@@ -246,9 +246,13 @@ pub struct Metrics {
     pub pill_inset: f32,
     /// Segment and tab corner inside a pill: `pill_radius − pill_inset`.
     pub segment_radius: f32,
-    /// Inspector value wells: height inside a `row`, and the shared column width.
+    /// Inspector value wells: height inside a `row`, and the least width of
+    /// a row's value column (it takes what the label column leaves).
     pub field: f32,
     pub value_column: f32,
+    /// The most a row's label takes before its value; it gives way first
+    /// when the panel is too narrow for both.
+    pub label_column: f32,
     /// Keyframe-toggle diamond and its column.
     pub keyframe: f32,
     /// Timeline geometry.
@@ -681,6 +685,7 @@ impl Tokens {
                 segment_radius: radius.nested(radius.md, space.hair),
                 field: 22.,
                 value_column: 128.,
+                label_column: 120.,
                 keyframe: 9.,
                 // v1's row height: the strip is 26 pt, tall enough for its
                 // material to read, with no density lost against v1.

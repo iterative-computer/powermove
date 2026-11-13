@@ -544,6 +544,7 @@ impl SurfaceView {
                     // secondary ink, for an option bar under a composer.
                     inline: matches!(crate::v4_compile::variant(node), Some("inline" | "quiet"))
                         && matches!(kind, crate::v4_control::Kind::Popup),
+                    well: view.well,
                     quiet: crate::v4_compile::variant(node) == Some("quiet"),
                     tint: None,
                     symbol: None,
@@ -621,6 +622,15 @@ impl SurfaceView {
         }
         self.controls.insert(id, control);
     }
+    /// The ink a panel gave a field's value (the accent on a value an
+    /// expression drives).
+    fn ink(view: &NodeView) -> Option<u32> {
+        view.style.text.color.map(|c| {
+            let c = hsla_to_rgba(c);
+            let byte = |v: f32| (v.clamp(0., 1.) * 255.).round() as u32;
+            (byte(c.red) << 16) | (byte(c.green) << 8) | byte(c.blue)
+        })
+    }
     fn mount_field(
         &mut self,
         view: &NodeView,
@@ -654,8 +664,10 @@ impl SurfaceView {
                 .get("metadata")
                 .and_then(|m| m.get("hostValue"))
                 .and_then(Value::as_u64);
+            let ink = Self::ink(view);
             field.update(cx, |f, cx| {
                 f.set_tokens(tokens);
+                f.set_ink(ink);
                 f.set_placeholder(&placeholder);
                 f.set_unit(unit);
                 match host {
@@ -687,8 +699,13 @@ impl SurfaceView {
         let tokens = self.table.tokens.clone();
         let field = cx.new(|cx| {
             let mut field = TextField::new(kind, label, &value, tokens, window, cx);
-            // A composer's panel draws the surface it is written on.
-            field.set_bare(kind == TextKind::Composer);
+            // A composer's panel draws the surface it is written on; a
+            // colour's hex stands in its row's well.
+            field.set_bare(kind == TextKind::Composer || view.bare);
+            if view.code {
+                field.set_code(pm_design::MONO_FONT);
+            }
+            field.set_ink(Self::ink(view));
             field.set_placeholder(&placeholder);
             field.set_unit(unit);
             field
@@ -887,6 +904,20 @@ impl SurfaceView {
             }
         })
         .detach();
+    }
+    /// Development builds: the panel's longest scroller put `points` down
+    /// its content, for captures of what lies below the fold.
+    #[cfg(debug_assertions)]
+    pub fn review_scroll_to(&mut self, points: f32, cx: &mut Context<Self>) {
+        if let Some(scroll) = self
+            .scrolls
+            .values()
+            .max_by(|a, b| f32::from(a.max_offset().y).total_cmp(&f32::from(b.max_offset().y)))
+        {
+            let y = points.clamp(0., f32::from(scroll.max_offset().y));
+            scroll.set_offset(point(px(0.), px(-y)));
+            cx.notify();
+        }
     }
     #[cfg(test)]
     pub fn click_semantic(&mut self, semantic: &str, cx: &mut Context<Self>) {
@@ -1454,7 +1485,18 @@ impl SurfaceView {
             if node.style.flex_grow.is_some_and(|g| g > 0.) && !control.read(cx).stretches() {
                 control.update(cx, |c, _| c.stretch());
             }
-            let slot = if control.read(cx).stretches() {
+            let t = &self.table.tokens;
+            let slot = if node.well && control.read(cx).is_popup() {
+                // A pop-up in a row: the real control, with no bezel, on the
+                // well every other value of the row stands in.
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .h(px(t.metrics.field))
+                    .rounded(px(t.metrics.inner_radius))
+                    .bg(crate::v4_compile::well(t))
+                    .overflow_hidden()
+            } else if control.read(cx).stretches() {
                 // A segmented control its panel lets grow fills its row.
                 div().w_full()
             } else if control.read(cx).is_search() {
@@ -1469,8 +1511,19 @@ impl SurfaceView {
             } else {
                 div().flex_none()
             };
+            // AppKit sets a bezel-less pop-up's title a little further in
+            // than a field's value: bring it onto the wells' inset.
+            let child = if node.well && control.read(cx).is_popup() {
+                div()
+                    .w_full()
+                    .ml(px(-t.space.hair))
+                    .child(control.clone())
+                    .into_any_element()
+            } else {
+                control.clone().into_any_element()
+            };
             return slot
-                .child(control.clone())
+                .child(child)
                 .children(self.probe(id))
                 .into_any_element();
         }
@@ -2078,14 +2131,25 @@ impl SurfaceView {
                     window,
                 ));
             }
+            // The chip inside its well: the colour under a keyline drawn
+            // inside its edge, so white reads on a light well and black on a
+            // dark one.
             Kit::Swatch { color, keyline } => {
-                element = element
-                    .w(px(t.metrics.field))
-                    .border(px(t.metrics.border))
-                    .border_color(rgb(*keyline));
+                let side = px(t.metrics.field - 2. * t.space.xs);
+                let mut chip = div()
+                    .size(side)
+                    .rounded(px(t.radius.xs))
+                    .shadow(vec![BoxShadow {
+                        color: pm_shell::kit::ink(*keyline, 1.).into(),
+                        offset: point(px(0.), px(0.)),
+                        blur_radius: px(0.),
+                        spread_radius: px(t.metrics.border),
+                        inset: true,
+                    }]);
                 if let Some(color) = color {
-                    element = element.bg(rgb(*color));
+                    chip = chip.bg(rgb(*color));
                 }
+                element = element.child(chip);
             }
             Kit::Progress(value) => {
                 let track = div()

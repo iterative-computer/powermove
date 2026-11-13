@@ -102,6 +102,8 @@ pub mod native {
         /// heading, a line of introduction or warning.
         Line(Note),
         Row(Row),
+        /// A multi-line editor that is a card of its own, this high.
+        Editor(Retained<NSScrollView>, f64),
     }
     /// Real AppKit sheet, retained with its controls until the owner closes it.
     /// Control keys are stable field/action IDs, never translated labels.
@@ -110,6 +112,8 @@ pub mod native {
         pub window: Retained<NSWindow>,
         pub content: Retained<NSView>,
         pub fields: BTreeMap<String, Retained<NSTextField>>,
+        /// Multi-line editors, by id.
+        pub editors: BTreeMap<String, Retained<NSTextView>>,
         pub buttons: BTreeMap<String, Retained<NSButton>>,
         pub controls: BTreeMap<String, Retained<NSControl>>,
         pub layout: SheetLayout,
@@ -151,6 +155,7 @@ pub mod native {
                 window,
                 content,
                 fields: BTreeMap::new(),
+                editors: BTreeMap::new(),
                 buttons: BTreeMap::new(),
                 controls: BTreeMap::new(),
                 layout,
@@ -304,22 +309,52 @@ pub mod native {
                 .push((field.clone().into_super().into_super(), size));
             self.fields.insert(id.into(), field);
         }
-        /// A text field for source text (an expression): most of its row,
-        /// in the fixed-width face.
-        pub fn source(&mut self, id: &str, label: &str, value: &str) {
-            self.text(id, label, value, false, true);
-            let width = (self.layout.card_width() * 0.7).floor();
-            if let Some(Item::Row(row)) = self.items.last_mut()
-                && let Some((_, size)) = row.trailing.last_mut()
-            {
-                size.width = width;
-            }
-            if let Some(field) = self.fields.get(id) {
-                field.setFont(Some(&NSFont::monospacedSystemFontOfSize_weight(
-                    self.tokens.typography.body.into(),
-                    unsafe { NSFontWeightRegular },
-                )));
-            }
+        /// An editor for source text (an expression): a card of its own on
+        /// the sheet's width, `lines` high, in the fixed-width face, with
+        /// nothing that rewrites what is typed (quotes, dashes, spelling).
+        /// The card is the well: its text starts on the sheet's text column.
+        pub fn editor(&mut self, id: &str, label: &str, value: &str, lines: usize) {
+            let t = &self.tokens;
+            let scroll = NSTextView::scrollableTextView(self.mtm);
+            scroll.setDrawsBackground(false);
+            scroll.setBorderType(NSBorderType::NoBorder);
+            scroll.setHasVerticalScroller(true);
+            scroll.setAutohidesScrollers(true);
+            let Some(view) = scroll
+                .documentView()
+                .and_then(|v| v.downcast::<NSTextView>().ok())
+            else {
+                return;
+            };
+            let size = f64::from(t.typography.body);
+            let font =
+                NSFont::monospacedSystemFontOfSize_weight(size, unsafe { NSFontWeightRegular });
+            view.setFont(Some(&font));
+            view.setTextColor(Some(&colour(t.colors.text)));
+            view.setInsertionPointColor(Some(&colour(t.colors.text)));
+            view.setDrawsBackground(false);
+            view.setRichText(false);
+            view.setAllowsUndo(true);
+            view.setContinuousSpellCheckingEnabled(false);
+            view.setGrammarCheckingEnabled(false);
+            view.setAutomaticSpellingCorrectionEnabled(false);
+            view.setAutomaticQuoteSubstitutionEnabled(false);
+            view.setAutomaticDashSubstitutionEnabled(false);
+            view.setAutomaticTextReplacementEnabled(false);
+            view.setAutomaticTextCompletionEnabled(false);
+            let line = (size * f64::from(t.typography.dense_leading)).ceil();
+            let above = f64::from(t.space.md);
+            // The view sets its text a line-fragment padding inside its inset.
+            let padding = unsafe { view.textContainer() }.map_or(5., |c| c.lineFragmentPadding());
+            view.setTextContainerInset(NSSize::new((self.layout.pad - padding).max(0.), above));
+            view.setString(&NSString::from_str(value));
+            view.setIdentifier(Some(&NSString::from_str(id)));
+            view.setAccessibilityLabel(Some(&NSString::from_str(label)));
+            self.items.push(Item::Editor(
+                scroll,
+                (lines as f64 * line + 2. * above).ceil(),
+            ));
+            self.editors.insert(id.into(), view);
         }
         pub fn number(&mut self, id: &str, label: &str, value: &str, unit: &str, enabled: bool) {
             let field = self.number_field(id, label, value, enabled);
@@ -457,7 +492,7 @@ pub mod native {
                 .iter()
                 .filter_map(|item| match item {
                     Item::Row(row) => row.unit.as_ref().map(|u| fitting(u).width),
-                    Item::Line(_) => None,
+                    Item::Line(_) | Item::Editor(..) => None,
                 })
                 .fold(0., f64::max);
             let measure = |note: &Note, width: f64| {
@@ -482,6 +517,24 @@ pub mod native {
             let (mut y, mut card, mut after_line) = (l.inset, None::<f64>, false);
             for (index, item) in self.items.iter().enumerate() {
                 match item {
+                    Item::Editor(scroll, height) => {
+                        if let Some(top) = card.take() {
+                            cards.push((top, y));
+                            y += l.pad;
+                        } else {
+                            y += if index == 1 { l.pad } else { l.gap };
+                        }
+                        cards.push((y, y + height));
+                        frames.push((
+                            scroll.clone().into_super(),
+                            NSRect::new(
+                                NSPoint::new(l.inset, y),
+                                NSSize::new(l.card_width(), *height),
+                            ),
+                        ));
+                        y += height + l.gap;
+                        after_line = false;
+                    }
                     Item::Line(note) => {
                         if let Some(top) = card.take() {
                             cards.push((top, y));
@@ -657,6 +710,9 @@ pub mod native {
             if let Some(field) = first.and_then(|id| self.fields.get(id)) {
                 self.window.makeFirstResponder(Some(field));
                 unsafe { field.selectText(None) };
+            } else if let Some(editor) = first.and_then(|id| self.editors.get(id)) {
+                self.window.makeFirstResponder(Some(editor));
+                unsafe { editor.selectAll(None) };
             }
         }
     }

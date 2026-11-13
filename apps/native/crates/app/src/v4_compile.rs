@@ -55,6 +55,13 @@ impl TokenTable {
         }
     }
 }
+/// A value well's fill: the ink at the wash step, so every well of a row
+/// (a field, a pop-up, a colour, a menu trigger) is one value on a
+/// translucent panel as on a solid one. An opaque `colors.field` nearly
+/// vanished on the panel's composite.
+pub fn well(t: &pm_design::Tokens) -> gpui::Rgba {
+    pm_shell::kit::ink(t.colors.text, t.translucency.hover)
+}
 pub fn parse_hex(text: &str) -> Option<u32> {
     let hex = text.strip_prefix('#')?;
     let value = u32::from_str_radix(hex.get(..6)?, 16).ok()?;
@@ -136,6 +143,14 @@ pub enum Kit {
 }
 #[derive(Clone, Debug)]
 pub struct NodeView {
+    /// A hosted control in a row's value column: field high, on the row's
+    /// drawn well (a pop-up has no bezel of its own there).
+    pub well: bool,
+    /// A text field inside a well its row draws (a colour's hex).
+    pub bare: bool,
+    /// A text field for source text (`metadata.code`): the fixed-width
+    /// face, no spelling or substitutions.
+    pub code: bool,
     pub id: Id,
     pub parent: Option<Id>,
     pub children: Vec<Id>,
@@ -398,7 +413,8 @@ fn compile(
                 .justify_center()
                 .gap(px(t.metrics.gap)),
             Some(Component::List | Component::Tree) => sheet.flex_1(),
-            Some(Component::DisclosureGroup) => sheet.w_full(),
+            // Sections stand a gap apart; the heading is a row of its own.
+            Some(Component::DisclosureGroup) => sheet.w_full().mt(px(t.metrics.gap)),
             Some(Component::ProgressRow) => sheet.gap(px(t.metrics.inner_radius)).justify_center(),
             Some(Component::Banner) => sheet
                 .flex_row()
@@ -437,7 +453,7 @@ fn compile(
         .parent
         .and_then(|p| surface.node(p))
         .is_some_and(|p| p.props.get("data-pm-slot").and_then(Value::as_str) == Some("value"));
-    if in_value_slot
+    let slot_control = in_value_slot
         && matches!(
             component,
             Some(
@@ -446,10 +462,29 @@ fn compile(
                     | Component::PopUpButton
                     | Component::SegmentedControl
             )
-        )
-    {
+        );
+    if slot_control {
         compiled.sheet = compiled.sheet.flex_1().min_w(px(0.)).overflow_hidden();
     }
+    // A colour is one well: its chip, then its hex, which draws no well of
+    // its own.
+    let siblings = |of: Option<Id>| -> Vec<Option<Component>> {
+        of.and_then(|p| surface.node(p))
+            .map(|p| {
+                p.children
+                    .iter()
+                    .filter_map(|c| surface.node(*c))
+                    .map(Component::of)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let joined = |of: Option<Id>| {
+        let kinds = siblings(of);
+        kinds.contains(&Some(Component::ColourWell)) && kinds.contains(&Some(Component::TextField))
+    };
+    let slot = node.props.get("data-pm-slot").and_then(Value::as_str);
+    let in_colour = in_value_slot && joined(node.parent);
     // In an inspector value column a segmented control is a compact,
     // field-high track filling the column (above); its segments share it
     // equally (Align: three cells, as wide as the wells beside it) and stay
@@ -479,7 +514,7 @@ fn compile(
                 .h(px(t.metrics.field))
                 .p(px(inset))
                 .gap(px(inset))
-                .rounded(px(t.metrics.control_radius))
+                .rounded(px(t.metrics.inner_radius))
         };
     }
     // A host-menu trigger in the value column (Font, Fill) reads as a well.
@@ -491,36 +526,89 @@ fn compile(
             .flex_1()
             .min_w(px(0.))
             .overflow_hidden()
-            .justify_start()
             .h(px(t.metrics.field))
             .min_h(px(t.metrics.field))
             .px(px(t.metrics.gap))
-            .bg(rgb(t.colors.field))
-            .rounded(px(t.metrics.control_radius));
+            .bg(well(t))
+            .rounded(px(t.metrics.inner_radius));
     }
-    match node.props.get("data-pm-slot").and_then(Value::as_str) {
+    // A colour well is a field-high square holding its chip; alone it is
+    // a well itself, beside its hex it stands in the row's well.
+    if component == Some(Component::ColourWell) {
+        let side = px(t.metrics.field);
+        compiled.sheet = compiled
+            .sheet
+            .flex_none()
+            .flex_row()
+            .items_center()
+            .justify_center()
+            .w(side)
+            .min_w(side)
+            .h(side)
+            .min_h(side)
+            .rounded(px(t.metrics.inner_radius));
+        if !in_colour {
+            compiled.sheet = compiled.sheet.bg(well(t));
+        }
+    }
+    let in_row = node
+        .parent
+        .and_then(|p| surface.node(p))
+        .is_some_and(|p| Component::of(p) == Some(Component::InspectorRow));
+    let has_slot = |row: &Node, name: &str| {
+        row.children.iter().any(|c| {
+            surface
+                .node(*c)
+                .is_some_and(|c| c.props.get("data-pm-slot").and_then(Value::as_str) == Some(name))
+        })
+    };
+    // A row's keyframe mark hangs in the gutter: the mark's own leading
+    // point stands on the panel's text edge, where headings start.
+    let hang = (t.metrics.hit - t.metrics.symbol_inline) / 2.;
+    if component == Some(Component::InspectorRow) && has_slot(node, "leading") {
+        compiled.sheet = compiled.sheet.pl(px((t.metrics.inset - hang).max(0.)));
+    }
+    match slot {
+        // The gutter a row's keyframe mark stands in; a row with no mark
+        // keeps it, so every label starts on one x.
+        Some("leading") if in_row => {
+            compiled.sheet = compiled
+                .sheet
+                .flex_none()
+                .flex_row()
+                .items_center()
+                .justify_center()
+                .w(px(t.metrics.hit))
+                .mr(px(t.space.hair));
+        }
+        // A row's label keeps its column and gives way first in a narrow
+        // panel; the value takes the rest, never less than `value_column`.
+        Some("label") if in_row => {
+            compiled.sheet = compiled
+                .sheet
+                .flex_none()
+                .flex_shrink(1.)
+                .w(px(t.metrics.label_column))
+                .min_w(px(t.metrics.hit))
+                .pr(px(t.metrics.gap));
+        }
         Some("label") => compiled.sheet = compiled.sheet.flex_1(),
         Some("value") => {
             compiled.sheet = compiled
                 .sheet
+                .flex_1()
                 .flex_row()
                 .items_center()
+                .min_w(px(t.metrics.value_column))
                 .gap(px(t.metrics.inner_radius));
-            // A trailing control (Scale's link) sits outside the column; the
-            // wells give up its width so the column's leading edge stays put.
-            let trailing = node
-                .parent
-                .and_then(|p| surface.node(p))
-                .is_some_and(|row| {
-                    row.children.iter().any(|c| {
-                        surface.node(*c).is_some_and(|c| {
-                            c.props.get("data-pm-slot").and_then(Value::as_str) == Some("trailing")
-                        })
-                    })
-                });
-            if trailing {
-                let w = px(t.metrics.value_column - t.metrics.hit);
-                compiled.sheet = compiled.sheet.w(w).min_w(w).max_w(w);
+            if joined(Some(node.id)) {
+                compiled.sheet = compiled
+                    .sheet
+                    .h(px(t.metrics.field))
+                    .gap(px(0.))
+                    .pr(px(t.metrics.gap))
+                    .bg(well(t))
+                    .rounded(px(t.metrics.inner_radius));
             }
         }
         Some("trailing") => {
@@ -530,6 +618,29 @@ fn compile(
                 .w(px(t.metrics.hit))
                 .items_center()
                 .justify_center();
+        }
+        // What stands under a row (its expression, what is wrong with its
+        // value): from the label's x to the panel's inset.
+        Some("detail") => {
+            compiled.sheet = compiled
+                .sheet
+                .gap(px(t.space.hair))
+                .pl(px(t.metrics.inset - hang + t.metrics.hit + t.space.hair))
+                .pr(px(t.metrics.inset))
+                .pb(px(t.metrics.gap));
+        }
+        // A section's heading row: its title, and its action at the
+        // trailing edge.
+        Some("heading") => {
+            compiled.sheet = compiled.sheet.flex_row().items_center().w_full();
+        }
+        Some("accessory") => {
+            compiled.sheet = compiled
+                .sheet
+                .flex_none()
+                .flex_row()
+                .items_center()
+                .pr(px(t.metrics.gap));
         }
         _ => {}
     }
@@ -578,7 +689,14 @@ fn compile(
         .flatten();
     let meta = node.props.get("metadata");
     NodeView {
-        sheet_body: node.props.get("data-pm-slot").and_then(Value::as_str) == Some("body"),
+        well: slot_control
+            && matches!(
+                component,
+                Some(Component::PopUpButton | Component::SegmentedControl)
+            ),
+        bare: in_colour && component == Some(Component::TextField),
+        code: meta.and_then(|m| m.get("code")) == Some(&Value::Bool(true)),
+        sheet_body: slot == Some("body"),
         fixed_width: meta
             .and_then(|m| m.get("fixedWidthSample"))
             .and_then(Value::as_str)
@@ -683,8 +801,9 @@ fn compile(
         number: (component == Some(Component::NumberField)).then(|| number_facts(node)),
     }
 }
-/// Characters a split value well shows at `body` size (half the value column).
-const SPLIT_WELL_CHARS: usize = 7;
+/// Characters a split value well shows at `body` size (half the value
+/// column of a panel at its usual width, less a trailing control).
+const SPLIT_WELL_CHARS: usize = 9;
 fn number_facts(node: &Node) -> NumberFacts {
     let number = |key: &str, default| {
         node.props
@@ -1028,7 +1147,10 @@ fn apply(mut e: StyleRefinement, style: &pm_surface::Props, table: &TokenTable) 
                 }
             }
             "background" | "backgroundColor" => {
-                if let Some(color) = table.color(raw) {
+                // A well is the ink's wash, whatever panel it stands on.
+                if raw.get("token").and_then(Value::as_str) == Some("colors.field") {
+                    e = e.bg(well(&table.tokens));
+                } else if let Some(color) = table.color(raw) {
                     e = e.bg(rgb(color));
                 }
             }

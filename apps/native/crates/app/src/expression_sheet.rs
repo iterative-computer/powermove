@@ -98,8 +98,9 @@ impl Target {
 /// The line under the field while typing: the problem, or that it is valid.
 pub fn status(typed: &str) -> (String, bool) {
     let source = typed.trim();
+    // An empty editor removes the expression: nothing to say about it.
     if source.is_empty() {
-        return (HINT.into(), false);
+        return (String::new(), false);
     }
     match expression_diagnostic(source) {
         Some(problem) => (problem, true),

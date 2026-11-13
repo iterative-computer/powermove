@@ -185,8 +185,11 @@ export function EffectControls(props: PanelProps) {
             paddingLeft: t("metrics.inset"),
             paddingRight: t("metrics.inset"),
             color: t(p.locked ? "colors.muted" : "colors.text"),
-            fontSize: t("typography.title"),
+            // As Properties names its layer: a label, a step under the
+            // panel's title.
+            fontSize: t("typography.label"),
             fontWeight: t("typography.semibold_weight"),
+            minHeight: t("metrics.row"),
           }}
         >
           <text
@@ -379,8 +382,12 @@ export function EffectControls(props: PanelProps) {
                           ? "colors.muted"
                           : "colors.text",
                       ),
-                      fontSize: t("typography.title"),
+                      // An effect's heading is a section heading: the
+                      // label role, its mark in the gutter its
+                      // parameters' keyframe marks stand in.
+                      fontSize: t("typography.label"),
                       fontWeight: t("typography.semibold_weight"),
+                      paddingLeft: t("metrics.border"),
                       borderRadius: t("metrics.control_radius"),
                       ...(row.ordinal ? { marginTop: t("metrics.gap") } : {}),
                       ...(hover === row.id && !row.selected && !p.locked
@@ -408,7 +415,9 @@ export function EffectControls(props: PanelProps) {
                         disabled={p.locked}
                         aria-expanded={row.expanded}
                         attr={{
-                          symbol: "chevron.right",
+                          symbol: row.expanded
+                            ? "chevron.down"
+                            : "chevron.right",
                           expanded: row.expanded,
                         }}
                         onClick={(e) => {
@@ -419,7 +428,10 @@ export function EffectControls(props: PanelProps) {
                             open: !row.expanded,
                           });
                         }}
-                        style={{ symbolSize: t("metrics.symbol_inline") }}
+                        style={{
+                          color: t("colors.muted"),
+                          symbolSize: t("metrics.symbol_inline"),
+                        }}
                       />
                       <UI.Checkbox
                         preventDefault={{ click: true }}
@@ -643,7 +655,7 @@ function ParameterView({
             style={{
               ...hit,
               color: t(p.animated ? "colors.accent" : "colors.muted"),
-              symbolSize: t("metrics.keyframe"),
+              symbolSize: t("metrics.symbol_inline"),
             }}
           />
         }

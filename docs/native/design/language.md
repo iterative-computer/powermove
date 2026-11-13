@@ -233,7 +233,7 @@ keyboard-only focus ring (`Tokens::focus_ring`), one symbol size per context
 `symbol_action` 20 for a surface's one primary action glyph, a composer's
 Send). A value in a well starts on the same inset with or without a unit, in
 the text font, so it sits on its row label's baseline. A section heading in a
-panel is the Label role, a step under the panel's Title.
+panel is the Label role, a step under the panel's Title (see Properties).
 Lists are quiet text for recall by name: no glyph tiles, no dividers.
 
 ## Home
@@ -321,6 +321,48 @@ would centre the sheet again on every frame, so the window class hangs it
 from the top it was first given), the actions ride the bottom edge, and
 nothing else moves. Hosted controls keep their distance from the window's
 top between a resize and the next paint.
+
+## Properties
+
+One grid for every panel of rows (Properties, Effect Controls, extension
+panels built from `InspectorRow`), from the kit, so a panel never sets it:
+
+- One text edge at the panel inset: the panel's title, the layer's name,
+  section headings, and the leading point of a row's keyframe mark, which
+  hangs in a gutter of its own. A row without a mark keeps the gutter, so
+  every label starts on one x. An effect's heading puts its disclosure in
+  the same gutter.
+- A label keeps `metrics.label_column` and gives way first in a narrow
+  panel; the value column takes the rest and is never under
+  `metrics.value_column`. A trailing control (a scale's link) stands
+  outside the value column.
+- Three ranks, one size apart at most: the panel's title (Title), then the
+  layer's name and section headings (Label: 12 medium, text ink; the kind
+  after the name in the muted ink), then row labels (Body, secondary ink)
+  and values (Body, tabular, text ink; units muted). Rows are 28 with 22
+  wells; sections stand a gap apart with no rule between them.
+- A section's own action (Refresh Fonts, Add Mask, Add Text Animator) is a
+  quiet text action at the trailing edge of its heading row.
+- One well for every value: the ink at the wash step (never an opaque
+  field colour, which vanishes on a translucent panel), the well corner, a
+  6 pt text inset, a step deeper under the pointer, and while edited a
+  hairline ring inside its edge in the neutral focus ink. A value keeps its
+  baseline when it is clicked into. A pop-up is the real `NSPopUpButton`
+  with no bezel on that well; a font or a fill that opens a menu is the
+  same well with the pop-up's chevrons; a colour is one well holding its
+  chip (a keyline inside its edge) and its hex; a multi-line text is as
+  tall as its lines, from two to six. Yes-or-no rows are checkboxes;
+  segmented rows are the small system control.
+- The keyframe mark is one glyph whose shape and ink say its state, as the
+  timeline's (outline muted, half accent, filled accent), with no lit
+  ground. A scale's link is one glyph whose ink says linked or not.
+- An expression stands under its row, from the label's x to the panel's
+  inset, in the fixed-width face, as many lines as it has; a problem with
+  it is one line under it in the danger ink, and a valid one says nothing.
+  The value it drives is in the accent ink. Its sheet is an editor that is
+  the card itself: seven lines, the fixed-width face, nothing that rewrites
+  what is typed, the parser's answer under it and the names an expression
+  can use under that; Return is a new line and ⌘Return applies.
 
 ## Timeline strips
 
