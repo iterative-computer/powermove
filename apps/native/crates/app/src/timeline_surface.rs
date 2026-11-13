@@ -2150,6 +2150,39 @@ fn drag_kind(model: &TimelineModel, spec: Spec, time: f64) -> Result<DragKind, S
             .map(|o| o.id.clone());
         Ok::<_, &str>((before, after))
     };
+    // In Layers mode every layer is its own row: the tools run the
+    // layer-level edits (all layer kinds; what overlaps stays), as the keys do.
+    let layered = model.mode == TimelineMode::Layers;
+    let edge_time = |id: &str, edge: Edge| {
+        model.index.layer(id).map(|l| match edge {
+            Edge::In => l.from,
+            Edge::Out => l.from + l.duration,
+        })
+    };
+    let timing_edge = |edge: Edge| match edge {
+        Edge::In => pm_kernel::commands::timing::TimeEdge::In,
+        Edge::Out => pm_kernel::commands::timing::TimeEdge::Out,
+    };
+    use pm_kernel::TimingCommand as Timing;
+    if layered && matches!(spec, Spec::Ripple(_) | Spec::Roll(_) | Spec::Slide) {
+        let id = primary()?;
+        return Ok(DragKind::Timing(match spec {
+            Spec::Ripple(edge) => Timing::RippleTrim {
+                layer_ids: vec![id.clone()],
+                edge: timing_edge(edge),
+                time: edge_time(&id, edge).ok_or("Unknown clip")?,
+            },
+            Spec::Roll(edge) => Timing::Roll {
+                layer_id: id.clone(),
+                edge: timing_edge(edge),
+                time: edge_time(&id, edge).ok_or("Unknown clip")?,
+            },
+            _ => Timing::Slide {
+                layer_id: id,
+                delta: 0.,
+            },
+        }));
+    }
     Ok(match spec {
         Spec::Layers => DragKind::Layers { ids },
         Spec::Duplicate => {

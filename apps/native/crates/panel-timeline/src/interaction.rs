@@ -946,6 +946,9 @@ impl Draft {
 pub enum DragKind {
     /// Scoped pro-media edits use the same actor replacement gesture lifecycle.
     ProEdit(pm_kernel::commands::pro_edit::ProEditCommand),
+    /// The Ripple, Rolling and Slide tools in Layers mode: the layer-level
+    /// edits the keys run, with the edge time (or slide) following the drag.
+    Timing(pm_kernel::TimingCommand),
     Layers {
         ids: Vec<String>,
     },
@@ -1032,6 +1035,15 @@ impl Drag {
                         | Pro::RippleTrim { .. }
                         | Pro::Roll { .. }
                         | Pro::Slide { .. }
+                ) {
+                    return Err(ModelError::InvalidGesture);
+                }
+            }
+            DragKind::Timing(command) => {
+                use pm_kernel::TimingCommand as T;
+                if !matches!(
+                    command,
+                    T::RippleTrim { .. } | T::Roll { .. } | T::Slide { .. }
                 ) {
                     return Err(ModelError::InvalidGesture);
                 }
@@ -1196,6 +1208,11 @@ impl Drag {
                     _ => "Edit Clips",
                 }
             }
+            DragKind::Timing(ref command) => match command {
+                pm_kernel::TimingCommand::RippleTrim { .. } => "Ripple Trim",
+                pm_kernel::TimingCommand::Roll { .. } => "Roll Edit",
+                _ => "Slide Layer",
+            },
             DragKind::Layers { .. } => "Move clip",
             DragKind::DuplicateLayers { .. } => "Duplicate Layers",
             DragKind::TrimIn { .. } | DragKind::TrimOut { .. } => "Trim clip",
@@ -1291,6 +1308,19 @@ impl Drag {
                     _ => return Err(ModelError::InvalidGesture),
                 }
                 out.push(command.into());
+            }
+            DragKind::Timing(command) => {
+                use pm_kernel::TimingCommand as T;
+                let mut command = command.clone();
+                match &mut command {
+                    // The stored time is the edge where the drag began.
+                    T::RippleTrim { time, .. } | T::Roll { time, .. } => *time += delta,
+                    T::Slide { delta: by, .. } => *by = delta,
+                    _ => return Err(ModelError::InvalidGesture),
+                }
+                if delta != 0. {
+                    out.push(command.into());
+                }
             }
 
             DragKind::Layers { ids } => {

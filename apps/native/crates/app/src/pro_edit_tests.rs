@@ -90,6 +90,8 @@ fn ripple_trim_keys_take_the_part_before_or_after_the_playhead_and_close_up() {
     one_step(&desk, |d| d.press("alt+shift+]", 3.));
     assert_eq!(span(&desk, "b"), (2., 3.));
     assert_eq!(span(&desk, "c"), (3., 5.));
+    // With the playhead outside the selected layer the keys do nothing.
+    assert!(command_plan("rippleTrimOut", &[], &desk.published(), 8.).is_none());
     let closed = spans(&desk);
     let again = desk.reopened();
     let reopened: Vec<_> =

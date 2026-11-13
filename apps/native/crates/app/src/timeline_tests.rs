@@ -722,6 +722,74 @@ fn the_edit_tools_make_a_plain_drag_ripple_roll_slip_and_slide(cx: &mut TestAppC
     assert!(s.start_of("b") > b_in);
     assert_eq!(s.out_of("a"), b_in, "a plain move leaves the neighbours");
 }
+/// In Layers mode each layer is its own row: the tools run the layer-level
+/// edits, so other layers on other rows close up or follow, and one that
+/// merely overlaps never blocks the edit.
+#[gpui::test]
+fn in_layers_mode_the_edit_tools_ripple_roll_and_slide_across_rows(cx: &mut TestAppContext) {
+    let mut s = stage_project(cx, crate::v4_view_tests::strips_json());
+    let tool = |s: &mut Stage, cx: &mut TestAppContext, name: &str| {
+        s.surface.update(&mut s.vcx, |t, cx| {
+            t.command(&format!("timeline.tool:{name}"), 0., None, false, cx)
+        });
+        s.idle(cx);
+    };
+    let row = |s: &Stage, id: &str| {
+        let p = s.rig.kernel.published(PROJECT).unwrap();
+        pm_kernel::model::list_layers(p.snapshot.root().unwrap(), None)
+            .iter()
+            .position(|l| l.id == id)
+            .unwrap()
+    };
+    let clean = |s: &Stage| {
+        assert!(
+            s.recorder.reports.borrow().is_empty(),
+            "{:?}",
+            s.recorder.reports.borrow()
+        )
+    };
+    let plain = Modifiers::none();
+    tool(&mut s, cx, "ripple");
+    let (a_out, b_in, c_in) = (s.out_of("a"), s.start_of("b"), s.start_of("c"));
+    let from = s.at(row(&s, "a"), a_out) - point(px(2.), px(0.));
+    s.drag(cx, from, from - point(px(30.), px(0.)), plain);
+    clean(&s);
+    let cut = a_out - s.out_of("a");
+    assert!(cut > 0.);
+    assert!((b_in - s.start_of("b") - cut).abs() < 1e-9, "b closes up");
+    assert!((c_in - s.start_of("c") - cut).abs() < 1e-9, "c closes up");
+    let p = s.rig.kernel.published(PROJECT).unwrap();
+    assert_eq!(p.history.undo_label.as_deref(), Some("Ripple Trim"));
+    s.undo(cx);
+    assert_eq!(s.start_of("b"), b_in);
+    tool(&mut s, cx, "roll");
+    let b_out = s.out_of("b");
+    s.drag(cx, from, from - point(px(30.), px(0.)), plain);
+    clean(&s);
+    assert!(s.out_of("a") < a_out);
+    assert!(
+        (s.out_of("a") - s.start_of("b")).abs() < 1e-9,
+        "b's start follows"
+    );
+    assert_eq!(s.out_of("b"), b_out);
+    s.undo(cx);
+    tool(&mut s, cx, "slide");
+    let length = s.out_of("b") - s.start_of("b");
+    let body = s.at(row(&s, "b"), b_in + length / 2.);
+    s.drag(cx, body, body + point(px(30.), px(0.)), plain);
+    clean(&s);
+    assert!(s.start_of("b") > b_in);
+    assert!(
+        (s.out_of("a") - s.start_of("b")).abs() < 1e-9,
+        "a grows to meet it"
+    );
+    assert!(
+        (s.out_of("b") - s.start_of("c")).abs() < 1e-9,
+        "c gives its head"
+    );
+    let p = s.rig.kernel.published(PROJECT).unwrap();
+    assert_eq!(p.history.undo_label.as_deref(), Some("Slide Layer"));
+}
 #[gpui::test]
 fn a_marquee_dragged_past_the_panel_selects_the_rows_it_covers_off_screen(cx: &mut TestAppContext) {
     // Eighty layers starting together, each with a key at 0.5 s.

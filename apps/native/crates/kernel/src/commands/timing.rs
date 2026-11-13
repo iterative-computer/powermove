@@ -75,7 +75,8 @@ pub enum TimingCommand {
     Stagger { layer_ids: Vec<String>, step: f64 },
     /// Ripple trim to `time` (Premiere Q/W): each layer whose span holds
     /// `time` loses the part before it (`In`) or after it (`Out`), and the
-    /// time removed closes up. What remains of a layer keeps its media and
+    /// time removed closes up; a `time` beyond the edge lengthens the layer
+    /// (its start stays) and later layers move on by the time gained. What remains of a layer keeps its media and
     /// keys; every later unlocked layer moves back by the removed time that
     /// ends at or before its start; a layer that overlaps a removed part
     /// stays. Groups stand for their members; locked layers are skipped.
@@ -844,12 +845,27 @@ fn ripple_trim(
     let (comp, targets) = leaves(cx, ids)?;
     let frame = 1.0 / cx.fps(comp.as_deref());
     let mut removed: Vec<(f64, f64)> = vec![];
+    // An edge dragged outward: (the layer's old end, the time it gained).
+    let mut grown: Vec<(String, f64, f64)> = vec![];
     for layer in targets {
         let (from, end) = ends(&layer);
-        if time <= from + EDGE_EPS || time >= end - EDGE_EPS {
-            continue;
-        }
+        let id = values::text(&layer, "id").unwrap_or_default().to_owned();
         match edge {
+            TimeEdge::In if time < from - EDGE_EPS => {
+                // More of the head shows; the layer keeps its start.
+                let t = time.max(first_start(&layer));
+                if from - t > EDGE_EPS {
+                    let mut longer = cut_head(&layer, layer.clone(), t);
+                    values::obj(&mut longer).insert("from", Value::Number(from));
+                    put(cx, longer)?;
+                    grown.push((id, end, from - t));
+                }
+            }
+            TimeEdge::Out if time > end + EDGE_EPS => {
+                put(cx, with_dur(layer, time - from))?;
+                grown.push((id, end, time - end));
+            }
+            _ if time <= from + EDGE_EPS || time >= end - EDGE_EPS => {}
             TimeEdge::In => {
                 let t = time.min(end - frame);
                 removed.push((from, t));
@@ -862,10 +878,34 @@ fn ripple_trim(
             }
         }
     }
-    if removed.is_empty() {
+    if removed.is_empty() && grown.is_empty() {
         return Err(CommandError::Invalid(
             "Put the playhead inside a selected layer to ripple trim it.".into(),
         ));
+    }
+    if !grown.is_empty() {
+        // Later unlocked layers move on by the time gained before them.
+        let layers = cx.layers(comp.as_deref());
+        for layer in &layers {
+            let id = values::text(layer, "id").unwrap_or_default();
+            if values::text(layer, "type") == Some("group")
+                || locked_here(&layers, layer)
+                || grown.iter().any(|(g, ..)| g == id)
+            {
+                continue;
+            }
+            let (from, _) = ends(layer);
+            let shift: f64 = grown
+                .iter()
+                .filter(|(_, pivot, _)| from >= pivot - EDGE_EPS)
+                .map(|(.., gained)| gained)
+                .sum();
+            if shift > 0.0 {
+                let mut path = cx.find(id)?.path();
+                path.push("from".into());
+                cx.set(path, Value::Number(from + shift))?;
+            }
+        }
     }
     close_up(cx, comp.as_deref(), removed)
 }

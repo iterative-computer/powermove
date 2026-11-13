@@ -1098,8 +1098,11 @@ pub fn command_plan(
                 )
             })
         }
+        // Premiere's Q and W: the selected layers under the playhead.
         "rippleTrimIn" | "rippleTrimOut" => {
-            let layer_ids = unlocked(&layers, &selected, |_| true);
+            let layer_ids = unlocked(&layers, &selected, |l| {
+                l.in_time < time - 1e-6 && time < l.out_time - 1e-6
+            });
             let edge = if name == "rippleTrimIn" {
                 TimeEdge::In
             } else {

@@ -110,7 +110,7 @@ fn ripple_trim_in_takes_the_head_and_the_rest_closes_up() {
 }
 
 #[test]
-fn ripple_trim_out_takes_the_tail_and_refuses_outside_the_layer() {
+fn ripple_trim_out_takes_the_tail_and_refuses_on_the_edge() {
     let mut s = store();
     run(
         &mut s,
@@ -123,12 +123,13 @@ fn ripple_trim_out_takes_the_tail_and_refuses_outside_the_layer() {
     assert_eq!(span(&s, "b"), (2.0, 2.0));
     assert_eq!(num(&layer(&s, "b"), &["d", "trim"]), 5.0);
     assert_eq!(span(&s, "c").0, 4.0);
+    // On the layer's own edge there is nothing to trim.
     let m = refused(
         &mut s,
         TimingCommand::RippleTrim {
             layer_ids: vec!["b".into()],
             edge: TimeEdge::Out,
-            time: 8.0,
+            time: 2.0,
         },
     );
     assert!(m.contains("playhead"), "{m}");
@@ -359,4 +360,43 @@ fn time_remap_freeze_and_reverse_write_the_source_time_channel() {
         },
     );
     assert!(m.contains("video or pre-comp"), "{m}");
+}
+
+#[test]
+fn a_ripple_trim_past_the_edge_lengthens_the_layer_and_pushes_what_follows() {
+    let mut s = store();
+    run(
+        &mut s,
+        TimingCommand::RippleTrim {
+            layer_ids: vec!["b".into()],
+            edge: TimeEdge::In,
+            time: 1.5,
+        },
+    );
+    let b = layer(&s, "b");
+    assert_eq!(
+        span(&s, "b"),
+        (2.0, 3.5),
+        "b keeps its start and shows more head"
+    );
+    assert_eq!(num(&b, &["d", "trim"]), 4.5);
+    assert_eq!(
+        num(&b, &["p", "opacity", "kf", "0", "t"]),
+        1.5,
+        "its key stays on the source frame it marked"
+    );
+    assert_eq!(span(&s, "c").0, 5.5, "c moves on");
+    assert_eq!(span(&s, "a"), (0.0, 2.0));
+    assert_eq!(span(&s, "lock").0, 6.0);
+    s.undo().unwrap();
+    run(
+        &mut s,
+        TimingCommand::RippleTrim {
+            layer_ids: vec!["b".into()],
+            edge: TimeEdge::Out,
+            time: 6.0,
+        },
+    );
+    assert_eq!(span(&s, "b"), (2.0, 4.0));
+    assert_eq!(span(&s, "c").0, 6.0);
 }
