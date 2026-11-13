@@ -187,6 +187,8 @@ struct StillFacts {
     planar: bool,
     /// Deeper than 8 bits per sample (or float).
     deep: bool,
+    /// Its pixels, width and height.
+    size: (usize, usize),
 }
 
 impl StillFacts {
@@ -212,6 +214,7 @@ impl StillFacts {
             float: still.float,
             planar: still.frame.format.layout == pm_media::frame::Layout::Planar,
             deep: still.float || still.bit_depth > 8,
+            size: (still.frame.format.width, still.frame.format.height),
         }
     }
 }
@@ -381,6 +384,17 @@ fn still_facts_from(
         Ok(StillFacts::of(still))
     })
     .unwrap_or_else(|| Err(ProbeIssue::Unreadable(offline(path))))
+}
+
+/// Whether `path` at its stamp was found unreadable as a still (truncated,
+/// corrupt, not permitted): an image sequence draws that frame's card.
+pub(crate) fn still_unreadable(path: &Path) -> bool {
+    matches!(known_still_facts(path), Some(Err(ProbeIssue::Unreadable(_))))
+}
+
+/// The pixel size of the still at `path` at its stamp, once it was read.
+pub(crate) fn still_size(path: &Path) -> Option<(usize, usize)> {
+    known_still_facts(path)?.ok().map(|f| f.size)
 }
 
 /// The facts of `path` at its stamp when they were read already.
@@ -615,15 +629,23 @@ fn packed(
     })
 }
 
-/// The shipped `sequencePlaybackTime`: select an available CFR slot,
-/// clamp to its ends, then seek one millisecond inside it. Container video
-/// instead selects directly from native source timestamps.
-pub fn sequence_playback_time(record: &pm_model::Node, time: f64) -> Option<f64> {
+/// The shipped `sequencePlaybackTime`: select an available CFR slot
+/// ([`pm_media::image::sequence::sequence_slot`], the rule a sequence's
+/// files follow), clamp to its ends, then seek one millisecond inside it.
+/// `rate` is Interpret Footage's frame rate, which replaces the sequence's
+/// own. Container video instead selects directly from native source
+/// timestamps.
+pub fn sequence_playback_time(
+    record: &pm_model::Node,
+    time: f64,
+    rate: Option<pm_time::Rate>,
+) -> Option<f64> {
     use pm_eval::node;
     let sequence = node::member(Some(record), "imageSequence")?;
     let number =
         |name| node::member(Some(sequence), name).map(|v| node::js_value_opt(Some(v)).to_number());
     let (fps, frames) = (number("fps")?, number("frames")?);
+    let fps = rate.map_or(fps, |r| r.to_f64());
     if !fps.is_finite()
         || !(1.0..=240.0).contains(&fps)
         || !frames.is_finite()
@@ -632,10 +654,7 @@ pub fn sequence_playback_time(record: &pm_model::Node, time: f64) -> Option<f64>
     {
         return None;
     }
-    let index = crate::js::max(
-        0.0,
-        crate::js::min(frames - 1.0, ((time + 1e-7) * fps).floor()),
-    );
+    let index = pm_media::image::sequence::sequence_slot(time, fps, frames as u64) as f64;
     Some(index / fps + 0.001)
 }
 
@@ -2165,9 +2184,17 @@ impl MediaCache {
             .find_map(|(target, revision)| (&target.texture == texture).then_some(*revision))
     }
 
-    /// Changes whenever a display frame a scrub asked for has decoded.
+    /// Changes whenever a display frame a scrub asked for has decoded, and
+    /// whenever a sequence's file is found unreadable as it is drawn.
     pub fn landed(&self) -> u64 {
-        self.viewer.landed()
+        self.viewer.landed() + self.unreadable
+    }
+
+    /// A sequence's file was found unreadable as it was drawn: the frame is
+    /// a stand-in and is drawn again (with the file's card) once this lands.
+    pub(crate) fn unreadable_found(&mut self) {
+        self.unreadable += 1;
+        self.stand_ins.push(0);
     }
 
     /// The display decode workers' counters.

@@ -215,6 +215,14 @@ pub enum Source {
         /// ahead on workers as a video's decoder runs ahead (empty for a
         /// still, and for a sequence while paused or exporting).
         ahead: Arc<[PathBuf]>,
+        /// A sequence's file in a frame that draws Media Offline cards: a
+        /// file found unreadable as it is drawn asks for the frame again,
+        /// which draws its card ([`crate::media::still_unreadable`]).
+        card_when_unreadable: bool,
+        /// A sequence's file: the pixel size of its sequence (its first
+        /// frame's). A file of another size is not drawn stretched: it is
+        /// that frame's card, or a failure naming it.
+        sequence_size: Option<(u32, u32)>,
     },
     Video {
         level2: bool,
@@ -1707,8 +1715,11 @@ fn native_content_quad<'d>(
                 // Native selection uses the source's PTS (or conformed
                 // grid) and holds its last frame. Browser seek padding
                 // hid valid frames and made preview differ from export.
-                let time = (sequence && rate.is_none())
-                    .then(|| crate::media::sequence_playback_time(record, st))
+                // A sequence's rendition shows the slot its files show
+                // (`pm_media::image::sequence::sequence_slot`), at the
+                // conformed rate when there is one.
+                let time = sequence
+                    .then(|| crate::media::sequence_playback_time(record, st, rate))
                     .flatten()
                     .unwrap_or_else(|| js::max(0.0, st));
                 Source::Video {
@@ -1726,6 +1737,8 @@ fn native_content_quad<'d>(
                     path,
                     interpret,
                     ahead: Arc::from([]),
+                    card_when_unreadable: false,
+                    sequence_size: None,
                 }
             };
             Ok(Some(Quad::Texture {
@@ -2203,21 +2216,6 @@ fn shader_quad(
 /// Composition frames a playing image sequence reads ahead of the playhead.
 const SEQUENCE_AHEAD: usize = 6;
 
-/// The frame number an image sequence shows at `seconds` of its source:
-/// frame `n` of the clip is number `first + n`, `n` counted at `fps` from
-/// source time 0, the ends held.
-pub fn sequence_number(
-    manifest: &pm_media::image::sequence::Manifest,
-    fps: f64,
-    seconds: f64,
-) -> i64 {
-    let last = manifest.frames().saturating_sub(1) as f64;
-    // A composition frame lands on its source frame's start up to
-    // floating-point error in `seconds`: never the frame before it.
-    let n = (seconds * fps + 1e-6).floor();
-    manifest.first + n.clamp(0.0, last) as i64
-}
-
 /// An image sequence read in place: the frame its source time selects,
 /// drawn as a still (at the file's depth, with its alpha, tags and
 /// profile). A number with no file is that frame's Media Offline card
@@ -2237,27 +2235,17 @@ fn sequence_frame<'d>(
     manifest: &pm_media::image::sequence::Manifest,
 ) -> JsResult<Option<Quad>> {
     let interpret = crate::footage::interpretation(record);
+    // Interpret Footage's rate, else the rate it was imported at (exact:
+    // 24000/1001 for 23.976).
     let fps = interpret
         .as_ref()
         .and_then(|i| i.frame_rate)
-        .map(|r| r.to_f64())
-        .or_else(|| {
-            let sequence = node::member(Some(record), "imageSequence");
-            node::number(node::member(sequence, "fps"))
-        })
-        .filter(|fps| fps.is_finite() && *fps > 0.0)
-        .unwrap_or(30.0);
-    // A rate typed or stored as 23.976 is 24000/1001: frames stay on the
-    // composition's grid however long the clip runs.
-    let fps = pm_time::SUPPORTED_RATES
-        .iter()
-        .map(|r| r.to_f64())
-        .find(|r| (r - fps).abs() < 1e-3)
-        .unwrap_or(fps);
+        .or_else(|| manifest.rate())
+        .map_or(30.0, |r| r.to_f64());
     // Inside motion-blur samples the center time's frame, as for video.
     let at = b.video_center.unwrap_or(time);
     let seconds = scope.source_time(layer, at, Some(&mut b.retime))?;
-    let number = sequence_number(manifest, fps, seconds);
+    let number = manifest.number_at(seconds, fps);
     let path = manifest.file(number);
     // While playing, the files of the next frames are read ahead: each is a
     // whole still to decode, and one frame's time is too short for that.
@@ -2267,7 +2255,7 @@ fn sequence_frame<'d>(
         let mut last = number;
         for i in 1..=SEQUENCE_AHEAD {
             let s = scope.source_time(layer, at + i as f64 * step, Some(&mut b.retime))?;
-            let next = sequence_number(manifest, fps, s);
+            let next = manifest.number_at(s, fps);
             if next != last && next != number {
                 ahead.push(manifest.file(next));
                 last = next;
@@ -2276,7 +2264,16 @@ fn sequence_frame<'d>(
     }
     let bw = js::or_number(js::get(d, "w"), wf);
     let bh = js::or_number(js::get(d, "h"), hf);
-    if crate::media::stamp(&path).is_none() {
+    let rec = |k: &str| node::js_value_opt(node::member(Some(record), k));
+    let sw = js::or_number(&rec("w"), 1.0);
+    let sh = js::or_number(&rec("h"), 1.0);
+    // A missing file, one that exists but can't be read (truncated,
+    // corrupt, no permission) and one of another size than the sequence's
+    // is that frame's Media Offline card.
+    let missing = crate::media::stamp(&path).is_none();
+    let other_size = crate::media::still_size(&path)
+        .filter(|&(w, h)| (w as f64, h as f64) != (sw, sh));
+    if missing || other_size.is_some() || crate::media::still_unreadable(&path) {
         let file = path
             .file_name()
             .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
@@ -2285,16 +2282,18 @@ fn sequence_frame<'d>(
         {
             return Ok(card);
         }
+        let message = match other_size {
+            _ if missing => format!("frame {number} of the image sequence is missing: {file}"),
+            Some((w, h)) => other_size_message(Some(number), (w, h), (sw, sh), &file),
+            None => format!("frame {number} of the image sequence can't be read: {file}"),
+        };
         b.failures.push(LayerFailure {
             composition: scope.comp.id().to_string_lossy(),
             layer: js::layer_id(layer),
-            message: format!("frame {number} of the image sequence is missing: {file}"),
+            message,
         });
         return Ok(None);
     }
-    let rec = |k: &str| node::js_value_opt(node::member(Some(record), k));
-    let sw = js::or_number(&rec("w"), 1.0);
-    let sh = js::or_number(&rec("h"), 1.0);
     let uv = fit_uv(&js::string(js::get(d, "fit")), sw, sh, bw, bh);
     Ok(Some(Quad::Texture {
         source: Source::Image {
@@ -2302,6 +2301,8 @@ fn sequence_frame<'d>(
             path,
             interpret,
             ahead: ahead.into(),
+            card_when_unreadable: b.offline_cards,
+            sequence_size: Some((sw as u32, sh as u32)),
         },
         w: bw,
         h: bh,
@@ -2309,6 +2310,17 @@ fn sequence_frame<'d>(
         ay: bh / 2.0,
         uv,
     }))
+}
+
+/// Why a sequence's file of another size is not drawn.
+pub(crate) fn other_size_message(
+    number: Option<i64>,
+    (w, h): (usize, usize),
+    (sw, sh): (f64, f64),
+    file: &str,
+) -> String {
+    let frame = number.map_or_else(|| "a frame".to_owned(), |n| format!("frame {n}"));
+    format!("{frame} of the image sequence is {w}×{h}, not {sw}×{sh} like the sequence: {file}")
 }
 
 /// The Media Offline card in a layer's `bw`×`bh` box naming `file`, as

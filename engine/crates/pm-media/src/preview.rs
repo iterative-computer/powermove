@@ -233,14 +233,13 @@ impl PreviewReader {
                 image::read(path, &self.pool).map(PreviewFrame::Image)
             }
             Source::InPlace(m) => {
-                let fps = f64::from(m.rate[0]) / f64::from(m.rate[1]);
-                let n = ((seconds * fps + 1e-6).floor() as i64).min(m.frames() as i64 - 1);
-                let path = m.file(m.first + n);
+                let fps = m.rate().map_or(30.0, |r| r.to_f64());
+                let number = m.number_at(seconds, fps);
+                let path = m.file(number);
                 if !path.is_file() {
                     let file = path.file_name().unwrap_or_default().to_string_lossy();
                     return Err(MediaError::invalid(format!(
-                        "frame {} of the image sequence is missing: {file}",
-                        m.first + n
+                        "frame {number} of the image sequence is missing: {file}"
                     )));
                 }
                 image::read(&path, &self.pool).map(PreviewFrame::Image)

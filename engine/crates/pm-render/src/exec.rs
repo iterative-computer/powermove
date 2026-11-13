@@ -545,6 +545,8 @@ impl Exec<'_> {
                         path,
                         interpret,
                         ahead,
+                        card_when_unreadable,
+                        sequence_size,
                         ..
                     } => {
                         let edge = self.media.preview_media.then(|| r.source_edge()).flatten();
@@ -565,8 +567,35 @@ impl Exec<'_> {
                             edge,
                         ) {
                             Ok(t) => {
-                                r.view = Some(t.view.clone());
-                                self.prepare_level2(encoder, r, &t.texture, Some(0));
+                                // A sequence's file of another size, found as
+                                // it is read: never drawn stretched.
+                                let other = sequence_size.and_then(|(sw, sh)| {
+                                    crate::media::still_size(path)
+                                        .filter(|&(w, h)| (w as u32, h as u32) != (sw, sh))
+                                        .map(|size| (size, (f64::from(sw), f64::from(sh))))
+                                });
+                                match other {
+                                    None => {
+                                        r.view = Some(t.view.clone());
+                                        self.prepare_level2(encoder, r, &t.texture, Some(0));
+                                    }
+                                    Some(_) if *card_when_unreadable => {
+                                        self.media.unreadable_found();
+                                    }
+                                    Some((size, sequence)) => {
+                                        let file =
+                                            path.file_name().unwrap_or_default().to_string_lossy();
+                                        let message = crate::plan::other_size_message(
+                                            None, size, sequence, &file,
+                                        );
+                                        self.fail(plan, draw, MediaFailure::Failed(message));
+                                    }
+                                }
+                            }
+                            // Found unreadable now: the frame is drawn
+                            // again, with the file's card.
+                            Err(_) if *card_when_unreadable && crate::media::still_unreadable(path) => {
+                                self.media.unreadable_found();
                             }
                             Err(e) => self.fail(plan, draw, e),
                         }

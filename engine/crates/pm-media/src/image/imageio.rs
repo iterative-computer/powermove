@@ -354,6 +354,30 @@ fn source(path: &Path) -> Result<Cf> {
     src.ok_or_else(|| MediaError::Image(format!("ImageIO cannot open {}", path.display())))
 }
 
+/// The pixel size an image is drawn at (after its orientation), read from
+/// its header without decoding it.
+pub fn pixel_size(path: &Path) -> Result<(u32, u32)> {
+    let src = source(path)?;
+    let props = unsafe {
+        Cf::from_create(CGImageSourceCopyPropertiesAtIndex(
+            src.as_mut_ptr(),
+            0,
+            std::ptr::null(),
+        ))
+    }
+    .ok_or_else(|| MediaError::Image(format!("ImageIO cannot read {}", path.display())))?;
+    let number = |key| unsafe { cf_i64(cf_dict_get(props.as_ptr(), key)) };
+    let (Some(w), Some(h)) = (number("PixelWidth"), number("PixelHeight")) else {
+        return Err(MediaError::Image(format!("no pixel size in {}", path.display())));
+    };
+    let (w, h) = (u32::try_from(w).unwrap_or(0), u32::try_from(h).unwrap_or(0));
+    // Orientations 5–8 turn the picture a quarter.
+    Ok(match number("Orientation") {
+        Some(5..=8) => (h, w),
+        _ => (w, h),
+    })
+}
+
 /// Frame count and delays; None for a single image.
 pub fn animation(path: &Path) -> Result<Option<Animation>> {
     let src = source(path)?;

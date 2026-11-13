@@ -75,19 +75,17 @@ pub fn is_sequence(record: &pm_model::Node) -> bool {
 }
 
 /// Source-only consumers use the same persisted image-sequence slots as
-/// composition. A conformed rate overrides those slots, as in the planner.
+/// composition, at a conformed rate when there is one, as in the planner.
 pub fn source_time(
     record: Option<&pm_model::Node>,
     time: pm_protocol::common::Ticks,
     interpretation: Option<&Interpretation>,
 ) -> pm_protocol::common::Ticks {
-    if interpretation.is_some_and(|i| i.frame_rate.is_some()) {
-        return time;
-    }
+    let rate = interpretation.and_then(|i| i.frame_rate);
     let seconds = time.get() as f64 / pm_time::TICKS_PER_SECOND as f64;
     record
         .filter(|record| is_sequence(record))
-        .and_then(|record| crate::media::sequence_playback_time(record, seconds))
+        .and_then(|record| crate::media::sequence_playback_time(record, seconds, rate))
         .and_then(|seconds| {
             pm_protocol::common::Ticks::new(
                 (seconds * pm_time::TICKS_PER_SECOND as f64).round() as i64
