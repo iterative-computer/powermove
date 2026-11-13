@@ -345,6 +345,118 @@ fn j_and_k_stop_on_keyframes_markers_and_the_work_area(cx: &mut TestAppContext) 
     }
     assert_eq!(back, [8.5, 6., 4., 3., 2., 1., 0.5, 0.]);
 }
+fn key_times(s: &Stage, id: &str, channel: &str) -> Vec<f64> {
+    let p = published(&s.rig.kernel);
+    let root = p.snapshot.root().unwrap();
+    let at = pm_kernel::model::find_layer(root, id).unwrap();
+    let layer = pm_kernel::model::layer_at(root, &at).unwrap().to_value();
+    layer
+        .get("p")
+        .and_then(|p| p.get(channel))
+        .and_then(|c| c.get("kf"))
+        .and_then(Value::as_array)
+        .map(|keys| {
+            keys.iter()
+                .filter_map(|k| k.get("t").and_then(Value::as_f64))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+const KEYABLE: &str = r##"{"id":"integration","name":"Keys","compId":"c","w":640,"h":360,"fps":30,"dur":10,"bg":"#000000","assets":{},"comps":{},"layers":[{"id":"l0","type":"shape","name":"Box","from":1,"dur":8,"on":true,"p":{"opacity":{"v":100,"kf":[]},"position.x":{"v":10,"kf":[]},"position.y":{"v":20,"kf":[]},"scale.x":{"v":100,"kf":[]},"scale.y":{"v":100,"kf":[]},"rotation":{"v":0,"kf":[]},"anchor.x":{"v":0,"kf":[]},"anchor.y":{"v":0,"kf":[]}},"d":{"w":100,"h":100},"fx":[]}]}"##;
+/// Option-Shift-P/S/R/T/A (After Effects): a key on that property at the
+/// playhead, removed by the same chord there, each one Undo step.
+#[gpui::test]
+fn option_shift_property_keys_add_and_remove_a_keyframe_at_the_playhead(cx: &mut TestAppContext) {
+    let mut s = stage_project(cx, KEYABLE.into());
+    select(&mut s, cx, &["l0"]);
+    *s.recorder.time.borrow_mut() = 3.;
+    for (chord, channels) in [
+        ("alt+shift+p", vec!["position.x", "position.y"]),
+        ("alt+shift+s", vec!["scale.x", "scale.y"]),
+        ("alt+shift+r", vec!["rotation"]),
+        ("alt+shift+t", vec!["opacity"]),
+        ("alt+shift+a", vec!["anchor.x", "anchor.y"]),
+    ] {
+        press(&mut s, cx, chord);
+        for channel in &channels {
+            // Layer time: the layer starts at 1 s.
+            assert_eq!(key_times(&s, "l0", channel), [2.], "{chord} {channel}");
+        }
+    }
+    assert_eq!(key_times(&s, "l0", "opacity"), [2.]);
+    let rows = s.surface.read_with(&s.vcx, |t, _| t.model().rows().len());
+    assert!(rows > 1, "the keyed properties show in the timeline");
+    // A second key elsewhere, then the chord on the first removes only it.
+    *s.recorder.time.borrow_mut() = 5.;
+    press(&mut s, cx, "alt+shift+t");
+    assert_eq!(key_times(&s, "l0", "opacity"), [2., 4.]);
+    *s.recorder.time.borrow_mut() = 3.;
+    press(&mut s, cx, "alt+shift+t");
+    assert_eq!(key_times(&s, "l0", "opacity"), [4.]);
+    undo(&mut s, cx);
+    assert_eq!(key_times(&s, "l0", "opacity"), [2., 4.]);
+    // One axis keyed: the chord completes the pair instead of removing.
+    *s.recorder.time.borrow_mut() = 6.;
+    let mut set = SetProperty::new("l0", "position.x", Value::Number(40.), 6.);
+    set.mode = pm_kernel::commands::properties::KeyMode::Keyframe;
+    call(
+        &s.rig.kernel,
+        Call::Transact {
+            label: None,
+            expected_revision: None,
+            body: pm_kernel::WriteBody::Commands(vec![pm_kernel::PropertyCommand::Set(set).into()]),
+        },
+    );
+    delivered(&mut s, cx);
+    assert_eq!(key_times(&s, "l0", "position.x"), [2., 5.]);
+    press(&mut s, cx, "alt+shift+p");
+    assert_eq!(key_times(&s, "l0", "position.y"), [2., 5.]);
+}
+/// Option-K (Add Keyframe): the animated properties of the selected layers
+/// get a key at the playhead; a selected property narrows it to that one.
+#[gpui::test]
+fn add_keyframe_keys_the_animated_properties_at_the_playhead(cx: &mut TestAppContext) {
+    let mut s = stage_project(cx, KEYABLE.into());
+    select(&mut s, cx, &["l0"]);
+    assert_eq!(dispatch("alt+k").0, "timeline.addKeyframe");
+    *s.recorder.time.borrow_mut() = 3.;
+    // Nothing is animated yet: nothing to key.
+    press(&mut s, cx, "alt+k");
+    assert!(key_times(&s, "l0", "opacity").is_empty());
+    press(&mut s, cx, "alt+shift+t");
+    press(&mut s, cx, "alt+shift+r");
+    *s.recorder.time.borrow_mut() = 5.;
+    press(&mut s, cx, "alt+k");
+    assert_eq!(key_times(&s, "l0", "opacity"), [2., 4.]);
+    assert_eq!(key_times(&s, "l0", "rotation"), [2., 4.]);
+    assert!(key_times(&s, "l0", "position.x").is_empty());
+    // Again on the same frame changes nothing.
+    press(&mut s, cx, "alt+k");
+    assert_eq!(key_times(&s, "l0", "opacity"), [2., 4.]);
+    undo(&mut s, cx);
+    assert_eq!(key_times(&s, "l0", "opacity"), [2.], "one Undo step");
+    assert_eq!(key_times(&s, "l0", "rotation"), [2.]);
+}
+/// With no layer selected Option-Shift-S has nothing to key and stays the
+/// Audio Skimming toggle.
+#[test]
+fn a_property_key_chord_falls_through_to_its_other_meaning() {
+    let mut resolver = Resolver::new();
+    let mut effects = resolver.submit(Key {
+        token: 1,
+        chord: "alt+shift+s".into(),
+        field: false,
+        repeat: false,
+        up: false,
+        compat: false,
+    });
+    let mut offered = vec![];
+    while let Some(Effect::Dispatch { command, .. }) = effects.into_iter().next() {
+        offered.push(command);
+        effects = resolver.resolve(1, false);
+    }
+    assert_eq!(offered, ["timeline.keyProperty:s", "toggleAudioSkimming"]);
+}
 #[gpui::test]
 fn layer_paste_plans_a_copy_at_the_playhead_and_undo_removes_it(cx: &mut TestAppContext) {
     let mut s = stage(cx, 1);

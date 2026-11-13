@@ -2432,6 +2432,16 @@ impl Controller {
                 let Some(timeline) = self.builtins.timeline.clone() else {
                     return false;
                 };
+                // A property's keyframe key with no layer selected has
+                // nothing to key: the chord goes on to its next meaning.
+                if cmd.name.starts_with("timeline.keyProperty:")
+                    && self
+                        .published
+                        .as_ref()
+                        .is_none_or(|p| p.selection.layers().is_empty())
+                {
+                    return false;
+                }
                 let time = self.time();
                 timeline.update(cx, |t, cx| t.command(&cmd.name, time, frames, shift, cx));
                 return true;

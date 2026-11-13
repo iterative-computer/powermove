@@ -2124,5 +2124,133 @@
     "in_fields": false,
     "repeat": false,
     "loose": false
+  },
+  {
+    "id": "native.rippleDelete",
+    "chord": "shift+backspace",
+    "command": "rippleDelete",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "native.rippleDelete.forward",
+    "chord": "shift+delete",
+    "command": "rippleDelete",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "native.nudgeLayerTime.earlier",
+    "chord": "alt+pageup",
+    "command": "nudgeLayerTime",
+    "args": [
+      -1
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": true,
+    "loose": false
+  },
+  {
+    "id": "native.nudgeLayerTime.later",
+    "chord": "alt+pagedown",
+    "command": "nudgeLayerTime",
+    "args": [
+      1
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": true,
+    "loose": false
+  },
+  {
+    "id": "native.nudgeLayerTime.earlier10",
+    "chord": "alt+shift+pageup",
+    "command": "nudgeLayerTime",
+    "args": [
+      -10
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": true,
+    "loose": false
+  },
+  {
+    "id": "native.nudgeLayerTime.later10",
+    "chord": "alt+shift+pagedown",
+    "command": "nudgeLayerTime",
+    "args": [
+      10
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": true,
+    "loose": false
+  },
+  {
+    "id": "native.addKeyframe",
+    "chord": "alt+k",
+    "command": "timeline.addKeyframe",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "native.keyProperty.p",
+    "chord": "alt+shift+p",
+    "command": "timeline.keyProperty:p",
+    "args": [],
+    "priority": 90,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "native.keyProperty.s",
+    "chord": "alt+shift+s",
+    "command": "timeline.keyProperty:s",
+    "args": [],
+    "priority": 90,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "native.keyProperty.r",
+    "chord": "alt+shift+r",
+    "command": "timeline.keyProperty:r",
+    "args": [],
+    "priority": 90,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "native.keyProperty.t",
+    "chord": "alt+shift+t",
+    "command": "timeline.keyProperty:t",
+    "args": [],
+    "priority": 90,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "native.keyProperty.a",
+    "chord": "alt+shift+a",
+    "command": "timeline.keyProperty:a",
+    "args": [],
+    "priority": 90,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
   }
 ]

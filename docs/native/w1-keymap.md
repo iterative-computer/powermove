@@ -369,3 +369,9 @@ Rows after the frozen table, in `apps/native/crates/shell/data/keymap.json` (ids
 | k | shuttleStop | [] | 90 | no | While playing: stop. Held, J and L step one frame and run at ¼ speed while they stay down. Stopped: declines to `nextVisibleEvent`. |
 | l | shuttleForward | [] | 90 | yes | While playing: 2×, 4×, 8×. Stopped: declines to the audio-levels reveal. |
 | ctrl+j | shuttleBackward | [true] | 90 | no | `true` starts from a stop. Menu rows and the palette also start from a stop. |
+| shift+backspace, shift+delete | rippleDelete | [] | 100 | no | Removes the selected layers and moves every later layer earlier by the time they took (a layer that overlaps a removed span, or is locked, stays). |
+| alt+pageup / alt+pagedown | nudgeLayerTime | [-1] / [1] | 100 | yes | The selected layers move one frame earlier / later; with shift, ten. |
+| alt+k | timeline.addKeyframe | [] | 100 | no | A key at the playhead on the selected property (else the selected keys' properties, else every animated property) of the selected layers. |
+| alt+shift+p, s, r, t, a | timeline.keyProperty:p … a | [] | 90 | no | Adds a keyframe on Position, Scale, Rotation, Opacity or Anchor Point at the playhead, or removes it when every axis has one there. Declines with no layer selected (alt+shift+s is then Audio Skimming). |
+
+Pointer: Option-drag on a clip (timeline) or a layer (viewer) leaves it and moves a copy. In Tracks mode Slide is Option-Shift-drag.

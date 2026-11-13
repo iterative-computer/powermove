@@ -743,3 +743,215 @@ fn chordless_layer_commands_run_from_the_menu_bar() {
         assert_eq!(desk.document(), before, "{command} is one Undo step");
     }
 }
+
+/// A shape layer from `from` for `dur` seconds.
+fn span(id: &str, from: f64, dur: f64) -> serde_json::Value {
+    let mut layer = shape(id);
+    layer["from"] = json!(from);
+    layer["dur"] = json!(dur);
+    layer
+}
+fn spans(desk: &Desk) -> Vec<(String, f64, f64)> {
+    desk.layers()
+        .into_iter()
+        .map(|l| (l.id, l.in_time, l.out_time))
+        .collect()
+}
+fn at(id: &str, from: f64, to: f64) -> (String, f64, f64) {
+    (id.to_owned(), from, to)
+}
+
+#[test]
+fn shift_delete_removes_the_selection_and_closes_the_time_it_took() {
+    // The chord, and the same command for the forward Delete key.
+    for chord in ["shift+backspace", "shift+delete"] {
+        let (command, args) = crate::layer_commands::commands_tests::dispatch(chord);
+        assert_eq!(
+            (command.as_str(), args.len()),
+            ("rippleDelete", 0),
+            "{chord}"
+        );
+    }
+    let mut locked = span("locked", 5., 2.);
+    locked["lock"] = json!(true);
+    let desk = Desk::new(project(vec![
+        span("a", 0., 2.),
+        span("b", 2., 2.),
+        span("c", 4., 2.),
+        span("background", 0., 10.),
+        span("overlapping", 1., 2.),
+        span("later", 5., 2.),
+        locked,
+    ]));
+    let before = desk.document();
+    desk.select(&["b"]);
+    desk.press("shift+backspace", 0.);
+    // Layers that start at or after b's end close up by its two seconds;
+    // ones that overlap it, and a locked one, stay.
+    let closed = vec![
+        at("a", 0., 2.),
+        at("c", 2., 4.),
+        at("background", 0., 10.),
+        at("overlapping", 1., 3.),
+        at("later", 3., 5.),
+        at("locked", 5., 7.),
+    ];
+    assert_eq!(spans(&desk), closed);
+    assert_eq!(
+        desk.published().history.undo_label.as_deref(),
+        Some("Ripple Delete")
+    );
+    let after = desk.document();
+    let again = desk.reopened();
+    let reopened: Vec<_> =
+        pm_kernel::model::list_layers(again.published.snapshot.root().unwrap(), None)
+            .into_iter()
+            .map(|l| (l.id, l.in_time, l.out_time))
+            .collect();
+    assert_eq!(reopened, closed, "saved and reopened");
+    desk.undo();
+    assert_eq!(desk.document(), before, "one Undo step");
+    desk.redo();
+    assert_eq!(desk.document(), after);
+}
+
+#[test]
+fn ripple_delete_closes_each_removed_span_and_a_moving_group_carries_its_members() {
+    let mut member = span("member", 6.5, 1.);
+    member["group"] = json!("group");
+    let mut group = span("group", 6., 2.);
+    group["type"] = json!("group");
+    let desk = Desk::new(project(vec![
+        span("a", 0., 2.),
+        span("b", 2., 2.),
+        span("c", 4., 2.),
+        group,
+        member,
+    ]));
+    desk.select(&["a", "c"]);
+    desk.press("shift+backspace", 0.);
+    // b closes a's two seconds; the group, after both spans, closes four,
+    // and its member moves with it (once).
+    assert_eq!(
+        spans(&desk),
+        [at("b", 0., 2.), at("group", 2., 4.), at("member", 2.5, 3.5)]
+    );
+    desk.undo();
+    assert_eq!(spans(&desk).len(), 5);
+    // A locked layer in the selection refuses the whole command.
+    desk.call(Call::Transact {
+        label: None,
+        expected_revision: None,
+        body: pm_kernel::WriteBody::Commands(vec![
+            pm_kernel::LayerCommand::Set {
+                layer_id: "b".into(),
+                patch: pm_kernel::commands::layers::LayerPatch {
+                    locked: Some(true),
+                    ..Default::default()
+                },
+            }
+            .into(),
+        ]),
+    });
+    desk.select(&["a", "b"]);
+    let published = desk.published();
+    assert!(command_plan("rippleDelete", &[], &published, 0.).is_none());
+    assert!(
+        crate::layer_commands::disabled(Some(&published), &desk.layers(), &Default::default())
+            .contains("rippleDelete")
+    );
+}
+
+#[test]
+fn option_page_keys_move_the_selected_layers_by_frames() {
+    let desk = Desk::new(project(vec![span("a", 1., 2.), span("b", 3., 2.)]));
+    let before = desk.document();
+    desk.select(&["a"]);
+    let frame = 1. / 30.;
+    for (chord, frames) in [
+        ("alt+pagedown", 1.),
+        ("alt+shift+pagedown", 10.),
+        ("alt+pageup", -1.),
+        ("alt+shift+pageup", -10.),
+    ] {
+        let from = desk.layers()[0].in_time;
+        desk.press(chord, 0.);
+        let layer = &desk.layers()[0];
+        assert!(
+            (layer.in_time - (from + frames * frame)).abs() < 1e-9,
+            "{chord}: {from} -> {}",
+            layer.in_time
+        );
+        assert!(
+            (layer.out_time - layer.in_time - 2.).abs() < 1e-9,
+            "{chord}"
+        );
+        assert_eq!(
+            desk.published().history.undo_label.as_deref(),
+            Some("Move Layers")
+        );
+    }
+    assert_eq!(desk.layers()[1].in_time, 3., "the unselected layer stays");
+    // Earlier than the composition's start is allowed, as a drag allows it.
+    desk.select(&["b"]);
+    for _ in 0..4 {
+        desk.undo();
+    }
+    assert_eq!(desk.document(), before);
+    desk.select(&["a"]);
+    desk.press("alt+pagedown", 0.);
+    let moved = desk.layers()[0].in_time;
+    let again = desk.reopened();
+    assert_eq!(
+        pm_kernel::model::list_layers(again.published.snapshot.root().unwrap(), None)[0].in_time,
+        moved,
+        "saved and reopened"
+    );
+    // The keys repeat while held.
+    let held = pm_shell::keyboard::shipped()
+        .into_iter()
+        .filter(|b| b.command == "nudgeLayerTime")
+        .all(|b| b.repeat);
+    assert!(held);
+}
+
+#[test]
+fn the_new_editing_rows_are_in_the_menus_with_their_keys() {
+    let menus = pm_shell::menu::menus();
+    let row = |menu: &str, command: &str, args: serde_json::Value| {
+        let (_, items) = menus.iter().find(|(title, _)| *title == menu).unwrap();
+        let args = args.as_array().cloned().unwrap();
+        items
+            .iter()
+            .find(|i| i.command == command && i.args == args)
+            .unwrap_or_else(|| panic!("{menu} has no {command}"))
+            .clone()
+    };
+    // Edit lists Ripple Delete without a key equivalent (AppKit would take
+    // Shift-Delete from a text field); the Layer menu shows the key.
+    assert_eq!(row("Edit", "rippleDelete", json!([])).chord, "");
+    assert_eq!(
+        row("Layer", "rippleDelete", json!([])).chord,
+        "shift+backspace"
+    );
+    for (frames, chord) in [
+        (-1, "alt+pageup"),
+        (1, "alt+pagedown"),
+        (-10, "alt+shift+pageup"),
+        (10, "alt+shift+pagedown"),
+    ] {
+        assert_eq!(row("Layer", "nudgeLayerTime", json!([frames])).chord, chord);
+    }
+    assert_eq!(
+        row("Timeline", "timeline.addKeyframe", json!([])).chord,
+        "alt+k"
+    );
+    for property in ["p", "s", "r", "t", "a"] {
+        let item = row(
+            "Timeline",
+            &format!("timeline.keyProperty:{property}"),
+            json!([]),
+        );
+        assert_eq!(item.chord, format!("alt+shift+{property}"));
+    }
+}

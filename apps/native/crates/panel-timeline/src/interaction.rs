@@ -232,8 +232,12 @@ impl TimelineModel {
             self.reveal_property(key, shift, millis, facts)?;
             return Ok(Plan::default());
         }
+        if let Some(property) = id.strip_prefix("timeline.keyProperty:") {
+            return self.key_property(property, time);
+        }
         let duration = self.index.duration;
         Ok(match id {
+            "timeline.addKeyframe" => self.add_keyframes(time)?,
             "play" => Plan {
                 effects: vec![HostEffect::TogglePlayback],
                 ..Plan::default()
@@ -491,6 +495,120 @@ impl TimelineModel {
             },
             _ => return Err(ModelError::UnknownCommand(id.into())),
         })
+    }
+    /// Option-Shift-P, S, R, T or A (After Effects): a keyframe at the
+    /// playhead on that transform property of the selected layers, or its
+    /// removal when every one of its channels has a key there. The property
+    /// shows in the timeline afterwards.
+    pub fn key_property(&mut self, property: &str, time: f64) -> Result<Plan, ModelError> {
+        let wanted = |path: &str| match property {
+            "p" => path.starts_with("position."),
+            "s" => path.starts_with("scale."),
+            "r" => path == "rotation" || path.starts_with("rotation."),
+            "t" => path == "opacity",
+            "a" => path.starts_with("anchor."),
+            _ => false,
+        };
+        if !["p", "s", "r", "t", "a"].contains(&property) {
+            return Err(ModelError::UnknownCommand(property.into()));
+        }
+        let targets = self.channels_of_selection(|_, path, _| wanted(path));
+        if targets.is_empty() {
+            return Ok(Plan::default());
+        }
+        let plan = self.property_diamond(&targets, time)?;
+        self.show_channels(&targets);
+        Ok(plan)
+    }
+    /// Add Keyframe: a key at the playhead on the selected property (the
+    /// properties of the selected keys, else every animated property) of the
+    /// selected layers. Channels that have a key there are left alone.
+    pub fn add_keyframes(&mut self, time: f64) -> Result<Plan, ModelError> {
+        finite(time)?;
+        let property = self.selection.channel().map(str::to_owned);
+        let keyed: Vec<(String, String)> = self
+            .selection
+            .keys()
+            .iter()
+            .filter_map(|id| self.index.key(id))
+            .map(|(l, c, _)| (l.id.clone(), c.path.clone()))
+            .collect();
+        let targets = self.channels_of_selection(|layer, path, animated| match &property {
+            Some(chosen) => path == chosen || path.starts_with(&format!("{chosen}.")),
+            None if !keyed.is_empty() => keyed.iter().any(|(l, c)| l == layer && c == path),
+            None => animated,
+        });
+        let half = 0.5 / self.index.fps;
+        let commands: Vec<Command> = targets
+            .iter()
+            .filter(|(l, c)| {
+                let from = self.index.layer(l).map_or(0., |l| l.from);
+                !self
+                    .index
+                    .channel(l, c)
+                    .is_some_and(|c| c.keys.iter().any(|k| (from + k.time - time).abs() < half))
+            })
+            .map(|(l, c)| {
+                KeyframeCommand::Add {
+                    layer_id: l.clone(),
+                    channel: c.clone(),
+                    time,
+                    key_id: new_id("K"),
+                    value: None,
+                }
+                .into()
+            })
+            .collect();
+        if commands.is_empty() {
+            return Ok(Plan::default());
+        }
+        self.show_channels(&targets);
+        Ok(Plan::edit(commands, self.index.revision))
+    }
+    /// `(layer, channel)` of the selected, unlocked layers whose channel
+    /// `wanted(layer, path, has keys)` accepts.
+    fn channels_of_selection(
+        &self,
+        wanted: impl Fn(&str, &str, bool) -> bool,
+    ) -> Vec<(String, String)> {
+        self.index
+            .layers
+            .iter()
+            .filter(|l| self.selection.contains(&l.id) && !l.effectively_locked)
+            .flat_map(|l| {
+                l.channels
+                    .iter()
+                    .filter(|c| wanted(&l.id, &c.path, !c.keys.is_empty()))
+                    .map(|c| (l.id.clone(), c.path.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+    /// Opens these layers' rows on these channels (with what they showed).
+    fn show_channels(&mut self, targets: &[(String, String)]) {
+        for (layer, path) in targets {
+            let Some(l) = self.index.layer(layer) else {
+                continue;
+            };
+            let shown = self.reveal.layers.entry(layer.clone()).or_insert_with(|| {
+                crate::reveal::Disclosure {
+                    collapsed: l.collapsed,
+                    group_collapsed: l.group_collapsed,
+                    paths: None,
+                }
+            });
+            if shown.collapsed {
+                // Closed, it showed nothing: open on what gets a key.
+                shown.collapsed = false;
+                shown.paths = Some(vec![]);
+            }
+            // `None` lists the animated channels, which these now are.
+            if let Some(paths) = &mut shown.paths
+                && !paths.iter().any(|p| p == "*" || p == path)
+            {
+                paths.push(path.clone());
+            }
+        }
     }
     pub fn add_marker(&self, time: f64) -> Result<Plan, ModelError> {
         finite(time)?;
