@@ -89,3 +89,45 @@ is preserved. If no above-floor placement exists for that point and size,
 the command fails without adding a light, explaining that a higher surface
 point or smaller softbox is needed. Scenes without a studio floor retain
 the unrestricted reflection placement.
+
+## Original glTF/GLB scale
+
+`edit_3d` can add an imported model with its metre dimensions and shared
+source origin:
+
+```json
+{
+  "operation": "add_object",
+  "id": "product-part",
+  "object": {"source": {"assetId": "imported-model-id"}},
+  "keepRealWorldScale": true
+}
+```
+
+This is opt-in. Omit it or pass `false` to retain the existing independent
+unit-size fit. The command reads the approved model's original fit and
+inverts it using the active World's `metersPerUnit` (default `0.1`). Separate
+files therefore retain their relative dimensions and their common origin.
+No geometry, renderer behavior, or existing project data is changed.
+
+The resulting position and scale are ordinary, visible layer properties;
+`get_3d_scene` returns them. Add with this option before applying further
+object transforms. A later scale edit replaces the absolute layer factor.
+Other formats are rejected for this option because their metre units are
+not reliably declared. Normal imports of those formats remain supported.
+
+## Scale units at the command boundary
+
+The existing two representations remain explicit for data compatibility:
+
+| Address | Unit | Example |
+| --- | --- | --- |
+| `edit_3d` object `p.sx`, `p.sy`, `p.sz` | Factor | `1.188` means 118.8% |
+| `apply_commands` `scale.x`, `scale.y`, `scale.z`, including keyframes | Percent | `118.8` means 118.8% |
+| `get_3d_scene` object `p.sx`, `p.sy`, `p.sz` | Factor | `1.188` |
+
+Both paths are validated and regression-tested against the same evaluated
+transform. Object scale channels are converted to percentages when stored,
+including their keys; readback converts them to factors. Unsupported property
+aliases and strings such as `"118.8%"` are rejected. Numeric values are never
+guessed or silently reinterpreted between these units.

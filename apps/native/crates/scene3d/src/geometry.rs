@@ -18,6 +18,11 @@ pub struct EvaluatedGeometry {
 }
 pub trait AssetGeometry: Send + Sync {
     fn bounds(&self, id: &str, record: &Value, time: f64) -> Result<Bounds>;
+    /// The glTF source uses metres. Its fit is inverted when a command opts
+    /// into original size/origin; the renderer's normalized resource is kept.
+    fn source_fit(&self, _id: &str, _record: &Value) -> Result<gltf::Fit> {
+        fail("Real-world import scale requires decoded glTF/GLB geometry")
+    }
 }
 pub struct NoAssets;
 impl AssetGeometry for NoAssets {
@@ -88,6 +93,16 @@ impl AssetGeometry for LoadedAssets {
         }
         model_bounds(model, time)
     }
+    fn source_fit(&self, id: &str, record: &Value) -> Result<gltf::Fit> {
+        let (loaded, model) = self
+            .models
+            .get(id)
+            .ok_or_else(|| Error(format!("3D model geometry is not loaded: {id}")))?;
+        if loaded != record {
+            return fail("3D model source changed; reload geometry");
+        }
+        source_fit(model)
+    }
 }
 /// Snapshot-approved originals, resolved by the same media host as exports.
 /// Decode with Studio's shared Resource loader, independent of editor views.
@@ -146,6 +161,19 @@ impl AssetGeometry for FileAssets {
     fn bounds(&self, id: &str, record: &Value, time: f64) -> Result<Bounds> {
         model_bounds(&self.resource(id, record)?.model, time)
     }
+    fn source_fit(&self, id: &str, record: &Value) -> Result<gltf::Fit> {
+        source_fit(&self.resource(id, record)?.model)
+    }
+}
+fn source_fit(model: &crate::import::Model) -> Result<gltf::Fit> {
+    let crate::import::Model::Gltf(model) = model else {
+        return fail("Real-world import scale requires glTF/GLB geometry in metres");
+    };
+    let fit = model.fit;
+    if !fit.radius.is_finite() || fit.radius <= 0. || !fit.center.iter().all(|v| v.is_finite()) {
+        return fail("Invalid original model scale");
+    }
+    Ok(fit)
 }
 fn model_bounds(model: &crate::import::Model, time: f64) -> Result<Bounds> {
     if !time.is_finite() {
