@@ -1594,6 +1594,285 @@ fn a_changed_file_that_cannot_be_kept_beside_the_project_is_still_told() {
         assert_eq!(kept_beside(&mut k, &session), [], "{why}: seen");
     }
 }
+/// The files beside `file` under its private names, as they are now.
+fn private_files(file: &Path) -> Vec<(std::path::PathBuf, Vec<u8>)> {
+    fs::read_dir(file.parent().unwrap())
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| {
+            p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with(&private_prefix(file))
+        })
+        .map(|p| (p.clone(), fs::read(&p).unwrap()))
+        .collect()
+}
+/// A changed file that could not be kept beside the project went to the
+/// Trash, and the process died before anything after that move reached the
+/// disk. The next open still tells the person it is in the Trash: what the
+/// save's record holds at the moment of the move already says so.
+#[test]
+fn a_file_moved_to_the_trash_is_told_after_a_crash_right_after_the_move() {
+    let dir = common::TempDir::new("stray-crash");
+    fs::create_dir_all(dir.path("job")).unwrap();
+    let file = dir.path("job/cut.pmv");
+    fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+    let native = dir.path("native");
+    assert!(killed(&native, &file, "no-exclusive", "installed", "save"));
+    let record = private_file(&file, ".save");
+    fs::copy(&file, record.with_extension("tmp")).unwrap();
+    let mut k = kernel(&native);
+    let (hook, written) = work_before_disposal();
+    // What is on disk beside the project the moment the Trash move returns.
+    let at_move = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let moved = at_move.clone();
+    let (trash, project) = (common::trash(&native.join("Trash")), file.clone());
+    k.set_publish_hooks(pm_kernel::project_io::PublishHooks {
+        before_disposal: Some(hook),
+        before_install: Some(std::sync::Arc::new(|to: &Path| {
+            if to.to_string_lossy().contains("(other version") {
+                land(to, b"in the way");
+            }
+        })),
+        trash: Some(pm_kernel::project_io::TrashHook(std::sync::Arc::new(
+            move |path: &Path| {
+                let now = (trash.0)(path);
+                *moved.lock().unwrap() = Some(private_files(&project));
+                now
+            },
+        ))),
+        ..child_disk("no-exclusive")
+    });
+    let (_session, _) = open_file(&mut k, &file);
+    let work = written.lock().unwrap()[0].clone();
+    assert!(common::trashed(&native.join("Trash")).contains(&work));
+    // The crash: nothing written after the move is on disk.
+    drop(k);
+    let at_move = at_move.lock().unwrap().take().expect("moved to the Trash");
+    for (path, _) in private_files(&file) {
+        fs::remove_file(path).unwrap();
+    }
+    for (path, bytes) in &at_move {
+        fs::write(path, bytes).unwrap();
+    }
+    let mut k = kernel(&native);
+    k.set_publish_hooks(child_disk("no-exclusive"));
+    let (session, _) = open_file(&mut k, &file);
+    let told = kept_beside(&mut k, &session);
+    assert!(
+        told.iter().any(|(why, _)| why == "trashed"),
+        "told after the crash: {told:?}"
+    );
+    seen(&mut k, &session, &told);
+    assert_eq!(kept_beside(&mut k, &session), [], "seen");
+}
+/// A changed file that could not be kept beside the project, where the
+/// save's record cannot be written to say what becomes of it: it is not
+/// moved anywhere the record would not lead (the Trash). It stays under the
+/// record's own name, the person is told where, and the next open takes it
+/// up again.
+#[test]
+fn a_file_whose_fate_cannot_be_recorded_stays_where_the_record_finds_it() {
+    let dir = common::TempDir::new("stray-unrecorded");
+    fs::create_dir_all(dir.path("job")).unwrap();
+    let file = dir.path("job/cut.pmv");
+    fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+    let native = dir.path("native");
+    assert!(killed(&native, &file, "no-exclusive", "installed", "save"));
+    let record = private_file(&file, ".save");
+    fs::copy(&file, record.with_extension("tmp")).unwrap();
+    let mut k = kernel(&native);
+    let (hook, written) = work_before_disposal();
+    k.set_publish_hooks(pm_kernel::project_io::PublishHooks {
+        before_disposal: Some(hook),
+        before_install: Some(std::sync::Arc::new(|to: &Path| {
+            if to.to_string_lossy().contains("(other version") {
+                land(to, b"in the way");
+            }
+        })),
+        record_fails: Some(std::sync::Arc::new(|step: &str| step == "left")),
+        ..child_disk("no-exclusive")
+    });
+    let (session, _) = open_file(&mut k, &file);
+    let work = written.lock().unwrap()[0].clone();
+    assert!(
+        !common::trashed(&native.join("Trash")).contains(&work),
+        "moved where no record leads"
+    );
+    let told = kept_beside(&mut k, &session);
+    assert!(
+        told.iter().any(|(why, path)| why == "hidden"
+            && path
+                .as_ref()
+                .is_some_and(|p| fs::read(p).is_ok_and(|b| b == work))),
+        "told where it is: {told:?}"
+    );
+    k.shell(ShellCall::Close(session)).unwrap();
+    drop(k);
+    let mut k = kernel(&native);
+    k.set_publish_hooks(child_disk("no-exclusive"));
+    let (session, _) = open_file(&mut k, &file);
+    let told = kept_beside(&mut k, &session);
+    assert!(
+        told.iter().any(|(_, path)| path
+            .as_ref()
+            .is_some_and(|p| fs::read(p).is_ok_and(|b| b == work))),
+        "taken up again: {told:?}"
+    );
+}
+/// Another computer's save is being copied into this one by a sync client
+/// and only the start of it has arrived (its first bytes are still the
+/// zeros a copy gets last). An earlier save on this Mac left a record that
+/// proves an older version. The open refuses the file as one still being
+/// copied, and no older version is offered or installed over it: nothing
+/// says that file is the earlier save's.
+#[test]
+fn a_file_still_being_copied_here_is_refused_and_never_recovered_over() {
+    let dir = common::TempDir::new("replica");
+    fs::create_dir_all(dir.path("job")).unwrap();
+    let file = dir.path("job/cut.pmv");
+    fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+    let native = dir.path("native");
+    // An earlier save here, cut short once its file was in place: its
+    // record proves the version it replaced and the one it wrote.
+    assert!(killed(&native, &file, "no-exclusive", "installed", "save"));
+    let mut k = kernel(&native);
+    k.set_publish_hooks(child_disk("no-exclusive"));
+    let ShellReply::Leftovers(before) = k.shell(ShellCall::Leftovers(file.clone())).unwrap() else {
+        panic!()
+    };
+    let proven = |rows: &[Value]| -> Vec<std::path::PathBuf> {
+        rows.iter()
+            .filter(|r| r.get("proven") == Some(&Value::Bool(true)))
+            .filter_map(|r| r.get("path").and_then(Value::as_str).map(Into::into))
+            .collect()
+    };
+    assert!(
+        !proven(&before).is_empty(),
+        "the earlier save proves versions: {before:?}"
+    );
+    // The start of another computer's later save: a different project's
+    // bytes, its first ones still zeros.
+    let mut later = fs::read(common::ts_fixture("fresh.pmv")).unwrap();
+    later.extend_from_slice(&vec![b' '; 4096]);
+    later.truncate(later.len() / 2);
+    later[..5].fill(0);
+    land(&file, &later);
+    let error = k
+        .shell(ShellCall::PrepareOpen {
+            id: "P".into(),
+            source: SessionSource::File(file.clone()),
+            electron_profile: None,
+        })
+        .expect_err("a file still being copied is not opened");
+    assert!(
+        error.to_string().contains(pm_kernel::error::STILL_COPYING),
+        "said plainly: {error}"
+    );
+    assert_eq!(fs::read(&file).unwrap(), later, "the file is not touched");
+    let ShellReply::Leftovers(rows) = k.shell(ShellCall::Leftovers(file.clone())).unwrap() else {
+        panic!()
+    };
+    assert_eq!(proven(&rows), Vec::<std::path::PathBuf>::new(), "{rows:?}");
+    for version in proven(&before) {
+        assert!(
+            k.shell(ShellCall::UseLeftover {
+                path: file.clone(),
+                leftover: version,
+                unproven: false,
+            })
+            .is_err(),
+            "never installed over the file being copied"
+        );
+    }
+    assert_eq!(fs::read(&file).unwrap(), later, "the file is not touched");
+}
+/// The version the person chose after a failed open was proven, and then,
+/// before it was put under the project's name, a sync client replaced the
+/// file under the chosen name with another complete project. The name must
+/// never end up holding that other file as if it were the version chosen:
+/// the choice is refused, and the file that arrived is not lost.
+#[test]
+fn a_chosen_version_replaced_before_it_is_placed_is_never_installed_as_the_choice() {
+    for route in ["exclusive rename", "links only"] {
+        let dir = common::TempDir::new("chosen-replaced");
+        fs::create_dir_all(dir.path("job")).unwrap();
+        let file = dir.path("job/cut.pmv");
+        fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+        let native = dir.path("native");
+        assert!(killed(&native, &file, "no-exclusive", "mid-copy", "save"));
+        let mut stray = fs::read(&file).unwrap();
+        stray[10] ^= 0xff;
+        land(&file, &stray);
+        let mut k = kernel(&native);
+        k.set_publish_hooks(child_disk("no-exclusive"));
+        k.shell(ShellCall::PrepareOpen {
+            id: "P".into(),
+            source: SessionSource::File(file.clone()),
+            electron_profile: None,
+        })
+        .expect_err("the file at the name is not a project");
+        let ShellReply::Leftovers(rows) = k.shell(ShellCall::Leftovers(file.clone())).unwrap()
+        else {
+            panic!()
+        };
+        let chosen = rows
+            .iter()
+            .find(|r| {
+                r.get("proven") == Some(&Value::Bool(true))
+                    && r.get("role").and_then(Value::as_str) == Some("saving")
+            })
+            .and_then(|r| r.get("path").and_then(Value::as_str))
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| panic!("{route}: {rows:?}"));
+        // Another complete project, landing under the chosen name once the
+        // choice is recorded.
+        let other = fs::read(common::ts_fixture("save-as.pmv")).unwrap();
+        assert_ne!(other, fs::read(&chosen).unwrap());
+        let (target, arriving) = (chosen.clone(), other.clone());
+        k.set_publish_hooks(pm_kernel::project_io::PublishHooks {
+            links_only: route == "links only",
+            step: Some(std::sync::Arc::new(move |step: &str, _: &Path| {
+                if step == "chosen" {
+                    land(&target, &arriving);
+                }
+            })),
+            ..Default::default()
+        });
+        let used = k.shell(ShellCall::UseLeftover {
+            path: file.clone(),
+            leftover: chosen.clone(),
+            unproven: false,
+        });
+        assert!(
+            fs::read(&file).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound),
+            "{route}: the other file was installed as the choice"
+        );
+        let refused = used.expect_err(&format!("{route}: the choice is refused"));
+        assert!(
+            refused
+                .to_string()
+                .contains(pm_kernel::error::CHOICE_REPLACED),
+            "{route}: {refused}"
+        );
+        let held = fs::read_dir(dir.path("job"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| fs::read(p).is_ok_and(|b| b == other))
+            .collect::<Vec<_>>();
+        assert!(
+            held.iter().any(|p| *p != file),
+            "{route}: the file that arrived is kept beside the project: {held:?}"
+        );
+        assert!(
+            fs::read_dir(dir.path("job"))
+                .unwrap()
+                .any(|e| fs::read(e.unwrap().path()).is_ok_and(|b| b == stray)),
+            "{route}: the unreadable file is not lost"
+        );
+    }
+}
 /// A save that only appends to the project file writes a file whose first
 /// bytes are the whole previous file. On a volume where the new file can
 /// only be copied to its name, the name must never hold those bytes alone
@@ -2694,6 +2973,503 @@ fn a_save_that_must_first_recover_does_not_hold_up_the_other_projects() {
             .iter()
             .any(|p| saved_name(p).as_deref() == Some("One")),
         "the save that was cut short is kept beside"
+    );
+    actor.shutdown();
+}
+/// The files under `dir` the kernel's own thread reads whole while the
+/// guard lives. Each such read holds up every other project's edits and
+/// saves for as long as the disk takes (a large file, a share that stalls).
+fn read_on_the_kernel_thread(
+    dir: &Path,
+) -> (
+    pm_kernel::project_io::WholeReads,
+    std::sync::Arc<std::sync::Mutex<Vec<std::path::PathBuf>>>,
+) {
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let log = seen.clone();
+    let guard = pm_kernel::project_io::watch_whole_reads(
+        dir,
+        std::sync::Arc::new(move |path: &Path| {
+            if std::thread::current().name() == Some("pm-kernel") {
+                log.lock().unwrap().push(path.to_owned());
+            }
+        }),
+    );
+    (guard, seen)
+}
+/// A kernel on its own thread, as the app runs it, with `hooks`.
+fn actor_with_hooks(profile: &Path, hooks: pm_kernel::project_io::PublishHooks) -> KernelActor {
+    let actor = KernelActor::spawn(KernelConfig {
+        journal_root: Some(profile.join("journals")),
+        trash: Some(common::trash(&profile.join("Trash"))),
+        publish_hooks: Some(hooks),
+        ..Default::default()
+    });
+    actor
+        .handle()
+        .shell(ShellCall::AttachLibrary {
+            profile: profile.into(),
+            format: DiskFormat::V1_2,
+            electron_profile: None,
+        })
+        .wait()
+        .unwrap()
+        .unwrap();
+    actor
+}
+/// A project that opens only as a copy (its folder cannot be written) is
+/// read whole on a worker, as one that opens for writing is: never on the
+/// kernel's own thread.
+#[test]
+fn a_project_opened_as_a_copy_is_read_off_the_kernel_thread() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = common::TempDir::new("copy-open-off-actor");
+    fs::create_dir_all(dir.path("job")).unwrap();
+    let file = dir.path("job/cut.pmv");
+    fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+    fs::set_permissions(dir.path("job"), fs::Permissions::from_mode(0o555)).unwrap();
+    let actor = actor_with_hooks(&dir.path("native"), Default::default());
+    let (_watch, read) = read_on_the_kernel_thread(&dir.path("job"));
+    let opened = actor
+        .handle()
+        .shell(ShellCall::Open {
+            id: "P".into(),
+            source: SessionSource::File(file.clone()),
+            electron_profile: None,
+        })
+        .wait();
+    fs::set_permissions(dir.path("job"), fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(
+        matches!(
+            opened,
+            Some(Ok(ShellReply::Opened {
+                decision: OpenDecision::AsCopy(CopyReason::ReadOnly),
+                ..
+            }))
+        ),
+        "{opened:?}"
+    );
+    assert_eq!(*read.lock().unwrap(), Vec::<std::path::PathBuf>::new());
+    actor.shutdown();
+}
+/// After a failed open, finding the versions a save's record proves (each
+/// read whole) and putting the chosen one in place (read again, perhaps
+/// copied) run on a worker: never on the kernel's own thread.
+#[test]
+fn versions_offered_after_a_failed_open_are_read_off_the_kernel_thread() {
+    let dir = common::TempDir::new("leftovers-off-actor");
+    fs::create_dir_all(dir.path("job")).unwrap();
+    let file = dir.path("job/cut.pmv");
+    fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+    let native = dir.path("native");
+    assert!(killed(&native, &file, "no-exclusive", "mid-copy", "save"));
+    let mut stray = fs::read(&file).unwrap();
+    stray[10] ^= 0xff;
+    land(&file, &stray);
+    let actor = actor_with_hooks(&native, child_disk("no-exclusive"));
+    let k = actor.handle();
+    let (_watch, read) = read_on_the_kernel_thread(&dir.path("job"));
+    let ShellReply::Leftovers(rows) = k
+        .shell(ShellCall::Leftovers(file.clone()))
+        .wait()
+        .unwrap()
+        .unwrap()
+    else {
+        panic!()
+    };
+    let saving = rows
+        .iter()
+        .find(|r| {
+            r.get("proven") == Some(&Value::Bool(true))
+                && r.get("role").and_then(Value::as_str) == Some("saving")
+        })
+        .and_then(|r| r.get("path").and_then(Value::as_str))
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| panic!("{rows:?}"));
+    k.shell(ShellCall::UseLeftover {
+        path: file.clone(),
+        leftover: saving,
+        unproven: false,
+    })
+    .wait()
+    .unwrap()
+    .unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(saved_name(&file).as_deref(), Some("One"));
+    assert_eq!(*read.lock().unwrap(), Vec::<std::path::PathBuf>::new());
+    actor.shutdown();
+}
+/// A save whose copy failed puts the last saved version back under the
+/// project's name as a copy; the session then carries on with that file.
+/// Proving it is the same version (a whole-file read) is not done on the
+/// kernel's own thread.
+#[test]
+fn a_version_put_back_by_a_failed_save_is_proven_off_the_kernel_thread() {
+    let dir = common::TempDir::new("put-back-off-actor");
+    fs::create_dir_all(dir.path("job")).unwrap();
+    let file = dir.path("job/cut.pmv");
+    fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+    let original = fs::read(&file).unwrap();
+    let armed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let actor = actor_with_hooks(
+        &dir.path("native"),
+        pm_kernel::project_io::PublishHooks {
+            no_exchange: true,
+            no_exclusive: true,
+            copy_fails: Some(armed.clone()),
+            ..Default::default()
+        },
+    );
+    let k = actor.handle();
+    let session = open_on(&k, "P", &file);
+    rename_on(&k, "P", "One").wait().unwrap().unwrap();
+    armed.store(true, std::sync::atomic::Ordering::SeqCst);
+    let (_watch, read) = read_on_the_kernel_thread(&dir.path("job"));
+    let save = k
+        .prepare_save(session.clone(), None)
+        .wait()
+        .unwrap()
+        .unwrap();
+    k.finish_save(save.run())
+        .wait()
+        .unwrap()
+        .expect_err("the copy failed");
+    assert_eq!(fs::read(&file).unwrap(), original, "put back whole");
+    assert_eq!(*read.lock().unwrap(), Vec::<std::path::PathBuf>::new());
+    let save = k.prepare_save(session, None).wait().unwrap().unwrap();
+    k.finish_save(save.run())
+        .wait()
+        .unwrap()
+        .unwrap_or_else(|e| panic!("the next save is an ordinary one: {e}"));
+    assert_eq!(saved_name(&file).as_deref(), Some("One"));
+    actor.shutdown();
+}
+/// A save whose folder did not sync leaves a ticket; the next save first
+/// proves the file is still that save's. When its times moved (a backup
+/// tool, a sync client touching it) that proof reads it whole, and that
+/// read is not done on the kernel's own thread.
+#[test]
+fn a_save_finished_after_its_folder_failed_to_sync_is_proven_off_the_kernel_thread() {
+    let dir = common::TempDir::new("finalize-off-actor");
+    fs::create_dir_all(dir.path("job")).unwrap();
+    let file = dir.path("job/cut.pmv");
+    fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+    // Once armed, the save's second folder sync (its last) fails.
+    let syncs = std::sync::Arc::new(std::sync::atomic::AtomicIsize::new(-1));
+    let counted = syncs.clone();
+    let actor = actor_with_hooks(
+        &dir.path("native"),
+        pm_kernel::project_io::PublishHooks {
+            folder_sync: Some(std::sync::Arc::new(move || {
+                use std::sync::atomic::Ordering::SeqCst;
+                let n = counted.load(SeqCst);
+                if n >= 0 {
+                    counted.store(if n == 1 { -1 } else { n + 1 }, SeqCst);
+                }
+                if n == 1 {
+                    (Some(5), None)
+                } else {
+                    (None, None)
+                }
+            })),
+            ..Default::default()
+        },
+    );
+    let k = actor.handle();
+    let session = open_on(&k, "P", &file);
+    rename_on(&k, "P", "One").wait().unwrap().unwrap();
+    let save = k
+        .prepare_save(session.clone(), None)
+        .wait()
+        .unwrap()
+        .unwrap();
+    syncs.store(0, std::sync::atomic::Ordering::SeqCst);
+    let failed = k
+        .finish_save(save.run())
+        .wait()
+        .unwrap()
+        .expect_err("the folder did not sync");
+    assert!(failed.to_string().contains("finalization"), "{failed}");
+    // Its times move; its bytes do not.
+    let touched = std::time::SystemTime::now() + Duration::from_secs(5);
+    fs::File::options()
+        .write(true)
+        .open(&file)
+        .unwrap()
+        .set_modified(touched)
+        .unwrap();
+    rename_on(&k, "P", "Two").wait().unwrap().unwrap();
+    let (_watch, read) = read_on_the_kernel_thread(&dir.path("job"));
+    let save = k.prepare_save(session, None).wait().unwrap().unwrap();
+    k.finish_save(save.run())
+        .wait()
+        .unwrap()
+        .unwrap_or_else(|e| panic!("the save goes through: {e}"));
+    assert_eq!(saved_name(&file).as_deref(), Some("Two"));
+    assert_eq!(*read.lock().unwrap(), Vec::<std::path::PathBuf>::new());
+    actor.shutdown();
+}
+/// Every file under `dir`, at any depth.
+fn files_under(dir: &Path) -> Vec<std::path::PathBuf> {
+    let mut found = Vec::new();
+    for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            found.extend(files_under(&path));
+        } else {
+            found.push(path);
+        }
+    }
+    found
+}
+/// A save whose folder did not sync leaves a ticket, and the next save
+/// first proves the file is still that save's. If another project replaces
+/// the file right after that proof, the ticket is not adopted on the proof
+/// of the file that was there: the work is still unsaved, and its journal
+/// is still there after Close, whether Close saves it or is refused.
+#[test]
+fn a_file_replaced_right_after_a_save_was_proven_is_never_adopted_as_that_save() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let dir = common::TempDir::new("finalize-replaced");
+    fs::create_dir_all(dir.path("job")).unwrap();
+    let file = dir.path("job/cut.pmv");
+    fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+    let native = dir.path("native");
+    // Once armed, the save's second folder sync (its last) fails.
+    let syncs = std::sync::Arc::new(std::sync::atomic::AtomicIsize::new(-1));
+    let counted = syncs.clone();
+    let swap = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let swapping = swap.clone();
+    let other = fs::read(common::ts_fixture("save-as.pmv")).unwrap();
+    let actor = actor_with_hooks(
+        &native,
+        pm_kernel::project_io::PublishHooks {
+            folder_sync: Some(std::sync::Arc::new(move || {
+                let n = counted.load(SeqCst);
+                if n >= 0 {
+                    counted.store(if n == 1 { -1 } else { n + 1 }, SeqCst);
+                }
+                if n == 1 {
+                    (Some(5), None)
+                } else {
+                    (None, None)
+                }
+            })),
+            after_proof: Some(std::sync::Arc::new(move |path: &Path| {
+                if swapping.swap(false, SeqCst) {
+                    land(path, &other);
+                }
+            })),
+            ..Default::default()
+        },
+    );
+    let k = actor.handle();
+    let session = open_on(&k, "P", &file);
+    rename_on(&k, "P", "One").wait().unwrap().unwrap();
+    let save = k
+        .prepare_save(session.clone(), None)
+        .wait()
+        .unwrap()
+        .unwrap();
+    syncs.store(0, SeqCst);
+    let failed = k
+        .finish_save(save.run())
+        .wait()
+        .unwrap()
+        .expect_err("the folder did not sync");
+    assert!(failed.to_string().contains("finalization"), "{failed}");
+    assert!(k.published("P").unwrap().dirty, "not saved yet");
+    swap.store(true, SeqCst);
+    let retried = match k.prepare_save(session.clone(), None).wait().unwrap() {
+        Ok(save) => k.finish_save(save.run()).wait().unwrap().map(|_| ()),
+        Err(e) => Err(e),
+    };
+    assert!(!swap.load(SeqCst), "the file was replaced after the proof");
+    assert!(retried.is_err(), "the replaced file is not saved over");
+    assert!(
+        k.published("P").unwrap().dirty,
+        "the work is still unsaved: {retried:?}"
+    );
+    let journals = native.join("journals");
+    assert!(!files_under(&journals).is_empty(), "journalled");
+    let _ = k.shell(ShellCall::Close(session)).wait();
+    assert!(
+        !files_under(&journals).is_empty(),
+        "the work's journal is still there after Close"
+    );
+    actor.shutdown();
+}
+/// The same for a library project's first Save As whose folder did not
+/// sync: the session stays the library's, and Save As again to that file
+/// adopts the save. Proving the file (read whole, its times having moved)
+/// and syncing its folder are not done on the kernel's own thread.
+#[test]
+fn a_first_save_as_retried_after_its_folder_failed_to_sync_is_proven_off_the_kernel_thread() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let dir = common::TempDir::new("finalize-save-as-off-actor");
+    fs::create_dir_all(dir.path("job")).unwrap();
+    let file = dir.path("job/cut.pmv");
+    // Once armed, the save's second folder sync (its last) fails; every
+    // sync on the kernel's own thread is noted.
+    let syncs = std::sync::Arc::new(std::sync::atomic::AtomicIsize::new(-1));
+    let counted = syncs.clone();
+    let on_kernel = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let noted = on_kernel.clone();
+    let actor = actor_with_hooks(
+        &dir.path("native"),
+        pm_kernel::project_io::PublishHooks {
+            folder_sync: Some(std::sync::Arc::new(move || {
+                if std::thread::current().name() == Some("pm-kernel") {
+                    noted.fetch_add(1, SeqCst);
+                }
+                let n = counted.load(SeqCst);
+                if n >= 0 {
+                    counted.store(if n == 1 { -1 } else { n + 1 }, SeqCst);
+                }
+                if n == 1 {
+                    (Some(5), None)
+                } else {
+                    (None, None)
+                }
+            })),
+            ..Default::default()
+        },
+    );
+    let k = actor.handle();
+    let session = match k
+        .shell(ShellCall::Open {
+            id: "P".into(),
+            source: SessionSource::New(value()),
+            electron_profile: None,
+        })
+        .wait()
+    {
+        Some(Ok(ShellReply::Opened { session, .. })) => session,
+        other => panic!("{other:?}"),
+    };
+    rename_on(&k, "P", "One").wait().unwrap().unwrap();
+    let save = k
+        .prepare_save(session.clone(), Some(file.clone()))
+        .wait()
+        .unwrap()
+        .unwrap();
+    syncs.store(0, SeqCst);
+    let failed = k
+        .finish_save(save.run())
+        .wait()
+        .unwrap()
+        .expect_err("the folder did not sync");
+    assert!(failed.to_string().contains("finalization"), "{failed}");
+    assert_ne!(
+        k.published("P").unwrap().path.as_deref(),
+        Some(file.as_path()),
+        "the session is still the library's"
+    );
+    // Its times move; its bytes do not.
+    let touched = std::time::SystemTime::now() + Duration::from_secs(5);
+    fs::File::options()
+        .write(true)
+        .open(&file)
+        .unwrap()
+        .set_modified(touched)
+        .unwrap();
+    on_kernel.store(0, SeqCst);
+    let (_watch, read) = read_on_the_kernel_thread(&dir.path("job"));
+    let save = k
+        .prepare_save(session, Some(file.clone()))
+        .wait()
+        .unwrap()
+        .unwrap_or_else(|e| panic!("Save As again goes through: {e}"));
+    k.finish_save(save.run())
+        .wait()
+        .unwrap()
+        .unwrap_or_else(|e| panic!("Save As again goes through: {e}"));
+    assert_eq!(saved_name(&file).as_deref(), Some("One"));
+    assert_eq!(
+        k.published("P").unwrap().path.as_deref(),
+        Some(file.as_path()),
+        "the session is that file's now"
+    );
+    assert_eq!(*read.lock().unwrap(), Vec::<std::path::PathBuf>::new());
+    assert_eq!(
+        on_kernel.load(SeqCst),
+        0,
+        "folder synced on the kernel thread"
+    );
+    actor.shutdown();
+}
+/// When the system refuses the thread a project's open, save or recovery
+/// choice needs (it has run out of them), the call is answered at once
+/// with a plain failure and nothing stays reserved: once threads can be
+/// had again, the same open, save and choice go through, and the project
+/// closes.
+#[test]
+fn work_whose_worker_cannot_start_is_refused_and_reserves_nothing() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let dir = common::TempDir::new("worker-refused");
+    fs::create_dir_all(dir.path("job")).unwrap();
+    let file = dir.path("job/cut.pmv");
+    fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+    let native = dir.path("native");
+    let refused = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let actor = KernelActor::spawn(KernelConfig {
+        journal_root: Some(native.join("journals")),
+        trash: Some(common::trash(&native.join("Trash"))),
+        refused_workers: Some(refused.clone()),
+        ..Default::default()
+    });
+    let k = actor.handle();
+    k.shell(ShellCall::AttachLibrary {
+        profile: native.clone(),
+        format: DiskFormat::V1_2,
+        electron_profile: None,
+    })
+    .wait()
+    .unwrap()
+    .unwrap();
+    let open = || {
+        k.shell(ShellCall::Open {
+            id: "P".into(),
+            source: SessionSource::File(file.clone()),
+            electron_profile: None,
+        })
+        .wait()
+    };
+    refused.store(1, SeqCst);
+    let first = open();
+    assert!(
+        matches!(first, Some(Err(_))),
+        "the open is refused: {first:?}"
+    );
+    let session = match open() {
+        Some(Ok(ShellReply::Opened { session, .. })) => session,
+        other => panic!("the open goes through afterwards: {other:?}"),
+    };
+    rename_on(&k, "P", "One").wait().unwrap().unwrap();
+    refused.store(1, SeqCst);
+    let first = k.prepare_save(session.clone(), None).wait();
+    assert!(matches!(first, Some(Err(_))), "the save is refused");
+    let save = k
+        .prepare_save(session.clone(), None)
+        .wait()
+        .unwrap()
+        .unwrap_or_else(|e| panic!("the save goes through afterwards: {e}"));
+    k.finish_save(save.run()).wait().unwrap().unwrap();
+    assert_eq!(saved_name(&file).as_deref(), Some("One"));
+    k.shell(ShellCall::Close(session)).wait().unwrap().unwrap();
+    // A recovery choice reserves the file while it runs: refused, it
+    // leaves the file free to open.
+    refused.store(1, SeqCst);
+    let chosen = k
+        .shell(ShellCall::UseLeftover {
+            path: file.clone(),
+            leftover: dir.path("job/.cut.pmv.missing.aside"),
+            unproven: false,
+        })
+        .wait();
+    assert!(matches!(chosen, Some(Err(_))), "{chosen:?}");
+    assert!(
+        matches!(open(), Some(Ok(ShellReply::Opened { .. }))),
+        "the file opens afterwards"
     );
     actor.shutdown();
 }
@@ -5559,6 +6335,41 @@ fn an_empty_or_torn_lock_record_on_a_local_volume_does_not_refuse_the_open() {
             Some(30.0)
         );
     }
+}
+#[test]
+fn torn_record_lock_recovers_without_stealing_a_live_flock() {
+    // FileLock::acquire explicitly exercises record mode; lock_project's
+    // local-user flock has no owner JSON and is covered independently below.
+    let dir = common::TempDir::new("bad-record-lock");
+    let path = dir.path("lock");
+    for bytes in [b"broken".as_slice(), b"", b"{\"pid\":", b"\xff"] {
+        fs::write(&path, bytes).unwrap();
+        fs::write(owner_record_path(&path), bytes).unwrap();
+        let lock = FileLock::acquire(&path).unwrap();
+        assert!(FileLock::acquire(&path).is_err(), "live flock must win over torn metadata");
+        let owner = parse(&fs::read_to_string(owner_record_path(&path)).unwrap()).unwrap();
+        assert_eq!(owner.get("pid"), Some(&Value::Number(std::process::id() as f64)));
+        drop(lock);
+        drop(FileLock::acquire(&path).unwrap());
+    }
+}
+#[test]
+fn fresh_legacy_owner_is_protected_when_heartbeats_share_a_millisecond() {
+    let dir = common::TempDir::new("legacy-owner-tie");
+    let path = dir.path("library.lock");
+    let heartbeat = now_ms();
+    fs::write(&path, format!("{{\"pid\":{},\"heartbeat\":{heartbeat}}}", std::process::id())).unwrap();
+    fs::write(owner_record_path(&path), format!("{{\"pid\":0,\"heartbeat\":{heartbeat}}}")).unwrap();
+    assert_eq!(FileLock::acquire(&path).err().map(|e| e.kind()), Some(std::io::ErrorKind::WouldBlock));
+}
+#[test]
+fn a_fresh_atomic_owner_is_protected_from_a_same_millisecond_legacy_release() {
+    let dir = common::TempDir::new("atomic-owner-tie");
+    let path = dir.path("library.lock");
+    let heartbeat = now_ms();
+    fs::write(&path, format!("{{\"pid\":0,\"heartbeat\":{heartbeat}}}")).unwrap();
+    fs::write(owner_record_path(&path), format!("{{\"pid\":{},\"heartbeat\":{heartbeat}}}", std::process::id())).unwrap();
+    assert_eq!(FileLock::acquire(&path).err().map(|e| e.kind()), Some(std::io::ErrorKind::WouldBlock));
 }
 #[test]
 fn lock_child_process() {

@@ -408,11 +408,58 @@ pub fn check_version(
     Ok(())
 }
 
+/// Test hook: whether a step's line fails to be written to a save's
+/// record ([`PublishHooks::record_fails`]).
+#[doc(hidden)]
+pub type StepFails = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+
+/// Test hook: called with a file's path (on the thread that reads it) as
+/// that file is about to be read whole.
+#[doc(hidden)]
+pub type ReadHook = Arc<dyn Fn(&Path) + Send + Sync>;
+type ReadHooks = std::sync::Mutex<Vec<(u64, PathBuf, ReadHook)>>;
+static READ_HOOKS: ReadHooks = std::sync::Mutex::new(Vec::new());
+/// Calls `hook` with every file under `dir` read whole (hashed, or read to
+/// open it), until the guard is dropped.
+#[doc(hidden)]
+pub fn watch_whole_reads(dir: &Path, hook: ReadHook) -> WholeReads {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if let Ok(mut hooks) = READ_HOOKS.lock() {
+        hooks.push((id, dir.to_owned(), hook));
+    }
+    WholeReads(id)
+}
+#[doc(hidden)]
+pub struct WholeReads(u64);
+impl Drop for WholeReads {
+    fn drop(&mut self) {
+        if let Ok(mut hooks) = READ_HOOKS.lock() {
+            hooks.retain(|(id, _, _)| *id != self.0);
+        }
+    }
+}
+/// Tells the [`watch_whole_reads`] hooks that `path` is read whole now.
+pub(super) fn reading_whole(path: &Path) {
+    let hooks: Vec<ReadHook> = match READ_HOOKS.lock() {
+        Ok(hooks) if !hooks.is_empty() => hooks
+            .iter()
+            .filter(|(_, dir, _)| path.starts_with(dir))
+            .map(|(_, _, hook)| hook.clone())
+            .collect(),
+        _ => return,
+    };
+    for hook in hooks {
+        hook(path);
+    }
+}
+
 /// SHA-256 of everything behind `file`, read by position from its start. A
 /// descriptor's cursor belongs to whatever read through it last (a held
 /// descriptor is hashed more than once, and its duplicates share the
 /// cursor), so it says nothing about where the file begins.
 pub(crate) fn hash_reader(file: &File, path: &Path) -> Result<Sha256, ProjectIoError> {
+    reading_whole(path);
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; 1 << 20];
     let mut offset = 0u64;
@@ -824,6 +871,12 @@ pub struct PublishHooks {
     /// Called with a public name right after the file under it was moved
     /// to a private name of the save's record, before that file is judged.
     pub after_withdrawn: Option<PublishHook>,
+    /// Called with a file's path right after a worker proved it is still
+    /// the version a save left there, before the kernel is given that proof.
+    pub after_proof: Option<PublishHook>,
+    /// While it answers true for a step's name, that step's line cannot be
+    /// written to the save's record (a full or failing disk).
+    pub record_fails: Option<StepFails>,
     /// The person's Trash, where a version of the project goes once a save
     /// no longer needs it (the kernel's host sets it; `None`: such files
     /// stay where they are).
@@ -1334,9 +1387,15 @@ pub(super) fn begins(whole: &Path, part: &Path) -> bool {
 /// Whether `path`'s first bytes are still the zeros a copy in the making
 /// has there ([`HELD_BACK`]).
 pub(super) fn head_held_back(path: &Path) -> bool {
+    File::open(path).is_ok_and(|file| file_head_held_back(&file))
+}
+
+/// [`head_held_back`] for an open file. No project file of any format
+/// begins with a zero byte.
+pub(super) fn file_head_held_back(file: &File) -> bool {
+    use std::os::unix::fs::FileExt;
     let mut head = [0u8; HELD_BACK];
-    File::open(path)
-        .and_then(|mut file| file.read(&mut head))
+    read_retry(|| file.read_at(&mut head, 0))
         .is_ok_and(|n| n > 0 && head[..n].iter().all(|b| *b == 0))
 }
 
@@ -1454,6 +1513,20 @@ pub(super) fn holds_hash<'a>(
         size.is_none_or(|size| stat.size == size)
             && hash_reader(file, Path::new("")).is_ok_and(|h| hex(&h.finalize()) == hash)
     }
+}
+
+/// The hash of `path`'s bytes and their length, read through one
+/// descriptor whose size and modification time did not move across the
+/// read: what that one file held, not what one name led to at two moments.
+pub(super) fn hash_held(path: &Path) -> Option<(String, u64)> {
+    let file = File::open(path).ok()?;
+    let before = stat_of(&file.metadata().ok()?);
+    if !fs::symlink_metadata(path).ok()?.is_file() {
+        return None;
+    }
+    let hash = hex(&hash_reader(&file, path).ok()?.finalize());
+    let after = stat_of(&file.metadata().ok()?);
+    (after.size == before.size && after.mtime_ns == before.mtime_ns).then_some((hash, before.size))
 }
 
 /// A file [`dispose`] found changed, that could not be kept beside the

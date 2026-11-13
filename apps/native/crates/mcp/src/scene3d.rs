@@ -10,6 +10,8 @@ pub fn batch(
     time: f64,
     assets: &dyn pm_scene3d::geometry::AssetGeometry,
 ) -> Result<Batch> {
+    let prepared = prepare_import_scale(snapshot, args, time, assets)?;
+    let args = &prepared;
     let command = if pm_scene3d::geometry::needs_geometry(args) {
         let geometry = pm_kernel::commands::scene3d::prepare_geometry(
             snapshot,
@@ -40,9 +42,101 @@ pub fn batch(
     Ok(Batch {
         commands: vec![command.into()],
         results: vec![],
-        descriptions: vec!["Edit 3D Layers".into()],
+        descriptions: vec![label(args)],
         selection: selection.to_vec(),
     })
+}
+
+/// Opt-in source scale is an ordinary layer transform. This leaves old
+/// projects and the renderer's shared normalized model resources unchanged.
+fn prepare_import_scale(
+    snapshot: &pm_kernel::Snapshot,
+    args: &Value,
+    time: f64,
+    assets: &dyn pm_scene3d::geometry::AssetGeometry,
+) -> Result<Value> {
+    let mut prepared = args.clone();
+    let Some(keep) = prepared
+        .as_object_mut()
+        .and_then(|v| v.remove("keepRealWorldScale"))
+    else {
+        return Ok(prepared);
+    };
+    if args["operation"] != "add_object" || !keep.is_boolean() {
+        return Err(Error::invalid(
+            "keepRealWorldScale is a boolean option for add_object",
+        ));
+    }
+    if keep == false {
+        return Ok(prepared);
+    }
+    let id = args["object"]["source"]["assetId"]
+        .as_str()
+        .ok_or_else(|| {
+            Error::invalid("keepRealWorldScale requires an imported glTF/GLB assetId")
+        })?;
+    // Apply further transforms after import, so the source's shared origin
+    // and units cannot be confused with already-normalized transform values.
+    if args["object"]
+        .get("p")
+        .is_some_and(|p| p.as_object().is_none_or(|p| !p.is_empty()))
+    {
+        return Err(Error::invalid(
+            "Add with keepRealWorldScale before applying object transforms",
+        ));
+    }
+    let record = snapshot
+        .root()
+        .and_then(|r| r.get("assets"))
+        .and_then(|a| a.get(id))
+        .map(|v| pm_scene3d::from_model(&v.to_value()))
+        .transpose()
+        .map_err(Error::kernel)?
+        .ok_or_else(|| Error::invalid("Imported model asset was not found"))?;
+    let format = record["format"]
+        .as_str()
+        .or_else(|| {
+            record["name"]
+                .as_str()
+                .and_then(|name| name.rsplit_once('.').map(|(_, ext)| ext))
+        })
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if !["glb", "gltf"].contains(&format.as_str()) {
+        return Err(Error::invalid(
+            "Real-world import scale requires glTF/GLB; other source formats do not declare reliable metre units",
+        ));
+    }
+    let fit = assets.source_fit(id, &record).map_err(Error::kernel)?;
+    let resolved =
+        pm_kernel::commands::scene3d::resolve_scene(snapshot, None, time).map_err(Error::kernel)?;
+    let value = |v: &Value| v.get("v").unwrap_or(v).clone();
+    let world = resolved.scene["objects"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|o| o.get("world").is_some() && value(&o["p"]["visible"]) != false)
+        .map(|o| &o["world"])
+        .or_else(|| {
+            resolved.scene["lights"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|l| l["type"] == "environment" && value(&l["p"]["visible"]) != false)
+                .map(|l| &l["world"])
+        });
+    let meters_per_unit = world
+        .map(|w| value(&w["p"]["metersPerUnit"]))
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.1);
+    if !meters_per_unit.is_finite() || meters_per_unit <= 0. {
+        return Err(Error::invalid("World scale must be finite and positive"));
+    }
+    let scale = fit.radius / meters_per_unit;
+    let center = fit.center.map(|v| v / meters_per_unit);
+    prepared["object"]["p"] =
+        json!({"x":center[0],"y":center[1],"z":center[2],"sx":scale,"sy":scale,"sz":scale});
+    Ok(prepared)
 }
 
 pub fn result_id(
@@ -147,5 +241,58 @@ pub fn properties(l: &Value) -> Vec<(String, Value)> {
             }
         }
     }
+    let node = if schema::role(l) == Some(schema::Role::Light) {
+        &l["d"]["data"]["light"]
+    } else {
+        &l["d"]["data"]["object"]
+    };
+    out.extend(
+        pm_scene3d::contract::channels(node)
+            .into_iter()
+            .map(|(path, prop)| (path, prop.clone())),
+    );
+    out.extend(pm_scene3d::extrusion::channels(l).into_iter().map(|(path,prop)|(path,prop.clone())));
     out
+}
+
+/// The Undo name for an agent's `edit_3d` when it gives none: what the
+/// operation does, in the words the 3D Studio's own controls use.
+pub fn label(args: &Value) -> String {
+    let op = args["operation"].as_str().unwrap_or("");
+    let light = |t: &Value| match t.as_str() {
+        Some("area") => "Softbox",
+        Some("spot") => "Spotlight",
+        Some("point") => "Bulb",
+        _ => "Sun",
+    };
+    match op {
+        "add_object" | "create" => "Add 3D Model".into(),
+        "add_light" => format!("Add {}", light(&args["light"]["type"])),
+        "add_camera" => "Add Camera".into(),
+        "update_object" => "Edit 3D Model".into(),
+        "update_light" => "Edit Light".into(),
+        "set_camera" => "Edit Camera".into(),
+        "set_environment" => "Environment".into(),
+        "set_world" => "Sky".into(),
+        "add_fog" => "Add Fog Volume".into(),
+        "update_fog" => "Edit Fog Volume".into(),
+        "add_terrain" => "Add Terrain".into(),
+        "update_terrain" => "Edit Terrain".into(),
+        "add_scatter" => "Add Scatter".into(),
+        "update_scatter" => "Edit Scatter".into(),
+        "set_material_options" => "Material Options".into(),
+        "set_render_quality" => "3D Quality".into(),
+        "apply_material" => "Finish".into(),
+        "light_highlight" => "Aim Light".into(),
+        "shot" => "Add Shot".into(),
+        "set_studio" => "Studio Set".into(),
+        "auto_studio" => "Set Up Studio".into(),
+        "drop_to_floor" => "Drop to Floor".into(),
+        "place_on" => "Place on Surface".into(),
+        "explode" => "Explode".into(),
+        "soften" => "Soften Light".into(),
+        "remove" => "Delete 3D Layers".into(),
+        "duplicate" => "Duplicate 3D Layers".into(),
+        _ => "Edit 3D Layers".into(),
+    }
 }

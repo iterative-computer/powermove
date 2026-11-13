@@ -127,6 +127,9 @@ pub struct SurfaceView {
     focus: BTreeMap<Id, FocusHandle>,
     /// Hover washes (pm-design springs), stepped once per render.
     motion: pm_shell::motion::Motion<Id>,
+    /// Floating surfaces marked `pmKit.presence` (the Light panel): how far
+    /// in they are this frame, 0–1. Set before the motion frame steps.
+    presence: HashMap<Id, f32>,
     subscriptions: BTreeMap<Id, Vec<Subscription>>,
     origin: Rc<Cell<Point<Pixels>>>,
     anchors: Rc<RefCell<HashMap<Id, Bounds<Pixels>>>>,
@@ -161,6 +164,8 @@ pub struct SurfaceView {
     /// A text layer whose Properties text to focus once its row shows
     /// (`inspector.focusText`), until the moment passes.
     focus_text: Option<(String, std::time::Instant)>,
+    /// A semantic id to scroll into view once a publication has it.
+    reveal: Option<(String, std::time::Instant)>,
     #[cfg(test)]
     pub renders: usize,
     #[cfg(test)]
@@ -194,6 +199,7 @@ impl SurfaceView {
             option_sets: BTreeMap::new(),
             focus: BTreeMap::new(),
             motion: Default::default(),
+            presence: HashMap::new(),
             subscriptions: BTreeMap::new(),
             origin: Rc::new(Cell::new(Point::default())),
             anchors: Default::default(),
@@ -216,6 +222,7 @@ impl SurfaceView {
             parked: None,
             requested: None,
             focus_text: None,
+            reveal: None,
             #[cfg(test)]
             renders: 0,
             #[cfg(test)]
@@ -309,6 +316,7 @@ impl SurfaceView {
         self.prepared = Rc::new(compiled.prepared);
         self.reconcile(window, cx);
         self.try_focus_text(cx);
+        self.try_reveal(cx);
         cx.notify();
     }
     /// A new generation (an extension reloaded, a fork swapped in) reuses node
@@ -380,6 +388,19 @@ impl SurfaceView {
                 .flatten();
             if let Some(kind) = kind {
                 self.mount_control(kind, view, node, lease, window, cx);
+                // A native control is a Tab stop too: the panel draws its
+                // focus ring and forwards its keys (Full Keyboard Access).
+                // A search field and a segmented control take no forwarded
+                // keys (`NativeControl::key`), so Tab passes them.
+                if !view.disabled
+                    && view.tab_index.is_none_or(|t| t >= 0)
+                    && !matches!(
+                        kind,
+                        crate::v4_control::Kind::Search | crate::v4_control::Kind::Segmented
+                    )
+                {
+                    self.focus.entry(id).or_insert_with(|| cx.focus_handle());
+                }
                 continue;
             }
             if !view.disabled
@@ -462,15 +483,10 @@ impl SurfaceView {
                 control.update(cx, |v, cx| v.retitle(label, cx));
             }
             let options = match &segmented {
-                Some((options, _, _)) => options.as_slice(),
-                None => node
-                    .props
-                    .get("options")
-                    .and_then(Value::as_array)
-                    .map(Vec::as_slice)
-                    .unwrap_or_default(),
+                Some((options, _, _)) => options.clone(),
+                None => control_options(kind, node),
             };
-            control.update(cx, |v, cx| v.update(&value, options, view.disabled, cx));
+            control.update(cx, |v, cx| v.update(&value, &options, view.disabled, cx));
             // A filter the panel's host applied shows even mid-typing.
             if let Some(revision) = node
                 .props
@@ -504,12 +520,7 @@ impl SurfaceView {
         );
         let options = match segmented {
             Some((options, _, _)) => options,
-            None => node
-                .props
-                .get("options")
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default(),
+            None => control_options(kind, node),
         };
         let button_role = node
             .props
@@ -710,9 +721,17 @@ impl SurfaceView {
             field.set_unit(unit);
             field
         });
-        self.subscriptions.entry(id).or_default().push(cx.subscribe(
+        self.subscriptions.entry(id).or_default().push(cx.subscribe_in(
             &field,
-            move |this, _, event, cx| {
+            window,
+            move |this, _, event, window, cx| {
+                // A multiline field hands Tab on: focus moves to the next
+                // (or previous) control, as from any other field.
+                match event {
+                    TextEvent::Key("tab") => return window.focus_next(cx),
+                    TextEvent::Key("backtab") => return window.focus_prev(cx),
+                    _ => {}
+                }
                 if this.prepared.node(id).and_then(|n| n.binding.clone()) != lease {
                     return;
                 }
@@ -968,6 +987,23 @@ impl SurfaceView {
             scroll.set_offset(point(offset.x, (offset.y - px(by)).clamp(-most, px(0.))));
         }
         cx.notify();
+    }
+    /// Scroll `semantic` into view now, or when a publication within two
+    /// seconds first has it (a section the panel is about to add or open).
+    pub fn reveal_semantic(&mut self, semantic: String, cx: &mut Context<Self>) {
+        self.reveal = Some((semantic, std::time::Instant::now()));
+        self.try_reveal(cx);
+    }
+    fn try_reveal(&mut self, cx: &mut Context<Self>) {
+        let Some((semantic, asked)) = self.reveal.clone() else {
+            return;
+        };
+        if asked.elapsed() > std::time::Duration::from_secs(2) {
+            self.reveal = None;
+        } else if self.prepared.semantics.contains_key(&semantic) {
+            self.reveal = None;
+            self.scroll_semantic(&semantic, cx);
+        }
     }
     pub fn scroll_semantic(&mut self, semantic: &str, cx: &mut Context<Self>) {
         if let Some(id) = self.prepared.semantics.get(semantic)
@@ -1522,6 +1558,32 @@ impl SurfaceView {
             } else {
                 div().flex_none()
             };
+            let mut slot = slot.id(("v4-control", id));
+            if let Some(focus) = self.focus.get(&id) {
+                let t = &self.table.tokens;
+                let (ring, color, radius) = (
+                    px(t.metrics.border * 2.),
+                    rgb(t.colors.focus),
+                    px(t.metrics.control_radius),
+                );
+                let tab = node.tab_index.unwrap_or(0);
+                let handle = &focus.clone().tab_stop(tab >= 0).tab_index(tab.max(0));
+                let control = control.clone();
+                slot = slot
+                    .track_focus(handle)
+                    .tab_index(tab.max(0))
+                    .rounded(radius)
+                    .focus_visible_style(move |s| s.ring(ring).ring_color(color))
+                    .on_key_down(move |event: &KeyDownEvent, _, cx| {
+                        let m = &event.keystroke.modifiers;
+                        if m.platform || m.control || m.alt {
+                            return;
+                        }
+                        if control.read(cx).key(event.keystroke.key.as_str()) {
+                            cx.stop_propagation();
+                        }
+                    });
+            }
             // AppKit sets a bezel-less pop-up's title a little further in
             // than a field's value: bring it onto the wells' inset.
             let child = if node.well && control.read(cx).is_popup() {
@@ -1610,13 +1672,28 @@ impl SurfaceView {
                 });
             }));
         }
+        // A floating surface springs in when it appears and out while its
+        // panel keeps it for the exit (`pmKit.closing`): opacity, and a
+        // short rise from `motion.start_scale` worth of its height.
+        if let Some(amount) = self.presence.get(&id).copied()
+            && amount < 1.
+        {
+            let t = &self.table.tokens;
+            let rise = (1. - amount) * (1. - t.motion.start_scale as f32) * 160.;
+            element = element.opacity(amount).mt(px(rise));
+        }
         element = self.accessible(element, node);
         if let Some(focus) = self.focus.get(&id) {
             let t = &self.table.tokens;
             let (ring, color) = (px(t.metrics.border * 2.), rgb(t.colors.focus));
+            // A tracked handle carries its own tab settings (the element's
+            // are ignored): `tabIndex` -1 stays focusable but out of the Tab
+            // order, as on the web (a segmented control's other segments).
+            let tab = node.tab_index.unwrap_or(0);
+            let focus = &focus.clone().tab_stop(tab >= 0).tab_index(tab.max(0));
             element = element
                 .track_focus(focus)
-                .tab_index(node.tab_index.unwrap_or(0))
+                .tab_index(tab.max(0))
                 .focus_visible_style(move |s| s.ring(ring).ring_color(color));
         }
         element = self.interactive(element, node, cx);
@@ -1907,6 +1984,9 @@ impl SurfaceView {
             if let Some(expanded) = ax.expanded {
                 element = element.aria_expanded(expanded);
             }
+            if let Some(toggled) = ax.toggled {
+                element = element.aria_toggled(toggled);
+            }
         }
         if let Some(semantic) = &node.semantic {
             element =
@@ -2080,7 +2160,16 @@ impl SurfaceView {
                 v.pointer(id, "wheel", detail, cx);
             }));
         }
-        if node.parent == Some(0) && self.prepared.has_keydown {
+        // Keys reach the panel's root and its header slot's root: the shell
+        // draws a header slot (the viewer's bar) apart from the body, so the
+        // body's root isn't an ancestor of the controls there.
+        let slot_root = self
+            .publication
+            .surface
+            .nodes()
+            .get(&id)
+            .is_some_and(|n| n.props.get("data-pm-slot").is_some());
+        if (node.parent == Some(0) || slot_root) && self.prepared.has_keydown {
             element =
                 element.on_key_down(cx.listener(move |v, event: &KeyDownEvent, window, cx| {
                     v.key_down(id, event, window, cx);
@@ -2101,6 +2190,14 @@ impl SurfaceView {
             });
         }
         element
+    }
+    /// The node holding keyboard focus (tests).
+    #[cfg(test)]
+    pub(crate) fn focused_node(&self, window: &Window) -> Option<Id> {
+        self.focus
+            .iter()
+            .find(|(_, h)| h.is_focused(window))
+            .map(|(id, _)| *id)
     }
     fn key_down(
         &mut self,
@@ -2350,6 +2447,7 @@ impl SurfaceView {
             }
         }
         if let Some(focus) = self.focus.get(&id) {
+            let focus = &focus.clone().tab_stop(true).tab_index(0);
             wrapper = wrapper.track_focus(focus).tab_index(0);
         }
         if node.number.is_some() {
@@ -2423,6 +2521,25 @@ impl Render for SurfaceView {
         {
             self.renders += 1;
         }
+        // Presences take their targets before the frame steps, so a surface
+        // that just appeared or was marked closing starts moving now.
+        let surface = self.publication.surface.clone();
+        let mut presence = HashMap::new();
+        for id in self.prepared.nodes.keys() {
+            let Some(kit) = surface
+                .node(*id)
+                .and_then(|n| n.props.get("metadata"))
+                .and_then(|m| m.get("pmKit"))
+            else {
+                continue;
+            };
+            if kit.get("presence") == Some(&Value::Bool(true)) {
+                let shown = kit.get("closing") != Some(&Value::Bool(true));
+                let amount = self.motion.presence(*id, shown, &self.table.tokens);
+                presence.insert(*id, amount);
+            }
+        }
+        self.presence = presence;
         self.motion.frame(window);
         let t = &self.table.tokens;
         div()
@@ -2444,14 +2561,26 @@ struct Tooltip {
 impl Render for Tooltip {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         let t = &self.tokens;
+        // Line 1 names the thing (with its shortcut); an optional line 2,
+        // after a newline, says what it does (HIG help tags), in secondary.
+        let (name, help) = match self.title.split_once('\n') {
+            Some((name, help)) => (SharedString::from(name.to_owned()), Some(help.to_owned())),
+            None => (self.title.clone(), None),
+        };
         div()
+            .flex()
+            .flex_col()
             .px(px(t.metrics.gap))
             .py(px(t.metrics.inner_radius))
             .bg(rgb(t.colors.floating))
             .rounded(px(t.metrics.inner_radius))
             .text_size(px(t.typography.minimum))
             .text_color(rgb(t.colors.text))
-            .child(self.title.clone())
+            .max_w(px(t.metrics.value_column * 2.))
+            .child(name)
+            .when_some(help, |d, help| {
+                d.child(div().text_color(rgb(t.colors.secondary)).child(help))
+            })
     }
 }
 /// What to announce: statuses that appeared or changed since the last frame,
@@ -2498,6 +2627,52 @@ fn segments(surface: &pm_surface::Surface, node: &pm_surface::Node) -> (Vec<Valu
     }
     (options, selected, ids)
 }
+/// A pop-up's rows, with the checkmarks its kit metadata carries (the
+/// frozen option shape has only `v`, `label` and `disabled`).
+fn native_options(node: &pm_surface::Node) -> Vec<Value> {
+    let mut options = node
+        .props
+        .get("options")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let menu = node
+        .props
+        .get("metadata")
+        .and_then(|m| m.get("pmKit"))
+        .and_then(|m| m.get("menu"))
+        .and_then(Value::as_array);
+    if let Some(menu) = menu {
+        for option in options.iter_mut().filter(|o| o.is_object()) {
+            let row = menu
+                .iter()
+                .find(|m| m.get("v").is_some() && m.get("v") == option.get("v"));
+            // A row's checkmark and its second line (the menu item subtitle).
+            for key in ["checked", "detail"] {
+                if let (Some(value), Some(o)) =
+                    (row.and_then(|m| m.get(key)).cloned(), option.as_object_mut())
+                {
+                    o.insert(key.into(), value);
+                }
+            }
+        }
+    }
+    options
+}
+/// A native control's rows: a pop-up's options, or a slider's one range.
+fn control_options(kind: crate::v4_control::Kind, node: &pm_surface::Node) -> Vec<Value> {
+    if !matches!(kind, crate::v4_control::Kind::Slider) {
+        return native_options(node);
+    }
+    let n = |k: &str| node.props.get(k).and_then(Value::as_f64);
+    let log = node
+        .props
+        .get("metadata")
+        .and_then(|m| m.get("pmKit"))
+        .and_then(|m| m.get("log"))
+        == Some(&Value::Bool(true));
+    vec![json!({"min":n("min").unwrap_or(0.),"max":n("max").unwrap_or(1.),"step":n("step").unwrap_or(0.),"log":log})]
+}
 fn control_kind(panel: &str, node: &pm_surface::Node) -> Option<crate::v4_control::Kind> {
     use crate::v4_control::Kind;
     match Component::of(node) {
@@ -2513,6 +2688,7 @@ fn control_kind(panel: &str, node: &pm_surface::Node) -> Option<crate::v4_contro
         {
             Some(Kind::Search)
         }
+        Some(Component::Slider) => Some(Kind::Slider),
         Some(Component::ToolbarItem)
             if panel == "export"
                 && node

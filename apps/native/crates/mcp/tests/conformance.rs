@@ -131,15 +131,18 @@ fn captured_installed_stdio_pairs_replay_with_owner_3d_contract() {
                     catalog::legacy_catalog()["tools"]
                 );
                 let studio: Value =
-                    serde_json::from_str(include_str!("../fixtures/scene3d-source-catalog.json"))
+                    serde_json::from_str(include_str!("../fixtures/studio3d-native-catalog.json"))
                         .unwrap();
                 let mut tools = main["tools"].as_array().unwrap().clone();
-                for replacement in studio["tools"].as_array().unwrap() {
+                let projects: Value = serde_json::from_str(include_str!("../fixtures/project-native-catalog.json")).unwrap();
+                for replacement in studio["tools"].as_array().unwrap().iter().chain(projects["tools"].as_array().unwrap()) {
                     *tools
                         .iter_mut()
                         .find(|t| t["name"] == replacement["name"])
                         .unwrap() = replacement.clone();
                 }
+                // The native window tools follow the pinned catalog.
+                tools.extend(catalog::native_tools().iter().cloned());
                 expected["result"]["tools"] = Value::Array(tools);
                 expected
             } else {
@@ -542,18 +545,46 @@ fn actor_save_handoff_keeps_session_generation_and_file_lock() {
     use pm_kernel::session::{SessionSource, ShellCall, ShellReply};
     let root = std::env::temp_dir().join(pm_kernel::new_id("pm-mcp-actor-save"));
     std::fs::create_dir_all(&root).unwrap();
-    let actor = pm_kernel::KernelActor::spawn(pm_kernel::KernelConfig {
-        journal_root: Some(root.join("journals")),
+    // Every copy of the app this user runs shares one lock folder; this
+    // test's is its own, so nothing lands in the real one.
+    let config = |name: &str| pm_kernel::KernelConfig {
+        journal_root: Some(root.join(name).join("journals")),
+        lock_root: Some(root.join("locks")),
         ..Default::default()
-    });
+    };
+    let attach = |kernel: &pm_kernel::KernelHandle, name: &str| {
+        block_on(kernel.shell(ShellCall::AttachLibrary {
+            profile: root.join(name),
+            format: pm_kernel::persistence::DiskFormat::V1_2,
+            electron_profile: None,
+        }))
+        .unwrap()
+        .unwrap();
+    };
+    let actor = pm_kernel::KernelActor::spawn(config("agent"));
     let kernel = actor.handle();
-    block_on(kernel.shell(ShellCall::AttachLibrary {
-        profile: root.clone(),
-        format: pm_kernel::persistence::DiskFormat::V1_2,
-        electron_profile: None,
-    }))
-    .unwrap()
-    .unwrap();
+    attach(&kernel, "agent");
+    // Another copy of the app (another profile) opening the same file.
+    let other = pm_kernel::KernelActor::spawn(config("other"));
+    attach(&other.handle(), "other");
+    let open_elsewhere = |path: &std::path::Path| {
+        let ShellReply::Opened {
+            session, decision, ..
+        } = block_on(other.handle().shell(ShellCall::Open {
+            id: "P-other".into(),
+            source: SessionSource::File(path.into()),
+            electron_profile: None,
+        }))
+        .unwrap()
+        .unwrap()
+        else {
+            panic!("expected the other copy to open the file");
+        };
+        block_on(other.handle().shell(ShellCall::Close(session)))
+            .unwrap()
+            .unwrap();
+        decision
+    };
     let source = || {
         SessionSource::New(
             pm_model::json::parse(
@@ -585,21 +616,34 @@ fn actor_save_handoff_keeps_session_generation_and_file_lock() {
             ..
         }
     ));
-    assert!(
-        pm_kernel::locks::FileLock::acquire(&pm_kernel::locks::project_lock_path(&path)).is_err()
+    // The session the agent saved holds the file: another copy of the app
+    // opens it only as a copy, before and after a save in place.
+    assert_eq!(
+        open_elsewhere(&path),
+        pm_kernel::locks::OpenDecision::AsCopy(pm_kernel::locks::CopyReason::Locked)
     );
     assert!(matches!(
         block_on(host.save(session.clone())).unwrap(),
         ShellReply::Saved { .. }
     ));
+    assert_eq!(
+        open_elsewhere(&path),
+        pm_kernel::locks::OpenDecision::AsCopy(pm_kernel::locks::CopyReason::Locked)
+    );
     block_on(kernel.shell(ShellCall::Close(session.clone())))
         .unwrap()
         .unwrap();
+    // Closed, the lock is released: the other copy may write it.
+    assert_eq!(
+        open_elsewhere(&path),
+        pm_kernel::locks::OpenDecision::Writable
+    );
     assert!(
         block_on(host.save(session)).is_err(),
         "stale session must not save"
     );
     actor.shutdown();
+    other.shutdown();
     assert!(pm_kernel::open_project(&path, pm_kernel::OpenOptions::default()).is_ok());
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -689,7 +733,7 @@ fn loopback_authentication_catalog_and_descriptor_lifetime() {
     reader.read_line(&mut line).unwrap();
     assert_eq!(
         serde_json::from_str::<Value>(&line).unwrap()["result"],
-        json!(catalog::tools())
+        json!(catalog::served_tools())
     );
     drop(reader);
     drop(stream);
@@ -732,7 +776,7 @@ fn binary_proxy_edits_and_disconnect_rolls_back() {
         rpc("initialize", json!({}));
         assert_eq!(
             rpc("tools/list", json!({}))["tools"],
-            json!(catalog::tools())
+            json!(catalog::served_tools())
         );
         value(rpc(
             "tools/call",

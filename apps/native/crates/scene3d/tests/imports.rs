@@ -30,6 +30,55 @@ fn self_contained_glb_loads_and_original_bytes_are_retained() {
     };
     assert_eq!(m.triangles, 1);
 }
+
+#[test]
+fn fbx_import_keeps_the_source_and_uses_the_shared_glb_converter() {
+    let original =
+        include_bytes!("../../../../../engine/crates/pm-import-fbx/fixtures/tiny-static.fbx");
+    let prepared = import::prepare(
+        vec![ImportFile {
+            name: "product.FBX".into(),
+            mime: "model/fbx".into(),
+            bytes: original.to_vec(),
+        }],
+        None,
+    )
+    .unwrap();
+    assert_eq!(prepared.name, "product.glb");
+    assert_eq!(prepared.original[0].bytes, original);
+    assert_eq!(&prepared.bytes[..4], b"glTF");
+    let import::Model::Gltf(model) = import::load(&prepared.name, &prepared.bytes).unwrap() else {
+        panic!("converted FBX")
+    };
+    assert_eq!(model.triangles, 1);
+    assert!(!model.materials.is_empty());
+    assert_eq!(model.lights.len(), 1);
+}
+
+#[test]
+fn persisted_fbx_assets_keep_skins_and_baked_animation() {
+    let original =
+        include_bytes!("../../../../../engine/crates/pm-import-fbx/fixtures/tiny-animated.fbx");
+    let import::Model::Gltf(model) = import::load("animation.fbx", original).unwrap() else {
+        panic!("FBX asset")
+    };
+    assert_eq!(model.triangles, 1);
+    assert_eq!(model.skins.len(), 1);
+    assert_eq!(model.clips.len(), 1);
+}
+
+#[test]
+fn malformed_fbx_and_multiple_models_are_rejected() {
+    assert!(import::load("bad.fbx", b"not an FBX").is_err());
+    let original =
+        include_bytes!("../../../../../engine/crates/pm-import-fbx/fixtures/tiny-static.fbx");
+    let file = |name: &str| ImportFile {
+        name: name.into(),
+        mime: "model/fbx".into(),
+        bytes: original.to_vec(),
+    };
+    assert!(import::prepare(vec![file("first.fbx"), file("second.fbx")], None).is_err());
+}
 #[test]
 fn rejects_external_gltf_dependencies_without_network() {
     let v = json!({"asset":{"version":"2.0"},"buffers":[{"uri":"https://example.invalid/geometry.bin","byteLength":36}]});
@@ -255,6 +304,33 @@ fn loaded_asset_bounds_refuse_stale_source_metadata() {
     );
     assert!(registry.bounds("missing", &record, 0.).is_err());
 }
+
+#[test]
+fn headless_bounds_use_the_render_resource_without_an_editor() {
+    let root = std::env::temp_dir().join(pm_scene3d_test_id());
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("approved-original.bin");
+    let bytes = triangle();
+    std::fs::write(&path, &bytes).unwrap();
+    let record = json!({"kind":"model","format":"glb","name":"model.glb","revision":"one",
+        "sourcePath":"/not-authorized/by-document.glb"});
+    let files = geometry::FileAssets::new([("model".into(), path.clone())].into());
+    let resource = pm_scene3d::render::Resource::load("resource.glb", &bytes).unwrap();
+    let mut editor = LoadedAssets::default();
+    editor.insert("model".into(), record.clone(), resource.model.clone());
+    for time in [0., 1., 2.] {
+        assert_eq!(files.bounds("model", &record, time).unwrap(), editor.bounds("model", &record, time).unwrap());
+    }
+    assert!(files.bounds("model", &json!({"revision":"changed"}), 0.).is_err());
+    assert!(files.bounds("missing", &record, 0.).is_err());
+    assert!(files.bounds("model", &record, f64::NAN).is_err());
+    std::fs::remove_dir_all(root).unwrap();
+}
+fn pm_scene3d_test_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    format!("pm-headless-bounds-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed))
+}
 #[test]
 fn archive_never_overwrites_conflicting_content_and_rejects_path_injection() {
     use pm_scene3d::import::archive::Archive;
@@ -324,8 +400,10 @@ fn splat_framing_uses_dense_core_without_changing_outlier_bytes() {
 fn a_live_model_resource_is_shared_and_a_dropped_one_reloads() {
     use pm_scene3d::render::Resource;
     use std::sync::Arc;
-    let bytes = triangle();
-    let other = import::triangle_glb(&[[0., 0., 0.], [2., 0., 0.], [0., 2., 0.]], &[0, 1, 2]);
+    // The process-wide cache hashes bytes, not paths. Dedicated geometry keeps
+    // parallel bounds/import tests from retaining this test's weak resource.
+    let bytes = import::triangle_glb(&[[0., 0., 0.], [13., 0., 0.], [0., 17., 0.]], &[0, 1, 2]);
+    let other = import::triangle_glb(&[[0., 0., 0.], [19., 0., 0.], [0., 23., 0.]], &[0, 1, 2]);
     let loads = [bytes.clone(), other.clone(), bytes.clone()]
         .map(|b| std::thread::spawn(move || Resource::load("model.glb", &b).unwrap()));
     let [a, b, c] = loads.map(|t| t.join().unwrap());
@@ -335,4 +413,18 @@ fn a_live_model_resource_is_shared_and_a_dropped_one_reloads() {
     drop((a, c));
     assert!(weak.upgrade().is_none());
     assert!(Resource::load("model.glb", &bytes).is_ok());
+}
+
+#[test]
+fn material_pixels_cache_by_content_and_preserve_alpha_on_replacement() {
+    let red = include_bytes!("../../../../../engine/fixtures/still-red.png");
+    let alpha = include_bytes!("../../../../../engine/fixtures/still-alpha.png");
+    let first = pm_scene3d::render::texture_rgba(red).unwrap();
+    let repeated = pm_scene3d::render::texture_rgba(&red.to_vec()).unwrap();
+    assert!(std::sync::Arc::ptr_eq(&first, &repeated));
+    let replaced = pm_scene3d::render::texture_rgba(alpha).unwrap();
+    assert!(!std::sync::Arc::ptr_eq(&first, &replaced));
+    assert!(replaced.chunks_exact(4).any(|p| p[3] < 255));
+    assert_eq!(first.len(), 1024 * 1024 * 4);
+    assert!(pm_scene3d::render::texture_rgba(b"bad image").is_err());
 }

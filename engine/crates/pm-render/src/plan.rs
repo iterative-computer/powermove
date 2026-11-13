@@ -296,6 +296,7 @@ pub struct Build<'r> {
     /// The 3D state of the compositing passes being built (innermost last).
     pass3d: Vec<crate::scene3d::Pass3d>,
     options3d: crate::scene3d::Options3d,
+    material: Option<MaterialPlan>,
     /// Prepares effects (`crate::composite::EffectHost`); without one,
     /// layers with renderable effects are unsupported.
     effects: Option<&'r dyn EffectHost>,
@@ -382,6 +383,24 @@ impl Build<'_> {
         {
             return Ok(raster.world());
         }
+        if let Some(material) = self.material.filter(|m| m.in_comp(scope.comp)) {
+            let local = if material.owns(layer) {
+                [1., 0., 0., 1., 0., 0.]
+            } else {
+                mul(&material.inverse, &scope.world_matrix(layer, time)?)
+            };
+            return Ok(mul(
+                &[
+                    scale.0,
+                    0.,
+                    0.,
+                    scale.1,
+                    -material.bounds.x * scale.0,
+                    -material.bounds.y * scale.1,
+                ],
+                &local,
+            ));
+        }
         scaled_world(scope, layer, time, scale, self.origin)
     }
     fn pass_facts(&mut self, layers: &[Node], all: &[&Node]) -> std::sync::Arc<PassFacts> {
@@ -401,6 +420,9 @@ impl Build<'_> {
 /// Options of a build beyond the frame's geometry.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct BuildOptions {
+    /// Local material capture; addresses are compared only while the borrowed
+    /// document is alive. No pointer is dereferenced or retained by a frame.
+    pub material: Option<MaterialPlan>,
     /// Resolved motion blur (`crate::motion::resolve`).
     pub blur: Option<crate::motion::Blur>,
     pub sampling: crate::sampling::Sampling,
@@ -425,6 +447,24 @@ pub struct BuildOptions {
     /// A playing viewer frame ([`RenderRequest::read_ahead`](crate::RenderRequest::read_ahead)):
     /// image sequences name the files their next frames show.
     pub read_ahead: bool,
+}
+
+/// A bounded source-local material canvas, without its receiving model.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MaterialPlan {
+    pub composition: usize,
+    pub layer: usize,
+    pub inverse: Mat2d,
+    pub bounds: pm_fx_defs::spatial::Extent,
+    pub group: bool,
+}
+impl MaterialPlan {
+    fn in_comp(self, comp: &Comp<'_>) -> bool {
+        self.composition == std::ptr::from_ref(comp.node()) as usize
+    }
+    fn owns(self, layer: &Node) -> bool {
+        self.layer == std::ptr::from_ref(layer) as usize
+    }
 }
 
 /// Today's `PC_MAX_DEPTH`.
@@ -562,6 +602,7 @@ pub(crate) fn build_reusing<'r>(
         precomp_depth: 0,
         pass3d: Vec::new(),
         options3d,
+        material: options.material,
         effects,
         matte_depth: 0,
         forced_on: None,
@@ -715,6 +756,23 @@ pub(crate) fn comp_pass<'d>(
         draws: Vec::new(),
         view,
     };
+    if group_parent.is_none()
+        && b.precomp_depth == 0
+        && let Some(material) = b.material.filter(|m| m.in_comp(scope.comp))
+    {
+        if let Some(layer) = all.iter().copied().find(|l| material.owns(l)) {
+            match draw_layer(scope, b, layer, time, width, height, scale, false, &all) {
+                Ok(Some(draws)) => plan.draws = draws,
+                Ok(None) => {}
+                Err(error) => {
+                    let comp = scope.comp.clone();
+                    layer_failure(b, &comp, layer, error.to_string());
+                }
+            }
+        }
+        plan.background = Background::Transparent;
+        return plan;
+    }
     let parent_id = group_parent.map(|g| node::get(g, b"id").to_js());
     let facts = b.pass_facts(scope.layers(), &all);
     // `compositingPass`: boundary groups stay one entry.
@@ -847,7 +905,14 @@ fn draw_layer<'d>(
     if !active {
         return Ok(None);
     }
-    let alpha = js::clamp(scope.num(layer, "opacity", time)? / 100.0, 0.0, 1.0);
+    let material_root = b
+        .material
+        .is_some_and(|m| m.in_comp(scope.comp) && m.owns(layer));
+    let alpha = if material_root {
+        1.
+    } else {
+        js::clamp(scope.num(layer, "opacity", time)? / 100.0, 0.0, 1.0)
+    };
     if alpha <= 0.001 {
         return Ok(None);
     }
@@ -862,7 +927,16 @@ fn draw_layer<'d>(
     // Effects prepared by the host (the effects lane); without one, a layer
     // with renderable effects is routed.
     let effects = if has_fx && !source_owner {
+        let capture_owner = if let Some(material) = b.material.filter(|m| m.in_comp(scope.comp)) {
+            Some(composite::effects::OwnerSpace {
+                world: b.world(scope, layer, time, scale)?,
+                bounds: material.owns(layer).then_some(material.bounds),
+            })
+        } else {
+            None
+        };
         let frame = composite::effects::EffectFrame {
+            owner: capture_owner,
             width,
             height,
             scale,
@@ -925,6 +999,7 @@ fn draw_layer<'d>(
         Some(_) if ty == "adjustment" => None,
         Some(host) => {
             let frame = composite::effects::EffectFrame {
+                owner: None,
                 width,
                 height,
                 scale,
@@ -951,9 +1026,7 @@ fn draw_layer<'d>(
         let Some(effects) = effects else {
             return Ok(None);
         };
-        let masks = layer_masks(
-            scope, layer, time, scale, b.origin, width, height, has_masks,
-        )?;
+        let masks = layer_masks(scope, b, layer, time, scale, width, height, has_masks)?;
         return Ok(Some(vec![node(composite::Node::Adjustment(
             composite::AdjustmentNode {
                 layer: id.clone(),
@@ -983,10 +1056,10 @@ fn draw_layer<'d>(
      -> JsResult<Option<Vec<Draw>>> {
         let masks = layer_masks(
             scope,
+            b,
             layer,
             time,
             scale,
-            b.origin,
             width,
             height,
             has_masks && !source_owner,
@@ -1040,8 +1113,12 @@ fn draw_layer<'d>(
                 }
             };
             let e = raster.extent;
-            let world = scaled_world(scope, layer, at, scale, b.origin)?;
-            let opacity = js::clamp(scope.num(layer, "opacity", at)? / 100., 0., 1.) / n as f64;
+            let world = b.world(scope, layer, at, scale)?;
+            let opacity = if material_root {
+                1.
+            } else {
+                js::clamp(scope.num(layer, "opacity", at)? / 100., 0., 1.)
+            } / n as f64;
             draws.push(Draw {
                 layer: id.clone(),
                 matrix: mul(&world, &[e.width, 0., 0., e.height, e.x, e.y]),
@@ -1204,17 +1281,13 @@ pub(crate) fn layer_draw<'d>(
         } => {
             let plane = crate::space25d::projected(scope, layer, time, scale, w, h, ax, ay)?
                 .map(|p| plane_at_origin(p, b.origin));
-            // Raster layers use one sampler regardless of compatibility.
-            // Text/vector canvas raster removal belongs to their coverage
-            // renderers; level-2 plane rasters and text on a perspective
-            // plane (its layer-space raster, `crate::space25d::local`) use
-            // this sampler too.
+            // Electron projects legacy canvas sources through the same
+            // bilinear sampler in 2D and 3D. Native level-2 planes retain
+            // their output-density resampler.
             let sampling = (matches!(
                 ty.as_str(),
                 "image" | "video" | "precomp" | "shader" | "extension"
-            ) || (plane.is_some()
-                && (crate::sampling::is_level2(layer)
-                    || matches!(ty.as_str(), "text" | "captions"))))
+            ) || (plane.is_some() && crate::sampling::is_level2(layer)))
             .then_some(b.sampling);
             Draw {
                 layer: id.clone(),
@@ -1300,10 +1373,10 @@ fn placed(
 #[allow(clippy::too_many_arguments)]
 fn layer_masks<'d>(
     scope: &mut Scope<'_, 'd>,
+    b: &mut Build<'_>,
     layer: &'d Node,
     time: f64,
     scale: (f64, f64),
-    origin: (f64, f64),
     width: u32,
     height: u32,
     has_masks: bool,
@@ -1311,7 +1384,7 @@ fn layer_masks<'d>(
     if !has_masks {
         return Ok(None);
     }
-    let world = scaled_world(scope, layer, time, scale, origin)?;
+    let world = b.world(scope, layer, time, scale)?;
     let plane = if scope.is_3d_layer(layer)? {
         let h = scope.plane_matrix(layer, time, false)?;
         let (sx, sy) = scale;
@@ -1326,7 +1399,7 @@ fn layer_masks<'d>(
             h[7] * sy,
             h[8],
         ])
-        .map(|p| plane_at_origin(p, origin))
+        .map(|p| plane_at_origin(p, b.origin))
     } else {
         None
     };
@@ -1496,6 +1569,32 @@ fn native_content_quad<'d>(
 ) -> JsResult<Option<Quad>> {
     let ty = js::layer_type(layer);
     let comp_id = scope.comp.id().to_string_lossy();
+    if let Some(settings) = b.options3d.studio {
+        let extrusion = node::member(node::member(Some(layer), "d"), "extrusion");
+        if matches!(ty.as_str(), "text" | "shape")
+            && node::truthy(node::member(Some(layer), "threeD"))
+            && node::truthy(node::member(extrusion, "enabled"))
+        {
+            return Ok(Some(Quad::Screen {
+                source: Source::Object3d(Box::new(Object3dPlan {
+                    layer: js::layer_id(layer),
+                    scene: std::sync::Arc::new(crate::scene3d::Scene3d::empty(width, height)),
+                    kind: crate::scene3d::Render3d::Studio {
+                        request: crate::scene3d::provider::SceneRequest {
+                            composition: comp_id.clone(),
+                            revision: settings.revision,
+                            ticks: crate::compat::ticks_of(time).get(),
+                            width,
+                            height,
+                        },
+                        settings,
+                        final_output: b.options3d.studio_final,
+                        shutter_samples: b.studio_shutters,
+                    },
+                })),
+            }));
+        }
+    }
     if let Some(quad) = compat_quad(scope, b, layer, &ty, time, scale)? {
         return Ok(quad);
     }
@@ -1511,6 +1610,22 @@ fn native_content_quad<'d>(
     let d = scope.ev.resolve_drawn_content(scope.comp, layer, time)?;
     match ty.as_str() {
         "shape" => {
+            if !crate::vector::level2(layer) {
+                let world = vector_world(scope, b, layer, time, scale)?;
+                let density = crate::text::continuous_raster_scale(&world);
+                return Ok(
+                    crate::vector::legacy_raster(scope, layer, &d, time, density)?.map(|q| {
+                        Quad::Texture {
+                            source: Source::Vector(Box::new(q.source)),
+                            w: q.w,
+                            h: q.h,
+                            ax: q.ax,
+                            ay: q.ay,
+                            uv: [0.0, 0.0, 1.0, 1.0],
+                        }
+                    }),
+                );
+            }
             if scope.is_3d_layer(layer)? {
                 let mut plan = |scope: &mut Scope<'_, 'd>, world: &Mat2d, target| {
                     crate::vector::plan_shape(scope, layer, &d, time, world, target)
@@ -1701,10 +1816,19 @@ fn native_content_quad<'d>(
             let fit = js::string(js::get(&d, "fit"));
             let uv = fit_uv(&fit, sw, sh, bw, bh);
             let mut interpret = crate::footage::interpretation(record);
+            let mut path = path;
             // Drawn from a proxy or optimized copy: the interpretation as
-            // the copy carries it.
-            if let Some(original) = b.assets.original(&asset_id).filter(|o| *o != path) {
-                interpret = interpret.and_then(|i| crate::footage::for_copy(i, &original));
+            // the copy carries it, or the original when it can't.
+            if let Some(original) = b.assets.original(&asset_id).filter(|o| *o != path)
+                && let Some(i) = interpret.take()
+            {
+                interpret = match crate::footage::for_copy(i, &original) {
+                    crate::footage::CopyReading::Copy(i) => i,
+                    crate::footage::CopyReading::Original(i) => {
+                        path = original;
+                        Some(i)
+                    }
+                };
             }
             let source = if ty == "video" {
                 // Inside motion-blur samples video keeps the center time's
@@ -1883,7 +2007,7 @@ fn native_content_quad<'d>(
                                 width, height,
                             )),
                             kind: crate::scene3d::Render3d::Studio {
-                                request: pm_studio::extract::SceneRequest {
+                                request: crate::scene3d::provider::SceneRequest {
                                     composition: comp_id.clone(),
                                     revision: settings.revision,
                                     ticks: crate::compat::ticks_of(time).get(),
@@ -2486,46 +2610,7 @@ fn text_quad<'d>(
         return Ok(None);
     }
     let level2 = node::to_number(node::member(Some(layer), "compat")) >= 2.0;
-    if scope.is_3d_layer(layer)? {
-        // A plane with no perspective is an affine output transform. Cover
-        // level 1 outlines directly under that exact plane matrix: painting
-        // a local bitmap and sampling it through an in-plane rotation would
-        // change hundreds of edge pixels even though the glyph geometry is
-        // identical. True perspective still uses the local raster sampler.
-        if !level2
-            && let Some(plane) = crate::space25d::local::content_plane(scope, layer, time, scale)?
-                .map(|p| plane_at_origin(p, b.origin))
-            && plane[2] == 0.0
-            && plane[5] == 0.0
-            && plane[8] > 0.0
-            && plane.iter().all(|v| v.is_finite())
-        {
-            let inv_w = 1.0 / plane[8];
-            let m = kurbo::Affine::new([
-                plane[0] * inv_w,
-                plane[1] * inv_w,
-                plane[3] * inv_w,
-                plane[4] * inv_w,
-                plane[6] * inv_w,
-                plane[7] * inv_w,
-            ]);
-            let plan = if ty == "text" {
-                text.text_layer_level1_device(scope, layer, time, m, target)?
-            } else {
-                text.captions_layer_level1_device(scope, layer, time, m, target)?
-            };
-            for what in text.take_unsupported() {
-                b.unsupported
-                    .push(Unsupported::layer(&comp_id, layer, Feature::Text(what)));
-            }
-            return Ok(plan.map(|p| {
-                let [x0, y0, x1, y1] = p.crop.map(f64::from);
-                Quad::Device {
-                    source: Source::Text(Box::new(p)),
-                    rect: [x0, y0, x1 - x0, y1 - y0],
-                }
-            }));
-        }
+    if level2 && scope.is_3d_layer(layer)? {
         return local_text(scope, b, layer, ty, time, scale);
     }
     if level2 {
@@ -2550,22 +2635,27 @@ fn text_quad<'d>(
             }
         }));
     }
-    let m = kurbo::Affine::new(world);
-    let plan = if ty == "text" {
-        text.text_layer_level1_device(scope, layer, time, m, target)?
+    // In 2D and 3D, Canvas2D first paints a layer-local bitmap at the compositor's
+    // quarter-step density, then WebGL samples it through the world matrix.
+    // Rasterizing after that matrix changes glyph phase, smoothing size and
+    // edge filtering, even for a fractional translation with no rotation.
+    let density = crate::text::continuous_raster_scale(&world);
+    let quad = if ty == "text" {
+        text.text_layer(scope, layer, time, density)?
     } else {
-        text.captions_layer_level1_device(scope, layer, time, m, target)?
+        text.captions_layer(scope, layer, time, density)?
     };
     for what in text.take_unsupported() {
         b.unsupported
             .push(Unsupported::layer(&comp_id, layer, Feature::Text(what)));
     }
-    Ok(plan.map(|p| {
-        let [x0, y0, x1, y1] = p.crop.map(f64::from);
-        Quad::Device {
-            source: Source::Text(Box::new(p)),
-            rect: [x0, y0, x1 - x0, y1 - y0],
-        }
+    Ok(quad.map(|q| Quad::Texture {
+        source: Source::Text(Box::new(q.plan)),
+        w: q.w,
+        h: q.h,
+        ax: q.ax,
+        ay: q.ay,
+        uv: [0.0, 0.0, 1.0, 1.0],
     }))
 }
 
@@ -2864,6 +2954,7 @@ fn source_plan<'d>(
             scope,
             layer,
             composite::effects::EffectFrame {
+                owner: None,
                 width,
                 height,
                 scale,
@@ -3204,7 +3295,7 @@ fn effect_inputs_once<'d>(
             }
             let masks = if request.stage != Stage::Source && !source_owner {
                 let has = composite::build::has_masks(scope, source, at)?;
-                layer_masks(scope, source, at, scale, b.origin, width, height, has)?
+                layer_masks(scope, b, source, at, scale, width, height, has)?
             } else {
                 None
             };
@@ -3217,6 +3308,7 @@ fn effect_inputs_once<'d>(
                     b,
                     source,
                     composite::effects::EffectFrame {
+                        owner: None,
                         width,
                         height,
                         scale,

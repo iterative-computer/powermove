@@ -131,6 +131,43 @@ fn color_interpretation_follows_section_9() {
     assert_eq!(p.video.unwrap().alpha, Some(AlphaSource::HevcAlphaLayer));
 }
 
+/// Packed RGB with alpha first (QuickTime Animation's `argb`), `abgr` and
+/// paletted video are R′G′B′: no matrix, full range, like `rgb24` and `gbrp`.
+#[test]
+fn packed_and_paletted_rgb_video_reads_as_rgb() {
+    let dir = tmp_dir();
+    for (name, codec, pix) in [
+        ("argb.mov", "qtrle", "argb"),
+        ("rgb24.mov", "qtrle", "rgb24"),
+        ("abgr.nut", "rawvideo", "abgr"),
+        ("pal8.mov", "png", "pal8"),
+    ] {
+        let path = dir.path().join(name);
+        let out = Command::new(ffmpeg_bin())
+            .args(["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi"])
+            .args(["-i", "testsrc2=size=320x240:rate=24:duration=0.25"])
+            .args(["-c:v", codec, "-pix_fmt", pix])
+            .arg(&path)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let video = probe(&path).unwrap().probe.video.unwrap();
+        assert!(video.codec.is_rgb(), "{name}");
+        assert_eq!(
+            (
+                video.color.interpreted.matrix,
+                video.color.interpreted.range
+            ),
+            (MatrixCoefficients::Identity, Range::Full),
+            "{name}"
+        );
+    }
+}
+
 #[test]
 #[ignore]
 fn corpus_probe_facts() {

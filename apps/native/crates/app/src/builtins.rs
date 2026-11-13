@@ -282,6 +282,9 @@ impl Controller {
             for (name, args) in run {
                 self.host.borrow().send_command(&name, args);
             }
+            if shown && std::mem::take(&mut self.workspace_after_open) {
+                self.host.borrow().send_command("bringWorkspace", vec![]);
+            }
         }
     }
     /// A surface extension's first commit landed; its panel can render and its
@@ -409,13 +412,25 @@ impl Controller {
                 .is_some_and(|c| c.state == pm_protocol::clock::TransportState::Playing)
         });
         // Auto's measured resolution; 0 until a frame has drawn.
+        // Layers left out of the frame on screen, by ID, so Properties can say
+        // so on that layer only (3d-studio.md §10).
+        let failures: serde_json::Map<String, Value> = status
+            .as_ref()
+            .map(|s| {
+                s.layer_failures
+                    .iter()
+                    .map(|f| (f.layer.clone(), json!(f.message)))
+                    .collect()
+            })
+            .unwrap_or_default();
         let effective = status
+            .as_ref()
             .map(|s| s.effective_quality)
             .filter(|q| *q > 0.)
             .unwrap_or(1.);
         json!({"time":self.time(),"playing":playing,"looping":self.playback.looping,
-            "channels":crate::viewer2::CHANNELS.iter().find(|(m, _, _)| *m == self.channels).map_or("viewer.showRGB", |(_, _, c)| c),"effectiveQuality":effective,"stage":self.view.stage,"light":self.host.borrow().tokens.scheme==pm_design::Scheme::Light,
-            "mediaSettings":self.media_settings_fact(),"shortcuts":self.shortcuts_page,"cloud":crate::cloud::fact(cx),"provider":crate::providers::fact(cx),"agentClients":crate::agent_clients::fact(cx),
+            "channels":crate::viewer2::CHANNELS.iter().find(|(m, _, _)| *m == self.channels).map_or("viewer.showRGB", |(_, _, c)| c),"effectiveQuality":effective,"layerFailures":failures,"studioRefineProgress":status.as_ref().and_then(|s|s.refine_progress),"studioExportEstimate":status.as_ref().map(|s|&s.export_estimate),"studioDenoiser":if pm_engine_service::studio::OIDN{"oidn"}else{"guided"},"focusPart":self.part_focus.as_ref().map(|(layer,slot,seq)|json!({"layer":layer,"slot":slot,"seq":seq})),"stage":self.view.stage,"light":self.host.borrow().tokens.scheme==pm_design::Scheme::Light,
+            "mediaSettings":self.media_settings_fact(),"skimming":self.skimming.on,"shortcuts":self.shortcuts_page,"cloud":crate::cloud::fact(cx),"provider":crate::providers::fact(cx),"agentClients":crate::agent_clients::fact(cx),
             // The Agent panel is a popover while its own window is open, a docked panel otherwise.
             "agentPopover":self.builtins.opening_windows.contains("agent")
                 || self.builtins.windows.get("agent").is_some_and(|w| cx.windows().contains(w))})
@@ -450,6 +465,9 @@ impl Controller {
     }
     pub fn update_builtins(&mut self, cx: &mut Context<Self>) {
         self.sync_keymap();
+        if crate::first_run::take_workspace_request() {
+            self.host.borrow().send_command("firstRunWorkspace", vec![]);
+        }
         self.start_builtins(cx);
         self.probe_builtin_media(cx);
         if self.builtins.updating {
@@ -677,21 +695,35 @@ impl Controller {
         if id == "viewer" {
             self.builtins.viewer_place = Some(bounds);
             let body_h = (bounds.h - t.metrics.header).max(1.);
-            let stage = [bounds.w as f64, body_h as f64];
+            // With Studio 3D views the main viewer is the first pane.
+            let split = self.host.borrow().viewer_split.get();
+            let (body_w, body_h) = if split > 1 {
+                let r = pm_shell::layout::Rect {
+                    x: 0.,
+                    y: 0.,
+                    w: bounds.w,
+                    h: body_h,
+                };
+                let first = pm_shell::layout::view_tiles(r, split, t.metrics.border * 2.)[0];
+                (first.w, first.h)
+            } else {
+                (bounds.w, body_h)
+            };
+            let stage = [body_w as f64, body_h as f64];
             if self.view.stage != stage {
                 // The chrome's Fit readout and zoom steps measure this slot.
                 self.view.stage = stage;
                 cx.defer_in(window, |v, _, cx| v.update_builtins(cx));
             }
             // Shown rulers take a band along the top and the leading edge;
-            // the composition fits inside them.
+            // the composition fits inside them (the first pane with 3D views).
             let inset = t.metrics.inset
                 + if self.rulers {
                     t.metrics.viewer_ruler
                 } else {
                     0.
                 };
-            let fit = crate::panels::fit_scale(bounds.w, body_h, self.dimensions, inset);
+            let fit = crate::panels::fit_scale(body_w, body_h, self.dimensions, inset);
             let scale = self.view.zoom.unwrap_or(fit).min(self.zoom_limit());
             if self.view.scale.replace(scale) != scale
                 && let Some(gizmos) = &self.builtins.gizmos
@@ -955,6 +987,20 @@ impl Controller {
             let _ = handle.update(cx, |_, w, _| w.remove_window());
         }
     }
+    /// A viewer double-click on an imported model's part: Properties opens
+    /// and scrolls to that material slot's section (`None` leaves it).
+    pub fn focus_part(&mut self, layer: &str, slot: Option<u64>, cx: &mut Context<Self>) {
+        let seq = self.part_focus.as_ref().map_or(0, |f| f.2) + 1;
+        self.part_focus = slot.map(|slot| (layer.to_owned(), slot, seq));
+        self.update_builtins(cx);
+        if let Some(slot) = slot
+            && let Some(view) = self.builtins.views.get("inspector").cloned()
+        {
+            view.update(cx, |v, cx| {
+                v.reveal_semantic(format!("section:3d.part.{slot}"), cx)
+            });
+        }
+    }
     pub fn open_builtin_composition(&mut self, id: &str, cx: &mut Context<Self>) {
         let Some(p) = &self.published else {
             return;
@@ -987,8 +1033,14 @@ impl Controller {
             return;
         };
         while let Some(request) = self.builtins.requests.pop_front() {
-            if !self.builtins.ready.contains(&request.panel)
-                || self.builtins.generations.get(&request.panel) != Some(&request.generation)
+            // The Export sheet asks for its 3D estimate from its first
+            // snapshot, before the panel is marked ready. The request only
+            // asks the viewer to measure and edits nothing, so it never
+            // waits on the panel.
+            let measure_only = request.operation == "export.estimate";
+            if !measure_only
+                && (!self.builtins.ready.contains(&request.panel)
+                    || self.builtins.generations.get(&request.panel) != Some(&request.generation))
             {
                 runtime.platform_reply(request.id, Err("Panel is not ready".into()));
                 continue;
@@ -1084,6 +1136,30 @@ impl Controller {
                 }
                 "media.settings" => {
                     self.media_settings(&request.input, cx);
+                    Ok(Value::Null)
+                }
+                // The Export sheet's 3D estimate: the viewer measures the
+                // shot on its idle worker; the state comes back in the facts.
+                "export.estimate" => {
+                    let n = |k: &str| request.input[k].as_u64().unwrap_or(0);
+                    // Measure the viewer's current scene (its stamp, not the
+                    // last drawn frame's, which may already be superseded).
+                    if let Some(viewer) = &self.viewer
+                        && let Some(stamp) = viewer.stamp()
+                        && n("width") > 0
+                        && n("height") > 0
+                    {
+                        let time = viewer.status().frame.map_or(pm_protocol::common::Ticks::ZERO, |f| f.time);
+                        if let Err(error) = viewer.estimate_studio_export_scaled(
+                            stamp,
+                            time,
+                            pm_protocol::common::Size::new(n("width") as u32, n("height") as u32),
+                            n("frames").max(1),
+                            request.input["renderScale"].as_f64().unwrap_or(1.) as f32,
+                        ) {
+                            eprintln!("Studio export estimate not started: {error}");
+                        }
+                    }
                     Ok(Value::Null)
                 }
                 "export.begin" | "export.retry" | "export.without" => {
@@ -1641,6 +1717,45 @@ impl crate::gizmo::Host for ControllerDelegate {
     fn overlay(&self, lines: Vec<pm_engine_service::OverlayLine>, cx: &mut App) {
         let _ = self.0.update(cx, |v, _| v.set_gizmos(lines));
     }
+    fn pick_surface(
+        &self,
+        at: [f32; 2],
+        cx: &App,
+    ) -> Option<async_channel::Receiver<Result<pm_engine_service::SurfaceReply, String>>> {
+        let c = self.0.upgrade()?;
+        let viewer = c.read(cx).viewer.as_ref()?;
+        let frame = viewer.status().frame?;
+        viewer
+            .pick_surface(
+                frame.stamp,
+                frame.time,
+                at,
+                pm_engine_service::SurfaceQueryKind::Click,
+            )
+            .ok()
+    }
+    fn open_composition(&self, comp: String, cx: &mut App) {
+        let _ = self
+            .0
+            .update(cx, |v, cx| v.open_builtin_composition(&comp, cx));
+    }
+    fn scene3d_assets(&self, cx: &App) -> Option<Arc<dyn pm_scene3d::geometry::AssetGeometry>> {
+        let c = self.0.upgrade()?;
+        let originals = c.read(cx).media.originals.clone();
+        Some(Arc::new(pm_scene3d::geometry::FileAssets::new(
+            originals.into_iter().collect(),
+        )))
+    }
+    fn focus_part(&self, layer: &str, slot: Option<u64>, cx: &mut App) {
+        let _ = self.0.update(cx, |v, cx| v.focus_part(layer, slot, cx));
+    }
+    fn studio_view(&self, view: Option<pm_engine_service::studio::FreeView>, cx: &mut App) {
+        if let Some(c) = self.0.upgrade()
+            && let Some(viewer) = &c.read(cx).viewer
+        {
+            let _ = viewer.studio_view_at(view, Controller::event_time());
+        }
+    }
     fn input(&self, at: f64, cx: &mut App) {
         if let Some(c) = self.0.upgrade()
             && let Some(viewer) = &c.read(cx).viewer
@@ -1660,17 +1775,32 @@ impl crate::gizmo::Host for ControllerDelegate {
         // is a tool here, not a command) and what extensions add to it.
         let Some(id) = layer else {
             controller.update(cx, |v, cx| {
-                let entries = vec![pm_shell::MenuEntry::submenu(
-                    "New",
-                    vec![
-                        pm_shell::MenuEntry::item("Solid", "newSolid"),
-                        pm_shell::MenuEntry::item("Shape Layer", "newShape"),
-                        pm_shell::MenuEntry::item("Adjustment Layer", "newAdjustment"),
-                        pm_shell::MenuEntry::item("Null Object", "newNull"),
-                        pm_shell::MenuEntry::separator(),
-                        pm_shell::MenuEntry::item("Composition…", "newComposition"),
-                    ],
-                )];
+                let entries = vec![
+                    pm_shell::MenuEntry::submenu(
+                        "New",
+                        vec![
+                            pm_shell::MenuEntry::item("Solid", "newSolid"),
+                            pm_shell::MenuEntry::item("Shape Layer", "newShape"),
+                            pm_shell::MenuEntry::item("Adjustment Layer", "newAdjustment"),
+                            pm_shell::MenuEntry::item("Null Object", "newNull"),
+                            pm_shell::MenuEntry::separator(),
+                            pm_shell::MenuEntry::item("Composition…", "newComposition"),
+                        ],
+                    ),
+                    // `new3d:<kind>` runs Layer ▸ Add 3D Layer with that kind.
+                    pm_shell::MenuEntry::submenu(
+                        "Add 3D Layer",
+                        pm_shell::menu::new3d()
+                            .into_iter()
+                            .map(|i| match i.args.first().and_then(|a| a.as_str()) {
+                                Some(kind) => {
+                                    pm_shell::MenuEntry::item(i.label, format!("new3d:{kind}"))
+                                }
+                                None => pm_shell::MenuEntry::separator(),
+                            })
+                            .collect(),
+                    ),
+                ];
                 let locations = vec![("viewer:context", json!({"layerId":null,"time":time}))];
                 if let Some(entries) = v.extension_menu(locations, entries, at, cx) {
                     v.host.borrow().context_menu(&entries, at.0, at.1);

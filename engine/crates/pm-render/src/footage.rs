@@ -30,28 +30,58 @@ pub fn interpretation(record: &pm_model::Node) -> Option<Interpretation> {
             Some(Interpretation::from_json(&value).0)
         })
         .unwrap_or_default();
+    interp.electron_color = pm_eval::node::is_str(
+        pm_eval::node::member(Some(record), "videoColor"),
+        "electron",
+    );
     interp.clip = clip_timing(Some(record));
     (!interp.is_empty()).then_some(interp)
 }
 
+/// Where a clip drawn from a converted copy of its original (a proxy or
+/// optimized media) reads its frames, and with which interpretation.
+#[derive(Clone, Debug, PartialEq)]
+pub enum CopyReading {
+    /// The copy, read with this interpretation.
+    Copy(Option<Interpretation>),
+    /// The original: the copy cannot carry this interpretation.
+    Original(Interpretation),
+}
+
 /// An asset's interpretation as it applies to a converted copy of its
-/// original (a proxy or optimized media). Interpret Footage describes the
-/// original file. A copy of a Y′CbCr original holds the original's codes, so
-/// every member applies to it as it stands. A copy of an R′G′B′ original was
-/// converted to Y′CbCr by its maker, which chose the matrix and range and
-/// tagged the copy with them: the asset's matrix, range and chroma siting do
-/// nothing on the original and would misread the copy, so the copy keeps its
-/// own. An original that can't be read is taken as Y′CbCr, what cameras and
-/// editors write.
-pub fn for_copy(mut interp: Interpretation, original: &std::path::Path) -> Option<Interpretation> {
-    if (interp.matrix.is_some() || interp.range.is_some() || interp.siting.is_some())
-        && crate::media::stores_rgb(original) == Some(true)
-    {
-        interp.matrix = None;
-        interp.range = None;
-        interp.siting = None;
+/// original. Interpret Footage describes the original file; the copy's
+/// maker (`pm_proxy`) tags the copy with the original's reading and writes
+/// limited-range Y′CbCr.
+/// - A copy of a limited-range Y′CbCr original holds the original's codes,
+///   so every member applies to it as it stands.
+/// - A copy of a full-range Y′CbCr original holds its codes rescaled to
+///   limited range: matrix, siting and the rest apply, but a corrected range
+///   says the original's codes were never full-range ones, which the
+///   rescaled copy cannot express, so the clip is drawn from its original.
+/// - A copy of an R′G′B′ original was converted to Y′CbCr by its maker,
+///   which chose the matrix and range and tagged them: the asset's matrix,
+///   range and chroma siting do nothing on the original and would misread
+///   the copy, so the copy keeps its own.
+///
+/// An original that can't be read is taken as limited-range Y′CbCr, what
+/// cameras and editors write.
+pub fn for_copy(mut interp: Interpretation, original: &std::path::Path) -> CopyReading {
+    use crate::media::StoredCodes;
+    use pm_protocol::color::Range;
+    if interp.matrix.is_some() || interp.range.is_some() || interp.siting.is_some() {
+        match crate::media::stored_codes(original) {
+            Some(StoredCodes::Rgb) => {
+                interp.matrix = None;
+                interp.range = None;
+                interp.siting = None;
+            }
+            Some(StoredCodes::YCbCr(Range::Full)) if interp.range.is_some() => {
+                return CopyReading::Original(interp);
+            }
+            _ => (),
+        }
     }
-    (!interp.is_empty()).then_some(interp)
+    CopyReading::Copy((!interp.is_empty()).then_some(interp))
 }
 
 /// Which reading of its file's timestamps an asset's stored times address

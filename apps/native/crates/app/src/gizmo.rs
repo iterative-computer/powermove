@@ -16,6 +16,8 @@ mod marquee;
 pub mod pen;
 #[path = "snap.rs"]
 mod snap;
+#[path = "gizmo3d.rs"]
+pub mod studio3d;
 #[path = "viewer_rulers.rs"]
 pub mod viewer_rulers;
 #[path = "text_edit.rs"]
@@ -162,6 +164,27 @@ pub trait Host: 'static {
     fn text_input(&self, _: &str, _: &mut Window, _: &mut App) -> Option<Rc<dyn text::TextInput>> {
         None
     }
+    /// Open a composition (a double-clicked precomp).
+    fn open_composition(&self, _: String, _: &mut App) {}
+    /// Imported-model geometry for picking a part (snapshot-approved
+    /// originals); `None` when no media host can load it.
+    fn scene3d_assets(&self, _: &App) -> Option<Arc<dyn pm_scene3d::geometry::AssetGeometry>> {
+        None
+    }
+    /// Reveal an imported model's material slot in Properties (a
+    /// double-clicked model part); `None` leaves part focus.
+    fn focus_part(&self, _: &str, _: Option<u64>, _: &mut App) {}
+    /// The viewer's Free View for Studio 3D layers; `None` is the shot.
+    fn studio_view(&self, _: Option<pm_engine_service::studio::FreeView>, _: &mut App) {}
+    /// The engine's surface pick at normalized composition coordinates, on
+    /// the frame on screen. `None` when there's no viewer frame to ask.
+    fn pick_surface(
+        &self,
+        _: [f32; 2],
+        _: &App,
+    ) -> Option<async_channel::Receiver<Result<pm_engine_service::SurfaceReply, String>>> {
+        None
+    }
 }
 /// One selected layer's pose at the current time, in composition pixels.
 #[derive(Clone, Debug)]
@@ -225,6 +248,10 @@ struct Press {
     shift: bool,
     deep: bool,
     time: f64,
+    /// Released inside the selection's box without moving: the selection
+    /// keeps itself unless the click asks otherwise (viewer.ts onDown
+    /// `startMove(... click)`).
+    inside: bool,
 }
 enum Job {
     Begin(&'static str),
@@ -239,6 +266,15 @@ enum Job {
     SelectLayers(Vec<String>),
 }
 pub struct GizmoSurface {
+    /// The layer a click would select under the pointer, outlined
+    /// (viewer.ts hoverTargetId): its id and composition corners.
+    hover_box: Option<(String, [[f64; 2]; 4])>,
+    /// A hover pick is out; the latest pointer waits here meanwhile.
+    hover_out: bool,
+    hover_next: Option<Press>,
+    /// ⌘/Ctrl held at the last pointer move: the hover reaches the leaf.
+    hover_deep: bool,
+    studio: studio3d::State,
     kernel: KernelHandle,
     project: String,
     tokens: pm_design::Tokens,
@@ -501,6 +537,11 @@ impl GizmoSurface {
         host: Rc<dyn Host>,
     ) -> Self {
         Self {
+            hover_box: None,
+            hover_out: false,
+            hover_next: None,
+            hover_deep: false,
+            studio: Default::default(),
             kernel,
             project,
             tokens,
@@ -575,16 +616,79 @@ impl GizmoSurface {
             self.host.time(cx),
         );
         cx.spawn(async move |this, cx| {
-            let poses = cx
+            let read = cx
                 .background_executor()
                 .spawn(async move {
                     let p = kernel.published(&project)?;
-                    read_at(&p, time)
+                    // 3D layers get 3D handles; their 2D boxes would mislead.
+                    let mut scene = pm_panel_studio3d::viewport::scene(&p, time).ok();
+                    let mut poses = read_at(&p, time).unwrap_or_default();
+                    // Extruded text and shapes are 3D too: their box in the
+                    // scene, from the layer's flat box, its z and its depth.
+                    if let Some(sc) = scene.as_mut() {
+                        for pose in poses.iter().filter(|pose| is_extruded(&p, &pose.id)) {
+                            if let Some(item) = extruded_item(&p, pose, time, sc.width, sc.height) {
+                                sc.items.push(item);
+                            }
+                        }
+                    }
+                    let three_d: Vec<String> = scene
+                        .as_ref()
+                        .map(|s| s.items.iter().map(|i| i.id.clone()).collect())
+                        .unwrap_or_default();
+                    // Extruded text and shapes are drawn by the 3D renderer too:
+                    // their flat box would sit somewhere else.
+                    poses.retain(|pose| {
+                        !three_d.contains(&pose.id)
+                            && !is_studio(&p, &pose.id)
+                            && !is_extruded(&p, &pose.id)
+                    });
+                    let selected = p
+                        .selection
+                        .layers()
+                        .iter()
+                        .filter(|id| three_d.contains(id))
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    let ui = |k: &str| {
+                        p.ui_state
+                            .viewer
+                            .get(k)
+                            .and_then(pm_model::Value::as_str)
+                            .map(str::to_owned)
+                    };
+                    Some((
+                        poses,
+                        scene,
+                        selected,
+                        ui("studioTool"),
+                        ui("studioLook"),
+                        ui("studioAxes"),
+                        (ui("studioLightKind"), ui("studioLightAdd"), ui("studioLightAim")),
+                    ))
                 })
                 .await;
             let _ = this.update(cx, |s, cx| {
                 if s.latest == ticket {
-                    s.poses = Arc::new(poses.unwrap_or_default());
+                    let (poses, scene, selected, tool, look, axes, (kind, add, aim)) =
+                        read.unwrap_or((vec![], None, vec![], None, None, None, (None, None, None)));
+                    s.studio.light_aim = aim.unwrap_or_else(|| "reflect".into());
+                    s.studio.object_axes = axes.as_deref() == Some("object");
+                    s.studio.light_kind = kind.unwrap_or_default();
+                    s.studio.light_add = add.as_deref() == Some("on");
+                    s.poses = Arc::new(poses);
+                    let had = s.studio.scene.is_some();
+                    let free_look = look.as_deref() == Some("free");
+                    let changed_look = free_look != s.studio.free_look;
+                    s.studio.scene = scene.map(Arc::new);
+                    s.studio.selected = selected;
+                    s.studio.tool = studio3d::Tool::parse(tool.as_deref());
+                    if !s.studio.busy() {
+                        s.studio.free_look = free_look;
+                    }
+                    if changed_look || had != s.studio.scene.is_some() {
+                        s.studio_push_view(cx);
+                    }
                     s.draw(cx);
                 }
             });
@@ -602,6 +706,26 @@ impl GizmoSurface {
             &[]
         };
         let mut lines = overlay(poses, frame, &self.tokens);
+        // The hover outline: the accent at 60% (viewer-chrome.md), never
+        // over a gesture or on a layer the selection already outlines.
+        if let Some((id, c)) = &self.hover_box
+            && self.controls
+            && !editing
+            && self.drag.is_none()
+            && !self.poses.iter().any(|p| &p.id == id)
+        {
+            let accent = self.tokens.colors.accent;
+            let channel = |shift: u32| ((accent >> shift) & 255) as f32 / 255.;
+            let color = [channel(16), channel(8), channel(0), 0.6];
+            let [w, h] = frame.size;
+            for i in 0..4 {
+                let (a, b) = (c[i], c[(i + 1) % 4]);
+                lines.push(OverlayLine {
+                    ends: [a[0] / w, a[1] / h, b[0] / w, b[1] / h].map(|v| v as f32),
+                    color,
+                });
+            }
+        }
         let drawn = self.sketch.as_ref().and_then(|s| s.shape);
         if let Some(shape) = drawn.or(self.text_sketch.as_ref().and_then(|s| s.shape)) {
             let [w, h] = frame.size;
@@ -619,6 +743,10 @@ impl GizmoSurface {
                 });
             }
         }
+        if self.controls && !editing {
+            lines.extend(self.studio_lines(frame));
+        }
+        lines.truncate(pm_engine_service::OverlayGeometry::MAX_LINES);
         self.host.overlay(lines, cx);
     }
     fn to_comp(&self, position: Point<Pixels>, frame: ViewFrame) -> [f64; 2] {
@@ -705,12 +833,41 @@ impl GizmoSurface {
                 .text_session()
                 .is_some_and(|s| s.contains(at, frame.scale));
         let ruler = self.rulers_cursor(position, frame);
+        // A 3D handle under the pointer lights up (3d-studio.md §5).
+        if matches!(tool, Tool::Select) && self.studio_hover(at, frame) {
+            self.draw(cx);
+        }
+        // The layer a click would select is outlined; not over a handle,
+        // text being edited, 3D layers (their own picking) or other tools.
+        let handle = self.handle_at(at, frame.scale).is_some();
+        if matches!(tool, Tool::Select)
+            && !in_text
+            && !handle
+            && ruler.is_none()
+            && self.text_session().is_none()
+            && !self.studio.active()
+            && self.marquee.is_none()
+        {
+            let press = Press {
+                at,
+                shift: false,
+                deep: self.hover_deep,
+                time: self.host.time(cx),
+                inside: false,
+            };
+            self.hover_pick(press, cx);
+        } else {
+            self.unhover(cx);
+        }
         let cursor = match tool {
             _ if ruler.is_some() => ruler.unwrap_or(CursorStyle::Arrow),
             _ if in_text => CursorStyle::IBeam,
             Tool::Hand => CursorStyle::OpenHand,
             Tool::Text => CursorStyle::IBeam,
             Tool::Anchor | Tool::Zoom | Tool::Shape | Tool::Pen => CursorStyle::Crosshair,
+            Tool::Select if self.studio_cursor(at, frame).is_some() => {
+                self.studio_cursor(at, frame).unwrap()
+            }
             _ => match self.handle_at(at, frame.scale) {
                 Some(Hit::Handle(index)) => self
                     .handle_pose()
@@ -722,6 +879,48 @@ impl GizmoSurface {
             self.cursor = cursor;
             cx.notify();
         }
+    }
+    fn unhover(&mut self, cx: &mut Context<Self>) {
+        self.hover_next = None;
+        if self.hover_box.take().is_some() {
+            self.draw(cx);
+        }
+    }
+    /// What a click at `press` would select, outlined unless it is already
+    /// selected. One query at a time; the latest pointer goes next.
+    fn hover_pick(&mut self, press: Press, cx: &mut Context<Self>) {
+        if self.hover_out {
+            self.hover_next = Some(press);
+            return;
+        }
+        self.hover_out = true;
+        self.picks += 1;
+        let (kernel, project) = (self.kernel.clone(), self.project.clone());
+        cx.spawn(async move |this, cx| {
+            let found = cx
+                .background_executor()
+                .spawn(async move {
+                    let p = kernel.published(&project)?;
+                    let id = pick_target(&p, press)??;
+                    if p.selection.layers().contains(&id) {
+                        return None;
+                    }
+                    Some((id.clone(), outline(&p, &id, press.time)?))
+                })
+                .await;
+            let _ = this.update(cx, |s, cx| {
+                s.picks -= 1;
+                s.hover_out = false;
+                if s.hover_box != found {
+                    s.hover_box = found;
+                    s.draw(cx);
+                }
+                if let Some(next) = s.hover_next.take() {
+                    s.hover_pick(next, cx);
+                }
+            });
+        })
+        .detach();
     }
     /// A selection holding a locked layer owns its geometry but does not move.
     fn transformable(&self) -> bool {
@@ -756,6 +955,7 @@ impl GizmoSurface {
         let Some(frame) = self.host.frame(self.bounds, cx) else {
             return;
         };
+        self.unhover(cx);
         // Space held over the viewer: the hand, whatever the tool.
         if self.space_hand {
             self.panning = Some(event.position);
@@ -780,6 +980,11 @@ impl GizmoSurface {
             self.finish_text(false, cx);
             tool = Tool::Select;
         }
+        if (tool == Tool::Select || event.modifiers.alt && self.studio.active())
+            && self.studio_down(event, at, frame, cx)
+        {
+            return;
+        }
         let start = |hit, click| Drag {
             hit,
             origin: event.position,
@@ -796,6 +1001,7 @@ impl GizmoSurface {
             shift: event.modifiers.shift,
             deep,
             time,
+            inside: false,
         };
         let drag = match tool {
             Tool::Other => return,
@@ -845,15 +1051,25 @@ impl GizmoSurface {
                 _ => None,
             },
             Tool::Select if event.click_count == 2 => {
-                self.text_double_click(at, window, cx);
+                self.double_click(press, window, cx);
                 None
             }
             Tool::Select => {
-                let inside_selection = self.poses.iter().any(|p| inside(&p.corners, at));
+                // A layer's own box, or the common box of a multiple
+                // selection (its gaps included), owns the press
+                // (viewer.ts pointInSelection).
+                let inside_selection = self.poses.iter().any(|p| inside(&p.corners, at))
+                    || self.handle_pose().is_some_and(|p| inside(&p.corners, at));
                 if let Some(hit) = self.handle_at(at, frame.scale) {
                     Some(start(hit, None))
                 } else if inside_selection && self.transformable() {
-                    Some(start(Hit::Body, Some(press)))
+                    Some(start(
+                        Hit::Body,
+                        Some(Press {
+                            inside: true,
+                            ..press
+                        }),
+                    ))
                 } else if inside_selection {
                     None
                 } else {
@@ -864,6 +1080,39 @@ impl GizmoSurface {
             }
         };
         self.drag = drag;
+    }
+    /// Select-tool double-click: edit text, descend into a group, or open a
+    /// precomp (viewer.ts). Studio 3D layers took theirs in `studio_down`.
+    fn double_click(&mut self, press: Press, window: &mut Window, cx: &mut Context<Self>) {
+        let (kernel, project) = (self.kernel.clone(), self.project.clone());
+        let handle = window.window_handle();
+        cx.spawn(async move |this, cx| {
+            let action = cx
+                .background_executor()
+                .spawn(async move {
+                    let p = kernel.published(&project)?;
+                    double_click_action(&p, press)
+                })
+                .await;
+            match action {
+                Some(DoubleClick::Select(id)) => {
+                    let _ = this.update(cx, |s, cx| {
+                        s.queue.push_back(Job::SelectLayers(vec![id]));
+                        s.pump(cx);
+                    });
+                }
+                Some(DoubleClick::Text(id)) => {
+                    let _ = handle.update(cx, |_, window, cx| {
+                        let _ = this.update(cx, |s, cx| s.edit_text_all(id, window, cx));
+                    });
+                }
+                Some(DoubleClick::Open(comp)) => {
+                    let _ = this.update(cx, |s, cx| s.host.open_composition(comp, cx));
+                }
+                None => {}
+            }
+        })
+        .detach();
     }
     /// Secondary press: selects what is under the pointer, locked layers
     /// included, then opens the shared layer menu on it.
@@ -882,6 +1131,7 @@ impl GizmoSurface {
             shift: false,
             deep: false,
             time: self.host.time(cx),
+            inside: false,
         };
         let (kernel, project) = (self.kernel.clone(), self.project.clone());
         let handle = window.window_handle();
@@ -934,14 +1184,30 @@ impl GizmoSurface {
     /// rules, off the main thread. The answer arrives while the press may be held.
     fn pick(&mut self, press: Press, cx: &mut Context<Self>) {
         let (kernel, project) = (self.kernel.clone(), self.project.clone());
+        // The 2D picker can't measure Studio 3D layers; their own picking ran
+        // first, so a 2D failure over a 3D scene is empty canvas.
+        let studio = self.studio.active();
         self.picks += 1;
         cx.spawn(async move |this, cx| {
             let poses = cx
                 .background_executor()
                 .spawn(async move {
                     let p = kernel.published(&project)?;
-                    let target = pick_target(&p, press)?;
+                    let target = match pick_target(&p, press) {
+                        Some(target) => target,
+                        None if studio => None,
+                        None => return None,
+                    };
                     let selected = p.selection.layers();
+                    // A click released inside the selection on one of its own
+                    // layers keeps the whole selection (it was a move that
+                    // never moved).
+                    if press.inside
+                        && !press.shift
+                        && target.as_ref().is_some_and(|id| selected.contains(id))
+                    {
+                        return Some((read_at(&p, press.time)?, None, false));
+                    }
                     let ids = match &target {
                         Some(id) if press.shift && selected.contains(id) => {
                             selected.iter().filter(|s| *s != id).cloned().collect()
@@ -1005,6 +1271,9 @@ impl GizmoSurface {
         .detach();
     }
     fn on_wheel(&mut self, event: &ScrollWheelEvent, line: Pixels, cx: &mut Context<Self>) {
+        if self.studio_wheel(event, line, cx) {
+            return;
+        }
         let delta = event.delta.pixel_delta(line);
         let m = event.modifiers;
         let (dx, dy) = (f32::from(delta.x) as f64, f32::from(delta.y) as f64);
@@ -1033,6 +1302,9 @@ impl GizmoSurface {
             cx.notify();
             return;
         }
+        if self.studio_move(event, cx) {
+            return;
+        }
         if let Some(last) = self.panning {
             self.panning = Some(event.position);
             if event.position != last {
@@ -1059,8 +1331,11 @@ impl GizmoSurface {
             }
         }
         if self.drag.is_none() {
+            self.hover_deep = event.modifiers.platform || event.modifiers.control;
             if self.bounds.contains(&event.position) {
                 self.hover(event.position, cx);
+            } else {
+                self.unhover(cx);
             }
             return;
         }
@@ -1188,6 +1463,9 @@ impl GizmoSurface {
             };
             self.set_cursor(open, cx);
         }
+        if self.studio_up(commit, cx) {
+            return;
+        }
         if !self.guides.is_empty() {
             self.guides.clear();
             cx.notify();
@@ -1229,6 +1507,9 @@ impl GizmoSurface {
         }
         if self.pen_up(false, cx) || self.marquee_up(false, cx) {
             return true;
+        }
+        if self.studio.busy() {
+            return self.studio_up(false, cx);
         }
         if self.drag.is_none() && self.sketch.is_none() && self.text_sketch.is_none() {
             return false;
@@ -1420,7 +1701,11 @@ impl GizmoSurface {
                     },
                     Err(error) => s.host.report(error, cx),
                 }
-                if s.queue.is_empty() && s.drag.is_none() && s.pen_drag.is_none() {
+                if s.queue.is_empty()
+                    && s.drag.is_none()
+                    && s.pen_drag.is_none()
+                    && !s.studio.busy()
+                {
                     s.gesture = None;
                 }
                 s.pump(cx);
@@ -1453,6 +1738,10 @@ impl GizmoSurface {
     #[cfg(test)]
     pub fn idle(&self) -> bool {
         !self.busy && self.queue.is_empty() && self.picks == 0
+    }
+    #[cfg(test)]
+    pub fn hovered(&self) -> Option<String> {
+        self.hover_box.as_ref().map(|(id, _)| id.clone())
     }
     #[cfg(test)]
     pub fn poses(&self) -> Arc<Vec<Pose>> {
@@ -1990,6 +2279,84 @@ fn resize_shape(
         ),
     ]
 }
+/// A layer's box in the composition at `time`: its transformed bounds.
+fn outline(p: &pm_kernel::Published, id: &str, time: f64) -> Option<[[f64; 2]; 4]> {
+    let world = QueryMirror::new(p)
+        .queries()
+        .world_matrix(None, id, time)
+        .ok()?;
+    let b = crate::text_host::query(p, |q| q.bounds(None, id, time)).ok()??;
+    Some([
+        transform(&world, [b.x0, b.y0]),
+        transform(&world, [b.x1, b.y0]),
+        transform(&world, [b.x1, b.y1]),
+        transform(&world, [b.x0, b.y1]),
+    ])
+}
+/// What a Select-tool double-click does, in viewer.ts order (onDown's
+/// remembered text, `drillTarget`, then the `dblclick` handler).
+#[derive(Debug, PartialEq)]
+enum DoubleClick {
+    /// Descend one group level: the child of the deepest selected group
+    /// holding the hit.
+    Select(String),
+    /// Edit the text layer's text, all of it selected.
+    Text(String),
+    /// Open the precomp's composition.
+    Open(String),
+}
+fn double_click_action(p: &pm_kernel::Published, press: Press) -> Option<DoubleClick> {
+    let root = p.snapshot.root()?;
+    let hit = crate::text_host::query(p, |q| {
+        q.pick(
+            None,
+            press.at[0],
+            press.at[1],
+            press.time,
+            &Default::default(),
+        )
+    })
+    .ok()?
+    .layer_id?;
+    // Studio 3D layers answer their own double-click.
+    if is_studio(p, &hit) {
+        return None;
+    }
+    let layers = pm_kernel::model::list_layers(root, None);
+    let info = layers.iter().find(|l| l.id == hit)?;
+    let selected = p.selection.layers();
+    let text = info.kind == "text" && !info.effectively_locked;
+    // The first click may have selected the text itself: edit it.
+    if text && selected.contains(&hit) {
+        return Some(DoubleClick::Text(hit));
+    }
+    let group_of = |id: &str| {
+        layers
+            .iter()
+            .find(|l| l.id == id)
+            .and_then(|l| l.group.clone())
+    };
+    let mut chain = vec![hit.clone()];
+    while let Some(group) = group_of(chain.last().unwrap()) {
+        chain.push(group);
+    }
+    chain.reverse();
+    if let Some(index) = chain.iter().rposition(|id| selected.contains(id))
+        && index + 1 < chain.len()
+    {
+        return Some(DoubleClick::Select(chain[index + 1].clone()));
+    }
+    if text {
+        return Some(DoubleClick::Text(hit));
+    }
+    if info.kind == "precomp" {
+        let loc = pm_kernel::model::find_layer(root, &hit)?;
+        let layer = pm_kernel::model::layer_at(root, &loc)?;
+        let comp = layer.get("d")?.get("comp")?.to_value().as_str()?.to_owned();
+        return Some(DoubleClick::Open(comp));
+    }
+    None
+}
 /// The top layer under a press. Groups the selection has not entered answer
 /// for their members; Command reaches the leaf (viewer.ts resolvePickTarget).
 fn pick_target(p: &pm_kernel::Published, press: Press) -> Option<Option<String>> {
@@ -2007,6 +2374,11 @@ fn pick_target(p: &pm_kernel::Published, press: Press) -> Option<Option<String>>
     let Some(id) = hit.layer_id else {
         return Some(None);
     };
+    // A 3D layer draws over the whole frame; its own picking ran first, so
+    // a 2D hit on one is empty canvas.
+    if is_studio(p, &id) {
+        return Some(None);
+    }
     if press.deep {
         return Some(Some(id));
     }
@@ -2117,6 +2489,15 @@ impl Render for GizmoSurface {
                 cx.listener(|s, event: &MouseDownEvent, window, cx| s.on_down(event, window, cx)),
             )
             .on_mouse_down(
+                MouseButton::Middle,
+                cx.listener(|s, event: &MouseDownEvent, _, cx| {
+                    if let Some(frame) = s.host.frame(s.bounds, cx) {
+                        let at = s.to_comp(event.position, frame);
+                        s.studio_down(event, at, frame, cx);
+                    }
+                }),
+            )
+            .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(|s, event: &MouseDownEvent, window, cx| {
                     s.on_context(event, window, cx);
@@ -2170,4 +2551,85 @@ impl Render for GizmoSurface {
                 .size_full(),
             )
     }
+}
+
+/// A Studio 3D layer (model, light, camera) by its definition.
+/// An extruded layer as a 3D item: the engine maps composition pixels into
+/// the scene with `u = 6 / height` units per pixel, x centred, y up, z out
+/// of the screen (`studio/extrusion.rs`); its depth runs back from its z.
+fn extruded_item(
+    p: &pm_kernel::Published,
+    pose: &Pose,
+    time: f64,
+    width: f64,
+    height: f64,
+) -> Option<pm_panel_studio3d::viewport::Item> {
+    let mut mirror = QueryMirror::new(p);
+    let mut q = |k: &str, d: f64| {
+        mirror
+            .queries()
+            .evaluate(None, &pose.id, k, time)
+            .ok()
+            .and_then(|v| v.as_f64())
+            .unwrap_or(d)
+    };
+    let position = [q("position.x", 0.), q("position.y", 0.), q("position.z", 0.)];
+    let rotation = [q("rotation.x", 0.), q("rotation.y", 0.), q("rotation", 0.)];
+    let scale = [q("scale.x", 100.), q("scale.y", 100.), q("scale.z", 100.)];
+    let depth = q("geo.depth", 0.).max(0.);
+    let u = 6. / height.max(1.);
+    let to_scene = |x: f64, y: f64, z: f64| [x * u - width * u / 2., 3. - y * u, -z * u];
+    let mut lo = [f64::MAX; 3];
+    let mut hi = [f64::MIN; 3];
+    for c in pose.corners {
+        for z in [position[2], position[2] + depth] {
+            let s = to_scene(c[0], c[1], z);
+            for a in 0..3 {
+                lo[a] = lo[a].min(s[a]);
+                hi[a] = hi[a].max(s[a]);
+            }
+        }
+    }
+    let name = p
+        .snapshot
+        .root()
+        .and_then(|root| {
+            let at = pm_kernel::model::find_layer(root, &pose.id)?;
+            let l = pm_kernel::model::layer_at(root, &at)?.to_value();
+            l.get("name").and_then(pm_model::Value::as_str).map(str::to_owned)
+        })
+        .unwrap_or_default();
+    Some(pm_panel_studio3d::viewport::Item {
+        id: pose.id.clone(),
+        role: pm_scene3d::schema::Role::Object,
+        name,
+        locked: pose.locked,
+        bounds: pm_scene3d::navigation::Bounds { min: lo, max: hi },
+        pivot: to_scene(position[0], position[1], position[2]),
+        target: None,
+        light: None,
+        position,
+        rotation,
+        scale,
+        pixels: Some(u),
+    })
+}
+/// A text or shape layer the 3D renderer draws with depth.
+pub(crate) fn is_extruded(p: &pm_kernel::Published, id: &str) -> bool {
+    p.snapshot.root().is_some_and(|root| {
+        pm_kernel::model::find_layer(root, id)
+            .and_then(|at| pm_kernel::model::layer_at(root, &at))
+            .map(|l| pm_scene3d::from_model(&l.to_value()).unwrap_or_default())
+            .is_some_and(|l| pm_scene3d::extrusion::enabled(&l))
+    })
+}
+pub(crate) fn is_studio(p: &pm_kernel::Published, id: &str) -> bool {
+    p.snapshot.root().is_some_and(|root| {
+        pm_kernel::model::find_layer(root, id)
+            .and_then(|at| pm_kernel::model::layer_at(root, &at))
+            .and_then(|l| l.get("d"))
+            .and_then(|d| d.get("definition"))
+            .and_then(|d| d.to_value().as_str().map(str::to_owned))
+            .is_some_and(|d| d.starts_with("powermove.3d."))
+    })
 }

@@ -65,6 +65,48 @@ fn create_update_undo_redo_is_exact() {
     assert_eq!(project(&s), created);
 }
 #[test]
+fn sparse_material_commands_channels_history_and_pmv_roundtrip() {
+    let mut s = store();
+    apply(
+        &mut s,
+        json!({"operation":"add_object","id":"model","object":{"source":{"primitive":"box"}}}),
+    );
+    let before = project(&s);
+    s.execute(command(json!({"operation":"update_object","target":"model","patch":{
+        "materialProperties":{"opacity":75,"roughness":0.6,"emissionIntensity":2,"ambientResponse":25},
+        "sourceMaterialProperties":{"1":{"metallic":0.3,"emissionColor":"#00FF00"}},
+        "sourceMaterials":{"1":{"color":"paint","emissive":"paint"}}
+    }})), Origin::Mcp).unwrap();
+    let authored = project(&s);
+    s.undo().unwrap();
+    assert_eq!(project(&s), before);
+    s.redo().unwrap();
+    assert_eq!(project(&s), authored);
+    s.execute(
+        PropertyCommand::Set(SetProperty::new("model", "mi.1.metallic", 0.8, 0.)).into(),
+        Origin::Interface,
+    )
+    .unwrap();
+    let resolved = pm_kernel::commands::scene3d::resolve_scene(&s.snapshot(), None, 0.).unwrap();
+    assert_eq!(
+        resolved.scene["objects"][0]["sourceMaterialProperties"]["1"]["metallic"]["v"],
+        0.8
+    );
+    let saved = project(&s);
+    let mut dir = common::TempDir::new("sparse-material");
+    dir.0 = std::fs::canonicalize(&dir.0).unwrap();
+    let path = dir.path("scene.pmv");
+    common::save_as(&mut s, &path).unwrap();
+    let mut reopened = DocumentStore::open(
+        pm_kernel::project_io::open_project(&path, Default::default()).unwrap(),
+    );
+    assert_eq!(project(&reopened), saved);
+    reopened.undo().unwrap();
+    assert_eq!(project(&reopened), authored);
+    reopened.redo().unwrap();
+    assert_eq!(project(&reopened), saved);
+}
+#[test]
 fn failure_is_atomic_and_preserves_history() {
     let mut s = store();
     apply(&mut s, json!({"operation":"add_camera","id":"cam"}));
@@ -714,4 +756,602 @@ fn splat_import_undo_reopen_preserves_exact_source() {
     assert_eq!(std::fs::read(out).unwrap(), bytes);
     reopened.undo().unwrap();
     assert!(project(&reopened)["assets"].get("splat").is_none());
+}
+
+#[test]
+fn studio_environment_quality_channels_undo_and_pmv_are_exact() {
+    let mut s = store();
+    let edits = [
+        json!({"operation":"set_world","id":"world","world":{"mode":"sky","preset":"golden-hour","p":{"elevation":8,"fogDensity":0.003}}}),
+        json!({"operation":"add_fog","id":"mist","fog":{"p":{"density":0.035}}}),
+        json!({"operation":"add_terrain","id":"ground","terrain":{"p":{"resolution":8,"seed":41},"regions":[{"p":{"minSlope":32,"color":"#8C7D64"}}]}}),
+        json!({"operation":"add_scatter","id":"trees","scatter":{"model":"nature:conifer","surface":"ground","p":{"count":12,"seed":71}}}),
+        json!({"operation":"update_fog","target":"mist","patch":{"p":{"density":{"v":0.02,"kf":[{"t":2,"v":0.05,"i":"fog-key","future":"keep"}],"expr":null}}}}),
+        json!({"operation":"set_material_options","target":"ground","patch":{"castsShadows":"only","appearsInReflections":false}}),
+        json!({"operation":"set_render_quality","preset":"preview"}),
+        json!({"operation":"set_render_quality","patch":{"maxSamples":128}}),
+    ];
+    for edit in edits {
+        let before = project(&s);
+        apply(&mut s, edit);
+        let after = project(&s);
+        s.undo().unwrap();
+        assert_eq!(project(&s), before);
+        s.redo().unwrap();
+        assert_eq!(project(&s), after);
+    }
+    s.execute(
+        PropertyCommand::Set(SetProperty::new("world", "world.azimuth", 30., 0.)).into(),
+        Origin::Interface,
+    )
+    .unwrap();
+    s.execute(
+        PropertyCommand::Set(SetProperty::new(
+            "ground",
+            "terrain.region0.roughness",
+            0.7,
+            0.,
+        ))
+        .into(),
+        Origin::Interface,
+    )
+    .unwrap();
+    assert_eq!(
+        layer(&s, "world")["d"]["data"]["object"]["world"]["p"]["azimuth"]["v"],
+        30.
+    );
+    assert_eq!(
+        layer(&s, "ground")["d"]["data"]["object"]["terrain"]["regions"][0]["p"]["roughness"]["v"],
+        0.7
+    );
+    let saved = project(&s);
+    let mut dir = common::TempDir::new("studio-contract");
+    dir.0 = std::fs::canonicalize(&dir.0).unwrap();
+    let path = dir.path("scene.pmv");
+    common::save_as(&mut s, &path).unwrap();
+    let reopened = DocumentStore::open(
+        pm_kernel::project_io::open_project(&path, Default::default()).unwrap(),
+    );
+    assert_eq!(project(&reopened), saved);
+    assert_eq!(saved["comps"]["C"]["studioQuality"]["preset"], "custom");
+}
+
+#[test]
+fn environment_cycles_ranges_and_locks_fail_atomically() {
+    let mut s = store();
+    apply(&mut s, json!({"operation":"set_world","id":"world"}));
+    apply(
+        &mut s,
+        json!({"operation":"add_terrain","id":"ground","terrain":{"p":{"resolution":8},"regions":[{"p":{}}]}}),
+    );
+    for edit in [
+        json!({"operation":"set_world","patch":{"source":{"layerId":"world"}}}),
+        json!({"operation":"add_scatter","scatter":{"model":"ground","surface":"ground","p":{"scaleMin":2,"scaleMax":1}}}),
+        json!({"operation":"update_terrain","target":"ground","patch":{"heights":[0,1]}}),
+        json!({"operation":"set_render_quality","patch":{"minSamples":4000,"maxSamples":32}}),
+    ] {
+        let before = project(&s);
+        assert!(s.execute(command(edit), Origin::Mcp).is_err());
+        assert_eq!(project(&s), before);
+    }
+    let mut property = SetProperty::new("world", "world.intensity", 2., 0.);
+    property.mark_intent = true;
+    s.execute(PropertyCommand::Set(property).into(), Origin::Interface)
+        .unwrap();
+    let before = project(&s);
+    assert!(
+        s.execute(
+            command(json!({"operation":"set_world","patch":{"p":{"intensity":3}}})),
+            Origin::Mcp
+        )
+        .is_err()
+    );
+    assert_eq!(project(&s), before);
+}
+
+#[test]
+fn structural_region_replacement_preserves_hand_edited_channels() {
+    let mut s = store();
+    apply(
+        &mut s,
+        json!({"operation":"add_terrain","id":"ground","terrain":{"regions":[{"p":{}}]}}),
+    );
+    let mut p = SetProperty::new("ground", "terrain.region0.roughness", 0.7, 0.);
+    p.mark_intent = true;
+    s.execute(PropertyCommand::Set(p).into(), Origin::Interface)
+        .unwrap();
+    let before = project(&s);
+    assert!(s.execute(command(json!({"operation":"update_terrain","target":"ground","patch":{"regions":[{"p":{"roughness":0.4}}]}})),Origin::Mcp).is_err());
+    assert_eq!(project(&s), before);
+}
+
+#[test]
+fn fbx_import_undo_and_pmv_keep_converted_and_original_bytes() {
+    use pm_scene3d::import::{self, ImportFile, archive::Archive};
+    let original =
+        include_bytes!("../../../../../engine/crates/pm-import-fbx/fixtures/tiny-animated.fbx");
+    let prepared = import::prepare(
+        vec![ImportFile {
+            name: "animated.fbx".into(),
+            mime: "model/fbx".into(),
+            bytes: original.to_vec(),
+        }],
+        None,
+    )
+    .unwrap();
+    let converted = prepared.bytes.clone();
+    let mut dir = common::TempDir::new("fbx-roundtrip");
+    dir.0 = std::fs::canonicalize(&dir.0).unwrap();
+    let archive = Archive::open(&dir.path("archive")).unwrap();
+    let receipt = std::sync::Arc::new(archive.admit(prepared).unwrap());
+    let mut s = store();
+    s.execute(
+        Scene3dCommand::Import {
+            comp: None,
+            asset_id: "fbx".into(),
+            layer_id: "product".into(),
+            receipt,
+            time: 0.,
+            setup_studio: false,
+        }
+        .into(),
+        Origin::Interface,
+    )
+    .unwrap();
+    assert_eq!(project(&s)["assets"]["fbx"]["format"], "glb");
+    let saved = project(&s);
+    let path = dir.path("scene.pmv");
+    common::save_as(&mut s, &path).unwrap();
+    let mut reopened = DocumentStore::open(
+        pm_kernel::project_io::open_project(&path, Default::default()).unwrap(),
+    );
+    assert_eq!(project(&reopened), saved);
+    for (id, expected) in [
+        ("fbx", converted.as_slice()),
+        ("fbx-source-0", original.as_slice()),
+    ] {
+        let output = dir.path(&format!("{id}.bin"));
+        reopened.media().get(id).unwrap().copy_to(&output).unwrap();
+        assert_eq!(std::fs::read(output).unwrap(), expected);
+    }
+    reopened.undo().unwrap();
+    assert!(project(&reopened)["assets"].get("fbx").is_none());
+    reopened.redo().unwrap();
+    assert_eq!(project(&reopened), saved);
+}
+
+#[test]
+fn sky_presets_write_source_defaults_and_quality_combines_preset_with_patch() {
+    let mut s = store();
+    apply(
+        &mut s,
+        json!({"operation":"set_world","id":"world","world":{"preset":"golden-hour","p":{"haze":5}}}),
+    );
+    assert_eq!(
+        layer(&s, "world")["d"]["data"]["object"]["world"]["p"]["elevation"]["v"],
+        6.
+    );
+    assert_eq!(
+        layer(&s, "world")["d"]["data"]["object"]["world"]["p"]["haze"]["v"],
+        5.
+    );
+    let before = project(&s);
+    apply(
+        &mut s,
+        json!({"operation":"set_world","patch":{"preset":"night"}}),
+    );
+    assert_eq!(
+        layer(&s, "world")["d"]["data"]["object"]["world"]["p"]["elevation"]["v"],
+        -20.
+    );
+    s.undo().unwrap();
+    assert_eq!(project(&s), before);
+    apply(
+        &mut s,
+        json!({"operation":"set_render_quality","preset":"draft","patch":{"maxSamples":8}}),
+    );
+    let q = &project(&s)["comps"]["C"]["studioQuality"];
+    assert_eq!(q["minSamples"], 4);
+    assert_eq!(q["maxSamples"], 8);
+    assert_eq!(q["maxBounces"], 4);
+}
+
+#[test]
+fn legacy_sample_command_updates_composition_quality_in_one_undo_step() {
+    let mut s = store();
+    apply(&mut s, json!({"operation":"add_camera","id":"cam"}));
+    let before = project(&s);
+    apply(
+        &mut s,
+        json!({"operation":"set_environment","patch":{"samples":12}}),
+    );
+    let after = project(&s);
+    let q = &after["comps"]["C"]["studioQuality"];
+    assert_eq!(q["maxSamples"], 12);
+    assert_eq!(q["minSamples"], 8);
+    assert_eq!(q["preset"], "custom");
+    assert_eq!(layer(&s, "cam")["d"]["data"]["environment"]["samples"], 12);
+    s.undo().unwrap();
+    assert_eq!(project(&s), before);
+    s.redo().unwrap();
+    assert_eq!(project(&s), after);
+    let revision = s.revision();
+    assert!(
+        s.execute(
+            command(json!({"operation":"set_environment","patch":{"samples":0}})),
+            Origin::Interface
+        )
+        .is_err()
+    );
+    assert_eq!(s.revision(), revision);
+    assert_eq!(project(&s), after);
+    apply(&mut s, json!({"operation":"set_environment","patch":{"samples":4}}));
+    let lowered=project(&s);
+    assert_eq!(lowered["comps"]["C"]["studioQuality"]["minSamples"],4);
+    assert_eq!(lowered["comps"]["C"]["studioQuality"]["maxSamples"],4);
+    s.undo().unwrap();assert_eq!(project(&s),after);
+}
+
+#[test]
+fn extrusion_surfaces_channels_undo_and_pmv_roundtrip() {
+    let mut s=DocumentStore::new_untitled(to_model(&json!({"id":"P","compId":"C","w":640,"h":360,"fps":30,"dur":10,"assets":{},"layers":[{"id":"title","name":"Title","type":"text","on":true,"from":0,"dur":10,"p":{},"d":{"text":"Studio","font":"Arial","fontSize":60,"color":"#E8E2CF"}}]})));
+    let flat=project(&s);
+    apply(&mut s,json!({"operation":"set_extrusion","target":"title","patch":{"enabled":true,"depth":30,"bevelStyle":"convex","bevelDepth":4}}));
+    let extruded=project(&s);
+    assert_eq!(layer(&s,"title")["threeD"],true);
+    assert_eq!(layer(&s,"title")["d"]["extrusion"]["p"]["depth"]["v"],30);
+    s.undo().unwrap();assert_eq!(project(&s),flat);s.redo().unwrap();assert_eq!(project(&s),extruded);
+    for (i,surface) in pm_scene3d::extrusion::SURFACES.iter().enumerate() {
+        apply(&mut s,json!({"operation":"set_surface_material_properties","target":"title","materialIndex":i,"patch":{"color":"#FFFFFF","roughness":0.25,"metallic":0.8}}));
+        apply(&mut s,json!({"operation":"set_surface_material_map","target":"title","surface":surface,"slot":"normal","map":"paint"}));
+        s.execute(PropertyCommand::Set(SetProperty::new("title",format!("ms.{surface}.roughness"),0.7,0.)).into(),Origin::Mcp).unwrap();
+        assert_eq!(layer(&s,"title")["d"]["extrusion"]["surfaces"][surface]["properties"]["roughness"]["v"],0.7);
+    }
+    let authored=project(&s);
+    assert!(s.execute(command(json!({"operation":"set_extrusion","target":"title","patch":{"depth":-1}})),Origin::Mcp).is_err());
+    assert!(s.execute(command(json!({"operation":"set_material_map","target":"title","slot":"normal","map":{"layerId":"title"}})),Origin::Mcp).is_err());
+    assert_eq!(project(&s),authored);
+    let mut dir=common::TempDir::new("extrusion");dir.0=std::fs::canonicalize(&dir.0).unwrap();let path=dir.path("text.pmv");
+    common::save_as(&mut s,&path).unwrap();
+    let mut reopened=DocumentStore::open(pm_kernel::project_io::open_project(&path,Default::default()).unwrap());
+    assert_eq!(project(&reopened),authored);reopened.undo().unwrap();reopened.redo().unwrap();assert_eq!(project(&reopened),authored);
+    apply(&mut reopened,json!({"operation":"set_material_properties","target":"title","surface":"back","patch":{"roughness":null}}));
+    assert!(layer(&reopened,"title")["d"]["extrusion"]["surfaces"]["back"]["properties"].get("roughness").is_none());
+    reopened.undo().unwrap();assert_eq!(project(&reopened),authored);
+}
+
+#[test]
+fn live_material_source_records_undo_and_reopen_without_rewriting_sources() {
+    let mut s=DocumentStore::new_untitled(to_model(&json!({"id":"P","compId":"C","w":640,"h":360,"fps":30,"dur":10,"assets":{},"layers":[{"id":"art","name":"Art","type":"group","on":false,"from":0,"dur":10,"p":{}},{"id":"paint","name":"Paint","type":"solid","group":"art","on":true,"from":0,"dur":10,"p":{},"d":{"w":32,"h":32,"color":"#FF0000"}}]})));
+    apply(&mut s,json!({"operation":"add_object","id":"model","object":{"source":{"primitive":"box"}}}));
+    let before=project(&s);let source=layer(&s,"art");
+    s.execute(command(json!({"operation":"update_object","target":"model","patch":{"material":{"screen":"screen","maps":{"color":{"layerId":"art"}}},"sourceMaterials":{"1":{"emissive":{"compositionId":"screen"}}}}})),Origin::Mcp).unwrap();
+    let saved=project(&s);assert_eq!(layer(&s,"art"),source);assert_eq!(layer(&s,"model")["d"]["data"]["object"]["material"]["maps"]["color"],json!({"layerId":"art"}));
+    s.undo().unwrap();assert_eq!(project(&s),before);s.redo().unwrap();assert_eq!(project(&s),saved);
+    let mut dir=common::TempDir::new("live-material");dir.0=std::fs::canonicalize(&dir.0).unwrap();let path=dir.path("material.pmv");common::save_as(&mut s,&path).unwrap();let mut opened=DocumentStore::open(pm_kernel::project_io::open_project(&path,Default::default()).unwrap());assert_eq!(project(&opened),saved);opened.undo().unwrap();assert_eq!(project(&opened),before);opened.redo().unwrap();assert_eq!(project(&opened),saved);
+}
+
+#[test]
+fn repeated_imports_are_grounded_separated_framed_and_one_undo_each() {
+    use pm_scene3d::import::{self, ImportFile, archive::Archive};
+    let mut dir = common::TempDir::new("placed-imports");
+    dir.0 = std::fs::canonicalize(&dir.0).unwrap();
+    let archive = Archive::open(&dir.path("archive")).unwrap();
+    let bytes = import::triangle_glb(&[[0., 0., 0.], [1., 0., 0.], [0., 1., 0.]], &[0, 1, 2]);
+    let receipt = std::sync::Arc::new(
+        archive
+            .admit(
+                import::prepare(
+                    vec![ImportFile {
+                        name: "part.glb".into(),
+                        mime: "model/gltf-binary".into(),
+                        bytes,
+                    }],
+                    None,
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+    );
+    let mut s = store();
+    let import = |s: &mut DocumentStore, asset: &str, id: &str, setup_studio: bool| {
+        s.execute(
+            Scene3dCommand::Import {
+                comp: None,
+                asset_id: asset.into(),
+                layer_id: id.into(),
+                receipt: receipt.clone(),
+                time: 0.,
+                setup_studio,
+            }
+            .into(),
+            Origin::Interface,
+        )
+        .unwrap()
+    };
+    import(&mut s, "a", "one", true);
+    let first = project(&s);
+    let camera = first["comps"]["C"]["layers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|l| pm_scene3d::schema::role(l) == Some(pm_scene3d::schema::Role::Camera))
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let old_camera = layer(&s, &camera);
+    import(&mut s, "b", "two", true);
+    let placed = project(&s);
+    assert_eq!(
+        placed["comps"]["C"]["layers"].as_array().unwrap().len(),
+        6,
+        "the existing rig must be reused"
+    );
+    assert_ne!(
+        layer(&s, &camera),
+        old_camera,
+        "studio imports frame the two models"
+    );
+    let mut geometry = pm_scene3d::geometry::LoadedAssets::default();
+    for asset in ["a", "b"] {
+        geometry.insert_shared(
+            asset.into(),
+            placed["assets"][asset].clone(),
+            receipt.model(),
+        );
+    }
+    let bounds = |id: &str| {
+        let args = to_model(&json!({"operation":"drop_to_floor","target":id}));
+        let result = pm_kernel::commands::scene3d::prepare_geometry(
+            &s.snapshot(),
+            None,
+            &args,
+            &[],
+            0.,
+            &geometry,
+        )
+        .unwrap();
+        let v = &result.bounds[id];
+        std::array::from_fn::<_, 6, _>(|i| v[i].as_f64().unwrap())
+    };
+    let a = bounds("one");
+    let b = bounds("two");
+    assert!(pm_kernel::commands::scene3d::prepare_geometry(&s.snapshot(),None,&to_model(&json!({"operation":"auto_studio","target":camera})),&[],0.,&geometry).is_err());
+    assert!(
+        a[1].abs() < 1e-6 && b[1].abs() < 1e-6,
+        "models must meet the ground: {a:?} {b:?}"
+    );
+    assert!(
+        (0..3).any(|i| a[i + 3] < b[i] || b[i + 3] < a[i]),
+        "model bounds overlap: {a:?} {b:?}"
+    );
+    s.undo().unwrap();
+    assert_eq!(project(&s), first);
+    s.redo().unwrap();
+    assert_eq!(project(&s), placed);
+    let path = dir.path("placed.pmv");
+    common::save_as(&mut s, &path).unwrap();
+    let mut opened = DocumentStore::open(
+        pm_kernel::project_io::open_project(&path, Default::default()).unwrap(),
+    );
+    assert_eq!(project(&opened), placed);
+    opened.undo().unwrap();
+    assert_eq!(project(&opened), first);
+    opened.redo().unwrap();
+    assert_eq!(project(&opened), placed);
+    // A locked shot remains exact while a subsequent import is still placed.
+    s.execute(
+        Command::SetLayerLocked {
+            layer_id: camera.clone(),
+            locked: true,
+        },
+        Origin::Interface,
+    )
+    .unwrap();
+    let locked = layer(&s, &camera);
+    let before = project(&s);
+    import(&mut s, "c", "three", true);
+    assert_eq!(layer(&s, &camera), locked);
+    s.undo().unwrap();
+    assert_eq!(project(&s), before);
+    // setup_studio=false adds no rig/camera edits but still grounds the import.
+    let mut bare = store();
+    import(&mut bare, "a", "one", false);
+    assert_eq!(
+        project(&bare)["comps"]["C"]["layers"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        layer(&bare, "one")["p"]["position.y"]["v"]
+            .as_f64()
+            .unwrap()
+            > 0.
+    );
+    // Pre-bounds projects still bind their exact retained archive without an edit.
+    let mut legacy = first.clone();
+    legacy["assets"]["a"]
+        .as_object_mut()
+        .unwrap()
+        .remove("native3dBounds");
+    let retained = std::sync::Arc::new(archive.recover(&legacy["assets"]["a"]).unwrap());
+    let mut legacy = DocumentStore::new_untitled(to_model(&legacy));
+    let before = project(&legacy);
+    let revision = legacy.revision();
+    legacy
+        .execute(
+            Scene3dCommand::BindImport {
+                asset_id: "a".into(),
+                receipt: retained,
+            }
+            .into(),
+            Origin::Interface,
+        )
+        .unwrap();
+    assert_eq!(legacy.revision(), revision);
+    assert_eq!(project(&legacy), before);
+}
+
+#[test]
+fn constant_scene_channels_match_the_expression_evaluator_with_animation() {
+    fn express_constants(v:&mut Value) {
+        match v {
+            Value::Object(m) if m.contains_key("v") && m.get("kf").is_some_and(|k|k.as_array().is_some_and(Vec::is_empty)) && m.get("expr").is_none_or(Value::is_null) => {m.insert("expr".into(),json!("value"));}
+            Value::Object(m)=>for v in m.values_mut(){express_constants(v)},
+            Value::Array(a)=>for v in a{express_constants(v)},
+            _=>{}
+        }
+    }
+    let mut s=store();
+    apply(&mut s,json!({"operation":"add_object","id":"model","object":{"source":{"primitive":"box"},"p":{"rx":{"v":0,"kf":[{"t":0,"v":0},{"t":2,"v":90}],"expr":null}},"material":{"p":{"color":"#33AA77","roughness":{"v":0.2,"kf":[],"expr":"time * 0.1 + value"},"metalness":0.4,"emissive":"#223344"}}}}));
+    apply(&mut s,json!({"operation":"add_light","id":"key","light":{"type":"area"}}));
+    apply(&mut s,json!({"operation":"add_camera","id":"camera"}));
+    let mut expressed=project(&s);express_constants(&mut expressed);
+    let other=DocumentStore::new_untitled(to_model(&expressed));
+    for t in [0.,0.5,1.5] {
+        let direct=pm_kernel::commands::scene3d::resolve_scene(&s.snapshot(),None,t).unwrap();
+        let evaluated=pm_kernel::commands::scene3d::resolve_scene(&other.snapshot(),None,t).unwrap();
+        assert_eq!(direct.scene,evaluated.scene,"t={t}");assert_eq!(direct.model_worlds,evaluated.model_worlds);assert_eq!(direct.targets,evaluated.targets);assert_eq!(direct.opacities,evaluated.opacities);
+        let object=direct.scene["objects"].as_array().unwrap().iter().find(|o|o["id"]=="model").unwrap();
+        assert!((object["material"]["p"]["roughness"]["v"].as_f64().expect("numeric roughness")-(0.2+t*0.1)).abs()<1e-6,"{object}");
+    }
+}
+
+#[test]
+fn enabling_untouched_legacy_landscape_fog_migrates_with_undo_and_reopen() {
+    let mut s = store();
+    apply(&mut s, json!({"operation":"set_world","id":"world"}));
+    apply(&mut s, json!({"operation":"add_terrain","id":"terrain"}));
+    let before = project(&s);
+    s.execute(
+        PropertyCommand::Set(SetProperty::new("world", "world.fogDensity", 0.004, 0.)).into(),
+        Origin::Interface,
+    )
+    .unwrap();
+    let p = layer(&s, "world")["d"]["data"]["object"]["world"]["p"].clone();
+    assert_eq!(p["fogHeightFalloff"]["v"], 0.06);
+    assert_eq!(p["fogDistance"]["v"], 400.);
+    let enabled = project(&s);
+    s.undo().unwrap();
+    assert_eq!(project(&s), before);
+    s.redo().unwrap();
+    assert_eq!(project(&s), enabled);
+    let mut dir = common::TempDir::new("legacy-fog");
+    dir.0 = std::fs::canonicalize(&dir.0).unwrap();
+    let path = dir.path("fog.pmv");
+    common::save_as(&mut s, &path).unwrap();
+    let mut reopened = DocumentStore::open(
+        pm_kernel::project_io::open_project(&path, Default::default()).unwrap(),
+    );
+    assert_eq!(project(&reopened), project(&s));
+    reopened.undo().unwrap();
+    assert_eq!(project(&reopened), before);
+}
+#[test]
+fn authored_or_active_legacy_fog_is_preserved_in_studios_and_landscapes() {
+    for (channels, terrain) in [
+        (json!({"fogDensity":0.002,"fogDistance":10000.,"fogHeightFalloff":0.}), false),
+        (json!({"fogHeightFalloff":0.03}), true),
+        (json!({"fogBaseHeight":5}), true),
+        (
+            json!({"fogDistance":{"v":10000,"kf":[{"t":0,"v":10000}],"expr":null}}),
+            true,
+        ),
+        (
+            json!({"fogHeightFalloff":{"v":0,"kf":[],"expr":"time*0"}}),
+            true,
+        ),
+    ] {
+        let mut s = store();
+        apply(
+            &mut s,
+            json!({"operation":"set_world","id":"world","world":{"p":channels}}),
+        );
+        if terrain {
+            apply(&mut s, json!({"operation":"add_terrain","id":"terrain"}));
+        }
+        let before = layer(&s, "world")["d"]["data"]["object"]["world"]["p"].clone();
+        s.execute(
+            PropertyCommand::Set(SetProperty::new("world", "world.fogDensity", 0.004, 0.)).into(),
+            Origin::Mcp,
+        )
+        .unwrap();
+        let after = layer(&s, "world")["d"]["data"]["object"]["world"]["p"].clone();
+        for key in ["fogBaseHeight", "fogHeightFalloff", "fogDistance"] {
+            assert_eq!(after[key], before[key]);
+        }
+    }
+}
+
+#[test]
+fn world_density_migration_respects_an_explicit_shape_patch() {
+    for explicit in [false, true] {
+        let mut s = store();
+        apply(&mut s, json!({"operation":"set_world","id":"world"}));
+        let mut p = json!({"fogDensity":0.004});
+        if explicit {
+            p["fogDistance"] = json!(10000);
+            p["fogHeightFalloff"] = json!(0);
+        }
+        apply(&mut s, json!({"operation":"set_world","patch":{"p":p}}));
+        let p = layer(&s, "world")["d"]["data"]["object"]["world"]["p"].clone();
+        assert_eq!(p["fogDistance"]["v"], if explicit { 10000. } else { 400. });
+        assert_eq!(p["fogHeightFalloff"]["v"], if explicit { 0. } else { 0.06 });
+    }
+}
+
+#[test]
+fn offline_sampling_limits_are_undoable_saved_and_legacy_quality_still_opens() {
+    let mut s=store();let before=project(&s);
+    apply(&mut s,json!({"operation":"set_render_quality","preset":"production"}));
+    let q=project(&s)["comps"]["C"]["studioQuality"].clone();
+    assert_eq!(q["minSamples"],8);assert_eq!(q["maxSamples"],128);
+    assert_eq!(q["edgeSamplesMultiplier"],2);assert_eq!(q["transmissionBounces"],8);
+    let authored=project(&s);s.undo().unwrap();assert_eq!(project(&s),before);s.redo().unwrap();
+    let mut dir=common::TempDir::new("sampling-policy");dir.0=std::fs::canonicalize(&dir.0).unwrap();
+    let path=dir.path("sampling.pmv");common::save_as(&mut s,&path).unwrap();
+    let mut reopened=common::open_store(&path);assert_eq!(project(&reopened),authored);
+    reopened.undo().unwrap();assert_eq!(project(&reopened),before);
+    let mut legacy=pm_scene3d::quality::preset("production").unwrap();
+    for key in ["perceptualNoise","edgeSamplesMultiplier","diffuseBounces","glossyBounces","transmissionBounces"]{legacy.as_object_mut().unwrap().remove(key);}
+    legacy["minSamples"]=json!(32);legacy["maxSamples"]=json!(256);legacy["noiseThreshold"]=json!(0.03);
+    assert_eq!(pm_scene3d::quality::validate(legacy.clone()).unwrap(),legacy);
+    legacy["diffuseBounces"]=json!(33);assert!(pm_scene3d::quality::validate(legacy).is_err());
+}
+
+#[test]
+fn enabling_untouched_legacy_studio_fog_migrates_without_terrain() {
+    let mut s=store();
+    apply(&mut s,json!({"operation":"set_world","id":"world"}));
+    let before=project(&s);
+    s.execute(PropertyCommand::Set(SetProperty::new("world","world.fogDensity",0.004,0.)).into(),Origin::Interface).unwrap();
+    let p=layer(&s,"world")["d"]["data"]["object"]["world"]["p"].clone();
+    assert_eq!(p["fogHeightFalloff"]["v"],0.06);
+    assert_eq!(p["fogDistance"]["v"],400.);
+    let enabled=project(&s);s.undo().unwrap();assert_eq!(project(&s),before);
+    s.redo().unwrap();assert_eq!(project(&s),enabled);
+    let mut dir=common::TempDir::new("studio-fog");dir.0=std::fs::canonicalize(&dir.0).unwrap();
+    let path=dir.path("fog.pmv");common::save_as(&mut s,&path).unwrap();
+    let mut reopened=common::open_store(&path);assert_eq!(project(&reopened),enabled);
+    reopened.undo().unwrap();assert_eq!(project(&reopened),before);
+}
+
+#[test]
+fn studio_world_fog_activation_and_creation_migrate_only_untouched_shapes() {
+    for existing in [false,true] { for explicit in [false,true] {
+        let mut s=store();
+        if existing {apply(&mut s,json!({"operation":"set_world","id":"world"}));}
+        let before=project(&s);
+        let mut p=json!({"fogDensity":0.004});
+        if explicit {p["fogDistance"]=json!(10000.);p["fogHeightFalloff"]=json!(0.);}
+        apply(&mut s,json!({"operation":"set_world","id":"world","world":{"p":p}}));
+        let p=layer(&s,"world")["d"]["data"]["object"]["world"]["p"].clone();
+        assert_eq!(p["fogDistance"]["v"],if explicit {10000.}else{400.});
+        assert_eq!(p["fogHeightFalloff"]["v"],if explicit {0.}else{0.06});
+        let after=project(&s);s.undo().unwrap();assert_eq!(project(&s),before);
+        s.redo().unwrap();assert_eq!(project(&s),after);
+    }}
 }

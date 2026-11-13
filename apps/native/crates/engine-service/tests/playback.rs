@@ -357,7 +357,10 @@ fn a_fixed_quality_renders_every_frame_at_that_resolution() {
 
 /// View › Media: a clip whose original is missing plays its proxy in
 /// Automatic, is offline in Originals, and a proxy is never counted as an
-/// original.
+/// original. The viewer's picture follows the mode (read here through the
+/// scopes, which analyze the picture on screen); a capture is a delivery
+/// picture and reads originals whatever the mode, so the clip is offline
+/// in it.
 #[test]
 fn media_modes_choose_proxies_and_originals_per_clip() {
     let s = project("clip");
@@ -365,13 +368,30 @@ fn media_modes_choose_proxies_and_originals_per_clip() {
     media.proxies.insert("clip".into(), fixture("h264-aac.mp4"));
     let service = service("media-modes");
     let v = service.viewer(config(s, media, output(320, 180))).unwrap();
+    let (frames, scope) = async_channel::bounded(1);
+    v.scopes(Some((pm_render::scopes::ScopeConfig::PANEL, frames)))
+        .unwrap();
     let settled = |v: &Viewer, why: &str| {
         let stamp = v.stamp().unwrap();
         wait(v, why, |s| {
             s.frame.as_ref().is_some_and(|f| f.stamp == stamp)
         })
     };
-    v.capture_next().unwrap();
+    // The next reading of a paused picture at the composition's size (the
+    // refinement the viewer settles on) that `accept`s.
+    let reading = |why: &str, accept: &dyn Fn(&pm_render::scopes::ScopeFrame) -> bool| {
+        let start = Instant::now();
+        loop {
+            if let Ok(frame) = scope.try_recv() {
+                let frame = frame.unwrap();
+                if frame.pixels == 640 * 360 && accept(&frame) {
+                    return frame;
+                }
+            }
+            assert!(start.elapsed() < Duration::from_secs(30), "{why}");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    };
     let status = settled(&v, "Automatic");
     assert!(
         status.layer_failures.is_empty(),
@@ -379,8 +399,7 @@ fn media_modes_choose_proxies_and_originals_per_clip() {
         status.layer_failures
     );
     assert_eq!(status.proxied, 1);
-    let proxy_frame = status.frame.clone().unwrap().pixels;
-    v.capture_next().unwrap();
+    let proxy_picture = reading("the proxy's picture", &|_| true);
     v.media_mode(MediaMode::Originals).unwrap();
     let status = settled(&v, "Originals");
     // Offline in Originals: the clip draws its Media Offline card (not a
@@ -391,15 +410,14 @@ fn media_modes_choose_proxies_and_originals_per_clip() {
         status.layer_failures
     );
     assert_eq!(status.proxied, 0);
-    let card_frame = status.frame.clone().unwrap().pixels.expect("captured");
+    let card_picture = reading("the card replaces the proxy", &|f| *f != proxy_picture);
+    v.capture_next().unwrap();
+    let captured = wait(&v, "a capture in Originals", |s| {
+        s.frame.as_ref().is_some_and(|f| f.pixels.is_some())
+    });
+    let card_frame = captured.frame.unwrap().pixels.expect("captured");
     assert!(card(at(&card_frame, 310, 170)));
     assert!(red(at(&card_frame, 60, 90)));
-    assert_ne!(
-        Some(&card_frame),
-        proxy_frame.as_ref(),
-        "the card replaces the proxy"
-    );
-    v.capture_next().unwrap();
     v.media_mode(MediaMode::ProxyOnly).unwrap();
     let status = settled(&v, "Proxy Only");
     assert!(
@@ -409,8 +427,21 @@ fn media_modes_choose_proxies_and_originals_per_clip() {
     );
     assert_eq!(status.proxied, 1);
     // Back to a readable file: the card goes away.
-    let back = status.frame.clone().unwrap().pixels.expect("captured");
-    assert_ne!(back, card_frame, "the proxy replaces the card");
+    reading("the proxy replaces the card", &|f| *f == proxy_picture);
+    assert_ne!(card_picture, proxy_picture);
+    // A capture reads originals: the clip has none, so it is offline in the
+    // captured picture although the viewer plays its proxy.
+    v.capture_next().unwrap();
+    let stamp = v.stamp().unwrap();
+    let captured = wait(&v, "a capture in Proxy Only", |s| {
+        s.frame
+            .as_ref()
+            .is_some_and(|f| f.stamp == stamp && f.pixels.is_some())
+    });
+    let delivered = captured.frame.unwrap().pixels.expect("captured");
+    assert!(card(at(&delivered, 310, 170)));
+    assert!(red(at(&delivered, 60, 90)));
+    v.scopes(None).unwrap();
 
     let mut both = MediaCatalog::default();
     both.originals.insert("a".into(), "/original.mov".into());
@@ -849,4 +880,117 @@ fn a_current_main_project_draws_and_names_what_this_build_bypasses() {
         before,
         "drawing never rewrites the document"
     );
+}
+
+/// A 64 × 64 still of one grey level.
+fn grey_still(path: &std::path::Path, level: u8) {
+    let (w, h) = (64u32, 64u32);
+    let size = 54 + w * 3 * h;
+    let mut b = Vec::with_capacity(size as usize);
+    b.extend_from_slice(b"BM");
+    b.extend_from_slice(&size.to_le_bytes());
+    b.extend_from_slice(&[0; 4]);
+    b.extend_from_slice(&54u32.to_le_bytes());
+    b.extend_from_slice(&40u32.to_le_bytes());
+    b.extend_from_slice(&(w as i32).to_le_bytes());
+    b.extend_from_slice(&(h as i32).to_le_bytes());
+    b.extend_from_slice(&1u16.to_le_bytes());
+    b.extend_from_slice(&24u16.to_le_bytes());
+    b.extend_from_slice(&[0; 24]);
+    b.resize(size as usize, level);
+    std::fs::write(path, b).unwrap();
+}
+/// A short composition filled by one linked still, looping.
+fn looping_still(service: &EngineService, still: &std::path::Path) -> Viewer {
+    let s = snapshot(&format!(
+        r##"{{"id":"P","name":"P","compId":"C","compName":"C","w":128,"h":72,"fps":30,"dur":0.2,"bg":"#000000",
+        "layers":[{{"id":"i","type":"image","name":"still","from":0,"dur":0.2,"on":true,"solo":false,"mblur":false,
+          "p":{{{}}},"fx":[],"masks":[],"d":{{"asset":"pic","fit":"stretch","w":64,"h":64}}}}],
+        "comps":{{}},"assets":{{"pic":{{"id":"pic","type":"image","name":"still","w":64,"h":64,"dur":0}}}},
+        "markers":[],"work":[0,0.2],"params":{{}}}}"##,
+        transform(32., 4.)
+    ));
+    let mut media = MediaCatalog::default();
+    media.originals.insert("pic".into(), still.to_path_buf());
+    let range = pm_protocol::common::TickRange {
+        start: Ticks::ZERO,
+        end: Ticks::new(TICKS_PER_SECOND / 5).unwrap(),
+    };
+    let v = service
+        .viewer(ViewerConfig {
+            end: Some(range.end.get()),
+            ..config(s, media, output(128, 72))
+        })
+        .unwrap();
+    wait(&v, "first frame", |s| s.frame.is_some());
+    v.command(C::SetLoop { range: Some(range) }).unwrap();
+    v.command(C::Play {
+        rate: PlaybackRate::NORMAL,
+    })
+    .unwrap();
+    v
+}
+
+/// A still saved again by another app while its composition loops. The
+/// loop's frames are kept in memory and nothing in the document changed, yet
+/// the picture on screen (which the scopes read) becomes the new file's: a
+/// frame kept in memory is the picture of the media as it was observed.
+#[test]
+fn a_looping_frame_follows_a_still_saved_again_on_disk() {
+    let dir = tempfile::tempdir().unwrap();
+    let still = dir.path().join("still.bmp");
+    grey_still(&still, 40);
+    let service = service("live-media");
+    let v = looping_still(&service, &still);
+    let (frames, inbox) = async_channel::bounded(1);
+    v.scopes(Some((pm_render::scopes::ScopeConfig::PANEL, frames)))
+        .unwrap();
+    // The scope's reading of a frame presented from now on.
+    let shown = |inbox: &async_channel::Receiver<ScopeResult>| {
+        while inbox.try_recv().is_ok() {}
+        let start = Instant::now();
+        loop {
+            if let Ok(frame) = inbox.try_recv() {
+                return frame.unwrap().luma_histogram;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(20),
+                "no frame was analyzed"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    };
+    wait(&v, "a looped frame presented from memory", |s| {
+        s.frame
+            .as_ref()
+            .is_some_and(|f| f.moment == Moment::Playing && f.cache_hit)
+    });
+    let dark = shown(&inbox);
+    grey_still(&still, 220);
+    // Media is looked at every 2 s.
+    let start = Instant::now();
+    let now = loop {
+        let now = shown(&inbox);
+        if now != dark {
+            break now;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(8),
+            "the loop keeps presenting the still as it was"
+        );
+    };
+    // And it stays: no frame of the old still is left to come round again.
+    let until = Instant::now() + Duration::from_millis(600);
+    while Instant::now() < until {
+        assert_eq!(shown(&inbox), now, "an old frame came round again");
+    }
+    // It is what a viewer that never saw the dark still plays.
+    let fresh_service = self::service("live-media-fresh");
+    let fresh = looping_still(&fresh_service, &still);
+    let (frames, fresh_inbox) = async_channel::bounded(1);
+    fresh
+        .scopes(Some((pm_render::scopes::ScopeConfig::PANEL, frames)))
+        .unwrap();
+    assert_eq!(now, shown(&fresh_inbox));
+    assert_eq!(v.status().error, None);
 }

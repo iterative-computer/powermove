@@ -146,7 +146,14 @@ pub fn generate_with_disk_probe(
         (request.control.on_pause)(None);
     }
     let temp = NamedTempFile::new_in(request.store.root())?;
-    transcode(&request, &input, &recipe, temp.path(), disk_space)?;
+    transcode(
+        &request,
+        &input,
+        &native_source,
+        &recipe,
+        temp.path(),
+        disk_space,
+    )?;
     if request.control.cancel.load(Ordering::Relaxed) {
         return Err(ProxyError::Cancelled);
     }
@@ -303,12 +310,86 @@ fn has_alpha(v: &Value) -> bool {
             || p.starts_with("gbrap")
             || p.starts_with("rgba")
             || p.starts_with("bgra")
+            || p.starts_with("argb")
+            || p.starts_with("abgr")
     })
+}
+
+/// The source stores R′G′B′ (or palette) samples, which the proxy converts
+/// to Y′CbCr.
+fn rgb_source(v: &Value) -> bool {
+    string(v, "color_space") == Some("gbr")
+        || string(v, "pix_fmt").is_some_and(pm_media::ff::rgb_pixel_format)
+}
+
+/// The source's colour reading as FFmpeg tag values, one per field: what the
+/// file says where it says it, otherwise what the engine reads an untagged
+/// field of the original as (`video_reading` at the original's size, and
+/// MJPEG's full range). A proxy is smaller than its original, so left
+/// untagged it would be read by its own size: a 720p or 1080p original's
+/// half-size proxy is "SD" and would read with BT.601 coefficients and
+/// 525-line primaries.
+/// Also says whether the source's Y′CbCr codes are full range.
+fn source_reading(
+    ffprobe: &Value,
+    native: &pm_media::probe::Probed,
+) -> Result<([(&'static str, String); 4], bool)> {
+    use pm_media::probe::color::video_reading;
+    use pm_protocol::color::Range;
+    let video = native
+        .probe
+        .video
+        .as_ref()
+        .ok_or_else(|| ProxyError::InvalidMedia("source has no video".into()))?;
+    let (w, h) = (
+        video.codec.width.max(0) as u32,
+        video.codec.height.max(0) as u32,
+    );
+    let table = video_reading(&video.color.tagged, w, h);
+    let tagged = |field: &str| {
+        string(ffprobe, field)
+            .filter(|s| !matches!(*s, "unknown" | "reserved" | "N/A"))
+            .map(str::to_owned)
+    };
+    let named = |code: u8, names: &[(u8, &str)]| {
+        names
+            .iter()
+            .find(|(c, _)| *c == code)
+            .map(|(_, n)| (*n).to_owned())
+            .ok_or_else(|| ProxyError::InvalidMedia(format!("no tag name for colour code {code}")))
+    };
+    let primaries = match tagged("color_primaries") {
+        Some(p) => p,
+        None => named(
+            table.primaries,
+            &[(1, "bt709"), (5, "bt470bg"), (6, "smpte170m")],
+        )?,
+    };
+    let transfer = match tagged("color_transfer") {
+        Some(t) => t,
+        None => named(table.transfer, &[(1, "bt709")])?,
+    };
+    let matrix = match tagged("color_space") {
+        Some(m) => m,
+        None => named(table.matrix, &[(1, "bt709"), (6, "smpte170m")])?,
+    };
+    let full = video.color.interpreted.range == Range::Full;
+    Ok((
+        [
+            ("-color_primaries", primaries),
+            ("-color_trc", transfer),
+            ("-colorspace", matrix),
+            // ProRes holds limited range: full-range codes are rescaled.
+            ("-color_range", "tv".to_owned()),
+        ],
+        full,
+    ))
 }
 
 fn transcode(
     request: &GenerationRequest<'_>,
     input: &Value,
+    native_source: &pm_media::probe::Probed,
     recipe: &ProxyRecipe,
     destination: &Path,
     disk_space: &dyn Fn(&Path) -> Result<(u64, u64)>,
@@ -338,21 +419,33 @@ fn transcode(
         "0",
     ]);
     cmd.args(["-map_metadata:s:v:0", "0:s:v:0"]);
-    let rgb_source = string(source_video, "color_space") == Some("gbr")
-        || string(source_video, "pix_fmt")
-            .is_some_and(|p| p.starts_with("rgb") || p.starts_with("gbr") || p.starts_with("bgr"));
+    let rgb_source = rgb_source(source_video);
+    let (reading, full_range) = source_reading(source_video, native_source)?;
     let output_matrix = if string(source_video, "color_primaries") == Some("bt2020") {
         "bt2020nc"
     } else {
         "bt709"
     };
+    // The frames carry the reading as well as the container: VideoToolbox
+    // writes the frame's properties into the bitstream, and an untagged
+    // source's frames have none.
+    let [(_, primaries), (_, transfer), (_, matrix), _] = &reading;
     let scale = if rgb_source {
         format!(
-            "scale={}:{}:flags=lanczos:in_range=full:out_range=tv:out_color_matrix={output_matrix}",
+            "scale={}:{}:flags=lanczos:in_range=full:out_range=tv:out_color_matrix={output_matrix},\
+             setparams=color_primaries={primaries}:color_trc={transfer}:colorspace={output_matrix}:range=tv",
             recipe.width, recipe.height
         )
     } else {
-        format!("scale={}:{}:flags=lanczos", recipe.width, recipe.height)
+        // Limited-range Y′CbCr codes pass through unchanged; full-range
+        // ones are rescaled (`pm_render::footage::for_copy` reads such a
+        // copy).
+        let codes = if full_range { "full" } else { "tv" };
+        format!(
+            "scale={}:{}:flags=lanczos:in_range={codes}:out_range=tv,\
+             setparams=color_primaries={primaries}:color_trc={transfer}:colorspace={matrix}:range=tv",
+            recipe.width, recipe.height
+        )
     };
     cmd.args([
         "-vf",
@@ -393,22 +486,15 @@ fn transcode(
         }
         _ => return Err(ProxyError::InvalidMedia("unknown codec recipe".into())),
     }
-    // Set tags explicitly: VideoToolbox otherwise may write a different
-    // matrix and still leave the source's container tags copied over.
-    for (field, option) in [
-        ("color_primaries", "-color_primaries"),
-        ("color_transfer", "-color_trc"),
-        ("color_space", "-colorspace"),
-        ("color_range", "-color_range"),
-    ] {
-        if rgb_source && matches!(field, "color_space" | "color_range") {
+    // Tag every field explicitly with the original's reading: VideoToolbox
+    // otherwise may write a different matrix and still leave the source's
+    // container tags copied over, and an untagged field would be read by the
+    // proxy's own (smaller) size.
+    for (option, value) in &reading {
+        if rgb_source && matches!(*option, "-colorspace" | "-color_range") {
             continue;
         }
-        if let Some(value) =
-            string(source_video, field).filter(|s| *s != "unknown" && *s != "reserved")
-        {
-            cmd.arg(option).arg(value);
-        }
+        cmd.arg(option).arg(value);
     }
     if rgb_source {
         cmd.args(["-colorspace", output_matrix, "-color_range", "tv"]);
@@ -751,26 +837,24 @@ fn validate(
     if src_dar.0 * dst_dar.1 != dst_dar.0 * src_dar.1 {
         return Err(fail("proxy changed display aspect"));
     }
-    for key in [
-        "color_primaries",
-        "color_transfer",
-        "color_space",
-        "color_range",
-    ] {
-        let rgb_source = string(src, "color_space") == Some("gbr")
-            || string(src, "pix_fmt").is_some_and(|p| {
-                p.starts_with("rgb") || p.starts_with("gbr") || p.starts_with("bgr")
-            });
-        if rgb_source && matches!(key, "color_space" | "color_range") {
-            continue;
+    // The proxy is read exactly as its original: compare the engine's
+    // resolved readings, untagged defaults included.
+    if let (Some(a), Some(b)) = (source_video, output_video) {
+        let (a, b) = (&a.color.interpreted, &b.color.interpreted);
+        if a.primaries != b.primaries {
+            return Err(fail("proxy changed color_primaries"));
         }
-        if let Some(source_value) = string(src, key).filter(|s| *s != "unknown" && *s != "N/A")
-            && string(dst, key) != Some(source_value)
-        {
-            return Err(ProxyError::Validation(format!("proxy changed {key}")));
+        if a.transfer != b.transfer {
+            return Err(fail("proxy changed color_transfer"));
+        }
+        if !rgb_source(src) && a.matrix != b.matrix {
+            return Err(fail("proxy changed color_space"));
+        }
+        if b.range != pm_protocol::color::Range::Limited {
+            return Err(fail("proxy is not limited range"));
         }
     }
-    if string(src, "color_space") == Some("gbr") {
+    if rgb_source(src) {
         let expected_matrix = if string(src, "color_primaries") == Some("bt2020") {
             "bt2020nc"
         } else {

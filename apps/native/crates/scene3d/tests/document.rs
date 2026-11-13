@@ -175,6 +175,24 @@ fn static_assembly_keeps_new_fields_and_default_light() {
     assert_eq!(s["lights"][0]["type"], "sun");
 }
 #[test]
+fn world_lighting_does_not_add_an_implicit_sun() {
+    for mode in ["hdri", "sky", "none"] {
+        let mut c = comp();
+        let world = service::new_layer(
+            &c, "world", "World", Role::Object,
+            json!({"object":{"source":{"primitive":"box"},"world":{"mode":mode,"source":"studio-map"}}}),
+            json!({}), true, None, 0.,
+        ).unwrap();
+        c["layers"] = json!([world]);
+        let scene = service::composition(&c, 1., &mut service::StaticEvaluator).unwrap();
+        assert_eq!(scene["lights"].as_array().unwrap().len(), usize::from(mode == "none"), "{mode}");
+        // A hidden or out-of-range World must not change legacy lighting.
+        c["layers"][0]["on"] = json!(false);
+        let scene = service::composition(&c, 1., &mut service::StaticEvaluator).unwrap();
+        assert_eq!(scene["lights"][0]["type"], "sun");
+    }
+}
+#[test]
 fn legacy_container_archive_and_outer_intent_survive() {
     let mut c = comp();
     let old = json!({"id":"old","name":"Old","type":"extension","from":2,"dur":5,"p":{"position.x":{"v":14,"kf":[],"expr":null}},"fx":[{"id":"fx"}],"masks":[],"lock":true,"future":{"keep":true},"d":{"definition":schema::SCENE,"data":{"scene":{"objects":[{"id":"a","source":{"primitive":"box"}}]}}}});
@@ -220,4 +238,53 @@ fn standalone_upgrade_archives_original_three_d_flag() {
     pm_scene3d::migration::upgrade_project(&mut project).unwrap();
     assert_eq!(project["layers"][0]["threeD"], true);
     assert_eq!(project["layers"][0]["native3dArchive"]["source"], original);
+}
+
+#[test]
+fn scatter_keeps_hidden_prototype_resources_without_making_them_visible() {
+    let mut c = comp();
+    let source = service::new_layer(
+        &c,
+        "source",
+        "Source",
+        Role::Object,
+        json!({"object":{"source":{"nature":"grass","seed":41}}}),
+        json!({}),
+        false,
+        None,
+        0.,
+    )
+    .unwrap();
+    let surface = service::new_layer(
+        &c,
+        "surface",
+        "Surface",
+        Role::Object,
+        json!({"object":{"source":{"primitive":"plane"}}}),
+        json!({}),
+        false,
+        None,
+        0.,
+    )
+    .unwrap();
+    let scatter = service::new_layer(&c, "scatter", "Scatter", Role::Object,
+        json!({"object":{"source":{"primitive":"plane"},"scatter":{"model":"source","surface":"surface"}}}), json!({}), true, None, 0.).unwrap();
+    c["layers"] = json!([source, surface, scatter]);
+    let scene = service::composition(&c, 1., &mut service::StaticEvaluator).unwrap();
+    let objects = scene["objects"].as_array().unwrap();
+    assert_eq!(objects.len(), 3);
+    assert_eq!(
+        objects.iter().find(|o| o["id"] == "source").unwrap()["p"]["visible"]["v"],
+        false
+    );
+    assert_eq!(
+        objects.iter().find(|o| o["id"] == "surface").unwrap()["p"]["visible"]["v"],
+        false
+    );
+    let expired = service::composition(&c, 11., &mut service::StaticEvaluator).unwrap();
+    assert!(expired["objects"].as_array().unwrap().is_empty());
+    assert_eq!(
+        c["layers"][0]["on"], false,
+        "evaluation cannot edit authored visibility"
+    );
 }

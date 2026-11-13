@@ -98,6 +98,30 @@ impl Evaluator for StaticEvaluator {
         Ok(l["on"] != false && t >= from && t < from + l["dur"].as_f64().unwrap_or(f64::INFINITY))
     }
 }
+/// Active scatters retain hidden model/surface resources. Resource evaluation
+/// ignores their visibility switch, while preserving the source's time range.
+fn scatter_sources(
+    layers: &[Value],
+    time: f64,
+    ev: &mut impl Evaluator,
+) -> Result<std::collections::HashSet<String>> {
+    let mut ids = std::collections::HashSet::new();
+    for l in layers {
+        let scatter = &l["d"]["data"]["object"]["scatter"];
+        if schema::role(l) == Some(Role::Object) && scatter.is_object() && ev.active(l, time)? {
+            for key in ["model", "surface"] {
+                if let Some(id) = scatter[key].as_str() {
+                    ids.insert(id.to_owned());
+                }
+            }
+        }
+    }
+    Ok(ids)
+}
+fn source_in_range(l: &Value, time: f64) -> bool {
+    let from = l["from"].as_f64().unwrap_or(0.);
+    time >= from && time < from + l["dur"].as_f64().unwrap_or(f64::INFINITY)
+}
 pub fn composition(comp: &Value, time: f64, ev: &mut impl Evaluator) -> Result<Value> {
     if !time.is_finite() {
         return fail("Invalid composition time");
@@ -109,11 +133,17 @@ pub fn composition(comp: &Value, time: f64, ev: &mut impl Evaluator) -> Result<V
     let layers = comp["layers"]
         .as_array()
         .ok_or_else(|| Error("Composition has no layers".into()))?;
+    let sources = scatter_sources(layers, time, ev)?;
     for l in layers {
         let Some(role) = schema::role(l) else {
             continue;
         };
-        if !ev.active(l, time)? {
+        let visible = ev.active(l, time)?;
+        if !visible
+            && !(role == Role::Object
+                && sources.contains(l["id"].as_str().unwrap_or(""))
+                && source_in_range(l, time))
+        {
             continue;
         }
         let data = schema::layer_data(role, l["d"]["data"].clone())?;
@@ -161,7 +191,42 @@ pub fn composition(comp: &Value, time: f64, ev: &mut impl Evaluator) -> Result<V
                 o["name"] = l["name"].clone();
                 o["parent"] = l["parent"].clone();
                 o["p"] = trans;
+                if !visible {
+                    o["p"]["visible"] = json!(false);
+                }
                 o["material"]["p"] = eval_p(&o["material"]["p"], "m")?;
+                for kind in crate::contract::GROUPS {
+                    if o.get(*kind).is_some() {
+                        o[*kind]["p"] = eval_p(&o[*kind]["p"], kind)?;
+                    }
+                }
+                if let Some(regions) = o["terrain"]["regions"].as_array().cloned() {
+                    for (i, region) in regions.iter().enumerate() {
+                        o["terrain"]["regions"][i]["p"] =
+                            eval_p(&region["p"], &format!("terrain.region{i}"))?;
+                    }
+                }
+                for key in ["materialProperties", "sourceMaterialProperties", "parts"] {
+                    if let Some(entries) = o.get(key).and_then(Value::as_object).cloned() {
+                        for (k, v) in entries {
+                            if key == "materialProperties" {
+                                o[key][&k] = eval_p(&json!({&k:v}), "mi")?[&k].clone();
+                            } else if key == "sourceMaterialProperties" {
+                                for (field, ch) in v.as_object().unwrap() {
+                                    o[key][&k][field] =
+                                        eval_p(&json!({field:ch}), &format!("mi.{k}"))?[field]
+                                            .clone();
+                                }
+                            } else {
+                                for (field, ch) in v["p"].as_object().unwrap() {
+                                    o[key][&k]["p"][field] =
+                                        eval_p(&json!({field:ch}), &format!("pt.{k}"))?[field]
+                                            .clone();
+                                }
+                            }
+                        }
+                    }
+                }
                 objects.push(o);
             }
             Role::Light => {
@@ -169,6 +234,9 @@ pub fn composition(comp: &Value, time: f64, ev: &mut impl Evaluator) -> Result<V
                 light["id"] = l["id"].clone();
                 light["name"] = l["name"].clone();
                 light["p"] = eval_p(&light["p"], "light")?;
+                if light.get("world").is_some() {
+                    light["world"]["p"] = eval_p(&light["world"]["p"], "world")?;
+                }
                 for k in ["x", "y", "z"] {
                     light["p"][k] = trans[k].clone();
                 }
@@ -196,7 +264,14 @@ pub fn composition(comp: &Value, time: f64, ev: &mut impl Evaluator) -> Result<V
             o["parent"] = Value::Null;
         }
     }
-    if lights.is_empty() {
+    // Keep legacy unlit scenes' studio sun, but an authored World already
+    // defines the lighting (including an intentionally dark/zero-intensity
+    // World). Its background visibility does not disable its illumination.
+    let world_lighting = objects.iter().any(|o| {
+        o["p"]["visible"] != false
+            && matches!(o["world"]["mode"].as_str(), Some("sky" | "hdri"))
+    });
+    if lights.is_empty() && !world_lighting {
         let mut id = "default_sun".to_string();
         while ids.contains(&id) {
             id.push('x');
@@ -205,7 +280,22 @@ pub fn composition(comp: &Value, time: f64, ev: &mut impl Evaluator) -> Result<V
     }
     scene["objects"] = json!(objects);
     scene["lights"] = json!(lights);
-    schema::parse_scene(scene)
+    let mut resolved = schema::parse_scene(scene)?;
+    let mut extrusions=vec![];
+    for layer in layers {
+        if layer["d"].get("extrusion").is_none() || !crate::extrusion::eligible(layer){continue;}
+        let mut data=crate::extrusion::parse(&layer["d"]["extrusion"])?;
+        for (path,prop) in crate::extrusion::channels(layer) {
+            let value=ev.value(layer,&path,prop,time)?;let parts:Vec<_>=path.split('.').collect();
+            if parts[0]=="geo"{data["p"][parts[1]]=schema::channel(value);}else{data["surfaces"][parts[1]]["properties"][parts[2]]=schema::channel(value);}
+        }
+        extrusions.push(json!({"id":layer["id"],"name":layer["name"],"threeD":layer["threeD"],"extrusion":data}));
+    }
+    if !extrusions.is_empty(){resolved["extrusions"]=json!(extrusions);}
+    if comp.get("studioQuality").is_some() {
+        resolved["studioQuality"] = crate::quality::get(comp)?;
+    }
+    Ok(resolved)
 }
 pub fn presets() -> Value {
     serde_json::from_str(include_str!("material-presets.json")).expect("frozen preset data")
@@ -220,6 +310,35 @@ fn target(l: &Value) -> Vec3 {
             .as_f64()
             .unwrap_or(0.)
     })
+}
+/// The model a light preset lights: the chosen one, else the first model.
+fn product_for<'a>(layers: &'a [Value], chosen: Option<&'a Value>) -> Result<&'a Value> {
+    chosen
+        .filter(|l| schema::role(l) == Some(Role::Object))
+        // An imported model first, else any object that is not the sky.
+        .or_else(|| layers.iter().find(|l| crate::part_material::is_model(l)))
+        .or_else(|| {
+            layers.iter().find(|l| {
+                schema::role(l) == Some(Role::Object) && l["d"]["data"]["object"]["world"].is_null()
+            })
+        })
+        .ok_or_else(|| Error("Add a model first".into()))
+}
+/// A model's centre and radius: its evaluated bounds when loaded, else its
+/// position and a unit-sized product (imported models are normalised to about
+/// one unit) times its largest scale, so presets also work headless.
+fn product_frame(comp: &Value, l: &Value) -> (Vec3, f64) {
+    if let Some(b) = l["id"].as_str().and_then(|id| box_for(comp, id).ok()) {
+        let c = b.center();
+        let r = (length(sub(b.max, b.min)) / 2.).max(1e-3);
+        return (c, r);
+    }
+    let scale = ["scale.x", "scale.y", "scale.z"]
+        .map(|k| l["p"][k]["v"].as_f64().unwrap_or(100.).abs() / 100.)
+        .into_iter()
+        .fold(0., f64::max)
+        .max(0.01);
+    (pos(l), 0.6 * scale)
 }
 fn scalar(args: &Value, k: &str, f: f64) -> Result<f64> {
     match args.get(k) {
@@ -304,6 +423,8 @@ pub(crate) fn studio_plan(
             "to",
             "on",
             "on_target",
+            "temperature",
+            "side",
         ],
     )?;
     let layers = comp["layers"]
@@ -354,10 +475,49 @@ pub(crate) fn studio_plan(
             let normal = vec3(&args["normal"])?;
             let eye = camera.map(pos).unwrap_or([3., 2., 6.]);
             let distance = scalar(args, "distance", (length(sub(eye, point)) * 0.9).max(2.))?;
-            let at = crate::light_tool::highlight_placement(point, normal, eye, distance)?;
-            let size = scalar(args, "size", distance * 0.6)?;
+            let size = args.get("size").map(|_| scalar(args, "size", 0.)).transpose()?;
+            let (at, size) = if camera.is_some_and(|c| c["d"]["data"]["environment"]["shadowCatcher"] == true) {
+                crate::light_tool::highlight_above_floor(point, normal, eye, distance, size, 0.)?
+            } else {
+                (crate::light_tool::highlight_placement(point, normal, eye, distance)?, size.unwrap_or(distance * 0.6))
+            };
             edit(
                 json!({"operation":"add_light","name":args["name"].as_str().unwrap_or("Softbox"),"light":{"type":"area","p":{"x":at[0],"y":at[1],"z":at[2],"targetX":point[0],"targetY":point[1],"targetZ":point[2],"width":size,"height":size*0.62,"intensity":scalar(args,"intensity",6.)?,"color":args["color"].as_str().unwrap_or("#FFFFFF")}}}),
+            )
+        }
+        "light_preset" => {
+            let preset = args["preset"].as_str().unwrap_or("");
+            let product = product_for(layers, layer)?;
+            let (c, r) = product_frame(comp, product);
+            let eye = camera.map(pos).unwrap_or([3., 2., 6.]);
+            let placement = crate::light_tool::preset_placement(preset, c, r, eye)?;
+            let color = match args.get("temperature") {
+                Some(t) => crate::light_tool::kelvin_hex(
+                    t.as_f64().ok_or_else(|| Error("Invalid temperature".into()))?,
+                ),
+                None => args["color"].as_str().unwrap_or("#FFFFFF").to_owned(),
+            };
+            let at = placement.at;
+            edit(
+                json!({"operation":"add_light","name":args["name"].as_str().unwrap_or(placement.name),"light":{"type":"area","p":{"x":at[0],"y":at[1],"z":at[2],"targetX":c[0],"targetY":c[1],"targetZ":c[2],"width":placement.width,"height":placement.height,"intensity":scalar(args,"intensity",placement.intensity)?,"color":color}}}),
+            )
+        }
+        "aim_light" => {
+            let l = layer
+                .filter(|l| schema::role(l) == Some(Role::Light))
+                .ok_or_else(|| Error("Choose a light to aim".into()))?;
+            let at = match &args["at"] {
+                Value::String(id) => {
+                    let object = layers
+                        .iter()
+                        .find(|o| o["id"] == id.as_str() && schema::role(o) == Some(Role::Object))
+                        .ok_or_else(|| Error("Aim at a model".into()))?;
+                    product_frame(comp, object).0
+                }
+                v => vec3(v)?,
+            };
+            edit(
+                json!({"operation":"update_light","target":l["id"],"patch":{"p":{"targetX":at[0],"targetY":at[1],"targetZ":at[2]}}}),
             )
         }
         "soften" => {
@@ -506,6 +666,8 @@ pub(crate) fn studio_plan(
                 .iter()
                 .filter(|l| schema::role(l) == Some(Role::Object))
                 .collect::<Vec<_>>();
+            let target=args["target"].as_str().or(args["id"].as_str());
+            let models:Vec<_>=models.into_iter().filter(|l|target.is_none_or(|id|l["id"]==id)).collect();
             let b = union(
                 models
                     .iter()
@@ -644,14 +806,19 @@ pub fn resolve(comp: &Value, time: f64, ev: &mut impl WorldEvaluator) -> Result<
         camera_position: None,
         camera_up: None,
     };
-    for l in comp["layers"]
+    let layers = comp["layers"]
         .as_array()
-        .ok_or_else(|| Error("No composition layers".into()))?
-    {
+        .ok_or_else(|| Error("No composition layers".into()))?;
+    let sources = scatter_sources(layers, time, ev)?;
+    for l in layers {
         let Some(role) = schema::role(l) else {
             continue;
         };
-        if !ev.active(l, time)? {
+        if !ev.active(l, time)?
+            && !(role == Role::Object
+                && sources.contains(l["id"].as_str().unwrap_or(""))
+                && source_in_range(l, time))
+        {
             continue;
         }
         let id = l["id"]

@@ -250,7 +250,7 @@ for (const [name, change] of cases) {
           disabled: false,
         });
         expect(byId("viewer.canvas").value).toContain(
-          `${state.model.selectionCount} layers selected`,
+          `${state.model.selectionCount} ${state.model.selectionCount === 1 ? "layer" : "layers"} selected`,
         );
         {
           // Docked bar or Focus/full-screen overlay: same controls, same labels.
@@ -382,6 +382,7 @@ test("source Back and empty Open callbacks; no visible viewer title or unrelated
   };
   const { root } = recorder();
   const actions = {
+    command() {},
     drive: (id: string) => {
       seen.push(id);
     },

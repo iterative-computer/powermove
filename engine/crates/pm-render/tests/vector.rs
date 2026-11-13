@@ -137,7 +137,7 @@ fn star_polygon(w: f64, h: f64, points: u32) -> Vec<(f64, f64)> {
 }
 
 #[test]
-fn shape_edges_are_analytic_at_every_compat_level() {
+fn native_shape_edges_are_analytic_and_legacy_sources_keep_canvas_filtering() {
     let mut renderer = Renderer::headless().unwrap();
     let (rotation, scale) = (17.0, 130.0);
     let ellipse = json!({ "shape": "ellipse", "w": 150, "h": 96, "color": "#FFFFFF", "stroke": 0 });
@@ -184,9 +184,9 @@ fn shape_edges_are_analytic_at_every_compat_level() {
             &mut renderer,
             vec![placed(name, "shape", d, 1, rotation, scale)],
         );
-        assert_eq!(
+        assert_ne!(
             level1, level2,
-            "{name}: `compat` does not change vector pixels"
+            "{name}: legacy sources retain Canvas texture filtering"
         );
         let e = edge_error(&level2, &reference);
         eprintln!(
@@ -744,4 +744,119 @@ fn svgs_draw_where_libxml2_paints_them() {
             assert!(rgba.iter().all(|&v| v == 0.0), "{name}");
         }
     }
+}
+
+#[test]
+fn fractional_translation_reuses_the_legacy_shape_source_pixel_grid() {
+    use pm_render::plan::{Content, Source};
+    let mut renderer = Renderer::headless().unwrap();
+    let mut keys = vec![];
+    let mut matrices = vec![];
+    for x in [128.0, 128.125] {
+        let shape = layer(
+            "shape",
+            "shape",
+            json!({"shape":"ellipse","w":83.5,"h":61.25,"color":"#FFFFFF","stroke":0}),
+            x,
+            128.0,
+            1.0,
+        );
+        let doc = load(&project(W, H, 1.0, no_fill(), vec![shape]));
+        let request = RenderRequest::sized(Size::new(W, H), Precision::Float32);
+        let (plan, failures) = renderer
+            .plan(
+                &doc,
+                "Ptest-root",
+                ticks(0.0),
+                &request,
+                &MapResolver::default(),
+            )
+            .unwrap();
+        assert!(failures.is_empty());
+        let draw = plan.draws.iter().find(|d| d.layer == "shape").unwrap();
+        let Content::Texture {
+            source: Source::Vector(source),
+            ..
+        } = &draw.content
+        else {
+            panic!("legacy shape must be sampled from its local texture")
+        };
+        keys.push(source.key());
+        matrices.push(draw.matrix);
+    }
+    assert_eq!(
+        keys[0], keys[1],
+        "a fractional output move must not rerasterize the local shape"
+    );
+    assert!((matrices[1][4] - matrices[0][4] - 0.125).abs() < 1e-9);
+}
+
+/// Electron projects the same local canvas when a layer's 3D switch is
+/// enabled. A flat plane must therefore preserve fractional edge phases.
+#[test]
+fn a_legacy_shape_keeps_its_canvas_when_3d_is_enabled() {
+    let mut renderer = Renderer::headless().unwrap();
+    for rotation in [0.0, 17.0] {
+        let mut l = placed(
+            "shape",
+            "shape",
+            json!({ "shape": "ellipse", "w": 75.0, "h": 49.0, "color": "#8AB4F8", "stroke": 0 }),
+            1,
+            rotation,
+            123.0,
+        );
+        set(&mut l, "position.x", json!(128.125));
+        set(&mut l, "position.y", json!(128.375));
+        let flat = render_rgba(
+            &mut renderer,
+            project(W, H, 2.0, no_fill(), vec![l.clone()]),
+            &MapResolver::default(),
+        );
+        l["threeD"] = json!(true);
+        let plane = render_rgba(
+            &mut renderer,
+            project(W, H, 2.0, no_fill(), vec![l]),
+            &MapResolver::default(),
+        );
+        let max = flat
+            .iter()
+            .zip(&plane)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            max < 1.0 / 255.0,
+            "flat legacy plane changes its canvas edge by {max}"
+        );
+    }
+}
+
+/// Cropping a canvas to its ink must retain the transparent texels that
+/// bilinear filtering reads. Otherwise a subpixel-height rule's cropped
+/// quad can miss every output pixel center and disappear.
+#[test]
+fn a_legacy_subpixel_rule_retains_its_canvas_filter_border() {
+    let mut renderer = Renderer::headless().unwrap();
+    let l = placed(
+        "rule",
+        "shape",
+        json!({ "shape": "rect", "w": 100, "h": 1, "radius": 0,
+            "color": "#FFFFFF", "stroke": 0 }),
+        1,
+        0.0,
+        200.0 / 3.0,
+    );
+    let alpha = render_alpha(&mut renderer, vec![l]);
+    // The quarter-step density is .75. A 9-unit padded canvas becomes
+    // seven texels high, with .75 coverage in row 3. Projected at 2/3,
+    // the two adjacent pixel centers read that row with weight 5/12.
+    let expected = 0.75 * (5.0 / 12.0);
+    for y in [127, 128] {
+        let a = alpha[(y * W + 128) as usize];
+        assert!(
+            (a - expected).abs() < 0.004,
+            "rule row {y}: {a} instead of {expected}"
+        );
+    }
+    assert_eq!(alpha[(126 * W + 128) as usize], 0.0);
+    assert_eq!(alpha[(129 * W + 128) as usize], 0.0);
 }

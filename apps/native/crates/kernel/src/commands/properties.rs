@@ -200,7 +200,7 @@ pub(crate) fn resolve(
     // The 3D source preserves hand-authored channels for every generated
     // origin, including expressions and full keyframe replacements.
     if cx.origin().is_generated()
-        && layer
+        && (layer.get("d").and_then(|d|d.get("extrusion")).is_some() || layer
             .get("d")
             .and_then(|d| d.get("definition"))
             .and_then(Value::as_str)
@@ -211,7 +211,7 @@ pub(crate) fn resolve(
                     pm_scene3d::schema::CAMERA,
                 ]
                 .contains(&d)
-            })
+            }))
         && (locked_intent(&layer, &key) || locked_intent(&layer, "3d"))
     {
         return Err(CommandError::PreservedHandEdit {
@@ -375,19 +375,25 @@ pub(crate) fn plan_set(
     presets: &mut Presets,
 ) -> Result<Vec<pm_model::Op>, CommandError> {
     let mut cx = Cx::new(root, origin);
-    set_property_inner(&mut cx, c, Some(presets))?;
+    set_property_inner(&mut cx, c, Some(presets), true)?;
     Ok(cx.finish())
 }
 
 /// `setProperty(command)` outside a property batch.
 pub(crate) fn set_property(cx: &mut Cx<'_>, c: &SetProperty) -> Result<(), CommandError> {
-    set_property_inner(cx, c, None)
+    set_property_inner(cx, c, None, true)
+}
+
+pub(super) fn set_scene_property(cx: &mut Cx<'_>, c: &SetProperty) -> Result<(), CommandError> {
+    // Composition plans already account for explicit coupled shape edits.
+    set_property_inner(cx, c, None, false)
 }
 
 fn set_property_inner(
     cx: &mut Cx<'_>,
     c: &SetProperty,
     presets: Option<&mut Presets>,
+    migrate_fog: bool,
 ) -> Result<(), CommandError> {
     let (loc, mut layer, channel, path) = resolve(cx, &c.layer_id, &c.channel)?;
     if preserves(cx, c.preserve_hand_edits) && locked_intent(&layer, &channel) {
@@ -408,6 +414,11 @@ fn set_property_inner(
         KeyMode::Static => false,
     };
     let local = track::local_time(&layer, time);
+    // Migrate only an inactive legacy atmosphere when it is first enabled.
+    // This remains part of this single-writer edit and its Undo record.
+    if migrate_fog && channel == "world.fogDensity" && !keyed && value.as_f64().is_some_and(|v| v > 0.) {
+        migrate_inactive_fog(&mut layer)?;
+    }
     if keyed {
         let prop = channels::get_mut(&mut layer, &path).expect("resolved");
         let before = track::keys_of(prop).len();
@@ -451,6 +462,20 @@ fn set_property_inner(
         mark_intent(&mut layer, &channel, local);
     }
     cx.put_layer(&loc, layer)
+}
+
+/// Never reinterpret active, animated, expression-driven or hand-shaped fog.
+fn migrate_inactive_fog(layer: &mut Value) -> Result<(), CommandError> {
+    let source = pm_scene3d::from_model(layer).map_err(|e| CommandError::Invalid(e.to_string()))?;
+    if !pm_scene3d::contract::inactive_legacy_fog(&source) {
+        return Ok(());
+    }
+    for (key, value) in [("fogHeightFalloff", 0.06), ("fogDistance", 400.)] {
+        let path = channels::materialize(layer, &format!("world.{key}")).expect("validated world");
+        values::obj(channels::get_mut(layer, &path).expect("validated fog channel"))
+            .insert("v", Value::Number(value));
+    }
+    Ok(())
 }
 
 /// `layer.locked_intent[channel] = { by: 'human', at, t }`.

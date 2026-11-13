@@ -440,6 +440,11 @@ pub fn layer3d_properties(layer: &Node) -> JsResult<Vec<PropEntry<'_>>> {
     let data = node::member(d, "data");
     let modeling = node::member(d, "modeling");
     let mut out = Vec::new();
+    let extrusion=node::member(d,"extrusion");
+    collect_kf(&mut out,node::member(extrusion,"p"),&s("geo"),&js("Geometry Options"));
+    for surface in ["front","bevel","side","back"] {
+        collect_kf(&mut out,node::member(node::member(node::member(extrusion,"surfaces"),surface),"properties"),&s(&format!("ms.{surface}")),&js("Surface Material"));
+    }
     if role.is_none() && !node::truthy(modeling) {
         return Ok(out);
     }
@@ -454,6 +459,33 @@ pub fn layer3d_properties(layer: &Node) -> JsResult<Vec<PropEntry<'_>>> {
     match role {
         Some(Layer3dRole::Object) => {
             let object = node::member_checked(data, "object")?;
+            // Studio `environmentProperties(object)`: World, fog, terrain (and
+            // its ground-cover regions), scatter and material-option channels.
+            for (kind, group) in [
+                ("world", "World"),
+                ("fog", "Fog"),
+                ("terrain", "Terrain"),
+                ("scatter", "Scatter"),
+                ("materialOptions", "Material Options"),
+            ] {
+                collect_kf(
+                    &mut out,
+                    node::member(node::member(object, kind), "p"),
+                    &s(kind),
+                    &js(group),
+                );
+            }
+            let regions = node::member(node::member(object, "terrain"), "regions");
+            for (i, region) in node::for_of_or_empty(regions)?.into_iter().enumerate() {
+                if let Item::Node(region) = &region {
+                    collect_kf(
+                        &mut out,
+                        node::member(Some(region), "p"),
+                        &s(&format!("terrain.region{i}")),
+                        &js(&format!("Ground Cover {}", i + 1)),
+                    );
+                }
+            }
             let material = node::member(object, "material");
             collect_kf(
                 &mut out,
@@ -483,6 +515,22 @@ pub fn layer3d_properties(layer: &Node) -> JsResult<Vec<PropEntry<'_>>> {
                     node::member(shader, "p"),
                     &cat(&[&s("slots."), &sid, &s(".shader")]),
                     &name,
+                );
+            }
+            // Imported models: sparse overrides on every part (`mi.KEY`) and
+            // on one material slot (`mi.INDEX.KEY`).
+            collect_kf(
+                &mut out,
+                node::member(object, "materialProperties"),
+                &s("mi"),
+                &js("Part Materials"),
+            );
+            for (index, part) in entries_or_empty(node::member(object, "sourceMaterialProperties")) {
+                collect_kf(
+                    &mut out,
+                    part.node(),
+                    &cat(&[&s("mi."), &index]),
+                    &js("Part Materials"),
                 );
             }
         }
@@ -599,6 +647,14 @@ pub fn is_scene_key(key: &[u8]) -> bool {
         b"shader.",
         b"slots.",
         b"model.",
+        b"world.",
+        b"fog.",
+        b"terrain.",
+        b"scatter.",
+        b"materialOptions.",
+        b"geo.",
+        b"ms.",
+        b"mi.",
     ]
     .iter()
     .any(|p| key.starts_with(p))
@@ -958,6 +1014,17 @@ mod tests {
         assert!(transition_key(b"transitionIn.p.1x").is_none());
         assert!(is_font_axis_key(b"fontAxis.wght"));
         assert!(!is_font_axis_key(b"fontAxis.wg"));
+    }
+
+    #[test]
+    fn finds_an_imported_models_part_material_overrides() {
+        let layer = n(r#"{"type":"3d","d":{"definition":"powermove.3d.object","data":{"object":{
+            "materialProperties":{"opacity":{"v":80,"kf":[]}},
+            "sourceMaterialProperties":{"8":{"roughness":{"v":0.06,"kf":[]}}}}}}}"#);
+        let get = |k: &str| find_prop(&layer, &JsString::from(k)).unwrap();
+        assert!(get("mi.8.roughness").node().is_some());
+        assert!(get("mi.opacity").node().is_some());
+        assert_eq!(get("mi.2.roughness"), Got::Undefined);
     }
 
     #[test]

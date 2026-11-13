@@ -58,6 +58,8 @@ pm-proxy = { path = "../../../../engine/crates/pm-proxy" }
 gpui_macos = { package = "gpui_ce_macos", path = "../../vendor/gpui-ce/crates/gpui_macos", features = ["frame-capture"] }
 
 pm-panel-media = { path = "../panel-media" }
+pm-panel-studio3d = { path = "../panel-studio3d" }
+pm-scene3d = { path = "../scene3d" }
 pm-first-launch = { path = "../first-launch" }
 pm-services = { path = "../services" }
 pm-captions = { path = "../../../../engine/crates/pm-captions" }
@@ -70,6 +72,9 @@ pm-panel-timeline = { path = "../panel-timeline" }
 
 [[test]]
 name = "text_commands"
+harness = false
+[[test]]
+name = "close_guard_gpui"
 harness = false
 
 [[example]]

@@ -444,6 +444,12 @@ pub enum OpenFailure {
     Service(ServiceErrorCode),
     /// The recovery journal that protects unsaved work couldn't start.
     Journal,
+    /// The file is the start of a copy that is still arriving (a sync
+    /// client, another computer's save): not damaged, not finished.
+    StillCopying,
+    /// The version chosen after a failed open was replaced by another file
+    /// as it was put in place, so it was not opened.
+    ChoiceReplaced,
 }
 pub fn open_error(name: &str, failure: OpenFailure, path_exists: bool) -> Alert<Action> {
     let (message, informative) = match failure {
@@ -451,6 +457,14 @@ pub fn open_error(name: &str, failure: OpenFailure, path_exists: bool) -> Alert<
         OpenFailure::Journal => (
             format!("“{name}” couldn’t be opened."),
             "Powermove couldn’t start the recovery journal that protects unsaved work. Check free space and permissions in your library, then try again.",
+        ),
+        OpenFailure::ChoiceReplaced => (
+            format!("“{name}” wasn’t opened."),
+            "The version you chose was replaced by another file as it was being opened. Nothing was lost: choose Window ▸ Error Log to see where that file is, then open the project again to choose.",
+        ),
+        OpenFailure::StillCopying => (
+            format!("“{name}” is still being copied to this Mac."),
+            "Wait until the copy or sync is done, then open it again. Nothing was changed.",
         ),
     };
     // S004 makes OK the default even though Show in Finder is written first.

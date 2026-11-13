@@ -79,6 +79,11 @@ pub struct RenderRequest {
     /// A frame of a playing viewer: media its next frames read (an image
     /// sequence's next files) is decoded ahead on workers.
     pub read_ahead: bool,
+    /// A viewer's frame. Its settled paused picture is final output for
+    /// effects and sampling, but 3D draws at the viewer's own preview tier:
+    /// only a delivery (an export, a still) path-traces at the
+    /// composition's saved quality.
+    pub viewer: bool,
     /// Where output pixel (0, 0) sits in scaled composition pixels:
     /// composition pixel `(x, y)` lands at output pixel `(x · sx − ox,
     /// y · sy − oy)` at the top level (today's `scaledWorld` with a
@@ -136,6 +141,7 @@ impl RenderRequest {
             sampling: Sampling::Final,
             output_kind: OutputKind::Preview,
             read_ahead: false,
+            viewer: false,
             origin: None,
             output_tone: None,
         }
@@ -158,6 +164,7 @@ impl RenderRequest {
             sampling: Sampling::Final,
             output_kind: OutputKind::Preview,
             read_ahead: false,
+            viewer: false,
             origin: None,
             output_tone: None,
         }
@@ -197,6 +204,8 @@ impl RenderRequest {
             sampling,
             output_kind: OutputKind::of(request.purpose),
             read_ahead: request.motion_blur == MotionBlurKind::PreviewPlaying,
+            // Final here is a delivery (an export or an agent capture).
+            viewer: false,
             origin: None,
             output_tone: None,
         })

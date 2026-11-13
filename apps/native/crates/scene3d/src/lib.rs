@@ -1,11 +1,15 @@
 //! Studio's document side. No UI, JS engine, platform handles or second writer.
 //! Source contracts: 3D source b81b94c66; shipped reference c7f46a056.
 pub mod geometry;
+pub mod extrusion;
+pub mod contract;
+pub mod quality;
 pub mod import;
 pub mod light_tool;
 pub mod migration;
 pub mod navigation;
 pub mod operations;
+pub mod part_material;
 pub mod presentation;
 pub mod render;
 pub mod schema;

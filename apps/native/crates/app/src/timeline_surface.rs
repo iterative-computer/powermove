@@ -235,6 +235,9 @@ pub struct TimelineSurface {
     /// time column of the frame last prepared.
     shown: (f64, f64, f64),
     fitted: bool,
+    /// The composition length last shown: when it changes while the view
+    /// shows all of it from 0, the view refits to the new length.
+    fit_duration: f64,
     gesture: Gesture,
     cursor: CursorStyle,
     /// A badge's tooltip shown after `motion.tooltip_delay` (text, local point).
@@ -304,6 +307,7 @@ impl TimelineSurface {
             view,
             shown: (view.pps, view.scroll_time, view.layer_column),
             fitted: false,
+            fit_duration: 0.,
             gesture: Gesture::Idle,
             cursor: CursorStyle::Arrow,
             tip: None,
@@ -813,10 +817,27 @@ impl TimelineSurface {
         self.outline.set_scene(Some(built.scene));
         self.frame = None;
         self.clamp_scroll();
-        if !self.fitted && self.model.index.duration > 0. && self.bounds.size.width > px(0.) {
-            self.fitted = true;
+        let duration = self.model.index.duration;
+        if duration > 0. && self.bounds.size.width > px(0.) {
             let width = (f32::from(self.bounds.size.width) as f64 - self.view.layer_column).max(1.);
-            self.view.pps = (width / self.model.index.duration).clamp(PPS.0, PPS.1);
+            let fit = (width / duration).clamp(PPS.0, PPS.1);
+            // The view started at 0 and showed all of the old length.
+            let whole = |d: f64| {
+                d > 0. && self.view.scroll_time.abs() < 1e-9 && width / self.view.pps >= d * 0.99
+            };
+            if !self.fitted {
+                self.fitted = true;
+                self.view.pps = fit;
+            } else if self.fit_duration > 0.
+                && (self.fit_duration - duration).abs() > 1e-9
+                && whole(self.fit_duration)
+            {
+                // A shorter or longer composition: a view that showed the
+                // whole old length shows the whole new one (the ruler and bars
+                // refit); a view the user zoomed into or scrolled stays.
+                self.view.pps = fit;
+            }
+            self.fit_duration = duration;
         }
         self.changed(false, cx);
     }
@@ -2302,7 +2323,7 @@ impl ModelPresenter for Presenter {
         }
     }
     fn layer_label(&self, layer: &pm_panel_timeline::Layer) -> Label {
-        Label::for_kind(&layer.kind)
+        Label::for_layer(&layer.kind, layer.definition.as_deref())
     }
     fn media(&self, layer: &pm_panel_timeline::Layer) -> Media {
         if layer
@@ -3044,19 +3065,12 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
                 window.paint_path(path, color);
             }
         }
-        // The playhead pin: a rounded top and a rounder point (the owner's demo).
+        // The playhead pin (v1's): a flat top, straight sides and a point
+        // resting on the foot of the ruler.
         "ph-head" => {
-            let r = |key: &str| px(op.detail[key].as_f64().unwrap_or(0.) as f32);
-            window.paint_quad(
-                PaintQuad::new(area)
-                    .background(color)
-                    .corner_radii(Corners {
-                        top_left: r("topRadius"),
-                        top_right: r("topRadius"),
-                        bottom_right: r("bottomRadius"),
-                        bottom_left: r("bottomRadius"),
-                    }),
-            );
+            if let Ok(path) = playhead_pin(area).build() {
+                window.paint_path(path, color);
+            }
         }
         "line" => {
             if let (Some(from), Some(to)) =
@@ -3317,4 +3331,20 @@ mod cull_tests {
         // Partly on the canvas draws.
         assert!(!cull.skip(&op("clip:z", 395., 10., false)));
     }
+}
+
+/// The playhead pin in `area` (v1's 11 pt pentagon: the shoulders sit at
+/// six elevenths of its height, then the sides meet in a point).
+fn playhead_pin(area: Bounds<Pixels>) -> PathBuilder {
+    let (l, r) = (area.origin.x, area.origin.x + area.size.width);
+    let (top, bottom) = (area.origin.y, area.origin.y + area.size.height);
+    let shoulder = top + area.size.height * (6. / 11.);
+    let mut path = PathBuilder::fill();
+    path.move_to(point(l, top));
+    path.line_to(point(r, top));
+    path.line_to(point(r, shoulder));
+    path.line_to(point(area.center().x, bottom));
+    path.line_to(point(l, shoulder));
+    path.close();
+    path
 }

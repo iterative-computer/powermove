@@ -24,6 +24,11 @@ window still shows. A windowless host uses slot 0.
   Export panel. Exports land in `~/Powermove`, or `<profile>/exports` for an
   explicit `--profile`. Effects need `pm-glsl-compiler` beside the executable;
   `package.py --glsl-compiler` puts it there.
+  Windowless projects also own raster wrappers, base layer rasters and the
+  shared font registry. A hidden WebKit document answers extensions' DOM
+  measurements through the production applier, including frozen export realms;
+  no editor window is shown. This keeps text-replacing and caret effects active
+  in headless captures as well as shader-only effects.
 - `probe_media`, `sample_media_frames`, `media_contact_sheet` and
   `media_waveform` read originals through `pm-media`. Layer targets refuse until
   evaluated clip timing exists; pass `assetId`. The `informative` frame scan
@@ -60,7 +65,7 @@ the running binary in both directions.
 <!-- refused-tools -->
 | Tools | What is missing |
 |---|---|
-| `capture_panel`, `computer_use_panel`, `get_panel_state`, `get_workspace_state`, `interact_panel`, `open_panel`, `set_panel_layout` | A window: only the headless `--powermove-mcp` host refuses these. The running app answers them on its main thread (`app/src/panel_bridge.rs`). |
+| `capture_panel`, `computer_use_panel`, `get_panel_state`, `get_workspace_state`, `interact_panel`, `list_commands`, `open_panel`, `run_command`, `set_panel_layout` | A window: only the headless `--powermove-mcp` host refuses these. The running app answers them on its main thread (`app/src/panel_bridge.rs`). |
 | `store_install`, `store_library`, `store_publish`, `store_publish_prepare`, `store_uninstall`, `store_update` | Install and update: the Store serves no release signature yet (`GET /v1/store/releases/<id>/signature`, [store-host.md](store-host.md)), and public hashes come over the same channel as the bytes, so nothing can be verified. Library, uninstall and publish: main's provenance, update checks and publish confirmation aren't ported. |
 | `thread_launch`, `thread_send`, `thread_cancel` | A window: only the headless host refuses these. The app runs them on the window's Agent panel (`Builtins::agent_thread_control`). |
 | `orchestrator_capabilities`, `delegate_task`, `task_status`, `task_send`, `task_cancel`, `thread_watch`, `thread_unwatch`, `publish_visual_reply` | A window: only the headless host refuses these. The app runs them for the calling provider run (`--agent-run`) on its window's Agent panel (`builtins/src/agent_tasks.rs`). |
@@ -338,7 +343,8 @@ transport playhead instead of keeping a separate time store.
 The frozen command vocabulary contains `add_captions` and `edit_captions`,
 whose complete legacy adapters are pending. `transform_layers` compiles to
 primitive edits in the kernel over the batch's selection and playhead; text
-geometry needs the app's fonts, so a headless kernel refuses it. Unsupported
+geometry uses the app's font broker, including in the windowless app host.
+The standalone kernel without a font host still refuses it. Unsupported
 variants return explicit unavailable errors before applying any batch. The frozen `availableOperations` vocabulary is not
 a claim that these variants work. Some engine-dependent layer/property operations
 can also be refused by kernel validation. Full legacy edit-command conformance

@@ -100,6 +100,7 @@ impl Evaluation {
     }
 }
 fn role(l: &Value) -> Option<&'static str> {
+    if pm_scene3d::extrusion::eligible(l) && l["d"].get("extrusion").is_some(){return Some("extrusion");}
     match l["d"]["definition"].as_str() {
         Some("powermove.3d.object") => Some("object"),
         Some("powermove.3d.light") => Some("light"),
@@ -115,7 +116,7 @@ pub fn scene(host: &Automation, id: &str, args: &Value) -> Result<Value> {
     let mut channels = vec![];
     for (index, l) in p["layers"].as_array().into_iter().flatten().enumerate() {
         let Some(role) = role(l) else { continue };
-        layers.push(json!({"id":l["id"],"name":l["name"],"role":role,"parent":l["parent"],"visible":l["on"],"locked":l["lock"],"from":l["from"],"duration":l["dur"],"content":l["d"]["data"]}));
+        layers.push(json!({"id":l["id"],"name":l["name"],"role":role,"parent":l["parent"],"visible":l["on"],"locked":l["lock"],"from":l["from"],"duration":l["dur"],"content":if role=="extrusion"{json!({"extrusion":l["d"]["extrusion"],"type":l["type"]})}else{l["d"]["data"].clone()}}));
         for (path, prop) in crate::scene3d::properties(l) {
             let value = ev.query("evP", index, time, json!({"key":path,"prop":prop}))?;
             channels.push(json!({"layerId":l["id"],"path":path,"value":value,"keyframeCount":prop["kf"].as_array().map_or(0,Vec::len)}));
@@ -132,6 +133,11 @@ pub fn scene(host: &Automation, id: &str, args: &Value) -> Result<Value> {
             if let Some(format) = a.get("format") {
                 out["format"] = format.clone();
             }
+            // Per-part materials: edit_3d set_material_properties /
+            // set_material_map {target, materialIndex} address these slots.
+            if let Some(slots) = a.get("native3dMaterials") {
+                out["materialSlots"] = slots.clone();
+            }
             out
         })
         .collect::<Vec<_>>();
@@ -139,6 +145,40 @@ pub fn scene(host: &Automation, id: &str, args: &Value) -> Result<Value> {
     let issues=p["layers"].as_array().into_iter().flatten().filter(|l|l["native3dUpgradeIssue"].is_string()).map(|l|json!({"layerId":l["id"],"message":l["native3dUpgradeIssue"],"diagnostic":l["native3dUpgradeDiagnostic"],"sourceRetained":l["native3dArchive"].get("source").is_some()})).collect::<Vec<_>>();
     if !issues.is_empty() {
         result["upgradeIssues"] = json!(issues);
+    }
+    // A viewer double-click's part pick, headless: the imported-model part
+    // under composition pixel [x, y] through the shot camera.
+    if let Some(at) = args.get("pick").filter(|v| !v.is_null()) {
+        let at = at
+            .as_array()
+            .filter(|a| a.len() == 2)
+            .and_then(|a| Some([a[0].as_f64()?, a[1].as_f64()?]))
+            .filter(|a| a.iter().all(|v| v.is_finite()))
+            .ok_or_else(|| Error::invalid("pick must be [x, y] in composition pixels"))?;
+        let snapshot = host.view(id)?.snapshot;
+        let geometry = host.scene_geometry(id)?;
+        let hit = pm_panel_studio3d::viewport::pick_part_at(&snapshot, time, at, &*geometry)
+            .map_err(|e| Error::invalid(e.to_string()))?;
+        result["pick"] = match hit {
+            Some((layer, hit)) => {
+                let asset = p["layers"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .find(|l| l["id"] == layer.as_str())
+                    .and_then(|l| l["d"]["data"]["object"]["source"]["assetId"].as_str())
+                    .unwrap_or_default();
+                let name = p["assets"][asset]["native3dMaterials"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .find(|s| s["index"] == hit.slot)
+                    .and_then(|s| s["name"].as_str())
+                    .map_or_else(|| hit.name.clone(), str::to_owned);
+                json!({"layerId":layer,"materialIndex":hit.slot,"slotName":name,"point":hit.point,"distance":hit.distance})
+            }
+            None => Value::Null,
+        };
     }
     if let Some(issue) = p.get("native3dHistoryIssue") {
         result["historyUpgradeIssue"] = issue.clone();

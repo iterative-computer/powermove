@@ -1110,7 +1110,7 @@ impl crate::composite::EffectHost for Effects {
         prefix: Option<usize>,
         measure: Option<&mut dyn pm_eval::text_geom::TextMeasure>,
     ) -> pm_eval::JsResult<Result<Option<crate::composite::PreparedEffects>, crate::Feature>> {
-        let steps = match plan::effect_steps_raster(
+        let steps = match plan::effect_steps_frame(
             scope,
             self,
             layer,
@@ -1119,6 +1119,7 @@ impl crate::composite::EffectHost for Effects {
             prefix,
             None,
             measure,
+            frame.owner,
         )? {
             Ok(steps) => steps,
             Err(f) => return Ok(Err(f)),

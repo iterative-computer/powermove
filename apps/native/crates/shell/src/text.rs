@@ -173,6 +173,8 @@ impl TextField {
         })
         .unwrap_or_default();
         self.slot.set_font(&face, size);
+        // Code keeps Tab for indenting.
+        self.slot.set_tab_inserts(true);
         // Code: no spelling marks, corrections or smart substitutions.
         if let Some(view) = self
             .slot

@@ -53,6 +53,8 @@ pub enum ProbeIssue {
 /// What the source pass needs to know about a source.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SourceColor {
+    /// Legacy WebGL video uploads are RGBA8 even in a float composition.
+    pub unorm8: bool,
     pub transfer: Transfer,
     pub primaries: Primaries,
     pub matrix: MatrixCoefficients,
@@ -264,6 +266,7 @@ fn still_reading(
     if si.colorsync {
         return Ok(InterpretedStill {
             color: SourceColor {
+                unorm8: false,
                 transfer: Transfer::Linear,
                 primaries: Primaries::Bt709,
                 matrix,
@@ -290,6 +293,7 @@ fn still_reading(
     let profile = color.icc_class.is_some();
     Ok(InterpretedStill {
         color: SourceColor {
+            unorm8: false,
             transfer: r.transfer.value,
             primaries: r.primaries.value,
             matrix,
@@ -332,13 +336,26 @@ fn per_stamp<T: Clone>(
     Some(v)
 }
 
-/// Whether `path`'s video is stored as R′G′B′ (`CodecInfo::is_rgb`); `None`
-/// when the file is offline or has no video. Read once per file stamp.
-pub(crate) fn stores_rgb(path: &Path) -> Option<bool> {
-    static CACHE: StampCache<Option<bool>> = OnceLock::new();
+/// How `path`'s video stores its codes: R′G′B′ (`CodecInfo::is_rgb`), or
+/// Y′CbCr in the range the file says (its reading before any override).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StoredCodes {
+    Rgb,
+    YCbCr(pm_protocol::color::Range),
+}
+
+/// [`StoredCodes`] of `path`; `None` when the file is offline or has no
+/// video. Read once per file stamp.
+pub(crate) fn stored_codes(path: &Path) -> Option<StoredCodes> {
+    static CACHE: StampCache<Option<StoredCodes>> = OnceLock::new();
     per_stamp(&CACHE, path, || {
         let source = MediaSource::open(path).ok()?;
-        Some(source.probe.video.as_ref()?.codec.is_rgb())
+        let video = source.probe.video.as_ref()?;
+        Some(if video.codec.is_rgb() {
+            StoredCodes::Rgb
+        } else {
+            StoredCodes::YCbCr(video.color.interpreted.range)
+        })
     })
     .flatten()
 }
@@ -886,8 +903,15 @@ fn video_color(
     // The file's reading is the source monitor's (`frame_reading`, with its
     // image-sequence rule); Interpret Footage members replace their fields,
     // and the host's per-file override replaces it all.
-    let file = pm_media::probe::color::frame_reading(&v.color, sequence);
+    let file = if interp.electron_color {
+        pm_media::probe::color::electron_frame_reading(&v.color, &v.codec.codec, sequence)
+    } else {
+        pm_media::probe::color::frame_reading(&v.color, sequence)
+    };
     let mut desc = reading.color;
+    if interp.transfer.is_none() {
+        desc.transfer = file.transfer;
+    }
     if interp.matrix.is_none() {
         desc.matrix = file.matrix;
     }
@@ -896,6 +920,12 @@ fn video_color(
     }
     let desc = override_color.unwrap_or(desc);
     SourceColor {
+        unorm8: interp.electron_color
+            && interp.primaries.is_none()
+            && interp.transfer.is_none()
+            && interp.matrix.is_none()
+            && desc.primaries == Primaries::Bt709
+            && desc.transfer == Transfer::DisplayE,
         transfer: desc.transfer,
         primaries: desc.primaries,
         matrix: desc.matrix,
@@ -1017,7 +1047,7 @@ fn source_uniform(
         c: [
             0,
             0,
-            u32::from(precision == Precision::Float16),
+            u32::from(precision == Precision::Float16) | (u32::from(color.unorm8) << 1),
             u32::from(convert_primaries),
         ],
         matte,
@@ -1158,7 +1188,7 @@ fn convert_format_scaled(
     if format != working_format(Precision::Float16) {
         // Only half-float storage rounds through f16; any other format
         // stores the f32 conversion directly.
-        uniform.c[2] = 0;
+        uniform.c[2] &= !1;
     }
     let buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("pm source params"),
@@ -2147,6 +2177,15 @@ impl MediaCache {
     /// Bytes of converted textures held (images and decoded frames).
     pub fn texture_bytes(&self) -> u64 {
         self.bytes
+    }
+
+    /// Drops the stills read whole (not at a view's size). A viewer's
+    /// settled paused frame reads them as an export does and keeps none of
+    /// them after it: held, large originals cost gigabytes.
+    pub fn release_whole_images(&mut self) {
+        self.images.retain(|key, _| key.edge.is_some());
+        self.image_seen.retain(|key, _| key.edge.is_some());
+        self.recount();
     }
 
     pub fn trim_images(&mut self, budget: u64) {

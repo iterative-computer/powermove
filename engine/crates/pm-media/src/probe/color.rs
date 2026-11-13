@@ -72,6 +72,53 @@ pub fn frame_reading(color: &ColorInfo, sequence: bool) -> ColorDescription {
     desc
 }
 
+/// Electron's legacy video path. Software Canvas frames with an invalid/
+/// partial colour space fall back to Rec.601, independently of dimensions
+/// (crbug.com/41380578). On macOS H.264/HEVC instead go through VideoToolbox:
+/// CoreVideo supplies the missing matrix (HD Rec.709, SD Rec.601). Opaque
+/// 4:2:0 VP9 profiles 0/2 also use VideoToolbox on macOS: Chromium's
+/// SetVp9CodecConfigurationBox defaults unspecified fields to Rec.709. VP9
+/// alpha uses the software decoder instead. Keep that distinction even when
+/// FFmpeg reports identical partial colour tags.
+/// This is opt-in per imported asset; the native video table is unchanged.
+///
+/// Electron's `proxyColorArgs` preserves non-HDR BT.2020 camera R′G′B′ code
+/// values and relabels them Rec.709 before grading. Keep the input YUV matrix
+/// (decode those values first); suppress only the gamut/transfer conversion.
+pub fn electron_frame_reading(color: &ColorInfo, codec: &str, sequence: bool) -> ColorDescription {
+    let mut desc = frame_reading(color, sequence);
+    let opaque_vp9 = cfg!(target_os = "macos")
+        && codec == "vp9"
+        && !sequence
+        && color.interpreted.alpha == AlphaMode::Opaque
+        && color.interpreted.subsampling == Subsampling::S420
+        && matches!(color.interpreted.bit_depth, 8 | 10);
+    let core_video = cfg!(target_os = "macos") && matches!(codec, "h264" | "hevc");
+    if opaque_vp9 && color.tagged.matrix.is_none() {
+        // vt_config_util's synthesized vpcC uses 709 even for SD VP9.
+        desc.matrix = MatrixCoefficients::Bt709;
+        if color.tagged.primaries.is_none() {
+            desc.primaries = Primaries::Bt709;
+        }
+    } else if !core_video
+        && color.tagged.matrix.is_none()
+        && desc.matrix != MatrixCoefficients::Identity
+    {
+        desc.matrix = MatrixCoefficients::Bt601;
+    }
+    if !matches!(desc.transfer, Transfer::Pq | Transfer::Hlg)
+        && (desc.primaries == Primaries::Bt2020
+            || matches!(
+                desc.matrix,
+                MatrixCoefficients::Bt2020Ncl | MatrixCoefficients::Bt2020Cl
+            ))
+    {
+        desc.primaries = Primaries::Bt709;
+        desc.transfer = Transfer::DisplayE;
+    }
+    desc
+}
+
 /// SMPTE ST 2086 mastering display, chromaticities as (x, y).
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -194,9 +241,7 @@ pub fn interpret(
     ];
     // FFmpeg reports matrix 0 (RGB) for untagged RGB codecs too; only an
     // RGB pixel format keeps it.
-    let rgb_format = info.pix_fmt.starts_with("gbr")
-        || info.pix_fmt.starts_with("rgb")
-        || info.pix_fmt.starts_with("bgr");
+    let rgb_format = crate::ff::rgb_pixel_format(&info.pix_fmt);
     if tagged.matrix == Some(0) && !rgb_format {
         tagged.matrix = None;
         from[2] = None;
@@ -626,6 +671,137 @@ mod interpret_tests {
                 );
                 assert_eq!(frame_reading(&c, true).primaries, Primaries::Bt709);
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod electron_tests {
+    use super::*;
+
+    fn color(tags: [i32; 3]) -> ColorInfo {
+        color_at(tags, 1280, 720)
+    }
+
+    fn color_at(tags: [i32; 3], width: i32, height: i32) -> ColorInfo {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/h264-aac.mp4");
+        let input = crate::ff::Input::open(&path).unwrap();
+        let mut info = input.codec_info(input.best_video().unwrap());
+        (info.width, info.height) = (width, height);
+        info.color_primaries = tags[0] as _;
+        info.color_trc = tags[1] as _;
+        info.color_space = tags[2] as _;
+        interpret(&info, None, &SideData::default(), None)
+    }
+
+    #[test]
+    fn partial_legacy_video_uses_canvas_601_without_changing_native_hd() {
+        let mut c = color([1, 13, 2]);
+        c.interpreted.alpha = AlphaMode::Straight;
+        assert_eq!(frame_reading(&c, false).matrix, MatrixCoefficients::Bt709);
+        assert_eq!(
+            electron_frame_reading(&c, "vp9", false).matrix,
+            MatrixCoefficients::Bt601
+        );
+        let tagged = color([1, 13, 1]);
+        assert_eq!(
+            electron_frame_reading(&tagged, "vp9", false).matrix,
+            MatrixCoefficients::Bt709
+        );
+    }
+
+    #[test]
+    fn opaque_vp9_uses_videotoolbox_defaults_but_alpha_keeps_canvas_defaults() {
+        for tags in [[2, 2, 2], [1, 13, 2]] {
+            for size in [(640, 480), (1404, 1080)] {
+                let opaque = color_at(tags, size.0, size.1);
+                let native = frame_reading(&opaque, false);
+                assert_eq!(
+                    electron_frame_reading(&opaque, "vp9", false).matrix,
+                    if cfg!(target_os = "macos") {
+                        MatrixCoefficients::Bt709
+                    } else {
+                        MatrixCoefficients::Bt601
+                    }
+                );
+                let mut alpha = opaque.clone();
+                alpha.interpreted.alpha = AlphaMode::Straight;
+                assert_eq!(
+                    electron_frame_reading(&alpha, "vp9", false).matrix,
+                    MatrixCoefficients::Bt601
+                );
+                assert_eq!(
+                    electron_frame_reading(&opaque, "vp9", true).matrix,
+                    MatrixCoefficients::Bt601
+                );
+                assert_eq!(frame_reading(&opaque, false), native);
+                for depth in [8, 10] {
+                    let mut ten_bit = opaque.clone();
+                    ten_bit.interpreted.bit_depth = depth;
+                    assert_eq!(
+                        electron_frame_reading(&ten_bit, "vp9", false).matrix,
+                        if cfg!(target_os = "macos") {
+                            MatrixCoefficients::Bt709
+                        } else {
+                            MatrixCoefficients::Bt601
+                        }
+                    );
+                }
+                let mut unsupported = opaque.clone();
+                unsupported.interpreted.subsampling = Subsampling::S444;
+                assert_eq!(
+                    electron_frame_reading(&unsupported, "vp9", false).matrix,
+                    MatrixCoefficients::Bt601
+                );
+            }
+        }
+        let explicit = color([1, 13, 6]);
+        assert_eq!(
+            electron_frame_reading(&explicit, "vp9", false).matrix,
+            MatrixCoefficients::Bt601
+        );
+    }
+
+    #[test]
+    fn legacy_matrix_defaults_follow_the_codec_decoder_path() {
+        for tags in [[2, 2, 2], [1, 13, 2]] {
+            let mut c = color(tags);
+            c.interpreted.alpha = AlphaMode::Straight;
+            assert_eq!(frame_reading(&c, false).matrix, MatrixCoefficients::Bt709);
+            assert_eq!(
+                electron_frame_reading(&c, "vp9", false).matrix,
+                MatrixCoefficients::Bt601
+            );
+            for codec in ["h264", "hevc"] {
+                assert_eq!(
+                    electron_frame_reading(&c, codec, false).matrix,
+                    if cfg!(target_os = "macos") {
+                        MatrixCoefficients::Bt709
+                    } else {
+                        MatrixCoefficients::Bt601
+                    },
+                    "{codec} {tags:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_log_preserves_camera_codes_but_hdr_and_native_keep_their_tags() {
+        let c = color([9, 1, 9]);
+        let native = frame_reading(&c, false);
+        assert_eq!(native.primaries, Primaries::Bt2020);
+        let legacy = electron_frame_reading(&c, "hevc", false);
+        assert_eq!(legacy.primaries, Primaries::Bt709);
+        assert_eq!(legacy.transfer, Transfer::DisplayE);
+        assert_eq!(legacy.matrix, MatrixCoefficients::Bt2020Ncl);
+        for transfer in [16, 18] {
+            let hdr = color([9, transfer, 9]);
+            assert_eq!(
+                electron_frame_reading(&hdr, "hevc", false),
+                frame_reading(&hdr, false)
+            );
         }
     }
 }

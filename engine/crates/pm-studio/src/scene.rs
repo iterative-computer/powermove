@@ -8,7 +8,7 @@ use crate::mesh::{self, Mesh};
 /// The layered material (an OpenPBR subset): base metal/dielectric, specular
 /// GGX, a clear coat, transmission, and emission (optionally from the screen
 /// texture).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Material {
     pub base: Vec3,
     pub metallic: f32,
@@ -34,52 +34,17 @@ pub struct Material {
     pub anisotropy: f32,
     /// Subsurface mean free path in scene units (0: opaque).
     pub subsurface: f32,
+    /// Procedural surface: 0 plain, 1 ground, 2 stone, 3 bark, 4 thin leaf, 5 grass, 6 birch bark.
+    #[serde(default)]
+    pub procedural: u32,
 }
 
 impl Material {
-    /// One immutable physical record; avoids rebuilding every earlier material
-    /// while an imported assembly appends its parts.
-    pub fn gpu(&self) -> GpuMaterial {
-        GpuMaterial {
-            base: self.base.to4(self.metallic),
-            spec: [
-                self.roughness.max(0.002),
-                self.coat,
-                self.coat_roughness.max(0.002),
-                self.transmission,
-            ],
-            emit: self.emission.to4(self.subsurface),
-            extra: [self.ior, self.specular, 1.0, self.anisotropy],
-            // The display's composition is texture layer 0.
-            maps: [-1.0, if self.screen { 0.0 } else { -1.0 }, -1.0, -1.0],
-            layers: [self.sheen, self.film_nm, self.dispersion, self.droplets],
-        }
-    }
     pub fn dielectric(base: Vec3, roughness: f32) -> Self {
-        Material {
-            base,
-            metallic: 0.0,
-            roughness,
-            coat: 0.0,
-            coat_roughness: 0.03,
-            transmission: 0.0,
-            ior: 1.5,
-            specular: 1.0,
-            emission: Vec3::ZERO,
-            screen: false,
-            sheen: 0.0,
-            film_nm: 0.0,
-            dispersion: 0.0,
-            droplets: 0.0,
-            anisotropy: 0.0,
-            subsurface: 0.0,
-        }
+        Material { base, metallic: 0.0, roughness, coat: 0.0, coat_roughness: 0.03, transmission: 0.0, ior: 1.5, specular: 1.0, emission: Vec3::ZERO, screen: false, sheen: 0.0, film_nm: 0.0, dispersion: 0.0, droplets: 0.0, anisotropy: 0.0, subsurface: 0.0, procedural: 0 }
     }
     pub fn metal(base: Vec3, roughness: f32) -> Self {
-        Material {
-            metallic: 1.0,
-            ..Self::dielectric(base, roughness)
-        }
+        Material { metallic: 1.0, ..Self::dielectric(base, roughness) }
     }
     /// Anodised aluminium: a slightly rough metal (bead-blasted finish).
     pub fn anodized(hex: &str) -> Self {
@@ -87,32 +52,20 @@ impl Material {
     }
     /// Cover glass over a black display: a dark dielectric with a mirror coat.
     pub fn cover_glass() -> Self {
-        Material {
-            coat: 1.0,
-            coat_roughness: 0.012,
-            specular: 0.0,
-            ..Self::dielectric(v3(0.003, 0.003, 0.004), 0.6)
-        }
+        Material { coat: 1.0, coat_roughness: 0.012, specular: 0.0, ..Self::dielectric(v3(0.003, 0.003, 0.004), 0.6) }
     }
     /// A lit display under its glass: emission from the screen composition.
     pub fn display(nits: f32) -> Self {
-        Material {
-            emission: Vec3::splat(nits),
-            screen: true,
-            ..Self::cover_glass()
-        }
+        Material { emission: Vec3::splat(nits), screen: true, ..Self::cover_glass() }
     }
     pub fn glass(tint: Vec3, roughness: f32) -> Self {
-        Material {
-            transmission: 1.0,
-            ..Self::dielectric(tint, roughness)
-        }
+        Material { transmission: 1.0, ..Self::dielectric(tint, roughness) }
     }
 }
 
 /// A rectangular softbox: `center`, two half-extent vectors spanning its face,
 /// emitting toward `u × v`.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Softbox {
     pub center: Vec3,
     pub u: Vec3,
@@ -123,33 +76,16 @@ pub struct Softbox {
 impl Softbox {
     /// A softbox of `width` × `height` mm at `distance` from `target`, seen
     /// from azimuth/elevation in degrees, facing the target.
-    pub fn aimed(
-        target: Vec3,
-        azimuth: f32,
-        elevation: f32,
-        distance: f32,
-        width: f32,
-        height: f32,
-        radiance: Vec3,
-    ) -> Self {
+    pub fn aimed(target: Vec3, azimuth: f32, elevation: f32, distance: f32, width: f32, height: f32, radiance: Vec3) -> Self {
         let (a, e) = (azimuth.to_radians(), elevation.to_radians());
         let dir = v3(a.sin() * e.cos(), e.sin(), a.cos() * e.cos());
         let center = target + dir * distance;
         let facing = -dir;
         let side = Vec3::Y.cross(facing).normalize();
-        let side = if side.length() < 0.5 {
-            v3(1.0, 0.0, 0.0)
-        } else {
-            side
-        };
+        let side = if side.length() < 0.5 { v3(1.0, 0.0, 0.0) } else { side };
         let up = facing.cross(side).normalize();
         // u × v must point along `facing`.
-        Softbox {
-            center,
-            u: side * (width / 2.0),
-            v: up * (height / 2.0),
-            radiance,
-        }
+        Softbox { center, u: side * (width / 2.0), v: up * (height / 2.0), radiance }
     }
 }
 
@@ -158,37 +94,20 @@ impl Softbox {
     /// `point` (surface normal `normal`) as seen from `eye`. The view ray is
     /// mirrored about the normal and the light sits `distance` along it,
     /// facing back. Bigger `width`/`height` give a softer highlight.
-    pub fn for_highlight(
-        point: Vec3,
-        normal: Vec3,
-        eye: Vec3,
-        distance: f32,
-        width: f32,
-        height: f32,
-        radiance: Vec3,
-    ) -> Self {
+    pub fn for_highlight(point: Vec3, normal: Vec3, eye: Vec3, distance: f32, width: f32, height: f32, radiance: Vec3) -> Self {
         let n = normal.normalize();
         let v = (eye - point).normalize();
         let r = n * (2.0 * v.dot(n)) - v;
         let center = point + r * distance;
         let facing = -r;
         let side = Vec3::Y.cross(facing);
-        let side = if side.length() < 1e-3 {
-            v3(1.0, 0.0, 0.0)
-        } else {
-            side.normalize()
-        };
+        let side = if side.length() < 1e-3 { v3(1.0, 0.0, 0.0) } else { side.normalize() };
         let up = facing.cross(side).normalize();
-        Softbox {
-            center,
-            u: side * (width / 2.0),
-            v: up * (height / 2.0),
-            radiance,
-        }
+        Softbox { center, u: side * (width / 2.0), v: up * (height / 2.0), radiance }
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Camera {
     pub position: Vec3,
     pub target: Vec3,
@@ -201,24 +120,41 @@ pub struct Camera {
 }
 
 impl Camera {
+    pub fn aperture_radius(&self,meters_per_unit:f32)->f32 {
+        if self.f_stop>0.{self.focal_mm*0.001/(2.*self.f_stop*meters_per_unit)}else{0.}
+    }
+    /// An orthonormal camera frame, including views straight up/down at a sky.
+    pub fn basis(&self)->(Vec3,Vec3,Vec3){
+        let forward=(self.target-self.position).normalize();let side=forward.cross(Vec3::Y);
+        let right=if side.length()<1e-6 {v3(1.,0.,0.)}else{side.normalize()};
+        (forward,right,right.cross(forward).normalize())
+    }
     pub fn lens(position: Vec3, target: Vec3, focal_mm: f32, f_stop: f32) -> Self {
-        Camera {
-            position,
-            target,
-            fov: 2.0 * (12.0f32 / focal_mm).atan().to_degrees(),
-            f_stop,
-            focus: None,
-            focal_mm,
-        }
+        Camera { position, target, fov: 2.0 * (12.0f32 / focal_mm).atan().to_degrees(), f_stop, focus: None, focal_mm }
     }
 }
 
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Object {
     pub mesh: Mesh,
     pub material: usize,
 }
 
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Scene {
+    /// Metres represented by one scene unit (legacy product scenes use mm).
+    #[serde(default="default_meters_per_unit")]
+    pub meters_per_unit:f32,
+    #[serde(default)]
+    pub world: crate::environment::World,
+    #[serde(default)]
+    pub instances: Vec<crate::scatter::Instance>,
+    #[serde(default)]
+    pub scatters: Vec<crate::scatter::Scatter>,
+    #[serde(default)]
+    pub terrains: Vec<crate::terrain::Terrain>,
+    #[serde(default)]
+    pub displacements: Vec<crate::displacement::Displacement>,
     pub objects: Vec<Object>,
     pub materials: Vec<Material>,
     pub lights: Vec<Softbox>,
@@ -237,8 +173,11 @@ pub struct Scene {
     pub layers: Option<Vec<u32>>,
 }
 
+pub fn default_meters_per_unit()->f32{0.001}
+
 /// What the GPU reads, flattened.
 pub struct Prepared {
+    pub instancing: Option<crate::geometry::Instancing>,
     /// Corner positions only (what intersection reads), 3 per triangle.
     pub positions: Vec<[f32; 4]>,
     pub tris: Vec<GpuTri>,
@@ -250,7 +189,7 @@ pub struct Prepared {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable, serde::Serialize, serde::Deserialize)]
 pub struct GpuTri {
     pub n: [[f32; 4]; 3],
     /// uv0.xy, uv1.xy
@@ -259,21 +198,41 @@ pub struct GpuTri {
     pub uv2m: [f32; 4],
     /// Per-triangle tangent (xyz) and handedness (w), for normal maps.
     pub tangent: [f32; 4],
+    #[serde(default)]
+    pub uv01_secondary: [f32; 4],
+    #[serde(default)]
+    pub uv2_secondary: [f32; 4],
+    #[serde(default)]
+    pub tangent_secondary: [f32; 4],
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable, serde::Serialize, serde::Deserialize)]
+pub struct GpuTextureMap {
+    pub info: [f32;4], // layer, UV set, S/T wrap (repeat/clamp/mirror)
+    pub u: [f32;4],
+    pub v: [f32;4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable, serde::Serialize, serde::Deserialize)]
 pub struct GpuMaterial {
-    pub base: [f32; 4],   // rgb, metallic
-    pub spec: [f32; 4],   // roughness, coat, coat roughness, transmission
-    pub emit: [f32; 4],   // rgb, screen flag
-    pub extra: [f32; 4],  // ior, specular, opacity
-    pub maps: [f32; 4],   // texture layers: color, emissive, orm, normal (-1: none)
+    pub base: [f32; 4],  // rgb, metallic
+    pub spec: [f32; 4],  // roughness, coat, coat roughness, transmission
+    pub emit: [f32; 4],  // rgb, screen flag
+    pub extra: [f32; 4], // ior, specular, opacity
+    pub maps: [f32; 4],  // texture layers: color, emissive, orm, normal (-1: none)
     pub layers: [f32; 4], // sheen, thin-film thickness (nm), dispersion, droplets
+    pub policy: [f32; 4], // ambient response, flags (casts=1,receives=2,double-sided=4,unlit=8,vertex-color=16,hidden-secondary=32,legacy-map-v-flip=128), alpha test
+    pub maps2: [f32; 4], // roughness, metalness, AO texture indices, normal scale
+    #[serde(default)]
+    pub imported: [[f32;4];6],
+    #[serde(default)]
+    pub physical_maps: [GpuTextureMap;18],
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable, serde::Serialize, serde::Deserialize)]
 pub struct GpuLight {
     pub pos: [f32; 4], // softbox centre, kind 0
     pub u: [f32; 4],   // half extent, area
@@ -288,156 +247,96 @@ impl GpuLight {
     /// `angular_radius` radians across.
     pub fn sun(toward: Vec3, angular_radius: f32, radiance: Vec3) -> GpuLight {
         let d = toward.normalize();
-        GpuLight {
-            pos: d.to4(3.0),
-            u: [angular_radius.cos(), 0.0, 0.0, 0.0],
-            v: [0.0; 4],
-            radiance: radiance.to4(0.0),
-        }
+        GpuLight { pos: d.to4(3.0), u: [angular_radius.cos(), 0.0, 0.0, 0.0], v: [0.0; 4], radiance: radiance.to4(0.0) }
     }
     /// A small sphere: `radiance` is per unit area of its surface.
     pub fn sphere(center: Vec3, radius: f32, radiance: Vec3) -> GpuLight {
-        GpuLight {
-            pos: center.to4(1.0),
-            u: [radius, 0.0, 0.0, 0.0],
-            v: [0.0; 4],
-            radiance: radiance.to4(0.0),
-        }
+        GpuLight { pos: center.to4(1.0), u: [radius, 0.0, 2.0, 0.0], v: [0.0; 4], radiance: radiance.to4(0.0) }
     }
     /// A spot: `axis` points where it shines; cosines of the outer and inner cone.
-    pub fn spot(
-        center: Vec3,
-        radius: f32,
-        axis: Vec3,
-        cos_outer: f32,
-        cos_inner: f32,
-        radiance: Vec3,
-    ) -> GpuLight {
+    pub fn spot(center: Vec3, radius: f32, axis: Vec3, cos_outer: f32, cos_inner: f32, radiance: Vec3) -> GpuLight {
         // trace.wgsl compares the ray toward the light with the axis, so it is stored flipped.
         let a = axis.normalize() * -1.0;
-        GpuLight {
-            pos: center.to4(2.0),
-            u: [radius, 0.0, 0.0, 0.0],
-            v: a.to4(cos_outer),
-            radiance: radiance.to4(cos_inner.max(cos_outer + 1e-4)),
-        }
+        GpuLight { pos: center.to4(2.0), u: [radius, 0.0, 2.0, 0.0], v: a.to4(cos_outer), radiance: radiance.to4(cos_inner.max(cos_outer + 1e-4)) }
     }
 }
 
 impl Scene {
     pub fn prepare(&self) -> Prepared {
+        if !self.terrains.is_empty() || !self.scatters.is_empty() || !self.displacements.is_empty() {return self.expanded().expect("validated environment geometry").prepare();}
+        if !self.instances.is_empty() {return crate::geometry::prepare(self);}
         let mut corners = Vec::new();
         let mut raw = Vec::new();
         let mut positions_raw = Vec::new();
         for (object, o) in self.objects.iter().enumerate() {
             let m = &o.mesh;
-            let layer = self
-                .layers
-                .as_ref()
-                .and_then(|l| l.get(object).copied())
-                .unwrap_or(object as u32);
-            for t in &m.indices {
+            let layer = self.layers.as_ref().and_then(|l| l.get(object).copied()).unwrap_or(object as u32);
+            for (face, t) in m.indices.iter().enumerate() {
                 let [a, b, c] = t.map(|i| i as usize);
                 corners.push([m.positions[a], m.positions[b], m.positions[c]]);
-                positions_raw.push([
-                    m.positions[a].to4(0.0),
-                    m.positions[b].to4(0.0),
-                    m.positions[c].to4(0.0),
-                ]);
+                positions_raw.push([m.positions[a].to4(0.0), m.positions[b].to4(0.0), m.positions[c].to4(0.0)]);
                 raw.push(GpuTri {
-                    n: [
-                        m.normals[a].to4(0.0),
-                        m.normals[b].to4(0.0),
-                        m.normals[c].to4(0.0),
-                    ],
+                    n: [a,b,c].map(|i| m.normals[i].to4(m.colors.get(i).map_or(f32::from_bits(0xffffffff), |c| {
+                        let b=c.to_array().map(|v|(v.clamp(0.,1.)*255.).round() as u32);
+                        f32::from_bits(b[0] | b[1]<<8 | b[2]<<16 | 255<<24)
+                    }))),
                     uv01: [m.uvs[a][0], m.uvs[a][1], m.uvs[b][0], m.uvs[b][1]],
-                    uv2m: [m.uvs[c][0], m.uvs[c][1], o.material as f32, layer as f32],
-                    tangent: tangent(
-                        [m.positions[a], m.positions[b], m.positions[c]],
-                        [m.uvs[a], m.uvs[b], m.uvs[c]],
-                    ),
+                    uv2m: [m.uvs[c][0], m.uvs[c][1], m.triangle_materials.get(face).copied().unwrap_or(o.material) as f32, layer as f32],
+                    tangent: tangent([m.positions[a], m.positions[b], m.positions[c]], [m.uvs[a], m.uvs[b], m.uvs[c]]),
+                    uv01_secondary:[m.uvs[a][0],m.uvs[a][1],m.uvs[b][0],m.uvs[b][1]],
+                    uv2_secondary:[m.uvs[c][0],m.uvs[c][1],0.,0.],
+                    tangent_secondary:tangent([m.positions[a],m.positions[b],m.positions[c]],[m.uvs[a],m.uvs[b],m.uvs[c]]),
                 });
             }
         }
         let (nodes, order) = bvh::build(&corners);
         let tris: Vec<GpuTri> = order.iter().map(|&i| raw[i as usize]).collect();
-        let positions = order
-            .iter()
-            .flat_map(|&i| positions_raw[i as usize])
-            .collect();
+        let positions = order.iter().flat_map(|&i| positions_raw[i as usize]).collect();
         // Two levels, as the app builds them: a top-level node (0) over one
         // identity instance whose own BVH starts at node 1.
         let blas = bvh::widen(&nodes);
-        let (lo, hi) = corners.iter().flatten().fold(
-            (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
-            |(a, b), &p| (a.min(p), b.max(p)),
-        );
+        let (lo, hi) = corners.iter().flatten().fold((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)), |(a, b), &p| (a.min(p), b.max(p)));
         let mut nodes = vec![bvh::WideNode {
-            lmin: [lo.x, lo.y, lo.z],
-            left: 0,
-            lmax: [hi.x, hi.y, hi.z],
-            lcount: 1,
-            rmin: [f32::MAX; 3],
-            right: 0,
-            rmax: [f32::MIN; 3],
-            rcount: u32::MAX,
+            lmin: [lo.x, lo.y, lo.z], left: 0, lmax: [hi.x, hi.y, hi.z], lcount: 1,
+            rmin: [f32::MAX; 3], right: 0, rmax: [f32::MIN; 3], rcount: u32::MAX,
         }];
         nodes.extend(blas.into_iter().map(|mut n| {
-            if n.lcount == 0 {
-                n.left += 1;
-            }
-            if n.rcount == 0 {
-                n.right += 1;
-            }
+            if n.lcount == 0 { n.left += 1; }
+            if n.rcount == 0 { n.right += 1; }
             n
         }));
-        let materials = self.gpu_materials();
-        let lights = self.gpu_lights();
-        let mut sdata: Vec<[f32; 4]> = lights
+        let materials = self
+            .materials
             .iter()
-            .flat_map(|l: &GpuLight| [l.pos, l.u, l.v, l.radiance])
-            .collect();
-        // The identity instance: world→object, normal matrix (n0.w: BVH root 1), object→world.
-        sdata.extend([
-            [1.0, 0.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0, 0.0],
-            [0.0, 0.0, 1.0, 0.0],
-        ]);
-        sdata.extend([
-            [1.0, 0.0, 0.0, 1.0],
-            [0.0, 1.0, 0.0, 0.0],
-            [0.0, 0.0, 1.0, 0.0],
-        ]);
-        sdata.extend([
-            [1.0, 0.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0, 0.0],
-            [0.0, 0.0, 1.0, 0.0],
-        ]);
-        Prepared {
-            positions,
-            tris,
-            nodes,
-            materials,
-            lights,
-            sdata,
-        }
-    }
-
-    pub fn gpu_materials(&self) -> Vec<GpuMaterial> {
-        self.materials.iter().map(|m| m.gpu()).collect()
-    }
-
-    pub fn gpu_lights(&self) -> Vec<GpuLight> {
-        self.lights
-            .iter()
-            .map(|l| GpuLight {
-                pos: l.center.to4(0.0),
-                u: l.u.to4(4.0 * l.u.cross(l.v).length()),
-                v: l.v.to4(0.0),
-                radiance: l.radiance.to4(0.0),
+            .enumerate().map(|(index, m)| GpuMaterial {
+                base: m.base.to4(m.metallic),
+                spec: [m.roughness.max(0.002), m.coat, m.coat_roughness.max(0.002), m.transmission],
+                emit: m.emission.to4(m.subsurface),
+                extra: [m.ior, m.specular, 1.0, m.anisotropy],
+                // The display's composition is texture layer 0.
+                maps: [-1.0, if m.screen { 0.0 } else { -1.0 }, -1.0, -1.0],
+                layers: [m.sheen, m.film_nm, m.dispersion, m.droplets],
+                policy: [1.0, if self.objects.iter().any(|o| !o.mesh.colors.is_empty() &&
+                    (o.material==index || o.mesh.triangle_materials.contains(&index))) {23.0} else {7.0}, 0.0, m.procedural as f32],
+                maps2: [-1.0, -1.0, -1.0, 1.0],
+                imported:[[0.;4];6],
+                physical_maps:[GpuTextureMap::default();18],
             })
+            .collect();
+        let lights: Vec<GpuLight> = self
+            .lights
+            .iter()
+            .map(|l| GpuLight { pos: l.center.to4(0.0), u: l.u.to4(4.0 * l.u.cross(l.v).length()), v: l.v.to4(0.0), radiance: l.radiance.to4(0.0) })
             .chain(self.extra_lights.iter().copied())
-            .collect()
+            .chain(self.world.sun())
+            .collect();
+        let mut sdata: Vec<[f32; 4]> = lights.iter().flat_map(|l: &GpuLight| [l.pos, l.u, l.v, l.radiance]).collect();
+        // The identity instance: world→object, normal matrix (n0.w: BVH root 1), object→world.
+        sdata.extend([[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]]);
+        sdata.extend([[1.0, 0.0, 0.0, 1.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]]);
+        sdata.extend([[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]]);
+        sdata.extend(self.world.pack(&lights));
+        Prepared { instancing:None, positions, tris, nodes, materials, lights, sdata }
     }
 
     pub fn triangle_count(&self) -> usize {
@@ -446,12 +345,9 @@ impl Scene {
 }
 
 /// A triangle's tangent (the direction of increasing u) and handedness, from its UVs.
-pub(crate) fn tangent(p: [Vec3; 3], uv: [[f32; 2]; 3]) -> [f32; 4] {
+fn tangent(p: [Vec3; 3], uv: [[f32; 2]; 3]) -> [f32; 4] {
     let (e1, e2) = (p[1] - p[0], p[2] - p[0]);
-    let (d1, d2) = (
-        [uv[1][0] - uv[0][0], uv[1][1] - uv[0][1]],
-        [uv[2][0] - uv[0][0], uv[2][1] - uv[0][1]],
-    );
+    let (d1, d2) = ([uv[1][0] - uv[0][0], uv[1][1] - uv[0][1]], [uv[2][0] - uv[0][0], uv[2][1] - uv[0][1]]);
     let r = d1[0] * d2[1] - d2[0] * d1[1];
     if r.abs() < 1e-12 {
         return [0.0; 4];
@@ -465,12 +361,7 @@ pub(crate) fn tangent(p: [Vec3; 3], uv: [[f32; 2]; 3]) -> [f32; 4] {
 }
 
 /// The finish of the tablet's aluminium.
-pub const FINISHES: [(&str, &str); 4] = [
-    ("space-gray", "#3B3C40"),
-    ("starlight", "#E3DDD3"),
-    ("blue", "#9FB3CC"),
-    ("purple", "#C6B9D8"),
-];
+pub const FINISHES: [(&str, &str); 4] = [("space-gray", "#3B3C40"), ("starlight", "#E3DDD3"), ("blue", "#9FB3CC"), ("purple", "#C6B9D8")];
 
 /// The film's studio: a `#F6F5F8` void, three softboxes and a soft dome.
 fn studio(target: Vec3) -> (Vec<Softbox>, (Vec3, Vec3)) {
@@ -487,50 +378,24 @@ fn studio(target: Vec3) -> (Vec<Softbox>, (Vec3, Vec3)) {
 
 /// Scenes for Phase 0. `t` animates in [0, 1).
 pub fn preset(name: &str, finish: &str, t: f32) -> Option<Scene> {
-    let hex = FINISHES
-        .iter()
-        .find(|(n, _)| *n == finish)
-        .map(|f| f.1)
-        .unwrap_or(FINISHES[0].1);
+    if let Some(scene)=crate::corpus::scene(name){return Some(scene);}
+    let hex = FINISHES.iter().find(|(n, _)| *n == finish).map(|f| f.1).unwrap_or(FINISHES[0].1);
     let mut materials = vec![
-        Material::anodized(hex),                    // 0 body
-        Material::cover_glass(),                    // 1 glass
-        Material::display(1.6),                     // 2 display
-        Material::metal(srgb_hex("#2A2B2E"), 0.12), // 3 camera ring
-        Material {
-            coat: 1.0,
-            coat_roughness: 0.01,
-            ..Material::dielectric(v3(0.002, 0.002, 0.003), 0.2)
-        }, // 4 lens
-        Material {
-            coat: 0.6,
-            coat_roughness: 0.04,
-            ..Material::dielectric(srgb_hex("#F4F4F2"), 0.32)
-        }, // 5 stylus
+        Material::anodized(hex),                       // 0 body
+        Material::cover_glass(),                       // 1 glass
+        Material::display(1.6),                        // 2 display
+        Material::metal(srgb_hex("#2A2B2E"), 0.12),    // 3 camera ring
+        Material { coat: 1.0, coat_roughness: 0.01, ..Material::dielectric(v3(0.002, 0.002, 0.003), 0.2) }, // 4 lens
+        Material { coat: 0.6, coat_roughness: 0.04, ..Material::dielectric(srgb_hex("#F4F4F2"), 0.32) },   // 5 stylus
     ];
     let tab = mesh::tablet();
     let parts = |tilt: f32, turn: f32, at: Vec3| -> Vec<Object> {
         vec![
-            Object {
-                mesh: tab.body.placed(tilt, turn, at),
-                material: 0,
-            },
-            Object {
-                mesh: tab.glass.placed(tilt, turn, at),
-                material: 1,
-            },
-            Object {
-                mesh: tab.display.placed(tilt, turn, at),
-                material: 2,
-            },
-            Object {
-                mesh: tab.camera_ring.placed(tilt, turn, at),
-                material: 3,
-            },
-            Object {
-                mesh: tab.camera_lens.placed(tilt, turn, at),
-                material: 4,
-            },
+            Object { mesh: tab.body.placed(tilt, turn, at), material: 0 },
+            Object { mesh: tab.glass.placed(tilt, turn, at), material: 1 },
+            Object { mesh: tab.display.placed(tilt, turn, at), material: 2 },
+            Object { mesh: tab.camera_ring.placed(tilt, turn, at), material: 3 },
+            Object { mesh: tab.camera_lens.placed(tilt, turn, at), material: 4 },
         ]
     };
     let turntable = t * std::f32::consts::TAU;
@@ -538,43 +403,23 @@ pub fn preset(name: &str, finish: &str, t: f32) -> Option<Scene> {
         // Flat lay, three-quarter view, stylus alongside.
         "hero" => {
             let mut objects = parts(0.0, 0.35 + turntable, Vec3::ZERO);
-            objects.push(Object {
-                mesh: mesh::stylus().placed(0.0, 1.92 + turntable, v3(92.0, 0.0, 70.0)),
-                material: 5,
-            });
+            objects.push(Object { mesh: mesh::stylus().placed(0.0, 1.92 + turntable, v3(92.0, 0.0, 70.0)), material: 5 });
             let target = v3(0.0, 4.0, 0.0);
-            (
-                objects,
-                Camera::lens(v3(0.0, 430.0, 610.0), target, 70.0, 0.0),
-                target,
-            )
+            (objects, Camera::lens(v3(0.0, 430.0, 610.0), target, 70.0, 0.0), target)
         }
         // Standing on its long edge, turning: the thin silhouette reveal.
         // Upright on its long edge, display facing +z after a quarter turn: at
         // t = 0 the camera sees only the thin side, then it turns to face it.
         "edge" => {
             let at = v3(0.0, 195.4 / 2.0 + 2.0, 0.0);
-            let objects = parts(
-                std::f32::consts::FRAC_PI_2,
-                std::f32::consts::FRAC_PI_2 - turntable,
-                at,
-            );
-            (
-                objects,
-                Camera::lens(v3(0.0, at.y + 30.0, 1150.0), at, 85.0, 0.0),
-                at,
-            )
+            let objects = parts(std::f32::consts::FRAC_PI_2, std::f32::consts::FRAC_PI_2 - turntable, at);
+            (objects, Camera::lens(v3(0.0, at.y + 30.0, 1150.0), at, 85.0, 0.0), at)
         }
         // Macro across the display corner with shallow focus.
         "macro" => {
             let objects = parts(0.0, 0.0, Vec3::ZERO);
             let focus = v3(52.0, 6.3, 84.0);
-            let mut cam = Camera::lens(
-                v3(118.0 + 40.0 * t, 46.0, 190.0),
-                v3(40.0, 4.0, 70.0),
-                100.0,
-                2.8,
-            );
+            let mut cam = Camera::lens(v3(118.0 + 40.0 * t, 46.0, 190.0), v3(40.0, 4.0, 70.0), 100.0, 2.8);
             cam.focus = Some(focus);
             (objects, cam, focus)
         }
@@ -583,16 +428,8 @@ pub fn preset(name: &str, finish: &str, t: f32) -> Option<Scene> {
             let (tilt, turn, at) = (std::f32::consts::PI, 0.4 + 0.3 * t, v3(0.0, 6.3, 0.0));
             let objects = parts(tilt, turn, at);
             // The camera bump's centre, through the same placement as the meshes.
-            let bump = v3(134.8 / 2.0 - 13.0, -0.7, -(195.4 / 2.0 - 13.0))
-                .rotate_x(tilt)
-                .rotate_y(turn)
-                + at;
-            let mut cam = Camera::lens(
-                bump + v3(70.0, 95.0, 150.0),
-                bump - v3(12.0, 0.0, 8.0),
-                90.0,
-                4.0,
-            );
+            let bump = v3(134.8 / 2.0 - 13.0, -0.7, -(195.4 / 2.0 - 13.0)).rotate_x(tilt).rotate_y(turn) + at;
+            let mut cam = Camera::lens(bump + v3(70.0, 95.0, 150.0), bump - v3(12.0, 0.0, 8.0), 90.0, 4.0);
             cam.focus = Some(bump);
             (objects, cam, bump)
         }
@@ -600,96 +437,41 @@ pub fn preset(name: &str, finish: &str, t: f32) -> Option<Scene> {
         "chrome" => {
             materials.push(Material::metal(v3(0.97, 0.97, 0.98), 0.02)); // 6
             materials.push(Material::glass(v3(1.0, 1.0, 1.0), 0.0)); // 7
-            materials.push(Material {
-                coat: 1.0,
-                coat_roughness: 0.01,
-                ..Material::dielectric(srgb_hex("#B3122E"), 0.45)
-            }); // 8
+            materials.push(Material { coat: 1.0, coat_roughness: 0.01, ..Material::dielectric(srgb_hex("#B3122E"), 0.45) }); // 8
             let objects = vec![
-                Object {
-                    mesh: mesh::sphere(v3(-70.0, 45.0, 0.0), 45.0, 96, 192),
-                    material: 6,
-                },
-                Object {
-                    mesh: mesh::sphere(v3(40.0, 35.0, 30.0), 35.0, 96, 192),
-                    material: 7,
-                },
-                Object {
-                    mesh: tab.body.placed(-1.2, 0.5, v3(30.0, 0.0, -110.0)),
-                    material: 8,
-                },
+                Object { mesh: mesh::sphere(v3(-70.0, 45.0, 0.0), 45.0, 96, 192), material: 6 },
+                Object { mesh: mesh::sphere(v3(40.0, 35.0, 30.0), 35.0, 96, 192), material: 7 },
+                Object { mesh: tab.body.placed(-1.2, 0.5, v3(30.0, 0.0, -110.0)), material: 8 },
             ];
             let target = v3(-10.0, 35.0, 0.0);
-            (
-                objects,
-                Camera::lens(v3(30.0, 140.0, 430.0), target, 60.0, 0.0),
-                target,
-            )
+            (objects, Camera::lens(v3(30.0, 140.0, 430.0), target, 60.0, 0.0), target)
         }
         // Phase 4 materials: sheen, thin film, dispersive glass, plain glass.
         "materials" => {
-            materials.push(Material {
-                sheen: 1.0,
-                ..Material::dielectric(srgb_hex("#3E4A7A"), 0.75)
-            }); // 6 fabric
-            materials.push(Material {
-                film_nm: 520.0,
-                ..Material::metal(srgb_hex("#C9CCD2"), 0.08)
-            }); // 7 thin film
-            materials.push(Material {
-                dispersion: 1.0,
-                ..Material::glass(v3(1.0, 1.0, 1.0), 0.0)
-            }); // 8 dispersive
+            materials.push(Material { sheen: 1.0, ..Material::dielectric(srgb_hex("#3E4A7A"), 0.75) }); // 6 fabric
+            materials.push(Material { film_nm: 520.0, ..Material::metal(srgb_hex("#C9CCD2"), 0.08) }); // 7 thin film
+            materials.push(Material { dispersion: 1.0, ..Material::glass(v3(1.0, 1.0, 1.0), 0.0) }); // 8 dispersive
             materials.push(Material::glass(v3(0.92, 0.97, 1.0), 0.0)); // 9 glass
-            materials.push(Material {
-                anisotropy: 0.85,
-                ..Material::metal(srgb_hex("#C4C7CC"), 0.3)
-            }); // 10 brushed
-            materials.push(Material {
-                subsurface: 6.0,
-                ..Material::dielectric(srgb_hex("#F2D9B8"), 0.45)
-            }); // 11 wax
+            materials.push(Material { anisotropy: 0.85, ..Material::metal(srgb_hex("#C4C7CC"), 0.3) }); // 10 brushed
+            materials.push(Material { subsurface: 6.0, ..Material::dielectric(srgb_hex("#F2D9B8"), 0.45) }); // 11 wax
             let objects = (0..6)
-                .map(|i| Object {
-                    mesh: mesh::sphere(v3(-200.0 + 80.0 * i as f32, 34.0, 0.0), 34.0, 96, 192),
-                    material: 6 + i,
-                })
+                .map(|i| Object { mesh: mesh::sphere(v3(-200.0 + 80.0 * i as f32, 34.0, 0.0), 34.0, 96, 192), material: 6 + i })
                 .collect();
             let target = v3(0.0, 34.0, 0.0);
-            (
-                objects,
-                Camera::lens(v3(0.0, 130.0, 560.0), target, 60.0, 0.0),
-                target,
-            )
+            (objects, Camera::lens(v3(0.0, 130.0, 560.0), target, 60.0, 0.0), target)
         }
         // Caustics: glass and a mirror under one small, hard light.
         "caustics" => {
             materials.push(Material::glass(v3(1.0, 1.0, 1.0), 0.0)); // 6
-            materials.push(Material {
-                dispersion: 1.0,
-                ..Material::glass(v3(1.0, 1.0, 1.0), 0.0)
-            }); // 7
+            materials.push(Material { dispersion: 1.0, ..Material::glass(v3(1.0, 1.0, 1.0), 0.0) }); // 7
             materials.push(Material::metal(srgb_hex("#E8C27A"), 0.03)); // 8 polished gold
             let objects = vec![
-                Object {
-                    mesh: mesh::sphere(v3(-90.0, 40.0, 0.0), 40.0, 96, 192),
-                    material: 6,
-                },
-                Object {
-                    mesh: mesh::sphere(v3(10.0, 40.0, 20.0), 40.0, 96, 192),
-                    material: 7,
-                },
-                Object {
-                    mesh: mesh::sphere(v3(105.0, 30.0, -10.0), 30.0, 96, 192),
-                    material: 8,
-                },
+                Object { mesh: mesh::sphere(v3(-90.0, 40.0, 0.0), 40.0, 96, 192), material: 6 },
+                Object { mesh: mesh::sphere(v3(10.0, 40.0, 20.0), 40.0, 96, 192), material: 7 },
+                Object { mesh: mesh::sphere(v3(105.0, 30.0, -10.0), 30.0, 96, 192), material: 8 },
             ];
             let target = v3(0.0, 30.0, 0.0);
-            (
-                objects,
-                Camera::lens(v3(0.0, 260.0, 470.0), v3(0.0, 0.0, 30.0), 60.0, 0.0),
-                target,
-            )
+            (objects, Camera::lens(v3(0.0, 260.0, 470.0), v3(0.0, 0.0, 30.0), 60.0, 0.0), target)
         }
         // The water shot: droplets beading on the display glass.
         "wet" => {
@@ -715,32 +497,9 @@ pub fn preset(name: &str, finish: &str, t: f32) -> Option<Scene> {
     // The back: a highlight painted onto the aluminium beside the camera bump.
     if name == "back" {
         let up = v3(0.0, 1.0, 0.0);
-        lights.push(Softbox::for_highlight(
-            target + v3(-30.0, 0.0, 20.0),
-            up,
-            camera.position,
-            600.0,
-            700.0,
-            380.0,
-            Vec3::splat(3.0),
-        ));
+        lights.push(Softbox::for_highlight(target + v3(-30.0, 0.0, 20.0), up, camera.position, 600.0, 700.0, 380.0, Vec3::splat(3.0)));
     }
-    Some(Scene {
-        objects,
-        materials,
-        lights,
-        camera,
-        backdrop: v3(
-            0xF6 as f32 / 255.0,
-            0xF5 as f32 / 255.0,
-            0xF8 as f32 / 255.0,
-        ),
-        environment,
-        exposure: 1.0,
-        shadow_catcher: true,
-        extra_lights: Vec::new(),
-        layers: None,
-    })
+    Some(Scene { meters_per_unit:0.001, instances:vec![], scatters:vec![], terrains:vec![], displacements:vec![], world: Default::default(), objects, materials, lights, camera, backdrop: v3(0xF6 as f32 / 255.0, 0xF5 as f32 / 255.0, 0xF8 as f32 / 255.0), environment, exposure: 1.0, shadow_catcher: true, extra_lights: Vec::new(), layers: None })
 }
 
 /// An original abstract wallpaper for the display: soft ribbons of blue and
@@ -749,11 +508,7 @@ pub fn screen_wallpaper(w: u32, h: u32, t: f32) -> Vec<u8> {
     let mut out = vec![0u8; (w * h * 4) as usize];
     let enc = |v: f32| -> u8 {
         let v = v.clamp(0.0, 1.0);
-        let s = if v <= 0.0031308 {
-            v * 12.92
-        } else {
-            1.055 * v.powf(1.0 / 2.4) - 0.055
-        };
+        let s = if v <= 0.0031308 { v * 12.92 } else { 1.055 * v.powf(1.0 / 2.4) - 0.055 };
         (s * 255.0 + 0.5) as u8
     };
     for y in 0..h {
@@ -785,11 +540,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn physical_aperture_respects_scene_scale_and_old_files(){
+        let c=Camera::lens(v3(0.,0.,5.),Vec3::ZERO,50.,4.);
+        assert!((c.aperture_radius(1.)-0.00625).abs()<1e-7);assert!((c.aperture_radius(0.001)-6.25).abs()<1e-5);
+        let mut old=serde_json::to_value(preset("hero","blue",0.).unwrap()).unwrap();old.as_object_mut().unwrap().remove("meters_per_unit");
+        let scene:Scene=serde_json::from_value(old).unwrap();assert_eq!(scene.meters_per_unit,0.001);
+    }
+    #[test]
+    fn sky_cameras_keep_an_orthonormal_frame_at_the_poles(){
+        for target in [Vec3::Y,-Vec3::Y,v3(1.,2.,3.)]{let c=Camera::lens(Vec3::ZERO,target,50.,0.);let(f,r,u)=c.basis();assert!((f.length()-1.).abs()<1e-6);assert!((r.length()-1.).abs()<1e-6);assert!((u.length()-1.).abs()<1e-6);assert!(f.dot(r).abs()<1e-6&&f.dot(u).abs()<1e-6&&r.dot(u).abs()<1e-6);}
+    }
+    #[test]
     fn a_highlight_light_reflects_into_the_eye() {
         let point = v3(10.0, 0.0, -5.0);
         let eye = v3(0.0, 300.0, 400.0);
-        let light =
-            Softbox::for_highlight(point, Vec3::Y, eye, 500.0, 100.0, 100.0, Vec3::splat(1.0));
+        let light = Softbox::for_highlight(point, Vec3::Y, eye, 500.0, 100.0, 100.0, Vec3::splat(1.0));
         // Mirror the light's direction about the normal: it must point at the eye.
         let to_light = (light.center - point).normalize();
         let mirrored = Vec3::Y * (2.0 * to_light.dot(Vec3::Y)) - to_light;
@@ -820,4 +585,76 @@ mod tests {
             assert!(facing.dot((target - l.center).normalize()) > 0.99);
         }
     }
+}
+
+
+/// Evaluated renderer input shared by Electron WebGPU and the native process.
+/// The project document stays on the host. Meshes contain world-space poses;
+/// layer/part identity and texture/material policies travel beside the Rust scene.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct SceneDocument {
+    pub version: u32,
+    pub scene: Scene,
+    pub layer_ids: Vec<String>,
+    pub object_ids: Vec<ObjectIdentity>,
+    pub textures: Vec<Texture>,
+    pub material_options: Vec<MaterialOptions>,
+    pub camera_options: CameraOptions,
+    pub environment_options: EnvironmentOptions,
+    pub light_options: Vec<LightOptions>,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct ObjectIdentity {
+    pub layer: String,
+    pub part: Option<String>,
+    pub cast_shadow: bool,
+    pub receive_shadow: bool,
+    #[serde(default)]
+    pub vertex_colors: Option<Vec<[f32; 4]>>,
+    #[serde(default)]
+    pub primary_visible: Option<bool>,
+    #[serde(default)]
+    pub secondary_uvs: Option<Vec<[f32;2]>>,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct Texture {
+    pub id: String,
+    pub width: u32,
+    pub height: u32,
+    /// Straight RGBA8, first row at UV v=0. Color/emission are sRGB.
+    pub rgba: Vec<u8>,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct MaterialOptions {
+    pub opacity: f32,
+    pub ambient_response: f32,
+    pub double_sided: bool,
+    pub alpha_test: f32,
+    #[serde(default)]
+    pub unlit: bool,
+    /// color, emissive, roughness, metalness, normal, AO; -1 = no map.
+    pub maps: [i32; 6],
+    #[serde(default)]
+    pub imported: Option<Vec<f32>>,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct CameraOptions {
+    pub projection: String,
+    pub up: Vec3,
+    pub ortho_height: f32,
+    pub near: f32,
+    pub far: f32,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct EnvironmentOptions {
+    pub backdrop_opaque: bool,
+    pub shadows: bool,
+    pub floor_y: f32,
+    pub ground: Vec3,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct LightOptions {
+    pub cast_shadow: bool,
+    pub distance: f32,
+    pub decay: f32,
 }

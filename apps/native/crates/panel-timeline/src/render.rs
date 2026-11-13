@@ -143,6 +143,15 @@ impl Label {
             _ => Self::Gray,
         }
     }
+    /// Studio 3D layers are `extension` layers told apart by their definition
+    /// (3d-studio.md §1): models on blue, lights and cameras on gray.
+    pub fn for_layer(kind: &str, definition: Option<&str>) -> Self {
+        match display_kind(kind, definition) {
+            "model3d" => Self::Blue,
+            "light3d" | "camera3d" => Self::Gray,
+            other => Self::for_kind(other),
+        }
+    }
     /// The `colors.labels.*` field name.
     pub fn name(self) -> &'static str {
         pm_design::Labels::NAMES[self as usize]
@@ -1765,28 +1774,25 @@ impl Frame {
         if x < v.layer_column || x > v.width {
             return Ok(vec![]);
         }
-        // pm-design `playhead`: a hairline with a round head resting in the
-        // ruler; it passes over everything.
+        // pm-design `playhead` (v1's): a hairline under a pin whose point
+        // rests on the foot of the ruler; it passes over everything.
         let p = t.playhead();
         let (line, d) = (p.line as f64, p.head as f64);
-        let top = (t.metrics.ruler as f64 - d - 3.).max(0.);
+        let top = (t.metrics.ruler as f64 - p.head_foot as f64 - d).max(0.);
         let mut head = Op::new(
             "playhead-head",
             "ph-head",
             Rect::new(x - d / 2., top, d, d),
             p.color,
         );
-        head.detail = json!({"topRadius":d / 2.,"bottomRadius":d / 2.});
+        head.detail = json!({"pin":true});
+        // The line starts inside the pin, just above its point.
+        let from = top + d - 1.;
         Ok(vec![
             Op::new(
                 "playhead-line",
                 "rect",
-                Rect::new(
-                    x - line / 2.,
-                    top + d / 2.,
-                    line,
-                    (v.height - top - d / 2.).max(0.),
-                ),
+                Rect::new(x - line / 2., from, line, (v.height - from).max(0.)),
                 p.color,
             ),
             head,
@@ -2219,5 +2225,15 @@ mod key_cover_tests {
         );
         assert_eq!(ops.len(), keys.len());
         assert_eq!(ops[1].id, format!("key:{}", json!(["L1", "a"])));
+    }
+}
+
+/// The kind a row's badge and clip read as: a Studio 3D layer by its role.
+pub fn display_kind<'a>(kind: &'a str, definition: Option<&str>) -> &'a str {
+    match (kind, definition) {
+        ("extension", Some("powermove.3d.object")) => "model3d",
+        ("extension", Some("powermove.3d.light")) => "light3d",
+        ("extension", Some("powermove.3d.camera")) => "camera3d",
+        _ => kind,
     }
 }

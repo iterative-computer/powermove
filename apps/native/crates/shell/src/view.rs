@@ -721,6 +721,9 @@ impl Editor {
             "shellFocusNext" | "shellFocusPrevious" | "shellPanelNext" | "shellPanelPrevious"
         ) {
             let reverse = cmd.name.ends_with("Previous");
+            // The shell took the key before the window saw it: still a
+            // keyboard move, so focus rings show (checklist §6).
+            window.note_keyboard_input();
             if cmd.name.starts_with("shellPanel") {
                 let current = self
                     .panel_order
@@ -1372,6 +1375,8 @@ impl Editor {
         if let Some(h) = &self.host {
             let h = h.borrow();
             h.viewer_rect.set(None);
+            // Home covers the viewer: its extra 3D views have no place.
+            h.viewer_tiles.borrow_mut().clear();
             h.canvas_focus.set(false);
             h.keyboard_control_focus.set(true);
             h.publish_menu_state(&self.menu_state(cx));
@@ -1507,6 +1512,21 @@ impl Render for Editor {
                 w: (p.rect.w - m.border * 2.).max(0.),
                 h: (p.rect.h - m.header - m.border).max(0.),
             });
+        // Studio 3D views split the viewer's body into panes; the first is
+        // the main viewer, the host draws the others (3d-studio.md §2).
+        let viewer = match (&self.host, viewer) {
+            (Some(h), Some(r)) if h.borrow().viewer_split.get() > 1 => {
+                let tiles = crate::layout::view_tiles(r, h.borrow().viewer_split.get(), m.border * 2.);
+                let first = tiles[0];
+                *h.borrow().viewer_tiles.borrow_mut() = tiles;
+                Some(first)
+            }
+            (Some(h), _) => {
+                h.borrow().viewer_tiles.borrow_mut().clear();
+                viewer
+            }
+            _ => viewer,
+        };
         if let Some(h) = &self.host {
             let h = h.borrow();
             h.viewer_rect.set(viewer);
@@ -2123,7 +2143,9 @@ impl Render for Editor {
             root = root.child(panel);
         }
         if let Some(integration) = &self.integration {
-            let shown: Vec<&str> = native_bodies.iter().map(|(id, _)| id.as_str()).collect();
+            // Every panel on screen, built-in or an extension's: the viewer
+            // and the timeline are not native bodies but are shown.
+            let shown: Vec<&str> = self.panel_order.iter().map(String::as_str).collect();
             integration.shown_panels(&shown, cx);
         }
         if let Some(h) = &self.host {
@@ -2561,6 +2583,8 @@ mod keyboard_tests {
                 let mut stops = vec![first.clone()];
                 for _ in 0..100 {
                     v.command(command("shellFocusNext"), w, cx);
+                    // The shell handled the key: rings still show (focus-visible).
+                    assert!(w.last_input_was_keyboard(), "Tab is keyboard input");
                     let focused = w.focused(cx).expect("Tab must have a focused element");
                     if focused == first {
                         break;
@@ -2785,6 +2809,77 @@ mod tests {
                 );
             })
             .unwrap();
+    }
+
+    /// What the window says is on screen each frame.
+    struct Shown(Rc<RefCell<Vec<Vec<String>>>>);
+    impl crate::integration::Integration for Shown {
+        fn observe(&self, _: &mut gpui::Context<Editor>) {}
+        fn command(&self, _: &crate::native::Command, _: &mut Window, _: &mut App) -> bool {
+            false
+        }
+        fn panel(
+            &self,
+            _: &str,
+            _: crate::layout::Rect,
+            _: &mut Window,
+            _: &mut App,
+        ) -> Option<AnyElement> {
+            None
+        }
+        fn shown_panels(&self, shown: &[&str], _: &mut App) {
+            let shown = shown.iter().map(|id| (*id).to_owned()).collect();
+            self.0.borrow_mut().push(shown);
+        }
+        fn project_id(&self, _: &App) -> Option<String> {
+            None
+        }
+        fn status(&self, _: &App) -> String {
+            String::new()
+        }
+        fn drop_paths(&self, _: Vec<std::path::PathBuf>, _: &mut App) {}
+    }
+
+    /// The viewer and the timeline are on screen even though no extension
+    /// draws them: the app keeps their picture place, playhead and timecode
+    /// only for panels the window names as shown (it named only extension
+    /// bodies, so the playhead never drew). A maximised panel shows alone.
+    #[gpui::test]
+    fn the_viewer_and_timeline_are_named_shown_until_another_panel_is_maximised(
+        cx: &mut TestAppContext,
+    ) {
+        let frames = Rc::new(RefCell::new(vec![]));
+        let tokens = Tokens::new(pm_design::Scheme::Dark, Default::default());
+        let record = frames.clone();
+        let window = cx.add_window(|_, cx| {
+            let mut e = Editor::new(tokens, None, cx);
+            e.integration = Some(Rc::new(Shown(record)));
+            e
+        });
+        cx.run_until_parked();
+        let last = || frames.borrow().last().cloned().expect("a frame");
+        let shown = last();
+        assert!(
+            shown.iter().any(|id| id == "viewer") && shown.iter().any(|id| id == "timeline"),
+            "{shown:?}"
+        );
+        let other = window
+            .update(cx, |v, _, _| {
+                v.layout
+                    .open_panels()
+                    .into_iter()
+                    .find(|id| !matches!(*id, "viewer" | "timeline"))
+                    .map(str::to_owned)
+            })
+            .unwrap()
+            .expect("a third panel");
+        window
+            .update(cx, |v, _, cx| {
+                assert!(v.run_shell_command(&format!("panel:maximize:{other}"), cx));
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(last(), [other]);
     }
 }
 

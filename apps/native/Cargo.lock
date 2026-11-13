@@ -136,15 +136,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
 
 [[package]]
-name = "ash"
-version = "0.38.0+1.3.281"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0bb44936d800fea8f016d7f2311c6a4f97aebd5dc86f09906139ec848cf3a46f"
-dependencies = [
- "libloading",
-]
-
-[[package]]
 name = "async-channel"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -333,6 +324,12 @@ dependencies = [
  "borsh",
  "serde",
 ]
+
+[[package]]
+name = "bit_field"
+version = "0.10.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cb2907cc03d08cdb1c6724ad0670ce67c4a71e1c45a6d7635224011714cfc4b1"
 
 [[package]]
 name = "bitflags"
@@ -1335,6 +1332,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "exr"
+version = "1.74.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cb29d0be702adf92c645d9b2f93472906ba83d400e59f98adb3770ce5c18c2f6"
+dependencies = [
+ "bit_field",
+ "half",
+ "lebe",
+ "miniz_oxide 0.8.9",
+ "multiversion",
+ "smallvec",
+ "zune-inflate",
+]
+
+[[package]]
 name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1851,19 +1863,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "gpu-allocator"
-version = "0.28.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "51255ea7cfaadb6c5f1528d43e92a82acb2b96c43365989a28b2d44ee38f8795"
-dependencies = [
- "ash",
- "hashbrown 0.16.1",
- "log",
- "presser",
- "thiserror 2.0.21",
-]
-
-[[package]]
 name = "gpui-ce"
 version = "0.2.2"
 dependencies = [
@@ -2209,8 +2208,6 @@ version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100"
 dependencies = [
- "allocator-api2",
- "equivalent",
  "foldhash 0.2.0",
 ]
 
@@ -2664,6 +2661,7 @@ dependencies = [
  "bytemuck",
  "byteorder-lite",
  "color_quant",
+ "exr",
  "gif",
  "image-webp",
  "moxcms",
@@ -2904,6 +2902,12 @@ checksum = "40a8225d44241fd324a8af2806ba635fc7c8a7e9a7de4d5cf3ef54e71f5926fc"
 dependencies = [
  "leak",
 ]
+
+[[package]]
+name = "lebe"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7a79a3332a6609480d7d0c9eab957bca6b455b91bb84e66d19f5ff66294b85b8"
 
 [[package]]
 name = "libc"
@@ -3182,6 +3186,28 @@ checksum = "bb85c154ba489f01b25c0d36ae69a87e4a1c73a72631fc6c0eb6dde34a73e44b"
 dependencies = [
  "num-traits",
  "pxfm",
+]
+
+[[package]]
+name = "multiversion"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eb8a68be21d0755f83bfe47e79b896cc732687cf1903f0e50585e8d6ecc53076"
+dependencies = [
+ "multiversion-macros",
+ "target-features",
+]
+
+[[package]]
+name = "multiversion-macros"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a05e0c3c3e4edaa21d87c645852ed0b0c3663752bcc6ec43353bd6189dce35e1"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+ "target-features",
 ]
 
 [[package]]
@@ -3932,15 +3958,6 @@ name = "option-ext"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
-
-[[package]]
-name = "ordered-float"
-version = "5.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f59006ce1e204c30956638535b74d317bca99477b9356dfaec54c37f6f600ab"
-dependencies = [
- "num-traits",
-]
 
 [[package]]
 name = "outref"
@@ -4716,6 +4733,7 @@ dependencies = [
  "pm-protocol",
  "pm-render",
  "pm-runtime-v8",
+ "pm-scene3d",
  "pm-services",
  "pm-surface",
  "pm-text",
@@ -4883,7 +4901,7 @@ dependencies = [
  "pm-protocol",
  "pm-render",
  "pm-scene3d",
- "pm-studio",
+ "pm-studio3d-engine",
  "pm-text",
  "pm-time",
  "png",
@@ -5040,6 +5058,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "pm-import-fbx"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "serde_json",
+ "ufbx",
+]
+
+[[package]]
 name = "pm-kernel"
 version = "0.1.0"
 dependencies = [
@@ -5070,6 +5097,7 @@ dependencies = [
  "libc",
  "pm-kernel",
  "pm-model",
+ "pm-panel-studio3d",
  "pm-scene3d",
  "regex",
  "serde",
@@ -5160,6 +5188,7 @@ dependencies = [
  "pm-native-migrate",
  "pm-panel-agentpanel",
  "pm-panel-media",
+ "pm-panel-studio3d",
  "pm-panel-timeline",
  "pm-panel-viewerchrome",
  "pm-promedia",
@@ -5168,6 +5197,7 @@ dependencies = [
  "pm-recorder",
  "pm-render",
  "pm-runtime-v8",
+ "pm-scene3d",
  "pm-services",
  "pm-shell",
  "pm-store-host",
@@ -5506,6 +5536,7 @@ version = "0.1.0"
 dependencies = [
  "image",
  "pm-geom3d",
+ "pm-import-fbx",
  "pm-model",
  "serde",
  "serde_json",
@@ -5585,7 +5616,26 @@ name = "pm-studio"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "glam",
+ "image",
  "png",
+ "pollster 0.4.0",
+ "serde",
+ "serde_json",
+ "wgpu",
+]
+
+[[package]]
+name = "pm-studio3d-engine"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "glam",
+ "pm-gpu",
+ "pm-model",
+ "pm-protocol",
+ "pm-render",
+ "pm-studio",
  "pollster 0.4.0",
  "serde",
  "serde_json",
@@ -5790,12 +5840,6 @@ checksum = "85eae3c4ed2f50dcfe72643da4befc30deadb458a9b590d720cde2f2b1e97da9"
 dependencies = [
  "zerocopy",
 ]
-
-[[package]]
-name = "presser"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e8cf8e6a8aa66ce33f63993ffc4ea4271eb5b0530a9002db8455ea6050c77bfa"
 
 [[package]]
 name = "prettyplease"
@@ -7204,6 +7248,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "target-features"
+version = "0.1.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c1bbb9f3c5c463a01705937a24fdabc5047929ac764b2d5b9cf681c1f5041ed5"
+
+[[package]]
 name = "tempfile"
 version = "3.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7560,6 +7610,15 @@ name = "typenum"
 version = "1.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
+
+[[package]]
+name = "ufbx"
+version = "0.11.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "260522f1eb74139f0e78b29dd82a58e5437d728c5498024a39e5af7282694240"
+dependencies = [
+ "cc",
+]
 
 [[package]]
 name = "unarray"
@@ -8038,17 +8097,13 @@ version = "30.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6b7fb58561a792bc237628ba0792e332de418fefe145f13b5ed8201e6d52f58"
 dependencies = [
- "android_system_properties",
  "arrayvec",
- "ash",
  "bitflags",
  "block2 0.6.2",
  "bytemuck",
  "cfg-if",
  "cfg_aliases",
- "gpu-allocator",
  "hashbrown 0.17.1",
- "libc",
  "libloading",
  "log",
  "naga 30.0.1",
@@ -8059,7 +8114,6 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "objc2-metal 0.3.2",
  "objc2-quartz-core 0.3.2",
- "ordered-float",
  "parking_lot",
  "portable-atomic",
  "portable-atomic-util",
@@ -8072,7 +8126,6 @@ dependencies = [
  "thiserror 2.0.21",
  "wgpu-naga-bridge",
  "wgpu-types",
- "windows 0.62.2",
 ]
 
 [[package]]
@@ -8810,6 +8863,15 @@ name = "zune-core"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d56377fd46368984a170bc5aac5567e52ca5da874caa60bea39fcbca78fb658b"
+
+[[package]]
+name = "zune-inflate"
+version = "0.2.54"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "73ab332fe2f6680068f3582b16a24f90ad7096d5d39b974d1c0aff0125116f02"
+dependencies = [
+ "simd-adler32",
+]
 
 [[package]]
 name = "zune-jpeg"

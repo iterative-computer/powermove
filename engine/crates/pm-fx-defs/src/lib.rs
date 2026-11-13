@@ -6,6 +6,7 @@
 //! shader compiler, renderer, or platform APIs are needed for defaults/Reset.
 
 pub mod catalog;
+pub mod grade;
 pub mod graph;
 pub mod inputs;
 pub mod spatial;

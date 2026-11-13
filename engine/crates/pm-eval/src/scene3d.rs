@@ -667,6 +667,7 @@ impl<'d> Scope<'_, 'd> {
         scene.insert("lights", Value::Array(lights));
         scene.insert("camera", camera);
         scene.insert("environment", environment);
+        raster_defaults(&mut scene);
         pm_geom3d::scene_validation::validate_scene(&scene).map_err(|message| JsThrow {
             kind: "ZodError",
             message: format!("Invalid 3D scene: {message}"),
@@ -733,6 +734,84 @@ impl<'d> Scope<'_, 'd> {
             0.0,
             time - node::to_number(node::member(Some(layer), "from")),
         )
+    }
+}
+
+/// Native scene normalization adds Studio's defaults. They are inert in
+/// the legacy rasterizer; remove only those defaults from its evaluated
+/// copy, while non-default/animated Studio properties still fail validation.
+fn raster_defaults(scene: &mut Map) {
+    if let Some(Value::Array(objects)) = scene.get_mut("objects") {
+        for object in objects {
+            let Some(material) = object
+                .as_object_mut()
+                .and_then(|o| o.get_mut("material"))
+                .and_then(Value::as_object_mut)
+            else {
+                continue;
+            };
+            if material.get("screen").is_some_and(Value::is_null) {
+                material.remove("screen");
+            }
+            if let Some(p) = material.get_mut("p").and_then(Value::as_object_mut) {
+                for (key, default) in [
+                    ("clearcoat", 0.),
+                    ("clearcoatRoughness", 0.03),
+                    ("transmission", 0.),
+                    ("ior", 1.5),
+                    ("specular", 1.),
+                    ("sheen", 0.),
+                    ("iridescence", 0.),
+                    ("dispersion", 0.),
+                    ("droplets", 0.),
+                    ("anisotropy", 0.),
+                    ("subsurface", 0.),
+                ] {
+                    let is_default = p
+                        .get(key)
+                        .is_some_and(|v| raster_default_channel(v, default));
+                    if is_default {
+                        p.remove(key);
+                    }
+                }
+            }
+        }
+    }
+    if let Some(camera) = scene
+        .get_mut("camera")
+        .and_then(Value::as_object_mut)
+        .and_then(|camera| camera.get_mut("p"))
+        .and_then(Value::as_object_mut)
+    {
+        for key in ["fStop", "focusDistance"] {
+            if camera
+                .get(key)
+                .is_some_and(|v| raster_default_channel(v, 0.))
+            {
+                camera.remove(key);
+            }
+        }
+    }
+    if let Some(environment) = scene.get_mut("environment").and_then(Value::as_object_mut) {
+        environment.remove("samples");
+        if environment.get("shadowCatcher") == Some(&Value::Bool(false)) {
+            environment.remove("shadowCatcher");
+        }
+    }
+}
+
+fn raster_default_channel(value: &Value, default: f64) -> bool {
+    match value {
+        Value::Number(v) => *v == default,
+        Value::Object(ch) => {
+            ch.get("v").and_then(Value::as_f64) == Some(default)
+                && ch
+                    .get("kf")
+                    .and_then(Value::as_array)
+                    .is_none_or(|kf| kf.is_empty())
+                && ch.get("expr").is_none_or(Value::is_null)
+        }
+        _ => false,
     }
 }
 

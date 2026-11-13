@@ -1,10 +1,10 @@
 //! Text and captions (plan sections 10 and 12, amendments 10 and 19).
 //! Design notes: `docs/engine/text-render.md`.
 //!
-//! Production text and captions paint exact glyph outlines in device space.
-//! Level 1 keeps its Blink-compatible layout; level 2 keeps its Parley
-//! layout. Both use exact float area coverage, float paint, and working-domain image
-//! filtering. The ordered scene retains only its ink crop. A 2.5D layer
+//! Level 1 text and captions retain their Blink-compatible layout, Canvas
+//! glyph masks and local source pixel grid. Level 2 keeps its Parley layout
+//! and exact device-space coverage. Both retain ordered paint and working-domain
+//! image filtering. The ordered scene retains only its ink crop. A 2.5D layer
 //! instead paints at its plane density and projects through that plane.
 //! The explicit raster API still paints into its requested canvas.
 //!
@@ -714,6 +714,35 @@ fn level1_animated(layer: &Node) -> bool {
 }
 
 impl TextContext {
+    /// Filled glyph contours in anchored layer pixels, from the same full-face
+    /// layout, style ranges and character animators used by the flat renderer.
+    /// Color bitmap glyphs fail explicitly: their rectangular image is not an
+    /// outline. Native hosts supply their existing render-thread font broker.
+    pub fn extrusion_outlines<'d>(&mut self,scope:&mut Scope<'_, 'd>,layer:&'d Node,time:f64,tolerance:f64)->Result<Vec<pm_geom3d::extrusion::Outline>,String>{
+        if !self.has_fonts(){return Err("Text extrusion needs the native font service".into());}
+        let quad=self.text_layer(scope,layer,time,1.).map_err(|e|e.message)?;
+        let failures=self.take_unsupported();
+        if !failures.is_empty(){return Err(failures.join("; "));}
+        let Some(quad)=quad else{return Ok(vec![])};
+        let crop=quad.plan.crop;
+        let sx=quad.w/f64::from(crop[2]-crop[0]);let sy=quad.h/f64::from(crop[3]-crop[1]);
+        let transform=Affine::translate((-quad.ax-f64::from(crop[0])*sx,-quad.ay-f64::from(crop[1])*sy))*Affine::scale_non_uniform(sx,sy);
+        let mut outlines=vec![];
+        for item in &quad.plan.scene.items {
+            if item.opacity<=0. || item.color[3]<=0. {continue;}
+            let ItemContent::Coverage{paths}=&item.content else{return Err("Bitmap/color image glyphs have no extrusion outline".into())};
+            // The geometry has no raster shadow/blur surface.
+            if item.blur>0. {continue;}
+            let mut color=item.color.map(|x|x as f32);color[3]*=item.opacity as f32;
+            for path in paths {
+                for mut shape in pm_text::render::scene::filled_contours(path,transform,tolerance) {
+                    if shape.is_empty(){continue;}
+                    outlines.push(pm_geom3d::extrusion::Outline{outer:shape.remove(0),holes:shape,color});
+                }
+            }
+        }
+        Ok(outlines)
+    }
     fn painter(&mut self) -> (Painter<'_>, &mut dyn TextFonts, &mut Vec<String>) {
         let fonts = self.fonts.as_deref_mut().expect("checked by the caller");
         (
@@ -790,9 +819,9 @@ impl TextContext {
         };
         let density = js_min(js_min(scale, 8192.0 / raster.w), 8192.0 / raster.h);
         let target = (canvas_px(raster.w, density), canvas_px(raster.h, density));
-        let scene = self.text_scene_level1(scope, layer, time, Affine::scale(density), target)?;
+        let world = Affine::scale(density) * Affine::translate((raster.anchor_x, raster.anchor_y));
         Ok(self
-            .finish(scene)
+            .text_layer_level1_device(scope, layer, time, world, target)?
             .map(|p| Self::quad(p, raster.w, raster.h, raster.anchor_x, raster.anchor_y)))
     }
 
@@ -888,10 +917,11 @@ impl TextContext {
                     if g.opacity.is_nan() || g.opacity <= 0.0 {
                         continue;
                     }
-                    let glyph_m = m
-                        * Affine::translate((-a.x0, -a.y0))
-                        * Affine::translate((g.unit.x, *baseline))
-                        * Affine::new(g.matrix);
+                    let glyph_m = animated_canvas_matrix(
+                        m * Affine::translate((-a.x0, -a.y0)),
+                        (g.unit.x, *baseline),
+                        Affine::new(g.matrix),
+                    );
                     let fill = match &g.color {
                         Some(c) => JsValue::String(c.clone()),
                         None => get(&g.style, "color").clone(),
@@ -1295,9 +1325,54 @@ fn run_refs<'a>(
         .collect()
 }
 
+/// `rasterAnimatedText` calls Canvas `setTransform`, `translate`, then
+/// `transform`. Blink clamps each API's arguments to float and SkCanvas
+/// concatenates float matrices. Keeping the whole chain in f64 until glyph
+/// snapping can put a half-pixel baseline on the other side of its pixel.
+fn animated_canvas_matrix(canvas: Affine, origin: (f64, f64), pose: Affine) -> Affine {
+    fn scalar(v: f64) -> f32 {
+        v.clamp(-f64::from(f32::MAX), f64::from(f32::MAX)) as f32
+    }
+    fn concat(lhs: Affine, rhs: Affine) -> Affine {
+        let [a, b, c, d, e, f] = lhs.as_coeffs().map(scalar);
+        let [g, h, i, j, k, l] = rhs.as_coeffs().map(scalar);
+        Affine::new(
+            [
+                a * g + c * h,
+                b * g + d * h,
+                a * i + c * j,
+                b * i + d * j,
+                (a * k + c * l) + e,
+                (b * k + d * l) + f,
+            ]
+            .map(f64::from),
+        )
+    }
+    let canvas = Affine::new(canvas.as_coeffs().map(|v| f64::from(scalar(v))));
+    concat(concat(canvas, Affine::translate(origin)), pose)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn animated_canvas_calls_keep_float_rounding_before_glyph_snapping() {
+        // Synthetic 42px text with a fractional animator displacement.
+        // Canvas's float translate/concat produces the float immediately
+        // below 34.5; collapsing the calls in double produces exactly 34.5.
+        // Those snap to different rows even though the layout is identical.
+        let baseline = 42.0 * 0.82;
+        let shift = 1.0 / 137.0;
+        let top = baseline - 42.0 + shift - 4.0;
+        let canvas = Affine::new([0.75, 0.0, 0.0, 0.75, 0.0, -top * 0.75]);
+        let pose = Affine::translate((0.0, shift));
+        let actual = animated_canvas_matrix(canvas, (0.0, baseline), pose);
+        let double = canvas * Affine::translate((0.0, baseline)) * pose;
+        assert_eq!(actual.as_coeffs()[5], 34.499_996_185_302_734);
+        assert_eq!((actual.as_coeffs()[5] + 0.5).floor(), 34.0);
+        assert_eq!((double.as_coeffs()[5] + 0.5).floor(), 35.0);
+    }
 
     /// The faces a document's text lays out with are asked for once per
     /// edition, in one round trip: every family of each text layer's canvas

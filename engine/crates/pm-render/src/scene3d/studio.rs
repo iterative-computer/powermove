@@ -156,6 +156,7 @@ pub fn studio_scene(scene: &Scene3d, depth_set: &[usize]) -> Option<Scene> {
                         normals: normals.clone(),
                         uvs: uvs.clone(),
                         indices: tris,
+                        ..Default::default()
                     },
                     material: materials.len() - 1,
                 });
@@ -221,6 +222,12 @@ pub fn studio_scene(scene: &Scene3d, depth_set: &[usize]) -> Option<Scene> {
     let fov_y = 2.0 * ((fov.to_radians() / 2.0).tan() / zoom.max(1e-3)).atan();
     let (sky, ground, hemi) = scene.hemisphere;
     Some(Scene {
+        meters_per_unit: 0.1,
+        world: Default::default(),
+        instances: vec![],
+        scatters: vec![],
+        terrains: vec![],
+        displacements: vec![],
         objects,
         materials,
         lights: softboxes,

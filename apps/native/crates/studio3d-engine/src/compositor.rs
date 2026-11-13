@@ -1,0 +1,329 @@
+//! Typed Studio seam. Full-scene transport is shared by all layer outputs;
+//! masking, effects, opacity and blending remain ordinary compositor passes.
+use crate::{
+    extract::{SceneRequest, SceneSource},
+    service::{RenderedScene, StudioService, Tier},
+};
+use pm_render::scene3d::provider::{Backend, Source as RenderSource};
+pub use pm_render::scene3d::provider::{Counters, Settings};
+use std::sync::Arc;
+
+pub trait Source: SceneSource {
+    /// Explicit per-export transport scale; preview and the 2D compositor stay full size.
+    fn final_render_scale(&self, _request: &SceneRequest) -> Result<f32,String> {Ok(1.)}
+
+    fn needs_materials(&self, _request: &SceneRequest) -> Result<bool, String> {
+        Ok(false)
+    }
+    fn prepare_materials(
+        &self,
+        _renderer: &mut pm_render::Renderer,
+        _request: &SceneRequest,
+        _tier: Tier,
+    ) -> Result<bool, String> {
+        Ok(false)
+    }
+    /// Authored camera/environment quality; immutable for this request.
+    fn final_samples(&self, request: &SceneRequest) -> Result<u32, String>;
+    fn splat_layers(&self, _request: &SceneRequest) -> Result<Vec<crate::splats::Layer>, String> {
+        Ok(vec![])
+    }
+}
+struct Pass {
+    source: Arc<dyn Source>,
+    service: Option<StudioService>,
+    cached: Option<(Tier, RenderedScene)>,
+    traces: u64,
+    splats: Option<crate::splats::Rasterizer>,
+    splat_cache: Option<(SceneRequest, Vec<crate::splats::Layer>)>,
+    failures: Vec<pm_render::LayerFailure>,
+    capture: Option<pm_render::Renderer>,
+    prepared_materials: Option<(SceneRequest, Tier)>,
+}
+impl Pass {
+    pub fn new(source: Arc<dyn Source>) -> Self {
+        Self {
+            source,
+            service: None,
+            cached: None,
+            traces: 0,
+            splats: None,
+            splat_cache: None,
+            failures: vec![],
+            capture: None,
+            prepared_materials: None,
+        }
+    }
+    pub fn replace_source(&mut self, source: Arc<dyn Source>) {
+        self.source = source;
+        self.prepared_materials = None;
+        self.cached = None;
+        self.splat_cache = None;
+        self.failures.clear();
+    }
+    pub fn begin_frame(&mut self) {
+        self.prepared_materials = None;
+        self.failures.clear();
+        if self
+            .cached
+            .as_ref()
+            .is_some_and(|(tier, _)| matches!(tier, Tier::QualityRefine { .. }))
+        {
+            self.cached = None;
+        }
+    }
+    pub fn counters(&self) -> Counters {
+        Counters {
+            samples: self.cached.as_ref().map_or(0, |(_, scene)| scene.samples),
+            traces: self.traces,
+            geometry_uploads: self
+                .service
+                .as_ref()
+                .map_or(0, StudioService::geometry_uploads),
+            scene_updates: self
+                .service
+                .as_ref()
+                .map_or(0, StudioService::scene_updates),
+            blas_builds: self.service.as_ref().map_or(0, StudioService::blas_builds),
+        }
+    }
+    fn prepare_materials(&mut self, request: &SceneRequest, tier: Tier) -> Result<(), String> {
+        if self.prepared_materials.as_ref().is_some_and(|(r,t)|r==request && *t==tier) { return Ok(()); }
+        if !self.source.needs_materials(request)? {
+            self.capture = None;
+            self.prepared_materials = Some((request.clone(),tier));
+            return Ok(());
+        }
+        let service = self
+            .service
+            .as_ref()
+            .ok_or("Studio service is not attached")?;
+        let capture = self.capture.get_or_insert_with(|| {
+            pm_render::Renderer::new(
+                service.device().unwrap().clone(),
+                service.queue().unwrap().clone(),
+            )
+        });
+        capture.set_studio_source(
+            Some(Arc::new(Adapter(self.source.clone()))),
+            Settings {
+                revision: request.revision,
+                preview: tier,
+                ..Default::default()
+            },
+        );
+        if self.source.prepare_materials(capture, request, tier)? {
+            self.cached = None;
+            self.splat_cache = None;
+        }
+        self.prepared_materials = Some((request.clone(),tier));
+        Ok(())
+    }
+    fn render_texture(
+        &mut self,
+        layer: &str,
+        request: &SceneRequest,
+        tier: Tier,
+        encoder: &mut wgpu::CommandEncoder,
+    ) -> Result<wgpu::Texture, String> {
+        let scaled=if matches!(tier,Tier::Final{..}) {
+            Some(scaled_export_request(request,self.source.final_render_scale(request)?)?)
+        } else {None};
+        let request=scaled.as_ref().unwrap_or(request);
+        self.prepare_materials(request, tier)?;
+        let service = self.service.as_ref().unwrap();
+        let device = service.device().unwrap();
+        let queue = service.queue().unwrap();
+        if self
+            .splat_cache
+            .as_ref()
+            .is_none_or(|(key, _)| key != request)
+        {
+            self.splat_cache = Some((request.clone(), self.source.splat_layers(request)?));
+        }
+        if let Some(splat) = self
+            .splat_cache
+            .as_ref()
+            .unwrap()
+            .1
+            .iter()
+            .find(|s| s.id == layer)
+        {
+            for failure in self.source.layer_failures(request)? {
+                if !self
+                    .failures
+                    .iter()
+                    .any(|f| f.composition == failure.composition && f.layer == failure.layer)
+                {
+                    self.failures.push(failure);
+                }
+            }
+            let color = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("Studio splat compositor layer"),
+                size: wgpu::Extent3d {
+                    width: request.width,
+                    height: request.height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            self.splats
+                .get_or_insert_with(|| crate::splats::Rasterizer::new(device))
+                .record(device, queue, encoder, splat, &color)?;
+            return Ok(color);
+        }
+        if self
+            .cached
+            .as_ref()
+            .is_none_or(|(t, s)| *t != tier || s.request != *request)
+        {
+            let rendered = self.service.as_mut().unwrap().render_bottom_up(
+                self.source.as_ref(),
+                request.clone(),
+                tier,
+            )?;
+            if std::env::var_os("STUDIO_TIMINGS").is_some() {
+                let service = self.service.as_ref().unwrap();
+                eprintln!(
+                    "STUDIO_FRAME_TIMING ticks={} size={}x{} tier={tier:?} hardware_rt={} prepare_ms={:.3} total_ms={:.3} geometry_uploads={} texture_uploads={} scene_updates={} blas_builds={} pipeline={:?}",
+                    request.ticks,
+                    request.width,
+                    request.height,
+                    rendered.hardware_rt,
+                    rendered.timings.prepare_ms,
+                    rendered.timings.total_ms,
+                    service.geometry_uploads(),
+                    service.texture_uploads(),
+                    service.scene_updates(),
+                    service.blas_builds(),
+                    rendered.timings.pipeline,
+                );
+                #[cfg(feature="oidn")]
+                eprintln!("STUDIO_OIDN_TIMING ticks={} filter={:?} init_ms={:.3} reused={}",request.ticks,rendered.timings.oidn,rendered.timings.oidn_init_ms,rendered.timings.oidn_reused);
+            }
+            self.cached = Some((tier, rendered));
+            self.traces += 1;
+        }
+        let scene = &self.cached.as_ref().unwrap().1;
+        for failure in &scene.failures {
+            if !self
+                .failures
+                .iter()
+                .any(|f| f.composition == failure.composition && f.layer == failure.layer)
+            {
+                self.failures.push(failure.clone());
+            }
+        }
+        if let Some(failure) = scene.failures.iter().find(|f| f.layer == layer) {
+            return Err(failure.message.clone());
+        }
+        let texture = &scene
+            .layers
+            .iter()
+            .find(|l| l.layer == layer)
+            .ok_or_else(|| format!("Studio did not produce layer {layer}"))?
+            .texture;
+        Ok(texture.clone())
+    }
+}
+impl Backend for Pass {
+    fn layer_failures(&self) -> &[pm_render::LayerFailure] {
+        &self.failures
+    }
+    fn pick_surface(
+        &mut self,
+        request: &SceneRequest,
+        tier: Tier,
+        x: f32,
+        y: f32,
+    ) -> Result<Option<pm_render::scene3d::provider::SurfaceHit>, String> {
+        self.prepared_materials = None;
+        self.prepare_materials(request, tier)?;
+        self.service
+            .as_mut()
+            .ok_or("Studio service is not attached")?
+            .pick_surface(self.source.as_ref(), request.clone(), tier, x, y)
+    }
+    fn update_source(&mut self, source: &dyn std::any::Any) -> bool {
+        let Some(source) = source.downcast_ref::<Adapter>() else {
+            return false;
+        };
+        self.replace_source(source.0.clone());
+        true
+    }
+    fn begin_frame(&mut self) {
+        Pass::begin_frame(self);
+    }
+    fn counters(&self) -> Counters {
+        Pass::counters(self)
+    }
+    fn render(
+        &mut self,
+        layer: &str,
+        request: &SceneRequest,
+        tier: Tier,
+        encoder: &mut wgpu::CommandEncoder,
+    ) -> Result<wgpu::Texture, String> {
+        self.render_texture(layer, request, tier, encoder)
+    }
+}
+/// Freeze a document source onto the generic compositor seam.
+pub struct Adapter(pub Arc<dyn Source>);
+impl RenderSource for Adapter {
+    fn final_samples(&self, request: &SceneRequest) -> Result<u32, String> {
+        // Use the same cache key as transport, rather than alternating full
+        // and reduced scene evaluation once for every compositor layer.
+        let scaled=scaled_export_request(request,self.0.final_render_scale(request)?)?;
+        self.0.final_samples(&scaled)
+    }
+    fn create(
+        &self,
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        width: u32,
+        height: u32,
+    ) -> Result<Box<dyn Backend>, String> {
+        let mut pass = Pass::new(self.0.clone());
+        pass.service = Some(StudioService::with_device(device, queue, width, height)?);
+        Ok(Box::new(pass))
+    }
+}
+
+/// Scale only the 3D transport request. The compositor's output dimensions
+/// and its 2D layer plans remain unchanged.
+pub fn scaled_export_request(request: &SceneRequest, scale: f32) -> Result<SceneRequest, String> {
+    if !scale.is_finite() || scale <= 0. || scale > 1. {
+        return Err("Studio render scale must be greater than zero and at most one".into());
+    }
+    if request.width == 0 || request.height == 0 {
+        return Err("Studio output is empty".into());
+    }
+    let mut scaled = request.clone();
+    scaled.width = (request.width as f64 * scale as f64).round().max(1.) as u32;
+    scaled.height = (request.height as f64 * scale as f64).round().max(1.) as u32;
+    Ok(scaled)
+}
+#[cfg(test)]
+mod scale_tests {
+    use super::*;
+    #[test]
+    fn export_scale_preserves_request_identity_and_defaults_to_full_size() {
+        let r=SceneRequest{composition:"C".into(),revision:7,ticks:123,width:1920,height:1080};
+        assert_eq!(scaled_export_request(&r,1.).unwrap(),r);
+        let small=scaled_export_request(&r,0.75).unwrap();
+        assert_eq!((small.width,small.height),(1440,810));
+        assert_eq!((&small.composition,small.revision,small.ticks),(&r.composition,r.revision,r.ticks));
+        for invalid in [0.,-0.5,1.01,f32::NAN,f32::INFINITY] {
+            assert!(scaled_export_request(&r,invalid).is_err());
+        }
+        let mut tiny=r;tiny.width=1;tiny.height=1;
+        assert_eq!(scaled_export_request(&tiny,0.75).unwrap(),tiny);
+    }
+}

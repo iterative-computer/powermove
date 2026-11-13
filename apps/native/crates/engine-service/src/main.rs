@@ -1,4 +1,3 @@
-use std::alloc::GlobalAlloc;
 mod bench;
 mod memory_bench;
 // Match the app allocator so headless footprint comparisons measure the
