@@ -514,6 +514,15 @@ fn torn_local_lock_recovers_without_stealing_a_live_flock() {
     }
 }
 #[test]
+fn fresh_legacy_owner_is_protected_when_heartbeats_share_a_millisecond() {
+    let dir = common::TempDir::new("legacy-owner-tie");
+    let path = dir.path("library.lock");
+    let heartbeat = now_ms();
+    fs::write(&path, format!("{{\"pid\":{},\"heartbeat\":{heartbeat}}}", std::process::id())).unwrap();
+    fs::write(owner_record_path(&path), format!("{{\"pid\":0,\"heartbeat\":{heartbeat}}}")).unwrap();
+    assert_eq!(FileLock::acquire(&path).err().map(|e| e.kind()), Some(std::io::ErrorKind::WouldBlock));
+}
+#[test]
 fn lock_child_process() {
     let Some(path) = std::env::var_os("PM_KERNEL_TEST_LOCK") else {
         return;
