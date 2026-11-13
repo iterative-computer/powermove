@@ -236,6 +236,50 @@ struct Published {
     view: u64,
     revision: u64,
 }
+impl Published {
+    fn publication(&self) -> Publication {
+        let realm = self
+            .contributions
+            .as_ref()
+            .and_then(|c| c["loading"].as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| {
+                let id = entry["id"].as_str()?;
+                Some((
+                    id.to_owned(),
+                    entry["name"].as_str().unwrap_or(id).to_owned(),
+                ))
+            });
+        Publication {
+            revision: self.revision,
+            settled: self.starting.is_empty()
+                && match &self.contributions {
+                    Some(contributions) => contributions["settled"] != false,
+                    None => self.ready,
+                },
+            loading: self.starting.iter().cloned().chain(realm).collect(),
+            contributions: self.contributions.clone(),
+        }
+    }
+}
+/// One moment of what a host publishes. A reader takes everything it pins
+/// from one of these: definitions read at one moment and a flag read at
+/// another could pair a finished-looking list with a load still running.
+#[derive(Clone, Debug, Default)]
+pub struct Publication {
+    pub revision: u64,
+    /// `None` until the first activation pass publishes (or with no
+    /// extension to run).
+    pub contributions: Option<Arc<Value>>,
+    /// No load pass is running: every extension has registered what it
+    /// registers, or has failed. Until then an effect the project uses that
+    /// no definition provides yet may still arrive, so it is not "not installed".
+    pub settled: bool,
+    /// The extensions still loading, as (id, name): the realm's load pass's
+    /// and the Store helpers starting. Empty once settled.
+    pub loading: Vec<(String, String)>,
+}
 
 struct Shared {
     published: Mutex<Published>,
@@ -703,40 +747,13 @@ impl ExtensionHost {
     pub fn contributions(&self) -> Option<Arc<Value>> {
         self.shared.published.lock().unwrap().contributions.clone()
     }
-    pub fn revision(&self) -> u64 {
-        self.shared.published.lock().unwrap().revision
-    }
     pub fn is_ready(&self) -> bool {
         self.shared.published.lock().unwrap().ready
     }
-    /// No load pass is running: every extension has registered what it
-    /// registers, or has failed. Until then an effect the project uses that no
-    /// definition provides yet may still arrive, so it is not "not installed".
-    pub fn definitions_settled(&self) -> bool {
-        let published = self.shared.published.lock().unwrap();
-        published.starting.is_empty()
-            && match &published.contributions {
-                Some(contributions) => contributions["settled"] != false,
-                None => published.ready,
-            }
-    }
-    /// The extensions still loading, as (id, name): the realm's load pass's
-    /// and the Store helpers starting. Empty once settled.
-    pub fn loading(&self) -> Vec<(String, String)> {
-        let published = self.shared.published.lock().unwrap();
-        let realm = published
-            .contributions
-            .as_ref()
-            .and_then(|c| c["loading"].as_array().cloned())
-            .unwrap_or_default();
-        let realm = realm.iter().filter_map(|entry| {
-            let id = entry["id"].as_str()?;
-            Some((
-                id.to_owned(),
-                entry["name"].as_str().unwrap_or(id).to_owned(),
-            ))
-        });
-        published.starting.iter().cloned().chain(realm).collect()
+    /// What the host publishes now, read at one moment: definitions are only
+    /// ever paired with the flag and the names published with them.
+    pub fn publication(&self) -> Publication {
+        self.shared.published.lock().unwrap().publication()
     }
     /// The realm generation drawing now, 0 with none. A page belongs to one
     /// generation: when this moves, that page is finished.
@@ -1479,10 +1496,13 @@ impl Owner {
             merge_store(&mut next, &store);
             published.contributions = Some(Arc::new(next));
         }
-        drop(published);
         *self.shared.store.lock().unwrap() = store;
-        // What the helpers registered is published: they have settled.
-        self.shared.update(|p| p.starting.clear());
+        // What the helpers registered is published with them: they have
+        // settled in the same publication that carries their definitions.
+        published.starting.clear();
+        published.revision += 1;
+        drop(published);
+        (self.shared.wake)();
     }
     fn realm_message(&mut self, envelope: RealmEnvelope) {
         if envelope.project != self.config.project {
@@ -2872,27 +2892,38 @@ mod tests {
                 .is_some_and(|d| d.iter().any(|d| d["id"] == id))
         };
         let deadline = Instant::now() + Duration::from_secs(20);
-        let mut partial = false;
+        let mut partial = None;
         let mut named = false;
         loop {
-            let loading = fixture.host.loading();
-            let settled = fixture.host.definitions_settled();
-            match fixture.host.contributions() {
-                Some(c) if has(&c, "slow.tint") && settled => break,
+            // One publication: its definitions, its flag and its names.
+            let now = fixture.host.publication();
+            match &now.contributions {
+                Some(c) if has(c, "slow.tint") && now.settled => break,
                 Some(c) => {
-                    partial |= has(&c, "fast.tint");
+                    if has(c, "fast.tint") {
+                        partial.get_or_insert(now.clone());
+                    }
                     // Who is still loading is named while it loads.
-                    named |= loading.iter().any(|(id, _)| id == "b-slow");
-                    assert!(!settled, "settled without slow.tint: {}", c["definitions"]);
+                    named |= now.loading.iter().any(|(id, _)| id == "b-slow");
+                    assert!(
+                        !now.settled,
+                        "settled without slow.tint: {}",
+                        c["definitions"]
+                    );
                 }
-                None => assert!(!settled, "settled before anything activated"),
+                None => assert!(!now.settled, "settled before anything activated"),
             }
             assert!(Instant::now() < deadline, "slow.tint never registered");
             thread::sleep(Duration::from_millis(2));
         }
-        assert!(partial, "the fast extension's effect was published first");
+        // A publication read while the slow extension loaded still says so
+        // after the host has settled: a reader that pins it later pins a
+        // load in progress, never these definitions as the finished list.
+        let partial = partial.expect("the fast extension's effect was published first");
+        assert!(!partial.settled && !has(partial.contributions.as_ref().unwrap(), "slow.tint"));
         assert!(named, "the slow extension was named as loading");
-        assert!(fixture.host.loading().is_empty());
+        let settled = fixture.host.publication();
+        assert!(settled.loading.is_empty() && settled.revision > partial.revision);
     }
     /// A Store helper's activation is part of the load: until it has
     /// registered its effect (at boot, or when it is installed later) the
@@ -2937,11 +2968,16 @@ mod tests {
         let watch = |id: &str| {
             let deadline = Instant::now() + Duration::from_secs(30);
             loop {
-                let settled = fixture.host.definitions_settled();
-                if has(id) && settled {
+                let now = fixture.host.publication();
+                let has = now.contributions.as_ref().is_some_and(|c| {
+                    c["definitions"]
+                        .as_array()
+                        .is_some_and(|d| d.iter().any(|d| d["id"] == id))
+                });
+                if has && now.settled {
                     break;
                 }
-                assert!(!settled, "settled without {id}");
+                assert!(!now.settled, "settled without {id}");
                 assert!(Instant::now() < deadline, "{id} never registered");
                 thread::sleep(Duration::from_millis(2));
             }
@@ -2952,7 +2988,8 @@ mod tests {
         store(&fixture._root.path().join("extensions"), "synthetic-later");
         fixture.until("the rescan starts it", |host| {
             assert!(!has("synthetic-later.tint"), "registered while settled");
-            host.loading()
+            host.publication()
+                .loading
                 .iter()
                 .any(|(id, name)| id == "synthetic-later" && name == "synthetic-later")
         });
@@ -2964,7 +3001,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         fs::create_dir_all(root.path().join("extensions")).unwrap();
         let fixture = Fixture::start(root);
-        fixture.until("an empty boot settles", |host| host.definitions_settled());
+        fixture.until("an empty boot settles", |host| host.publication().settled);
         assert!(fixture.host.contributions().is_none());
     }
     #[test]

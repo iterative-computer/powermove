@@ -337,6 +337,43 @@ pub(crate) fn starts_once_loaded(what: &str, resources: &ResourceSnapshot) -> St
         }
     }
 }
+/// The resources one host publication pins after `current`, or `None` when
+/// it pins what `current` does. Definitions, the pending flag and the names
+/// of who is loading all come from that publication, never from the host
+/// again: a later look could pair these definitions with a load that has
+/// since finished, and the frame would draw a late effect as not installed.
+fn pinned(
+    current: &ResourceSnapshot,
+    publication: &pm_compat_runner::host::Publication,
+) -> Option<ResourceSnapshot> {
+    let definitions: Vec<pm_protocol::definitions::DefinitionSnapshot> = publication
+        .contributions
+        .as_deref()
+        .and_then(|value| value["definitions"].as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|definition| serde_json::from_value(definition.clone()).ok())
+        .collect();
+    let pending = !publication.settled;
+    let loading = if pending {
+        publication.loading.clone()
+    } else {
+        vec![]
+    };
+    if definitions == current.definitions
+        && pending == current.pending
+        && loading == current.loading
+    {
+        return None;
+    }
+    Some(ResourceSnapshot {
+        generation: current.generation + 1,
+        definitions,
+        pending,
+        loading,
+        ..Default::default()
+    })
+}
 /// Effect types the engine draws without any extension.
 fn builtin_effects() -> &'static BTreeSet<String> {
     static BUILTIN: std::sync::LazyLock<BTreeSet<String>> = std::sync::LazyLock::new(|| {
@@ -507,7 +544,9 @@ impl Controller {
         let Some(host) = &self.extensions.host else {
             return;
         };
-        let revision = host.revision();
+        // Everything pinned below comes from this one publication.
+        let publication = host.publication();
+        let revision = publication.revision;
         // A rebuilt realm is a new document: render again so open panels
         // replace the page the old one drew into.
         if self
@@ -538,16 +577,11 @@ impl Controller {
         if revision != self.extensions.seen {
             self.extensions.seen = revision;
             self.mount_surfaces(cx);
-            if let Some(contributions) = self
-                .extensions
-                .host
-                .as_ref()
-                .and_then(|h| h.contributions())
-            {
-                self.apply_contributions(&contributions, cx);
+            if publication.contributions.is_some() {
+                self.apply_contributions(&publication, cx);
             } else {
-                // No extension to run: settled with no definitions.
-                self.pin_definitions(vec![]);
+                // No extension to run, or none has published yet.
+                self.pin_definitions(&publication);
             }
         }
         self.present_page();
@@ -1071,7 +1105,14 @@ impl Controller {
         })
         .detach();
     }
-    fn apply_contributions(&mut self, value: &Value, cx: &mut Context<Self>) {
+    fn apply_contributions(
+        &mut self,
+        publication: &pm_compat_runner::host::Publication,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(value) = publication.contributions.as_deref() else {
+            return;
+        };
         let panels: Vec<(String, String)> = value["panels"]
             .as_array()
             .into_iter()
@@ -1186,13 +1227,7 @@ impl Controller {
         shell.contributed_choices = self.extensions.palette_choices();
         shell.set_contributed_bindings(OWNER, bindings);
         drop(shell);
-        let definitions: Vec<_> = value["definitions"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|definition| serde_json::from_value(definition.clone()).ok())
-            .collect();
-        self.pin_definitions(definitions);
+        self.pin_definitions(publication);
         self.apply_v1_theme(&value["nativeTheme"], cx);
         self.update_builtins(cx);
         cx.notify();
@@ -1235,31 +1270,19 @@ impl Controller {
     }
     /// The contributed definitions every viewer, capture and export of this
     /// window draws with, and whether a load pass is still running (an effect
-    /// the project uses may yet arrive: `ResourceSnapshot::pending`).
-    fn pin_definitions(&mut self, definitions: Vec<pm_protocol::definitions::DefinitionSnapshot>) {
-        let host = self.extensions.host.as_ref();
-        let pending = host.is_some_and(|host| !host.definitions_settled());
-        let loading = match host {
-            Some(host) if pending => host.loading(),
-            _ => vec![],
-        };
+    /// the project uses may yet arrive: `ResourceSnapshot::pending`), all from
+    /// one publication of the host.
+    fn pin_definitions(&mut self, publication: &pm_compat_runner::host::Publication) {
         let current = &self.extensions.resources;
-        if definitions == current.definitions
-            && pending == current.pending
-            && loading == current.loading
-        {
+        let Some(next) = pinned(current, publication) else {
             return;
+        };
+        if current.pending && !next.pending {
+            crate::diag::line(
+                json!({"extensions": "settled", "definitions": next.definitions.len()}),
+            );
         }
-        if current.pending && !pending {
-            crate::diag::line(json!({"extensions": "settled", "definitions": definitions.len()}));
-        }
-        self.extensions.resources = Arc::new(ResourceSnapshot {
-            generation: current.generation + 1,
-            definitions,
-            pending,
-            loading,
-            ..Default::default()
-        });
+        self.extensions.resources = Arc::new(next);
         if let Some(doc_id) = self.extensions.doc_id {
             crate::mcp_services::set_resources(doc_id, Some(self.extensions.resources.clone()));
         }
@@ -2077,6 +2100,60 @@ impl Controller {
 
 #[cfg(test)]
 mod tests {
+    /// What a window pins comes from one publication of the host: the
+    /// definitions published while an extension was still loading stay a
+    /// load in progress however far the host has moved on since, so a frame
+    /// never pairs them with "everything has loaded".
+    #[test]
+    fn a_window_pins_definitions_and_their_flag_from_one_publication() {
+        use super::{ResourceSnapshot, pinned};
+        use pm_compat_runner::host::Publication;
+        use serde_json::json;
+        use std::sync::Arc;
+        let effect = |id: &str| {
+            let mut definition = serde_json::to_value(
+                pm_render::all_builtin_definitions()
+                    .definitions
+                    .into_iter()
+                    .find(|d| d.id.as_str() == "invert")
+                    .unwrap(),
+            )
+            .unwrap();
+            definition["id"] = json!(id);
+            definition
+        };
+        let early = Publication {
+            revision: 3,
+            contributions: Some(Arc::new(json!({"definitions": [effect("fast.tint")]}))),
+            settled: false,
+            loading: vec![("b-slow".into(), "Slow".into())],
+        };
+        // The host settles (with the late effect) before the window pins.
+        let late = Publication {
+            revision: 4,
+            contributions: Some(Arc::new(
+                json!({"definitions": [effect("fast.tint"), effect("slow.tint")]}),
+            )),
+            settled: true,
+            loading: vec![],
+        };
+        let start = ResourceSnapshot {
+            pending: true,
+            ..Default::default()
+        };
+        let first = pinned(&start, &early).unwrap();
+        assert!(
+            first.pending,
+            "the early definitions are a load in progress"
+        );
+        assert_eq!(first.loading, early.loading);
+        assert_eq!(first.definitions.len(), 1);
+        assert!(pinned(&first, &early).is_none(), "the same pins again");
+        let second = pinned(&first, &late).unwrap();
+        assert!(!second.pending && second.loading.is_empty());
+        assert_eq!(second.definitions.len(), 2);
+        assert!(second.generation > first.generation);
+    }
     #[test]
     fn a_job_waiting_for_extensions_names_them() {
         use super::{ResourceSnapshot, starts_once_loaded};
