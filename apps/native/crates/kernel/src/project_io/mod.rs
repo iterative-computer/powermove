@@ -38,6 +38,7 @@ mod envelope;
 mod main_delta_tests;
 pub mod media_jobs;
 pub mod save;
+mod transaction;
 
 use std::collections::HashSet;
 use std::fs::File;
@@ -49,14 +50,19 @@ use pm_model::container::{ContainerFormat, MediaRecord, ReadOptions, read_contai
 use pm_model::{JsString, Map, Value};
 use sha2::{Digest, Sha256};
 
-pub use durable::PublishHooks;
-pub(crate) use durable::remove_abandoned_temps;
+pub use crate::error::kept_beside;
 pub(crate) use durable::stat_of as durable_stat_of;
 pub use durable::{
     BackupPolicy, FileStat, FileVersion, Publish, check_version, hash_file, list_backups,
-    temporary_sibling,
+    local_time, temporary_sibling,
+};
+pub(crate) use durable::{Host, folder_sync_now, remove_abandoned_temps};
+pub use durable::{
+    PublishHook, PublishHooks, SharedWriteCoordinator, StepHook, TrashHook, WriteCoordinator,
 };
 pub use save::{SaveOptions, SavePlan, SaveReceipt, SaveTarget, VerifyLevel, WriteFault};
+pub use transaction::{LeftAside, Leftover, Owner, Settled, Undecided};
+pub(crate) use transaction::{kept_notices, kept_seen, leftovers, pending, settle, use_leftover};
 
 use crate::error::{ProjectIoError, io_err};
 use crate::history::History;

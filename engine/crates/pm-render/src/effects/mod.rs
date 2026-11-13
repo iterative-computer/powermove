@@ -158,6 +158,7 @@ pub struct Effects {
     /// Viewer frames: an effect whose provider isn't installed is bypassed
     /// (its layer draws without it) instead of refusing the layer.
     pub(crate) bypass_missing: bool,
+    bypassed: std::sync::Mutex<Vec<crate::LayerFailure>>,
     /// Neutral of a layer map: byte projects have a representable 128 of 255.
     pub(crate) map_midpoint: f64,
     set: DefinitionSet,
@@ -329,6 +330,24 @@ pub fn definition_error(id: &DefinitionId, status: &Status) -> Option<EngineErro
 }
 
 impl Effects {
+    pub(crate) fn take_bypassed(&self) -> Vec<crate::LayerFailure> {
+        std::mem::take(&mut *self.bypassed.lock().unwrap())
+    }
+
+    fn report_bypassed(
+        &self,
+        composition: String,
+        layer: &pm_model::Node,
+        effect: &str,
+        feature: &crate::Feature,
+    ) {
+        self.bypassed.lock().unwrap().push(crate::LayerFailure {
+            composition,
+            layer: crate::js::layer_id(layer),
+            message: format!("effect {effect} bypassed: {feature}"),
+        });
+    }
+
     /// `context` names the device (back end and driver) for the
     /// translation cache.
     pub fn new(context: impl Into<String>) -> Effects {
@@ -347,6 +366,7 @@ impl Effects {
             file_app_version: None,
             versioned_builtins: false,
             bypass_missing: false,
+            bypassed: Default::default(),
             map_midpoint: 0.5,
             set: DefinitionSet::default(),
             configured: false,
@@ -948,6 +968,7 @@ impl crate::composite::EffectHost for Effects {
             (1., 1.),
             prefix,
             Some(raster),
+            None,
         )? {
             Ok(s) => s,
             Err(f) => return Ok(Err(f)),
@@ -1015,6 +1036,7 @@ impl crate::composite::EffectHost for Effects {
         let owner = std::sync::Arc::new(raster.owner());
         for (step, domain) in steps.iter_mut().zip(domains) {
             step.owner = Some(owner.clone());
+            step.density = owner.pixel_scale;
             step.source_domain = Some((domain, raster.extent));
             if let Some(spatial) = &mut step.spatial {
                 let def = versions::main_definition(&step.definition).unwrap();
@@ -1069,6 +1091,25 @@ impl crate::composite::EffectHost for Effects {
         frame: crate::composite::effects::EffectFrame,
         prefix: Option<usize>,
     ) -> pm_eval::JsResult<Result<Option<crate::composite::PreparedEffects>, crate::Feature>> {
+        self.prepare_measured(scope, layer, frame, prefix, None)
+    }
+
+    fn take_bypassed(&self) -> Vec<crate::LayerFailure> {
+        Effects::take_bypassed(self)
+    }
+
+    fn bypasses_refusals(&self) -> bool {
+        self.bypass_missing
+    }
+
+    fn prepare_measured<'d>(
+        &self,
+        scope: &mut pm_eval::Scope<'_, 'd>,
+        layer: &'d pm_model::Node,
+        frame: crate::composite::effects::EffectFrame,
+        prefix: Option<usize>,
+        measure: Option<&mut dyn pm_eval::text_geom::TextMeasure>,
+    ) -> pm_eval::JsResult<Result<Option<crate::composite::PreparedEffects>, crate::Feature>> {
         let steps = match plan::effect_steps_frame(
             scope,
             self,
@@ -1077,6 +1118,7 @@ impl crate::composite::EffectHost for Effects {
             frame.scale,
             prefix,
             None,
+            measure,
             frame.owner,
         )? {
             Ok(steps) => steps,

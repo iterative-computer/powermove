@@ -438,6 +438,53 @@ struct View {
     paths: Arc<pm_export::render::MediaPaths>,
     /// What a paused frame reads: `paths` without Automatic's HD proxies.
     paused_paths: Arc<pm_export::render::MediaPaths>,
+    /// Stamp sequence bumps that only moved the shown time (scrub seeks and
+    /// their pauses, skimmer moves): PM_FIX_PRESENT_STALE.
+    moves: u64,
+}
+/// While dragging, a finished frame of the same content (generation,
+/// document, revision) is presented even though newer playhead moves have
+/// arrived; the newest time is drawn next. Dropping it instead meant a drag
+/// that moves faster than a frame renders showed no picture until it stopped.
+/// `PM_FIX_PRESENT_STALE=0` restores dropping; `=1` accepts only frames older
+/// by playhead moves alone (the app bumps the stamp for more than moves).
+/// Diagnostics (traced viewers only): stamp bumps counted by source line and
+/// command kind, written into each frame's trace row as `bumps`.
+static BUMPS: Mutex<BTreeMap<String, u64>> = Mutex::new(BTreeMap::new());
+fn bump_site(line: u32, kind: &str) {
+    if trace::enabled() {
+        *BUMPS.lock().unwrap().entry(format!("{line}{kind}")).or_default() += 1;
+    }
+}
+fn command_kind(cmd: Option<&TransportCommand>) -> &'static str {
+    match cmd {
+        Some(TransportCommand::Pause) => ":pause",
+        Some(TransportCommand::Seek { mode: pm_protocol::clock::SeekMode::Scrub, .. }) => ":seek-scrub",
+        Some(TransportCommand::Seek { .. }) => ":seek-other",
+        Some(TransportCommand::Play { .. }) => ":play",
+        Some(_) => ":other",
+        None => ":none",
+    }
+}
+fn bumps_snapshot() -> serde_json::Value {
+    serde_json::to_value(&*BUMPS.lock().unwrap()).unwrap_or_default()
+}
+/// The last scrub time asked of each view, and repeats of it (diagnostics).
+static LAST_SCRUB: Mutex<BTreeMap<u64, (i64, u64)>> = Mutex::new(BTreeMap::new());
+
+fn only_moved(v: &View, stamp: Stamp, moves: u64, moment: Moment, capture: bool) -> bool {
+    // 1: only playhead moves since the frame's stamp. 2: the same content
+    // (generation, document, revision); a drag picture may carry the
+    // previous overlay or quality for one frame, never another document.
+    let mode = pm_media::decode::diag::knob("PM_FIX_PRESENT_STALE").or(Some(2));
+    moment == Moment::Scrub
+        && !capture
+        && matches!(mode, Some(1 | 2))
+        && v.stamp.generation == stamp.generation
+        && v.stamp.doc_id == stamp.doc_id
+        && v.stamp.revision == stamp.revision
+        && (mode == Some(2)
+            || v.stamp.sequence.wrapping_sub(stamp.sequence) == v.moves.wrapping_sub(moves))
 }
 impl View {
     fn set_studio_preview(&mut self, preview: studio::Preview) {
@@ -466,9 +513,19 @@ impl View {
             TransportCommand::AudioScrub { enabled } => self.audio_scrub = enabled,
             _ => {}
         }
+        let moved = matches!(
+            cmd,
+            TransportCommand::Pause
+                | TransportCommand::Seek {
+                    mode: pm_protocol::clock::SeekMode::Scrub,
+                    ..
+                }
+        );
         self.commands.push_back(cmd);
         self.commands_sent.get_or_insert_with(trace::now);
         self.stamp.sequence += 1;
+        bump_site(line!(), command_kind(self.commands.back()));
+        self.moves += u64::from(moved);
         self.dirty = true;
         Ok(())
     }
@@ -538,6 +595,7 @@ impl Shared {
         let mut state = self.state.lock().unwrap();
         for v in state.views.values_mut() {
             v.stamp.sequence += 1;
+            bump_site(line!(), "");
             v.dirty = true;
         }
         self.wake.try_send(()).ok();
@@ -631,6 +689,7 @@ impl Viewer {
                 v.config.snapshot = snapshot;
                 v.stamp.revision = v.config.snapshot.revision;
                 v.stamp.sequence += 1;
+                bump_site(line!(), "");
                 // Paused gizmo geometry names one revision and time; safe
                 // areas and guides are time-invariant and persist across edits.
                 if v.overlay_time.take().is_some() {
@@ -655,6 +714,7 @@ impl Viewer {
         v.config.media = media;
         v.content = content;
         v.stamp.sequence += 1;
+        bump_site(line!(), "");
         v.dirty = true;
         self.shared.wake.try_send(()).ok();
         Ok(())
@@ -676,6 +736,7 @@ impl Viewer {
         v.status.proxied = v.config.media.proxied(mode);
         v.content = content;
         v.stamp.sequence += 1;
+        bump_site(line!(), "");
         v.dirty = true;
         self.shared.wake.try_send(()).ok();
         Ok(())
@@ -750,6 +811,7 @@ impl Viewer {
             if v.quality != quality {
                 v.quality = quality;
                 v.stamp.sequence += 1;
+                bump_site(line!(), "");
                 v.dirty = true;
             }
             Ok(())
@@ -788,6 +850,8 @@ impl Viewer {
             v.input = Some(input);
             v.pipeline.request = trace::now();
             v.stamp.sequence += 1;
+            bump_site(line!(), "");
+            v.moves += 1;
             v.dirty = true;
             Ok(())
         })
@@ -806,6 +870,25 @@ impl Viewer {
     /// NSEvent.timestamp in monotonic host seconds; preserve event origin.
     pub fn scrub_at(&self, time: Ticks, input: f64) -> Result<()> {
         ensure!(input.is_finite() && input > 0., "invalid input timestamp");
+        if trace::enabled() {
+            let mut last = LAST_SCRUB.lock().unwrap();
+            let e = last.entry(self.id).or_insert((i64::MIN, 0));
+            if e.0 == time.get() {
+                e.1 += 1;
+                if e.1 % 20 == 1 {
+                    eprintln!(
+                        "PM_SCRUB_REPEAT view={} time={} repeats={} at={:.6}\n{}",
+                        self.id,
+                        time.get(),
+                        e.1,
+                        trace::now(),
+                        std::backtrace::Backtrace::force_capture()
+                    );
+                }
+            } else {
+                *e = (time.get(), 0);
+            }
+        }
         self.edit(|v| {
             v.input = Some(input);
             v.pipeline.request = trace::now();
@@ -845,6 +928,7 @@ impl Viewer {
             {
                 v.stamp.generation += 1;
                 v.stamp.sequence += 1;
+                bump_site(line!(), "");
                 v.dirty = true;
             }
             Ok(())
@@ -866,6 +950,7 @@ impl Viewer {
             v.overlay_time = Some(time);
             v.locked_provider = None;
             v.stamp.sequence += 1;
+            bump_site(line!(), "");
             v.dirty = true;
             Ok(())
         })
@@ -874,6 +959,7 @@ impl Viewer {
         self.edit(|v| {
             v.locked_provider = Some(provider);
             v.stamp.sequence += 1;
+            bump_site(line!(), "");
             v.dirty = true;
             Ok(())
         })
@@ -890,6 +976,7 @@ impl Viewer {
             v.overlay_time = None;
             v.locked_provider = None;
             v.stamp.sequence += 1;
+            bump_site(line!(), "");
             v.dirty = true;
             Ok(())
         })
@@ -968,6 +1055,7 @@ impl Viewer {
             v.content = content;
             v.stamp.generation += 1;
             v.stamp.sequence += 1;
+            bump_site(line!(), "");
             v.dirty = true;
             self.shared.interactive.set(true);
             self.shared.wake.try_send(()).ok();
@@ -986,6 +1074,7 @@ impl Viewer {
             v.mastering = mode;
             v.stamp.generation += 1;
             v.stamp.sequence += 1;
+            bump_site(line!(), "");
             v.dirty = true;
             Ok(())
         })
@@ -996,6 +1085,7 @@ impl Viewer {
         *self.shared.scopes.lock().unwrap() = tap.map(|tap| (self.id, tap));
         self.edit(|v| {
             v.stamp.sequence += 1;
+            bump_site(line!(), "");
             v.dirty = true;
             Ok(())
         })
@@ -1007,6 +1097,7 @@ impl Viewer {
         self.edit(|v| {
             v.capture = true;
             v.stamp.sequence += 1;
+            bump_site(line!(), "");
             v.dirty = true;
             Ok(())
         })
@@ -1165,7 +1256,22 @@ impl EngineService {
         let worker = shared.clone();
         let thread = std::thread::Builder::new()
             .name("pm-engine-service".into())
-            .spawn(move || supervise(engine, worker, wakes))?;
+            .spawn(move || {
+                // PM_FIX_RENDER_QOS=1: the viewer's render thread runs at the
+                // UI's class, as the frames it draws are interactive; at the
+                // default class the app's scheduler can place it on slower
+                // cores (same work cost ~1.6x more CPU time in the app).
+                if pm_media::decode::diag::knob("PM_FIX_RENDER_QOS") == Some(1) {
+                    // SAFETY: affects only the calling thread.
+                    unsafe {
+                        libc::pthread_set_qos_class_self_np(
+                            libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE,
+                            0,
+                        );
+                    }
+                }
+                supervise(engine, worker, wakes)
+            })?;
         Ok(Self {
             shared,
             thread: Some(thread),
@@ -1297,6 +1403,7 @@ impl EngineService {
                 media_mode: MediaMode::default(),
                 paths,
                 paused_paths,
+                moves: 0,
             },
         );
         // After the new view is in: the document they share stays open.
@@ -1466,6 +1573,7 @@ mod lookahead_tests {
 struct Flight {
     id: u64,
     stamp: Stamp,
+    moves: u64,
     spec: FrameSpec,
     submission: render::Submission,
     input: Option<f64>,
@@ -1482,6 +1590,7 @@ const DROPS_AT_MOST: i64 = 48;
 struct Work {
     id: u64,
     stamp: Stamp,
+    moves: u64,
     scene: Scene,
     /// What rendered frames are drawn from: a paused frame's media (never
     /// Automatic's HD proxies), whatever this frame's moment reads.
@@ -1634,6 +1743,7 @@ fn supervise(engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc
             });
             v.status.restarts += u64::from(restarted);
             v.stamp.sequence += 1;
+            bump_site(line!(), "");
             v.dirty = true;
             if restarted {
                 resume(v, now);
@@ -1842,6 +1952,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                         v.status.device_losses += 1;
                         v.status.error = None;
                         v.stamp.sequence += 1;
+                        bump_site(line!(), "");
                         v.dirty = true;
                         if let Some(r) = runtime.get_mut(id) {
                             r.last = None;
@@ -1963,11 +2074,19 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                         "input":f.input,"audio_host":f.audio_host,"time":f.spec.time.get(),"scale":f.spec.scale,"moment":format!("{:?}",f.spec.moment),"disk":t.disk,"disk_wait_ms":t.disk_wait_ms,"enter_ms":t.enter_ms,"disk_upload_ms":t.disk_upload_ms,"cache_hit":t.cache_hit,
                         "stale":v.stamp != f.stamp,"viewer_id":f.id,"generation":f.stamp.generation,"revision":f.stamp.revision,"sequence":f.stamp.sequence,"gpu_ok":t.gpu_ok,
                         "request":f.pipeline.request,"actor_ms":f.pipeline.actor_ms,"publication_ms":f.pipeline.publication_ms,
-                        "render_start":t.render_start,"render_submitted":t.render_submitted,"render_cpu_ms":t.render_cpu_ms,"work":serde_json::from_str::<serde_json::Value>(&t.work.to_json()).unwrap_or_default(),"drawable_asked":t.drawable_asked,"drawable_acquired":t.drawable_acquired,
+                        "bumps":bumps_snapshot(),"present_requested":t.present_requested,"render_start":t.render_start,"render_submitted":t.render_submitted,"render_cpu_ms":t.render_cpu_ms,"work":serde_json::from_str::<serde_json::Value>(&t.work.to_json()).unwrap_or_default(),"drawable_asked":t.drawable_asked,"drawable_acquired":t.drawable_acquired,
                         "encode_end":t.encode_end,"scheduled":t.scheduled,"gpu_start":t.gpu_start,"gpu_done":t.gpu_done,"callback":t.display_callback,"target":t.target,"requested":t.requested,"predicted":t.predicted})) {
                     v.status.error = Some("viewer diagnostic trace overflow/disconnected".into());
                 }
-                if v.stamp != f.stamp {
+                if v.stamp != f.stamp
+                    && !only_moved(
+                        v,
+                        f.stamp,
+                        f.moves,
+                        f.spec.moment,
+                        f.submission.readback.is_some(),
+                    )
+                {
                     v.status.stale_rejections += 1;
                     // Its readback is for a stamp no one shows: ask again.
                     v.capture |= f.submission.readback.is_some();
@@ -2337,12 +2456,14 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 r.refine_at = None;
                 r.scrub = false;
                 v.stamp.sequence += 1;
+                bump_site(line!(), "");
                 v.dirty = true;
             }
             // The paused picture landed at the drawable's size: draw it again
             // at the composition's size, a new picture of the same time.
             if !r.transport.running() && std::mem::take(&mut r.full_due) {
                 v.stamp.sequence += 1;
+                bump_site(line!(), "");
                 v.dirty = true;
                 r.full_for = Some(v.stamp);
             }
@@ -2425,6 +2546,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             work = Some(Work {
                 id,
                 stamp: v.stamp,
+                moves: v.moves,
                 scene,
                 rendered_media: v.paused_paths.clone(),
                 spec: FrameSpec {
@@ -2531,6 +2653,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
         if let Some(Work {
             id,
             stamp,
+            moves,
             scene,
             rendered_media,
             spec,
@@ -2719,7 +2842,16 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                     v.status.missing_effects = engine.missing_effects.clone();
                 }
                 // A capture asked for belongs to the next frame that lands.
-                if v.stamp != stamp {
+                if v.stamp != stamp && !only_moved(v, stamp, moves, spec.moment, capture) {
+                    if let Some(recorder) = &recorder {
+                        recorder.record(serde_json::json!({
+                            "rejected_before_commit": true, "at": trace::now(),
+                            "view_stamp": format!("{:?}", v.stamp), "frame_stamp": format!("{:?}", stamp),
+                            "view_moves": v.moves, "frame_moves": moves,
+                            "moment": format!("{:?}", spec.moment), "capture": capture,
+                            "knob": pm_media::decode::diag::knob("PM_FIX_PRESENT_STALE"),
+                        }));
+                    }
                     v.status.stale_rejections += 1;
                     v.capture |= capture;
                     continue;
@@ -2801,6 +2933,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                         flights.push_back(Flight {
                             id,
                             stamp,
+                            moves,
                             spec,
                             submission: s,
                             input,
@@ -3616,6 +3749,22 @@ mod worker_tests {
         assert_eq!(
             status.notice().as_deref(),
             Some("Not drawn, 2 layers: no definition for effect deep-glow.effect (and 1 more)")
+        );
+    }
+
+    #[test]
+    fn the_notice_reports_a_refused_effect_bypassed_on_a_drawn_layer() {
+        let status = ViewerStatus {
+            layer_failures: vec![pm_render::LayerFailure {
+                composition: "c".into(),
+                layer: "caption".into(),
+                message: "effect shadow bypassed: no definition for invalid input".into(),
+            }],
+            ..ViewerStatus::default()
+        };
+        assert_eq!(
+            status.notice().as_deref(),
+            Some("Not drawn, 1 layer: effect shadow bypassed: no definition for invalid input")
         );
     }
 

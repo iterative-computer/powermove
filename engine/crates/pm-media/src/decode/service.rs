@@ -326,6 +326,9 @@ pub struct DecodeService {
     arbiter: Arc<dyn HardwareArbiter>,
     config: ServiceConfig,
     idle: Mutex<HashMap<SessionKey, Vec<Session>>>,
+    /// When a drag frame last asked for video (ms since process start), for
+    /// PM_FIX_VIDEO2's scrub-only decoder retention.
+    scrubbed_ms: AtomicU64,
     open_sessions: AtomicU64,
     /// Decoders a failed session's recovery tried to open, in all.
     recovery_opens: AtomicU64,
@@ -545,20 +548,36 @@ impl Drop for SessionGuard<'_> {
             // and closes when that is still not enough (always for a zero
             // share, as in `fit_decoders`).
             let zero = svc.decoder_budget.load(Ordering::Relaxed) == 0;
+            // PM_FIX_KEEP_SESSION: over the share, a session gives back its
+            // window but stays open as its key's one idle session; cold
+            // sources and idle release close it.
+            let keep = (super::diag::knob("PM_FIX_KEEP_SESSION") == Some(2)
+                || super::diag::knob("PM_FIX_KEEP_SESSION") == Some(1)
+                || svc.scrubbing())
+                && svc
+                    .idle
+                    .lock()
+                    .unwrap()
+                    .get(&self.key)
+                    .is_none_or(|l| l.is_empty());
             if zero || svc.decoders_over() {
                 s.clear_window();
-                if zero || svc.decoders_over() {
+                if !keep && (zero || svc.decoders_over()) {
                     drop(s);
                     svc.open_sessions.fetch_sub(1, Ordering::Relaxed);
+                    super::diag::bump(&super::diag::SESSIONS_CLOSED_OVER_SHARE, 1);
                     svc.fit_decoders();
                     return;
                 }
             }
             let mut idle = svc.idle.lock().unwrap();
             let list = idle.entry(self.key).or_default();
-            if list.len() < svc.config.idle_sessions {
+            let idle_cap = super::diag::knob("PM_ABL_IDLE_SESSIONS")
+                .map_or(svc.config.idle_sessions, |n| n as usize);
+            if list.len() < idle_cap {
                 list.push(s);
             } else {
+                super::diag::bump(&super::diag::SESSIONS_CLOSED_IDLE_FULL, 1);
                 svc.open_sessions.fetch_sub(1, Ordering::Relaxed);
             }
         }
@@ -566,6 +585,30 @@ impl Drop for SessionGuard<'_> {
 }
 
 impl DecodeService {
+    /// A drag frame is asking for video now (PM_FIX_VIDEO2).
+    pub fn note_scrub(&self) {
+        self.scrubbed_ms.store(scrub_clock_ms().max(1), Ordering::Relaxed);
+    }
+
+    /// Whether a drag asked for video in the last half second, with
+    /// PM_FIX_VIDEO2 on: decoders and reorder windows are then kept.
+    pub fn scrubbing(&self) -> bool {
+        (super::diag::video2()
+            || super::diag::knob("PM_SCRUB_EXTRA_MIB").is_some_and(|m| m > 0))
+            && self.scrubbed_within(std::time::Duration::from_millis(500))
+    }
+
+    /// Whether a drag asked for video within `within`.
+    pub fn scrubbed_within(&self, within: std::time::Duration) -> bool {
+        let at = self.scrubbed_ms.load(Ordering::Relaxed);
+        at != 0 && scrub_clock_ms().saturating_sub(at) < within.as_millis() as u64
+    }
+
+    /// Playback or export began: retention and the allowance end now.
+    pub fn clear_scrub_mark(&self) {
+        self.scrubbed_ms.store(0, Ordering::Relaxed);
+    }
+
     pub fn new(config: ServiceConfig) -> DecodeService {
         Self::with_arbiter(config, Arc::new(LocalArbiter::unlimited()))
     }
@@ -577,6 +620,7 @@ impl DecodeService {
             arbiter,
             config,
             idle: Mutex::new(HashMap::new()),
+            scrubbed_ms: AtomicU64::new(0),
             open_sessions: AtomicU64::new(0),
             recovery_opens: AtomicU64::new(0),
             decoder_budget: AtomicUsize::new(usize::MAX),
@@ -631,6 +675,8 @@ impl DecodeService {
             Some(s) => s,
             None => self.open_session(source, purpose, prefer)?,
         };
+        let mut session = session;
+        session.set_reorder(self.scrubbing());
         Ok(SessionGuard {
             service: self,
             key,
@@ -669,8 +715,11 @@ impl DecodeService {
         let reader = PacketReader::new(source.path(), source.stream)?;
         let mut s = Session::new(source.index.clone(), reader, decoder, Some(source.color));
         s.set_window(self.config.session_window);
-        s.set_window_bytes(32 << 20);
+        s.set_window_bytes(
+            super::diag::knob("PM_ABL_WINDOW_MIB").map_or(32 << 20, |m| (m << 20) as usize),
+        );
         self.open_sessions.fetch_add(1, Ordering::Relaxed);
+        super::diag::bump(&super::diag::SESSIONS_OPENED, 1);
         Ok(s)
     }
 
@@ -684,6 +733,7 @@ impl DecodeService {
             if drop {
                 self.open_sessions
                     .fetch_sub(v.len() as u64, Ordering::Relaxed);
+                super::diag::bump(&super::diag::SESSIONS_RELEASED, v.len() as u64);
             }
             !drop
         });
@@ -724,12 +774,17 @@ impl DecodeService {
         // A zero share closes every idle session: the state VideoToolbox
         // keeps per session is not measurable, so nothing else frees it.
         let zero = self.decoder_budget.load(Ordering::Relaxed) == 0;
-        while zero || self.decoders_over() {
+        // PM_FIX_KEEP_SESSION=2: over the share, idle sessions keep only
+        // their decoder (windows and free pool memory go above); only a zero
+        // share (idle release, project close) closes them.
+        let keep = super::diag::knob("PM_FIX_KEEP_SESSION") == Some(2) || self.scrubbing();
+        while zero || (!keep && self.decoders_over()) {
             let Some(s) = idle.values_mut().find_map(|l| l.pop()) else {
                 break;
             };
             drop(s);
             self.open_sessions.fetch_sub(1, Ordering::Relaxed);
+            super::diag::bump(&super::diag::SESSIONS_CLOSED_OVER_SHARE, 1);
             self.trim_free();
         }
         idle.retain(|_, l| !l.is_empty());
@@ -812,4 +867,10 @@ pub fn read_ahead_order(source: &MediaSource, from: usize, plan: ReadAhead) -> V
                 .collect()
         }
     }
+}
+
+/// Milliseconds since this process first asked (PM_FIX_VIDEO2's clock).
+fn scrub_clock_ms() -> u64 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    START.get_or_init(std::time::Instant::now).elapsed().as_millis() as u64
 }

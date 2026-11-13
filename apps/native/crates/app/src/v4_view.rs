@@ -532,6 +532,8 @@ impl SurfaceView {
                     quiet: crate::v4_compile::variant(node) == Some("quiet"),
                     tint: None,
                     symbol: None,
+                    glass: false,
+                    symbol_only: false,
                 },
                 &tokens,
                 window,

@@ -141,6 +141,11 @@ impl TextField {
     }
     /// Muted hint shown while the field is empty (`metadata.placeholder`).
     /// Draw no well: the enclosing control owns the fill, edge and padding.
+    /// Escape cancels the edit (the owner hears `Cancelled`) instead of
+    /// committing it: a search field, which clears itself.
+    pub fn set_escape_cancels(&mut self, cancels: bool) {
+        self.slot.set_escape_cancels(cancels);
+    }
     pub fn set_bare(&mut self, bare: bool) {
         self.bare = bare;
     }

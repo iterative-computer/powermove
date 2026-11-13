@@ -373,6 +373,216 @@ fn a_panic_in_one_projects_open_leaves_the_others_editable() {
     shell(&kernel, ShellCall::Save(session)).unwrap();
 }
 
+/// A panic inside one project's save or close (its file or slot already
+/// written, its journal not yet rebased or released) stops that project
+/// only. The other open project keeps taking edits and saves; the stopped
+/// one refuses edits, closes without writing, and reopens with all its
+/// acknowledged work.
+fn panic_in_a_shell_call(stage: Stage) {
+    let root = Temp::new(&format!("shell-{stage:?}").to_lowercase());
+    let (_actor, kernel, working) = fixture(&root.0, "working");
+    let stopped = opened(shell(
+        &kernel,
+        ShellCall::Open {
+            id: "stopped".into(),
+            source: SessionSource::New(project("stopped")),
+            electron_profile: None,
+        },
+    ));
+    kernel
+        .call_blocking("stopped", Request::new(Caller::native(), opacity(70.0)))
+        .unwrap();
+    kernel.arm_fault(stage, "stopped");
+    let call = match stage {
+        Stage::InSave => ShellCall::Save(stopped.clone()),
+        _ => ShellCall::Close(stopped.clone()),
+    };
+    assert!(
+        kernel.shell(call).wait().is_none(),
+        "{stage:?}: the interrupted call has no answer"
+    );
+    assert!(kernel.published("working").unwrap().fault.is_none());
+    let ack = kernel
+        .call_blocking("working", Request::new(Caller::native(), opacity(5.0)))
+        .expect("the other project still takes edits");
+    assert_eq!(
+        kernel.published("working").unwrap().revision(),
+        ack.revision
+    );
+    shell(&kernel, ShellCall::Save(working)).unwrap();
+    assert!(
+        kernel.published("stopped").unwrap().fault.is_some(),
+        "{stage:?}: the project whose call panicked is stopped"
+    );
+    assert!(refused(kernel.call_blocking(
+        "stopped",
+        Request::new(Caller::native(), opacity(10.0))
+    )));
+    assert!(matches!(
+        shell(&kernel, ShellCall::Close(stopped)),
+        Ok(ShellReply::Closed {
+            recovery_copy: None
+        })
+    ));
+    // Reopened, asked or not: all of its acknowledged work is there.
+    let reply = shell(
+        &kernel,
+        ShellCall::PrepareOpen {
+            id: "stopped".into(),
+            source: SessionSource::Library {
+                profile: root.0.clone(),
+                project: "stopped".into(),
+            },
+            electron_profile: None,
+        },
+    );
+    match reply {
+        Ok(ShellReply::RecoveryRequired { ticket, .. }) => {
+            opened(shell(
+                &kernel,
+                ShellCall::DecideRecovery {
+                    ticket,
+                    decision: RecoveryDecision::Recover,
+                },
+            ));
+        }
+        Ok(ShellReply::Opened { .. }) => {}
+        other => panic!("{stage:?}: {other:?}"),
+    }
+    assert!(kernel.published("stopped").unwrap().fault.is_none());
+    assert_eq!(
+        layer_opacity(&document(&kernel, "stopped")),
+        70.0,
+        "{stage:?}"
+    );
+    kernel
+        .call_blocking("stopped", Request::new(Caller::native(), opacity(20.0)))
+        .expect("it edits normally again");
+}
+
+#[test]
+fn a_panic_in_one_projects_save_leaves_the_others_editable_and_its_work_whole() {
+    panic_in_a_shell_call(Stage::InSave);
+}
+
+#[test]
+fn a_panic_in_one_projects_close_leaves_the_others_editable_and_its_work_whole() {
+    panic_in_a_shell_call(Stage::InClose);
+}
+
+/// Undo memory is one budget across projects: opening a project can trim
+/// the history of another that is already open. A panic right after such a
+/// trim stops only the project being opened. The other project is whole: it
+/// is not stopped, what it publishes about its history is what its history
+/// holds once the next shell call is answered, it still edits and undoes,
+/// and its journal recovers exactly its document.
+#[test]
+fn a_panic_while_an_open_trims_another_projects_history_leaves_that_project_whole() {
+    let root = Temp::new("trim-panics");
+    let (actor, kernel, session) = fixture(&root.0, "working");
+    for v in [50.0, 60.0, 70.0] {
+        kernel
+            .call_blocking("working", Request::new(Caller::native(), opacity(v)))
+            .unwrap();
+    }
+    let before = kernel.published("working").unwrap().history.clone();
+    assert!(
+        before.entries >= 4 && before.applied == before.entries,
+        "{before:?}"
+    );
+    // The budget shrinks; the next open is the call that trims for it.
+    kernel.set_history_budget_later(before.entries - 1);
+    kernel.arm_fault(Stage::InHistoryTrim, "second");
+    let open = || ShellCall::PrepareOpen {
+        id: "second".into(),
+        source: SessionSource::New(project("second")),
+        electron_profile: None,
+    };
+    assert!(
+        kernel.shell(open()).wait().is_none(),
+        "the open that panicked is not answered"
+    );
+    assert!(kernel.published("working").unwrap().fault.is_none());
+    // Nothing more to trim: the next publication of anything says what the
+    // interrupted call did to this project's history.
+    kernel.set_history_budget_later(before.entries);
+    opened(shell(
+        &kernel,
+        ShellCall::Open {
+            id: "second".into(),
+            source: SessionSource::New(project("second")),
+            electron_profile: None,
+        },
+    ));
+    let after = kernel.published("working").unwrap().history.clone();
+    assert_eq!(
+        (after.entries, after.applied),
+        (before.entries - 1, before.applied - 1),
+        "the publication holds the trimmed history, not the one before the panic"
+    );
+    // Every step it says can be undone can be, and no more.
+    for _ in 0..after.applied {
+        kernel
+            .call_blocking("working", Request::new(Caller::native(), HistoryCall::Undo))
+            .expect("an undo the publication offers");
+    }
+    let undone = kernel.published("working").unwrap();
+    assert!(!undone.history.can_undo, "{:?}", undone.history);
+    for _ in 0..after.applied {
+        kernel
+            .call_blocking("working", Request::new(Caller::native(), HistoryCall::Redo))
+            .expect("a redo the publication offers");
+    }
+    assert_eq!(layer_opacity(&document(&kernel, "working")), 70.0);
+    let ack = kernel
+        .call_blocking("working", Request::new(Caller::native(), opacity(5.0)))
+        .expect("it still takes edits");
+    assert_eq!(
+        kernel.published("working").unwrap().revision(),
+        ack.revision
+    );
+    // Ended with that edit only in the journal: recovery gives it back.
+    kernel.sync().wait();
+    drop((session, kernel));
+    drop(actor);
+    let again = KernelActor::spawn(KernelConfig {
+        journal_root: Some(root.0.join("journals")),
+        ..Default::default()
+    });
+    let kernel = again.handle();
+    shell(
+        &kernel,
+        ShellCall::AttachLibrary {
+            profile: root.0.clone(),
+            format: DiskFormat::V1_2,
+            electron_profile: None,
+        },
+    )
+    .unwrap();
+    let reply = shell(
+        &kernel,
+        ShellCall::Open {
+            id: "working".into(),
+            source: SessionSource::Library {
+                profile: root.0.clone(),
+                project: "working".into(),
+            },
+            electron_profile: None,
+        },
+    );
+    assert!(
+        matches!(
+            &reply,
+            Ok(ShellReply::Opened {
+                recovery: crate::session::RecoveryResult::Recovered { truncated: false },
+                ..
+            })
+        ),
+        "{reply:?}"
+    );
+    assert_eq!(layer_opacity(&document(&kernel, "working")), 5.0);
+}
+
 /// A caller waiting on the stopped project (an Undo deferred to a realm)
 /// gets the failure instead of waiting forever.
 #[test]

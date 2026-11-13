@@ -396,6 +396,8 @@ pub struct Engine {
     memory_client: crate::memory::Registration,
     memory_request: Arc<std::sync::atomic::AtomicU64>,
     budgeted_surfaces: u64,
+    /// PM_SCRUB_EXTRA_MIB: the borrowed scrub allowance in force (bytes).
+    budgeted_extra: u64,
 }
 type Waker = Arc<std::sync::Mutex<Option<std::sync::mpsc::SyncSender<()>>>>;
 fn lose(lost: &AtomicBool, waker: &Waker) {
@@ -450,6 +452,7 @@ impl Engine {
                 + self.renderer.scene3d_resident().map_bytes,
             binding_bytes: self.renderer.binding_cache_bytes(),
             gpu_allocated_bytes: self.metal.current_allocated_size(),
+            scrub_extra_bytes: self.budgeted_extra,
             // Counted by the service across engine rebuilds.
             project_releases: 0,
         }
@@ -511,6 +514,22 @@ impl Engine {
         self.gpu.wait_idle();
     }
 
+    /// PM_SCRUB_EXTRA_MIB: bytes borrowed while a drag or skim asked for
+    /// video in the last two seconds, scaled with installed memory as the
+    /// base budget is (×1 at 16 GB), none under memory pressure. Only decoded
+    /// (60 %) and converted (40 %) frames receive it; it is returned at once
+    /// on playback or export and two seconds after the drag otherwise.
+    fn scrub_extra(&self) -> u64 {
+        let mib = pm_media::decode::diag::knob("PM_SCRUB_EXTRA_MIB").unwrap_or(0);
+        if mib == 0
+            || crate::memory::pressure() != crate::memory::Pressure::Normal
+            || !self.renderer.scrubbed_within(Duration::from_secs(2))
+        {
+            return 0;
+        }
+        (mib << 20) * crate::memory::budget() / (160 << 20)
+    }
+
     pub fn govern_memory(&mut self) {
         objc2::rc::autoreleasepool(|_| self.govern_memory_inner());
     }
@@ -523,18 +542,48 @@ impl Engine {
         let request = self.memory_request.swap(u64::MAX, Ordering::AcqRel);
         let surfaces = self.memory_usage().surface_bytes;
         let share = self.memory_client.grant();
-        if request != u64::MAX || surfaces != self.budgeted_surfaces {
+        let extra = self.scrub_extra();
+        if request != u64::MAX || surfaces != self.budgeted_surfaces || extra != self.budgeted_extra {
+            self.budgeted_extra = extra;
+            // A traced viewer logs why its caches are trimmed (diagnostics).
+            if crate::trace::enabled() {
+                eprintln!(
+                    "PM_MEMORY_TRIM at={:.6} request={} surfaces={} previous_surfaces={} share={} pool_bytes={} vector_bytes={}",
+                    crate::trace::now(),
+                    request != u64::MAX,
+                    surfaces,
+                    self.budgeted_surfaces,
+                    share,
+                    self.renderer.target_pool_bytes(),
+                    self.renderer.vector_cache_bytes(),
+                );
+            }
             self.budgeted_surfaces = surfaces;
             // In-flight surfaces are pinned. Divide only the remainder,
             // so every independently reusable cache shares the same allowance.
-            let cache = share.saturating_sub(surfaces);
+            let knob = pm_media::decode::diag::knob;
+            let cache = if knob("PM_ABL_SURFACES") == Some(0) {
+                share
+            } else {
+                share.saturating_sub(surfaces)
+            };
+            // PM_FIX_SHARES: the remainder after output frames favours
+            // decoded frames (35 %) over stills (10 %); the parts still sum
+            // to the grant.
+            let shares = knob("PM_FIX_SHARES") == Some(1);
+            let (frame_part, image_part) = if shares { (35, 10) } else { (15, 20) };
             self.renderer
                 .apply_media_lease(pm_media::decode::service::MediaLease {
-                    frame_cache: (cache * 15 / 100) as usize,
-                    decoders: (cache / 4) as usize,
+                    frame_cache: knob("PM_ABL_FRAME_CACHE_MIB")
+                        .map_or((cache * frame_part / 100) as usize, |m| (m << 20) as usize)
+                        + (extra * 6 / 10) as usize,
+                    decoders: knob("PM_ABL_DECODERS_MIB")
+                        .map_or((cache / 4) as usize, |m| (m << 20) as usize),
                 });
-            self.renderer.set_image_cache_budget(cache / 5);
-            self.renderer.set_converted_frame_budget(cache / 10);
+            self.renderer.set_image_cache_budget(cache * image_part / 100);
+            self.renderer.set_converted_frame_budget(
+                knob("PM_ABL_CONVERTED_MIB").map_or(cache / 10, |m| m << 20) + extra * 4 / 10,
+            );
             self.renderer.set_target_pool_budget(cache / 10);
             self.renderer.set_vector_cache_budget(cache / 20, 512);
             self.renderer.trim(cache / 20);
@@ -701,6 +750,11 @@ impl Engine {
             decoders: 32 << 20,
         });
         renderer.set_draw_reuse(true);
+        // A/B diagnostics: `PM_VECTOR_BATCHING=0` resolves every vector scene
+        // on its own (`Renderer::set_vector_batching`).
+        if std::env::var_os("PM_VECTOR_BATCHING").is_some_and(|v| v == "0") {
+            renderer.set_vector_batching(false);
+        }
         renderer.set_program_cache_dir(shader_cache.clone());
         Ok(Self {
             mastering: Default::default(),
@@ -754,6 +808,7 @@ impl Engine {
             memory_client,
             memory_request,
             budgeted_surfaces: u64::MAX,
+            budgeted_extra: 0,
         })
     }
     /// Raster overrides the viewer's frames ask for (`crate::compat`).
@@ -1100,6 +1155,7 @@ impl Engine {
         scopes.flush(&self.gpu.device, &self.gpu.queue)
     }
     pub fn export(&mut self, scene: &Scene, time: Ticks, size: Size) -> Result<Vec<f32>> {
+        self.renderer.clear_scrub_mark();
         self.renderer.set_preview_media(false, false);
         self.last_frame = Instant::now();
         self.idle_released = false;
@@ -1298,11 +1354,19 @@ impl Engine {
                 request.output_tone = self.output_tone;
                 // An exact read never takes a stand-in, whatever the moment,
                 // and draws from original media without reused draws.
-                self.renderer
-                    .set_preview_media(spec.preview_stills(scene), spec.preview_video());
+                // PM_ABL_PREVIEW=0 turns preview-size media off (measurement only).
+                let preview = pm_media::decode::diag::knob("PM_ABL_PREVIEW") != Some(0);
+                self.renderer.set_preview_media(
+                    preview && spec.preview_stills(scene),
+                    preview && spec.preview_video(),
+                );
                 self.renderer.set_draw_reuse(!spec.exact);
                 self.renderer
                     .set_scrub(spec.moment == Moment::Scrub && !spec.exact);
+                if spec.moment == Moment::Playing {
+                    // Playback returns a scrub allowance at once.
+                    self.renderer.clear_scrub_mark();
+                }
                 self.renderer.set_playback(if spec.exact {
                     None
                 } else {
@@ -1544,7 +1608,18 @@ impl Engine {
     /// room in the cache first.
     fn cache_surface(&mut self, size: Size) -> Result<Arc<ExportedSurface>> {
         let bytes = u64::from(size.width) * u64::from(size.height) * 8;
-        let capacity = ((FRAME_CACHE_BYTES / bytes).clamp(1, 8)) as usize;
+        // PM_FIX_OUT_HALF: the output frame cache keeps within half the
+        // engine's grant, leaving the rest to decode and conversion.
+        let limit = if pm_media::decode::diag::knob("PM_FIX_OUT_HALF") == Some(1)
+            || pm_media::decode::diag::video2()
+            || pm_media::decode::diag::knob("PM_SCRUB_EXTRA_MIB").is_some_and(|m| m > 0)
+            || pm_media::decode::diag::knob("PM_FIX_SHARES") == Some(1)
+        {
+            FRAME_CACHE_BYTES.min(self.memory_client.grant() / 2)
+        } else {
+            FRAME_CACHE_BYTES
+        };
+        let capacity = ((limit / bytes).clamp(1, 8)) as usize;
         while self.cache.len() >= capacity {
             self.cache.pop_front();
         }

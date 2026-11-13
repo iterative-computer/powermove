@@ -266,6 +266,11 @@ impl NativeControl {
     }
 }
 
+/// What a glass capsule keeps clear around the control it holds, along and
+/// across.
+const GLASS_PAD: (f32, f32) = (4., 3.);
+/// Before and after a glass search field's magnifier.
+const GLASS_LEAD: f64 = 6.;
 pub struct ControlSpec<'a> {
     pub kind: Kind,
     pub label: &'a str,
@@ -288,6 +293,14 @@ pub struct ControlSpec<'a> {
     /// (`⌘F`): the field is then the view's one prominent search, drawn large
     /// with the shortcut at its trailing end while it is empty.
     pub symbol: Option<&'a str>,
+    /// The system's liquid glass (macOS 26 and later; the plain control
+    /// before). A push button takes the system's glass bezel at the large
+    /// size: a surface's one raised action. A search field or a segmented
+    /// control stands, with no bezel of its own, in a glass capsule.
+    pub glass: bool,
+    /// A glass push button that shows its symbol alone; `label` is then its
+    /// tooltip and accessibility label.
+    pub symbol_only: bool,
 }
 
 impl NativeControl {
@@ -310,7 +323,10 @@ impl NativeControl {
             quiet,
             tint,
             symbol,
+            glass,
+            symbol_only,
         } = spec;
+        let glass = glass && objc2::runtime::AnyClass::get(c"NSGlassEffectView").is_some();
         use raw_window_handle::{HasWindowHandle, RawWindowHandle};
         let RawWindowHandle::AppKit(handle) =
             HasWindowHandle::window_handle(window).unwrap().as_raw()
@@ -446,7 +462,14 @@ impl NativeControl {
                 } else if matches!(kind, Kind::Radio) {
                     v.setButtonType(NSButtonType::Radio);
                 } else {
-                    v.setBezelStyle(NSBezelStyle::Push);
+                    v.setBezelStyle(if glass {
+                        NSBezelStyle::Glass
+                    } else {
+                        NSBezelStyle::Push
+                    });
+                    if glass {
+                        v.setControlSize(NSControlSize::Large);
+                    }
                     v.setHasDestructiveAction(destructive);
                     if let Some(image) = symbol.and_then(|name| {
                         NSImage::imageWithSystemSymbolName_accessibilityDescription(
@@ -455,7 +478,12 @@ impl NativeControl {
                         )
                     }) {
                         v.setImage(Some(&image));
-                        v.setImagePosition(NSCellImagePosition::ImageLeading);
+                        v.setImagePosition(if symbol_only {
+                            v.setToolTip(Some(&NSString::from_str(label)));
+                            NSCellImagePosition::ImageOnly
+                        } else {
+                            NSCellImagePosition::ImageLeading
+                        });
                     }
                     if let Some(rgb) = tint {
                         let channel = |shift: u32| ((rgb >> shift) & 255) as f64 / 255.;
@@ -544,6 +572,92 @@ impl NativeControl {
         let height = t.metrics.control.max(intrinsic.height as f32);
         let native =
             unsafe { Retained::retain(control.view() as *const NSView as *mut NSView).unwrap() };
+        // A field or a segmented control on glass: the control, with no
+        // bezel of its own, is the content of a glass capsule, and the
+        // capsule is what the view places.
+        let capsule = (glass && matches!(kind, Kind::Search | Kind::Segmented)).then(|| {
+            let height = (height + GLASS_PAD.1 * 2.) as f64;
+            let pad = GLASS_PAD.0 as f64;
+            let size = NSSize::new(width as f64 + 2. * pad, height);
+            let capsule = NSGlassEffectView::initWithFrame(
+                NSGlassEffectView::alloc(mtm),
+                NSRect::new(NSPoint::ZERO, size),
+            );
+            capsule.setCornerRadius(height / 2.);
+            let content =
+                NSView::initWithFrame(NSView::alloc(mtm), NSRect::new(NSPoint::ZERO, size));
+            if let Control::Search(field) = &control {
+                // With no bezel the field is as high as its text, which
+                // then stands in the middle of the capsule.
+                field.setBezeled(false);
+                field.setDrawsBackground(false);
+                // A field with no bezel lays its text over its own search
+                // button while it is edited: the magnifier is the capsule's
+                // instead, and the field starts after it.
+                if let Some(cell) = field
+                    .cell()
+                    .and_then(|c| c.downcast::<NSSearchFieldCell>().ok())
+                {
+                    cell.setSearchButtonCell(None);
+                }
+                field.sizeToFit();
+            }
+            let own = native.frame().size;
+            if matches!(control, Control::Search(_)) {
+                let glyph = t.metrics.symbol_toolbar as f64 + 1.;
+                let lead = pad + GLASS_LEAD;
+                if let Some(image) = NSImage::imageWithSystemSymbolName_accessibilityDescription(
+                    &NSString::from_str("magnifyingglass"),
+                    None,
+                ) {
+                    let config = NSImageSymbolConfiguration::configurationWithPointSize_weight(
+                        glyph,
+                        unsafe { NSFontWeightRegular },
+                    );
+                    let image = image.imageWithSymbolConfiguration(&config).unwrap_or(image);
+                    let mark = NSImageView::imageViewWithImage(&image, mtm);
+                    mark.setContentTintColor(Some(&NSColor::secondaryLabelColor()));
+                    let side = glyph + 4.;
+                    mark.setFrame(NSRect::new(
+                        NSPoint::new(lead, ((height - side) / 2.).round()),
+                        NSSize::new(side, side),
+                    ));
+                    mark.setAutoresizingMask(
+                        NSAutoresizingMaskOptions::ViewMinYMargin
+                            | NSAutoresizingMaskOptions::ViewMaxYMargin,
+                    );
+                    content.addSubview(&mark);
+                }
+                let from = lead + glyph + 4. + GLASS_LEAD;
+                native.setFrame(NSRect::new(
+                    NSPoint::new(from, ((height - own.height) / 2.).round()),
+                    NSSize::new(size.width - from - pad, own.height),
+                ));
+                native.setAutoresizingMask(
+                    NSAutoresizingMaskOptions::ViewWidthSizable
+                        | NSAutoresizingMaskOptions::ViewMinYMargin
+                        | NSAutoresizingMaskOptions::ViewMaxYMargin,
+                );
+            } else {
+                native.setFrameOrigin(NSPoint::new(
+                    ((size.width - own.width) / 2.).round(),
+                    ((height - own.height) / 2.).round(),
+                ));
+                native.setAutoresizingMask(
+                    NSAutoresizingMaskOptions::ViewMinXMargin
+                        | NSAutoresizingMaskOptions::ViewMaxXMargin
+                        | NSAutoresizingMaskOptions::ViewMinYMargin
+                        | NSAutoresizingMaskOptions::ViewMaxYMargin,
+                );
+            }
+            content.addSubview(&native);
+            capsule.setContentView(Some(&content));
+            Retained::into_super(capsule)
+        });
+        let (native, width, height) = match capsule {
+            Some(capsule) => (capsule, width + 2. * GLASS_PAD.0, height + 2. * GLASS_PAD.1),
+            None => (native, width, height),
+        };
         let slot = Rc::new(NativeControlSlot::new(&gpui, native));
         cx.spawn(async move |this, cx| {
             while let Ok(value) = rx.recv().await {
