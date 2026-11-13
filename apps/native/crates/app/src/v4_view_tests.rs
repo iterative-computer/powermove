@@ -367,7 +367,7 @@ fn every_kit_component_renders_a_real_element(cx: &mut TestAppContext) {
                 .to_owned()
         })
         .collect();
-    assert_eq!(names.len(), 30);
+    assert_eq!(names.len(), 32);
     for (i, name) in names.iter().enumerate() {
         let primitive = match name.as_str() {
             "sheet-anchor" | "popover-anchor" | "colour-popover" => "anchored",
@@ -386,6 +386,16 @@ fn every_kit_component_renders_a_real_element(cx: &mut TestAppContext) {
             "colour-well" => props["value"] = json!("#ff0000"),
             "viewer-gizmo" => {
                 props["metadata"] = json!({"pmKit":{"kind":"transform","position":{"x":4.,"y":5.}}})
+            }
+            "color-wheel" => {
+                props["value"] = json!([0.1, 0., -0.1]);
+                props["binding"] = json!("r+g+b");
+                props["metadata"] = json!({"pmKit":{"neutral":0.,"min":-1.,"max":1.}});
+            }
+            "curve-editor" => {
+                props["value"] = json!([2., 0., 0., 1., 1.]);
+                props["binding"] = json!("curve");
+                props["metadata"] = json!({"pmKit":{"channel":1}});
             }
             _ => {}
         }

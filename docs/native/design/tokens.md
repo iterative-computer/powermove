@@ -24,6 +24,9 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `colors.accent` | Powermove orange: primary button, playhead, selection marks | `#F0580C` | `#FA6310` | `#F0580C` | `#FA6310` |
 | `colors.accent_text` | Accent as text or a thin mark on panels (4.5:1) | `#B93800` | `#FF8B4D` | `#9A2F00` | `#FFA073` |
 | `colors.accent_wash` | Opaque accent tint: drop targets, active guide bed | `#FCEDE6` | `#402617` | `#FCEDE6` | `#402617` |
+| `colors.channel_blue` | Blue channel ink on panels (curves, channel values) | `#3263C3` | `#70ADFB` | `#3263C3` | `#70ADFB` |
+| `colors.channel_green` | Green channel ink on panels (curves, channel values) | `#1D7D3E` | `#6FD087` | `#1D7D3E` | `#6FD087` |
+| `colors.channel_red` | Red channel ink on panels (curves, channel values) | `#BA3630` | `#F47B74` | `#BA3630` | `#F47B74` |
 | `colors.danger` | Destructive and error text, offline media | `#C22A1F` | `#F36357` | `#C22A1F` | `#F36357` |
 | `colors.faint` | Placeholders, shortcut hints, disabled labels (derived) | `#9FA0A3` | `#6A6867` | `#9FA0A3` | `#6A6867` |
 | `colors.field` | Value wells, text fields, segmented control track | `#F3F3F4` | `#282523` | `#F3F3F4` | `#282523` |
@@ -72,6 +75,7 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `metrics.composer_max_lines` | Agent composer grows to this many lines, then scrolls | 10 | 10 | 10 | 10 |
 | `metrics.control` | Standalone control height (buttons, popups) | 28 | 28 | 28 | 28 |
 | `metrics.control_radius` | Control radius inside a panel (panel radius − gap) | 8 | 8 | 8 | 8 |
+| `metrics.curve_editor` | The curve editor's graph height | 200 | 200 | 200 | 200 |
 | `metrics.dock_gap` | Space between docked panels and to the window edge | 8 | 8 | 8 | 8 |
 | `metrics.drag_opacity` | Opacity of a drag source left in place | 0.5 | 0.5 | 0.5 | 0.5 |
 | `metrics.drag_threshold` | Pointer travel before a drag starts | 3 | 3 | 3 | 3 |
@@ -84,6 +88,7 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `metrics.gap` | Gap between panels and to the window edge | 6 | 6 | 6 | 6 |
 | `metrics.gizmo_handle` | Transform handle and path vertex square | 7 | 7 | 7 | 7 |
 | `metrics.gizmo_keyline` | Gizmo stroke and keyline width over the image | 1 | 1 | 1 | 1 |
+| `metrics.grade_wheel` | A colour wheel's diameter | 112 | 112 | 112 | 112 |
 | `metrics.group_radius` | Settings grouped-form card corner | 12 | 12 | 12 | 12 |
 | `metrics.header` | Panel header, viewer bar and timeline header height | 38 | 38 | 38 | 38 |
 | `metrics.hit` | Minimum pointer target | 24 | 24 | 24 | 24 |

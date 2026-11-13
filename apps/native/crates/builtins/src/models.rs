@@ -1322,7 +1322,7 @@ impl Backend {
                 // Effect Controls and the Color panel write effect parameters.
                 if matches!(self.panel_id.as_str(), "layer-effects" | "color") {
                     return self
-                        .parameter_write(handle, model(&args["value"])?, time)
+                        .parameter_write(handle, &args["value"], time)
                         .map(NativeCommand::Kernel);
                 }
                 let request = self.native.properties.write(

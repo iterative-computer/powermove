@@ -9,11 +9,13 @@ import {
   PANEL_ID,
   PANEL_TITLE,
   WHEELS,
+  WHEELS_OF,
   WHEEL_SECTIONS,
   coverage,
-  curveRows,
+  curveGroup,
   grade,
   parameter,
+  wheelGroup,
   type GradeEffect,
 } from "./contract";
 
@@ -55,13 +57,17 @@ export function ColorPanel({ controller: c, command }: ColorProps) {
       (row) =>
         row && <Control key={row.id} row={row} locked={p.locked} model={c} />,
     );
-  const wheelRows = (g: GradeEffect) =>
-    WHEEL_SECTIONS.map((s) => (
+  // Balance and Tone as rows, then the four wheels (Lift, Gamma, Gain,
+  // Offset) side by side as the panel's width allows.
+  const wheelControls = (g: GradeEffect) => [
+    ...WHEEL_SECTIONS.slice(0, 2).map((s) => (
       <div key={`${g.header.id}:${s.title}`} role="group" label={s.title}>
         <Subheading title={s.title} />
         {rows(s.keys.map((k) => parameter(g, k)))}
       </div>
-    ));
+    )),
+    <Wheels key={`${g.header.id}:wheels`} g={g} locked={p.locked} />,
+  ];
   const add = (definition: string, label: string) => (
     <SectionAction
       id={`${PANEL_ID}:add:${definition}`}
@@ -114,7 +120,7 @@ export function ColorPanel({ controller: c, command }: ColorProps) {
               editable={editable}
               action={wheels ? undefined : add(WHEELS, "Add Color Wheels")}
             >
-              {wheels ? wheelRows(wheels) : null}
+              {wheels ? wheelControls(wheels) : null}
               {moreWheels.map((g) => (
                 <Tool
                   key={g.header.id}
@@ -122,7 +128,7 @@ export function ColorPanel({ controller: c, command }: ColorProps) {
                   send={send}
                   editable={editable}
                 >
-                  {wheelRows(g)}
+                  {wheelControls(g)}
                 </Tool>
               ))}
             </Section>
@@ -139,7 +145,8 @@ export function ColorPanel({ controller: c, command }: ColorProps) {
                   send={send}
                   editable={editable}
                 >
-                  {rows(curveRows(g))}
+                  {rows([parameter(g, "channel")])}
+                  <CurveControl g={g} locked={p.locked} />
                 </Tool>
               ))}
             </Section>
@@ -185,6 +192,160 @@ export function ColorPanel({ controller: c, command }: ColorProps) {
           </scroll>
         </>
       )}
+    </div>
+  );
+}
+
+/** Lift, Gamma, Gain and Offset: each a drawn wheel over its master and
+ * its red, green and blue (as Resolve shows them), wrapping two across in a
+ * narrow panel and four across in a wide one. */
+function Wheels({
+  g,
+  locked,
+}: {
+  key?: string;
+  g: GradeEffect;
+  locked: boolean;
+}) {
+  return (
+    <div
+      role="group"
+      label="Wheels"
+      style={{
+        display: "flex",
+        flexDirection: "row",
+        flexWrap: "wrap",
+        justifyContent: "center",
+        columnGap: t("metrics.inset"),
+        rowGap: t("metrics.inset"),
+        paddingTop: t("metrics.inset"),
+        paddingLeft: t("metrics.inset"),
+        paddingRight: t("metrics.inset"),
+      }}
+    >
+      {WHEELS_OF.map((w) => {
+        const group = wheelGroup(g, w.key);
+        const master = parameter(g, `${w.key}Master`);
+        const rgb = (group?.value ?? [w.neutral, w.neutral, w.neutral]) as [
+          number,
+          number,
+          number,
+        ];
+        const disabled = locked || !g.header.enabled || !group;
+        return (
+          <div
+            key={w.key}
+            role="group"
+            label={w.title}
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              gap: t("metrics.gap"),
+              width: t("metrics.grade_wheel"),
+            }}
+          >
+            <text
+              style={{
+                color: t("colors.secondary"),
+                fontSize: t("typography.label"),
+                fontWeight: t("typography.semibold_weight"),
+              }}
+            >
+              {w.title}
+            </text>
+            {group && (
+              <UI.ColorWheel
+                id={`${PANEL_ID}:wheel:${g.header.id}:${w.key}`}
+                label={`${w.title} colour`}
+                binding={group.binding}
+                value={rgb}
+                neutral={w.neutral}
+                min={w.range[0]}
+                max={w.range[1]}
+                disabled={disabled}
+                onKeyDown={stop}
+              />
+            )}
+            {master && (
+              <UI.NumberField
+                id={`${PANEL_ID}:field:${master.id}`}
+                label={`${w.title} Master`}
+                binding={master.parameter.binding}
+                value={master.parameter.value as number}
+                step={master.parameter.step}
+                min={master.parameter.min}
+                max={master.parameter.max}
+                precision={master.parameter.precision}
+                disabled={locked || master.parameter.readonly}
+                mixed={master.parameter.mixed}
+                onKeyDown={stop}
+                onClick={stop}
+                style={{ width: t("metrics.grade_wheel") }}
+              />
+            )}
+            <div
+              role="group"
+              label={`${w.title} red ${signed(rgb[0])}, green ${signed(rgb[1])}, blue ${signed(rgb[2])}`}
+              style={{
+                display: "flex",
+                flexDirection: "row",
+                justifyContent: "space-between",
+                width: t("metrics.grade_wheel"),
+              }}
+            >
+              {(["channel_red", "channel_green", "channel_blue"] as const).map(
+                (ink, i) => (
+                  <text
+                    key={ink}
+                    style={{
+                      color: t(`colors.${ink}`),
+                      fontSize: t("typography.caption"),
+                      fontVariantNumeric: "tabular-nums",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {signed(rgb[i])}
+                  </text>
+                ),
+              )}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/** A channel value as a colourist reads it: two places, a true minus. */
+function signed(v: number) {
+  return v.toFixed(2).replace("-", "\u2212");
+}
+
+/** One curve's drawn editor, on the panel's inset. */
+function CurveControl({ g, locked }: { g: GradeEffect; locked: boolean }) {
+  const group = curveGroup(g);
+  if (!group) return null;
+  const channel = Number(parameter(g, "channel")?.parameter.value ?? 0);
+  return (
+    <div
+      role="group"
+      label="Curve"
+      style={{
+        paddingTop: t("metrics.gap"),
+        paddingLeft: t("metrics.inset"),
+        paddingRight: t("metrics.inset"),
+      }}
+    >
+      <UI.CurveEditor
+        id={`${PANEL_ID}:curve:${g.header.id}`}
+        label="Curve"
+        binding={group.binding}
+        value={group.value}
+        channel={channel}
+        disabled={locked || !g.header.enabled}
+        onKeyDown={stop}
+      />
     </div>
   );
 }
