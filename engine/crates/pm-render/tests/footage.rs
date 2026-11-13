@@ -666,20 +666,36 @@ fn a_range_override_reads_the_codes_the_file_holds() {
     let full = |code: f64| code / 255.;
     for n in [0, 3] {
         let t = n as f64 / 25. + 0.01;
-        check("as the file says", frame(&mut r, &moving, None, t), n, &limited);
+        check(
+            "as the file says",
+            frame(&mut r, &moving, None, t),
+            n,
+            &limited,
+        );
         let chosen = frame(&mut r, &moving, Some(json!({ "range": "limited" })), t);
         check("limited chosen", chosen, n, &limited);
         let chosen = frame(&mut r, &moving, Some(json!({ "range": "full" })), t);
         check("full chosen", chosen, n, &full);
         // Back to Automatic after the override: the earlier frame is not kept.
-        check("automatic again", frame(&mut r, &moving, None, t), n, &limited);
+        check(
+            "automatic again",
+            frame(&mut r, &moving, None, t),
+            n,
+            &limited,
+        );
     }
     // Through deinterlacing (a held picture, so every field shows it).
     let held = mistagged_clip(dir.path(), 8, |_| luma(2));
     for (interpret, read) in [
-        (json!({ "fieldOrder": "topFirst" }), &limited as &dyn Fn(f64) -> f64),
+        (
+            json!({ "fieldOrder": "topFirst" }),
+            &limited as &dyn Fn(f64) -> f64,
+        ),
         (json!({ "fieldOrder": "topFirst", "range": "full" }), &full),
-        (json!({ "fieldOrder": "bottomFirst", "range": "full" }), &full),
+        (
+            json!({ "fieldOrder": "bottomFirst", "range": "full" }),
+            &full,
+        ),
     ] {
         let got = frame(&mut r, &held, Some(interpret.clone()), 0.13);
         check(&interpret.to_string(), got, 2, read);
@@ -734,18 +750,19 @@ fn an_interpretation_reads_a_generated_proxy_as_it_reads_the_original() {
     let (w, h) = (64u32, 48u32);
     let mut r = Renderer::headless().unwrap();
     // The centre of each of the four bands.
-    let bands = |r: &mut Renderer, original: &Path, proxy: Option<&Path>, interpret: Option<Value>| {
-        let (doc, mut res) = document(proxy.unwrap_or(original), (w, h), 25.0, interpret);
-        if proxy.is_some() {
-            res.originals.insert("clip".into(), original.to_path_buf());
-        }
-        let pixels = render(r, &doc, (w, h), 0.01, &res);
-        let at = |band: usize| {
-            let o = ((h as usize / 2) * w as usize + band * 16 + 8) * 4;
-            [pixels[o], pixels[o + 1], pixels[o + 2]].map(f64::from)
+    let bands =
+        |r: &mut Renderer, original: &Path, proxy: Option<&Path>, interpret: Option<Value>| {
+            let (doc, mut res) = document(proxy.unwrap_or(original), (w, h), 25.0, interpret);
+            if proxy.is_some() {
+                res.originals.insert("clip".into(), original.to_path_buf());
+            }
+            let pixels = render(r, &doc, (w, h), 0.01, &res);
+            let at = |band: usize| {
+                let o = ((h as usize / 2) * w as usize + band * 16 + 8) * 4;
+                [pixels[o], pixels[o + 1], pixels[o + 2]].map(f64::from)
+            };
+            [at(0), at(1), at(2), at(3)]
         };
-        [at(0), at(1), at(2), at(3)]
-    };
     let apart = |a: [[f64; 3]; 4], b: [[f64; 3]; 4]| {
         a.iter()
             .flatten()
@@ -765,7 +782,10 @@ fn an_interpretation_reads_a_generated_proxy_as_it_reads_the_original() {
         let proxy = bands(&mut r, &camera, Some(&camera_proxy), interpret.clone());
         let d = apart(original, proxy);
         eprintln!("Y′CbCr original, {interpret:?}: proxy {d:.4} from the original");
-        assert!(d < CODEC, "{interpret:?}: proxy {proxy:?}, original {original:?}");
+        assert!(
+            d < CODEC,
+            "{interpret:?}: proxy {proxy:?}, original {original:?}"
+        );
         let read = |code: u8| match interpret {
             Some(_) => f64::from(code) / 255.,
             None => (f64::from(code) - 16.) / 219.,
@@ -780,7 +800,12 @@ fn an_interpretation_reads_a_generated_proxy_as_it_reads_the_original() {
     }
 
     // R′G′B′ tagged Rec.2020: saturated bands, where a wrong matrix shows.
-    let colours = [[200u8, 40, 40], [40, 200, 40], [40, 40, 200], [128, 128, 128]];
+    let colours = [
+        [200u8, 40, 40],
+        [40, 200, 40],
+        [40, 40, 200],
+        [128, 128, 128],
+    ];
     let mut raw = Vec::new();
     for _ in 0..8 * h as usize {
         for x in 0..w as usize {
@@ -801,7 +826,14 @@ fn an_interpretation_reads_a_generated_proxy_as_it_reads_the_original() {
             "-vf",
             "setparams=color_primaries=bt2020:color_trc=bt709:colorspace=bt2020nc",
         ])
-        .args(["-c:v", "qtrle", "-pix_fmt", "rgb24", "-movflags", "+write_colr"])
+        .args([
+            "-c:v",
+            "qtrle",
+            "-pix_fmt",
+            "rgb24",
+            "-movflags",
+            "+write_colr",
+        ])
         .arg(&graphics)
         .status()
         .unwrap();
@@ -822,13 +854,19 @@ fn an_interpretation_reads_a_generated_proxy_as_it_reads_the_original() {
         let proxy = bands(&mut r, &graphics, Some(&graphics_proxy), interpret.clone());
         let d = apart(original, proxy);
         eprintln!("R′G′B′ original, {interpret:?}: proxy {d:.4} from the original");
-        assert!(d < CODEC, "{interpret:?}: proxy {proxy:?}, original {original:?}");
+        assert!(
+            d < CODEC,
+            "{interpret:?}: proxy {proxy:?}, original {original:?}"
+        );
     }
     // The other members still reach the proxy: a transfer chosen for the
     // asset rereads original and proxy alike.
     let log = Some(json!({ "transfer": "gamma22", "matrix": "identity" }));
     let original = bands(&mut r, &graphics, None, log.clone());
-    assert!(apart(original, plain) > 0.01, "the transfer changes the reading");
+    assert!(
+        apart(original, plain) > 0.01,
+        "the transfer changes the reading"
+    );
     let proxy = bands(&mut r, &graphics, Some(&graphics_proxy), log);
     assert!(apart(original, proxy) < CODEC, "{proxy:?} {original:?}");
 }

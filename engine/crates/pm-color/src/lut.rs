@@ -343,7 +343,8 @@ impl CubeLut {
         }
         let mut shaper = Vec::new();
         if let Some(input) = input {
-            let top = f64::from((1u32 << depth(largest(&mut input.iter().copied()), "input line")?) - 1);
+            let top =
+                f64::from((1u32 << depth(largest(&mut input.iter().copied()), "input line")?) - 1);
             let step = top / (input.len() - 1) as f64;
             let even = |(i, v): (usize, &f64)| (i as f64 * step - v).abs() < 2.;
             if !input.iter().enumerate().all(even) {
@@ -675,7 +676,9 @@ mod tests {
         assert!((declared.apply([1.; 3]).unwrap()[0] - 1023. / 4095.).abs() < 1e-12);
         // Values that are not code values are not a .3dl.
         assert_eq!(
-            CubeLut::parse_3dl(&three_dl("", &[0, 1])).unwrap_err().to_string(),
+            CubeLut::parse_3dl(&three_dl("", &[0, 1]))
+                .unwrap_err()
+                .to_string(),
             "The table’s largest value is 1, too low for a .3dl: its values are whole code values of 8 bits or more."
         );
     }
@@ -691,12 +694,15 @@ mod tests {
             let t = at - lo as f64;
             (f64::from(axis[lo]) * (1. - t) + f64::from(axis[lo + 1]) * t) / 4095.
         };
-        let shaped = CubeLut::parse_3dl(&three_dl("Mesh 2 12\n0 250 500 750 1000\n", &axis))
-            .unwrap();
-        let even = CubeLut::parse_3dl(&three_dl("Mesh 2 12\n0 256 512 767 1023\n", &axis))
-            .unwrap();
+        let shaped =
+            CubeLut::parse_3dl(&three_dl("Mesh 2 12\n0 250 500 750 1000\n", &axis)).unwrap();
+        let even = CubeLut::parse_3dl(&three_dl("Mesh 2 12\n0 256 512 767 1023\n", &axis)).unwrap();
         // 1000 is a 10-bit line: 0.5 reaches the cube at 500/1023.
-        for (x, through) in [(0.5, 500. / 1023.), (1., 1000. / 1023.), (0.125, 125. / 1023.)] {
+        for (x, through) in [
+            (0.5, 500. / 1023.),
+            (1., 1000. / 1023.),
+            (0.125, 125. / 1023.),
+        ] {
             let out = shaped.apply([x; 3]).unwrap();
             assert!(
                 (out[0] - cube(through)).abs() < 1e-12,
@@ -763,7 +769,8 @@ mod tests {
         .unwrap();
         // Infinite: the nearer end of the domain. Not a number: its low end.
         assert_eq!(
-            lut.apply([f64::INFINITY, f64::NEG_INFINITY, f64::NAN]).unwrap(),
+            lut.apply([f64::INFINITY, f64::NEG_INFINITY, f64::NAN])
+                .unwrap(),
             [0.7, 0.2, 0.3]
         );
     }

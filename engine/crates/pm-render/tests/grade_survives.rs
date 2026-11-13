@@ -184,7 +184,10 @@ fn hue_keeps_colour_outside_rec709_and_above_white() {
         let mut twice = graded("color", None, json!({"hue":180}), colour);
         let mut second = twice["layers"][0]["fx"][0].clone();
         second["id"] = json!("again");
-        twice["layers"][0]["fx"].as_array_mut().unwrap().push(second);
+        twice["layers"][0]["fx"]
+            .as_array_mut()
+            .unwrap()
+            .push(second);
         let out = pixel(&mut renderer, &twice);
         for c in 0..4 {
             assert!(
@@ -193,7 +196,10 @@ fn hue_keeps_colour_outside_rec709_and_above_white() {
             );
         }
         // One half turn keeps the colour's smallest and largest channel.
-        let once = pixel(&mut renderer, &graded("color", None, json!({"hue":180}), colour));
+        let once = pixel(
+            &mut renderer,
+            &graded("color", None, json!({"hue":180}), colour),
+        );
         let ends = |v: &[f64]| {
             (
                 v[..3].iter().copied().fold(f64::INFINITY, f64::min),
@@ -205,7 +211,10 @@ fn hue_keeps_colour_outside_rec709_and_above_white() {
             (was.0 - is.0).abs() < 2e-5 && (was.1 - is.1).abs() < 2e-5,
             "a half turn of {colour:?} gave {once:?}"
         );
-        assert!((0..3).any(|c| (once[c] - colour[c]).abs() > 0.05), "{once:?}");
+        assert!(
+            (0..3).any(|c| (once[c] - colour[c]).abs() > 0.05),
+            "{once:?}"
+        );
     }
     for degrees in [-150, -60, 45, 90, 180] {
         let colour = [0.8, 0.4, 0.2, 1.0];
@@ -230,7 +239,12 @@ fn color_grades_a_pixel_with_faint_coverage() {
     let grade = json!({"exposure":1,"saturation":30});
     let opaque = pixel(
         &mut renderer,
-        &graded("color", None, grade.clone(), [colour[0], colour[1], colour[2], 1.0]),
+        &graded(
+            "color",
+            None,
+            grade.clone(),
+            [colour[0], colour[1], colour[2], 1.0],
+        ),
     );
     for alpha in [0.0004, 0.00001] {
         let faint = pixel(
@@ -239,14 +253,23 @@ fn color_grades_a_pixel_with_faint_coverage() {
                 "color",
                 None,
                 grade.clone(),
-                [colour[0] * alpha, colour[1] * alpha, colour[2] * alpha, alpha],
+                [
+                    colour[0] * alpha,
+                    colour[1] * alpha,
+                    colour[2] * alpha,
+                    alpha,
+                ],
             ),
         );
         for c in 0..3 {
             assert!(
                 (faint[c] / faint[3] - opaque[c]).abs() < 1e-3,
                 "alpha {alpha}: straight {:?}, opaque {opaque:?}",
-                [faint[0] / faint[3], faint[1] / faint[3], faint[2] / faint[3]]
+                [
+                    faint[0] / faint[3],
+                    faint[1] / faint[3],
+                    faint[2] / faint[3]
+                ]
             );
         }
     }

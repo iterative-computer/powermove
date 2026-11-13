@@ -612,7 +612,10 @@ fn a_graded_frame_is_the_same_in_the_viewer_the_cache_the_scopes_and_the_export(
         viewer.command(C::Pause).unwrap();
         cached
     });
-    assert!(played, "playback through a rendered range shows cached frames");
+    assert!(
+        played,
+        "playback through a rendered range shows cached frames"
+    );
 
     // The picture a playing frame presents from the cache: the viewer's own
     // scene, through the engine's frame path with the cache it reads, until
@@ -711,7 +714,11 @@ fn a_corrected_range_is_read_the_same_in_the_viewer_and_the_export() {
             .into_iter()
             .map(|code| {
                 let code = f64::from(code);
-                if full { code / 255. } else { (code - 16.) / 219. }
+                if full {
+                    code / 255.
+                } else {
+                    (code - 16.) / 219.
+                }
             })
             .collect();
         // The middle of each band, away from its edges.

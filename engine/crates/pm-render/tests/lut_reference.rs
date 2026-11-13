@@ -312,7 +312,11 @@ fn worst(
         let rgb = [input[0], input[1], input[2]].map(f64::from);
         let expected = reference::apply(lut, rgb);
         for c in 0..3 {
-            finite(out[c], expected[c], &format!("pixel {i} channel {c}, in {rgb:?}"));
+            finite(
+                out[c],
+                expected[c],
+                &format!("pixel {i} channel {c}, in {rgb:?}"),
+            );
             let error = (f64::from(out[c]) - expected[c]).abs() / tolerance(expected[c]);
             if error > worst.0 {
                 worst = (
@@ -474,7 +478,11 @@ fn the_reference_agrees_with_ffmpeg() {
         for (i, out) in filtered.iter().enumerate() {
             let expected = reference::apply(lut, pixel(i).map(f64::from));
             for c in 0..3 {
-                finite(out[c], expected[c], &format!("{name}, pixel {i} channel {c}"));
+                finite(
+                    out[c],
+                    expected[c],
+                    &format!("{name}, pixel {i} channel {c}"),
+                );
                 worst = worst.max((f64::from(out[c]) - expected[c]).abs());
             }
         }
@@ -659,7 +667,11 @@ fn a_pixel_that_is_not_a_finite_number_has_a_stated_lookup() {
             let pixels = draw(&mut renderer, &graded, &files);
             for (i, out) in pixels.chunks_exact(4).enumerate() {
                 for c in 0..3 {
-                    finite(out[c], expected[c], &format!("{name}, amount {amount}, pixel {i}"));
+                    finite(
+                        out[c],
+                        expected[c],
+                        &format!("{name}, amount {amount}, pixel {i}"),
+                    );
                     assert!(
                         (f64::from(out[c]) - expected[c]).abs() < 1e-4,
                         "{name}, amount {amount}: rendered {:?}, reference {expected:?}",
@@ -699,10 +711,7 @@ fn a_pq_code_past_either_end_of_pq_is_that_end() {
         ([-0.5, 2.0, 0.25], [0.0, 1.0, 0.25]),
         ([65504.0, -65504.0, 0.75], [1.0, 0.0, 0.75]),
     ] {
-        let text = format!(
-            "LUT_3D_SIZE 2\n{}",
-            cube_rows(2, |_, _, _| table)
-        );
+        let text = format!("LUT_3D_SIZE 2\n{}", cube_rows(2, |_, _, _| table));
         let files = resolver(&dir, &text);
         let project = project_with(code, Some(lut_effect(100., 8., 8.)), 32);
         let pixels = draw(&mut renderer, &project, &files);
