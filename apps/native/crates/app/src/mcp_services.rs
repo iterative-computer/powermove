@@ -1834,7 +1834,10 @@ mod relink_tests {
         let file = root.join("Warm.cube");
         std::fs::write(&file, table).unwrap();
         let imported = import(&file).unwrap();
-        assert_eq!((imported.status, imported.kind.as_str()), ("imported", "lut"));
+        assert_eq!(
+            (imported.status, imported.kind.as_str()),
+            ("imported", "lut")
+        );
         let asset = &root_of(&kernel).1["assets"][&imported.asset];
         assert_eq!(asset["kind"], "lut");
         assert_eq!(asset["format"], "cube");
@@ -1847,7 +1850,10 @@ mod relink_tests {
         std::fs::write(&broken, "LUT_3D_SIZE 2\n0 0 0\n").unwrap();
         let revision = root_of(&kernel).0.revision();
         let refused = import(&broken).unwrap_err().to_string();
-        assert!(refused.starts_with("This LUT couldn’t be read."), "{refused}");
+        assert!(
+            refused.starts_with("This LUT couldn’t be read."),
+            "{refused}"
+        );
         assert_eq!(root_of(&kernel).0.revision(), revision);
     }
 
