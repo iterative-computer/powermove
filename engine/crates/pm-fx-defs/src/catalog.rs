@@ -135,8 +135,117 @@ pub fn main_effects() -> &'static MainEffects {
         let mut main: MainEffects = serde_json::from_str(include_str!("main-effects.json"))
             .expect("pinned main effect definitions");
         add_lut_revision(&mut main);
+        add_unclipped_revisions(&mut main);
         main
     })
+}
+
+/// A revision of `id` made here and not in main: the pinned shader with each
+/// `(from, to)` replaced once. Its parameters and their defaults stay main's.
+/// The definition it replaces stays as history, so an effect saved with it
+/// draws as it did.
+fn revise(main: &mut MainEffects, id: &str, edits: &[(&str, &str)]) {
+    let revision = main
+        .effects
+        .iter_mut()
+        .find(|e| e.id == id)
+        .expect("a pinned effect");
+    let version = effect_version(revision.metadata.get("version")).expect("a pinned version");
+    let mut history = revision.clone();
+    history
+        .metadata
+        .insert("version".into(), Value::from(version));
+    history.metadata.remove("legacy");
+    let old_frag = revision.frag.clone();
+    for (from, to) in edits {
+        assert_eq!(revision.frag.matches(from).count(), 1, "{id}: {from}");
+        revision.frag = revision.frag.replacen(from, to, 1);
+    }
+    revision
+        .metadata
+        .insert("version".into(), Value::from(version + 1));
+    let legacy = revision
+        .metadata
+        .entry("legacy")
+        .or_insert_with(|| Value::Array(vec![]));
+    legacy
+        .as_array_mut()
+        .expect("a list of historical definitions")
+        .push(serde_json::to_value(history).expect("a serializable definition"));
+    let assembled = &main
+        .shaders
+        .iter()
+        .find(|s| s.id == id && s.version == version)
+        .expect("the pinned program")
+        .source;
+    assert_eq!(assembled.matches(&old_frag).count(), 1, "{id}");
+    let source = assembled.replacen(&old_frag, &revision.frag, 1);
+    main.shaders.push(EffectShader {
+        id: id.to_owned(),
+        version: version + 1,
+        source,
+    });
+}
+
+/// E and its inverse for a colour revision's shader, every real number in.
+const E_GLSL: &str = "float pm_e_dec(float v){float m=abs(v);float l=m<=.04045?m/12.92:pow((m+.055)/1.055,2.4);return v<0.?-l:l;}
+float pm_e_enc(float l){float m=abs(l);float e=m<=.0031308?12.92*m:1.055*pow(m,1./2.4)-.055;return l<0.?-e:e;}
+";
+
+/// Revisions that stop clipping colour a float project holds: light above
+/// white and the negative components of colours outside Rec.709. The shipped
+/// shaders clipped them (to 0..8, 0..1 or 0..4), which an 8-bit canvas hid.
+/// Color's exposure also becomes a stop of light (a gain in linear light,
+/// not on encoded values), and its neutral setting changes nothing.
+fn add_unclipped_revisions(main: &mut MainEffects) {
+    let main_fn = format!("{E_GLSL}void main(){{");
+    revise(
+        main,
+        "color",
+        &[
+            ("void main(){", &main_fn),
+            (
+                "x *= pow(2., u_p0);",
+                "if (u_p0 != 0.) { float g = pow(2., u_p0); x = vec3(pm_e_enc(pm_e_dec(x.r)*g), pm_e_enc(pm_e_dec(x.g)*g), pm_e_enc(pm_e_dec(x.b)*g)); }",
+            ),
+            (
+                "x = (x - .5) * (1. + u_p1/100.) + .5;",
+                "if (u_p1 != 0.) x = (x - .5) * (1. + u_p1/100.) + .5;",
+            ),
+            (
+                "float l = luma(x); x = mix(vec3(l), x, 1. + u_p2/100.);",
+                "if (u_p2 != 0.) { float l = luma(x); x = mix(vec3(l), x, 1. + u_p2/100.); }",
+            ),
+            (
+                "o = vec4(clamp(x,0.,8.) * c.a, c.a);",
+                "o = vec4(x * c.a, c.a);",
+            ),
+        ],
+    );
+    revise(
+        main,
+        "channelMixer",
+        &[(
+            "o = vec4(clamp(mixed, 0., 1.) * c.a, c.a);",
+            "o = vec4(mixed * c.a, c.a);",
+        )],
+    );
+    revise(
+        main,
+        "sharpen",
+        &[(
+            "o = vec4(clamp(c.rgb + (c.rgb - b.rgb*.25) * (u_p0/100.), 0., 4.), c.a);",
+            "o = vec4(c.rgb + (c.rgb - b.rgb*.25) * (u_p0/100.), c.a);",
+        )],
+    );
+    revise(
+        main,
+        "grain",
+        &[(
+            "o = vec4(clamp(c.rgb + n * (u_p0/100.) * c.a, 0., 8.), c.a);",
+            "o = vec4(c.rgb + n * (u_p0/100.) * c.a, c.a);",
+        )],
+    );
 }
 
 /// The Apply Color LUT program, including its stated input and output spaces.
