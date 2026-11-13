@@ -328,12 +328,18 @@ impl pm_shell::integration::Integration for Bridge {
             on.insert("toggleLoop".to_owned());
         }
         if let Some(timeline) = &v.builtins.timeline {
+            if timeline.read(cx).hides_shy() {
+                on.insert("timeline.toggleShy".to_owned());
+            }
             let (tracks, snapping) = timeline.read(cx).toggles();
             if tracks {
                 on.insert("timeline.toggleMode".to_owned());
             }
             if snapping {
                 on.insert("timeline.toggleSnapping".to_owned());
+            }
+            if timeline.read(cx).graph_merged() {
+                on.insert("graph.merge".to_owned());
             }
         }
         on
@@ -1179,6 +1185,11 @@ impl Controller {
         use crate::layer_commands::Clipboard;
         // Figma's layers claim the paste ahead of the app's own clipboard.
         if self.paste_figma(cx) {
+            return true;
+        }
+        // Then media copied elsewhere. Copying layers or keyframes here
+        // replaces it on the pasteboard, so the newest copy is what pastes.
+        if self.paste_media(cx) {
             return true;
         }
         let time = self.time();
@@ -2626,6 +2637,7 @@ impl Controller {
                 }
             }
             "settings" | "agent" => self.show_builtin(&cmd.name, window, cx),
+            "bringWorkspace" => self.bring_workspace(window, cx),
             "quit" => cx.defer(crate::lifecycle::begin_quit),
             "closeWindow" | "closeTab" => self.request_close(crate::lifecycle::Intent::Window, cx),
             "cancel" | "deselect" if self.importing.is_some() => {
@@ -2835,6 +2847,44 @@ impl Controller {
             "fit" | "fitComp" | "fitComposition" | "viewer.fit" => {
                 self.view.place(None, [0., 0.]);
                 self.write_view(None, cx);
+            }
+            // The whole composition in the viewer and its whole length in
+            // the timeline.
+            "fitView" => {
+                if self.published.is_none() {
+                    return false;
+                }
+                self.view.place(None, [0., 0.]);
+                self.write_view(None, cx);
+                // Each view saves the project's whole view state. The
+                // timeline fits once the viewer's save has landed, so its
+                // own save does not carry the old viewer zoom back.
+                if let Some(timeline) = self.builtins.timeline.clone() {
+                    let time = self.time();
+                    cx.spawn(async move |this, cx| {
+                        cx.background_executor()
+                            .timer(crate::gizmo::NAVIGATION_IDLE)
+                            .await;
+                        let _ = this.update(cx, |_, cx| {
+                            timeline.update(cx, |t, cx| {
+                                t.command("timeline.fit", time, None, false, cx)
+                            })
+                        });
+                    })
+                    .detach();
+                }
+            }
+            // Settings, at the open project's own page.
+            "projectSettings" => {
+                if self.published.is_none() {
+                    return false;
+                }
+                self.show_builtin("settings", window, cx);
+                if let Some(view) = self.builtins.views.get("settings") {
+                    view.update(cx, |v, cx| {
+                        v.scroll_semantic("settings.section.project", cx)
+                    });
+                }
             }
             "actualSize" => {
                 self.view.place(Some(1.), self.view.pan);

@@ -1980,6 +1980,31 @@ impl Properties {
                 },
             )));
         }
+        if intent["type"] == "distribute" {
+            use pm_kernel::commands::transform::{Spread, TransformCommand};
+            let spread = match intent["axis"].as_str() {
+                Some("horizontal") => Spread::HorizontalSpace,
+                Some("vertical") => Spread::VerticalSpace,
+                _ => return Err("Unknown distribution".into()),
+            };
+            if model.selected_layers().len() < 3 {
+                return Err("Select three or more layers to distribute".into());
+            }
+            return Ok(Some(Request::new(
+                caller,
+                pm_kernel::Call::Transact {
+                    label: Some("Distribute Layers".into()),
+                    expected_revision: Some(model.revision()),
+                    body: pm_kernel::WriteBody::Commands(vec![pm_kernel::Command::Transform(
+                        TransformCommand::Distribute {
+                            layer_ids: model.selected_layers().to_vec(),
+                            spread,
+                            time,
+                        },
+                    )]),
+                },
+            )));
+        }
         let row = intent["row"].as_str().unwrap_or("");
         let path = match row {
             "position" => "position.x",

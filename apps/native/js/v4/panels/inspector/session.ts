@@ -167,10 +167,16 @@ export class InspectorSession {
         return false;
     }
     if (
-      intent.type === "align" &&
+      (intent.type === "align" || intent.type === "distribute") &&
       (this.snapshot.target.kind !== "layers" ||
         this.snapshot.target.first.audio ||
         this.snapshot.target.first.locked)
+    )
+      return false;
+    // Distribute spaces three or more layers; the outermost stay.
+    if (
+      intent.type === "distribute" &&
+      (this.snapshot.target.kind !== "layers" || this.snapshot.target.count < 3)
     )
       return false;
     const operation = this.model.plan(intent);

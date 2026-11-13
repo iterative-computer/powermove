@@ -223,17 +223,25 @@ fn timeline_owned(name: &str) -> bool {
             | "timeline.adjacentKeyframe:next"
             | "prevVisibleEvent"
             | "nextVisibleEvent"
+            | "prevEdge"
+            | "nextEdge"
+            | "prevSelectedEvent"
+            | "nextSelectedEvent"
             | "timeline.addKeyframe"
             | "timeline.addMarker"
             | "timeline.toggleHold"
             | "timeline.toggleSnapping"
             | "timeline.toggleMode"
+            | "timeline.toggleShy"
+            | "toggleShy"
             | "timeline.zoomIn"
             | "timeline.zoomOut"
             | "timeline.fit"
             | "resetWorkArea"
             | "graph.value"
             | "graph.speed"
+            | "graph.fit"
+            | "graph.merge"
             | "timeline.revealAll"
     ) || name.starts_with("timeline.revealProperty:")
         || name.starts_with("timeline.keyProperty:")
@@ -582,7 +590,7 @@ pub const PLANNED: [&str; 41] = [
     "unlockGroup",
 ];
 /// Menu rows with no working path yet. They stay visible and disabled.
-pub const UNAVAILABLE: [&str; 2] = ["help", "importFolder"];
+pub const UNAVAILABLE: [&str; 1] = ["help"];
 fn selection_plan(ids: Vec<String>) -> Plan {
     Plan {
         select: Some(ids),
@@ -1442,6 +1450,9 @@ pub fn disabled(
         selected.iter().any(|l| !l.effectively_locked),
     );
     set("timeline.toggleHold", keys);
+    for name in ["prevSelectedEvent", "nextSelectedEvent"] {
+        set(name, chosen);
+    }
     for name in ["timeline.addKeyframe", "timeline.keyProperty:p"] {
         set(name, selected.iter().any(|l| !l.effectively_locked));
     }
@@ -1459,9 +1470,10 @@ pub fn disabled(
     off
 }
 /// Rows that act on the selected layers.
-const SELECTION: [&str; 20] = [
+const SELECTION: &[&str] = &[
     "rippleDelete",
     "nudgeLayerTime",
+    "toggleShy",
     "alignLayers",
     "distributeLayers",
     "split",
@@ -1482,17 +1494,25 @@ const SELECTION: [&str; 20] = [
     "centerAnchor",
 ];
 /// Rows that need a document, on top of the selection-based ones.
-const DOCUMENT: [&str; 29] = [
+const DOCUMENT: &[&str] = &[
+    "importFolder",
+    "projectSettings",
+    "fitView",
+    "prevEdge",
+    "nextEdge",
     "timeline.addMarker",
     "timeline.toggleHold",
     "timeline.toggleSnapping",
     "timeline.toggleMode",
+    "timeline.toggleShy",
     "timeline.zoomIn",
     "timeline.zoomOut",
     "timeline.fit",
     "resetWorkArea",
     "graph.value",
     "graph.speed",
+    "graph.fit",
+    "graph.merge",
     "importSequence",
     "delete",
     "copyLayers",

@@ -187,6 +187,12 @@ pub async fn dispatch(
             persist = true;
             Plan::default()
         }
+        "hideShy" => {
+            client.model.hide_shy = !client.model.hide_shy;
+            client.model.rebuild_rows();
+            persist = true;
+            Plan::default()
+        }
         "selectRow" => {
             let row = parse_row(string(intent, "id")?)?;
             if client.model.row_position(&row).is_none() {
@@ -251,6 +257,7 @@ pub async fn dispatch(
                 "visibility" => client.model.switch(&id, LayerSwitch::Visible)?,
                 "lock" => client.model.switch(&id, LayerSwitch::Locked)?,
                 "solo" => client.model.switch(&id, LayerSwitch::Solo)?,
+                "shy" => client.model.switch(&id, LayerSwitch::Shy)?,
                 "mute" => client.model.mute(&id, context.time)?,
                 _ => return Err(Error::InvalidIntent("switch")),
             }
@@ -448,6 +455,7 @@ pub fn project_window(
                     value["locked"] = json!(layer.effectively_locked);
                     value["visible"] = json!(layer.visible);
                     value["solo"] = json!(layer.solo);
+                    value["shy"] = json!(layer.shy);
                     value["expanded"] = json!(!if layer.kind == "group" {
                         disclosure
                             .map(|d| d.group_collapsed)
@@ -560,6 +568,8 @@ fn frame_facts(
         "mode": if model.mode == TimelineMode::Layers { "Layers" } else { "Tracks" },
         "view": match model.graph_display { GraphDisplay::DopeSheet => "DopeSheet", GraphDisplay::Combined => "Combined", GraphDisplay::Graph => "Graph" },
         "snapping": !model.track_snap_disabled,
+        "hideShy": model.hide_shy,
+        "shyLayers": model.index.layers.iter().any(|l| l.shy),
         "window": { "first": first, "total": total, "rows": rows },
         "indexDigits": model.index.layers.len().max(1).to_string().len(),
         "selection": if !model.selection.keys().is_empty() { json!({"kind":"keys","count":model.selection.keys().len()}) }

@@ -186,10 +186,83 @@ pub fn import_paths(
     choose_paths(window, folders, multiple, extensions, "Import")
 }
 
-/// The general pasteboard's HTML and PNG, for Figma paste. Main thread: the
+#[cfg(debug_assertions)]
+thread_local! {
+    static REVIEW_BOARD: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+/// Development builds: Paste reads the pasteboard of this name instead of
+/// the general one, so an on-screen review never reads or overwrites what
+/// the person has copied.
+#[cfg(debug_assertions)]
+pub fn review_pasteboard(name: Option<String>) {
+    REVIEW_BOARD.with(|b| *b.borrow_mut() = name);
+}
+/// The pasteboard Paste reads.
+fn paste_board() -> Retained<NSPasteboard> {
+    #[cfg(debug_assertions)]
+    if let Some(name) = REVIEW_BOARD.with(|b| b.borrow().clone()) {
+        return NSPasteboard::pasteboardWithName(&NSString::from_str(&name));
+    }
+    NSPasteboard::generalPasteboard()
+}
+
+/// What Paste finds for the importer on the pasteboard.
+#[derive(Debug, PartialEq)]
+pub enum PastedMedia {
+    /// Files copied in Finder, or handed over as files by another app.
+    Files(Vec<PathBuf>),
+    /// A copied picture (a screenshot, an image from a browser) in the
+    /// pasteboard's own encoding: PNG, else TIFF.
+    Image { data: Vec<u8>, png: bool },
+}
+/// Main thread, once per paste. Files win over picture data: a file copied
+/// in Finder also carries its icon as a picture.
+pub fn pasteboard_media() -> Option<PastedMedia> {
+    read_media(&paste_board())
+}
+fn read_media(board: &NSPasteboard) -> Option<PastedMedia> {
+    let files: Vec<PathBuf> = board
+        .pasteboardItems()
+        .iter()
+        .flat_map(|items| items.iter())
+        .filter_map(|item| item.stringForType(unsafe { NSPasteboardTypeFileURL }))
+        .filter_map(|url| objc2_foundation::NSURL::URLWithString(&url)?.path())
+        .map(|path| PathBuf::from(path.to_string()))
+        .collect();
+    if !files.is_empty() {
+        return Some(PastedMedia::Files(files));
+    }
+    let picture = |kind, png| {
+        board
+            .dataForType(kind)
+            .filter(|data| !data.is_empty())
+            .map(|data| PastedMedia::Image {
+                data: data.to_vec(),
+                png,
+            })
+    };
+    picture(unsafe { NSPasteboardTypePNG }, true)
+        .or_else(|| picture(unsafe { NSPasteboardTypeTIFF }, false))
+}
+/// A copied TIFF as the PNG the importer keeps. Any thread: the image is
+/// decoded and encoded by its own bitmap object.
+pub fn tiff_to_png(tiff: &[u8]) -> Option<Vec<u8>> {
+    let rep = NSBitmapImageRep::imageRepWithData(&objc2_foundation::NSData::with_bytes(tiff))?;
+    // SAFETY: an empty properties dictionary; the result is copied out.
+    let png = unsafe {
+        rep.representationUsingType_properties(
+            NSBitmapImageFileType::PNG,
+            &objc2_foundation::NSDictionary::new(),
+        )
+    }?;
+    Some(png.to_vec())
+}
+
+/// The pasteboard's HTML and PNG, for Figma paste. Main thread: the
 /// pasteboard is read where AppKit expects it, once per paste.
 pub fn pasteboard_figma() -> Option<(String, Option<Vec<u8>>)> {
-    let board = NSPasteboard::generalPasteboard();
+    let board = paste_board();
     let html = board
         .stringForType(unsafe { NSPasteboardTypeHTML })?
         .to_string();
@@ -598,6 +671,78 @@ mod signal_tests {
             .status()
             .unwrap();
         assert!(!status.success(), "the default action ends the child");
+    }
+}
+
+#[cfg(test)]
+mod paste_tests {
+    use super::{PastedMedia, read_media, tiff_to_png};
+    use objc2_app_kit::*;
+    use objc2_foundation::{NSData, NSString, NSURL};
+    /// A pasteboard of the tests' own: the person's clipboard is never touched.
+    fn board(name: &str) -> objc2::rc::Retained<NSPasteboard> {
+        let name = format!("com.powermove.tests.paste.{name}");
+        let board = NSPasteboard::pasteboardWithName(&NSString::from_str(&name));
+        board.clearContents();
+        board
+    }
+    #[test]
+    fn paste_reads_copied_files_then_a_copied_picture_and_nothing_from_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let clip = dir.path().join("A clip.mov");
+        std::fs::write(&clip, b"x").unwrap();
+        let png = crate::mcp_services::png(&[10, 20, 30, 255], 1, 1).unwrap();
+
+        // Text only (what copying layers leaves): nothing for the importer.
+        let text = board("text");
+        text.setString_forType(&NSString::from_str("Box"), unsafe {
+            NSPasteboardTypeString
+        });
+        assert_eq!(read_media(&text), None);
+
+        // A screenshot or a copied image: its PNG as it is.
+        let shot = board("picture");
+        shot.setData_forType(Some(&NSData::with_bytes(&png)), unsafe {
+            NSPasteboardTypePNG
+        });
+        assert_eq!(
+            read_media(&shot),
+            Some(PastedMedia::Image {
+                data: png.clone(),
+                png: true
+            })
+        );
+
+        // An app that copies TIFF only: converted to a PNG of the same size.
+        let rep = NSBitmapImageRep::imageRepWithData(&NSData::with_bytes(&png)).unwrap();
+        let tiff = rep.TIFFRepresentation().unwrap().to_vec();
+        let tiff_only = board("tiff");
+        tiff_only.setData_forType(Some(&NSData::with_bytes(&tiff)), unsafe {
+            NSPasteboardTypeTIFF
+        });
+        let Some(PastedMedia::Image { data, png: false }) = read_media(&tiff_only) else {
+            panic!("the TIFF is read")
+        };
+        let converted = tiff_to_png(&data).expect("the TIFF converts");
+        assert_eq!(&converted[..8], b"\x89PNG\r\n\x1a\n");
+        assert_eq!(tiff_to_png(b"not a picture"), None);
+
+        // A file copied in Finder carries its icon too: the file wins.
+        let finder = board("files");
+        let url = NSURL::fileURLWithPath(&NSString::from_str(&clip.to_string_lossy()));
+        finder.setString_forType(&url.absoluteString().unwrap(), unsafe {
+            NSPasteboardTypeFileURL
+        });
+        finder.setData_forType(Some(&NSData::with_bytes(&png)), unsafe {
+            NSPasteboardTypePNG
+        });
+        assert_eq!(
+            read_media(&finder),
+            Some(PastedMedia::Files(vec![clip.clone()]))
+        );
+        for board in [text, shot, tiff_only, finder] {
+            board.clearContents();
+        }
     }
 }
 

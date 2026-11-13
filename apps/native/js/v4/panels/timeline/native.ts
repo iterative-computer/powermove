@@ -59,6 +59,8 @@ export function completeFrame(
     mode: native.mode,
     view: native.view,
     snapping: native.snapping,
+    hideShy: native.hideShy === true,
+    shyLayers: native.shyLayers === true,
     indexDigits: native.indexDigits,
     selection: native.selection,
     window: { first: window.first, total: window.total, rows },
