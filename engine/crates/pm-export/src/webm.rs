@@ -1171,8 +1171,15 @@ pub fn verify_webm(
         &mut picture,
         &mut problems,
     );
-    let pixels: Vec<PixelCheck> =
-        verify::check_pixel_blocks(spec.codec, blocks, decoded, &mut picture, &mut problems);
+    let mut notes = vec![];
+    let pixels: Vec<PixelCheck> = verify::check_pixel_blocks(
+        spec.codec,
+        blocks,
+        decoded,
+        &mut picture,
+        &mut problems,
+        &mut notes,
+    );
     let pixel_check_ms =
         pixel_check_started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1e3);
     if let Some(started) = verify_started {
@@ -1203,6 +1210,7 @@ pub fn verify_webm(
         timecode: None,
         pixels,
         picture,
+        notes,
         hardware_encoder: Some(false),
         bytes: 0,
         mix: None,

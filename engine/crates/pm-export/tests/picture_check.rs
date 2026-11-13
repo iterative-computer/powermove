@@ -87,6 +87,7 @@ struct Format {
     name: &'static str,
     codec: Codec,
     container: Container,
+    alpha: AlphaOutput,
 }
 
 fn formats() -> Vec<Format> {
@@ -103,6 +104,7 @@ fn formats() -> Vec<Format> {
         name,
         codec: Codec::ProRes(profile),
         container: Container::Mov,
+        alpha: AlphaOutput::None,
     })
     .collect();
     out.push(Format {
@@ -111,6 +113,7 @@ fn formats() -> Vec<Format> {
             bitrate_bps: 12_000_000,
         },
         container: Container::Mp4,
+        alpha: AlphaOutput::None,
     });
     out.push(Format {
         name: "HEVC Main10 12 Mb/s",
@@ -119,8 +122,36 @@ fn formats() -> Vec<Format> {
             ten_bit: true,
         },
         container: Container::Mp4,
+        alpha: AlphaOutput::None,
     });
     out
+}
+
+/// The formats that carry alpha.
+fn alpha_formats() -> Vec<Format> {
+    vec![
+        Format {
+            name: "ProRes 4444 with alpha",
+            codec: Codec::ProRes(ProResProfile::P4444),
+            container: Container::Mov,
+            alpha: AlphaOutput::Straight,
+        },
+        Format {
+            name: "ProRes 4444 XQ with alpha",
+            codec: Codec::ProRes(ProResProfile::P4444Xq),
+            container: Container::Mov,
+            alpha: AlphaOutput::Straight,
+        },
+        Format {
+            name: "HEVC with alpha 12 Mb/s",
+            codec: Codec::Hevc {
+                bitrate_bps: 12_000_000,
+                ten_bit: false,
+            },
+            container: Container::Mov,
+            alpha: AlphaOutput::Straight,
+        },
+    ]
 }
 
 fn spec(format: Format, destination: PathBuf) -> ExportSpec {
@@ -132,7 +163,7 @@ fn spec(format: Format, destination: PathBuf) -> ExportSpec {
         codec: format.codec,
         container: format.container,
         tags: ColorTags::Rec709QuickTime,
-        alpha: AlphaOutput::None,
+        alpha: format.alpha,
         working: WorkingEncoding::Standard,
         dither: Dither::Off,
         audio: None,
@@ -289,65 +320,242 @@ fn foreign_block(frames: &mut [Vec<f32>]) {
 
 type Tamper = fn(&mut [Vec<f32>]);
 
-fn tampers() -> Vec<(&'static str, Tamper, &'static [&'static str])> {
+/// A wrong picture, and what the check says of it. `local` cases damage one
+/// block of a frame that a long-GOP codec predicts: a skipped or
+/// intra-predicted block shows a picture that is not the frame's own at a
+/// low rate, so those codecs note it and keep the file; ProRes, which codes
+/// each block from its own samples, refuses it.
+struct Case {
+    what: &'static str,
+    tamper: Tamper,
+    expected: &'static [&'static str],
+    local: bool,
+}
+
+fn tampers() -> Vec<Case> {
     vec![
-        (
-            "a level shift of 10 codes",
-            level_shift,
-            &["CV from what was encoded"],
-        ),
-        (
-            "a picture one pixel to the right",
-            one_pixel_shift,
-            &["displaced by (1, 0)"],
-        ),
-        (
-            "a flattened block",
-            flattened_block,
-            &["is not the picture that was encoded", "lost its detail"],
-        ),
-        (
-            "a stale frame",
-            stale_frame,
-            &["frame 2 holds the picture of frame 1"],
-        ),
-        (
-            "a swapped pair of frames",
-            swapped_pair,
-            &[
-                "frame 5 holds the picture of frame 6",
-                "frame 6 holds the picture of frame 5",
+        Case {
+            what: "a level shift of 10 codes",
+            tamper: level_shift,
+            expected: &["luma is +", "from what was rendered in every frame"],
+            local: false,
+        },
+        Case {
+            what: "a picture one pixel to the right",
+            tamper: one_pixel_shift,
+            expected: &["displaced by (1, 0)"],
+            local: false,
+        },
+        Case {
+            what: "a flattened block",
+            tamper: flattened_block,
+            expected: &["frame 4 at (624, 352): a block lost its detail"],
+            local: true,
+        },
+        Case {
+            what: "a stale frame",
+            tamper: stale_frame,
+            expected: &["frame 2 shows the picture of frame 1"],
+            local: false,
+        },
+        Case {
+            what: "a swapped pair of frames",
+            tamper: swapped_pair,
+            expected: &[
+                "frame 5 shows the picture of frame 6",
+                "frame 6 shows the picture of frame 5",
             ],
-        ),
-        (
-            "a garbage block",
-            garbage_block,
-            &["is not the picture that was encoded"],
-        ),
-        (
-            "a foreign block away from the sampled places",
-            foreign_block,
-            &["frame 3"],
-        ),
+            local: false,
+        },
+        Case {
+            what: "a garbage block",
+            tamper: garbage_block,
+            expected: &["frame 4 at (624, 352): a block holds a picture that was not rendered"],
+            local: true,
+        },
+        Case {
+            what: "a foreign block away from the sampled places",
+            tamper: foreign_block,
+            expected: &["frame 3 is not the picture that was rendered"],
+            local: false,
+        },
     ]
+}
+
+/// The check's verdict on `problems`/`notes` for `case` in `format`.
+fn judged(format: Format, case: &Case, problems: &[String], notes: &[String]) -> Option<String> {
+    let intra = matches!(format.codec, Codec::ProRes(_));
+    if case.local && !intra {
+        return (!problems.is_empty() || notes.is_empty()).then(|| {
+            format!(
+                "{}: {} was to be noted with the file kept: {problems:?} {notes:?}",
+                format.name, case.what
+            )
+        });
+    }
+    let found = case
+        .expected
+        .iter()
+        .all(|e| problems.iter().any(|p| p.contains(e)));
+    (!found).then(|| {
+        format!(
+            "{}: {} was not refused for it: {problems:?}",
+            format.name, case.what
+        )
+    })
+}
+
+/// A picture whose frames differ only in colour: mid-grey luma under fine
+/// grain, the left half bluish and the right half yellowish at the same
+/// luma (Cb ±0.1, Cr neutral), the halves changing sides from frame to
+/// frame. Every frame has the same luma grid and the same channel means.
+fn colour_halves(n: u64) -> Vec<f32> {
+    // Rec. 709 R′G′B′ of Y′ = 0.5, Cb = ±0.1, Cr = 0.
+    let tint = |cb: f32| [0.5, 0.5 - 0.1873 * cb, 0.5 + 1.8556 * cb];
+    (0..H)
+        .flat_map(|y| (0..W).map(move |x| (x, y)))
+        .flat_map(|(x, y)| {
+            let left = x < W / 2;
+            let cb = if left == n.is_multiple_of(2) {
+                0.1
+            } else {
+                -0.1
+            };
+            let grain = 0.04 * hash(x, y, n);
+            let [r, g, b] = tint(cb).map(|c| c + grain);
+            [r, g, b, 1.0]
+        })
+        .collect()
+}
+
+/// Frame 2 with its colour gone: each pixel's R′G′B′ set to its own luma.
+fn colour_lost(frames: &mut [Vec<f32>]) {
+    for p in frames[2].chunks_exact_mut(4) {
+        let luma = 0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2];
+        p[..3].fill(luma);
+    }
+}
+
+/// A grey picture under grain whose alpha is 0.3 on one half and 0.9 on the
+/// other, the halves changing sides from frame to frame (premultiplied
+/// working values, as the renderer hands them).
+fn alpha_halves(n: u64) -> Vec<f32> {
+    (0..H)
+        .flat_map(|y| (0..W).map(move |x| (x, y)))
+        .flat_map(|(x, y)| {
+            let left = x < W / 2;
+            let a = if left == n.is_multiple_of(2) {
+                0.3
+            } else {
+                0.9
+            };
+            let v = 0.45 + 0.04 * hash(x, y, n);
+            [v * a, v * a, v * a, a]
+        })
+        .collect()
+}
+
+/// Frame 2's alpha halves top and bottom instead of left and right: the
+/// same average alpha, in other places.
+fn alpha_misplaced(frames: &mut [Vec<f32>]) {
+    for y in 0..H {
+        for x in 0..W {
+            let i = ((y * W + x) * 4) as usize;
+            let p = &mut frames[2][i..i + 4];
+            let a = if y < H / 2 { 0.3 } else { 0.9 };
+            let v = p[0] / p[3];
+            p.copy_from_slice(&[v * a, v * a, v * a, a]);
+        }
+    }
+}
+
+/// Frames that differ only in colour (or only in where their alpha is) are
+/// each held to their own colour: a frame that lost its colour, a stale
+/// frame and a swapped pair that keep every frame's luma and means are
+/// refused, while the same frames encoded as they are are delivered.
+#[test]
+fn a_frame_with_lost_or_another_frames_colour_or_alpha_is_refused() {
+    let dir = scratch("colour");
+    let mut failures = vec![];
+    let colour: [(&str, Tamper, &[u64]); 3] = [
+        ("frame 2 without its colour", colour_lost, &[2]),
+        ("a colour-only stale frame", stale_frame, &[2]),
+        ("a colour-only swapped pair", swapped_pair, &[5, 6]),
+    ];
+    let alpha: [(&str, Tamper, &[u64]); 3] = [
+        (
+            "frame 2 with its alpha in other places",
+            alpha_misplaced,
+            &[2],
+        ),
+        ("an alpha-only stale frame", stale_frame, &[2]),
+        ("an alpha-only swapped pair", swapped_pair, &[5, 6]),
+    ];
+    let runs = formats()
+        .into_iter()
+        .map(|f| (f, frames_of(colour_halves), &colour))
+        .chain(
+            alpha_formats()
+                .into_iter()
+                .map(|f| (f, frames_of(alpha_halves), &alpha)),
+        );
+    for (format, frames, cases) in runs {
+        let intended = evidence(format, &frames);
+        let right = write(format, &frames, &dir, "right");
+        let (report, problems) = examine(format, &right, &intended);
+        eprintln!("MEASURE {}, as encoded: {}", format.name, summary(&report));
+        if !problems.is_empty() {
+            failures.push(format!("{}: refused as encoded: {problems:?}", format.name));
+        }
+        for (what, tamper, wrong_frames) in cases.iter() {
+            let mut wrong = frames.clone();
+            tamper(&mut wrong);
+            let path = write(format, &wrong, &dir, "wrong");
+            let (report, problems) = examine(format, &path, &intended);
+            eprintln!(
+                "MEASURE {}, {what}: {} problems; {}; first: {}",
+                format.name,
+                problems.len(),
+                summary(&report),
+                problems.first().map_or("", |p| p.as_str())
+            );
+            for n in wrong_frames.iter() {
+                if !problems.iter().any(|p| p.contains(&format!("frame {n} "))) {
+                    failures.push(format!(
+                        "{}: {what}: frame {n} was not refused: {problems:?}",
+                        format.name
+                    ));
+                }
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 fn summary(report: &VerifyReport) -> String {
     let p = &report.picture;
     let least = |values: Vec<f64>| values.into_iter().fold(f64::INFINITY, f64::min);
-    let correlation = least(report.pixels.iter().filter_map(|c| c.correlation).collect());
     let detail = least(report.pixels.iter().filter_map(|c| c.detail).collect());
-    let excess = report.pixels.iter().map(|c| c.excess).fold(0.0, f64::max);
+    let foreign = report
+        .pixels
+        .iter()
+        .map(|c| c.foreign_cv)
+        .fold(0.0, f64::max);
+    let opt = |v: Option<f64>| v.map_or("-".into(), |v| format!("{v:.2}"));
     format!(
-        "{} frames: a frame's means {:+.2} CV, shared by every frame {:+.2} CV, grid {:.2} CV (one cell {:.2} CV); sampled blocks: mean {:.2} CV, beyond flat by {excess:.3} of activity, least correlation {correlation:.3}, least luma detail kept {detail:.2}, registration {}",
+        "{} frames: typical distance {:.2} CV, largest {:.2} (one cell {:.2}); identity ratio {}; least kept {}; gain off {}; a frame's means {:+.2} CV, most of the picture shared by every frame {:+.2} CV; blocks: mean {:.2} CV, least luma detail kept {detail:.2}, most foreign {foreign:.1} CV, registration {}",
         p.frames_checked,
-        p.frame_bias_cv,
-        p.level_cv,
+        p.typical_cv,
         p.frame_distance_cv,
         p.frame_cell_cv,
+        opt(p.identity),
+        opt(p.kept),
+        opt(p.gain),
+        p.frame_bias_cv,
+        p.level_cv,
         report.max_pixel_error_cv(),
-        p.registration
-            .map_or("not judged".into(), |r| format!("{r:.2}"))
+        opt(p.registration),
     )
 }
 
@@ -368,27 +576,24 @@ fn a_detailed_picture_is_delivered_and_every_wrong_one_is_refused() {
         if !problems.is_empty() {
             failures.push(format!("{}: refused as encoded: {problems:?}", format.name));
         }
-        for (what, tamper, expected) in tampers() {
+        for case in tampers() {
             let mut wrong = frames.clone();
-            tamper(&mut wrong);
+            (case.tamper)(&mut wrong);
             let path = write(format, &wrong, &dir, "wrong");
             let (report, problems) = examine(format, &path, &intended);
             eprintln!(
-                "MEASURE {}, {what}: {} problems; {}; first: {}",
+                "MEASURE {}, {}: {} problems, {} notes; {}; first: {}",
                 format.name,
+                case.what,
                 problems.len(),
+                report.notes.len(),
                 summary(&report),
-                problems.first().map_or("", |p| p.as_str())
+                problems
+                    .first()
+                    .or(report.notes.first())
+                    .map_or("", |p| p.as_str())
             );
-            if !expected
-                .iter()
-                .any(|e| problems.iter().any(|p| p.contains(e)))
-            {
-                failures.push(format!(
-                    "{}: {what} was not refused for it: {problems:?}",
-                    format.name
-                ));
-            }
+            failures.extend(judged(format, &case, &problems, &report.notes));
         }
     }
     assert!(failures.is_empty(), "{failures:#?}");
@@ -434,13 +639,13 @@ fn alternating_detail_does_not_hide_a_level_shift_a_flat_block_or_a_moved_pictur
             (
                 "a level shift of 10 codes",
                 level_shift,
-                "CV from what was encoded in every frame",
+                "from what was rendered in every frame",
                 true,
             ),
             (
                 "a flattened block",
                 flattened_block,
-                "lost its detail",
+                "a block lost its detail",
                 carries,
             ),
             (

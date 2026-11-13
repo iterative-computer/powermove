@@ -955,12 +955,14 @@ fn probe_and_verify(
         &mut picture,
         &mut problems,
     );
+    let mut notes = vec![];
     let pixels = verify::check_pixels(
         spec.codec,
         &evidence.blocks,
         &decoded.sampled,
         &mut picture,
         &mut problems,
+        &mut notes,
     );
     if !problems.is_empty() {
         return Err(Error::Verify(problems.join("; ")));
@@ -981,6 +983,7 @@ fn probe_and_verify(
         timecode,
         pixels,
         picture,
+        notes,
         hardware_encoder: Some(false),
         bytes: fs::metadata(path).map_err(io)?.len(),
         mix: None,

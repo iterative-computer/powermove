@@ -365,6 +365,7 @@ impl Sink for PngSink {
                             excess: 0.0,
                             correlation: None,
                             detail: None,
+                            foreign_cv: 0.0,
                         }),
                 );
             }
@@ -388,6 +389,7 @@ impl Sink for PngSink {
             timecode: None,
             pixels,
             picture: Default::default(),
+            notes: vec![],
             hardware_encoder: None,
             bytes,
             mix: None,

@@ -4,12 +4,14 @@
 //! the export asked for and what the encoder was handed. Any mismatch fails the export.
 //!
 //! The picture itself is held to what the encoder was handed in every frame and, more
-//! closely, in sampled blocks of the first, middle and last frame (`evidence`).
+//! closely, in sampled regions of the first, middle and last frame (`evidence`). Only
+//! what no codec loss can explain fails the export; what is a matter of degree is
+//! reported in [`VerifyReport::notes`] with the file kept.
 
 pub use crate::evidence::{
-    ACTIVITY_TOLERANCE, BLOCK, BlockSample, Decoded, Evidence, FrameSignature, PictureReport,
-    PixelCheck, bias_tolerance, block_means, channel_scale, check_frames, check_pixels,
-    frame_signature, frame_tolerance, level_tolerance, pixel_tolerance, sampled_frames,
+    BLOCK, BlockSample, Decoded, Evidence, FrameSignature, PictureReport, PixelCheck, REGION,
+    block_means, channel_scale, check_frames, check_pixels, frame_signature, level_tolerance,
+    pixel_tolerance, sampled_frames,
 };
 pub(crate) use crate::evidence::{block_regions, check_pixel_blocks};
 use crate::mp4box::Movie;
@@ -159,6 +161,9 @@ pub struct VerifyReport {
     pub pixels: Vec<PixelCheck>,
     /// What the picture checks measured over the file.
     pub picture: PictureReport,
+    /// What the person is told with the file kept: differences that are a
+    /// matter of degree (fine detail a low data rate does not keep).
+    pub notes: Vec<String>,
     /// Whether VideoToolbox reported a hardware encoder.
     pub hardware_encoder: Option<bool>,
     /// Bytes delivered (every file of a PNG sequence).
@@ -604,12 +609,14 @@ pub fn examine(
         &mut picture,
         &mut problems,
     );
+    let mut notes = vec![];
     let pixels = check_pixels(
         expected.codec,
         &expected.evidence.blocks,
         &decoded.sampled,
         &mut picture,
         &mut problems,
+        &mut notes,
     );
     let report = VerifyReport {
         codec,
@@ -627,6 +634,7 @@ pub fn examine(
         timecode,
         pixels,
         picture,
+        notes,
         hardware_encoder: None,
         bytes: 0,
         mix: None,

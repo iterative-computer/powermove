@@ -12,9 +12,7 @@
 use std::path::PathBuf;
 
 use pm_export::convert::WorkingFrame;
-use pm_export::verify::{
-    self, ACTIVITY_TOLERANCE, bias_tolerance, frame_tolerance, level_tolerance, pixel_tolerance,
-};
+use pm_export::verify::{self, pixel_tolerance};
 use pm_export::*;
 use pm_time::Rate;
 
@@ -162,7 +160,7 @@ fn every_format_delivers_noise_and_grain() {
                     let fold = |f: fn(&verify::PixelCheck) -> f64| {
                         report.pixels.iter().map(f).fold(0.0, f64::max)
                     };
-                    let (activity, excess) = (fold(|p| p.activity_cv), fold(|p| p.excess));
+                    let activity = fold(|p| p.activity_cv);
                     let least = |f: fn(&verify::PixelCheck) -> Option<f64>| {
                         report
                             .pixels
@@ -172,19 +170,11 @@ fn every_format_delivers_noise_and_grain() {
                     };
                     let picture = report.picture;
                     eprintln!(
-                        "MEASURE {what}: delivered, {:.0} Mb/s; block means within {worst:.2} codes (flat tolerance {base}), block activity up to {activity:.0} codes, beyond the flat tolerance by {excess:.3} of the block's activity at most (allowed {ACTIVITY_TOLERANCE}); least correlation {:.3}, least luma detail kept {:.2}, registration {:?}; every frame ({}): means within {:+.2} codes (allowed {}), shared by all {:+.2} (allowed {}), grid within {:.2} codes (allowed {}), one cell {:.2}",
+                        "MEASURE {what}: delivered, {:.0} Mb/s; block means within {worst:.2} codes (flat noise {base}), block activity up to {activity:.0} codes; least correlation {:.3}, least luma detail kept {:.2}; {picture:?}; notes {:?}",
                         report.bytes as f64 * 8.0 * 25.0 / FRAMES as f64 / 1e6,
                         least(|p| p.correlation),
                         least(|p| p.detail),
-                        picture.registration,
-                        picture.frames_checked,
-                        picture.frame_bias_cv,
-                        bias_tolerance(codec),
-                        picture.level_cv,
-                        level_tolerance(codec),
-                        picture.frame_distance_cv,
-                        frame_tolerance(codec),
-                        picture.frame_cell_cv,
+                        report.notes,
                     );
                     // A flat picture has no activity to lean on.
                     if amount == 0.0 && worst > base {
