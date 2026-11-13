@@ -485,13 +485,14 @@ impl Controller {
             }),
             vars: Some({
                 let profile = self.profile.clone();
+                let service = crate::extension_vars::own_service();
                 Arc::new(move |id: &str, keys: &[String]| {
                     let items = |service: &str, account: &str| {
                         crate::cloud::keychain::read(service, account)
                             .ok()
                             .flatten()
                     };
-                    crate::extension_vars::values(&profile, id, keys, &items)
+                    crate::extension_vars::values(&profile, id, keys, &service, &items)
                 })
             }),
         });
