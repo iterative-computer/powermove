@@ -1,4 +1,5 @@
-//! Strict IRIDAS .cube reader and f64 evaluation; RGB rows are red-fastest.
+//! Strict IRIDAS `.cube` and Autodesk `.3dl` readers and f64 evaluation; cube
+//! rows are kept red-fastest. Every refusal is a sentence a person can read.
 //! No implicit transfer function, gamut conversion, alpha handling or output clamp.
 use std::fmt;
 
@@ -71,7 +72,7 @@ impl CubeLut {
         let mut one_range = None;
         let mut three_range = None;
         for (line_index, raw) in text.trim_start_matches('\u{feff}').lines().enumerate() {
-            let fail = |why: &str| LutError(format!("line {}: {why}", line_index + 1));
+            let fail = |why: &str| LutError(format!("Line {} {why}", line_index + 1));
             // # inside a quoted TITLE is part of the title, not a comment.
             let mut quoted = false;
             let end = raw
@@ -101,10 +102,10 @@ impl CubeLut {
             );
             if directive {
                 if !rows.is_empty() {
-                    return Err(fail("header after table data"));
+                    return Err(fail("is a heading after the table’s rows began."));
                 }
                 if !seen.insert(key.to_owned()) {
-                    return Err(fail("duplicate header"));
+                    return Err(fail("repeats a heading."));
                 }
             }
             let numbers = |parts: &[&str]| -> Result<Vec<f64>, LutError> {
@@ -114,7 +115,7 @@ impl CubeLut {
                         s.parse::<f64>()
                             .ok()
                             .filter(|n| n.is_finite())
-                            .ok_or_else(|| fail("expected finite number"))
+                            .ok_or_else(|| fail("has a value that isn’t a number."))
                     })
                     .collect()
             };
@@ -126,20 +127,25 @@ impl CubeLut {
                         || !title.ends_with('"')
                         || title[1..title.len() - 1].contains('"')
                     {
-                        return Err(fail("expected quoted title"));
+                        return Err(fail("has a title that isn’t in quotes."));
                     }
                     result.title = Some(title[1..title.len() - 1].into());
                 }
                 "LUT_1D_SIZE" | "LUT_3D_SIZE" => {
-                    if fields.len() != 2 {
-                        return Err(fail("expected one integer size"));
+                    let size = (fields.len() == 2)
+                        .then(|| fields[1].parse::<usize>().ok())
+                        .flatten()
+                        .ok_or_else(|| fail("has a size that isn’t a whole number."))?;
+                    let largest = if key == "LUT_1D_SIZE" { 65536 } else { 129 };
+                    if size < 2 {
+                        return Err(fail("asks for a table of fewer than 2 points."));
                     }
-                    let n = fields[1]
-                        .parse::<usize>()
-                        .map_err(|_| fail("invalid size"))?;
-                    if !(2..=if key == "LUT_1D_SIZE" { 65536 } else { 129 }).contains(&n) {
-                        return Err(fail("size outside supported bounds"));
+                    if size > largest {
+                        return Err(fail(&format!(
+                            "asks for a table of {size} points; the largest is {largest}."
+                        )));
                     }
+                    let n = size;
                     if key == "LUT_1D_SIZE" {
                         one = Some(n);
                     } else {
@@ -148,18 +154,18 @@ impl CubeLut {
                 }
                 "DOMAIN_MIN" | "DOMAIN_MAX" => {
                     if fields.len() != 4 {
-                        return Err(fail("expected RGB domain"));
+                        return Err(fail("needs three numbers: red, green and blue."));
                     }
                     let values = numbers(&fields[1..])?;
                     result.domain[usize::from(key == "DOMAIN_MAX")].copy_from_slice(&values);
                 }
                 "LUT_1D_INPUT_RANGE" | "LUT_3D_INPUT_RANGE" => {
                     if fields.len() != 3 {
-                        return Err(fail("expected min max range"));
+                        return Err(fail("needs two numbers: the lowest and highest input."));
                     }
                     let v = numbers(&fields[1..])?;
                     if v[0] >= v[1] || !(v[1] - v[0]).is_finite() {
-                        return Err(fail("invalid input range"));
+                        return Err(fail("has an empty input range."));
                     }
                     if key == "LUT_1D_INPUT_RANGE" {
                         one_range = Some([v[0], v[1]]);
@@ -169,12 +175,15 @@ impl CubeLut {
                 }
                 _ => {
                     if fields.len() != 3 {
-                        return Err(fail("expected RGB row or known header"));
+                        return Err(fail("isn’t a row of three numbers or a known heading."));
                     }
                     let values = numbers(&fields)?;
                     let expected = one.unwrap_or(0) + three.map_or(0, |n| n * n * n);
+                    if expected == 0 {
+                        return Err(fail("is a row before any LUT_1D_SIZE or LUT_3D_SIZE line."));
+                    }
                     if rows.len() >= expected {
-                        return Err(fail("extra data or missing size header"));
+                        return Err(fail("is a row past the end of the table."));
                     }
                     rows.push([values[0], values[1], values[2]]);
                 }
@@ -182,15 +191,19 @@ impl CubeLut {
         }
         let error = |s: &str| LutError(s.into());
         if one.is_none() && three.is_none() {
-            return Err(error("missing LUT size"));
+            return Err(error("The file has no LUT_1D_SIZE or LUT_3D_SIZE line."));
         }
         if one_range.is_some() && one.is_none() || three_range.is_some() && three.is_none() {
-            return Err(error("input range without its table"));
+            return Err(error(
+                "The file gives an input range for a table it doesn’t have.",
+            ));
         }
         if (one_range.is_some() || three_range.is_some())
             && (seen.contains("DOMAIN_MIN") || seen.contains("DOMAIN_MAX"))
         {
-            return Err(error("mixed domain conventions"));
+            return Err(error(
+                "The file gives both DOMAIN_MIN/MAX and an input range; a table has one or the other.",
+            ));
         }
         if let Some(range) = one_range.or(if one.is_none() { three_range } else { None }) {
             result.domain = [[range[0]; 3], [range[1]; 3]];
@@ -198,12 +211,15 @@ impl CubeLut {
         for c in 0..3 {
             let width = result.domain[1][c] - result.domain[0][c];
             if width <= 0. || !width.is_finite() {
-                return Err(error("invalid domain"));
+                return Err(error("The table’s input range is empty."));
             }
         }
         let count = one.unwrap_or(0) + three.map_or(0, |n| n * n * n);
         if rows.len() != count {
-            return Err(error("incomplete table"));
+            return Err(LutError(format!(
+                "The table has {} rows; its size needs {count}.",
+                rows.len()
+            )));
         }
         result.cube = rows.split_off(one.unwrap_or(0));
         result.shaper = rows;
@@ -212,6 +228,120 @@ impl CubeLut {
             result.cube_range = three_range.unwrap_or([0., 1.]);
         }
         Ok(result)
+    }
+
+    /// Reads a LUT file of `format`: `3dl`, or `.cube` for anything else.
+    pub fn parse_format(format: &str, text: &str) -> Result<Self, LutError> {
+        if format.eq_ignore_ascii_case("3dl") {
+            Self::parse_3dl(text)
+        } else {
+            Self::parse(text)
+        }
+    }
+
+    /// Reads an Autodesk `.3dl` cube: an input mesh line, then one row of
+    /// whole numbers per grid point, blue fastest. `Mesh in out` gives the
+    /// grid (2^in + 1 points) and the output depth; without it the grid is
+    /// the mesh line's length and the output depth is the smallest of 8, 10,
+    /// 12, 14 and 16 bits that holds the table's largest value. The mesh must
+    /// be evenly spaced: the table is looked up over 0..1.
+    pub fn parse_3dl(text: &str) -> Result<Self, LutError> {
+        let mut mesh: Option<Vec<f64>> = None;
+        let mut declared: Option<(u32, u32)> = None;
+        let mut rows = Vec::new();
+        for (line_index, raw) in text.trim_start_matches('\u{feff}').lines().enumerate() {
+            let fail = |why: &str| LutError(format!("Line {} {why}", line_index + 1));
+            let line = raw.split('#').next().unwrap_or("").trim();
+            let fields: Vec<_> = line.split_whitespace().collect();
+            let Some(key) = fields.first() else { continue };
+            if key.eq_ignore_ascii_case("3DMESH")
+                || key.eq_ignore_ascii_case("LUT8")
+                || key.eq_ignore_ascii_case("gamma")
+            {
+                continue;
+            }
+            if key.eq_ignore_ascii_case("Mesh") {
+                let bits = |i: usize| fields.get(i).and_then(|s| s.parse::<u32>().ok());
+                declared = match (fields.len(), bits(1), bits(2)) {
+                    (3, Some(input @ 1..=7), Some(output @ 8..=16)) => Some((input, output)),
+                    _ => return Err(fail("needs the grid’s and the output’s bit depths.")),
+                };
+                continue;
+            }
+            let values = fields
+                .iter()
+                .map(|s| s.parse::<f64>().ok().filter(|n| n.is_finite()))
+                .collect::<Option<Vec<f64>>>()
+                .ok_or_else(|| fail("has a value that isn’t a number."))?;
+            match values.len() {
+                3 => rows.push([values[0], values[1], values[2]]),
+                2.. if mesh.is_none() && rows.is_empty() => mesh = Some(values),
+                _ => return Err(fail("isn’t a row of three numbers.")),
+            }
+            if rows.len() > 129 * 129 * 129 {
+                return Err(fail("is a row past the largest table of 129 points."));
+            }
+        }
+        // A three-point table's mesh line reads as a row.
+        let three = declared.is_some_and(|(input, _)| input == 1) && !rows.is_empty();
+        if mesh.is_none() && (three || rows.len() == 28) {
+            mesh = Some(rows.remove(0).to_vec());
+        }
+        let size = match (&mesh, declared) {
+            (Some(mesh), _) => mesh.len(),
+            (None, Some((input, _))) => (1 << input) + 1,
+            (None, None) => (rows.len() as f64).cbrt().round() as usize,
+        };
+        if !(2..=129).contains(&size) || declared.is_some_and(|(input, _)| size != (1 << input) + 1)
+        {
+            return Err(LutError(
+                "The file’s mesh doesn’t give a table of 2 to 129 points.".into(),
+            ));
+        }
+        if rows.len() != size * size * size {
+            return Err(LutError(format!(
+                "The table has {} rows; its size needs {}.",
+                rows.len(),
+                size * size * size
+            )));
+        }
+        if let Some(mesh) = &mesh {
+            let top = mesh[size - 1];
+            let even = |(i, v): (usize, &f64)| (v - top * i as f64 / (size - 1) as f64).abs() <= 1.;
+            if top <= 0. || !mesh.iter().enumerate().all(even) {
+                return Err(LutError(
+                    "The file’s input mesh isn’t evenly spaced, which isn’t supported.".into(),
+                ));
+            }
+        }
+        let largest = rows.iter().flatten().fold(0f64, |a, b| a.max(*b));
+        let bits = declared.map_or_else(
+            || {
+                [8, 10, 12, 14, 16]
+                    .into_iter()
+                    .find(|bits| largest <= f64::from((1u32 << bits) - 1))
+                    .unwrap_or(16)
+            },
+            |(_, output)| output,
+        );
+        let scale = f64::from((1u32 << bits) - 1);
+        let mut cube = vec![[0.; 3]; rows.len()];
+        for r in 0..size {
+            for g in 0..size {
+                for b in 0..size {
+                    cube[r + size * (g + size * b)] =
+                        rows[b + size * (g + size * r)].map(|v| v / scale);
+                }
+            }
+        }
+        Ok(Self {
+            title: None,
+            domain: [[0.; 3], [1.; 3]],
+            shaper: Vec::new(),
+            size,
+            cube,
+            cube_range: [0., 1.],
+        })
     }
 
     /// The texture and layout the renderer samples, or why it can't hold
@@ -224,7 +354,9 @@ impl CubeLut {
             .flatten()
             .any(|v| v.abs() > MAX_VALUE)
         {
-            return Err(LutError("value outside half-float range".into()));
+            return Err(LutError(
+                "The table has a value beyond ±65504, the most a frame can hold.".into(),
+            ));
         }
         let n = self.size;
         let columns = if n == 0 { 1 } else { n.min(MAX_ROW / n) };
@@ -363,6 +495,82 @@ mod tests {
         }
         let large = CubeLut::parse("LUT_1D_SIZE 2\n0 0 0\n65505 0 0").unwrap();
         assert!(large.gpu().is_err());
+    }
+
+    #[test]
+    fn a_malformed_file_is_refused_with_a_plain_sentence() {
+        for (text, sentence) in [
+            ("", "The file has no LUT_1D_SIZE or LUT_3D_SIZE line."),
+            (
+                "LUT_3D_SIZE 2\n0 0 0\n1 1 1\n",
+                "The table has 2 rows; its size needs 8.",
+            ),
+            (
+                "LUT_3D_SIZE 2\n0 0 0\n0 0 zero\n",
+                "Line 3 has a value that isn’t a number.",
+            ),
+            (
+                "LUT_3D_SIZE 2\n0 0 0\n0 0\n",
+                "Line 3 isn’t a row of three numbers or a known heading.",
+            ),
+            (
+                "LUT_3D_SIZE 2\n0 0 0\nLUT_3D_SIZE 2\n",
+                "Line 3 is a heading after the table’s rows began.",
+            ),
+            (
+                "LUT_3D_SIZE 300\n",
+                "Line 1 asks for a table of 300 points; the largest is 129.",
+            ),
+            (
+                "LUT_1D_SIZE 2\nDOMAIN_MIN 0 0 0\nDOMAIN_MAX 0 1 1\n0 0 0\n1 1 1\n",
+                "The table’s input range is empty.",
+            ),
+            (
+                "LUT_1D_SIZE 2\n0 0 0\n1 1 1\n2 2 2\n",
+                "Line 4 is a row past the end of the table.",
+            ),
+        ] {
+            assert_eq!(CubeLut::parse(text).unwrap_err().to_string(), sentence);
+        }
+    }
+
+    #[test]
+    fn a_3dl_cube_is_read_blue_fastest_at_its_output_depth() {
+        // Red is the slowest axis; each channel has its own slope.
+        let mut text = String::from("# made for a test\n3DMESH\nMesh 1 12\n0 512 1023\n");
+        for r in 0..3 {
+            for g in 0..3 {
+                for b in 0..3 {
+                    text += &format!("{} {} {}\n", r * 2047, g * 1000, b * 500);
+                }
+            }
+        }
+        text += "LUT8\ngamma 1.0\n";
+        let lut = CubeLut::parse_format("3DL", &text).unwrap();
+        let out = lut.apply([1., 0.5, 0.25]).unwrap();
+        let expected = [4094. / 4095., 1000. / 4095., 250. / 4095.];
+        for c in 0..3 {
+            assert!((out[c] - expected[c]).abs() < 1e-12, "{out:?}");
+        }
+        // Without a Mesh line the depth is the smallest that holds the table.
+        let bare = text.replace("Mesh 1 12\n", "");
+        assert_eq!(CubeLut::parse_3dl(&bare).unwrap(), lut);
+        for (bad, sentence) in [
+            (
+                text.replace("0 512 1023", "0 100 1023"),
+                "The file’s input mesh isn’t evenly spaced, which isn’t supported.",
+            ),
+            (
+                text.replace("Mesh 1 12", "Mesh 2 12"),
+                "The file’s mesh doesn’t give a table of 2 to 129 points.",
+            ),
+            (
+                format!("{text}0 0 0\n"),
+                "The table has 28 rows; its size needs 27.",
+            ),
+        ] {
+            assert_eq!(CubeLut::parse_3dl(&bad).unwrap_err().to_string(), sentence);
+        }
     }
 
     #[test]

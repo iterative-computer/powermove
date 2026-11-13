@@ -58,20 +58,22 @@ mat3 lut_from_gamut(int s){if(s==2)return mat3(1.660491002,-0.124550475,-0.01815
 vec3 lut_encode(vec3 e,int s){if(s==0)return e;vec3 l=vec3(lut_e_dec(e.r),lut_e_dec(e.g),lut_e_dec(e.b));if(s==1)return l;l=lut_to_gamut(s)*l;return vec3(lut_log_enc(l.r,s),lut_log_enc(l.g,s),lut_log_enc(l.b,s));}
 vec3 lut_decode(vec3 v,int s){if(s==0)return v;vec3 l=v;if(s>1)l=lut_from_gamut(s)*vec3(lut_log_dec(v.r,s),lut_log_dec(v.g,s),lut_log_dec(v.b,s));return vec3(lut_e_enc(l.r),lut_e_enc(l.g),lut_e_enc(l.b));}
 vec3 lut_texel(int r,int g,int b){int n=int(u_lutCubeSize),c=int(u_lutColumns);int rows=(n+c-1)/c;return texelFetch(u_lut,ivec2(r+n*(g%c),b*rows+g/c),0).rgb;}
+// The six tetrahedra around the cell's black-to-white diagonal, as steps from
+// its black corner: a table whose rows are its own grid returns the input bits.
 vec3 lut_tetrahedral(vec3 p){
  float m=u_lutCubeSize-1.;vec3 x=p*m;ivec3 a=ivec3(min(floor(x),vec3(m-1.)));vec3 f=x-vec3(a);ivec3 b=a+ivec3(1);
  vec3 c000=lut_texel(a.r,a.g,a.b),c111=lut_texel(b.r,b.g,b.b);
  if(f.r>=f.g){
-  if(f.g>=f.b){vec3 c100=lut_texel(b.r,a.g,a.b),c110=lut_texel(b.r,b.g,a.b);return c000*(1.-f.r)+c100*(f.r-f.g)+c110*(f.g-f.b)+c111*f.b;}
-  if(f.r>=f.b){vec3 c100=lut_texel(b.r,a.g,a.b),c101=lut_texel(b.r,a.g,b.b);return c000*(1.-f.r)+c100*(f.r-f.b)+c101*(f.b-f.g)+c111*f.g;}
-  vec3 c001=lut_texel(a.r,a.g,b.b),c101=lut_texel(b.r,a.g,b.b);return c000*(1.-f.b)+c001*(f.b-f.r)+c101*(f.r-f.g)+c111*f.g;
+  if(f.g>=f.b){vec3 c100=lut_texel(b.r,a.g,a.b),c110=lut_texel(b.r,b.g,a.b);return c000+(c100-c000)*f.r+(c110-c100)*f.g+(c111-c110)*f.b;}
+  if(f.r>=f.b){vec3 c100=lut_texel(b.r,a.g,a.b),c101=lut_texel(b.r,a.g,b.b);return c000+(c100-c000)*f.r+(c101-c100)*f.b+(c111-c101)*f.g;}
+  vec3 c001=lut_texel(a.r,a.g,b.b),c101=lut_texel(b.r,a.g,b.b);return c000+(c001-c000)*f.b+(c101-c001)*f.r+(c111-c101)*f.g;
  }
- if(f.r>=f.b){vec3 c010=lut_texel(a.r,b.g,a.b),c110=lut_texel(b.r,b.g,a.b);return c000*(1.-f.g)+c010*(f.g-f.r)+c110*(f.r-f.b)+c111*f.b;}
- if(f.g>=f.b){vec3 c010=lut_texel(a.r,b.g,a.b),c011=lut_texel(a.r,b.g,b.b);return c000*(1.-f.g)+c010*(f.g-f.b)+c011*(f.b-f.r)+c111*f.r;}
- vec3 c001=lut_texel(a.r,a.g,b.b),c011=lut_texel(a.r,b.g,b.b);return c000*(1.-f.b)+c001*(f.b-f.g)+c011*(f.g-f.r)+c111*f.r;
+ if(f.r>=f.b){vec3 c010=lut_texel(a.r,b.g,a.b),c110=lut_texel(b.r,b.g,a.b);return c000+(c010-c000)*f.g+(c110-c010)*f.r+(c111-c110)*f.b;}
+ if(f.g>=f.b){vec3 c010=lut_texel(a.r,b.g,a.b),c011=lut_texel(a.r,b.g,b.b);return c000+(c010-c000)*f.g+(c011-c010)*f.b+(c111-c011)*f.r;}
+ vec3 c001=lut_texel(a.r,a.g,b.b),c011=lut_texel(a.r,b.g,b.b);return c000+(c001-c000)*f.b+(c011-c001)*f.g+(c111-c011)*f.r;
 }
 float lut_shaper_at(int i,int ch){int w=int(u_lutRes.x);return texelFetch(u_lut,ivec2(i%w,int(u_lutShaperRow)+i/w),0)[ch];}
-float lut_shaper(float v,int ch){float m=u_lutShaperSize-1.;float x=v*m;int i=int(min(floor(x),m-1.));return mix(lut_shaper_at(i,ch),lut_shaper_at(i+1,ch),x-float(i));}
+float lut_shaper(float v,int ch){float m=u_lutShaperSize-1.;float x=v*m;int i=int(min(floor(x),m-1.));float lo=lut_shaper_at(i,ch);return lo+(lut_shaper_at(i+1,ch)-lo)*(x-float(i));}
 vec3 lut_apply(vec3 v){
  vec3 p=clamp((v-u_lutDomainMin)/(u_lutDomainMax-u_lutDomainMin),0.,1.);
  if(u_lutShaperSize>.5){
@@ -83,7 +85,10 @@ vec3 lut_apply(vec3 v){
 }
 void main(){
 vec4 c=texture(u_tex,v_st);if(u_has_lut<.5||u_amount<=0.||c.a<=0.){o=c;return;}
- vec3 x=c.rgb/c.a;
- vec3 result=lut_decode(lut_apply(lut_encode(x,int(u_inputSpace+.5))),int(u_outputSpace+.5));
- o=vec4(mix(x,result,clamp(u_amount/100.,0.,1.))*c.a,c.a);
+ vec3 x=c.rgb/c.a;int from=int(u_inputSpace+.5),to=int(u_outputSpace+.5);
+ vec3 e=lut_encode(x,from),graded=lut_apply(e),result=lut_decode(graded,to);
+ // A channel the table leaves alone keeps its stored bits: no divide and multiply by alpha, no trip through the space.
+ vec3 same=from==to?lut_decode(e,to):x;
+ vec3 mixed=mix(x,result,clamp(u_amount/100.,0.,1.))*c.a;
+ o=vec4(result.r==same.r?c.r:mixed.r,result.g==same.g?c.g:mixed.g,result.b==same.b?c.b:mixed.b,c.a);
 }

@@ -523,6 +523,7 @@ fn effect_feature(f: &Feature) -> bool {
             | Feature::Adjustment
             | Feature::ExtensionDefinition(_)
             | Feature::Definition(_)
+            | Feature::EffectAsset(_)
             | Feature::ShaderFallback(_)
     )
 }

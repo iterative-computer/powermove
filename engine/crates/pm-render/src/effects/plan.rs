@@ -458,7 +458,7 @@ pub(crate) fn effect_steps_raster<'d>(
                                     step.assets.push((param.k.clone(), asset.clone()))
                                 }
                                 Some(Err(e)) => {
-                                    refused.get_or_insert(Feature::Definition(e.clone()));
+                                    refused.get_or_insert(Feature::EffectAsset(e.clone()));
                                     failed = true;
                                 }
                                 None => {

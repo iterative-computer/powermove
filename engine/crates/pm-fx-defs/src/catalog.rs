@@ -142,7 +142,7 @@ pub fn main_effects() -> &'static MainEffects {
 /// The Apply Color LUT program, including its stated input and output spaces.
 const LUT_SOURCE: &str = include_str!("apply-color-lut.glsl");
 const LUT_SPACES: [&str; 9] = [
-    "Working",
+    "Project Display (Rec.709)",
     "Rec.709 Linear",
     "Apple Log (Rec.2020)",
     "S-Log3 (S-Gamut3.Cine)",
@@ -154,8 +154,10 @@ const LUT_SPACES: [&str; 9] = [
 ];
 
 /// Revision 2 of Apply Color LUT, added here and not in main: tetrahedral
-/// cubes, 1D shapers and stated colour spaces. Revision 1 stays exact for files
-/// that saved it; new effects take revision 2.
+/// cubes, 1D shapers and a stated encoding the table is applied on (the
+/// project's display encoding unless a camera's is chosen). A table that
+/// changes nothing returns the pixel's own bits. Revision 1 stays exact for
+/// files that saved it; new effects take revision 2.
 fn add_lut_revision(main: &mut MainEffects) {
     let revision = main
         .effects
