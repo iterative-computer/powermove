@@ -76,6 +76,9 @@ pub struct RenderRequest {
     pub sampling: Sampling,
     /// Preview-only canvas policy; video timing is identical for both kinds.
     pub output_kind: OutputKind,
+    /// A frame of a playing viewer: media its next frames read (an image
+    /// sequence's next files) is decoded ahead on workers.
+    pub read_ahead: bool,
     /// Where output pixel (0, 0) sits in scaled composition pixels:
     /// composition pixel `(x, y)` lands at output pixel `(x · sx − ox,
     /// y · sy − oy)` at the top level (today's `scaledWorld` with a
@@ -132,6 +135,7 @@ impl RenderRequest {
             motion_blur: MotionBlur::Off,
             sampling: Sampling::Final,
             output_kind: OutputKind::Preview,
+            read_ahead: false,
             origin: None,
             output_tone: None,
         }
@@ -153,6 +157,7 @@ impl RenderRequest {
             motion_blur: MotionBlur::Off,
             sampling: Sampling::Final,
             output_kind: OutputKind::Preview,
+            read_ahead: false,
             origin: None,
             output_tone: None,
         }
@@ -191,6 +196,7 @@ impl RenderRequest {
             },
             sampling,
             output_kind: OutputKind::of(request.purpose),
+            read_ahead: request.motion_blur == MotionBlurKind::PreviewPlaying,
             origin: None,
             output_tone: None,
         })

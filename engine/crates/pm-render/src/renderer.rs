@@ -296,6 +296,7 @@ fn build_options(
         preview: preview_window(comp, request),
         origin: request.origin,
         final_output: request.output_kind == crate::OutputKind::Final,
+        read_ahead: request.read_ahead && !request.export,
     }
 }
 

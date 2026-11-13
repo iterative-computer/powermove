@@ -93,6 +93,8 @@ pub(crate) struct BuildKey {
     /// Final output plans levels at the composition's density where their
     /// effects need it (`crate::plan::comp_pass`).
     pub final_output: bool,
+    /// Playing frames name the files a sequence reads next.
+    pub read_ahead: bool,
 }
 
 /// Which document the entries belong to.

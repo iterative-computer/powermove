@@ -311,6 +311,8 @@ pub struct Build<'r> {
     pub(crate) studio_shutters: u32,
     /// The resampler of level 2 raster content.
     pub(crate) sampling: crate::sampling::Sampling,
+    /// A playing viewer frame ([`BuildOptions::read_ahead`]).
+    read_ahead: bool,
     /// The output origin of the level being built (the request's at the
     /// top level, in its groups, mattes, and motion-blur samples; `(0, 0)`
     /// inside a precomp, which renders its own target).
@@ -412,6 +414,9 @@ pub struct BuildOptions {
     /// every level whose effects need the composition's pixel grid draws
     /// at the composition's density ([`comp_pass`]).
     pub final_output: bool,
+    /// A playing viewer frame ([`RenderRequest::read_ahead`](crate::RenderRequest::read_ahead)):
+    /// image sequences name the files their next frames show.
+    pub read_ahead: bool,
 }
 
 /// Today's `PC_MAX_DEPTH`.
@@ -534,6 +539,7 @@ pub(crate) fn build_reusing<'r>(
                 view_override: options3d.view.is_some(),
                 origin: options.origin.map(|(x, y)| (x.to_bits(), y.to_bits())),
                 final_output: options.final_output,
+                read_ahead: options.read_ahead,
             },
         );
     }
@@ -562,6 +568,7 @@ pub(crate) fn build_reusing<'r>(
         origin: options.origin.unwrap_or((0.0, 0.0)),
         windowed: options.origin.is_some(),
         final_output: options.final_output,
+        read_ahead: options.read_ahead,
         passes: Vec::new(),
         compat,
         compat_missing: Vec::new(),
@@ -2241,7 +2248,7 @@ fn sequence_frame<'d>(
     // While playing, the files of the next frames are read ahead: each is a
     // whole still to decode, and one frame's time is too short for that.
     let mut ahead = Vec::new();
-    if b.sampling == crate::sampling::Sampling::Playback {
+    if b.read_ahead {
         let step = 1.0 / scope.comp.rate().map_or(30.0, |r| r.rate.to_f64());
         let mut last = number;
         for i in 1..=SEQUENCE_AHEAD {

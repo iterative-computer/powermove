@@ -732,10 +732,9 @@ fn an_older_transcoded_sequence_asset_shows_the_same_frames() {
 
 /// While playing, a sequence's next files are decoded ahead on workers: the
 /// frame that meets one draws it without decoding (each file is decoded
-/// once). Paused frames read nothing ahead.
+/// once). Paused and dragged frames read nothing ahead.
 #[test]
 fn a_playing_sequence_reads_its_next_files_ahead() {
-    use pm_render::sampling::Sampling;
     let sequence = coded_sequence();
     let mut source = layer(
         "seq",
@@ -754,10 +753,10 @@ fn a_playing_sequence_reads_its_next_files_ahead() {
         .paths
         .insert("clip".into(), sequence.retained.clone());
     let document = load(&doc);
-    for (sampling, ahead) in [(Sampling::Final, false), (Sampling::Playback, true)] {
+    for ahead in [false, true] {
         let mut renderer = Renderer::headless().unwrap();
         let mut request = RenderRequest::at_scale(Size::new(16, 16), 1.0, Precision::Float16);
-        request.sampling = sampling;
+        request.read_ahead = ahead;
         // Files 1, 2 and 3 show at 0, 0.1 and 0.2 s (10 fps in 30).
         let mut decodes = vec![];
         for t in [0.0, 0.1, 0.2] {
@@ -782,9 +781,9 @@ fn a_playing_sequence_reads_its_next_files_ahead() {
         }
         if ahead {
             assert!(decodes[0] >= 1, "{decodes:?}");
-            assert_eq!(&decodes[1..], [0, 0], "{sampling:?}: decoded ahead");
+            assert_eq!(&decodes[1..], [0, 0], "decoded ahead");
         } else {
-            assert!(decodes.iter().all(|&d| d >= 1), "{sampling:?}: {decodes:?}");
+            assert!(decodes.iter().all(|&d| d >= 1), "paused: {decodes:?}");
         }
     }
 }

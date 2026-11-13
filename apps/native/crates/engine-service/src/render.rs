@@ -171,6 +171,7 @@ impl FrameSpec {
             MotionBlurKind::Export
         });
         request.sampling = self.sampling();
+        request.read_ahead = self.read_ahead();
         // A capture reads the exact picture: final output, as an export
         // (effects at the composition's density, `pm_render::plan`).
         if self.exact {
@@ -195,6 +196,12 @@ impl FrameSpec {
     /// take the final one (Lanczos-3), so footage and precomps don't sharpen
     /// when playback stops. Its cost on a real project's playing frames was
     /// within run-to-run noise.
+    /// Frames of a playing viewer read media ahead (an image sequence's
+    /// next files); paused, dragged and exact frames read only their own.
+    pub(crate) fn read_ahead(&self) -> bool {
+        self.moment == Moment::Playing && !self.exact
+    }
+
     pub(crate) fn sampling(&self) -> pm_render::sampling::Sampling {
         if !self.exact && self.moment == Moment::Scrub && self.scale < 1. {
             pm_render::sampling::Sampling::Playback
@@ -1783,6 +1790,11 @@ mod sampling_tests {
             ..spec(Moment::Scrub, 0.5)
         };
         assert_eq!(capture.sampling(), Sampling::Final);
+        // Only playing frames read an image sequence's next files ahead.
+        assert!(spec(Moment::Playing, 1.).read_ahead());
+        assert!(!spec(Moment::Scrub, 0.5).read_ahead());
+        assert!(!spec(Moment::Paused, 1.).read_ahead());
+        assert!(!capture.read_ahead());
     }
 }
 
