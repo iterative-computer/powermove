@@ -196,7 +196,9 @@ float pm_e_enc(float l){float m=abs(l);float e=m<=.0031308?12.92*m:1.055*pow(m,1
 /// white and the negative components of colours outside Rec.709. The shipped
 /// shaders clipped them (to 0..8, 0..1 or 0..4), which an 8-bit canvas hid.
 /// Color's exposure also becomes a stop of light (a gain in linear light,
-/// not on encoded values), and its neutral setting changes nothing.
+/// not on encoded values), its hue turn keeps those colours, a faintly
+/// covered pixel is graded like any other, and its neutral setting changes
+/// nothing.
 fn add_unclipped_revisions(main: &mut MainEffects) {
     let main_fn = format!("{E_GLSL}void main(){{");
     revise(
@@ -215,6 +217,18 @@ fn add_unclipped_revisions(main: &mut MainEffects) {
             (
                 "float l = luma(x); x = mix(vec3(l), x, 1. + u_p2/100.);",
                 "if (u_p2 != 0.) { float l = luma(x); x = mix(vec3(l), x, 1. + u_p2/100.); }",
+            ),
+            // Hue turns the colour about its own grey, between its smallest
+            // and largest channel: the HSV turn for a colour inside 0..1, and
+            // the same turn for one with a negative or above-white channel.
+            (
+                "if (abs(u_p3) > .01) { vec3 hsv = rgb2hsv(max(x,0.)); hsv.x = fract(hsv.x + u_p3/360.); x = hsv2rgb(hsv); }",
+                "if (abs(u_p3) > .01) { float lo = min(x.r, min(x.g, x.b)), d = max(x.r, max(x.g, x.b)) - lo; if (d > 0.) x = lo + d * hue2rgb(fract(rgb2hsv((x - lo) / d).x + u_p3/360.)); }",
+            ),
+            // Any pixel with coverage is graded, however faint.
+            (
+                "if (c.a < .0005) { o = c; return; }",
+                "if (c.a <= 0.) { o = c; return; }",
             ),
             (
                 "o = vec4(clamp(x,0.,8.) * c.a, c.a);",

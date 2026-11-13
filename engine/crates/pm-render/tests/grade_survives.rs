@@ -168,6 +168,90 @@ fn a_stop_of_exposure_doubles_the_light_and_is_not_clipped() {
     }
 }
 
+/// Color's hue turns a colour about its own grey, so a colour outside
+/// Rec.709 or above white keeps what makes it so: two half turns give the
+/// colour back, and a colour inside 0..1 turns as the shipped effect turned
+/// it.
+#[test]
+fn hue_keeps_colour_outside_rec709_and_above_white() {
+    let mut renderer = Renderer::headless().unwrap();
+    for colour in [
+        [-0.125, 0.5, 0.25, 1.0],
+        [2.5, 0.5, -0.125, 1.0],
+        [0.25, 1.75, 4.0, 1.0],
+        [-0.5, -0.25, -0.125, 1.0],
+    ] {
+        let mut twice = graded("color", None, json!({"hue":180}), colour);
+        let mut second = twice["layers"][0]["fx"][0].clone();
+        second["id"] = json!("again");
+        twice["layers"][0]["fx"].as_array_mut().unwrap().push(second);
+        let out = pixel(&mut renderer, &twice);
+        for c in 0..4 {
+            assert!(
+                (out[c] - colour[c]).abs() < 2e-5 * colour[c].abs().max(1.0),
+                "two half turns of {colour:?} gave {out:?}"
+            );
+        }
+        // One half turn keeps the colour's smallest and largest channel.
+        let once = pixel(&mut renderer, &graded("color", None, json!({"hue":180}), colour));
+        let ends = |v: &[f64]| {
+            (
+                v[..3].iter().copied().fold(f64::INFINITY, f64::min),
+                v[..3].iter().copied().fold(f64::NEG_INFINITY, f64::max),
+            )
+        };
+        let (was, is) = (ends(&colour), ends(&once));
+        assert!(
+            (was.0 - is.0).abs() < 2e-5 && (was.1 - is.1).abs() < 2e-5,
+            "a half turn of {colour:?} gave {once:?}"
+        );
+        assert!((0..3).any(|c| (once[c] - colour[c]).abs() > 0.05), "{once:?}");
+    }
+    for degrees in [-150, -60, 45, 90, 180] {
+        let colour = [0.8, 0.4, 0.2, 1.0];
+        let hue = json!({"hue":degrees});
+        let now = pixel(&mut renderer, &graded("color", None, hue.clone(), colour));
+        let shipped = pixel(&mut renderer, &graded("color", Some(1), hue, colour));
+        for c in 0..3 {
+            assert!(
+                (now[c] - shipped[c]).abs() < 2e-5,
+                "{degrees}°: {now:?}, the shipped effect {shipped:?}"
+            );
+        }
+    }
+}
+
+/// A pixel with almost no coverage is graded like any other: its straight
+/// colour takes the grade the opaque pixel takes.
+#[test]
+fn color_grades_a_pixel_with_faint_coverage() {
+    let mut renderer = Renderer::headless().unwrap();
+    let colour = [0.8, 0.4, 0.2];
+    let grade = json!({"exposure":1,"saturation":30});
+    let opaque = pixel(
+        &mut renderer,
+        &graded("color", None, grade.clone(), [colour[0], colour[1], colour[2], 1.0]),
+    );
+    for alpha in [0.0004, 0.00001] {
+        let faint = pixel(
+            &mut renderer,
+            &graded(
+                "color",
+                None,
+                grade.clone(),
+                [colour[0] * alpha, colour[1] * alpha, colour[2] * alpha, alpha],
+            ),
+        );
+        for c in 0..3 {
+            assert!(
+                (faint[c] / faint[3] - opaque[c]).abs() < 1e-3,
+                "alpha {alpha}: straight {:?}, opaque {opaque:?}",
+                [faint[0] / faint[3], faint[1] / faint[3], faint[2] / faint[3]]
+            );
+        }
+    }
+}
+
 /// Unpremultiply, operate, premultiply: a half-transparent pixel leaves each
 /// effect as the opaque pixel's result at half coverage, so soft edges keep
 /// their colour (no dark or bright fringe).
