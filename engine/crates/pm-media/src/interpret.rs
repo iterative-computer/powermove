@@ -53,6 +53,9 @@ pub enum Origin {
     Default { rule: String },
     /// Set in Interpret Footage.
     Override,
+    /// As Powermove 1 showed it: kept for the asset of a v1 project
+    /// (`videoColor`); `file` names the file's own reading when it differs.
+    PowermoveOne { file: Option<String> },
 }
 
 impl Origin {
