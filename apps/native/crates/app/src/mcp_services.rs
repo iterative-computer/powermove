@@ -509,8 +509,13 @@ fn frame(
     capture: Capture,
 ) -> AnyResult<Vec<u8>> {
     // Home's poster draws 3D at Draft: a card needs the picture, not a
-    // clean render.
-    let studio_quality = matches!(capture, Capture::Poster).then(|| serde_json::json!("draft"));
+    // clean render. A project with no 3D asks for nothing.
+    let studio_quality = (matches!(capture, Capture::Poster)
+        && pm_engine_service::draws_studio(
+            &published.snapshot.document,
+            &published.snapshot.render_comp(),
+        ))
+    .then(|| serde_json::json!("draft"));
     frame_with(
         jobs,
         published,
