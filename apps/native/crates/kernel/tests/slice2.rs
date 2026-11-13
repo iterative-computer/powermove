@@ -3685,11 +3685,13 @@ fn save_child_process() {
         ),
         ..child_disk(&var("PM_KERNEL_TEST_SAVE_DISK").unwrap_or_else(|| "no-exchange".into()))
     };
-    // A build that does not share the user's lock folder has its own.
-    let mut k = match std::env::var_os("PM_KERNEL_TEST_SAVE_LOCKS") {
-        Some(locks) => kernel_with_locks(Path::new(&profile), Path::new(&locks)),
-        None => kernel(Path::new(&profile)),
-    };
+    // A build that does not share the user's lock folder has its own. A
+    // child that is killed never removes its lock file, so without one it
+    // locks beside its own profile, never in the user's lock folder.
+    let locks = std::env::var_os("PM_KERNEL_TEST_SAVE_LOCKS")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| Path::new(&profile).with_extension("child-locks"));
+    let mut k = kernel_with_locks(Path::new(&profile), &locks);
     if var("PM_KERNEL_TEST_SAVE_ACTION").as_deref() == Some("open") {
         k.set_publish_hooks(hooks);
         let _ = k.shell(ShellCall::PrepareOpen {
