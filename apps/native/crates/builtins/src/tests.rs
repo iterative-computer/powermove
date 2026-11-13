@@ -1575,6 +1575,27 @@ fn viewer_repeated_publications_keep_usable_native_tickets_until_model_changes()
     );
 }
 
+/// One set of play controls on screen: with a timeline in the workspace the
+/// viewer publishes no transport (no play buttons, no timecode); without one,
+/// it carries both. Unknown (before the first layout) keeps the viewer's.
+#[test]
+fn the_viewer_shows_transport_only_when_no_timeline_is_shown() {
+    let actor = actor();
+    let kernel = actor.handle();
+    let identity = pm_surface::host_api::Identity {
+        realm: "viewer-transport".into(),
+        generation: 1,
+        project: "synthetic".into(),
+    };
+    let mut backend = data::Backend::new(kernel.clone(), identity, "viewer", false).unwrap();
+    assert!(backend.viewer_snapshot().unwrap()["host"]["transport"].is_object());
+    backend.native.facts["timelineShown"] = json!(true);
+    assert!(backend.viewer_snapshot().unwrap()["host"]["transport"].is_null());
+    backend.native.facts["timelineShown"] = json!(false);
+    let shown = backend.viewer_snapshot().unwrap();
+    assert!(shown["host"]["transport"]["timecode"].is_string());
+}
+
 #[test]
 fn media_completion_reaches_actor_with_actual_originals_and_relink_undo_keeps_bytes() {
     let dir = tempfile::tempdir().unwrap();
@@ -3587,6 +3608,8 @@ fn properties_show_the_3d_section_for_models_lights_and_cameras() {
 
     let (mut model, p) = publish(&mut presenter, "lamp");
     assert_eq!(titles(&p), ["Light"]);
+    // Everything the Light tool's panel held is here, with the light: no
+    // separate panel (3d-studio.md §8).
     assert_eq!(
         labels(&p, "Light"),
         [
@@ -3595,9 +3618,61 @@ fn properties_show_the_3d_section_for_models_lights_and_cameras() {
             "Brightness",
             "Width",
             "Height",
+            "Temperature",
+            "Distance",
             "Cast Shadows"
         ]
     );
+    // A light aims by its target: Transform shows it under Position, and
+    // hides the rotation the renderer ignores.
+    let transform: Vec<String> = p["sections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == "transform")
+        .unwrap()["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["label"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(transform, ["Position", "Target"]);
+    let stored = |id: &str| {
+        let p = kernel.published("synthetic").unwrap();
+        let root = data::wire(&p.snapshot.root().unwrap().to_value());
+        fn find(v: &Value, id: &str) -> Option<Value> {
+            match v {
+                Value::Object(o) if o.get("id").and_then(Value::as_str) == Some(id) && o.contains_key("p") => Some(v.clone()),
+                Value::Object(o) => o.values().find_map(|c| find(c, id)),
+                Value::Array(a) => a.iter().find_map(|c| find(c, id)),
+                _ => None,
+            }
+        }
+        find(&root, id).unwrap()
+    };
+    // Temperature writes the light's colour; Distance slides it along its
+    // aim, both as one Undo through the Studio's typed edits.
+    let before = stored("lamp");
+    write(
+        &presenter,
+        &mut model,
+        &row(&p, "3d.light.adjust.temperature").unwrap(),
+        json!(3200.),
+    );
+    let warm = stored("lamp");
+    assert_ne!(
+        warm["d"]["data"]["light"]["p"]["color"],
+        before["d"]["data"]["light"]["p"]["color"]
+    );
+    let (mut model, p) = publish(&mut presenter, "lamp");
+    let distance = row(&p, "3d.light.adjust.distance").unwrap();
+    let was = distance["control"]["axes"][0]["value"].as_f64().unwrap();
+    write(&presenter, &mut model, &distance, json!(was * 2.));
+    let (mut model, p) = publish(&mut presenter, "lamp");
+    let now = row(&p, "3d.light.adjust.distance").unwrap()["control"]["axes"][0]["value"]
+        .as_f64()
+        .unwrap();
+    assert!((now - was * 2.).abs() < 1e-6, "{was} -> {now}");
     write(
         &presenter,
         &mut model,
@@ -3615,6 +3690,8 @@ fn properties_show_the_3d_section_for_models_lights_and_cameras() {
             "Falloff",
             "Spread",
             "Softness",
+            "Temperature",
+            "Distance",
             "Cast Shadows"
         ]
     );
