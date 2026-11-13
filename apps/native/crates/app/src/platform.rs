@@ -112,7 +112,7 @@ pub fn lut_file(window: &NSWindow) -> async_channel::Receiver<Option<PathBuf>> {
             .map(|p| PathBuf::from(p.to_string()));
         let _ = tx.try_send(path);
     });
-    begin_panel(&panel, window, done);
+    begin_panel(&panel, &sheet_host(window), done);
     rx
 }
 
@@ -149,7 +149,7 @@ pub fn paths_named(
                 .map(|p| PathBuf::from(p.to_string()));
             let _ = tx.try_send(path);
         });
-        begin_panel(&panel, window, done);
+        begin_panel(&panel, &sheet_host(window), done);
     } else {
         let panel = NSOpenPanel::openPanel(mtm);
         panel.setCanChooseDirectories(false);
@@ -163,7 +163,7 @@ pub fn paths_named(
                 .map(|p| PathBuf::from(p.to_string()));
             let _ = tx.try_send(path);
         });
-        begin_panel(&panel, window, done);
+        begin_panel(&panel, &sheet_host(window), done);
     }
     rx
 }
@@ -361,7 +361,7 @@ pub fn choose_paths(
         };
         let _ = tx.try_send(paths);
     });
-    begin_panel(&panel, window, done);
+    begin_panel(&panel, &sheet_host(window), done);
     rx
 }
 
@@ -657,7 +657,7 @@ pub fn export_destination(
             .map(|(parent, name)| parent.join(name));
         let _ = tx.try_send(path);
     });
-    begin_panel(&panel, window, done);
+    begin_panel(&panel, &sheet_host(window), done);
     rx
 }
 

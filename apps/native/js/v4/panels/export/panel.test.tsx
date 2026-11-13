@@ -427,6 +427,31 @@ test("offline refusal offers Export Without Them; only the person's click sends 
   ).toBe(false);
   await g.root.dispose();
 });
+test("a 3D export states its preset's promise, its render time and the 75% option", async () => {
+  const s = initial();
+  s.project.studio = {
+    saved: "Production",
+    preset: "production",
+    estimate: "12–60 min",
+    state: "measured",
+  };
+  s.project.summary = "300 frames · 10 s · 1920×1080 · 3D Production, 12–60 min";
+  s.bindings.studioQuality = "fixture:export:studioQuality";
+  s.bindings.studioReducedSize = "fixture:export:studioReducedSize";
+  const f = await mounted(s);
+  // The row's second line is the chosen preset's promise in plain words.
+  const texts = [...f.root.host.nodes.values()].map((n) => n.text ?? "");
+  expect(texts.some((t) => t.includes("about 3 s a frame"))).toBe(true);
+  // The measured time has its own row and closes the footer line, semibold.
+  expect(named(f.root, "export.studioTime").props.label).toBe(
+    "Render time 12–60 min",
+  );
+  expect(named(f.root, "export.summary").props.label).toBe(s.project.summary);
+  expect(named(f.root, "export.summaryTime").props.style.fontWeight).toBe("600");
+  // Render at 75% Size is offered, and off unless chosen.
+  expect(named(f.root, "export.studioReducedSize").props.value).toBe(false);
+  await f.root.dispose();
+});
 
 test("a QuickTime export offers color tag, start timecode and audio format, each where it applies", async () => {
   const seed = initial();
@@ -486,30 +511,5 @@ test("HDR delivery carries its own label: no color tag row", async () => {
     [...f.root.host.nodes.values()].some((n) => n.props.id === id);
   expect(has("export.dynamicRange")).toBe(true);
   expect(has("export.colorTag")).toBe(false);
-  await f.root.dispose();
-});
-test("a 3D export states its preset's promise, its render time and the 75% option", async () => {
-  const s = initial();
-  s.project.studio = {
-    saved: "Production",
-    preset: "production",
-    estimate: "12–60 min",
-    state: "measured",
-  };
-  s.project.summary = "300 frames · 10 s · 1920×1080 · 3D Production, 12–60 min";
-  s.bindings.studioQuality = "fixture:export:studioQuality";
-  s.bindings.studioReducedSize = "fixture:export:studioReducedSize";
-  const f = await mounted(s);
-  // The row's second line is the chosen preset's promise in plain words.
-  const texts = [...f.root.host.nodes.values()].map((n) => n.text ?? "");
-  expect(texts.some((t) => t.includes("about 3 s a frame"))).toBe(true);
-  // The measured time has its own row and closes the footer line, semibold.
-  expect(named(f.root, "export.studioTime").props.label).toBe(
-    "Render time 12–60 min",
-  );
-  expect(named(f.root, "export.summary").props.label).toBe(s.project.summary);
-  expect(named(f.root, "export.summaryTime").props.style.fontWeight).toBe("600");
-  // Render at 75% Size is offered, and off unless chosen.
-  expect(named(f.root, "export.studioReducedSize").props.value).toBe(false);
   await f.root.dispose();
 });

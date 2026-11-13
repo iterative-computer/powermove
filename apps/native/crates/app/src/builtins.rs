@@ -716,7 +716,7 @@ impl Controller {
                 cx.defer_in(window, |v, _, cx| v.update_builtins(cx));
             }
             // Shown rulers take a band along the top and the leading edge;
-            // the composition fits inside them.
+            // the composition fits inside them (the first pane with 3D views).
             let inset = t.metrics.inset
                 + if self.rulers {
                     t.metrics.viewer_ruler

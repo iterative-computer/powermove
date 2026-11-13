@@ -74,10 +74,10 @@ export type SectionAction =
   | "animator"
   | "release-precomp"
   | "refresh-fonts"
+  | "set-up-studio"
   | "time-remap"
   | "freeze-frame"
-  | "reverse"
-  | "set-up-studio";
+  | "reverse";
 export interface AnimatorPreset {
   id: string | null;
   label: string;

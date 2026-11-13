@@ -2,9 +2,9 @@ import { useEffect, useRef, useState } from "preact/hooks";
 import {
   EmptyState,
   PopUpButton,
-  PushButton,
   Slider,
   SegmentedControl,
+  PushButton,
   ToolbarItem,
   token,
 } from "../../src/components";
@@ -705,6 +705,7 @@ export function ViewerPanel({
               gap: token("metrics.gap"),
             }}
           >
+            {!source && studio}
             {popups}
           </div>
         </div>

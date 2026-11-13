@@ -1558,17 +1558,6 @@ impl SurfaceView {
             } else {
                 div().flex_none()
             };
-            // AppKit sets a bezel-less pop-up's title a little further in
-            // than a field's value: bring it onto the wells' inset.
-            let child = if node.well && control.read(cx).is_popup() {
-                div()
-                    .w_full()
-                    .ml(px(-t.space.hair))
-                    .child(control.clone())
-                    .into_any_element()
-            } else {
-                control.clone().into_any_element()
-            };
             let mut slot = slot.id(("v4-control", id));
             if let Some(focus) = self.focus.get(&id) {
                 let t = &self.table.tokens;
@@ -1595,6 +1584,17 @@ impl SurfaceView {
                         }
                     });
             }
+            // AppKit sets a bezel-less pop-up's title a little further in
+            // than a field's value: bring it onto the wells' inset.
+            let child = if node.well && control.read(cx).is_popup() {
+                div()
+                    .w_full()
+                    .ml(px(-t.space.hair))
+                    .child(control.clone())
+                    .into_any_element()
+            } else {
+                control.clone().into_any_element()
+            };
             return slot
                 .child(child)
                 .children(self.probe(id))

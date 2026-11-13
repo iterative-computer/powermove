@@ -41,6 +41,11 @@ export interface Options {
   dynamicRange: "sdr" | "pq" | "hlg";
   /** Use Proxies (Draft); absent means originals. */
   useProxies?: boolean;
+  /** This export's 3D quality; absent or `composition` uses the saved preset. */
+  studioQuality?: StudioQuality;
+  /** Render 3D at 75% of the output size and scale up: faster, slightly
+   * softer. Never automatic; absent means full size. */
+  studioReducedSize?: boolean;
   /** The label of an SDR ProRes or MP4. Absent from options saved before
    * it existed: read as the QuickTime label. */
   colorTag: ColorTag;
@@ -51,11 +56,6 @@ export interface Options {
   /** Sound coding of a QuickTime export. Absent from older options: read as
    * 24-bit PCM. */
   audioCoding: AudioCoding;
-  /** This export's 3D quality; absent or `composition` uses the saved preset. */
-  studioQuality?: StudioQuality;
-  /** Render 3D at 75% of the output size and scale up: faster, slightly
-   * softer. Never automatic; absent means full size. */
-  studioReducedSize?: boolean;
 }
 export type StudioQuality =
   | "composition"

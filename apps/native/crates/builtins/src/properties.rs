@@ -2081,6 +2081,19 @@ impl Properties {
                 },
             )));
         }
+        if intent["type"] == "section-action" && intent["action"] == "set-up-studio" {
+            let (label, commands) =
+                pm_panel_studio3d::properties::set_up_studio(model.published(), time)
+                    .map_err(|e| e.to_string())?;
+            return Ok(Some(Request::new(
+                caller,
+                pm_kernel::Call::Transact {
+                    label: Some(label),
+                    expected_revision: Some(model.revision()),
+                    body: pm_kernel::WriteBody::Commands(commands),
+                },
+            )));
+        }
         if intent["type"] == "section-action"
             && let Some((mode, label)) = match intent["action"].as_str() {
                 Some("time-remap") => Some((RetimeMode::Remap, "Enable Time Remapping")),
@@ -2120,19 +2133,6 @@ impl Properties {
                         }
                         .into(),
                     ]),
-                },
-            )));
-        }
-        if intent["type"] == "section-action" && intent["action"] == "set-up-studio" {
-            let (label, commands) =
-                pm_panel_studio3d::properties::set_up_studio(model.published(), time)
-                    .map_err(|e| e.to_string())?;
-            return Ok(Some(Request::new(
-                caller,
-                pm_kernel::Call::Transact {
-                    label: Some(label),
-                    expected_revision: Some(model.revision()),
-                    body: pm_kernel::WriteBody::Commands(commands),
                 },
             )));
         }

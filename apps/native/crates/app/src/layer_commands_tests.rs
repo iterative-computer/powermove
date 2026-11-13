@@ -349,7 +349,8 @@ fn every_seeded_effect_adds_through_the_kernel_and_draws_in_the_viewer_path() {
     assert!(plain.iter().any(|p| p[0] > 0.1), "the fixture draws");
     let state = kernel.state();
     let seeded = state.registries.get("effects").unwrap();
-    assert_eq!(seeded.len(), 43);
+    // 43 shipped definitions plus Color Wheels and Color Curves.
+    assert_eq!(seeded.len(), 45);
     let mut changed = Vec::new();
     for entry in seeded {
         let p = kernel.published("synthetic").unwrap();
@@ -416,6 +417,14 @@ fn every_seeded_effect_adds_through_the_kernel_and_draws_in_the_viewer_path() {
         assert!(
             changed.iter().any(|c| c == id),
             "{id} drew nothing: {changed:?}"
+        );
+    }
+    // A neutral grade is an identity: the grading tools at their defaults
+    // leave the picture exactly as it was.
+    for id in ["colorWheels", "colorCurves"] {
+        assert!(
+            !changed.iter().any(|c| c == id),
+            "{id} changed the picture at its defaults"
         );
     }
 }

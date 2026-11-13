@@ -1,11 +1,28 @@
 [
   { "id": "timeline", "folder": "timeline", "title": "Timeline" },
-  { "id": "inspector", "folder": "inspector", "title": "Properties", "parks": true },
-  { "id": "layer-effects", "folder": "effect-controls", "title": "Effect Controls", "parks": true },
+  {
+    "id": "inspector",
+    "folder": "inspector",
+    "title": "Properties",
+    "parks": true
+  },
+  {
+    "id": "layer-effects",
+    "folder": "effect-controls",
+    "title": "Effect Controls",
+    "parks": true
+  },
   { "id": "viewer", "folder": "viewer", "title": "Viewer" },
   { "id": "assets", "folder": "project", "title": "Project", "parks": true },
   { "id": "fxbrowser", "folder": "effects", "title": "Effects", "parks": true },
+  { "id": "color", "folder": "color", "title": "Color", "parks": true },
   { "id": "agent", "folder": "agent", "title": "Agent", "application": true },
-  { "id": "settings", "folder": "settings", "title": "Settings", "application": true, "window": true },
+  {
+    "id": "settings",
+    "folder": "settings",
+    "title": "Settings",
+    "application": true,
+    "window": true
+  },
   { "id": "export", "folder": "export", "title": "Export", "window": true }
 ]

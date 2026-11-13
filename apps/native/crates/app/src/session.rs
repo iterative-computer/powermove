@@ -961,8 +961,6 @@ impl Controller {
             self.message = format!("Popout viewer: {e}");
         }
         self.publish_studio_panes(&p);
-        // A changed Views setting splits the viewer now, not at the next frame.
-        self.sync_studio_panes(cx);
         {
             let _span = crate::diag::span("refresh.mirror");
             if let Some(m) = &mut self.mirror {
@@ -1027,6 +1025,9 @@ impl Controller {
                 .filter(|_| p.history.can_redo),
         );
         self.published = Some(p);
+        // A changed Views setting splits the viewer now, not at the next
+        // frame (a paused viewer has none): read from the publication just stored.
+        self.sync_studio_panes(cx);
         self.update_builtins(cx);
         if let Some(timeline) = &self.builtins.timeline {
             timeline.update(cx, |t, cx| t.published(cx));

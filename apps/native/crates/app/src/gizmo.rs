@@ -16,10 +16,10 @@ mod marquee;
 pub mod pen;
 #[path = "snap.rs"]
 mod snap;
-#[path = "viewer_rulers.rs"]
-pub mod viewer_rulers;
 #[path = "gizmo3d.rs"]
 pub mod studio3d;
+#[path = "viewer_rulers.rs"]
+pub mod viewer_rulers;
 #[path = "text_edit.rs"]
 pub mod text;
 

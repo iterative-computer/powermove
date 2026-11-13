@@ -174,11 +174,11 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
             ? (o[key] ?? "sdr")
             : key === "studioQuality"
               ? (o[key] ?? "composition")
-            : key === "colorTag" || key === "audioCoding"
-              ? (o[key] ?? fieldDefaults[key])
-              : key === "fps"
-                ? listedRate(o.fps)
-                : o[key]
+              : key === "colorTag" || key === "audioCoding"
+                ? (o[key] ?? fieldDefaults[key])
+                : key === "fps"
+                  ? listedRate(o.fps)
+                  : o[key]
         }
         options={options}
         disabled={busy}

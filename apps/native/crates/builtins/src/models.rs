@@ -438,23 +438,6 @@ impl Backend {
                 Some((vm.stamp.clone(), viewport, effective, projection.clone()));
             projection
         };
-        // The bar's transport: the same time, run and loop the timeline's
-        // header shows (one state); while playing the time is a native layer.
-        let time = self.time().clamp(0., vm.transport.duration);
-        let (now, spoken) = timecode(time, vm.transport.fps);
-        let transport = json!({
-            "time": time,
-            "timecode": now,
-            "spokenTime": spoken,
-            "duration": timecode(vm.transport.duration, vm.transport.fps).0,
-            "playing": self.native.facts["playing"].as_bool().unwrap_or(false),
-            "looping": self.native.facts["looping"].as_bool().unwrap_or(false),
-        });
-        // The channel view's command (`viewer.showRGB`, `viewer.showRed`…).
-        let channels = self.native.facts["channels"]
-            .as_str()
-            .unwrap_or("viewer.showRGB")
-            .to_owned();
         // The Light tool's panel (3d-studio.md §6) rides on the 3D state.
         let mut model = model;
         // Refine progress for the status capsule (3d-studio.md §3).
@@ -487,6 +470,23 @@ impl Backend {
                     json!(ui("studioLightAim").unwrap_or_else(|| "reflect".into()));
             }
         }
+        // The bar's transport: the same time, run and loop the timeline's
+        // header shows (one state); while playing the time is a native layer.
+        let time = self.time().clamp(0., vm.transport.duration);
+        let (now, spoken) = timecode(time, vm.transport.fps);
+        let transport = json!({
+            "time": time,
+            "timecode": now,
+            "spokenTime": spoken,
+            "duration": timecode(vm.transport.duration, vm.transport.fps).0,
+            "playing": self.native.facts["playing"].as_bool().unwrap_or(false),
+            "looping": self.native.facts["looping"].as_bool().unwrap_or(false),
+        });
+        // The channel view's command (`viewer.showRGB`, `viewer.showRed`…).
+        let channels = self.native.facts["channels"]
+            .as_str()
+            .unwrap_or("viewer.showRGB")
+            .to_owned();
         Ok(
             json!({"model":model,"host":{"presentation":"Docked","frame":{"resource":null,"loading":self.native.facts["frameLoading"].as_bool().unwrap_or(false),"failed":self.native.facts["frameFailed"].as_bool().unwrap_or(false)},"source":null,"interaction":"idle","transport":transport,"channels":channels}}),
         )
@@ -1056,11 +1056,11 @@ impl Backend {
                 "depth",
                 "dynamicRange",
                 "useProxies",
+                "studioQuality",
+                "studioReducedSize",
                 "colorTag",
                 "timecode",
                 "audioCoding",
-                "studioQuality",
-                "studioReducedSize",
                 "preset",
                 "presetName"
             ]))?;
@@ -1317,7 +1317,8 @@ impl Backend {
                     );
                 }
                 self.validate_binding_owner(handle)?;
-                if self.panel_id == "layer-effects" {
+                // Effect Controls and the Color panel write effect parameters.
+                if matches!(self.panel_id.as_str(), "layer-effects" | "color") {
                     return self
                         .parameter_write(handle, model(&args["value"])?, time)
                         .map(NativeCommand::Kernel);

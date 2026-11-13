@@ -144,6 +144,30 @@ fn open_lut_effect(
     })
 }
 
+/// A LUT file's format by its extension, or `None` for a file that is not
+/// one (`.cube` or `.3dl`).
+pub(crate) fn lut_file(path: &Path) -> Option<&'static str> {
+    let extension = path.extension()?.to_str()?;
+    if extension.eq_ignore_ascii_case("cube") {
+        Some("cube")
+    } else if extension.eq_ignore_ascii_case("3dl") {
+        Some("3dl")
+    } else {
+        None
+    }
+}
+
+/// The asset record of a retained LUT file, as Apply LUT… and an agent's
+/// import write it.
+pub(crate) fn lut_asset(name: &str, path: &Path) -> Value {
+    let mut asset = Map::new();
+    asset.insert("name", Value::from(name));
+    asset.insert("kind", Value::from("lut"));
+    asset.insert("format", Value::from(lut_format(name)));
+    asset.insert("sourcePath", Value::from(path.to_string_lossy().as_ref()));
+    Value::Object(asset)
+}
+
 /// A LUT file's format, from its name: `3dl`, or `cube`.
 fn lut_format(name: &str) -> &'static str {
     let extension = Path::new(name).extension().and_then(|e| e.to_str());
@@ -168,11 +192,6 @@ pub fn lut_commands(
     use pm_kernel::commands::effects::{
         AddEffect, EffectCommand, EffectPatch, saved_builtin_definition,
     };
-    let mut asset = Map::new();
-    asset.insert("name", Value::from(name));
-    asset.insert("kind", Value::from("lut"));
-    asset.insert("format", Value::from(lut_format(name)));
-    asset.insert("sourcePath", Value::from(path.to_string_lossy().as_ref()));
     let mut input = Map::new();
     input.insert("kind", Value::from("asset"));
     input.insert("assetId", Value::from(asset_id));
@@ -210,7 +229,7 @@ pub fn lut_commands(
     Ok(vec![
         pm_kernel::MediaCommand::AddAsset {
             asset_id: asset_id.to_owned(),
-            asset: Value::Object(asset),
+            asset: lut_asset(name, path),
         }
         .into(),
         effect.into(),
@@ -218,7 +237,7 @@ pub fn lut_commands(
 }
 
 /// Worker: validates the LUT and keeps a copy that outlives the original.
-fn retain_lut(profile: &Path, path: &Path) -> Result<PathBuf, String> {
+pub(crate) fn retain_lut(profile: &Path, path: &Path) -> Result<PathBuf, String> {
     let unreadable = |reason: String| format!("This LUT couldn’t be read. {reason}");
     let size = std::fs::metadata(path)
         .map_err(|e| unreadable(e.to_string()))?
