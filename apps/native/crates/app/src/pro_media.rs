@@ -880,7 +880,9 @@ impl Inner {
                 }
                 e => std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()),
             })?
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "not a sequence"))?;
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "not a sequence")
+            })?;
         let content = format!("seq:{identity}");
         let mut state = self.state.lock().unwrap();
         state.index.stamps.retain(|(s, _)| s.path != stamp.path);
@@ -1454,7 +1456,10 @@ impl ProMedia {
                             (Rendition::Proxy, "Update proxy"),
                             (Rendition::Optimized, "Update optimized media"),
                         ] {
-                            if earlier.and_then(|r| r.get(kind)).is_some_and(|f| !f.attached) {
+                            if earlier
+                                .and_then(|r| r.get(kind))
+                                .is_some_and(|f| !f.attached)
+                            {
                                 renew.push((kind, (asset.clone(), title.into(), path.clone())));
                             }
                         }
@@ -2525,9 +2530,11 @@ mod tests {
             .args(["-f", "rawvideo", "-pix_fmt", "gray", "-"])
             .output()
             .unwrap();
-        let spread = grey.stdout.iter().map(|&v| i32::from(v)).fold((255, 0), |(lo, hi), v| {
-            (lo.min(v), hi.max(v))
-        });
+        let spread = grey
+            .stdout
+            .iter()
+            .map(|&v| i32::from(v))
+            .fold((255, 0), |(lo, hi), v| (lo.min(v), hi.max(v)));
         assert!(
             spread.0 > 110 && spread.1 < 150,
             "frame 2 of the new preview is not the grey file: {spread:?}"

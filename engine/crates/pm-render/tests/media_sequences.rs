@@ -601,10 +601,17 @@ fn shown_in(
     let mut source = layer("seq", "video", d, 8.0, 8.0, 10.0);
     source["from"] = json!(from);
     let mut doc = project(16, 16, 10.0, no_fill(), vec![source]);
-    asset(&mut doc, "clip", "video", "png", 16, 16, 10.0 / f64::from(fps));
+    asset(
+        &mut doc,
+        "clip",
+        "video",
+        "png",
+        16,
+        16,
+        10.0 / f64::from(fps),
+    );
     doc["assets"]["clip"]["fps"] = json!(fps);
-    doc["assets"]["clip"]["imageSequence"] =
-        json!({"fps":fps,"frames":10,"first":1,"last":10});
+    doc["assets"]["clip"]["imageSequence"] = json!({"fps":fps,"frames":10,"first":1,"last":10});
     if let Some(interpret) = interpret {
         doc["assets"]["clip"]["interpret"] = interpret;
     }
@@ -762,17 +769,38 @@ fn a_conformed_sequence_and_its_proxy_show_the_same_file() {
     let speed = |s: f64| json!({"asset":"clip","w":16,"h":16,"fit":"stretch","speed":s});
     let at = |frames: &[f64]| frames.iter().map(|k| k / 24.0).collect::<Vec<_>>();
     assert_eq!(
-        shown_in(speed(0.9), &sequence.retained, 0.0, &[1.0 / 24.0], 24, Some(conformed.clone())),
+        shown_in(
+            speed(0.9),
+            &sequence.retained,
+            0.0,
+            &[1.0 / 24.0],
+            24,
+            Some(conformed.clone())
+        ),
         vec![1]
     );
     assert_eq!(
-        shown_in(speed(0.9), &proxy, 0.0, &[1.0 / 24.0], 24, Some(conformed.clone())),
+        shown_in(
+            speed(0.9),
+            &proxy,
+            0.0,
+            &[1.0 / 24.0],
+            24,
+            Some(conformed.clone())
+        ),
         vec![1]
     );
     let times = at(&[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
     for interpret in [Some(conformed), Some(json!({"frameRate": [25, 1]})), None] {
         for s in [0.9, 0.95, 0.88, 1.1, 1.13] {
-            let files = shown_in(speed(s), &sequence.retained, 0.0, &times, 24, interpret.clone());
+            let files = shown_in(
+                speed(s),
+                &sequence.retained,
+                0.0,
+                &times,
+                24,
+                interpret.clone(),
+            );
             let from_proxy = shown_in(speed(s), &proxy, 0.0, &times, 24, interpret.clone());
             assert_eq!(files, from_proxy, "speed {s}, {interpret:?}");
         }
@@ -827,11 +855,23 @@ fn an_unreadable_or_resized_sequence_frame_shows_its_card() {
     let mut drawn = |t: f64| {
         let landed = viewer.media_landed();
         let mut frame = viewer
-            .render(&document, "Ptest-root", support::ticks(t), &request, &resolver)
+            .render(
+                &document,
+                "Ptest-root",
+                support::ticks(t),
+                &request,
+                &resolver,
+            )
             .unwrap();
         if viewer.media_landed() != landed {
             frame = viewer
-                .render(&document, "Ptest-root", support::ticks(t), &request, &resolver)
+                .render(
+                    &document,
+                    "Ptest-root",
+                    support::ticks(t),
+                    &request,
+                    &resolver,
+                )
                 .unwrap();
             assert_eq!(viewer.media_landed(), landed + 1, "{t}: drawn again once");
         }
@@ -852,7 +892,13 @@ fn an_unreadable_or_resized_sequence_frame_shows_its_card() {
         (0.2, "shot.0003.png"),
         (0.4, "is 32×16, not 16×16 like the sequence: shot.0005.png"),
     ] {
-        let failures = match export.render(&document, "Ptest-root", support::ticks(t), &request, &resolver) {
+        let failures = match export.render(
+            &document,
+            "Ptest-root",
+            support::ticks(t),
+            &request,
+            &resolver,
+        ) {
             Ok(frame) => frame.failures,
             Err(e) => panic!("{t}: {e}"),
         };
@@ -940,7 +986,15 @@ fn an_associated_alpha_sequence_and_its_proxy_composite_alike() {
     std::fs::write(&raw, planes).unwrap();
     for n in 1..=2 {
         let status = std::process::Command::new(&ffmpeg)
-            .args(["-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "gbrapf32le"])
+            .args([
+                "-v",
+                "error",
+                "-y",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "gbrapf32le",
+            ])
             .args(["-s", "16x16", "-i"])
             .arg(&raw)
             .args(["-c:v", "exr", "-format", "half", "-frames:v", "1"])
@@ -948,7 +1002,12 @@ fn an_associated_alpha_sequence_and_its_proxy_composite_alike() {
             .status()
             .unwrap();
         assert!(status.success());
-        associated_tiff(&tif.join(format!("shot.{n:04}.tif")), 16, 16, [16384, 0, 0, 32768]);
+        associated_tiff(
+            &tif.join(format!("shot.{n:04}.tif")),
+            16,
+            16,
+            [16384, 0, 0, 32768],
+        );
     }
     for (folder, suffix) in [(&exr, ".exr"), (&tif, ".tif")] {
         let manifest = pm_media::image::sequence::Manifest {
@@ -1011,7 +1070,13 @@ fn an_associated_alpha_sequence_and_its_proxy_composite_alike() {
             let mut renderer = Renderer::headless().unwrap();
             let request = RenderRequest::at_scale(Size::new(16, 16), 1.0, Precision::Float32);
             let frame = renderer
-                .render(&document, "Ptest-root", support::ticks(0.0), &request, &resolver)
+                .render(
+                    &document,
+                    "Ptest-root",
+                    support::ticks(0.0),
+                    &request,
+                    &resolver,
+                )
                 .unwrap();
             assert!(frame.failures.is_empty(), "{:?}", frame.failures);
             let rgba = renderer.read_rgba(&frame).unwrap();

@@ -594,7 +594,10 @@ impl Exec<'_> {
                             }
                             // Found unreadable now: the frame is drawn
                             // again, with the file's card.
-                            Err(_) if *card_when_unreadable && crate::media::still_unreadable(path) => {
+                            Err(_)
+                                if *card_when_unreadable
+                                    && crate::media::still_unreadable(path) =>
+                            {
                                 self.media.unreadable_found();
                             }
                             Err(e) => self.fail(plan, draw, e),

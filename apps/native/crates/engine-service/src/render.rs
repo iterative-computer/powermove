@@ -3057,9 +3057,15 @@ mod frame_cache_tests {
         assert!(disk.observe(&scene, &[], None, None, None, 1, at(0)));
         disk.test_ready();
         let again = grey(&mut engine, Moment::Paused, 0);
-        assert!(again > first + 50, "the viewer's cached picture of the old file: {again}");
+        assert!(
+            again > first + 50,
+            "the viewer's cached picture of the old file: {again}"
+        );
         let playing = grey(&mut engine, Moment::Playing, 1);
-        assert_ne!(playing, from_disk, "the render cache's frame of the old file");
+        assert_ne!(
+            playing, from_disk,
+            "the render cache's frame of the old file"
+        );
         assert!(playing > again, "file 2 as rendered again: {playing}");
 
         let before = grey(&mut engine, Moment::Paused, 2);
@@ -3068,7 +3074,14 @@ mod frame_cache_tests {
         assert!(disk.observe(&scene, &[], None, None, None, 1, at(2)));
         let sub = loop {
             let sub = engine
-                .frame(&scene, spec(Moment::Paused, 2), None, &Default::default(), true, Arc::default())
+                .frame(
+                    &scene,
+                    spec(Moment::Paused, 2),
+                    None,
+                    &Default::default(),
+                    true,
+                    Arc::default(),
+                )
                 .unwrap()
                 .unwrap();
             sub.commit();

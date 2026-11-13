@@ -150,8 +150,11 @@ impl StillPrefetch {
     pub(crate) fn set_limit(&mut self, bytes: usize) {
         self.limit.store(bytes, Ordering::Release);
         self.drain();
-        let mut by_age: Vec<(StillKey, Instant)> =
-            self.ready.iter().map(|(k, (_, asked))| (k.clone(), *asked)).collect();
+        let mut by_age: Vec<(StillKey, Instant)> = self
+            .ready
+            .iter()
+            .map(|(k, (_, asked))| (k.clone(), *asked))
+            .collect();
         by_age.sort_by_key(|(_, asked)| *asked);
         for (key, _) in by_age {
             if self.held.load(Ordering::Acquire) <= bytes {
@@ -212,7 +215,8 @@ impl StillPrefetch {
             None => 0,
             Some(size) => size,
         };
-        if self.held.load(Ordering::Acquire) + queued + admitted > self.limit.load(Ordering::Acquire)
+        if self.held.load(Ordering::Acquire) + queued + admitted
+            > self.limit.load(Ordering::Acquire)
         {
             return;
         }
@@ -539,7 +543,11 @@ mod tests {
         for n in 1..6u128 {
             prefetch.request(&path, (stamp.0, stamp.1 + n), StillAsk::default(), &pool);
         }
-        assert_eq!(prefetch.pending.len(), 1, "one more fits beside the held one");
+        assert_eq!(
+            prefetch.pending.len(),
+            1,
+            "one more fits beside the held one"
+        );
         settle(&mut prefetch);
         assert_eq!(prefetch.ready.len(), 2);
         assert_eq!(prefetch.held.load(Ordering::Acquire), one * 2);

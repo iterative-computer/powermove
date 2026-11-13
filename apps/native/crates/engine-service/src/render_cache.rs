@@ -3024,7 +3024,9 @@ mod tests {
             file.set_modified(std::time::SystemTime::now() + Duration::from_secs(5))
                 .unwrap();
         });
-        changed("frame 1 removed", &|| std::fs::remove_file(frame(1)).unwrap());
+        changed("frame 1 removed", &|| {
+            std::fs::remove_file(frame(1)).unwrap()
+        });
         changed("the hole at 3 filled", &|| {
             std::fs::write(frame(3), [3u8; 64]).unwrap()
         });

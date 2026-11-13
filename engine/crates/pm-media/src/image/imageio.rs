@@ -368,7 +368,10 @@ pub fn pixel_size(path: &Path) -> Result<(u32, u32)> {
     .ok_or_else(|| MediaError::Image(format!("ImageIO cannot read {}", path.display())))?;
     let number = |key| unsafe { cf_i64(cf_dict_get(props.as_ptr(), key)) };
     let (Some(w), Some(h)) = (number("PixelWidth"), number("PixelHeight")) else {
-        return Err(MediaError::Image(format!("no pixel size in {}", path.display())));
+        return Err(MediaError::Image(format!(
+            "no pixel size in {}",
+            path.display()
+        )));
     };
     let (w, h) = (u32::try_from(w).unwrap_or(0), u32::try_from(h).unwrap_or(0));
     // Orientations 5–8 turn the picture a quarter.

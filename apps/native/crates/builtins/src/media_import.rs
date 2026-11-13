@@ -595,9 +595,11 @@ impl Builtins {
         };
         let chosen = match (&request.sequence, &relinked) {
             (Some(sequence), _) => Some(choose_sequence(&request.paths, sequence, cancel)?),
-            (None, Some(relinked)) => {
-                Some(choose_sequence(&relinked.frames, &relinked.sequence, cancel)?)
-            }
+            (None, Some(relinked)) => Some(choose_sequence(
+                &relinked.frames,
+                &relinked.sequence,
+                cancel,
+            )?),
             (None, None) => None,
         };
         let sequence = match chosen {
@@ -1306,7 +1308,13 @@ mod tests {
         std::fs::create_dir(&sparse).unwrap();
         let far: Vec<_> = [1, 1_000_000_001]
             .iter()
-            .map(|n| write(&sparse, &format!("shot.{n:010}.png"), &png16(64, 4, |x, y| coded(1, x, y))))
+            .map(|n| {
+                write(
+                    &sparse,
+                    &format!("shot.{n:010}.png"),
+                    &png16(64, 4, |x, y| coded(1, x, y)),
+                )
+            })
             .collect();
         let started = std::time::Instant::now();
         let refused = import(ImportRequest {
@@ -1324,9 +1332,19 @@ mod tests {
         let renders = f.root.join("renders");
         std::fs::create_dir(&renders).unwrap();
         let mut frames: Vec<_> = (1..=3)
-            .map(|n| write(&renders, &format!("shot.{n:04}.png"), &png16(64, 4, |x, y| coded(n, x, y))))
+            .map(|n| {
+                write(
+                    &renders,
+                    &format!("shot.{n:04}.png"),
+                    &png16(64, 4, |x, y| coded(n, x, y)),
+                )
+            })
             .collect();
-        let odd = write(&renders, "shot.0004.png", &png16(32, 4, |x, y| coded(4, x, y)));
+        let odd = write(
+            &renders,
+            "shot.0004.png",
+            &png16(32, 4, |x, y| coded(4, x, y)),
+        );
         frames.push(odd.clone());
         let words = "shot.0004.png is 32×4, but the sequence’s first frame is 64×4. Render every frame at one size.";
         let refused = import(ImportRequest {

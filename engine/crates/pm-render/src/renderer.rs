@@ -2172,7 +2172,8 @@ impl Renderer {
         // cache returns within its bound; 3D meshes and maps no recent 3D
         // frame drew are released.
         self.pool.begin_frame();
-        self.media.begin_frame(request.read_ahead && !request.export);
+        self.media
+            .begin_frame(request.read_ahead && !request.export);
         self.media.retire_cold_sessions();
         self.vector.begin_frame();
         self.scene3d.begin_frame();

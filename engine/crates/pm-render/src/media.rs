@@ -389,7 +389,10 @@ fn still_facts_from(
 /// Whether `path` at its stamp was found unreadable as a still (truncated,
 /// corrupt, not permitted): an image sequence draws that frame's card.
 pub(crate) fn still_unreadable(path: &Path) -> bool {
-    matches!(known_still_facts(path), Some(Err(ProbeIssue::Unreadable(_))))
+    matches!(
+        known_still_facts(path),
+        Some(Err(ProbeIssue::Unreadable(_)))
+    )
 }
 
 /// The pixel size of the still at `path` at its stamp, once it was read.

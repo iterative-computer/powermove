@@ -129,7 +129,11 @@ pub struct Manifest {
 pub fn sequence_slot(seconds: f64, fps: f64, frames: u64) -> u64 {
     let last = frames.saturating_sub(1) as f64;
     let slot = ((seconds + 1e-7) * fps).floor();
-    if slot.is_nan() { 0 } else { slot.clamp(0.0, last) as u64 }
+    if slot.is_nan() {
+        0
+    } else {
+        slot.clamp(0.0, last) as u64
+    }
 }
 
 /// The most numbers a sequence's range may span, gaps included (over eleven
@@ -206,7 +210,10 @@ impl Manifest {
 
     /// Frames from the first number to the last, gaps included.
     pub fn frames(&self) -> u64 {
-        self.last.saturating_sub(self.first).saturating_add(1).max(0) as u64
+        self.last
+            .saturating_sub(self.first)
+            .saturating_add(1)
+            .max(0) as u64
     }
 
     /// The numbers of the range that have a file now, ascending: one
@@ -493,19 +500,28 @@ mod tests {
         let started = std::time::Instant::now();
         let sequence = ImageSequence::from_paths(&far).unwrap();
         let refused = Manifest::of(&sequence, pm_time::Rate::FPS_24).unwrap_err();
-        assert!(refused.to_string().contains("more than 1000000 numbers"), "{refused}");
+        assert!(
+            refused.to_string().contains("more than 1000000 numbers"),
+            "{refused}"
+        );
         // Just inside the bound: two files, a million numbers.
         let near = [1_i64, 1_000_000].map(|n| dir.path().join(format!("shot.{n:010}.png")));
         std::fs::write(&near[1], b"x").unwrap();
-        let m = Manifest::of(&ImageSequence::from_paths(&near).unwrap(), pm_time::Rate::FPS_24)
-            .unwrap();
+        let m = Manifest::of(
+            &ImageSequence::from_paths(&near).unwrap(),
+            pm_time::Rate::FPS_24,
+        )
+        .unwrap();
         assert_eq!(m.missing(), vec![(2, 999_999)]);
         assert!(m.present());
         assert!(started.elapsed() < std::time::Duration::from_secs(1));
         let cancelled = std::sync::atomic::AtomicBool::new(true);
         assert_eq!(m.missing_until(&cancelled), None);
         // An untrusted manifest spanning more is not read.
-        let wide = Manifest { last: 5_000_000, ..m };
+        let wide = Manifest {
+            last: 5_000_000,
+            ..m
+        };
         let path = dir.path().join("manifest");
         std::fs::write(&path, wide.to_bytes()).unwrap();
         assert!(Manifest::read(&path).is_err());
