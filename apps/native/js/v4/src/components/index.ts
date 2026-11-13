@@ -74,16 +74,12 @@ export function InspectorRow(
           },
           label,
         ),
+        // The label keeps `metrics.label_column` and the value takes the
+        // rest of the row, never less than `metrics.value_column` (the host
+        // sizes both slots).
         h(
           "div",
-          {
-            "data-pm-slot": "value",
-            style: {
-              width: token("metrics.value_column"),
-              minWidth: token("metrics.value_column"),
-              maxWidth: token("metrics.value_column"),
-            },
-          },
+          { "data-pm-slot": "value" },
           h(Label.Provider, { value: id }, children),
         ),
         trailing ? h("div", { "data-pm-slot": "trailing" }, trailing) : null,
@@ -146,6 +142,8 @@ export interface Option {
   separator?: boolean;
   keyEquivalent?: string;
   detail?: string;
+  /** A checkmark beside the row (a pull-down showing several settings). */
+  checked?: boolean;
 }
 export function PopUpButton(
   props: Omit<Bound<Json>, "options"> & {
@@ -240,6 +238,10 @@ export interface SegmentOption {
   disabled?: boolean;
   /** SF Symbol shown instead of the label; the label becomes the tooltip. */
   symbol?: string;
+  /** Tooltip line 1 when it differs from the label (a shortcut, say). */
+  title?: string;
+  /** Tooltip line 2: what it does, one sentence. */
+  help?: string;
 }
 export function SegmentedControl(
   props: Omit<Common, "options" | "onChange"> & {
@@ -281,8 +283,13 @@ export function SegmentedControl(
             key: option.id,
             id: `${group}:${option.id}`,
             label: option.label,
-            ...(option.symbol
-              ? { attr: { symbol: option.symbol }, title: option.label }
+            ...(option.symbol ? { attr: { symbol: option.symbol } } : {}),
+            ...(option.symbol || option.help || option.title
+              ? {
+                  title: [option.title ?? option.label, option.help]
+                    .filter(Boolean)
+                    .join("\n"),
+                }
               : {}),
             role: "radio",
             disabled: props.disabled || option.disabled,
@@ -353,36 +360,48 @@ export function DisclosureGroup(
   props: Omit<Common, "onChange"> & {
     open: boolean;
     onChange: (open: boolean) => void;
+    /** The section's own action, at the trailing edge of its heading row
+     * (Refresh Fonts, Add Mask). */
+    accessory?: ComponentChildren;
   },
 ) {
-  const { children, open, onChange, ...rest } = props;
+  const { children, open, onChange, accessory, ...rest } = props;
   const id = useId();
+  // A section heading is a label, a step under its panel's title, on a row
+  // of its own.
+  const button = kit(
+    "disclosure-button",
+    "button",
+    {
+      label: props.label,
+      disabled: props.disabled,
+      "aria-expanded": open,
+      "aria-controls": id,
+      onClick: () => {
+        if (!props.disabled) onChange(!open);
+      },
+      children: props.label,
+    },
+    {
+      ...target,
+      color: token("colors.text"),
+      fontSize: token("typography.label"),
+      fontWeight: token("typography.semibold_weight"),
+      height: token("metrics.row"),
+      minHeight: token("metrics.row"),
+      ...(accessory ? { flexGrow: 1 } : {}),
+    },
+  );
   return kit("disclosure-group", "div", {
     ...rest,
     role: "group",
     children: [
-      kit(
-        "disclosure-button",
-        "button",
-        {
-          label: props.label,
-          disabled: props.disabled,
-          "aria-expanded": open,
-          "aria-controls": id,
-          onClick: () => {
-            if (!props.disabled) onChange(!open);
-          },
-          children: props.label,
-        },
-        {
-          ...target,
-          color: token("colors.text"),
-          fontSize: token("typography.title"),
-          fontWeight: token("typography.semibold_weight"),
-          paddingTop: token("metrics.inset"),
-          paddingBottom: token("metrics.gap"),
-        },
-      ),
+      accessory
+        ? h("div", { "data-pm-slot": "heading" }, [
+            button,
+            h("div", { "data-pm-slot": "accessory" }, accessory),
+          ])
+        : button,
       open ? h("div", { id }, children) : null,
     ],
   });
@@ -631,6 +650,29 @@ export function SettingsRoot(props: Common) {
     role: "group",
     metadata: { ...props.metadata, hostWindow: "settings" },
   });
+}
+export interface SliderProps extends Bound<number> {
+  min: number;
+  max: number;
+  step?: number;
+  /** A logarithmic track (brightness, size): equal moves multiply the value. */
+  log?: boolean;
+  unit?: string;
+}
+/** A native NSSlider for a bounded value. It changes once per pull (one
+ * Undo) and steps with the arrow keys; VoiceOver reads the value itself. */
+export function Slider(props: SliderProps) {
+  const { log, ...rest } = props;
+  return field(
+    "slider",
+    "slider",
+    "input",
+    {
+      ...rest,
+      metadata: kitMetadata(props, { log: !!log }),
+    },
+    { ...target, width: token("metrics.value_column") },
+  );
 }
 export function Switch(props: Bound<boolean>) {
   return field(

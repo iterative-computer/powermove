@@ -4,20 +4,29 @@ import type { SurfaceEvent } from "../../src";
 import * as UI from "../../src/components";
 import { ExportModel, isProgress, progress, type Options } from "./model";
 import {
+  audioCodings,
   codecs,
   colorNote,
+  colorNoteRec709,
+  colorTags,
   depths,
   descriptions,
+  fieldDefaults,
   formats,
   kinds,
   kindOf,
   profiles,
   dynamicRanges,
   qualities,
-  rates,
+  listedRate,
+  rateOptions,
   rows,
   shows,
   sidecars,
+  studioQualities,
+  studioPromises,
+  guidedDenoiseNote,
+  estimateNotes,
 } from "./spec";
 const { token } = UI;
 const text = {
@@ -119,12 +128,23 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
     model.set(key, value);
     watch(model.refreshPlan());
   };
+  // The 3D preset this export renders with: the sheet's choice, or the
+  // composition's own.
+  const studioPreset =
+    o.studioQuality && o.studioQuality !== "composition"
+      ? o.studioQuality
+      : (p.studio?.preset ?? p.studio?.saved.toLowerCase() ?? "production");
   const help = (key: keyof typeof rows) =>
     key === "audio" && !p.hasAudio
       ? "No audio layers in this project."
       : key === "captionsSidecar" && p.captionLayers > 1
         ? "Also write one subtitle file per captions layer beside the video."
-        : rows[key][1];
+        : key === "studioQuality"
+          ? (studioPromises[studioPreset] ?? rows[key][1]) +
+            (p.studio?.denoiser === "guided" && studioPreset !== "draft" ? ` ${guidedDenoiseNote}` : "")
+          : key === "studioTime"
+            ? estimateNotes[p.studio?.state ?? "guess"]
+            : rows[key][1];
   const select = (
     key: keyof Options,
     options: UI.Option[],
@@ -149,7 +169,17 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
             : undefined
         }
         binding={s.bindings[key]}
-        value={key === "dynamicRange" ? (o[key] ?? "sdr") : o[key]}
+        value={
+          key === "dynamicRange"
+            ? (o[key] ?? "sdr")
+            : key === "studioQuality"
+              ? (o[key] ?? "composition")
+              : key === "colorTag" || key === "audioCoding"
+                ? (o[key] ?? fieldDefaults[key])
+                : key === "fps"
+                  ? listedRate(o.fps)
+                  : o[key]
+        }
         options={options}
         disabled={busy}
         onChange={(e) => edit(key, e.value as Options[typeof key])}
@@ -157,7 +187,13 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
     </FormRow>
   );
   const toggle = (
-    key: "mblur" | "audio" | "alpha" | "captionsBurn" | "useProxies",
+    key:
+      | "mblur"
+      | "audio"
+      | "alpha"
+      | "captionsBurn"
+      | "useProxies"
+      | "studioReducedSize",
   ) => (
     <FormRow name={key} help={help(key)}>
       <UI.Switch
@@ -188,9 +224,17 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
     s.capabilities[o.format]?.available === false
       ? (s.capabilities[o.format].reason ?? undefined)
       : undefined;
+  // "300 frames · 10 s · 1920×1080 · 3D Production, " then the time.
+  const timedSummary = (summary: string) => {
+    const time = p.studio?.estimate;
+    if (!time || model.planningError || blocked || !summary.endsWith(time))
+      return undefined;
+    return { lead: summary.slice(0, summary.length - time.length), time };
+  };
   const summary = model.planningError
     ? `Can’t export with these settings: ${model.planningError}`
     : (blocked ?? p.summary);
+  const timed = timedSummary(summary);
   return (
     <UI.SheetAnchor
       id="export.sheet"
@@ -455,7 +499,7 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
                       ) : null}
                     </FormRow>
                   ) : null}
-                  {shows(o, "fps") ? select("fps", rates) : null}
+                  {shows(o, "fps") ? select("fps", rateOptions(o.fps)) : null}
                   {shows(o, "range")
                     ? select("range", [
                         {
@@ -471,10 +515,65 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
                   {p.hdr && (o.format === "prores" || o.format === "mp4")
                     ? select("dynamicRange", dynamicRanges)
                     : null}
+                  {/* HDR delivery carries its own label. */}
+                  {shows(o, "colorTag") &&
+                  !(p.hdr && (o.dynamicRange ?? "sdr") !== "sdr")
+                    ? select("colorTag", colorTags)
+                    : null}
+                  {shows(o, "timecode") ? (
+                    <FormRow name="timecode" help={help("timecode")}>
+                      <UI.TextField
+                        id="export.timecode"
+                        label={rows.timecode[0]}
+                        title={help("timecode")}
+                        binding={s.bindings.timecode}
+                        value={o.timecode ?? ""}
+                        disabled={busy}
+                        // A field has no width of its own while it is empty.
+                        style={{ width: token("metrics.value_column") }}
+                        metadata={{ export: { placeholder: "00:00:00:00" } }}
+                        onInput={(e) =>
+                          edit("timecode", String(e.value ?? "").trim())
+                        }
+                      />
+                    </FormRow>
+                  ) : null}
                 </Group>
                 <Group label="Rendering">
+                  {p.studio && o.format !== "json"
+                    ? select("studioQuality", studioQualities(p.studio.saved))
+                    : null}
+                  {p.studio?.estimate && o.format !== "json" ? (
+                    // The estimate is the decision this group exists for: its
+                    // own row, in the text colour, beside the preset it prices.
+                    <FormRow name="studioTime" help={help("studioTime")}>
+                      <text
+                        id="export.studioTime"
+                        role="status"
+                        label={`Render time ${p.studio.estimate}`}
+                        style={{
+                          ...text,
+                          fontWeight: "600",
+                          fontVariantNumeric: "tabular-nums",
+                          color: token(
+                            p.studio.state === "measuring"
+                              ? "colors.secondary"
+                              : "colors.text",
+                          ),
+                        }}
+                      >
+                        {p.studio.estimate}
+                      </text>
+                    </FormRow>
+                  ) : null}
+                  {p.studio && o.format !== "json"
+                    ? toggle("studioReducedSize")
+                    : null}
                   {shows(o, "mblur") ? toggle("mblur") : null}
                   {shows(o, "audio") ? toggle("audio") : null}
+                  {shows(o, "audioCoding") && p.hasAudio && o.audio
+                    ? select("audioCoding", audioCodings)
+                    : null}
                   {shows(o, "alpha") ? toggle("alpha") : null}
                   {shows(o, "useProxies") ? toggle("useProxies") : null}
                 </Group>
@@ -512,6 +611,7 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
                       binding={s.bindings.presetName}
                       value={model.presetName}
                       disabled={busy}
+                      style={{ width: token("metrics.value_column") }}
                       metadata={{ export: { placeholder: "Preset name" } }}
                       onInput={(e) => model.namePreset(String(e.value ?? ""))}
                       onKeyDown={(e) => {
@@ -545,7 +645,13 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
                     Couldn’t save the preset. Try again.
                   </text>
                 ) : null}
-                <text style={{ ...detail, ...column }}>{colorNote}</text>
+                <text style={{ ...detail, ...column }}>
+                  {shows(o, "colorTag") &&
+                  o.colorTag === "rec709" &&
+                  !(p.hdr && (o.dynamicRange ?? "sdr") !== "sdr")
+                    ? colorNoteRec709
+                    : colorNote}
+                </text>
               </scroll>
             )}
           </div>
@@ -561,6 +667,52 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
             style={footer}
           >
             <div style={notice}>
+              {timed ? (
+                <>
+                  {/* The 3D render time is the line's news: its own first
+                      line, semibold, in the text colour; the frames, size and
+                      preset follow in the secondary colour. */}
+                  <text
+                    id="export.summaryTime"
+                    style={{
+                      color: token(
+                        p.studio?.state === "measuring"
+                          ? "colors.secondary"
+                          : "colors.text",
+                      ),
+                      fontSize: token("typography.body"),
+                      fontWeight: "600",
+                      fontVariantNumeric: "tabular-nums",
+                    }}
+                  >
+                    {p.studio?.state === "measuring"
+                      ? "Measuring the render time…"
+                      : `${timed.time} to render`}
+                  </text>
+              <text
+                id="export.summary"
+                label={summary}
+                title={blocked ? s.capabilities[o.format].detail : undefined}
+                metadata={{
+                  export: { announce: "polite" },
+                  ...(model.planningError || blocked
+                    ? { symbol: "exclamationmark.triangle.fill" }
+                    : {}),
+                }}
+                style={{
+                  color: token(
+                    model.planningError || blocked
+                      ? "colors.warning"
+                      : "colors.secondary",
+                  ),
+                  fontSize: token("typography.body"),
+                  fontVariantNumeric: "tabular-nums",
+                }}
+              >
+                {timed.lead.replace(/,\s*$/, "")}
+              </text>
+                </>
+              ) : (
               <text
                 id="export.summary"
                 label={summary}
@@ -583,6 +735,7 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
               >
                 {summary}
               </text>
+              )}
               {p.note ? <text style={detail}>{p.note}</text> : null}
             </div>
             <div style={actions}>

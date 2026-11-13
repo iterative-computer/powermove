@@ -14,6 +14,47 @@ export interface ViewerModel {
   showControls: boolean;
   empty: boolean;
   selectionCount: number;
+  /** Present when the composition has Studio 3D layers: the preview tier. */
+  studio?: {
+    tier: "live" | "refine";
+    tool?: "move" | "rotate" | "scale" | "orbit" | "pan" | "zoom" | "light";
+    look?: "camera" | "free";
+    /** Handles follow the scene's axes or the object's own. */
+    axes?: "scene" | "object";
+    /** Panes in the viewer: one, two side by side, or four. */
+    views?: "1" | "2" | "4";
+    /** The viewer is narrower than the 3D group: show one pull-down. */
+    compact?: boolean;
+    /** The Light tool's panel (3d-studio.md §6), while Light is the tool. */
+    light?: {
+      settings: { aim: string; add: boolean; kind: string };
+      hint?: string;
+      name?: string;
+      kind?: string;
+      locked?: boolean;
+      rows: {
+        id: string;
+        label: string;
+        value: number;
+        min: number;
+        max: number;
+        log: boolean;
+        tooltip: string;
+      }[];
+    };
+    lightKind?: string;
+    lightAim?: "reflect" | "direct" | "orbit";
+    /** Quality's refinement (3d-studio.md §3 status capsule). */
+    refine?: {
+      samplesDone: number;
+      samplesTarget: number;
+      stage: "sampling" | "denoising" | "complete";
+    };
+    /** Quality, paused, before the first progress report. */
+    pending?: boolean;
+    /** "guided" when this build has no Open Image Denoise (the engine's own filter). */
+    denoiser?: "oidn" | "guided";
+  } | null;
 }
 /** Observed host facts, never inferred from an enqueued intent. No pixel data. */
 export interface ViewerHostFacts {
@@ -29,6 +70,18 @@ export interface ViewerHostFacts {
     epoch: string;
   };
   interaction: "idle" | "hover" | "focus" | "media-drop" | "effect-drop";
+  /** The composition's transport, the same state the timeline header shows.
+   * While playing, `timecode` stands still: a native layer draws the time. */
+  transport?: {
+    time: number;
+    timecode: string;
+    spokenTime: string;
+    duration: string;
+    playing: boolean;
+    looping: boolean;
+  };
+  /** The channel view, as the command that shows it (display only). */
+  channels?: string;
 }
 export interface ViewerSnapshot {
   model: ViewerModel | null;
@@ -75,6 +128,8 @@ export function snapshot(value: unknown): ViewerSnapshot {
     finite(m.effectiveQuality);
     if (m.effectiveQuality < 0.25 || m.effectiveQuality > 1)
       throw new RangeError("Invalid effective quality");
+    if (m.studio !== undefined && m.studio !== null)
+      oneOf(record(m.studio).tier, ["live", "refine"]);
     finite(m.selectionCount);
     if (!Number.isSafeInteger(m.selectionCount) || m.selectionCount < 0)
       throw new RangeError("Invalid selection count");
@@ -86,6 +141,19 @@ export function snapshot(value: unknown): ViewerSnapshot {
   if (frame.resource !== null) text(frame.resource);
   if (typeof frame.loading !== "boolean" || typeof frame.failed !== "boolean")
     throw new TypeError("Invalid frame observation");
+  if (h.transport !== undefined) {
+    const t = record(h.transport);
+    finite(t.time);
+    for (const k of ["timecode", "spokenTime", "duration"])
+      if (typeof t[k] !== "string") throw new TypeError("Invalid transport");
+    if (typeof t.playing !== "boolean" || typeof t.looping !== "boolean")
+      throw new TypeError("Invalid transport");
+  }
+  if (h.channels !== undefined)
+    oneOf(
+      h.channels,
+      channelViews.map((c) => c.v),
+    );
   if (h.source !== null) {
     if (root.model === null) throw new TypeError("Source requires a project");
     const s = record(h.source);
@@ -104,6 +172,15 @@ export function snapshot(value: unknown): ViewerSnapshot {
   }
   return result as unknown as ViewerSnapshot;
 }
+/** View › Channels: what the viewer shows of the picture, by command. */
+export const channelViews = [
+  { v: "viewer.showRGB", label: "RGB" },
+  { v: "viewer.showRed", label: "Red" },
+  { v: "viewer.showGreen", label: "Green" },
+  { v: "viewer.showBlue", label: "Blue" },
+  { v: "viewer.showAlpha", label: "Alpha" },
+  { v: "viewer.showAlphaOverlay", label: "Alpha Overlay" },
+];
 export const zoomPresets = [0.05, 0.125, 0.25, 0.5, 1, 2, 4, 8] as const;
 export const resolutions = [
   { v: "auto", label: "Auto" },

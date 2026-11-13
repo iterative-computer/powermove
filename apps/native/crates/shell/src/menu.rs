@@ -11,6 +11,11 @@ pub struct Equivalent {
 pub fn equivalents() -> Vec<Equivalent> {
     serde_json::from_str(include_str!("../data/menu-equivalents.json")).unwrap()
 }
+/// A command whose key the menu bar itself matches (Save, Undo): its key is
+/// not the keymap's to change.
+pub fn is_equivalent(command: &str) -> bool {
+    equivalents().iter().any(|e| e.command == command)
+}
 #[derive(Clone, Debug)]
 pub struct Item {
     pub label: String,
@@ -59,12 +64,19 @@ impl Item {
 /// but never matched by AppKit. Their shortcuts come from the W1 registry and are
 /// resolved only by the shell's ordered key resolver, so a declined key replays
 /// to the focused control (typing `v` in a field) instead of firing a menu item.
-pub const DISPLAY_ONLY: [&str; 3] = ["Layer", "Timeline", "tools"];
+pub const DISPLAY_ONLY: [&str; 4] = ["Layer", "Timeline", "tools", "view3d"];
 /// Commands whose items get a dynamic submenu (rebuilt when opened).
-pub const SUBMENUS: [&str; 4] = ["openRecent", "workspaces", "panels", "tools"];
+pub const SUBMENUS: [&str; 6] = [
+    "openRecent",
+    "workspaces",
+    "panels",
+    "tools",
+    "new3d",
+    "view3d",
+];
 /// Items of the View ▸ Tools submenu, in toolbar order (registry chords).
 pub fn tools() -> Vec<Item> {
-    let keymap = crate::keyboard::shipped();
+    let keymap = crate::keymap::current();
     [
         ("Select", "toolSelect"),
         ("Hand", "toolHand"),
@@ -79,6 +91,92 @@ pub fn tools() -> Vec<Item> {
     .map(|(l, c)| Item::registered(&keymap, l, c, json!([])))
     .collect()
 }
+/// Items of View ▸ 3D (3d-studio.md §2): the viewer's 3D group as menu items,
+/// in the bar's order (command `studio.view`, arguments `[group, value]`).
+/// Empty labels are separators.
+pub fn view3d() -> Vec<Item> {
+    [
+        ("Camera", "look", "camera"),
+        ("Free View", "look", "free"),
+        ("", "", ""),
+        ("Move", "tool", "move"),
+        ("Rotate", "tool", "rotate"),
+        ("Scale", "tool", "scale"),
+        ("Orbit", "tool", "orbit"),
+        ("Pan", "tool", "pan"),
+        ("Zoom", "tool", "zoom"),
+        ("Light", "tool", "light"),
+        ("", "", ""),
+        ("Scene Axes", "axes", "scene"),
+        ("Object Axes", "axes", "object"),
+        ("Frame", "frame", ""),
+        ("", "", ""),
+        ("One View", "views", "1"),
+        ("Two Views", "views", "2"),
+        ("Four Views", "views", "4"),
+        ("", "", ""),
+        ("Fast Preview", "tier", "live"),
+        ("Quality Preview", "tier", "refine"),
+    ]
+    .iter()
+    .map(|(label, group, value)| {
+        if label.is_empty() {
+            Item::command("", "", "")
+        } else {
+            Item {
+                args: vec![json!(group), json!(value)],
+                ..Item::command(label, "studio.view", "")
+            }
+        }
+    })
+    .collect()
+}
+/// Items of Layer ▸ Add 3D Layer (3d-studio.md §7, plus environments) (command `new3d`, argument = kind). Empty labels
+/// are separators. Kinds match pm-panel-studio3d's `new_menu` and `NATURE`.
+pub fn new3d() -> Vec<Item> {
+    let item = |label: &str, kind: &str| {
+        if label.is_empty() {
+            Item::command("", "", "")
+        } else {
+            Item {
+                args: vec![json!(kind)],
+                ..Item::command(label, "new3d", "")
+            }
+        }
+    };
+    [
+        ("Cube", "box"),
+        ("Sphere", "sphere"),
+        ("Plane", "plane"),
+        ("Cylinder", "cylinder"),
+        ("Cone", "cone"),
+        ("Torus", "torus"),
+        ("Capsule", "capsule"),
+        ("Icosphere", "icosahedron"),
+        ("", ""),
+        ("Import 3D Model…", "import"),
+        ("", ""),
+        ("Softbox", "area"),
+        ("Spotlight", "spot"),
+        ("Bulb", "point"),
+        ("Sun", "sun"),
+        ("Camera", "camera"),
+        ("", ""),
+        ("Sky", "sky"),
+        ("Fog Volume", "fog"),
+        ("Terrain", "terrain"),
+        ("", ""),
+        ("Pine Trees", "scatter:conifer"),
+        ("Oak Trees", "scatter:broadleaf"),
+        ("Birch Trees", "scatter:birch"),
+        ("Bushes", "scatter:bush"),
+        ("Grass", "scatter:grass"),
+        ("Rocks", "scatter:rock"),
+    ]
+    .iter()
+    .map(|(l, k)| item(l, k))
+    .collect()
+}
 pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
     let eq = equivalents();
     let m = |command: &str| {
@@ -87,7 +185,7 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
     };
     let sep = || Item::command("", "", "");
     // Registry-only commands, labelled for the menu bar, with their W1 chords.
-    let keymap = crate::keyboard::shipped();
+    let keymap = crate::keymap::current();
     let r = |label: &str, command: &str| Item::registered(&keymap, label, command, json!([]));
     let r_args = |label: &str, command: &str, args| Item::registered(&keymap, label, command, args);
     let k = Item::command;
@@ -149,6 +247,10 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
                 // Its key (Shift-Delete) is shown in the Layer menu: here
                 // AppKit would take it from a text field.
                 k("Ripple Delete", "rippleDelete", ""),
+                k("Lift Work Area", "liftWorkArea", ""),
+                k("Extract Work Area", "extractWorkArea", ""),
+                sep(),
+                k("Keyboard Shortcuts…", "keyboardShortcuts", ""),
                 m("contextSelectAll"),
                 r("Deselect All", "deselect"),
                 sep(),
@@ -211,6 +313,7 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
                 r("New Solid", "newSolid"),
                 r("New Shape", "newShape"),
                 r("New Adjustment Layer", "newAdjustment"),
+                Item::command("Add 3D Layer", "new3d", ""),
                 r("New Null Object", "newNull"),
                 sep(),
                 r("Group", "groupLayers"),
@@ -233,10 +336,21 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
                 r("Move Out Point to Playhead", "moveLayerOut"),
                 r("Move to Composition Start", "moveLayerInToStart"),
                 r("Move to Composition End", "moveLayerOutToEnd"),
+                r("Ripple Trim In Point to Playhead", "rippleTrimIn"),
+                r("Ripple Trim Out Point to Playhead", "rippleTrimOut"),
+                r("Extend Edit to Playhead", "extendEdit"),
+                r_args("Slip One Frame Left", "slipLayers", json!([-1])),
+                r_args("Slip One Frame Right", "slipLayers", json!([1])),
+                r_args("Slide One Frame Left", "slideLayer", json!([-1])),
+                r_args("Slide One Frame Right", "slideLayer", json!([1])),
                 r_args("Move One Frame Earlier", "nudgeLayerTime", json!([-1])),
                 r_args("Move One Frame Later", "nudgeLayerTime", json!([1])),
                 r_args("Move Ten Frames Earlier", "nudgeLayerTime", json!([-10])),
                 r_args("Move Ten Frames Later", "nudgeLayerTime", json!([10])),
+                sep(),
+                r("Enable Time Remapping", "timeRemapLayers"),
+                r("Time-Reverse Layer", "reverseLayers"),
+                r("Freeze Frame", "freezeFrame"),
                 sep(),
                 r("Center Anchor Point", "centerAnchor"),
                 r("Edit Text", "text.editSelected"),
@@ -314,12 +428,18 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
                 m("zoomIn"),
                 m("zoomOut"),
                 m("actualSize"),
+                k("Zoom to 200%", "viewer.zoom200", ""),
                 m("fitComposition"),
                 k("Fit Composition and Timeline", "fitView", ""),
                 m("toggleLayerControls"),
                 Item::command("Composition Flowchart", "composition.flowchart", ""),
                 sep(),
                 k("Timeline in Tracks", "timeline.toggleMode", ""),
+                k("Timeline Selection Tool", "timeline.tool:selection", ""),
+                k("Ripple Edit Tool", "timeline.tool:ripple", ""),
+                k("Rolling Edit Tool", "timeline.tool:roll", ""),
+                k("Slip Tool", "timeline.tool:slip", ""),
+                k("Slide Tool", "timeline.tool:slide", ""),
                 k("Snapping", "timeline.toggleSnapping", ""),
                 k("Hide Shy Layers", "timeline.toggleShy", ""),
                 k("Value Graph", "graph.value", ""),
@@ -328,6 +448,7 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
                 k("Fit Selected Curves", "graph.fit", ""),
                 sep(),
                 Item::command("Tools", "tools", ""),
+                Item::command("3D", "view3d", ""),
                 sep(),
                 Item::command("Show/Hide Sidebar", "toggleSidebar", ""),
                 Item::command("Show/Hide Inspector", "toggleInspector", ""),
@@ -377,7 +498,7 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
 /// is built beside them; align and distribute are buttons in Properties):
 /// the palette lists them under the menu named, with their keys.
 pub fn extras() -> Vec<(&'static str, Item)> {
-    let keymap = crate::keyboard::shipped();
+    let keymap = crate::keymap::current();
     let view =
         |label: &str, command: &str| ("View", Item::registered(&keymap, label, command, json!([])));
     let layer = |label: &str, command: &str, how: &str| {
@@ -386,9 +507,24 @@ pub fn extras() -> Vec<(&'static str, Item)> {
             Item::registered(&keymap, label, command, json!([how])),
         )
     };
+    let frames = |label: &str, command: &str, count: i32| {
+        (
+            "Layer",
+            Item::registered(&keymap, label, command, json!([count])),
+        )
+    };
     vec![
+        view("Show Rulers", "viewer.rulers"),
+        view("Show Grid", "viewer.grid"),
+        view("Clear Guides", "viewer.clearGuides"),
         view("Show Safe Areas", "viewer.safeAreas"),
         view("Show Guides", "viewer.guides"),
+        view("Show RGB", "viewer.showRGB"),
+        view("Show Red Channel", "viewer.showRed"),
+        view("Show Green Channel", "viewer.showGreen"),
+        view("Show Blue Channel", "viewer.showBlue"),
+        view("Show Alpha Channel", "viewer.showAlpha"),
+        view("Show Alpha Overlay", "viewer.showAlphaOverlay"),
         view("Popout Viewer", "viewer.popout"),
         view("Toggle Proxies", "viewer.toggleProxies"),
         view("Skimming", "toggleSkimming"),
@@ -405,6 +541,10 @@ pub fn extras() -> Vec<(&'static str, Item)> {
         layer("Align Bottom", "alignLayers", "bottom"),
         layer("Distribute Horizontally", "distributeLayers", "horizontal"),
         layer("Distribute Vertically", "distributeLayers", "vertical"),
+        frames("Slip Ten Frames Left", "slipLayers", -10),
+        frames("Slip Ten Frames Right", "slipLayers", 10),
+        frames("Slide Ten Frames Left", "slideLayer", -10),
+        frames("Slide Ten Frames Right", "slideLayer", 10),
     ]
 }
 /// The palette's static rows: menu name, command (`palette_command`), label.

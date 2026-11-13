@@ -9,7 +9,7 @@ use pm_kernel::commands::layers::{AddLayer, LayerPatch, ParentChange, Restack};
 use pm_kernel::commands::precompose::{can_leave_attributes, next_name};
 use pm_kernel::commands::properties::SetProperty;
 use pm_kernel::commands::text::{SplitMode, TextCommand};
-use pm_kernel::commands::timing::TimingCommand;
+use pm_kernel::commands::timing::{RetimeMode, TimeEdge, TimingCommand};
 use pm_kernel::commands::transform::{AlignMode, Spread, TransformCommand};
 use pm_kernel::model::{LayerInfo, list_layers};
 use pm_kernel::{Command, CompCommand, LayerCommand, PropertyCommand, Published, new_id};
@@ -245,6 +245,7 @@ fn timeline_owned(name: &str) -> bool {
             | "timeline.revealAll"
     ) || name.starts_with("timeline.revealProperty:")
         || name.starts_with("timeline.keyProperty:")
+        || name.starts_with("timeline.tool:")
 }
 /// What a layer of the open composition is to the layer menu.
 struct Facts {
@@ -546,12 +547,23 @@ pub fn layer_menu_choice(
     ))
 }
 /// Commands [`command_plan`] answers.
-pub const PLANNED: [&str; 40] = [
+pub const PLANNED: [&str; 51] = [
     "rippleDelete",
     "nudgeLayerTime",
+    "rippleTrimIn",
+    "rippleTrimOut",
+    "extendEdit",
+    "slipLayers",
+    "slideLayer",
+    "liftWorkArea",
+    "extractWorkArea",
+    "timeRemapLayers",
+    "freezeFrame",
+    "reverseLayers",
     "alignLayers",
     "distributeLayers",
     "newSolid",
+    "new3d",
     "newShape",
     "newAdjustment",
     "newNull",
@@ -709,6 +721,8 @@ pub fn transform_roots<'a>(layers: &'a [LayerInfo], selected: &[String]) -> Hash
         .map(|l| l.id.as_str())
         .collect()
 }
+/// Scene units per composition pixel of a keyboard nudge on a 3D layer.
+const STUDIO_NUDGE: f64 = 0.1;
 /// One keyboard step in composition pixels, mapped into each layer's parent.
 fn nudge(
     published: &Published,
@@ -727,14 +741,22 @@ fn nudge(
     let roots = transform_roots(layers, &unlocked);
     let mut commands = vec![];
     for layer in layers.iter().filter(|l| roots.contains(l.id.as_str())) {
-        let q = mirror.queries();
-        let (Ok(world), Ok(local)) = (
-            q.world_matrix(None, &layer.id, time),
-            q.local_matrix(None, &layer.id, time),
-        ) else {
-            continue;
+        let studio = crate::gizmo::is_studio(published, &layer.id);
+        let step = if studio {
+            // A 3D layer moves in scene units, up is up: 0.1 per arrow and
+            // 1 with ⇧ (whose step is ten pixels), the ⌃-snap unit (§5).
+            Some([delta[0] * STUDIO_NUDGE, -delta[1] * STUDIO_NUDGE])
+        } else {
+            let q = mirror.queries();
+            let (Ok(world), Ok(local)) = (
+                q.world_matrix(None, &layer.id, time),
+                q.local_matrix(None, &layer.id, time),
+            ) else {
+                continue;
+            };
+            crate::gizmo::parent_delta(&world, &local, delta)
         };
-        let Some(step) = crate::gizmo::parent_delta(&world, &local, delta) else {
+        let Some(step) = step else {
             continue;
         };
         for (channel, offset) in [("position.x", step[0]), ("position.y", step[1])] {
@@ -749,7 +771,12 @@ fn nudge(
             else {
                 continue;
             };
-            let mut set = SetProperty::new(&layer.id, channel, Value::Number(value + offset), time);
+            let next = if studio {
+                ((value + offset) * 1000.).round() / 1000.
+            } else {
+                value + offset
+            };
+            let mut set = SetProperty::new(&layer.id, channel, Value::Number(next), time);
             set.preserve_hand_edits = false;
             set.mark_intent = true;
             commands.push(PropertyCommand::Set(set).into());
@@ -831,6 +858,29 @@ fn ripple_delete(layers: &[LayerInfo], selected: &[String]) -> Option<Plan> {
     );
     Some(plain("Ripple Delete", commands))
 }
+/// The selected layers `keep` admits that no lock holds, in stack order.
+fn unlocked(
+    layers: &[LayerInfo],
+    selected: &[String],
+    keep: impl Fn(&LayerInfo) -> bool,
+) -> Vec<String> {
+    layers
+        .iter()
+        .filter(|l| selected.contains(&l.id) && !l.effectively_locked && keep(l))
+        .map(|l| l.id.clone())
+        .collect()
+}
+/// The open composition's work area (`work`), else all of it.
+fn work_area(published: &Published) -> Option<(f64, f64)> {
+    let root = published.snapshot.root()?;
+    let open = pm_kernel::model::open_comp_id(root);
+    let comp = pm_kernel::model::comp_node(root, open.as_deref())
+        .or_else(|| pm_kernel::model::comp_node(root, None))?
+        .to_value();
+    let work = comp.get("work").and_then(Value::as_array);
+    let at = |i: usize| work.and_then(|w| w.get(i)).and_then(Value::as_f64);
+    Some((at(0).unwrap_or(0.), at(1).or(comp.get("dur")?.as_f64())?))
+}
 /// Cmd+V layers: the block keeps its timing and starts at the playhead.
 pub fn paste_plan(layers: Vec<Value>, time: f64) -> Plan {
     let new_ids: Vec<String> = layers.iter().map(|_| new_id("L")).collect();
@@ -877,6 +927,20 @@ pub fn command_plan(
         })
     };
     match name {
+        "new3d" => {
+            // Layer ▸ Add 3D Layer: one Undo step named for what it adds, then the
+            // new layer is selected so Properties shows it.
+            let kind = args.first().and_then(serde_json::Value::as_str)?;
+            let id = new_id("L");
+            let (label, commands, select) =
+                pm_panel_studio3d::properties::add_layer(published, time, kind, &id).ok()?;
+            Some(Plan {
+                label,
+                commands,
+                select: Some(vec![select]),
+                count_keys: None,
+            })
+        }
         "newSolid" => Some(new_layer(published, "solid", "Solid", false, time)),
         "newShape" => Some(new_layer(published, "shape", "Shape", true, time)),
         "newAdjustment" => Some(new_layer(
@@ -1058,6 +1122,158 @@ pub fn command_plan(
                         TimingCommand::Move {
                             layer_ids,
                             delta: frames / fps,
+                        }
+                        .into(),
+                    ],
+                )
+            })
+        }
+        // Premiere's Q and W: the selected layers under the playhead.
+        "rippleTrimIn" | "rippleTrimOut" => {
+            let layer_ids = unlocked(&layers, &selected, |l| {
+                l.in_time < time - 1e-6 && time < l.out_time - 1e-6
+            });
+            let edge = if name == "rippleTrimIn" {
+                TimeEdge::In
+            } else {
+                TimeEdge::Out
+            };
+            (!layer_ids.is_empty()).then(|| {
+                plain(
+                    "Ripple Trim",
+                    vec![
+                        TimingCommand::RippleTrim {
+                            layer_ids,
+                            edge,
+                            time,
+                        }
+                        .into(),
+                    ],
+                )
+            })
+        }
+        // Extend Edit (Premiere E, Final Cut Shift-X): the selected layer's
+        // nearer edit rolls to the playhead.
+        "extendEdit" => {
+            let id = unlocked(&layers, &selected, |l| l.kind != "group")
+                .into_iter()
+                .next()?;
+            let info = layers.iter().find(|l| l.id == id)?;
+            let edge = if (time - info.in_time).abs() <= (time - info.out_time).abs() {
+                TimeEdge::In
+            } else {
+                TimeEdge::Out
+            };
+            Some(plain(
+                "Extend Edit",
+                vec![
+                    TimingCommand::Roll {
+                        layer_id: id,
+                        edge,
+                        time,
+                    }
+                    .into(),
+                ],
+            ))
+        }
+        // Slip by frames (Premiere Option-Command-Arrow): a negative count
+        // moves the content left, showing later source frames.
+        "slipLayers" => {
+            let frames = args.first().and_then(serde_json::Value::as_f64)?;
+            let fps = comp_number(published, "fps").filter(|fps| *fps > 0.)?;
+            let commands: Vec<Command> = unlocked(&layers, &selected, |l| {
+                matches!(l.kind.as_str(), "video" | "audio")
+            })
+            .into_iter()
+            .filter_map(|layer_id| {
+                let l = layer(published, &layer_id)?;
+                let content = |key: &str, fallback: f64| {
+                    l.get("d")
+                        .and_then(|d| d.get(key))
+                        .and_then(|v| v.as_f64().or_else(|| v.get("v")?.as_f64()))
+                        .unwrap_or(fallback)
+                };
+                let rate = if l.get("type").and_then(Value::as_str) == Some("video") {
+                    content("speed", 1.).max(0.0001)
+                } else {
+                    1.
+                };
+                let source_in = (content("trim", 0.) - frames / fps * rate).max(0.);
+                Some(
+                    TimingCommand::Slip {
+                        layer_id,
+                        source_in,
+                    }
+                    .into(),
+                )
+            })
+            .collect();
+            (!commands.is_empty() && frames != 0.).then(|| plain("Slip Layers", commands))
+        }
+        "slideLayer" => {
+            let frames = args.first().and_then(serde_json::Value::as_f64)?;
+            let fps = comp_number(published, "fps").filter(|fps| *fps > 0.)?;
+            let layer_id = unlocked(&layers, &selected, |l| l.kind != "group")
+                .into_iter()
+                .next()?;
+            (frames != 0.).then(|| {
+                plain(
+                    "Slide Layer",
+                    vec![
+                        TimingCommand::Slide {
+                            layer_id,
+                            delta: frames / fps,
+                        }
+                        .into(),
+                    ],
+                )
+            })
+        }
+        // After Effects' Edit ▸ Lift / Extract Work Area: the selected
+        // layers, or every layer when none is selected.
+        "liftWorkArea" | "extractWorkArea" => {
+            let (start, end) = work_area(published)?;
+            let layer_ids: Vec<String> = if any {
+                selected
+            } else {
+                layers.iter().map(|l| l.id.clone()).collect()
+            };
+            let close = name == "extractWorkArea";
+            let label = if close {
+                "Extract Work Area"
+            } else {
+                "Lift Work Area"
+            };
+            Some(plain(
+                label,
+                vec![
+                    TimingCommand::RemoveRange {
+                        layer_ids,
+                        start,
+                        end,
+                        close,
+                    }
+                    .into(),
+                ],
+            ))
+        }
+        "timeRemapLayers" | "freezeFrame" | "reverseLayers" => {
+            let (mode, label) = match name {
+                "timeRemapLayers" => (RetimeMode::Remap, "Enable Time Remapping"),
+                "freezeFrame" => (RetimeMode::Freeze, "Freeze Frame"),
+                _ => (RetimeMode::Reverse, "Time-Reverse Layer"),
+            };
+            let layer_ids = unlocked(&layers, &selected, |l| {
+                matches!(l.kind.as_str(), "video" | "precomp")
+            });
+            (!layer_ids.is_empty()).then(|| {
+                plain(
+                    label,
+                    vec![
+                        TimingCommand::Retime {
+                            layer_ids,
+                            mode,
+                            time,
                         }
                         .into(),
                     ],
@@ -1403,6 +1619,7 @@ pub fn disabled(
         chosen && selected.iter().all(|l| !l.effectively_locked),
     );
     set("ungroupLayers", has("group"));
+    set("interpretFootage", has("video") || has("image"));
     set("releasePrecomp", has("precomp"));
     set("toggleContinuousRaster", has("precomp"));
     for name in ["splitTextWords", "splitTextCharacters", "splitTextLines"] {
@@ -1413,6 +1630,29 @@ pub fn disabled(
         set(name, editable);
     }
     set("rippleDelete", editable);
+    let free = |kinds: &[&str]| {
+        selected.iter().any(|l| {
+            !l.effectively_locked && (kinds.is_empty() || kinds.contains(&l.kind.as_str()))
+        })
+    };
+    for name in ["rippleTrimIn", "rippleTrimOut"] {
+        set(name, free(&[]));
+    }
+    for name in ["extendEdit", "slideLayer"] {
+        set(
+            name,
+            selected
+                .iter()
+                .any(|l| !l.effectively_locked && l.kind != "group"),
+        );
+    }
+    set("slipLayers", free(&["video", "audio"]));
+    for name in ["timeRemapLayers", "freezeFrame", "reverseLayers"] {
+        set(name, free(&["video", "precomp"]));
+    }
+    for name in ["liftWorkArea", "extractWorkArea"] {
+        set(name, !layers.is_empty());
+    }
     set("alignLayers", editable);
     set("distributeLayers", editable && selected.len() >= 3);
     set(
@@ -1442,6 +1682,14 @@ pub fn disabled(
 /// Rows that act on the selected layers.
 const SELECTION: &[&str] = &[
     "rippleDelete",
+    "rippleTrimIn",
+    "rippleTrimOut",
+    "extendEdit",
+    "slipLayers",
+    "slideLayer",
+    "timeRemapLayers",
+    "freezeFrame",
+    "reverseLayers",
     "nudgeLayerTime",
     "toggleShy",
     "alignLayers",
@@ -1465,6 +1713,13 @@ const SELECTION: &[&str] = &[
 ];
 /// Rows that need a document, on top of the selection-based ones.
 const DOCUMENT: &[&str] = &[
+    "timeline.tool:selection",
+    "timeline.tool:ripple",
+    "timeline.tool:roll",
+    "timeline.tool:slip",
+    "timeline.tool:slide",
+    "liftWorkArea",
+    "extractWorkArea",
     "importFolder",
     "projectSettings",
     "fitView",
@@ -1502,6 +1757,7 @@ const DOCUMENT: &[&str] = &[
     "timeline.revealAll",
     "newComposition",
     "compositionSettings",
+    "interpretFootage",
 ];
 
 /// A command that acts on the project: asked for while one is still

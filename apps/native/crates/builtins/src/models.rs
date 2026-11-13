@@ -48,6 +48,14 @@ pub(crate) struct Models {
     pub facts: Value,
     pub fields: BTreeMap<String, String>,
     pub platform: Vec<(String, Value)>,
+    /// The export the viewer last measured a 3D estimate for (size, length,
+    /// revision), so the sheet asks once per change.
+    pub export_estimate_key: Option<String>,
+    /// The estimate state last seen and how often it was asked again: the
+    /// viewer drops a queued measurement when its picture is redrawn (a
+    /// full-resolution refine after a scrub), so the sheet asks again, at
+    /// most a few times per change.
+    pub export_estimate_seen: (String, u8),
     /// Loaded for the Agent panel only; its load settles interrupted runs.
     pub agent: Option<crate::agent_host::SharedAgent>,
     pub agent_link: std::sync::Arc<crate::agent_host::AgentLink>,
@@ -117,6 +125,8 @@ impl Models {
             facts: json!({"time":0.,"playing":false,"stage":[640.,360.],"light":false}),
             fields: BTreeMap::new(),
             platform: vec![],
+            export_estimate_key: None,
+            export_estimate_seen: (String::new(), 0),
             agent,
             agent_link: Default::default(),
             stamp: String::new(),
@@ -220,6 +230,7 @@ impl Backend {
         self.sync()?;
         let time = self.time();
         let playing = self.native.facts["playing"].as_bool().unwrap_or(false);
+        self.native.properties.failures = self.native.facts["layerFailures"].clone();
         self.native.properties.snapshot(
             self.model.as_mut().ok_or("No open project")?,
             time,
@@ -339,26 +350,10 @@ impl Backend {
             display.push(row);
         }
         frame["window"]["rows"] = json!(display);
-        let frames = (time * fps).round().max(0.) as u64;
-        let nominal = fps.round().max(1.) as u64;
-        let sec = frames / nominal;
-        frame["graphEmpty"] = json!(
-            !client
-                .model
-                .index
-                .layers
-                .iter()
-                .any(|l| l.channels.iter().any(|c| !c.keys.is_empty()))
-        );
+        let (timecode, spoken) = timecode(time, fps);
         frame["playing"] = json!(playing);
-        frame["timecode"] = json!(format!(
-            "{:02}:{:02}:{:02}:{:02}",
-            sec / 3600,
-            sec / 60 % 60,
-            sec % 60,
-            frames % nominal
-        ));
-        frame["spokenTime"] = json!(format!("{sec} seconds, {} frames", frames % nominal));
+        frame["timecode"] = json!(timecode);
+        frame["spokenTime"] = json!(spoken);
         if self.native.timeline_editor == Some(TimelineEditor::Time) {
             frame["timeEditor"] = json!({"value":frame["timecode"],"binding":editor_field});
         }
@@ -437,8 +432,57 @@ impl Backend {
                 Some((vm.stamp.clone(), viewport, effective, projection.clone()));
             projection
         };
+        // The Light tool's panel (3d-studio.md §6) rides on the 3D state.
+        let mut model = model;
+        // Refine progress for the status capsule (3d-studio.md §3).
+        if model["studio"].is_object() {
+            model["studio"]["denoiser"] = self.native.facts["studioDenoiser"].clone();
+            let refine = &self.native.facts["studioRefineProgress"];
+            if refine.is_object() {
+                model["studio"]["refine"] = refine.clone();
+            } else if model["studio"]["tier"] == "refine" && self.native.facts["playing"] != true {
+                // Quality before its first progress report: the picture is
+                // on its way (a heavy scene can take a while), not missing.
+                model["studio"]["pending"] = json!(true);
+            }
+        }
+        if model["studio"]["tool"] == "light" {
+            let ui = |k: &str| {
+                p.ui_state
+                    .viewer
+                    .get(k)
+                    .and_then(pm_model::Value::as_str)
+                    .map(str::to_owned)
+            };
+            let kind = ui("studioLightKind").unwrap_or_else(|| "area".into());
+            let add = ui("studioLightAdd").as_deref() == Some("on");
+            let time = self.native.facts["time"].as_f64().unwrap_or(0.);
+            if let Ok(light) = pm_panel_studio3d::properties::light_panel(&p, time, &kind, add) {
+                model["studio"]["light"] = light;
+                model["studio"]["lightKind"] = json!(kind);
+                model["studio"]["lightAim"] =
+                    json!(ui("studioLightAim").unwrap_or_else(|| "reflect".into()));
+            }
+        }
+        // The bar's transport: the same time, run and loop the timeline's
+        // header shows (one state); while playing the time is a native layer.
+        let time = self.time().clamp(0., vm.transport.duration);
+        let (now, spoken) = timecode(time, vm.transport.fps);
+        let transport = json!({
+            "time": time,
+            "timecode": now,
+            "spokenTime": spoken,
+            "duration": timecode(vm.transport.duration, vm.transport.fps).0,
+            "playing": self.native.facts["playing"].as_bool().unwrap_or(false),
+            "looping": self.native.facts["looping"].as_bool().unwrap_or(false),
+        });
+        // The channel view's command (`viewer.showRGB`, `viewer.showRed`…).
+        let channels = self.native.facts["channels"]
+            .as_str()
+            .unwrap_or("viewer.showRGB")
+            .to_owned();
         Ok(
-            json!({"model":model,"host":{"presentation":"Docked","frame":{"resource":null,"loading":self.native.facts["frameLoading"].as_bool().unwrap_or(false),"failed":self.native.facts["frameFailed"].as_bool().unwrap_or(false)},"source":null,"interaction":"idle"}}),
+            json!({"model":model,"host":{"presentation":"Docked","frame":{"resource":null,"loading":self.native.facts["frameLoading"].as_bool().unwrap_or(false),"failed":self.native.facts["frameFailed"].as_bool().unwrap_or(false)},"source":null,"interaction":"idle","transport":transport,"channels":channels}}),
         )
     }
     pub(crate) fn project_view(&mut self, request: Option<Value>) -> Result<Value, String> {
@@ -660,7 +704,10 @@ impl Backend {
         let speech = crate::speech::status();
         let speech_rows = speech.as_ref().map(crate::speech::rows).unwrap_or_default();
         let mut publication = json!({"revision":self.native.settings_sequence,"multiWindow":true,"rows":accounts,"extensions":extensions,"extensionsState":"ready",
-            "speech":speech.as_ref().map(crate::speech::models).unwrap_or_default()});
+            "speech":speech.as_ref().map(crate::speech::models).unwrap_or_default(),
+            // Settings › Shortcuts, built by the app from the keymap it uses.
+            "shortcuts":self.native.facts["shortcuts"]});
+        let shortcut_rows = self.shortcut_rows()?;
         if let Some(rows) = publication["rows"].as_array_mut() {
             rows.extend(speech_rows.iter().cloned());
         }
@@ -696,6 +743,10 @@ impl Backend {
             }).collect::<Vec<_>>();
             publication["memory"] =
                 json!({"enabled":pm_model::memory::enabled(&root),"entries":entries});
+        }
+        // Settings › Shortcuts shows with or without a project.
+        if let Some(rows) = publication["rows"].as_array_mut() {
+            rows.extend(shortcut_rows);
         }
         // Targets stay here: recorded for this revision, not published.
         let mut targets = serde_json::Map::new();
@@ -999,6 +1050,11 @@ impl Backend {
                 "depth",
                 "dynamicRange",
                 "useProxies",
+                "studioQuality",
+                "studioReducedSize",
+                "colorTag",
+                "timecode",
+                "audioCoding",
                 "preset",
                 "presetName"
             ]))?;
@@ -1047,6 +1103,91 @@ impl Backend {
             serde_json::to_value(&options).map_err(|e| e.to_string())?;
         let plan = crate::delivery::plan(&p.snapshot, &options, self.time())?;
         self.native.export["project"] = json!({"id":p.project,"name":name,"width":width,"height":height,"hasAudio":plan.has_audio,"captionLayers":plan.captions,"hasWorkArea":comp.get("work").is_some(),"hdr":pm_render::composite::project_color(root).is_ok_and(|c|c.mode==pm_protocol::color::ColorMode::Hdr),"summary":plan.summary});
+        // A composition with 3D layers offers a per-export 3D quality; the sheet
+        // names the composition's own preset as the default choice.
+        if let Some((_, label)) =
+            pm_panel_studio3d::properties::export_quality(&wire(&comp.to_value()), None)
+        {
+            self.native.export["project"]["studio"] = json!({ "saved": label });
+            // Which filter cleans the frames: a build without Open Image
+            // Denoise uses the engine's own, and the sheet says so.
+            if let Some(d) = self.native.facts["studioDenoiser"].as_str() {
+                self.native.export["project"]["studio"]["denoiser"] = json!(d);
+            }
+        }
+        // The viewer measures this export's 3D cost on its idle worker; the
+        // sheet asks when the size, length or scene changes and shows the
+        // measured range once it's ready (Sol's export-estimate state).
+        let choice = options.opaque.get("studioQuality").and_then(Value::as_str);
+        if let (Some(settings), Some((policy, label))) = (
+            plan.settings.as_ref(),
+            pm_panel_studio3d::properties::export_quality(&wire(&comp.to_value()), choice),
+        ) {
+            let (w, h, frames) = (settings.size.width, settings.size.height, plan.frames.max(1));
+            let render_scale=if options.opaque.get("studioReducedSize").and_then(Value::as_bool)==Some(true){0.75}else{1.};
+            let key = format!("{w}x{h}x{frames}@{}:{render_scale}", p.revision());
+            let status = self.native.facts["studioExportEstimate"]["status"]
+                .as_str()
+                .unwrap_or("idle")
+                .to_owned();
+            let (seen, asked) = std::mem::take(&mut self.native.export_estimate_seen);
+            let superseded =
+                matches!(seen.as_str(), "queued" | "measuring") && status == "idle" && asked < 3;
+            let changed = self.native.export_estimate_key.as_deref() != Some(key.as_str());
+            self.native.export_estimate_seen =
+                (status, if changed { 0 } else { asked + superseded as u8 });
+            if changed || superseded {
+                self.native.export_estimate_key = Some(key);
+                self.native.platform.push((
+                    "export.estimate".into(),
+                    json!({"width":w,"height":h,"frames":frames,"renderScale":render_scale}),
+                ));
+            }
+            let preset = policy["preset"].as_str().unwrap_or("production");
+            // Asked just now: say so until the viewer's state catches up,
+            // rather than flash the static guess before the measured range.
+            let asked = (changed || superseded).then(|| format!("3D {label}, measuring…"));
+            let from_viewer = asked.is_some()
+                || crate::delivery::measured_estimate_scaled(
+                    &self.native.facts["studioExportEstimate"],
+                    preset,
+                    &label,
+                    w,
+                    h,
+                    frames,
+                    render_scale,
+                )
+                .is_some();
+            if let Some(note) = asked.or_else(|| {
+                crate::delivery::measured_estimate_scaled(
+                    &self.native.facts["studioExportEstimate"],
+                    preset,
+                    &label,
+                    w,
+                    h,
+                    frames,
+                    render_scale,
+                )
+            }) {
+                let base = plan.summary.split(" · 3D ").next().unwrap_or("").to_owned();
+                self.native.export["project"]["summary"] = json!(format!("{base} · {note}"));
+            }
+            // The estimate on its own, for the sheet's Render Time row: the
+            // measured range, "measuring…", or the static guess.
+            let summary = self.native.export["project"]["summary"].as_str().unwrap_or("");
+            if let Some((_, time)) = summary
+                .split(" · 3D ")
+                .nth(1)
+                .and_then(|tail| tail.split_once(", "))
+            {
+                let measuring = time.ends_with("measuring…");
+                let measured = !measuring && from_viewer;
+                self.native.export["project"]["studio"]["estimate"] = json!(time);
+                self.native.export["project"]["studio"]["state"] =
+                    json!(if measuring { "measuring" } else if measured { "measured" } else { "guess" });
+                self.native.export["project"]["studio"]["preset"] = json!(preset);
+            }
+        }
         self.native.export["presets"] = json!(
             self.kernel
                 .state()
@@ -1140,7 +1281,7 @@ impl Backend {
                 | "export.closeFailure"
         ) && matches!(
             self.native.export["run"]["phase"].as_str(),
-            Some("choosingDestination" | "preparing" | "rendering" | "cancelling")
+            Some("choosingDestination" | "preparing" | "rendering" | "checking" | "cancelling")
         ) {
             return Err("Export is in progress".into());
         }
@@ -1170,7 +1311,8 @@ impl Backend {
                     );
                 }
                 self.validate_binding_owner(handle)?;
-                if self.panel_id == "layer-effects" {
+                // Effect Controls and the Color panel write effect parameters.
+                if matches!(self.panel_id.as_str(), "layer-effects" | "color") {
                     return self
                         .parameter_write(handle, model(&args["value"])?, time)
                         .map(NativeCommand::Kernel);
@@ -1592,6 +1734,24 @@ fn archived(entry: &pm_kernel::state::ExtensionEntry) -> bool {
         .and_then(|r| r.get("archived"))
         .and_then(pm_model::Value::as_bool)
         == Some(true)
+}
+
+/// A time as the transport shows it (`00:00:02:15`: hours, minutes, seconds,
+/// frames at the composition's rate), and as it is spoken.
+pub(crate) fn timecode(time: f64, fps: f64) -> (String, String) {
+    let frames = (time * fps).round().max(0.) as u64;
+    let nominal = fps.round().max(1.) as u64;
+    let sec = frames / nominal;
+    (
+        format!(
+            "{:02}:{:02}:{:02}:{:02}",
+            sec / 3600,
+            sec / 60 % 60,
+            sec % 60,
+            frames % nominal
+        ),
+        format!("{sec} seconds, {} frames", frames % nominal),
+    )
 }
 
 #[cfg(test)]

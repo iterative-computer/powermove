@@ -57,6 +57,12 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                     let r_layer = r["layer"].as_str().map(str::to_owned);
                     match op {
                         "status" => {},
+                        "focus" => {
+                            v.host.borrow().window.makeKeyAndOrderFront(None);
+                            let app=objc2_app_kit::NSApplication::sharedApplication(objc2::MainThreadMarker::new().unwrap());
+                            #[allow(deprecated)]
+                            app.activateIgnoringOtherApps(true);
+                        },
                         "open" => {
                             let path = std::path::PathBuf::from(r["path"].as_str().ok_or_else(|| anyhow::anyhow!("missing path"))?);
                             let path = path.canonicalize()?;
@@ -131,7 +137,20 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                                 }
                             }).detach();
                         },
-                        "save" => v.save(None, cx),
+                        // `path`: Save As to it with no panel (the panel runs
+                        // out of process, so a background check can't drive it).
+                        "save" => {
+                            let path = match r["path"].as_str() {
+                                Some(path) => {
+                                    let path = std::path::PathBuf::from(path);
+                                    let folder = path.parent().and_then(|f| f.canonicalize().ok());
+                                    anyhow::ensure!(folder.as_deref().is_some_and(temporary), "temporary destination required");
+                                    Some(path)
+                                }
+                                None => None,
+                            };
+                            v.save(path, cx)
+                        },
                         // Diagnostics: the window's AppKit view tree (class, frame, hidden).
                         "views" => {
                             let w = v.host.borrow().window.clone();
@@ -164,7 +183,7 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                     let status = v.viewer.as_ref().map(|v| v.status());
                     let frame = status.as_ref().and_then(|s| s.frame.as_ref());
                     let mut out = json!({
-                        "accepted_host_s":now, "opening":v.opening,
+                        "accepted_host_s":now, "window_key":v.host.borrow().window.isKeyWindow(), "window_visible":v.host.borrow().window.isVisible(), "opening":v.opening,
                         "opened":v.session.is_some(), "message":v.message,
                         "revision":v.published.as_ref().map(|p| p.revision()),
                         "viewer_id":v.viewer.as_ref().map(|v| v.identity()),

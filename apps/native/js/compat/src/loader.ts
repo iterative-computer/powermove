@@ -10,6 +10,10 @@ import type { Data } from "./types";
 const DEFAULT_TIMEOUT = 10_000;
 const DEFAULT_WINDOW = 10_000;
 const DEFAULT_LIMIT = 2;
+/** How long work an activation started and left running (a timer chain, a
+ * fetch) keeps its extension counted as loading. */
+const DEFAULT_DRAIN = 5_000;
+const DRAIN_POLL = 25;
 const ERROR_CHARS = 4_000;
 const BLOCKED = new Set([
   "build-error",
@@ -138,6 +142,14 @@ export interface LoaderOptions {
   progress?(): void;
   document?: any;
   vars?(record: Data): Data;
+  /** The runtime's account of which load asynchronous work belongs to
+   * (`__work`): without one, an activation's own promise is all of its load. */
+  work?: {
+    only(id: string): void;
+    apart<T>(fn: () => T): T;
+    pending(id: string, deadline: number): boolean;
+  };
+  drainMs?: number;
   timeoutMs?: number;
   windowMs?: number;
   limit?: number;
@@ -162,6 +174,60 @@ export function createLoader(options: LoaderOptions) {
   /** Load work asked for and not finished (queued or running). While there
    * is any, what an extension registers may still arrive. */
   let work = 0;
+  /** Activated extensions with work their activation started still out (a
+   * timer, a fetch, an answer from the host): a definition registered from
+   * it is still to come, so they count as loading until it has finished or
+   * `drainMs` has passed. */
+  const draining = new Set<string>();
+  /** Readiness an extension holds itself (`api.readiness.hold`). */
+  const held = new Map<string, Set<object>>();
+  const tracker = options.work;
+  const apart = <T>(fn: () => T): T => (tracker ? tracker.apart(fn) : fn());
+  function drain(id: string): void {
+    if (!tracker) return;
+    const deadline = performance.now() + (options.drainMs ?? DEFAULT_DRAIN);
+    draining.add(id);
+    const check = () => {
+      if (
+        draining.has(id) &&
+        performance.now() < deadline &&
+        tracker.pending(id, deadline)
+      ) {
+        apart(() => setTimeout(check, DRAIN_POLL));
+        return;
+      }
+      if (draining.delete(id)) options.progress?.();
+    };
+    // A later task: a promise chain the activation left has set its timers.
+    apart(() => setTimeout(check, 0));
+  }
+  /** `api.readiness.hold()`: the extension is loading until it releases,
+   * whatever drives its setup. Held as long as an activation may take, it is
+   * let go and said. */
+  function hold(id: string, api: Data): Data {
+    const lease = {};
+    const mine = held.get(id) ?? new Set();
+    held.set(id, mine);
+    mine.add(lease);
+    options.progress?.();
+    const release = () => {
+      if (!mine.delete(lease)) return;
+      clearTimeout(timer);
+      if (!mine.size && held.get(id) === mine) held.delete(id);
+      options.progress?.();
+    };
+    const timer = apart(() =>
+      setTimeout(() => {
+        if (!mine.has(lease)) return;
+        console.error(
+          `[kernel] extension "${id}" held readiness for ${timeoutMs / 1000} s without releasing it`,
+        );
+        release();
+      }, timeoutMs),
+    );
+    api.onDispose(release);
+    return { release, dispose: release };
+  }
   /** Every entry that can activate an extension runs through here: it counts
    * as loading from the moment it is asked for, before anything it replaces
    * is disposed, until it has finished or failed. */
@@ -210,6 +276,8 @@ export function createLoader(options: LoaderOptions) {
     if (active.has(record.id)) return true;
     const id = record.id;
     let module: Data;
+    // From here on, what this load starts is its own (its module's too).
+    tracker?.only(id);
     try {
       module = await withTimeout(
         importGraph(record),
@@ -227,6 +295,7 @@ export function createLoader(options: LoaderOptions) {
       scope: record.scope,
       vars: options.vars?.(record),
     });
+    handle.api.readiness = { hold: () => hold(id, handle.api) };
     try {
       const addStyle = (css: string) => {
         if (!options.document) throw new Error("Remote DOM is not attached");
@@ -240,7 +309,10 @@ export function createLoader(options: LoaderOptions) {
         handle.api.onDispose(module.__powermoveAcquireStyles(addStyle));
       handle.setActivating(true);
       options.activating?.(id);
-      const started = realm.task(() => module.default(handle.api));
+      const started = realm.task(() => {
+        tracker?.only(id);
+        return module.default(handle.api);
+      });
       options.activating?.(null);
       const result = await withTimeout(
         Promise.resolve(started),
@@ -260,6 +332,7 @@ export function createLoader(options: LoaderOptions) {
     }
     active.set(id, { record, module, handle });
     failed.delete(id);
+    drain(id);
     health(id, { state: "ok" });
     kernel.events.emit("extension:loaded", { id });
     return true;
@@ -267,6 +340,7 @@ export function createLoader(options: LoaderOptions) {
   async function deactivate(id: string): Promise<void> {
     const entry = active.get(id);
     active.delete(id);
+    draining.delete(id);
     if (entry) {
       try {
         await withTimeout(
@@ -403,11 +477,13 @@ export function createLoader(options: LoaderOptions) {
     reportRuntimeError,
     records: () => [...records.values()],
     activeIds: () => [...active.keys()],
-    /** Extensions still loading: a pass's, a reload's, an activation's. */
-    loading: () => [...loading],
-    /** No load work is queued or running: every extension has registered
-     * what its activation registers, or has failed. */
-    settled: () => work === 0,
+    /** Extensions still loading: a pass's, a reload's, an activation's, and
+     * those whose activation left work running or that hold readiness. */
+    loading: () => [...new Set([...loading, ...draining, ...held.keys()])],
+    /** No load work is queued or running, none an activation started is
+     * still out, and no readiness is held: every extension has registered
+     * what its load registers, or has failed. */
+    settled: () => work === 0 && !draining.size && !held.size,
     whenIdle: () => queue.then(() => undefined),
     async dispose(): Promise<void> {
       for (const id of [...active.keys()].reverse()) await deactivate(id);

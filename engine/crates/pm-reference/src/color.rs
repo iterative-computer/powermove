@@ -414,6 +414,35 @@ impl Primaries {
         white: D65,
     };
 
+    /// ACES AP1 (S-2014-004), ACES white.
+    pub const AP1: Primaries = Primaries {
+        r: [0.713, 0.293],
+        g: [0.165, 0.830],
+        b: [0.128, 0.044],
+        white: [0.32168, 0.33767],
+    };
+    /// RED Wide Gamut RGB (RED's white paper).
+    pub const RED_WIDE_GAMUT: Primaries = Primaries {
+        r: [0.780308, 0.304253],
+        g: [0.121595, 1.493994],
+        b: [0.095612, -0.084589],
+        white: D65,
+    };
+    /// Blackmagic Wide Gamut Gen 5 (Blackmagic Generation 5 Color Science).
+    pub const BMD_WIDE_GAMUT_5: Primaries = Primaries {
+        r: [0.7177215, 0.3171181],
+        g: [0.2280410, 0.8615690],
+        b: [0.1005841, -0.0820452],
+        white: [0.3127170, 0.3290312],
+    };
+
+    /// Linear RGB in `self` to linear RGB in `to`, Bradford-adapted between
+    /// their whites when they differ.
+    pub fn convert_to(&self, to: &Primaries) -> M3 {
+        let adapt = bradford(white_xyz(self.white), white_xyz(to.white));
+        mul(&invert(&to.to_xyz()), &mul(&adapt, &self.to_xyz()))
+    }
+
     pub fn from_h273(code: u8) -> Option<Primaries> {
         Some(match code {
             1 => Primaries::BT709,

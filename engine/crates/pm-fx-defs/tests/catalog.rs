@@ -4,10 +4,14 @@ use serde_json::{Value, json};
 #[test]
 fn pinned_main_has_every_family_and_full_historical_revisions() {
     assert_eq!(main_effects().commit, MAIN_COMMIT);
-    assert_eq!(main_effects().effects.len(), 43);
-    // 53 pinned from main plus Apply Color LUT's native revision 2.
-    assert_eq!(main_catalog().definitions().count(), 54);
-    assert_eq!(main_catalog().current_definitions().count(), 43);
+    // Main's 43 and the two grading effects made here (`grade`).
+    assert_eq!(main_effects().effects.len(), 45);
+    // 53 pinned from main, Apply Color LUT's native revision 2, the four
+    // unclipped revisions, Levels and Levels (Individual Controls) with their
+    // clip switches off, Duotone and Posterize grading faint pixels, and
+    // Color Wheels and Color Curves.
+    assert_eq!(main_catalog().definitions().count(), 64);
+    assert_eq!(main_catalog().current_definitions().count(), 45);
     assert_eq!(main_effects().blobs.len(), 22);
     let raw: Value = serde_json::from_str(include_str!("../src/main-effects.json")).unwrap();
     assert_eq!(raw["effects"].as_array().unwrap().len(), 43);
@@ -96,14 +100,17 @@ fn older_art_keeps_its_shader_and_parameter_schema() {
         } else {
             assert_ne!(old.frag, current.frag, "{id}");
         }
-        assert_eq!(main_catalog().current(id), main_catalog().get(id, 2));
-        assert!(main_catalog().get(id, 3).is_none());
+        // Main's newest is 2; Levels has a revision 3 made here (its clip
+        // switches start off).
+        let newest = if id == "levels" { 3 } else { 2 };
+        assert_eq!(main_catalog().current(id), main_catalog().get(id, newest));
+        assert!(main_catalog().get(id, newest + 1).is_none());
         assert!(
             main_catalog()
-                .instance(id, Some(&json!(3)))
+                .instance(id, Some(&json!(newest + 1)))
                 .unwrap_err()
                 .0
-                .contains("version 3")
+                .contains(&format!("version {}", newest + 1))
         );
     }
 }
@@ -231,7 +238,7 @@ fn changed_historical_gradient_requires_provenance_instead_of_silent_reinterpret
 fn assembled_programs_are_keyed_by_implementation_revision_and_preserve_raw_sources() {
     use std::collections::BTreeSet;
     let shaders = &main_effects().shaders;
-    assert_eq!(shaders.len(), 54);
+    assert_eq!(shaders.len(), 64);
     let mut keys = BTreeSet::new();
     for shader in shaders {
         assert!(keys.insert((&shader.id, shader.version)));
@@ -305,4 +312,35 @@ fn owner_saving_version_policy_keeps_old_and_unknown_artwork_exact() {
     // An effect the tag never had cannot be a tagged instance.
     assert_eq!(definition_for_file("tint", None, None).unwrap().id, "tint");
     assert!(definition_for_file("gradient", Some(&json!(999)), Some("9.0.0")).is_err());
+}
+
+#[test]
+fn unclipped_revisions_keep_the_pinned_shaders_as_history() {
+    let pinned: Value = serde_json::from_str(include_str!("../src/main-effects.json")).unwrap();
+    for id in ["color", "channelMixer", "sharpen", "grain"] {
+        let old = main_catalog().get(id, 1).unwrap();
+        let current = main_catalog().current(id).unwrap();
+        assert_eq!(current, main_catalog().get(id, 2).unwrap(), "{id}");
+        let original = pinned["effects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["id"] == id)
+            .unwrap();
+        assert_eq!(old.frag, original["frag"].as_str().unwrap(), "{id}");
+        assert!(old.frag.contains("clamp("), "{id}");
+        assert_eq!(old.params, current.params, "{id}");
+        // A file saved without a version, or by v1.2.0, keeps the old shader.
+        assert_eq!(
+            definition_for_file(id, None, Some("1.2.0")).unwrap().frag,
+            old.frag
+        );
+        assert_eq!(
+            definition_for_file(id, Some(&json!(2)), Some("1.2.0")).unwrap(),
+            current
+        );
+    }
+    let colour = &main_catalog().current("color").unwrap().frag;
+    assert!(!colour.contains("clamp(x,0.,8.)"));
+    assert!(colour.contains("pm_e_dec"));
 }

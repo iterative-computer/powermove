@@ -314,7 +314,8 @@ fn display_only_menu_items_carry_the_old_apps_registry_shortcuts() {
         .into_iter()
         .filter(|(title, _)| menu::DISPLAY_ONLY.contains(title))
         .flat_map(|(_, i)| i)
-        .filter(|i| !i.label.is_empty())
+        // A submenu's parent row (Layer ▸ Add 3D Layer) has no chord of its own.
+        .filter(|i| !i.label.is_empty() && !menu::SUBMENUS.contains(&i.command.as_str()))
         .collect();
     items.extend(menu::tools());
     assert!(items.len() > 40);

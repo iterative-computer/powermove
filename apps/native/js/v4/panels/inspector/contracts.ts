@@ -20,6 +20,10 @@ export type Target =
         locked: boolean;
         audio: boolean;
         acceptsEffects: boolean;
+        /** A Studio 3D layer: 2D alignment doesn't apply to it. */
+        studio?: boolean;
+        /** The viewer couldn't draw this layer: what happened and the fix. */
+        error?: string;
       };
       sharedType: string | null;
     };
@@ -58,6 +62,8 @@ export interface Row {
   control: Control;
   locked?: boolean;
   disabled?: boolean;
+  /** Addressable by intents but drawn elsewhere (the finish shelf). */
+  hidden?: boolean;
   animation?: "static" | "animated" | "key-at-playhead";
   linked?: boolean;
   expression?: { binding: Binding; source: string; error: string | null };
@@ -67,11 +73,30 @@ export type SectionAction =
   | "mask"
   | "animator"
   | "release-precomp"
-  | "refresh-fonts";
+  | "refresh-fonts"
+  | "set-up-studio"
+  | "time-remap"
+  | "freeze-frame"
+  | "reverse";
 export interface AnimatorPreset {
   id: string | null;
   label: string;
   disabled: boolean;
+}
+/** A finish tile drawn as a tiny shaded sphere (colours are content). */
+export interface Finish {
+  id: string;
+  label: string;
+  rim: string;
+  body: string;
+  highlight: string;
+  /** The lit body's size, the highlight's and the glint's, as percentages
+   * of the tile (swatch artwork, from the material). */
+  size: string;
+  spot: string;
+  glintSize: string;
+  /** A clear coat's sharp glint colour, or null for none. */
+  glint: string | null;
 }
 export interface Section {
   id: string;
@@ -79,10 +104,16 @@ export interface Section {
   collapsed: boolean;
   rows: Row[];
   action?: SectionAction;
+  /** Several quiet actions in a row (Time: remap, freeze, reverse). */
+  actions?: SectionAction[];
   animators?: { id: string; name: string }[];
   presets?: AnimatorPreset[];
   /** Masks: a heading row with Remove, then that mask's rows. */
   masks?: { id: string; name: string; rows: Row[] }[];
+  /** One quiet line under the rows that explains them (a 3D preset's cost). */
+  note?: string;
+  /** Studio finishes: swatch tiles under the heading; a click applies one. */
+  finishes?: Finish[];
 }
 export interface InspectorSnapshot {
   target: Target;

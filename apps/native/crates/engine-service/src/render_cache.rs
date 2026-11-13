@@ -51,7 +51,7 @@ use crate::render::Scene;
 /// coded losslessly (`crate::frame_codec`).
 pub const FORMAT: &str = "rgba16f-export-lzfse-v4";
 /// Media stamps are looked at again at most this often.
-const MEDIA_RECHECK: Duration = Duration::from_secs(2);
+pub(crate) const MEDIA_RECHECK: Duration = Duration::from_secs(2);
 /// The same storage is indexed again at most this often.
 const REINDEX_EVERY: Duration = Duration::from_secs(2);
 /// Frames read ahead of the playhead, and kept read.
@@ -180,6 +180,9 @@ pub(crate) struct Held {
     id: FrameId,
 }
 
+/// A scene's document, revision, content and composition.
+type SceneState = (usize, u64, u64, String);
+
 /// The composition state a fingerprint is taken of.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Identity {
@@ -209,6 +212,9 @@ struct Source {
     scene: Scene,
     definitions: Vec<DefinitionSnapshot>,
     doc_id: u64,
+    /// The fonts its frames' keys were taken from (`None` until they are
+    /// fingerprinted): a fill draws with exactly these.
+    fonts: Option<Arc<pm_text::system_fonts::Inventory>>,
 }
 
 /// The open composition's frames.
@@ -436,6 +442,11 @@ struct State {
     /// Rises with every storage change or deletion: fences fills' frames.
     storage: u64,
     frames: Option<Frames>,
+    /// The scene state last looked at, and whether the path-traced 3D
+    /// renderer draws it ([`crate::frame_inputs::draws_studio`]): such a
+    /// composition has no `frames`, so none is rendered to disk or shown
+    /// from it.
+    studio: Option<(SceneState, bool)>,
     known: Known,
     media_checked: Option<Instant>,
     indexed: Option<Instant>,
@@ -478,6 +489,24 @@ pub struct Kept {
     pub changed: u64,
     /// Rendered frames that already were in the asked state.
     pub already: u64,
+}
+
+/// What a Render Selection is asked of: a document at a revision, one of its
+/// compositions, drawn with these definitions.
+#[derive(Clone, Copy)]
+pub struct Observation<'a> {
+    pub doc_id: u64,
+    pub revision: u64,
+    pub comp: &'a str,
+    pub definitions: &'a [DefinitionSnapshot],
+}
+impl Observation<'_> {
+    fn is(&self, frames: &Frames) -> bool {
+        frames.source.doc_id == self.doc_id
+            && frames.identity.revision == self.revision
+            && frames.identity.comp == self.comp
+            && frames.source.definitions == self.definitions
+    }
 }
 
 /// The engine's render cache, shared by the engine thread (observation,
@@ -698,6 +727,12 @@ impl DiskFrames {
         });
     }
 
+    /// [`media_identity`] with this cache's content-named folder.
+    pub(crate) fn media_identity(&self, media: &pm_export::render::MediaPaths) -> u64 {
+        let content_named = self.with(|s| (s.content_named.clone(), false));
+        media_identity(media, content_named.as_deref())
+    }
+
     /// Storage › Renders: the folder and the Render Files Limit (`None`: no
     /// render cache). The same folder again finds its frames again (Clear…
     /// may have removed some). Disk work: call off the main thread.
@@ -758,6 +793,26 @@ impl DiskFrames {
         Ok(())
     }
 
+    /// Whether the path-traced 3D renderer draws `scene`
+    /// ([`crate::frame_inputs::draws_studio`]), looked up once per scene
+    /// state: the frame loop asks again for every frame.
+    pub(crate) fn draws_studio(&self, scene: &Scene) -> bool {
+        let at: SceneState = (
+            Arc::as_ptr(&scene.doc) as usize,
+            scene.doc.revision(),
+            scene.content,
+            scene.comp.clone(),
+        );
+        if let Some((known, studio)) = &self.inner.state.lock().unwrap().studio
+            && *known == at
+        {
+            return *studio;
+        }
+        let studio = crate::frame_inputs::draws_studio(&scene.doc, &scene.comp);
+        self.inner.state.lock().unwrap().studio = Some((at, studio));
+        studio
+    }
+
     /// The engine thread's current scene, drawn at `time`. A new
     /// composition state (scene, output tone, override wrappers, or, looked
     /// at every 2 s, a media file's stamp) takes a new fingerprint off this
@@ -777,6 +832,21 @@ impl DiskFrames {
         state.playhead = Some(time);
         if state.cache.is_none() {
             return false;
+        }
+        drop(state);
+        let studio = self.draws_studio(scene);
+        let mut state = self.inner.state.lock().unwrap();
+        if studio {
+            // Path-traced frames are never kept on disk: whatever was
+            // rendered for an earlier state of this composition stops
+            // showing, and nothing new is rendered.
+            if state.frames.take().is_none() {
+                return false;
+            }
+            state.generation += 1;
+            self.inner.reader.clear(state.generation);
+            bump(&mut state, &self.inner.published);
+            return true;
         }
         let unchanged = state.frames.as_ref().is_some_and(|f| {
             f.identity.scene_matches(scene)
@@ -825,6 +895,7 @@ impl DiskFrames {
             scene: scene.clone(),
             definitions: definitions.to_vec(),
             doc_id,
+            fonts: None,
         };
         state.generation += 1;
         let generation = state.generation;
@@ -937,37 +1008,23 @@ impl DiskFrames {
             .as_ref()
             .is_none_or(|frames| frames.fingerprint.is_none() || frames.ids.is_empty())
     }
-    /// The viewer has drawn a settled frame of exactly this: document
-    /// `doc_id` at `revision`, composition `comp`, with `definitions`. An
-    /// observation of anything else (another project open in the window
-    /// before, an earlier revision, another composition, an effect's code
-    /// before its extension reloaded) is not it, so a Render Selection of
-    /// this does not start from that.
-    pub fn observed(
-        &self,
-        doc_id: u64,
-        revision: u64,
-        comp: &str,
-        definitions: &[DefinitionSnapshot],
-    ) -> bool {
+    /// The viewer has drawn a settled frame of exactly `of`. An observation
+    /// of anything else (another project open in the window before, an
+    /// earlier revision, another composition, an effect's code before its
+    /// extension reloaded) is not it, so a Render Selection of this does
+    /// not start from that.
+    pub fn observed(&self, of: Observation) -> bool {
         let state = self.inner.state.lock().unwrap();
         state.frames.as_ref().is_some_and(|frames| {
-            frames.fingerprint.is_some()
-                && !frames.ids.is_empty()
-                && frames.source.doc_id == doc_id
-                && frames.identity.revision == revision
-                && frames.identity.comp == comp
-                && frames.source.definitions == definitions
+            frames.fingerprint.is_some() && !frames.ids.is_empty() && of.is(frames)
         })
     }
-    /// [`Self::start_fill`] for the composition `comp` of document `doc_id`:
-    /// refused when the cache is on another one (the window moved on while
-    /// the Render Selection waited).
-    #[allow(clippy::too_many_arguments)]
+    /// [`Self::start_fill`] of exactly `of`, checked as the frames are
+    /// chosen: refused when the cache holds anything else (the window moved
+    /// on while the Render Selection waited, or the viewer never drew this).
     pub fn start_fill_of(
         &self,
-        doc_id: u64,
-        comp: &str,
+        of: Observation,
         from: f64,
         to: f64,
         executable: &Path,
@@ -977,7 +1034,7 @@ impl DiskFrames {
         let frames = {
             let state = self.inner.state.lock().unwrap();
             let frames = ready(&state)?;
-            if frames.source.doc_id != doc_id || frames.identity.comp != comp {
+            if !of.is(frames) {
                 return Err("The composition changed before rendering started.".into());
             }
             frame_range(frames, from, to)
@@ -1436,6 +1493,22 @@ impl DiskFrames {
         })
     }
 
+    /// The scene the open composition's rendered frames belong to: the
+    /// viewer's own, for reading them back through a [`crate::Headless`].
+    pub fn observed_scene(&self) -> Option<Scene> {
+        let state = self.inner.state.lock().unwrap();
+        Some(state.frames.as_ref()?.source.scene.clone())
+    }
+
+    /// `scene`'s rendered frame at `time` as playback reads it (RGBA half
+    /// floats, row by row), waiting up to ten seconds for the read.
+    pub fn stored_frame(&self, scene: &Scene, time: Ticks) -> Option<Arc<Vec<u8>>> {
+        match self.read_within(scene, time, Duration::from_secs(10)) {
+            Read::Frame(_, bytes, _) => Some(bytes),
+            Read::Late(_) | Read::Absent => None,
+        }
+    }
+
     /// The media files the open composition's rendered frames are drawn
     /// from, by asset.
     pub fn rendered_from(&self) -> Option<BTreeMap<String, PathBuf>> {
@@ -1577,6 +1650,9 @@ impl DiskFrames {
 
 /// The open composition's frames, if a fill can start from them.
 fn ready(state: &State) -> Result<&Frames, String> {
+    if state.frames.is_none() && state.studio.as_ref().is_some_and(|(_, studio)| *studio) {
+        return Err("Rendering to disk isn't available for a composition with 3D objects.".into());
+    }
     let frames = state
         .frames
         .as_ref()
@@ -1769,6 +1845,7 @@ fn fill_request(
         document: pm_model::json::to_canonical_string(&document),
         originals: source.scene.media.paths.clone(),
         proxies: Default::default(),
+        copies_of: source.scene.media.originals.clone(),
         destination: dir,
         saving_app_version: None,
         resources: crate::resources::ResourceSnapshot {
@@ -1781,6 +1858,9 @@ fn fill_request(
         without_offline: true,
         preview: false,
         cache: Some(fill),
+        studio_quality: None,
+        studio_render_scale:None,
+        fonts: source.fonts.as_deref().cloned(),
     })
 }
 
@@ -2355,7 +2435,12 @@ impl IndexerShared {
         if stale() {
             return;
         }
-        let fingerprint = fingerprint(&source, &identity);
+        let fonts = pm_text::system_fonts::Inventory::current();
+        let fingerprint = fingerprint(&source, &identity, &fonts);
+        let source = Source {
+            fonts: Some(Arc::new(fonts)),
+            ..source
+        };
         if stale() {
             return;
         }
@@ -2470,6 +2555,18 @@ fn stamps(media: &pm_export::render::MediaPaths, content_named: Option<&Path>) -
         .collect()
 }
 
+/// A digest of the stamps of `media`'s files: what a frame kept in memory
+/// was drawn from.
+pub(crate) fn media_identity(
+    media: &pm_export::render::MediaPaths,
+    content_named: Option<&Path>,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    stamps(media, content_named).hash(&mut hash);
+    hash.finish()
+}
+
 /// The running renderer: a digest of this executable (any rebuild is
 /// another renderer), taken once. A development build takes
 /// `PM_RENDER_CACHE_RENDERER` instead when set, so a rebuild that did not
@@ -2512,27 +2609,31 @@ fn media_content(path: &Path, hash: &mut blake3::Hasher) {
     }
 }
 
-/// The fonts text can resolve to: every font file CoreText has registered
-/// now (`pm_text::system_fonts::available_files`: installed for the system
-/// or the user, activated from anywhere else, or registered by the
-/// process), with its length and modification time. The list is current as
-/// soon as a font is installed or removed; the font generation observes
-/// again when it changes.
-fn fonts_identity(hash: &mut blake3::Hasher) {
-    for file in pm_text::system_fonts::available_files() {
-        let (path, len, modified, _) = stamp(&file, None);
+/// The fonts text can resolve to (`pm_text::system_fonts::Inventory`):
+/// every font file CoreText has registered (installed for the system or
+/// the user, activated from anywhere else, or registered by the process),
+/// with its length and modification time. The list is current as soon as a
+/// font is installed or removed; the font generation observes again when
+/// it changes, and a fill draws with the very list its keys were taken
+/// from (`Source::fonts`).
+fn fonts_identity(fonts: &pm_text::system_fonts::Inventory, hash: &mut blake3::Hasher) {
+    for (path, len, modified) in &fonts.0 {
         hash.update(path.as_os_str().as_encoded_bytes());
         hash.update(&[0]);
         hash.update(&len.to_le_bytes());
-        hash.update(&modified.to_le_bytes());
+        hash.update(&u128::from(*modified).to_le_bytes());
     }
 }
 
 /// The fingerprint of everything that draws the composition's frames
 /// besides the document, whose parts each frame draws from are in its key
 /// (`crate::frame_inputs`).
-fn fingerprint(source: &Source, identity: &Identity) -> [u8; 32] {
-    let parts = fingerprint_parts(source, identity);
+fn fingerprint(
+    source: &Source,
+    identity: &Identity,
+    fonts: &pm_text::system_fonts::Inventory,
+) -> [u8; 32] {
+    let parts = fingerprint_parts(source, identity, fonts);
     let mut hash = blake3::Hasher::new_derive_key("powermove render cache v6");
     for (_, part) in &parts {
         hash.update(part);
@@ -2566,7 +2667,11 @@ fn fingerprint(source: &Source, identity: &Identity) -> [u8; 32] {
 
 /// What a composition state's frames depend on beyond its document, each
 /// part digested on its own.
-fn fingerprint_parts(source: &Source, identity: &Identity) -> Vec<(&'static str, [u8; 32])> {
+fn fingerprint_parts(
+    source: &Source,
+    identity: &Identity,
+    fonts: &pm_text::system_fonts::Inventory,
+) -> Vec<(&'static str, [u8; 32])> {
     let part = |fill: &dyn Fn(&mut blake3::Hasher)| {
         let mut hash = blake3::Hasher::new();
         fill(&mut hash);
@@ -2606,7 +2711,7 @@ fn fingerprint_parts(source: &Source, identity: &Identity) -> Vec<(&'static str,
                 }
             }),
         ),
-        ("fonts", part(&|hash| fonts_identity(hash))),
+        ("fonts", part(&|hash| fonts_identity(fonts, hash))),
         (
             "tone",
             part(&|hash| {
@@ -2728,14 +2833,20 @@ mod tests {
             content: 1,
         }
     }
+    /// Waits for `until` on the cache's own reports: it fails only when
+    /// nothing was published for 30 s (a fill that stalled), however long a
+    /// loaded machine takes to render.
     fn settle(disk: &DiskFrames, until: impl Fn(&RenderBars) -> bool) -> Arc<RenderBars> {
-        let start = Instant::now();
+        let (mut last, mut heard) = (disk.bars(), Instant::now());
         loop {
             let bars = disk.bars();
             if until(&bars) {
                 return bars;
             }
-            assert!(start.elapsed() < Duration::from_secs(20), "{bars:?}");
+            if !Arc::ptr_eq(&bars, &last) {
+                (last, heard) = (bars.clone(), Instant::now());
+            }
+            assert!(heard.elapsed() < Duration::from_secs(30), "{bars:?}");
             std::thread::sleep(Duration::from_millis(5));
         }
     }
@@ -3066,20 +3177,25 @@ mod tests {
             .unwrap();
         let scene = scene();
         let revision = scene.doc.revision();
-        assert!(!disk.observed(1, revision, &scene.comp, &[]), "nothing yet");
+        let observed = |doc_id, revision, comp: &str, definitions: &[DefinitionSnapshot]| {
+            disk.observed(Observation {
+                doc_id,
+                revision,
+                comp,
+                definitions,
+            })
+        };
+        assert!(!observed(1, revision, &scene.comp, &[]), "nothing yet");
         disk.observe(&scene, &[], None, None, None, 1, Ticks::new(0).unwrap());
         ready(&disk);
-        assert!(disk.observed(1, revision, &scene.comp, &[]));
+        assert!(observed(1, revision, &scene.comp, &[]));
+        assert!(!observed(2, revision, &scene.comp, &[]), "another project");
         assert!(
-            !disk.observed(2, revision, &scene.comp, &[]),
-            "another project"
-        );
-        assert!(
-            !disk.observed(1, revision, "another", &[]),
+            !observed(1, revision, "another", &[]),
             "another composition"
         );
         assert!(
-            !disk.observed(1, revision + 1, &scene.comp, &[]),
+            !observed(1, revision + 1, &scene.comp, &[]),
             "a later revision"
         );
         let definition = pm_render::all_builtin_definitions()
@@ -3088,16 +3204,27 @@ mod tests {
             .next()
             .unwrap();
         assert!(
-            !disk.observed(1, revision, &scene.comp, &[definition]),
+            !observed(1, revision, &scene.comp, std::slice::from_ref(&definition)),
             "other definitions"
         );
         let nowhere = Path::new("/nonexistent/engine-job");
-        let fill = |doc, comp: &str| {
-            disk.start_fill_of(doc, comp, 1., 1.2, nowhere, Default::default(), |_| {})
+        let other = [definition];
+        let fill = |doc, at, comp: &str, definitions: &[DefinitionSnapshot]| {
+            let of = Observation {
+                doc_id: doc,
+                revision: at,
+                comp,
+                definitions,
+            };
+            disk.start_fill_of(of, 1., 1.2, nowhere, Default::default(), |_| {})
         };
         let changed = Err("The composition changed before rendering started.".to_owned());
-        assert_eq!(fill(2, &scene.comp), changed);
-        assert_eq!(fill(1, "another"), changed);
+        assert_eq!(fill(2, revision, &scene.comp, &[]), changed);
+        assert_eq!(fill(1, revision, "another", &[]), changed);
+        // The observation it has is of an earlier revision or other effect
+        // code than the one asked for: its frames are not rendered instead.
+        assert_eq!(fill(1, revision + 1, &scene.comp, &[]), changed);
+        assert_eq!(fill(1, revision, &scene.comp, &other), changed);
     }
     /// Render Selection through the real `--engine-job` child: the frames
     /// land on disk as the paused viewer draws them, the render bar and the
@@ -3292,6 +3419,267 @@ mod tests {
         }
     }
 
+    /// What a paused viewer settles on at 1 s as its drawable takes each of
+    /// `drawables` in turn (one engine: a window resized), drawn as the
+    /// worker draws it: the picture at the drawable's size at once, then
+    /// its refinement at the composition's size in bands. With `disk`, the
+    /// frame on disk is shown instead; whether it was comes with each
+    /// picture.
+    fn settled_pictures(
+        disk: Option<&DiskFrames>,
+        scene: &Scene,
+        definitions: &[DefinitionSnapshot],
+        drawables: &[(u32, u32)],
+    ) -> Vec<(bool, Vec<[f64; 3]>)> {
+        use crate::render::{Engine, FrameSpec};
+        let mut engine = Engine::new(pm_gpu::Gpu::new("settled-pictures").unwrap()).unwrap();
+        engine.set_resources(Arc::new(crate::resources::ResourceSnapshot {
+            generation: 1,
+            definitions: definitions.to_vec(),
+            ..Default::default()
+        }));
+        engine.disk = disk.cloned();
+        let shown = |engine: &mut Engine, spec: FrameSpec| {
+            let start = Instant::now();
+            loop {
+                let trace = Arc::new(Mutex::new(crate::trace::Trace::default()));
+                let sub = engine
+                    .frame(scene, spec, None, &Default::default(), true, trace.clone())
+                    .unwrap()
+                    .unwrap();
+                sub.commit();
+                sub.complete().unwrap();
+                assert!(sub.failures.is_empty(), "{:?}", sub.failures);
+                let from_disk = trace.lock().unwrap().disk == 2;
+                // A frame on disk is shown once its read lands.
+                if !sub.stand_ins && (from_disk || disk.is_none()) {
+                    return (from_disk, sub.pixels());
+                }
+                assert!(start.elapsed() < Duration::from_secs(20), "never settled");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        drawables
+            .iter()
+            .map(|&(width, height)| {
+                let output = crate::Output {
+                    width,
+                    height,
+                    display: 0,
+                    headroom: 1.,
+                    crop: None,
+                };
+                let fast = FrameSpec {
+                    exact: false,
+                    ..FrameSpec::exact(second(), output)
+                };
+                let full = FrameSpec::paused_full_scale(scene, &output);
+                if full <= 1. {
+                    return shown(&mut engine, fast);
+                }
+                let first = shown(&mut engine, fast);
+                if first.0 {
+                    return first;
+                }
+                let refined = FrameSpec {
+                    scale: full,
+                    ..fast
+                };
+                let mut costs = crate::jobs::Costs::default();
+                assert!(
+                    engine
+                        .refine(scene, refined, &mut costs, &|| false)
+                        .unwrap()
+                );
+                shown(&mut engine, refined)
+            })
+            .collect()
+    }
+
+    /// The fixture with `layer` on top, its still linked to `path`.
+    fn scene_with(layer: serde_json::Value, still: Option<&Path>) -> Scene {
+        let mut project: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/shapes.json")).unwrap();
+        project["layers"].as_array_mut().unwrap().insert(0, layer);
+        if still.is_some() {
+            project["assets"]["pic"] = serde_json::json!(
+                {"id":"pic","type":"image","name":"Texture","w":2048,"h":2048,"dur":0});
+        }
+        let mut scene = scene_from(&project.to_string());
+        if let Some(still) = still {
+            scene.media = Arc::new(pm_export::render::MediaPaths {
+                paths: [("pic".to_owned(), still.to_owned())].into(),
+                ..Default::default()
+            });
+        }
+        scene
+    }
+
+    /// A paused picture drawn and the same frame read from disk, at a
+    /// drawable of the composition's size, at smaller ones, and again at
+    /// the first after the window was resized: one picture.
+    fn assert_drawn_is_rendered(scene: &Scene, definitions: &[DefinitionSnapshot]) {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = DiskFrames::default();
+        disk.set_storage(Some((dir.path().join("frames"), 1 << 30)))
+            .unwrap();
+        disk.observe(scene, definitions, None, None, None, 1, Ticks::ZERO);
+        ready(&disk);
+        disk.start_fill(
+            1.,
+            1.03,
+            &job_binary(),
+            crate::jobs::Activity::default(),
+            |_| {},
+        )
+        .unwrap();
+        let bars = settle(&disk, |b| !b.running);
+        assert_eq!(bars.error.as_deref(), None, "{bars:?}");
+        let drawables = [(640, 360), (320, 180), (213, 120), (640, 360)];
+        let drawn = settled_pictures(None, scene, definitions, &drawables);
+        let rendered = settled_pictures(Some(&disk), scene, definitions, &drawables);
+        for ((drawable, drawn), rendered) in drawables.iter().zip(&drawn).zip(&rendered) {
+            assert!(rendered.0, "{drawable:?}: the frame on disk is shown");
+            let differing = drawn
+                .1
+                .iter()
+                .zip(&rendered.1)
+                .filter(|(a, b)| a != b)
+                .count();
+            assert_eq!(
+                (differing, apart(&rendered.1, &drawn.1)),
+                (0, 0.),
+                "{drawable:?}: the paused picture changes when its frame is rendered"
+            );
+        }
+    }
+
+    /// A large detailed still fitted small is the same in a paused picture
+    /// drawn and one read from disk: a settled paused frame is drawn from
+    /// the original, as an export and a rendered frame are. (Before: the
+    /// viewer drew it from a thumbnail at the size it is shown, and its
+    /// fine texture changed when the render bar turned green.)
+    #[test]
+    fn a_detailed_still_fitted_small_is_the_same_drawn_and_rendered() {
+        let dir = tempfile::tempdir().unwrap();
+        // 2048 × 2048, every pixel its own grey: texture at the finest scale.
+        let (w, h) = (2048u32, 2048u32);
+        let mut bmp = Vec::with_capacity((54 + w * h * 3) as usize);
+        bmp.extend_from_slice(b"BM");
+        bmp.extend_from_slice(&(54 + w * h * 3).to_le_bytes());
+        bmp.extend_from_slice(&[0; 4]);
+        bmp.extend_from_slice(&54u32.to_le_bytes());
+        bmp.extend_from_slice(&40u32.to_le_bytes());
+        bmp.extend_from_slice(&(w as i32).to_le_bytes());
+        bmp.extend_from_slice(&(h as i32).to_le_bytes());
+        bmp.extend_from_slice(&1u16.to_le_bytes());
+        bmp.extend_from_slice(&24u16.to_le_bytes());
+        bmp.extend_from_slice(&[0; 24]);
+        let mut seed = 0x2545_F491u32;
+        for _ in 0..w * h {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            bmp.extend_from_slice(&[(seed >> 24) as u8; 3]);
+        }
+        let still = dir.path().join("texture.bmp");
+        std::fs::write(&still, bmp).unwrap();
+        let ch = |v: f64| serde_json::json!({"v": v, "kf": [], "expr": null});
+        let scene = scene_with(
+            serde_json::json!({
+                "id":"still","type":"image","name":"Texture","from":0,"dur":3,"on":true,
+                "solo":false,"mblur":false,"fx":[],"masks":[],
+                "p":{"position.x":ch(170.),"position.y":ch(30.),"anchor.x":ch(0.),"anchor.y":ch(0.),
+                     "scale.x":ch(14.7),"scale.y":ch(14.7),"rotation":ch(0.),"opacity":ch(100.)},
+                "d":{"asset":"pic","fit":"stretch","w":2048,"h":2048}
+            }),
+            Some(&still),
+        );
+        assert_drawn_is_rendered(&scene, &[]);
+    }
+
+    /// An extension's glow in the shape of a multi-pass bloom (a
+    /// half-resolution tile packed into its target, blurred and upsampled;
+    /// it declares a spread of 10 px and reaches 40) is
+    /// the same in a paused picture drawn and one read from disk: a settled
+    /// paused frame draws its effects over the whole frame, as an export
+    /// and a rendered frame do. (Before: its refinement drew the effect
+    /// band by band within the declared spread.)
+    #[test]
+    fn a_reduced_pass_effect_is_the_same_drawn_and_rendered() {
+        const HALO: &str = "#version 300 es
+precision highp float;
+in vec2 v_st;
+uniform sampler2D u_tex;
+uniform sampler2D u_orig;
+uniform vec2 u_texel;
+uniform int u_pass;
+uniform float u_radius;
+out vec4 o;
+void main() {
+  vec2 halfTexel = 0.5 * u_texel;
+  bool tile = v_st.x < 0.5 && v_st.y < 0.5;
+  vec2 logicalUV = v_st / 0.5;
+  if (u_pass == 0) {
+    vec4 sum = vec4(0.0);
+    if (tile) {
+      for (int dy = 0; dy < 2; dy++) {
+        for (int dx = 0; dx < 2; dx++) {
+          sum += texture(u_orig, logicalUV + (vec2(float(dx), float(dy)) - 0.5) * u_texel) * 0.25;
+        }
+      }
+    }
+    o = sum;
+  } else if (u_pass < 3) {
+    vec4 sum = vec4(0.0);
+    float weights = 0.0;
+    if (tile) {
+      vec2 axis = u_pass == 1 ? vec2(1.0, 0.0) : vec2(0.0, 1.0);
+      for (int i = -16; i <= 16; i++) {
+        float t = float(i) / 16.0;
+        float w = exp(-4.5 * t * t);
+        vec2 uv = logicalUV + axis * (u_radius * t) * u_texel;
+        if (all(greaterThanEqual(uv, vec2(0.0))) && all(lessThanEqual(uv, vec2(1.0)))) {
+          sum += texture(u_tex, clamp(uv * 0.5, halfTexel, vec2(0.5) - halfTexel)) * w;
+        }
+        weights += w;
+      }
+    }
+    o = sum / max(weights, 0.00001);
+  } else {
+    vec4 bloom = texture(u_tex, clamp(v_st * 0.5, halfTexel, vec2(0.5) - halfTexel));
+    o = texture(u_orig, v_st) + bloom * 2.0;
+  }
+}
+";
+        let halo: DefinitionSnapshot = serde_json::from_value(serde_json::json!({
+            "id": "acme.halo", "kind": "effect", "version": 0, "origin": "local", "renderer": null,
+            "glsl": { "source": HALO, "bodyLineOffset": 0,
+                      "bodyUtf16Len": HALO.encode_utf16().count(), "bodyUtf8Len": HALO.len() },
+            "params": [
+                { "type": "number", "key": "radius", "default": 40, "min": 0, "max": 500, "step": null },
+                { "type": "number", "key": "reach", "default": 40, "min": 0, "max": 500, "step": null }
+            ],
+            "flags": { "passes": 4, "keepOrig": true, "backdrop": false, "rawShader": true,
+                       "viewportSafe": true, "viewportPadding": ["reach"], "clamp": false }
+        }))
+        .unwrap();
+        let ch = |v: f64| serde_json::json!({"v": v, "kf": [], "expr": null});
+        let scene = scene_with(
+            serde_json::json!({
+                "id":"lit","type":"shape","name":"Lit","from":0,"dur":3,"on":true,
+                "solo":false,"mblur":false,"masks":[],
+                "fx":[{"id":"e1","type":"acme.halo","on":true,
+                       "p":{"radius":ch(40.),"reach":ch(10.)}}],
+                "p":{"position.x":ch(320.),"position.y":ch(125.),"anchor.x":ch(0.),"anchor.y":ch(0.),
+                     "scale.x":ch(100.),"scale.y":ch(100.),"rotation":ch(0.),"opacity":ch(100.)},
+                "d":{"shape":"rect","w":180,"h":60,"radius":0,"color":"#FFE9A0"}
+            }),
+            None,
+        );
+        assert_drawn_is_rendered(&scene, &[halo]);
+    }
+
     /// A stored frame is a delivery: an effect whose extension isn't
     /// installed refuses the fill and nothing is stored (the viewer draws it
     /// bypassed live; a stored frame without it would play back silently).
@@ -3436,6 +3824,7 @@ mod tests {
             scene: scene.clone(),
             definitions: vec![],
             doc_id: 1,
+            fonts: None,
         };
         let mut request = fill_request(&source, Rate::FPS_30, frames, 0).unwrap();
         request.cache = None;

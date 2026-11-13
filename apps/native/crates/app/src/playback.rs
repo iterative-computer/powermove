@@ -104,6 +104,9 @@ impl Drop for FrameOutline {
 
 pub fn install(entity: &Entity<Controller>, cx: &mut App) {
     let layers = PlaybackLayers::new(MainThreadMarker::new().unwrap());
+    // The viewer bar's time while playing: the timeline's timecode, again.
+    let viewer_time: Retained<AnyObject> =
+        unsafe { Retained::from_raw(msg_send![objc2::class!(CATextLayer), new]).unwrap() };
     let host = entity.read(cx).host.clone();
     let mut playhead = None;
     if let Some(parent) = host.borrow().gpui.layer() {
@@ -121,6 +124,11 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
             let font_ref = objc2::rc::Retained::as_ptr(&font) as *const std::ffi::c_void;
             let _: () = msg_send![&*layers.timecode,setFont:font_ref];
             let _: () = msg_send![&*layers.timecode,setHidden:true];
+            let _: () = msg_send![&*parent,addSublayer:&*viewer_time];
+            let _: () =
+                msg_send![&*viewer_time,setAlignmentMode:objc2_quartz_core::kCAAlignmentLeft];
+            let _: () = msg_send![&*viewer_time,setFont:font_ref];
+            let _: () = msg_send![&*viewer_time,setHidden:true];
             playhead = Some(crate::playhead::Playhead::new(
                 &parent,
                 layers.playhead.clone(),
@@ -185,6 +193,7 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
     // out): set when it changes, cleared only while no other message
     // replaced it.
     let mut shown = None::<String>;
+    let mut studio_status = None;
     let mut measured = None::<(f32, Slot)>;
     cx.spawn(async move|cx| {
         loop {
@@ -193,7 +202,7 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                 let Some(viewer)=&v.viewer else{
                     link.set_paused(true); *current.borrow_mut()=None; binding=None;
                     // A closed project (Home stays in the window) leaves no playhead.
-                    unsafe {let _:()=msg_send![&*layers.timecode,setHidden:true];let _:()=msg_send![&*layers.playhead,setHidden:true];}
+                    unsafe {let _:()=msg_send![&*layers.timecode,setHidden:true];let _:()=msg_send![&*layers.playhead,setHidden:true];let _:()=msg_send![&*viewer_time,setHidden:true];}
                     return
                 };
                 let new_viewer = current.borrow().as_ref().map(|v|v.identity()) != Some(viewer.identity());
@@ -214,6 +223,11 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                 }
                 if let Some((target, interval)) = ticks.borrow_mut().take() { let _=viewer.display_tick(target, interval); }
                 let status=viewer.status();
+                let next_studio_status=(status.refine_progress,status.export_estimate.clone());
+                if studio_status.as_ref()!=Some(&next_studio_status) {
+                    studio_status=Some(next_studio_status);
+                    v.update_builtins(cx);
+                }
                 v.tell_presented(status.frame.as_ref());
                 // Run through the audio-start wait too: its vsync phase places the start.
                 link.set_paused(!status.wants_display);
@@ -224,8 +238,10 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                         crate::error_log::shared(cx).borrow_mut().push("Viewer",e);
                         format!("Viewer: {first} Details are in Window ▸ Error Log.")
                     }
-                }).or_else(||status.notice());
+                }).or_else(||failures_line(&status, v.published.as_deref())).or_else(||status.notice());
                 if line!=shown {
+                    // Layers newly left out (or back): Properties marks them.
+                    v.update_builtins(cx);
                     match &line {
                         Some(text)=>{v.message=text.clone();cx.notify();}
                         None if shown.as_ref()==Some(&v.message)=>{v.message.clear();cx.notify();}
@@ -235,7 +251,8 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                 }
                 v.tick_builtins(cx);
                 let scale=v.host.borrow().window.backingScaleFactor();
-                if let Some(clock)=status.clock { v.watch_run(&clock); v.sync_popout(&clock); }
+                if let Some(clock)=status.clock { v.watch_run(&clock); v.sync_popout(&clock); v.sync_studio_pane_clock(&clock); }
+                v.sync_studio_panes(cx);
                 if let Some(clock)=status.clock {
                     // Shuttling is a run too: the live timecode shows at every speed.
                     let playing=clock.state!=pm_protocol::clock::TransportState::Stopped;
@@ -263,13 +280,24 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                         // shows through unchanged.
                         let _:()=msg_send![&*layers.timecode,setBackgroundColor:&*crate::playhead::colour(colors.panel, 0.)];
                         let _:()=msg_send![&*layers.timecode,setHidden:geometry.is_none()||!playing];
+                        let viewer_bar=v.builtins.viewer_place;
+                        let text:*mut AnyObject=msg_send![&*layers.timecode,string];
+                        let _:()=msg_send![&*viewer_time,setString:text];
+                        let _:()=msg_send![&*viewer_time,setContentsScale:scale];
+                        let _:()=msg_send![&*viewer_time,setFontSize:host.tokens.typography.timecode as f64];
+                        let _:()=msg_send![&*viewer_time,setForegroundColor:&*cg!(colors.text)];
+                        let _:()=msg_send![&*viewer_time,setHidden:viewer_bar.is_none()||!playing];
                         let _:()=msg_send![&*layers.playhead,setHidden:geometry.is_none_or(|(r,_)|offset<column||offset>r.w as f64)];
+                        // Measured once per timecode size, never per tick.
+                        if measured.as_ref().is_none_or(|(size,_)|*size!=host.tokens.typography.timecode) {
+                            measured=Some((host.tokens.typography.timecode,timecode_slot(&host.tokens)));
+                        }
+                        let slot=&measured.as_ref().unwrap().1;
+                        if let Some(b)=viewer_bar {
+                            let top=b.y+(metrics.header-slot.h)/2.;
+                            let _:()=msg_send![&*viewer_time,setFrame:NSRect::new(NSPoint::new((b.x+metrics.inset) as f64,height-(top+slot.h) as f64),NSSize::new(slot.w as f64,slot.h as f64))];
+                        }
                         if let Some((r,y))=geometry {
-                            // Measured once per timecode size, never per tick.
-                            if measured.as_ref().is_none_or(|(size,_)|*size!=host.tokens.typography.timecode) {
-                                measured=Some((host.tokens.typography.timecode,timecode_slot(&host.tokens)));
-                            }
-                            let slot=&measured.as_ref().unwrap().1;
                             let top=r.y+(metrics.header-slot.h)/2.;
                             let _:()=msg_send![&*layers.timecode,setFrame:NSRect::new(NSPoint::new((r.x+metrics.inset+metrics.hit+metrics.gap) as f64,height-(top+slot.h) as f64),NSSize::new(slot.w as f64,slot.h as f64))];
                             let foot=bar.max(metrics.inset);
@@ -284,6 +312,38 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
             }).is_err(){break;}
         }
         drop(playhead);
-        unsafe {let _:()=msg_send![&*layers.timecode,removeFromSuperlayer];let _:()=msg_send![&*layers.playhead,removeFromSuperlayer];}
+        unsafe {let _:()=msg_send![&*layers.timecode,removeFromSuperlayer];let _:()=msg_send![&*layers.playhead,removeFromSuperlayer];let _:()=msg_send![&*viewer_time,removeFromSuperlayer];}
     }).detach();
+}
+
+/// The status line for layers a frame leaves out, by name, pointing at
+/// where the reason is (Properties shows each layer's own, in words).
+fn failures_line(
+    status: &pm_engine_service::ViewerStatus,
+    published: Option<&pm_kernel::Published>,
+) -> Option<String> {
+    let mut ids: Vec<&str> = vec![];
+    for f in &status.layer_failures {
+        if !ids.contains(&f.layer.as_str()) {
+            ids.push(&f.layer);
+        }
+    }
+    let first = *ids.first()?;
+    let name = published
+        .and_then(|p| {
+            let root = p.snapshot.root()?;
+            let at = pm_kernel::model::find_layer(root, first)?;
+            let layer = pm_kernel::model::layer_at(root, &at)?.to_value();
+            layer
+                .get("name")
+                .and_then(pm_model::Value::as_str)
+                .map(str::to_owned)
+        })
+        .filter(|n| !n.is_empty());
+    Some(match (ids.len(), name) {
+        (1, Some(name)) => format!("“{name}” isn’t drawn. Select it to see why in Properties."),
+        (1, None) => "1 layer isn’t drawn. Select it to see why in Properties.".into(),
+        (n, Some(name)) => format!("“{name}” and {} more aren’t drawn. Select one to see why in Properties.", n - 1),
+        (n, None) => format!("{n} layers aren’t drawn. Select one to see why in Properties."),
+    })
 }

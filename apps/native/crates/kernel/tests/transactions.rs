@@ -738,6 +738,82 @@ fn edit_cancel_reverts_and_restores_selection() {
     assert_eq!(p.store().selection().layers(), ["layer1"]);
 }
 
+fn mutate_begin(p: &mut Project, label: &str) -> u64 {
+    let ack = call(
+        p,
+        page(),
+        EditCall::MutateBegin {
+            label: label.into(),
+        },
+    );
+    match ack.reply {
+        Reply::Mutation(lease) => lease,
+        other => panic!("not a lease: {other:?}"),
+    }
+}
+
+fn mutate_finish(p: &mut Project, lease: u64) -> EditResult {
+    edit_result(&call(
+        p,
+        page(),
+        EditCall::MutateFinish {
+            lease,
+            ops: vec![],
+            label: None,
+        },
+    ))
+}
+
+/// A realm's structural edit is a lease: one begun inside another takes
+/// back only what was written since it began, and the outer one is still
+/// one step.
+#[test]
+fn a_realms_structural_edit_inside_another_has_its_own_rollback() {
+    let mut p = project();
+    let outer = mutate_begin(&mut p, "Outer");
+    call(&mut p, page(), transact(add_layer("a")));
+    let inner = mutate_begin(&mut p, "Inner");
+    call(&mut p, page(), transact(add_layer("b")));
+    let aborted = call(&mut p, page(), EditCall::MutateAbort { lease: inner });
+    assert!(matches!(aborted.reply, Reply::Bool(true)));
+    assert!(layer(&p, "b").is_none() && layer(&p, "a").is_some());
+    assert!(p.open_entry().is_some(), "the outer edit is still open");
+    // The aborted lease is spent; another realm cannot end this one's.
+    assert!(!mutate_finish(&mut p, inner).ok);
+    let foreign = call(&mut p, mcp(), EditCall::MutateAbort { lease: outer });
+    assert!(matches!(foreign.reply, Reply::Bool(false)));
+    call(&mut p, page(), transact(add_layer("c")));
+    assert!(mutate_finish(&mut p, outer).ok);
+    assert!(p.open_entry().is_none());
+    assert_eq!(entries(&p), 1, "one step");
+    call(&mut p, native(), HistoryCall::Undo);
+    assert!(layer(&p, "a").is_none() && layer(&p, "c").is_none());
+}
+
+/// An edit never finished or aborted (its realm lost the reply) goes with
+/// its writes when the edit around it ends; an edit whose entry was closed
+/// under it says so.
+#[test]
+fn a_structural_edit_left_open_or_closed_under_it_is_never_reported_done() {
+    let mut p = project();
+    let outer = mutate_begin(&mut p, "Outer");
+    call(&mut p, page(), transact(add_layer("a")));
+    mutate_begin(&mut p, "Lost");
+    call(&mut p, page(), transact(add_layer("b")));
+    assert!(mutate_finish(&mut p, outer).ok);
+    assert!(layer(&p, "a").is_some() && layer(&p, "b").is_none());
+    assert!(p.open_entry().is_none());
+
+    let closed = mutate_begin(&mut p, "Closed");
+    call(&mut p, page(), HistoryCall::Rollback);
+    let result = mutate_finish(&mut p, closed);
+    assert!(!result.ok);
+    assert_eq!(
+        result.message.as_deref(),
+        Some("This edit was closed before it finished; its last changes were not applied")
+    );
+}
+
 #[test]
 fn index_paths_rebase_by_id_and_cancel_preserves_foreign_insert() {
     let mut p = project();

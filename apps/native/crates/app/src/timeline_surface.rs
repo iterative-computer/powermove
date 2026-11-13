@@ -6,9 +6,9 @@ use gpui::{prelude::*, *};
 use pm_design::Tokens;
 use pm_kernel::{Caller, KernelHandle, Published, QueryMirror, SelectionCall};
 use pm_panel_timeline::{
-    Context as MenuContext, DragKind, DragSample, GraphDisplay, HostEffect, MarqueeSession,
-    Modifiers as Mods, Plan, PropertyFacts, RowId, Scrub, TimelineClient, TimelineMode,
-    TimelineModel,
+    Context as MenuContext, DragKind, DragSample, EditTool, GraphDisplay, HostEffect,
+    MarqueeSession, Modifiers as Mods, Plan, PropertyFacts, RowId, Scrub, TimelineClient,
+    TimelineMode, TimelineModel,
     footer::Part,
     frame,
     graph_render::{self, Graph},
@@ -235,6 +235,9 @@ pub struct TimelineSurface {
     /// time column of the frame last prepared.
     shown: (f64, f64, f64),
     fitted: bool,
+    /// The composition length last shown: when it changes while the view
+    /// shows all of it from 0, the view refits to the new length.
+    fit_duration: f64,
     gesture: Gesture,
     cursor: CursorStyle,
     /// A badge's tooltip shown after `motion.tooltip_delay` (text, local point).
@@ -304,6 +307,7 @@ impl TimelineSurface {
             view,
             shown: (view.pps, view.scroll_time, view.layer_column),
             fitted: false,
+            fit_duration: 0.,
             gesture: Gesture::Idle,
             cursor: CursorStyle::Arrow,
             tip: None,
@@ -467,6 +471,10 @@ impl TimelineSurface {
             self.model.mode == TimelineMode::Tracks,
             !self.model.track_snap_disabled,
         )
+    }
+    /// The edit tool a clip drag uses (View menu checkmarks).
+    pub fn edit_tool(&self) -> pm_panel_timeline::EditTool {
+        self.model.edit_tool
     }
     /// View ▸ Hide Shy Layers is on.
     pub fn hides_shy(&self) -> bool {
@@ -809,10 +817,27 @@ impl TimelineSurface {
         self.outline.set_scene(Some(built.scene));
         self.frame = None;
         self.clamp_scroll();
-        if !self.fitted && self.model.index.duration > 0. && self.bounds.size.width > px(0.) {
-            self.fitted = true;
+        let duration = self.model.index.duration;
+        if duration > 0. && self.bounds.size.width > px(0.) {
             let width = (f32::from(self.bounds.size.width) as f64 - self.view.layer_column).max(1.);
-            self.view.pps = (width / self.model.index.duration).clamp(PPS.0, PPS.1);
+            let fit = (width / duration).clamp(PPS.0, PPS.1);
+            // The view started at 0 and showed all of the old length.
+            let whole = |d: f64| {
+                d > 0. && self.view.scroll_time.abs() < 1e-9 && width / self.view.pps >= d * 0.99
+            };
+            if !self.fitted {
+                self.fitted = true;
+                self.view.pps = fit;
+            } else if self.fit_duration > 0.
+                && (self.fit_duration - duration).abs() > 1e-9
+                && whole(self.fit_duration)
+            {
+                // A shorter or longer composition: a view that showed the
+                // whole old length shows the whole new one (the ruler and bars
+                // refit); a view the user zoomed into or scrolled stays.
+                self.view.pps = fit;
+            }
+            self.fit_duration = duration;
         }
         self.changed(false, cx);
     }
@@ -1060,7 +1085,20 @@ impl TimelineSurface {
         match self.model.graph_display {
             GraphDisplay::DopeSheet => None,
             GraphDisplay::Graph => Some(Rect::new(x, ruler, w - x, body)),
-            GraphDisplay::Combined => Some(Rect::new(x, ruler + body / 2., w - x, body / 2.)),
+            GraphDisplay::Combined => {
+                // The lower half, from the first row edge there: the graph
+                // never cuts a strip or a row of keys in two.
+                let half = ruler + body / 2.;
+                let scroll = self.view.scroll_y;
+                let top = self
+                    .scene
+                    .as_ref()
+                    .and_then(|scene| scene.edge_from(half - ruler + scroll))
+                    .map(|edge| edge - scroll + ruler)
+                    .filter(|top| *top - half <= m.track_row as f64)
+                    .unwrap_or(half);
+                Some(Rect::new(x, top, w - x, (h - top).max(1.)))
+            }
         }
     }
     fn mods(modifiers: Modifiers) -> Mods {
@@ -1216,15 +1254,20 @@ impl TimelineSurface {
                 return;
             }
             let tracks = self.model.mode == TimelineMode::Tracks;
+            // A chosen edit tool works in both modes; in Tracks the
+            // modifiers reach the same edits with the Selection tool.
+            let tool = self.model.edit_tool;
             let spec = match edge {
+                _ if tool == EditTool::Slip => Spec::Slip,
+                _ if tool == EditTool::Slide => Spec::Slide,
                 Some(edge) => {
                     let edge = match edge {
                         pm_panel_timeline::render::Edge::In => Edge::In,
                         pm_panel_timeline::render::Edge::Out => Edge::Out,
                     };
-                    if tracks && mods.alt {
+                    if tool == EditTool::Ripple || tracks && mods.alt {
                         Spec::Ripple(edge)
-                    } else if tracks && mods.control {
+                    } else if tool == EditTool::Roll || tracks && mods.control {
                         Spec::Roll(edge)
                     } else {
                         Spec::Trim(edge)
@@ -2141,6 +2184,39 @@ fn drag_kind(model: &TimelineModel, spec: Spec, time: f64) -> Result<DragKind, S
             .map(|o| o.id.clone());
         Ok::<_, &str>((before, after))
     };
+    // In Layers mode every layer is its own row: the tools run the
+    // layer-level edits (all layer kinds; what overlaps stays), as the keys do.
+    let layered = model.mode == TimelineMode::Layers;
+    let edge_time = |id: &str, edge: Edge| {
+        model.index.layer(id).map(|l| match edge {
+            Edge::In => l.from,
+            Edge::Out => l.from + l.duration,
+        })
+    };
+    let timing_edge = |edge: Edge| match edge {
+        Edge::In => pm_kernel::commands::timing::TimeEdge::In,
+        Edge::Out => pm_kernel::commands::timing::TimeEdge::Out,
+    };
+    use pm_kernel::TimingCommand as Timing;
+    if layered && matches!(spec, Spec::Ripple(_) | Spec::Roll(_) | Spec::Slide) {
+        let id = primary()?;
+        return Ok(DragKind::Timing(match spec {
+            Spec::Ripple(edge) => Timing::RippleTrim {
+                layer_ids: vec![id.clone()],
+                edge: timing_edge(edge),
+                time: edge_time(&id, edge).ok_or("Unknown clip")?,
+            },
+            Spec::Roll(edge) => Timing::Roll {
+                layer_id: id.clone(),
+                edge: timing_edge(edge),
+                time: edge_time(&id, edge).ok_or("Unknown clip")?,
+            },
+            _ => Timing::Slide {
+                layer_id: id,
+                delta: 0.,
+            },
+        }));
+    }
     Ok(match spec {
         Spec::Layers => DragKind::Layers { ids },
         Spec::Duplicate => {
@@ -2247,7 +2323,7 @@ impl ModelPresenter for Presenter {
         }
     }
     fn layer_label(&self, layer: &pm_panel_timeline::Layer) -> Label {
-        Label::for_kind(&layer.kind)
+        Label::for_layer(&layer.kind, layer.definition.as_deref())
     }
     fn media(&self, layer: &pm_panel_timeline::Layer) -> Media {
         if layer
@@ -2420,7 +2496,11 @@ impl Render for TimelineSurface {
             .size_full()
             .cursor(self.cursor)
             .role(Role::ListBox)
-            .aria_label("Timeline tracks")
+            .aria_label(if region.is_some() && graph.is_none() {
+                format!("Timeline tracks. {}", graph_render::EMPTY)
+            } else {
+                "Timeline tracks".into()
+            })
             // Each clip is a selectable option VoiceOver and agents can find and
             // press (macOS: static text in a list, which AX walkers that skip
             // groups still report); a Press clicks its centre, the same path as
@@ -2500,7 +2580,16 @@ impl Render for TimelineSurface {
                                 if cull.skip(op) {
                                     continue;
                                 }
-                                match above {
+                                // The time grid and the markers' lines run
+                                // on through the graph: it reads the same time.
+                                let through = op.id.starts_with("grid:")
+                                    || op.id.starts_with("marker-guide:");
+                                match above.filter(|_| !through) {
+                                    // Wholly under the graph: not painted.
+                                    Some(mask)
+                                        if op.bounds.x >= column - 1.
+                                            && bounds.origin.y + px(op.bounds.y as f32)
+                                                >= mask.bottom() => {}
                                     Some(mask) if op.bounds.x >= column - 1. => window
                                         .with_content_mask(
                                             Some(ContentMask {
@@ -2550,6 +2639,11 @@ impl Render for TimelineSurface {
                         }
                         for op in graph.iter().flatten() {
                             paint(op, bounds.origin, &tokens, window, cx);
+                        }
+                        // A graph with no curve says how to get one.
+                        if let (Some(r), None) = (region, &graph) {
+                            let note = graph_render::empty_note(r, &tokens);
+                            paint(&note, bounds.origin, &tokens, window, cx);
                         }
                         // The bottom bar and the row thumb, over the tracks.
                         let started = crate::diag::enabled().then(std::time::Instant::now);
@@ -2710,7 +2804,13 @@ fn strip_rim(
             .corner_smoothing(smoothing)
     };
     let band = Bounds::new(area.origin, size(area.size.width, radius + width));
-    let masked = |bounds, quad: PaintQuad, window: &mut Window| {
+    let masked = |bounds: Bounds<Pixels>, quad: PaintQuad, window: &mut Window| {
+        // A band wholly outside what may be painted (a strip cut by the
+        // graph's top) paints nothing: an empty mask left a speck.
+        let seen = window.content_mask().bounds.intersect(&bounds);
+        if seen.size.width <= px(0.) || seen.size.height <= px(0.) {
+            return;
+        }
         window.with_content_mask(
             Some(ContentMask {
                 bounds,

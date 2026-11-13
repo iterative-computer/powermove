@@ -367,17 +367,21 @@ fn every_kit_component_renders_a_real_element(cx: &mut TestAppContext) {
                 .to_owned()
         })
         .collect();
-    assert_eq!(names.len(), 29);
+    assert_eq!(names.len(), 30);
     for (i, name) in names.iter().enumerate() {
         let primitive = match name.as_str() {
             "sheet-anchor" | "popover-anchor" | "colour-popover" => "anchored",
-            "number-field" | "text-field" => "input",
+            "number-field" | "text-field" | "slider" => "input",
             _ => "div",
         };
         let mut props = json!({"id":name,"data-pm-component":name,"label":name,"style":{"height":16,"width":20}});
         match name.as_str() {
             "number-field" => props["control"] = json!("number"),
             "text-field" => props["control"] = json!("text"),
+            "slider" => {
+                props["control"] = json!("slider");
+                props["value"] = json!(0.5);
+            }
             "progress-row" => props["aria-valuenow"] = json!(0.5),
             "colour-well" => props["value"] = json!("#ff0000"),
             "viewer-gizmo" => {
@@ -809,8 +813,38 @@ fn a_disabled_field_still_shows_its_value(cx: &mut TestAppContext) {
         json!({"id":"live","data-pm-component":"text-field","control":"text","label":"Live","value":"Editable"}),
         &[],
     ));
+    // A locked colour: its well and its hex in one value slot.
+    ops.extend(node_ops(5, 1, "div", json!({"data-pm-slot":"value"}), &[]));
+    ops.extend(node_ops(
+        6,
+        5,
+        "button",
+        json!({"id":"fill","data-pm-component":"colour-well","control":"colour","label":"Fill","value":"#6A6A70","disabled":true}),
+        &[],
+    ));
+    ops.extend(node_ops(
+        7,
+        5,
+        "input",
+        json!({"id":"hex","data-pm-component":"text-field","control":"text","label":"Fill Hex","value":"#6A6A70","disabled":true,"style":{"background":{"token":"colors.field"}}}),
+        &[],
+    ));
     let (view, vcx) = window(cx, &rig, synthetic(&rig, ops), Default::default());
     vcx.run_until_parked();
+    let hex = view.read_with(&vcx, |v, _| {
+        v.prepared.nodes.get(&7).map(|n| {
+            (
+                n.bare,
+                n.style.background.is_some(),
+                v.disabled_field_text(n),
+            )
+        })
+    });
+    assert_eq!(
+        hex,
+        Some((true, false, Some("#6A6A70".into()))),
+        "a locked hex is its value in the colour's well, with no well of its own"
+    );
     let shown = view.read_with(&vcx, |v, _| {
         [2, 3, 4].map(|id| {
             v.prepared
@@ -823,6 +857,15 @@ fn a_disabled_field_still_shows_its_value(cx: &mut TestAppContext) {
     assert_eq!(shown[1].as_deref(), Some("2.5 px"));
     // An enabled field draws through its editor instead.
     assert_eq!(shown[2], None);
+    // Once: the number decoration leaves a disabled field's value to it (a
+    // locked layer's wells read "100 px100 px").
+    let decorated = view.read_with(&vcx, |v, _| {
+        v.prepared
+            .nodes
+            .get(&3)
+            .map(|n| (n.number.is_some(), v.draws_number(n)))
+    });
+    assert_eq!(decorated, Some((true, false)));
 }
 
 /// The export sheet's footer laid out with `offline` unreadable originals in
@@ -896,4 +939,115 @@ fn a_long_export_notice_wraps_and_never_squeezes_the_buttons(cx: &mut TestAppCon
         "notice {summary:?}, buttons {cancel:?} {start:?}, sheet {sheet:?}"
     );
     assert!(summary.size.height > cancel.size.height, "the notice wraps");
+}
+
+/// Full Keyboard Access: Tab reaches kit controls in order; `tabIndex` -1
+/// (a segmented control's other segments) stays out of the Tab order.
+#[gpui::test]
+fn tab_reaches_kit_controls_and_skips_roving_segments(cx: &mut TestAppContext) {
+    let rig = rig("viewer", 1);
+    let _ = publication(&rig);
+    let mut ops = node_ops(1, 0, "div", json!({"style":{"width":200,"height":40}}), &[]);
+    for (i, (name, tab)) in [("first", 0), ("roving", -1), ("last", 0)].iter().enumerate() {
+        ops.extend(node_ops(
+            2 + i as u64,
+            1,
+            "button",
+            json!({"id":name,"data-pm-component":"toolbar-item","label":name,"tabIndex":tab,"style":{"width":20,"height":16}}),
+            &["click"],
+        ));
+    }
+    let (view, mut vcx) = window(cx, &rig, synthetic(&rig, ops), Default::default());
+    vcx.run_until_parked();
+    let mut order = vec![];
+    for _ in 0..2 {
+        vcx.update(|window, cx| window.focus_next(cx));
+        vcx.run_until_parked();
+        let focused = view.update_in(&mut vcx, |v, window, _| v.focused_node(window));
+        order.push(focused);
+    }
+    assert_eq!(order, [Some(2), Some(4)], "Tab skips the -1 segment");
+}
+
+/// A panel in a tab group: its tab names it, so its header leaves out its
+/// own title (the duplicate "Project" beside the tabs) and keeps its actions.
+#[gpui::test]
+fn a_tabbed_panel_header_leaves_out_its_title(cx: &mut TestAppContext) {
+    let rig = rig("viewer", 1);
+    let _ = publication(&rig);
+    let mut ops = node_ops(
+        1,
+        0,
+        "div",
+        json!({"style":{"width":400,"height":200}}),
+        &[],
+    );
+    ops.extend(node_ops(2, 1, "div", json!({"data-pm-slot":"header"}), &[]));
+    // As a panel writes it: a styled text holding its words.
+    ops.extend(node_ops(
+        3,
+        2,
+        "text",
+        json!({"style":{"fontSize":{"token":"typography.title"}}}),
+        &[],
+    ));
+    ops.extend(node_ops(4, 3, "text", json!({}), &[]));
+    ops.push(Op::SetText {
+        id: 4,
+        text: "Project".into(),
+    });
+    ops.extend(node_ops(
+        5,
+        2,
+        "button",
+        json!({"id":"search","data-pm-component":"toolbar-item","label":"Search Media"}),
+        &["click"],
+    ));
+    let (view, vcx) = window(cx, &rig, synthetic(&rig, ops), Default::default());
+    vcx.run_until_parked();
+    let (header, title) = view.read_with(&vcx, |v, _| {
+        let header = v.prepared.header;
+        (header, header.and_then(|h| v.header_title(h)))
+    });
+    assert_eq!(header, Some(2));
+    assert_eq!(title, Some(3), "the title is its first text, not a control");
+}
+
+/// A tooltip says what is not in view: a row titled with the name it
+/// already shows has none; an icon-only control keeps its title.
+#[gpui::test]
+fn a_tooltip_never_repeats_the_text_in_view(cx: &mut TestAppContext) {
+    let rig = rig("viewer", 1);
+    let _ = publication(&rig);
+    let mut ops = node_ops(
+        1,
+        0,
+        "div",
+        json!({"style":{"width":400,"height":200}}),
+        &[],
+    );
+    ops.extend(node_ops(
+        2,
+        1,
+        "div",
+        json!({"title":"Gaussian Blur","data-pm-component":"list-item","label":"Gaussian Blur"}),
+        &["click"],
+    ));
+    ops.extend(node_ops(3, 2, "text", json!({}), &[]));
+    ops.push(Op::SetText {
+        id: 3,
+        text: "Gaussian Blur".into(),
+    });
+    ops.extend(node_ops(
+        4,
+        1,
+        "button",
+        json!({"title":"Reset Effect","data-pm-component":"toolbar-item","label":"Reset Gaussian Blur","metadata":{"symbol":"arrow.counterclockwise"}}),
+        &["click"],
+    ));
+    let (view, vcx) = window(cx, &rig, synthetic(&rig, ops), Default::default());
+    vcx.run_until_parked();
+    let shown = view.read_with(&vcx, |v, _| (v.shown_text(2, 3), v.shown_text(4, 3)));
+    assert_eq!(shown.0, "Gaussian Blur", "the title is in view: no tooltip");
+    assert_eq!(shown.1, "", "an icon says nothing: its title stays");
 }

@@ -1070,3 +1070,96 @@ fn unwindowed_jobs_pin_enabled_local_and_store_effects() {
             .definitions
     );
 }
+
+/// A job of a project no window has open stops waiting for its extensions
+/// when it is cancelled (Background Tasks, a stopped capture), at once.
+#[test]
+fn a_cancelled_job_without_a_window_stops_waiting_for_its_extensions() {
+    let f = Fixture::new();
+    let folder = f.host.profile.join("extensions/synthetic-slow");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(
+        folder.join("manifest.json"),
+        json!({"id":"synthetic-slow","name":"Slow","version":"1.0.0","apiVersion":3}).to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        folder.join("index.ts"),
+        "export default async function(){await new Promise(r=>setTimeout(r,8000))}",
+    )
+    .unwrap();
+    let jobs =
+        crate::mcp_services::connect_engine(&f.tools, Default::default(), Default::default())
+            .unwrap();
+    let published = f.host.kernel.published("test").unwrap();
+    let started = std::time::Instant::now();
+    let cancelled = || started.elapsed() > std::time::Duration::from_millis(400);
+    let answer = jobs.resources(&published, true, &cancelled);
+    assert!(
+        answer.is_err(),
+        "a cancelled wait answers with no definitions"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(4),
+        "the cancel was honoured after {:?}",
+        started.elapsed()
+    );
+}
+/// The window's commands are served beside the pinned catalog (which keeps
+/// its identity): list_commands and run_command reach the attached project's
+/// window, and run_command counts as one of the run's edits.
+#[test]
+fn run_command_and_list_commands_reach_the_projects_window() {
+    type Calls = std::sync::Mutex<Vec<(String, Option<String>, Value)>>;
+    struct Recorder(Calls);
+    impl pm_mcp::automation::SurfaceHook for Recorder {
+        fn call(&self, tool: &str, project: Option<&str>, args: &Value) -> pm_mcp::Result<Value> {
+            self.0
+                .lock()
+                .unwrap()
+                .push((tool.into(), project.map(str::to_owned), args.clone()));
+            Ok(json!({"ran": true}))
+        }
+    }
+    let f = Fixture::new();
+    let recorder = Arc::new(Recorder(Default::default()));
+    f.tools.automation.lock().unwrap().surfaces = Some(recorder.clone());
+    let mut c = f.connection();
+    let listed: Vec<String> = pm_mcp::transport::ToolConnection::list(&mut c)
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|t| t["name"].as_str().map(str::to_owned))
+        .collect();
+    assert!(listed.contains(&"run_command".into()) && listed.contains(&"list_commands".into()));
+    assert!(
+        pm_mcp::catalog::tools()
+            .iter()
+            .all(|t| t["name"] != "run_command"),
+        "the pinned catalog is unchanged"
+    );
+    assert!(pm_mcp::catalog::names().contains(&"run_command".into()));
+    start(&mut c);
+    c.dispatch("list_commands", &json!({"query": "ripple"}))
+        .unwrap();
+    c.dispatch(
+        "run_command",
+        &json!({"command": "slipLayers", "args": [-1]}),
+    )
+    .unwrap();
+    assert!(
+        c.dispatch("run_command", &json!({})).is_err(),
+        "a command is required"
+    );
+    assert!(
+        c.dispatch("run_command", &json!({"command": "play", "extra": 1}))
+            .is_err()
+    );
+    let calls = recorder.0.lock().unwrap();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].0, "list_commands");
+    assert_eq!(calls[1].0, "run_command");
+    assert_eq!(calls[1].1.as_deref(), Some("test"), "the session's project");
+    assert_eq!(calls[1].2["args"], json!([-1]));
+}

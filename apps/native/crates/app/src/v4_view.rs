@@ -380,6 +380,19 @@ impl SurfaceView {
                 .flatten();
             if let Some(kind) = kind {
                 self.mount_control(kind, view, node, lease, window, cx);
+                // A native control is a Tab stop too: the panel draws its
+                // focus ring and forwards its keys (Full Keyboard Access).
+                // A search field and a segmented control take no forwarded
+                // keys (`NativeControl::key`), so Tab passes them.
+                if !view.disabled
+                    && view.tab_index.is_none_or(|t| t >= 0)
+                    && !matches!(
+                        kind,
+                        crate::v4_control::Kind::Search | crate::v4_control::Kind::Segmented
+                    )
+                {
+                    self.focus.entry(id).or_insert_with(|| cx.focus_handle());
+                }
                 continue;
             }
             if !view.disabled
@@ -462,15 +475,10 @@ impl SurfaceView {
                 control.update(cx, |v, cx| v.retitle(label, cx));
             }
             let options = match &segmented {
-                Some((options, _, _)) => options.as_slice(),
-                None => node
-                    .props
-                    .get("options")
-                    .and_then(Value::as_array)
-                    .map(Vec::as_slice)
-                    .unwrap_or_default(),
+                Some((options, _, _)) => options.clone(),
+                None => control_options(kind, node),
             };
-            control.update(cx, |v, cx| v.update(&value, options, view.disabled, cx));
+            control.update(cx, |v, cx| v.update(&value, &options, view.disabled, cx));
             // A filter the panel's host applied shows even mid-typing.
             if let Some(revision) = node
                 .props
@@ -504,12 +512,7 @@ impl SurfaceView {
         );
         let options = match segmented {
             Some((options, _, _)) => options,
-            None => node
-                .props
-                .get("options")
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default(),
+            None => control_options(kind, node),
         };
         let button_role = node
             .props
@@ -544,6 +547,7 @@ impl SurfaceView {
                     // secondary ink, for an option bar under a composer.
                     inline: matches!(crate::v4_compile::variant(node), Some("inline" | "quiet"))
                         && matches!(kind, crate::v4_control::Kind::Popup),
+                    well: view.well,
                     quiet: crate::v4_compile::variant(node) == Some("quiet"),
                     tint: None,
                     symbol: None,
@@ -621,6 +625,15 @@ impl SurfaceView {
         }
         self.controls.insert(id, control);
     }
+    /// The ink a panel gave a field's value (the accent on a value an
+    /// expression drives).
+    fn ink(view: &NodeView) -> Option<u32> {
+        view.style.text.color.map(|c| {
+            let c = hsla_to_rgba(c);
+            let byte = |v: f32| (v.clamp(0., 1.) * 255.).round() as u32;
+            (byte(c.red) << 16) | (byte(c.green) << 8) | byte(c.blue)
+        })
+    }
     fn mount_field(
         &mut self,
         view: &NodeView,
@@ -654,8 +667,10 @@ impl SurfaceView {
                 .get("metadata")
                 .and_then(|m| m.get("hostValue"))
                 .and_then(Value::as_u64);
+            let ink = Self::ink(view);
             field.update(cx, |f, cx| {
                 f.set_tokens(tokens);
+                f.set_ink(ink);
                 f.set_placeholder(&placeholder);
                 f.set_unit(unit);
                 match host {
@@ -687,15 +702,28 @@ impl SurfaceView {
         let tokens = self.table.tokens.clone();
         let field = cx.new(|cx| {
             let mut field = TextField::new(kind, label, &value, tokens, window, cx);
-            // A composer's panel draws the surface it is written on.
-            field.set_bare(kind == TextKind::Composer);
+            // A composer's panel draws the surface it is written on; a
+            // colour's hex stands in its row's well.
+            field.set_bare(kind == TextKind::Composer || view.bare);
+            if view.code {
+                field.set_code(pm_design::MONO_FONT);
+            }
+            field.set_ink(Self::ink(view));
             field.set_placeholder(&placeholder);
             field.set_unit(unit);
             field
         });
-        self.subscriptions.entry(id).or_default().push(cx.subscribe(
+        self.subscriptions.entry(id).or_default().push(cx.subscribe_in(
             &field,
-            move |this, _, event, cx| {
+            window,
+            move |this, _, event, window, cx| {
+                // A multiline field hands Tab on: focus moves to the next
+                // (or previous) control, as from any other field.
+                match event {
+                    TextEvent::Key("tab") => return window.focus_next(cx),
+                    TextEvent::Key("backtab") => return window.focus_prev(cx),
+                    _ => {}
+                }
                 if this.prepared.node(id).and_then(|n| n.binding.clone()) != lease {
                     return;
                 }
@@ -888,6 +916,20 @@ impl SurfaceView {
         })
         .detach();
     }
+    /// Development builds: the panel's longest scroller put `points` down
+    /// its content, for captures of what lies below the fold.
+    #[cfg(debug_assertions)]
+    pub fn review_scroll_to(&mut self, points: f32, cx: &mut Context<Self>) {
+        if let Some(scroll) = self
+            .scrolls
+            .values()
+            .max_by(|a, b| f32::from(a.max_offset().y).total_cmp(&f32::from(b.max_offset().y)))
+        {
+            let y = points.clamp(0., f32::from(scroll.max_offset().y));
+            scroll.set_offset(point(px(0.), px(-y)));
+            cx.notify();
+        }
+    }
     #[cfg(test)]
     pub fn click_semantic(&mut self, semantic: &str, cx: &mut Context<Self>) {
         let id = self.prepared.semantics[semantic];
@@ -926,6 +968,17 @@ impl SurfaceView {
     }
     pub fn has_header(&self) -> bool {
         self.prepared.header.is_some()
+    }
+    /// Development builds: every scroll region of the view moved down by
+    /// `by` points (`review/scroll`).
+    #[cfg(debug_assertions)]
+    pub fn review_scroll_by(&mut self, by: f32, cx: &mut Context<Self>) {
+        for scroll in self.scrolls.values() {
+            let offset = scroll.offset();
+            let most = scroll.max_offset().y;
+            scroll.set_offset(point(offset.x, (offset.y - px(by)).clamp(-most, px(0.))));
+        }
+        cx.notify();
     }
     pub fn scroll_semantic(&mut self, semantic: &str, cx: &mut Context<Self>) {
         if let Some(id) = self.prepared.semantics.get(semantic)
@@ -1454,7 +1507,18 @@ impl SurfaceView {
             if node.style.flex_grow.is_some_and(|g| g > 0.) && !control.read(cx).stretches() {
                 control.update(cx, |c, _| c.stretch());
             }
-            let slot = if control.read(cx).stretches() {
+            let t = &self.table.tokens;
+            let slot = if node.well && control.read(cx).is_popup() {
+                // A pop-up in a row: the real control, with no bezel, on the
+                // well every other value of the row stands in.
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .h(px(t.metrics.field))
+                    .rounded(px(t.metrics.inner_radius))
+                    .bg(crate::v4_compile::well(t))
+                    .overflow_hidden()
+            } else if control.read(cx).stretches() {
                 // A segmented control its panel lets grow fills its row.
                 div().w_full()
             } else if control.read(cx).is_search() {
@@ -1469,8 +1533,45 @@ impl SurfaceView {
             } else {
                 div().flex_none()
             };
+            let mut slot = slot.id(("v4-control", id));
+            if let Some(focus) = self.focus.get(&id) {
+                let t = &self.table.tokens;
+                let (ring, color, radius) = (
+                    px(t.metrics.border * 2.),
+                    rgb(t.colors.focus),
+                    px(t.metrics.control_radius),
+                );
+                let tab = node.tab_index.unwrap_or(0);
+                let handle = &focus.clone().tab_stop(tab >= 0).tab_index(tab.max(0));
+                let control = control.clone();
+                slot = slot
+                    .track_focus(handle)
+                    .tab_index(tab.max(0))
+                    .rounded(radius)
+                    .focus_visible_style(move |s| s.ring(ring).ring_color(color))
+                    .on_key_down(move |event: &KeyDownEvent, _, cx| {
+                        let m = &event.keystroke.modifiers;
+                        if m.platform || m.control || m.alt {
+                            return;
+                        }
+                        if control.read(cx).key(event.keystroke.key.as_str()) {
+                            cx.stop_propagation();
+                        }
+                    });
+            }
+            // AppKit sets a bezel-less pop-up's title a little further in
+            // than a field's value: bring it onto the wells' inset.
+            let child = if node.well && control.read(cx).is_popup() {
+                div()
+                    .w_full()
+                    .ml(px(-t.space.hair))
+                    .child(control.clone())
+                    .into_any_element()
+            } else {
+                control.clone().into_any_element()
+            };
             return slot
-                .child(control.clone())
+                .child(child)
                 .children(self.probe(id))
                 .into_any_element();
         }
@@ -1550,9 +1651,14 @@ impl SurfaceView {
         if let Some(focus) = self.focus.get(&id) {
             let t = &self.table.tokens;
             let (ring, color) = (px(t.metrics.border * 2.), rgb(t.colors.focus));
+            // A tracked handle carries its own tab settings (the element's
+            // are ignored): `tabIndex` -1 stays focusable but out of the Tab
+            // order, as on the web (a segmented control's other segments).
+            let tab = node.tab_index.unwrap_or(0);
+            let focus = &focus.clone().tab_stop(tab >= 0).tab_index(tab.max(0));
             element = element
                 .track_focus(focus)
-                .tab_index(node.tab_index.unwrap_or(0))
+                .tab_index(tab.max(0))
                 .focus_visible_style(move |s| s.ring(ring).ring_color(color));
         }
         element = self.interactive(element, node, cx);
@@ -1708,6 +1814,12 @@ impl SurfaceView {
             )
             .into_any_element()
     }
+    /// Whether a node's number is drawn with it (scrub values and wells with
+    /// no editor). A disabled field draws its value once, dimmed, through
+    /// [`Self::disabled_field_text`], so not here too.
+    pub(crate) fn draws_number(&self, node: &NodeView) -> bool {
+        node.number.is_some() && self.disabled_field_text(node).is_none()
+    }
     /// What a disabled text or number field shows: its value as the editor
     /// would (number precision, then the unit).
     pub(crate) fn disabled_field_text(&self, node: &NodeView) -> Option<String> {
@@ -1837,6 +1949,9 @@ impl SurfaceView {
             if let Some(expanded) = ax.expanded {
                 element = element.aria_expanded(expanded);
             }
+            if let Some(toggled) = ax.toggled {
+                element = element.aria_toggled(toggled);
+            }
         }
         if let Some(semantic) = &node.semantic {
             element =
@@ -1944,8 +2059,31 @@ impl SurfaceView {
             );
         }
         // One hover handler: the control's wash (a spring, never a snap) and
-        // the panel's own pointer events.
-        let wash = clickable;
+        // the panel's own pointer events. Only a control washes: a container
+        // that listens to clicks to keep them from its list (a row of
+        // Effect Controls) is not one.
+        // A selectable item (a media row is a `cell` with `aria-selected`)
+        // or a control by role washes; a plain container does not.
+        let props = self.publication.surface.node(id).map(|n| &n.props);
+        let control_role = props.is_some_and(|p| {
+            p.contains_key("aria-selected")
+                || p.get("role").and_then(Value::as_str).is_some_and(|r| {
+                    matches!(
+                        r,
+                        "button"
+                            | "link"
+                            | "tab"
+                            | "option"
+                            | "menuitem"
+                            | "cell"
+                            | "gridcell"
+                            | "row"
+                            | "listitem"
+                            | "treeitem"
+                    )
+                })
+        });
+        let wash = clickable && (node.component.is_some() || control_role);
         if wash || events.hover {
             element = element.on_hover(cx.listener(move |v, hovered: &bool, _, cx| {
                 if wash {
@@ -1987,13 +2125,29 @@ impl SurfaceView {
                 v.pointer(id, "wheel", detail, cx);
             }));
         }
-        if node.parent == Some(0) && self.prepared.has_keydown {
+        // Keys reach the panel's root and its header slot's root: the shell
+        // draws a header slot (the viewer's bar) apart from the body, so the
+        // body's root isn't an ancestor of the controls there.
+        let slot_root = self
+            .publication
+            .surface
+            .nodes()
+            .get(&id)
+            .is_some_and(|n| n.props.get("data-pm-slot").is_some());
+        if (node.parent == Some(0) || slot_root) && self.prepared.has_keydown {
             element =
                 element.on_key_down(cx.listener(move |v, event: &KeyDownEvent, window, cx| {
                     v.key_down(id, event, window, cx);
                 }));
         }
-        if let Some(title) = node.title.clone() {
+        // A tooltip says what is not already in view: one that repeats the
+        // text the element shows (an effect's name, a row's label) only
+        // covers its neighbours.
+        if let Some(title) = node
+            .title
+            .clone()
+            .filter(|title| title.trim() != self.shown_text(node.id, 3).trim())
+        {
             let tokens = self.table.tokens.clone();
             element = element.tooltip(move |_, cx| {
                 let (title, tokens) = (title.clone(), tokens.clone());
@@ -2001,6 +2155,14 @@ impl SurfaceView {
             });
         }
         element
+    }
+    /// The node holding keyboard focus (tests).
+    #[cfg(test)]
+    pub(crate) fn focused_node(&self, window: &Window) -> Option<Id> {
+        self.focus
+            .iter()
+            .find(|(_, h)| h.is_focused(window))
+            .map(|(id, _)| *id)
     }
     fn key_down(
         &mut self,
@@ -2078,14 +2240,25 @@ impl SurfaceView {
                     window,
                 ));
             }
+            // The chip inside its well: the colour under a keyline drawn
+            // inside its edge, so white reads on a light well and black on a
+            // dark one.
             Kit::Swatch { color, keyline } => {
-                element = element
-                    .w(px(t.metrics.field))
-                    .border(px(t.metrics.border))
-                    .border_color(rgb(*keyline));
+                let side = px(t.metrics.field - 2. * t.space.xs);
+                let mut chip = div()
+                    .size(side)
+                    .rounded(px(t.radius.xs))
+                    .shadow(vec![BoxShadow {
+                        color: pm_shell::kit::ink(*keyline, 1.).into(),
+                        offset: point(px(0.), px(0.)),
+                        blur_radius: px(0.),
+                        spread_radius: px(t.metrics.border),
+                        inset: true,
+                    }]);
                 if let Some(color) = color {
-                    element = element.bg(rgb(*color));
+                    chip = chip.bg(rgb(*color));
                 }
+                element = element.child(chip);
             }
             Kit::Progress(value) => {
                 let track = div()
@@ -2187,7 +2360,7 @@ impl SurfaceView {
         if let Some(text) = &node.text {
             element = element.child(text.clone());
         }
-        if let Some(number) = node.number {
+        if let Some(number) = node.number.filter(|_| self.draws_number(node)) {
             let shown = self
                 .scrub_shown
                 .filter(|(id, _)| *id == node.id)
@@ -2217,9 +2390,14 @@ impl SurfaceView {
             .parent
             .and_then(|p| self.prepared.node(p))
             .is_some_and(|p| p.style.flex_direction == Some(FlexDirection::Row));
+        // A field given a width keeps it: it has no title to be sized by,
+        // so in a row as wide as its content (a form row's control) it would
+        // otherwise be its padding wide.
+        let own = node.style.size.width.filter(|_| in_row);
         let mut wrapper = div()
             .id(("field", id))
-            .when(in_row, |d| d.flex_1())
+            .when_some(own, |d, width| d.flex_none().w(width))
+            .when(in_row && own.is_none(), |d| d.flex_1())
             .when(!in_row, |d| d.flex_none().w_full())
             .min_w(px(0.))
             .child(field.clone())
@@ -2234,6 +2412,7 @@ impl SurfaceView {
             }
         }
         if let Some(focus) = self.focus.get(&id) {
+            let focus = &focus.clone().tab_stop(true).tab_index(0);
             wrapper = wrapper.track_focus(focus).tab_index(0);
         }
         if node.number.is_some() {
@@ -2328,14 +2507,26 @@ struct Tooltip {
 impl Render for Tooltip {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         let t = &self.tokens;
+        // Line 1 names the thing (with its shortcut); an optional line 2,
+        // after a newline, says what it does (HIG help tags), in secondary.
+        let (name, help) = match self.title.split_once('\n') {
+            Some((name, help)) => (SharedString::from(name.to_owned()), Some(help.to_owned())),
+            None => (self.title.clone(), None),
+        };
         div()
+            .flex()
+            .flex_col()
             .px(px(t.metrics.gap))
             .py(px(t.metrics.inner_radius))
             .bg(rgb(t.colors.floating))
             .rounded(px(t.metrics.inner_radius))
             .text_size(px(t.typography.minimum))
             .text_color(rgb(t.colors.text))
-            .child(self.title.clone())
+            .max_w(px(t.metrics.value_column * 2.))
+            .child(name)
+            .when_some(help, |d, help| {
+                d.child(div().text_color(rgb(t.colors.secondary)).child(help))
+            })
     }
 }
 /// What to announce: statuses that appeared or changed since the last frame,
@@ -2382,6 +2573,52 @@ fn segments(surface: &pm_surface::Surface, node: &pm_surface::Node) -> (Vec<Valu
     }
     (options, selected, ids)
 }
+/// A pop-up's rows, with the checkmarks its kit metadata carries (the
+/// frozen option shape has only `v`, `label` and `disabled`).
+fn native_options(node: &pm_surface::Node) -> Vec<Value> {
+    let mut options = node
+        .props
+        .get("options")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let menu = node
+        .props
+        .get("metadata")
+        .and_then(|m| m.get("pmKit"))
+        .and_then(|m| m.get("menu"))
+        .and_then(Value::as_array);
+    if let Some(menu) = menu {
+        for option in options.iter_mut().filter(|o| o.is_object()) {
+            let row = menu
+                .iter()
+                .find(|m| m.get("v").is_some() && m.get("v") == option.get("v"));
+            // A row's checkmark and its second line (the menu item subtitle).
+            for key in ["checked", "detail"] {
+                if let (Some(value), Some(o)) =
+                    (row.and_then(|m| m.get(key)).cloned(), option.as_object_mut())
+                {
+                    o.insert(key.into(), value);
+                }
+            }
+        }
+    }
+    options
+}
+/// A native control's rows: a pop-up's options, or a slider's one range.
+fn control_options(kind: crate::v4_control::Kind, node: &pm_surface::Node) -> Vec<Value> {
+    if !matches!(kind, crate::v4_control::Kind::Slider) {
+        return native_options(node);
+    }
+    let n = |k: &str| node.props.get(k).and_then(Value::as_f64);
+    let log = node
+        .props
+        .get("metadata")
+        .and_then(|m| m.get("pmKit"))
+        .and_then(|m| m.get("log"))
+        == Some(&Value::Bool(true));
+    vec![json!({"min":n("min").unwrap_or(0.),"max":n("max").unwrap_or(1.),"step":n("step").unwrap_or(0.),"log":log})]
+}
 fn control_kind(panel: &str, node: &pm_surface::Node) -> Option<crate::v4_control::Kind> {
     use crate::v4_control::Kind;
     match Component::of(node) {
@@ -2397,6 +2634,7 @@ fn control_kind(panel: &str, node: &pm_surface::Node) -> Option<crate::v4_contro
         {
             Some(Kind::Search)
         }
+        Some(Component::Slider) => Some(Kind::Slider),
         Some(Component::ToolbarItem)
             if panel == "export"
                 && node
@@ -2438,18 +2676,75 @@ fn value_text(value: &Value) -> String {
 
 pub struct HeaderView {
     view: Entity<SurfaceView>,
+    /// In a tab group: the tab names the panel, so the header's own title
+    /// (its first text) is left out and only its actions stay.
+    tabbed: bool,
     _observe: Subscription,
 }
 impl HeaderView {
     pub fn new(view: Entity<SurfaceView>, cx: &mut Context<Self>) -> Self {
         let _observe = cx.observe(&view, |_, _, cx| cx.notify());
-        Self { view, _observe }
+        Self {
+            view,
+            tabbed: false,
+            _observe,
+        }
+    }
+    pub fn set_tabbed(&mut self, tabbed: bool, cx: &mut Context<Self>) {
+        if self.tabbed != tabbed {
+            self.tabbed = tabbed;
+            cx.notify();
+        }
+    }
+}
+impl SurfaceView {
+    /// The words a node shows: its own text and its descendants' (to
+    /// `depth` levels), in order, without controls' values.
+    pub(crate) fn shown_text(&self, id: Id, depth: usize) -> String {
+        let Some(node) = self.prepared.node(id) else {
+            return String::new();
+        };
+        let mut words: Vec<String> = node.text.iter().map(|t| t.to_string()).collect();
+        if depth > 0 {
+            for child in &node.children {
+                let text = self.shown_text(*child, depth - 1);
+                if !text.is_empty() {
+                    words.push(text);
+                }
+            }
+        }
+        words.join(" ")
+    }
+    /// A header's title: the header itself when it is only its title
+    /// (Effects), else its first child that is text (words of its own, or
+    /// only words inside) and not a control.
+    pub(crate) fn header_title(&self, header: Id) -> Option<Id> {
+        let words = |n: &NodeView| {
+            n.text.is_some()
+                || (!n.children.is_empty()
+                    && n.children
+                        .iter()
+                        .all(|c| self.prepared.node(*c).is_some_and(|k| k.is_plain_text)))
+        };
+        let node = self.prepared.node(header)?;
+        if node.component.is_none() && words(node) {
+            return Some(header);
+        }
+        node.children.iter().copied().find(|c| {
+            self.prepared
+                .node(*c)
+                .is_some_and(|n| n.component.is_none() && words(n))
+        })
     }
 }
 impl Render for HeaderView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let tabbed = self.tabbed;
         self.view.update(cx, |v, cx| match v.prepared.header {
-            Some(id) => v.element(id, window, cx, None),
+            Some(id) => {
+                let skip = if tabbed { v.header_title(id) } else { None };
+                v.element(id, window, cx, skip)
+            }
             None => div().into_any_element(),
         })
     }

@@ -438,6 +438,22 @@ pub struct CodecInfo {
     pub sample_aspect: (i32, i32),
 }
 
+impl CodecInfo {
+    /// The samples are R′G′B′ (or palette or XYZ colour), not Y′CbCr: the
+    /// file has no matrix or range of its own to read them with.
+    pub fn is_rgb(&self) -> bool {
+        // H.273 matrix code 0: identity (GBR).
+        self.color_space == 0 || rgb_pixel_format(&self.pix_fmt) || self.pix_fmt.starts_with("xyz")
+    }
+}
+
+/// Whether FFmpeg's pixel format `name` holds R′G′B′ samples (packed or
+/// planar, any component order, with or without alpha or padding) or
+/// palette entries: samples with no Y′CbCr matrix or range.
+pub fn rgb_pixel_format(name: &str) -> bool {
+    name.contains("rgb") || name.contains("bgr") || name.starts_with("gbr") || name == "pal8"
+}
+
 impl Input {
     pub fn codec_info(&self, i: usize) -> CodecInfo {
         unsafe {

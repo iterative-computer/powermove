@@ -74,6 +74,11 @@ impl Client {
         assert_eq!(r["isError"], false, "{r}");
         serde_json::from_str(r["content"][0]["text"].as_str().unwrap()).unwrap()
     }
+    /// Ends the session as a client does: its input closes, the server exits.
+    fn finish(mut self) {
+        self.input.take();
+        assert!(self.child.wait().unwrap().success());
+    }
 }
 impl Drop for Client {
     fn drop(&mut self) {
@@ -110,7 +115,7 @@ fn app_stdio_conformance_on_a_corpus_copy_commit_and_rollback() {
         let init=client.rpc("initialize",json!({"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1"}}));
         assert_eq!(init["serverInfo"]["name"], "powermove");
         let tools = client.rpc("tools/list", json!({}));
-        assert_eq!(tools["tools"], json!(pm_mcp::catalog::tools()));
+        assert_eq!(tools["tools"], json!(pm_mcp::catalog::served_tools()));
         client.tool(
             "start_session",
             json!({"prompt":"Synthetic corpus transport test"}),
@@ -231,6 +236,136 @@ fn export_video_and_render_frames_reach_the_production_engine_job() {
     assert!(path.starts_with(profile.join("exports")));
     let bytes = std::fs::read(path).unwrap();
     assert_eq!(&bytes[4..8], b"ftyp", "not an MP4 container");
+}
+
+/// The pixel at the centre of a PNG, as RGB.
+fn centre_of_png(bytes: &[u8]) -> [u8; 3] {
+    let mut reader = png::Decoder::new(std::io::Cursor::new(bytes))
+        .read_info()
+        .unwrap();
+    let mut pixels = vec![0; reader.output_buffer_size().unwrap()];
+    let info = reader.next_frame(&mut pixels).unwrap();
+    let at = (info.height / 2) as usize * info.line_size
+        + (info.width / 2) as usize * info.color_type.samples();
+    [pixels[at], pixels[at + 1], pixels[at + 2]]
+}
+/// An extension that wraps the `raster` service (it paints its text layers
+/// itself) draws in a still and in an exported video of a project that has
+/// no window, as it does when a window owns the project: the agent's host
+/// answers the engine's override asks, a delivery from a realm of its own.
+#[test]
+fn a_raster_wrapper_draws_in_stills_and_exports_of_a_project_without_a_window() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = root.path().join("profile");
+    let extension = profile.join("extensions/synthetic-wrap");
+    std::fs::create_dir_all(&extension).unwrap();
+    std::fs::write(
+        extension.join("manifest.json"),
+        json!({"id":"synthetic-wrap","name":"Wrap","version":"1.0.0","apiVersion":3}).to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        extension.join("index.ts"),
+        "export default function(api: any){const base=api.services.get('raster');
+           api.services.register('raster',(L: any,...rest: any[])=>{
+             if(L.type!=='text')return base(L,...rest);
+             const c=document.createElement('canvas');c.width=96;c.height=96;
+             const x=c.getContext('2d');x.fillStyle='#00ff00';x.fillRect(0,0,96,96);
+             return {cv:c,w:96,h:96,anchorX:48,anchorY:48}})}",
+    )
+    .unwrap();
+    let compiler = glsl_compiler();
+    let mut client = Client::with_env(&profile, None, &[("POWERMOVE_GLSL_COMPILER", &compiler)]);
+    client.rpc(
+        "initialize",
+        json!({"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1"}}),
+    );
+    client.tool(
+        "create_project",
+        json!({"name":"Synthetic wrap","width":320,"height":180,"fps":30,"duration":0.5}),
+    );
+    client.tool("start_session", json!({"prompt":"Synthetic wrap"}));
+    client.tool(
+        "apply_commands",
+        json!({"commands":[{"type":"add_layer","id":"title","layerType":"text","name":"Title",
+            "content":{"text":"."}}]}),
+    );
+    let frames = client.rpc(
+        "tools/call",
+        json!({"name":"render_frames","arguments":{"times":[0],"width":320}}),
+    );
+    assert_eq!(frames["isError"], false, "{frames}");
+    let still = base64::engine::general_purpose::STANDARD
+        .decode(frames["content"][1]["data"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(centre_of_png(&still), [0, 255, 0], "the still");
+
+    let exported = client.tool("export_video", json!({"audio":false}));
+    let video = std::path::Path::new(exported["path"].as_str().unwrap());
+    let ffmpeg = std::env::var_os("PM_FFMPEG_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::PathBuf::from(std::env::var("HOME").unwrap())
+                .join("Library/Caches/powermove-engine/ffmpeg/out")
+        })
+        .join("bin/ffmpeg");
+    let frame = root.path().join("frame.png");
+    let status = Command::new(ffmpeg)
+        .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
+        .arg(video)
+        .args(["-frames:v", "1"])
+        .arg(&frame)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let [r, g, b] = centre_of_png(&std::fs::read(frame).unwrap());
+    assert!(r < 40 && g > 215 && b < 40, "the video: {r} {g} {b}");
+}
+
+/// A project opened at launch starts its extensions, but the tool server
+/// answers at once: it neither waits for them nor quits when they are slow.
+#[test]
+fn a_project_opened_at_launch_is_served_while_its_extensions_still_load() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = root.path().join("profile");
+    let extension = profile.join("extensions/synthetic-slow");
+    std::fs::create_dir_all(&extension).unwrap();
+    std::fs::write(
+        extension.join("manifest.json"),
+        json!({"id":"synthetic-slow","name":"Slow","version":"1.0.0","apiVersion":3}).to_string(),
+    )
+    .unwrap();
+    // Held and never released: the load settles only at the hold's limit.
+    std::fs::write(
+        extension.join("index.ts"),
+        "export default function(api: any){api.readiness.hold()}",
+    )
+    .unwrap();
+    let initialize = json!({"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1"}});
+    let saved = {
+        let mut client = Client::new(&profile, None);
+        client.rpc("initialize", initialize.clone());
+        client.tool(
+            "create_project",
+            json!({"name":"Slow load","width":320,"height":180,"fps":30,"duration":0.5}),
+        );
+        client.tool("start_session", json!({"prompt":"Slow load"}));
+        let saved = client.tool("save_project", json!({}))["path"]
+            .as_str()
+            .map(std::path::PathBuf::from)
+            .unwrap();
+        client.finish();
+        saved
+    };
+    let started = std::time::Instant::now();
+    let mut client = Client::new(&profile, Some(&saved));
+    client.rpc("initialize", initialize);
+    client.tool("start_session", json!({"prompt":"Slow load"}));
+    assert!(
+        started.elapsed() < Duration::from_secs(8),
+        "the tool server waited {:?} for the extensions",
+        started.elapsed()
+    );
 }
 
 /// One second of tone, then one of silence.

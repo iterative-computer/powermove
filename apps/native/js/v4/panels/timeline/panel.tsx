@@ -326,6 +326,9 @@ export function kindSymbol(kind: string): string | null {
         solid: "square.fill",
         shader: "wand.and.rays",
         extension: "wand.and.rays",
+        model3d: "cube",
+        light3d: "lightbulb",
+        camera3d: "camera",
       } as Record<string, string>
     )[kind] ?? null
   );
@@ -581,6 +584,23 @@ function Property({ row, send }: { row: PropertyRow; send: Send }) {
         </text>
       </div>
       <div style={{ ...line, paddingRight: t("metrics.gap") }}>
+        {/* The link stands before the value: values end on one edge. */}
+        {row.scaleLinked !== undefined && (
+          <Icon
+            id={`timeline:scale-link:${row.id}`}
+            label={
+              row.scaleLinked ? "Unlock Aspect Ratio" : "Lock Aspect Ratio"
+            }
+            // One glyph (there is no slashed link in the system's set: it
+            // drew nothing); the state is its ink.
+            symbol="link"
+            tint={row.scaleLinked ? "colors.secondary" : "colors.faint"}
+            disabled={row.locked}
+            tabIndex={-1}
+            send={send}
+            intent={{ type: "scaleLink", layer: row.layer }}
+          />
+        )}
         {row.numeric && row.scaleLinked === undefined ? (
           <UI.NumberField
             id={`timeline:value:${row.id}`}
@@ -604,19 +624,6 @@ function Property({ row, send }: { row: PropertyRow; send: Send }) {
           >
             {row.readout}
           </text>
-        )}
-        {row.scaleLinked !== undefined && (
-          <Icon
-            id={`timeline:scale-link:${row.id}`}
-            label={
-              row.scaleLinked ? "Unlock Aspect Ratio" : "Lock Aspect Ratio"
-            }
-            symbol={row.scaleLinked ? "link" : "link.slash"}
-            disabled={row.locked}
-            tabIndex={-1}
-            send={send}
-            intent={{ type: "scaleLink", layer: row.layer }}
-          />
         )}
       </div>
     </>
@@ -899,19 +906,6 @@ export function TimelinePanel({
                 </UI.Tree>
               </div>
             </div>
-            {f.view !== "DopeSheet" && f.graphEmpty && (
-              <text
-                id="timeline:graph"
-                style={{
-                  ...reading,
-                  position: "absolute",
-                  right: t("metrics.inset"),
-                  bottom: t("metrics.inset"),
-                }}
-              >
-                Select an animated property to see its curve.
-              </text>
-            )}
             {f.announcement && refusal(f.announcement.value) && (
               // A refused edit stays visible: a quiet capsule over the tracks,
               // also announced (role="status").

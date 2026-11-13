@@ -302,6 +302,7 @@ impl EffectsPanel {
                         pm_model::json::to_canonical_string(&property.value()).into(),
                     ),
                     ("effect", id.into()),
+                    ("key", key.clone().into()),
                     (
                         "label",
                         display
@@ -409,6 +410,8 @@ impl EffectsPanel {
                 rows.push(object([
                     ("kind", "effect".into()),
                     ("id", id.into()),
+                    ("definition", text(effect, "type").into()),
+                    ("grade", model.is_grade(effect).into()),
                     ("label", label.into()),
                     ("enabled", enabled.into()),
                     ("expanded", model.effect_disclosure(&layer, id)?.into()),

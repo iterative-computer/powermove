@@ -43,8 +43,27 @@ export const depths = [
   { v: 8, label: "8-bit" },
   { v: 16, label: "16-bit" },
 ];
+export type ColorTag = "rec709QuickTime" | "rec709";
+export type AudioCoding = "pcm24" | "pcm16" | "pcmFloat";
+/** The label an SDR video carries; the picture is the same codes either way. */
+export const colorTags: { v: ColorTag; label: string }[] = [
+  { v: "rec709QuickTime", label: "Rec.709 (QuickTime and Safari)" },
+  { v: "rec709", label: "Rec.709" },
+];
+export const audioCodings: { v: AudioCoding; label: string }[] = [
+  { v: "pcm24", label: "24-bit PCM" },
+  { v: "pcm16", label: "16-bit PCM" },
+  { v: "pcmFloat", label: "32-bit float PCM" },
+];
 /** Settings saved before these fields existed mean today's output. */
-export const fieldDefaults = { profile: "4444", codec: "h264", depth: 8 } as const;
+export const fieldDefaults = {
+  profile: "4444",
+  codec: "h264",
+  depth: 8,
+  colorTag: "rec709QuickTime",
+  timecode: "",
+  audioCoding: "pcm24",
+} as const;
 export type Field =
   | "profile"
   | "codec"
@@ -56,10 +75,35 @@ export type Field =
   | "mblur"
   | "audio"
   | "alpha"
-  | "useProxies";
+  | "useProxies"
+  | "colorTag"
+  | "timecode"
+  | "audioCoding";
 export const fields: Record<Format, readonly Field[]> = {
-  prores: ["profile", "scale", "fps", "range", "mblur", "audio", "alpha", "useProxies"],
-  mp4: ["codec", "scale", "fps", "range", "quality", "mblur", "audio", "useProxies"],
+  prores: [
+    "profile",
+    "scale",
+    "fps",
+    "range",
+    "colorTag",
+    "timecode",
+    "mblur",
+    "audio",
+    "audioCoding",
+    "alpha",
+    "useProxies",
+  ],
+  mp4: [
+    "codec",
+    "scale",
+    "fps",
+    "range",
+    "quality",
+    "colorTag",
+    "mblur",
+    "audio",
+    "useProxies",
+  ],
   webm: ["scale", "fps", "range", "quality", "mblur", "audio", "useProxies"],
   png: ["depth", "scale", "fps", "range", "mblur", "alpha", "useProxies"],
   still: ["depth", "scale", "mblur", "alpha"],
@@ -98,6 +142,19 @@ export const rates = [
   { v: 60000 / 1001, label: "59.94 fps" },
   { v: 60, label: "60 fps" },
 ];
+/** The listed rate a stored rate is: a project keeps 29.97 as that float,
+ * and the engine exports any rate within 0.02 % of a listed one as it. */
+export function listedRate(fps: number): number {
+  return rates.find((r) => Math.abs(fps - r.v) <= 0.0002 * r.v)?.v ?? fps;
+}
+/** The Frame Rate choices for an export at `fps`: the list, led by the
+ * export's own rate when it is none of them (a 12 fps composition). */
+export function rateOptions(fps: number) {
+  const own = listedRate(fps);
+  return rates.some((r) => r.v === own)
+    ? rates
+    : [{ v: own, label: `${+own.toFixed(3)} fps` }, ...rates];
+}
 export const dynamicRanges = [
   { v: "sdr", label: "SDR" },
   { v: "pq", label: "HDR · PQ" },
@@ -108,6 +165,34 @@ export const qualities = [
   { v: "high", label: "High · 16 Mbps" },
   { v: "max", label: "Max · 40 Mbps" },
 ];
+/** Per-export 3D quality; the first row is the composition's own preset. */
+export const studioQualities = (saved: string) => [
+  { v: "composition", label: `Composition · ${saved}` },
+  { v: "draft", label: "Draft", detail: "Check motion and timing" },
+  { v: "preview", label: "Preview", detail: "A quicker look for review" },
+  { v: "production", label: "Production", detail: "Clean, final-looking" },
+  { v: "final", label: "Final", detail: "Reference quality" },
+];
+/** What each 3D quality promises (owner decision 2026-11-11): the row's
+ * second line names the chosen one's speed and look in plain words. */
+export const studioPromises: Record<string, string> = {
+  draft:
+    "A quick check of motion and timing, about 1 s a frame. It can look soft.",
+  preview: "A quicker, cleaner look for review. Not for delivery.",
+  production:
+    "A clean, final-looking picture: about 3 s a frame, up to 8 s with glass or chrome.",
+  final: "Reference quality. It takes as long as it needs.",
+  custom: "The composition's own sampling settings.",
+};
+/** Added to the Quality row when this build has no Open Image Denoise. */
+export const guidedDenoiseNote =
+  "This build has no Open Image Denoise, so the built-in filter cleans the frames.";
+/** The Render Time row's second line, by where the estimate comes from. */
+export const estimateNotes = {
+  measured: "Measured on this Mac for this scene and size.",
+  measuring: "Measuring on this Mac…",
+  guess: "A rough guess until this scene is measured.",
+} as const;
 export const sidecars = [
   { v: "none", label: "None" },
   { v: "srt", label: "SubRip (.srt)" },
@@ -134,11 +219,29 @@ export const rows = {
   range: ["Range", "Export the work area or the whole composition."],
   quality: ["Quality", "Video bitrate used for video exports."],
   mblur: ["Motion Blur", "Render motion blur for moving layers."],
+  studioQuality: [
+    "3D Quality",
+    "Cleaner 3D takes longer per frame.",
+  ],
+  studioTime: ["Render Time", "Measured on this Mac for this scene and size."],
+  studioReducedSize: [
+    "Render at 75% Size",
+    "Faster, slightly softer. Full size is always the default.",
+  ],
   useProxies: [
     "Use Proxies (Draft)",
     "Read proxy media where it exists, for a quick draft. Otherwise exports always read originals.",
   ],
+  colorTag: [
+    "Color Tag",
+    "How the file labels its color. The picture is the same either way.",
+  ],
+  timecode: [
+    "Start Timecode",
+    "Timecode of the first frame, as HH:MM:SS:FF, or ;FF for drop-frame. Leave empty to use the composition's time.",
+  ],
   audio: ["Include Audio", "Mix composition audio into the video."],
+  audioCoding: ["Audio Format", "Sample format of the audio track."],
   alpha: [
     "Transparent Background",
     "Keep the background see-through, with straight alpha.",
@@ -155,5 +258,8 @@ export const rows = {
   ],
 } as const;
 export const sizeError = "Enter a size from 16 to 8192 px.";
+/** With the Rec.709 label chosen for an SDR ProRes or MP4. */
+export const colorNoteRec709 =
+  "Color: Rec.709. The file is tagged BT.709 primaries and BT.709 transfer. Transparent output uses straight alpha.";
 export const colorNote =
   "Color: sRGB. ProRes uses tagged BT.709 primaries and sRGB transfer. Transparent output uses straight alpha.";

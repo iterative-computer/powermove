@@ -76,6 +76,11 @@ pub struct RenderRequest {
     pub sampling: Sampling,
     /// Preview-only canvas policy; video timing is identical for both kinds.
     pub output_kind: OutputKind,
+    /// A viewer's frame. Its settled paused picture is final output for
+    /// effects and sampling, but 3D draws at the viewer's own preview tier:
+    /// only a delivery (an export, a still) path-traces at the
+    /// composition's saved quality.
+    pub viewer: bool,
     /// Where output pixel (0, 0) sits in scaled composition pixels:
     /// composition pixel `(x, y)` lands at output pixel `(x · sx − ox,
     /// y · sy − oy)` at the top level (today's `scaledWorld` with a
@@ -132,6 +137,7 @@ impl RenderRequest {
             motion_blur: MotionBlur::Off,
             sampling: Sampling::Final,
             output_kind: OutputKind::Preview,
+            viewer: false,
             origin: None,
             output_tone: None,
         }
@@ -153,6 +159,7 @@ impl RenderRequest {
             motion_blur: MotionBlur::Off,
             sampling: Sampling::Final,
             output_kind: OutputKind::Preview,
+            viewer: false,
             origin: None,
             output_tone: None,
         }
@@ -191,6 +198,8 @@ impl RenderRequest {
             },
             sampling,
             output_kind: OutputKind::of(request.purpose),
+            // Final here is a delivery (an export or an agent capture).
+            viewer: false,
             origin: None,
             output_tone: None,
         })

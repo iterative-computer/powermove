@@ -176,6 +176,14 @@ impl Inspector {
             .as_ref()?
             .get(id, saved_version(effect)?)
     }
+    /// The effect's definition says `grade: true`: a grading tool the Colour
+    /// panel lists (built-in or an extension's).
+    pub(crate) fn is_grade(&self, effect: &Value) -> bool {
+        self.raw_saved_effect_definition(effect)
+            .and_then(|d| d.metadata.get("grade"))
+            .and_then(|v| v.as_bool())
+            == Some(true)
+    }
     pub(crate) fn color_actions(&self, effect: &Value) -> Result<Vec<ColorAction>, InspectorError> {
         let Some(def) = self.raw_saved_effect_definition(effect) else {
             return Ok(vec![]);

@@ -43,6 +43,20 @@ thread_local! {
     static MENU_DELEGATES:RefCell<Vec<Retained<MenuDelegate>>>=const{RefCell::new(Vec::new())};
     /// The context menu being tracked, so a test driver can cancel it.
     static OPEN_MENU:RefCell<Option<Retained<NSMenu>>>=const{RefCell::new(None)};
+    /// View ▸ 3D items with their (group, value), for checkmarks.
+    static VIEW3D_ITEMS:RefCell<Vec<(String,String,Retained<NSMenuItem>)>>=const{RefCell::new(Vec::new())};
+}
+/// Checkmarks for View ▸ 3D (3d-studio.md §2: the same names and checkmarks
+/// as the viewer bar): `on(group, value)` says whether a row is current.
+pub fn check_view3d(on: &dyn Fn(&str, &str) -> bool) {
+    VIEW3D_ITEMS.with(|items| {
+        for (group, value, item) in &*items.borrow() {
+            let state = if on(group, value) { 1 } else { 0 };
+            if item.state() != state {
+                item.setState(state);
+            }
+        }
+    });
 }
 /// A context-menu row. An empty label is a separator.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -1867,6 +1881,11 @@ pub struct Host {
     backdrop: Retained<NSVisualEffectView>,
     viewer: Retained<NSView>,
     pub viewer_rect: Rc<Cell<Option<crate::layout::Rect>>>,
+    /// Studio 3D views: 1, 2 or 4 panes. With more than one, `viewer_rect`
+    /// is the first pane and `viewer_tiles` holds every pane (the host
+    /// places the others' views), in content coordinates, top-left origin.
+    pub viewer_split: Cell<u8>,
+    pub viewer_tiles: Rc<std::cell::RefCell<Vec<crate::layout::Rect>>>,
     pub splitter_focus: bool,
     pub keyboard_control_focus: Cell<bool>,
     pub canvas_focus: Cell<bool>,
@@ -1885,6 +1904,10 @@ pub struct Host {
     registration: Option<gpui_macos::composition::CompositionRegistration>,
     monitor: Option<Retained<AnyObject>>,
     resolver: Resolver,
+    /// Extension rows, kept apart so a new keymap replaces only the base.
+    contributed: Vec<crate::keyboard::Binding>,
+    /// The next key pressed goes to Settings › Shortcuts, not to a command.
+    recording: bool,
     events: HashMap<u64, Retained<NSEvent>>,
     /// Commands owed when a held key comes up, by key code ([`Host::on_release`]).
     releases: Rc<RefCell<HashMap<u16, Command>>>,
@@ -1952,7 +1975,7 @@ fn shortcut_glyphs() -> HashMap<String, String> {
                 .or_insert_with(|| menu::glyphs(&i.chord));
         }
     }
-    for b in crate::keyboard::shipped() {
+    for b in crate::keymap::current() {
         if !b.chord.starts_with("ctrl+") {
             map.entry(menu::palette_command(&b.command, &b.args))
                 .or_insert_with(|| menu::glyphs(&b.chord));
@@ -2058,6 +2081,8 @@ impl Host {
             backdrop,
             viewer,
             viewer_rect: Rc::new(Cell::new(None)),
+            viewer_split: Cell::new(1),
+            viewer_tiles: Rc::default(),
             splitter_focus: false,
             keyboard_control_focus: Cell::new(false),
             canvas_focus: Cell::new(false),
@@ -2072,7 +2097,9 @@ impl Host {
             observer: None,
             registration: None,
             monitor: None,
-            resolver: Resolver::new(),
+            resolver: Resolver::with(crate::keymap::current()),
+            contributed: vec![],
+            recording: false,
             events: HashMap::new(),
             releases: Default::default(),
             up_early: Default::default(),
@@ -2226,6 +2253,15 @@ impl Host {
                             }
                             return event.as_ptr();
                         }
+                    }
+                    // Settings › Shortcuts is taking a key: it comes from
+                    // whichever of the app's windows is key (Settings is its own).
+                    if e.r#type() == NSEventType::KeyDown && host.borrow().recording {
+                        let key = chord(e);
+                        let mut h = host.borrow_mut();
+                        h.recording = false;
+                        h.send_command("shortcuts.recorded", vec![serde_json::json!(key)]);
+                        return std::ptr::null_mut();
                     }
                     if e.windowNumber() != window.windowNumber() {
                         return event.as_ptr();
@@ -3263,10 +3299,30 @@ impl Host {
         zoom_limit(dimensions, self.window.backingScaleFactor())
     }
     pub fn add_bindings(&mut self, bindings: impl IntoIterator<Item = crate::keyboard::Binding>) {
-        self.resolver.bindings.extend(bindings);
+        self.contributed.extend(bindings);
+        self.rebuild_bindings(crate::keymap::current());
+    }
+    fn rebuild_bindings(&mut self, base: Vec<crate::keyboard::Binding>) {
+        self.resolver.bindings = base;
+        self.resolver
+            .bindings
+            .extend(self.contributed.iter().cloned());
         self.resolver
             .bindings
             .sort_by_key(|b| std::cmp::Reverse(b.priority));
+    }
+    /// A new keymap: keys resolve against `table` (with the extensions'
+    /// rows), and the menu bar and palette show its keys.
+    pub fn set_keymap(&mut self, table: Vec<crate::keyboard::Binding>) {
+        crate::keymap::set_current(table.clone());
+        self.rebuild_bindings(table);
+        self.palette.borrow_mut().shortcuts = shortcut_glyphs();
+        install_menus();
+    }
+    /// The next key pressed is sent as `shortcuts.recorded` with its chord
+    /// (Escape included, which cancels) instead of running anything.
+    pub fn record_next_key(&mut self, on: bool) {
+        self.recording = on;
     }
     /// The view native surfaces install beside the viewer, below GPUI.
     pub fn native_container(&self) -> Retained<NSView> {
@@ -3277,7 +3333,7 @@ impl Host {
         owner: &str,
         bindings: impl IntoIterator<Item = crate::keyboard::Binding>,
     ) {
-        self.resolver.bindings.retain(|b| !b.id.starts_with(owner));
+        self.contributed.retain(|b| !b.id.starts_with(owner));
         self.add_bindings(bindings);
     }
     pub fn viewer_layer(&self) -> metal::MetalLayer {
@@ -3636,7 +3692,9 @@ impl Host {
     /// Return = Save (the accent default button), Esc = Cancel. Save sends
     /// `layout:save:<name>`.
     pub fn prompt_workspace_name(&self, workspace: &str) {
-        if self.window.attachedSheet().is_some() {
+        if self.window.attachedSheet().is_some()
+            || gpui_macos::child_window::sheet_pending(&self.window)
+        {
             return;
         }
         let sheet = workspace_sheet(&self.tokens, &format!("{workspace} Copy"));
@@ -3658,8 +3716,13 @@ impl Host {
                 });
             }
         });
-        self.window
-            .beginSheet_completionHandler(&sheet.window, Some(&handler));
+        let (on, shown) = (self.window.clone(), sheet.window.clone());
+        gpui_macos::child_window::sheet(
+            &self.window,
+            &sheet.window,
+            move || on.beginSheet_completionHandler(&shown, Some(&handler)),
+            || {},
+        );
         sheet.window.makeFirstResponder(Some(&sheet.field));
         *self.sheet.borrow_mut() = Some(sheet);
     }
@@ -3668,7 +3731,9 @@ impl Host {
     /// (else the reason shows above the buttons, and nothing changes), then
     /// sends `layout:define` with the text and the definition it started from.
     pub fn edit_workspace_definition(&self, json: &str) {
-        if self.window.attachedSheet().is_some() {
+        if self.window.attachedSheet().is_some()
+            || gpui_macos::child_window::sheet_pending(&self.window)
+        {
             return;
         }
         let target = definition_sheet(&self.tokens, json);
@@ -3685,8 +3750,13 @@ impl Host {
                 });
             }
         });
-        self.window
-            .beginSheet_completionHandler(&window, Some(&handler));
+        let (on, shown) = (self.window.clone(), window.clone());
+        gpui_macos::child_window::sheet(
+            &self.window,
+            &window,
+            move || on.beginSheet_completionHandler(&shown, Some(&handler)),
+            || {},
+        );
         window.makeFirstResponder(Some(&target.ivars().text));
         *self.definition.borrow_mut() = Some(target);
     }
@@ -5183,6 +5253,8 @@ fn animate(
 }
 pub fn install_menus() {
     let mtm = MainThreadMarker::new().unwrap();
+    // Built again when the keymap changes: the old menus' delegates go.
+    MENU_DELEGATES.with(|v| v.borrow_mut().clear());
     let app = NSApplication::sharedApplication(mtm);
     let root = NSMenu::new(mtm);
     let mut commands: Vec<(String, Vec<serde_json::Value>)> = vec![];
@@ -5194,6 +5266,10 @@ pub fn install_menus() {
     }
     let tools_start = commands.len();
     commands.extend(menu::tools().into_iter().map(|i| (i.command, i.args)));
+    let new3d_start = commands.len();
+    commands.extend(menu::new3d().into_iter().map(|i| (i.command, i.args)));
+    let view3d_start = commands.len();
+    commands.extend(menu::view3d().into_iter().map(|i| (i.command, i.args)));
     let target = Target::new(mtm, commands, None);
     // Dynamic rows look the target up through MENU_TARGET.
     MENU_TARGET.with(|t| *t.borrow_mut() = Some(target.clone()));
@@ -5279,6 +5355,40 @@ pub fn install_menus() {
                     delegate(&tools, MenuKind::DisplayOnly);
                     item.setSubmenu(Some(&tools));
                 }
+                "new3d" => {
+                    let sub = NSMenu::new(mtm);
+                    for (i, t) in menu::new3d().iter().enumerate() {
+                        if t.label.is_empty() {
+                            sub.addItem(&NSMenuItem::separatorItem(mtm));
+                        } else {
+                            sub.addItem(&row(&t.label, &t.chord, new3d_start + i));
+                        }
+                    }
+                    delegate(&sub, MenuKind::DisplayOnly);
+                    item.setSubmenu(Some(&sub));
+                }
+                "view3d" => {
+                    let sub = NSMenu::new(mtm);
+                    VIEW3D_ITEMS.with(|v| v.borrow_mut().clear());
+                    for (i, t) in menu::view3d().iter().enumerate() {
+                        if t.label.is_empty() {
+                            sub.addItem(&NSMenuItem::separatorItem(mtm));
+                        } else {
+                            let item = row(&t.label, &t.chord, view3d_start + i);
+                            let arg = |k: usize| {
+                                t.args
+                                    .get(k)
+                                    .and_then(|a| a.as_str())
+                                    .unwrap_or("")
+                                    .to_owned()
+                            };
+                            VIEW3D_ITEMS.with(|v| v.borrow_mut().push((arg(0), arg(1), item.clone())));
+                            sub.addItem(&item);
+                        }
+                    }
+                    delegate(&sub, MenuKind::DisplayOnly);
+                    item.setSubmenu(Some(&sub));
+                }
                 "panels" => {
                     let dynamic = NSMenu::new(mtm);
                     delegate(&dynamic, MenuKind::Panels);
@@ -5299,7 +5409,16 @@ pub fn install_menus() {
                 }
                 _ => {}
             }
-            if menu::SUBMENUS.contains(&spec.command.as_str()) {
+            if matches!(spec.command.as_str(), "tools" | "new3d" | "view3d") {
+                // In an auto-enabling menu an item with no action is disabled;
+                // its submenu's own action keeps the parent enabled.
+                if let Some(sub) = item.submenu() {
+                    unsafe {
+                        item.setTarget(Some(&sub));
+                        item.setAction(Some(sel!(submenuAction:)));
+                    }
+                }
+            } else if menu::SUBMENUS.contains(&spec.command.as_str()) {
                 unsafe { item.setAction(None) };
             }
             submenu.addItem(&item);

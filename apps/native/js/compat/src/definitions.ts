@@ -10,6 +10,15 @@ import { extensionLayerFragment } from "./frozen/host/extension-layers";
 import { toLegacyFx, toLegacyTransition } from "./frozen/host/glsl";
 import type { Data } from "./types";
 
+/** The shipped app's transition preamble (`PM.TRANSITION_PRE`). */
+const TRANSITION_PRE =
+  "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st;\nuniform sampler2D u_from, u_to;\nuniform float u_prog;\nuniform vec2 u_res, u_texel;\nuniform float u_time;\nout vec4 o;\nvec4 src(vec2 uv){ return texture(u_from, uv); }\nfloat luma(vec3 c){ return dot(c, vec3(.2126,.7152,.0722)); }\nvec3 hue2rgb(float h){ return clamp(abs(mod(h*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.); }\nvec3 rgb2hsv(vec3 c){\n  vec4 K=vec4(0.,-1./3.,2./3.,-1.); vec4 p=mix(vec4(c.bg,K.wz),vec4(c.gb,K.xy),step(c.b,c.g));\n  vec4 q=mix(vec4(p.xyw,c.r),vec4(c.r,p.yzx),step(p.x,c.r));\n  float d=q.x-min(q.w,q.y); float e=1e-10;\n  return vec3(abs(q.z+(q.w-q.y)/(6.*d+e)), d/(q.x+e), q.x);\n}\nvec3 hsv2rgb(vec3 c){ return c.z*mix(vec3(1.),clamp(abs(mod(c.x*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.),c.y); }\nfloat hash(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453); }\nfloat noise(vec2 p){\n  vec2 i=floor(p), f=fract(p); f=f*f*(3.-2.*f);\n  return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x),f.y);\n}\nfloat fbm(vec2 p){ float v=0.,a=.5; for(int i=0;i<5;i++){ v+=a*noise(p); p*=2.03; a*=.5; } return v; }\n";
+/** The shipped app's `PM.FX[id]` and `PM.TRANSITIONS[id]`: a definition as
+ * its legacy table held it, the shader complete with its preamble. */
+export const legacyEffect = (item: Data): Data => toLegacyFx(item, GLSL_PRE);
+export const legacyTransition = (item: Data): Data =>
+  toLegacyTransition(item, TRANSITION_PRE);
+
 const utf8 = (text: string) => new TextEncoder().encode(text).length;
 function wrapped(source: string, body: string) {
   const at = source.lastIndexOf(body);

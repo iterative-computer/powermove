@@ -447,6 +447,48 @@ impl<'a> Named<'a> {
     }
 }
 
+/// Whether `comp`, or a composition it nests (a precomp layer's, transitively),
+/// has a layer the path-traced 3D renderer draws: a 3D object, or a layer in
+/// 3D with its extrusion on (what `pm_render`'s plan sends to it). Such a
+/// composition keeps no frames on disk (`crate::render_cache`): a path-traced
+/// frame also depends on its render quality, its model and environment files
+/// and a material source's own clock, none of which a frame's key carries.
+/// A look at each layer's own fields, nothing more: it runs for every edit.
+pub fn draws_studio(doc: &pm_model::Document, comp: &str) -> bool {
+    use pm_eval::node::{is_str, member, truthy};
+    use pm_eval::parenting::Role3d;
+    let Ok(resolved) = pm_eval::Comp::resolve(doc, comp) else {
+        return false;
+    };
+    let comps = resolved.root().get("comps");
+    let mut seen: Vec<&Node> = Vec::new();
+    let mut stack = vec![resolved.node()];
+    while let Some(node) = stack.pop() {
+        let Some(NodeKind::Array(layers)) = node.get("layers").map(Node::kind) else {
+            continue;
+        };
+        for layer in layers.iter() {
+            let d = member(Some(layer), "d");
+            if Role3d::of(layer) == Some(Role3d::Object)
+                || (truthy(member(Some(layer), "threeD"))
+                    && truthy(member(member(d, "extrusion"), "enabled")))
+            {
+                return true;
+            }
+            if is_str(member(Some(layer), "type"), "precomp")
+                && let Some(nested) = member(d, "comp")
+                    .and_then(string)
+                    .and_then(|id| comps?.get(&id))
+                && !seen.iter().any(|known| std::ptr::eq(*known, nested))
+            {
+                seen.push(nested);
+                stack.push(nested);
+            }
+        }
+    }
+    false
+}
+
 fn string(node: &Node) -> Option<String> {
     match node.kind() {
         NodeKind::String(s) => Some(s.to_string_lossy()),
@@ -472,6 +514,41 @@ mod tests {
     fn layer(id: &str, from: f64, dur: f64) -> serde_json::Value {
         serde_json::json!({"id": id, "type": "shape", "name": id, "from": from, "dur": dur,
             "p": {"opacity": {"v": 100}}})
+    }
+    fn studio(project: &serde_json::Value) -> bool {
+        let parsed = pm_model::json::parse(&project.to_string()).unwrap();
+        draws_studio(&pm_model::Document::new(Some(parsed), 1), ROOT)
+    }
+    #[test]
+    fn a_composition_the_path_tracer_draws_is_found_through_nesting() {
+        let flat = project(serde_json::json!([layer("La", 0., 4.)]));
+        assert!(!studio(&flat));
+        // A light or a camera alone draws nothing; an object does.
+        let mut lit = flat.clone();
+        lit["layers"][0]["d"] = serde_json::json!({"definition": "powermove.3d.light"});
+        assert!(!studio(&lit));
+        let mut object = flat.clone();
+        object["layers"][0]["d"] = serde_json::json!({"definition": "powermove.3d.object"});
+        assert!(studio(&object));
+        // Extruded text or a shape, only while it is a 3D layer.
+        let mut extruded = flat.clone();
+        extruded["layers"][0]["d"] = serde_json::json!({"extrusion": {"enabled": true}});
+        assert!(!studio(&extruded));
+        extruded["layers"][0]["threeD"] = serde_json::json!(true);
+        assert!(studio(&extruded));
+        // A nested composition's object makes its parent's frames 3D too.
+        let mut nested = project(serde_json::json!([
+            {"id": "Lpre", "type": "precomp", "from": 0, "dur": 4, "d": {"comp": "Cpre"}}
+        ]));
+        assert!(!studio(&nested));
+        nested["comps"]["Cpre"]["layers"][0]["d"] =
+            serde_json::json!({"definition": "powermove.3d.object"});
+        assert!(studio(&nested));
+        // A composition nothing names does not.
+        let mut apart = flat;
+        apart["comps"]["Cpre"]["layers"][0]["d"] =
+            serde_json::json!({"definition": "powermove.3d.object"});
+        assert!(!studio(&apart));
     }
     fn digests(project: &serde_json::Value, whole: bool) -> Vec<[u8; 32]> {
         let parsed = pm_model::json::parse(&project.to_string()).unwrap();

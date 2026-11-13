@@ -18311,34 +18311,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
               },
               "type": "div",
             },
-            {
-              "children": [
-                {
-                  "props": {},
-                  "text": "Select an animated property to see its curve.",
-                  "type": "text",
-                },
-              ],
-              "props": {
-                "id": "timeline:graph",
-                "style": {
-                  "bottom": {
-                    "token": "metrics.inset",
-                  },
-                  "color": {
-                    "token": "colors.secondary",
-                  },
-                  "fontSize": {
-                    "token": "typography.reading",
-                  },
-                  "position": "absolute",
-                  "right": {
-                    "token": "metrics.inset",
-                  },
-                },
-              },
-              "type": "text",
-            },
           ],
           "props": {
             "id": "timeline:body",
@@ -23021,35 +22993,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             {
                               "children": [
                                 {
-                                  "children": [
-                                    {
-                                      "props": {},
-                                      "text": "100, 100 %",
-                                      "type": "text",
-                                    },
-                                  ],
-                                  "props": {
-                                    "label": "Scale, 100 by 100 percent, animated, keyframe at playhead",
-                                    "metadata": {
-                                      "designTodo": "T5",
-                                      "timelineScrub": {
-                                        "layer": "headline",
-                                        "path": "scale",
-                                      },
-                                    },
-                                    "style": {
-                                      "color": {
-                                        "token": "colors.text",
-                                      },
-                                      "fontSize": {
-                                        "token": "typography.body",
-                                      },
-                                      "fontVariantNumeric": "tabular-nums",
-                                    },
-                                  },
-                                  "type": "text",
-                                },
-                                {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
                                     "disabled": false,
@@ -23077,6 +23020,35 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "title": "Unlock Aspect Ratio",
                                   },
                                   "type": "button",
+                                },
+                                {
+                                  "children": [
+                                    {
+                                      "props": {},
+                                      "text": "100, 100 %",
+                                      "type": "text",
+                                    },
+                                  ],
+                                  "props": {
+                                    "label": "Scale, 100 by 100 percent, animated, keyframe at playhead",
+                                    "metadata": {
+                                      "designTodo": "T5",
+                                      "timelineScrub": {
+                                        "layer": "headline",
+                                        "path": "scale",
+                                      },
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.text",
+                                      },
+                                      "fontSize": {
+                                        "token": "typography.body",
+                                      },
+                                      "fontVariantNumeric": "tabular-nums",
+                                    },
+                                  },
+                                  "type": "text",
                                 },
                               ],
                               "props": {

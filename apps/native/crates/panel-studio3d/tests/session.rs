@@ -230,16 +230,27 @@ fn restrictions_cover_camera_sun_and_bulb() {
     }
 }
 #[test]
-fn quality_preference_survives_orthographic_fallback() {
+fn quality_and_tiers_support_orthographic_without_document_edits() {
     let (a, mut s) = fixture();
     drive(&mut s, "add", json!("camera"));
     select(&a, &created(&a));
     drive(&mut s, "preview", json!("quality"));
     drive(&mut s, "projection", json!("orthographic"));
     let v = publish(&mut s);
-    assert_eq!(v["quality"], false);
+    assert_eq!(v["quality"], true);
     assert_eq!(v["qualityStored"], true);
-    assert!(run(s.drive(v["ticket"].as_str().unwrap(), "preview", json!("quality"))).is_err());
+    drive(&mut s, "preview", json!("quality"));
+    let before = root(&a);
+    let history = a.handle().published("p").unwrap().history.entries;
+    assert_eq!(publish(&mut s)["tier"], "live");
+    for tier in ["refine", "final", "live"] {
+        drive(&mut s, "tier", json!(tier));
+        assert_eq!(publish(&mut s)["tier"], tier);
+    }
+    let v = publish(&mut s);
+    assert!(run(s.drive(v["ticket"].as_str().unwrap(), "tier", json!("invalid"))).is_err());
+    assert_eq!(root(&a), before);
+    assert_eq!(a.handle().published("p").unwrap().history.entries, history);
     drive(&mut s, "projection", json!("perspective"));
     assert_eq!(publish(&mut s)["quality"], true);
 }

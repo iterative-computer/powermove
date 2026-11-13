@@ -1396,6 +1396,12 @@ impl Builtins {
             run
         ))
     }
+    /// Brings Settings forward on one of its pages (`shortcuts`).
+    pub fn show_section(&self, panel: &str, section: &str) -> Result<Ticket<Evaluation>> {
+        let section = serde_json::to_string(section).unwrap_or_default();
+        self.realm_of(panel)?
+            .eval(format!("__pmBuiltin.show({section})"))
+    }
     pub fn show(&self, panel: &str) -> Result<Ticket<Evaluation>> {
         self.realm_of(panel)?.eval("__pmBuiltin.show()")
     }
@@ -1706,6 +1712,38 @@ impl Broker {
         (self.wake)();
     }
 }
+impl Broker {
+    /// Hands a panel's native platform requests to the host and wakes it.
+    fn forward_platform(&self, backend: &mut Backend, panel: &str, generation: u64) {
+        let requests = std::mem::take(&mut backend.native.platform);
+        if requests.is_empty() {
+            return;
+        }
+        let mut queue = self.platform.shared();
+        for (operation, input) in requests {
+            let id = if operation == "timeline.effect" {
+                let id = self
+                    .platform_ids
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.timeline_requests
+                    .shared()
+                    .insert(id, (panel.into(), generation));
+                id
+            } else {
+                0
+            };
+            queue.push(PlatformRequest {
+                id,
+                panel: panel.into(),
+                generation,
+                operation,
+                input,
+            });
+        }
+        drop(queue);
+        (self.wake)();
+    }
+}
 impl EngineProxy for Broker {
     /// Request queues are bounded here (256 host, 128 platform), so a
     /// built-in panel awaiting one reply per property row stays within its
@@ -1828,31 +1866,7 @@ impl EngineProxy for Broker {
                         }
                     }
                     backend.tick().map_err(Error::Host)?;
-                    let requests = std::mem::take(&mut backend.native.platform);
-                    if !requests.is_empty() {
-                        let mut queue = self.platform.shared();
-                        for (operation, input) in requests {
-                            let id = if operation == "timeline.effect" {
-                                let id = self
-                                    .platform_ids
-                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                self.timeline_requests
-                                    .shared()
-                                    .insert(id, (panel.into(), generation.number));
-                                id
-                            } else {
-                                0
-                            };
-                            queue.push(PlatformRequest {
-                                id,
-                                panel: panel.into(),
-                                generation: generation.number,
-                                operation,
-                                input,
-                            });
-                        }
-                        (self.wake)();
-                    }
+                    self.forward_platform(&mut backend, panel, generation.number);
                 }
                 serde_json::to_value(
                     entry
@@ -1864,8 +1878,12 @@ impl EngineProxy for Broker {
             }
             "host.publications" => {
                 entry.backend.shared().tick().map_err(Error::Host)?;
-                serde_json::to_value(entry.router.publications().map_err(Error::Host)?)
-                    .map_err(|e| Error::Host(e.to_string()))
+                let publications = entry.router.publications().map_err(Error::Host)?;
+                // A snapshot may ask the host for something too (the Export
+                // sheet asks the viewer to measure again); it goes now, not
+                // at the panel's next command.
+                self.forward_platform(&mut entry.backend.shared(), panel, generation.number);
+                serde_json::to_value(publications).map_err(|e| Error::Host(e.to_string()))
             }
             "host.retire" => {
                 entry.router.retire().map_err(Error::Host)?;

@@ -329,6 +329,30 @@ fn per_stamp<T: Clone>(
     Some(v)
 }
 
+/// How `path`'s video stores its codes: R′G′B′ (`CodecInfo::is_rgb`), or
+/// Y′CbCr in the range the file says (its reading before any override).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StoredCodes {
+    Rgb,
+    YCbCr(pm_protocol::color::Range),
+}
+
+/// [`StoredCodes`] of `path`; `None` when the file is offline or has no
+/// video. Read once per file stamp.
+pub(crate) fn stored_codes(path: &Path) -> Option<StoredCodes> {
+    static CACHE: StampCache<Option<StoredCodes>> = OnceLock::new();
+    per_stamp(&CACHE, path, || {
+        let source = MediaSource::open(path).ok()?;
+        let video = source.probe.video.as_ref()?;
+        Some(if video.codec.is_rgb() {
+            StoredCodes::Rgb
+        } else {
+            StoredCodes::YCbCr(video.color.interpreted.range)
+        })
+    })
+    .flatten()
+}
+
 fn offline(path: &Path) -> String {
     format!("{} is offline", path.display())
 }
@@ -1916,6 +1940,10 @@ impl MediaCache {
                 .map_err(|e| MediaFailure::Failed(e.to_string()))
         };
         let imported = import(&frame)?;
+        // Interpret Footage's Range reads the codes; the frame's own range
+        // (the decoder's fact, shared with other readers) stays as it is.
+        // The reading is part of this frame's key (`reading_key`).
+        let range = interp.range.unwrap_or(frame.format.range);
         let mut held = vec![];
         // The importer's normalizations to hand back once recorded.
         let mut recycled = vec![];
@@ -1925,7 +1953,7 @@ impl MediaCache {
                 let next = import(&f.next)?;
                 let norm = |i: &pm_gpu::decode_in::ImportedFrame, e: &mut wgpu::CommandEncoder| {
                     importer
-                        .normalize(queue, e, i)
+                        .normalize_as(queue, e, i, range)
                         .map_err(|e| MediaFailure::Failed(e.to_string()))
                 };
                 let (np, nc, nn) = (
@@ -1947,14 +1975,14 @@ impl MediaCache {
                         &nc,
                         &nn,
                         pass,
-                        &CodeSpace::of(&frame.format),
+                        &CodeSpace::read_as(&frame.format, range),
                     )
                     .map_err(|e| MediaFailure::Failed(e.to_string()))?;
                 recycled.extend([np, nc, nn]);
                 out
             }
             None => importer
-                .normalize(queue, encoder, &imported)
+                .normalize_as(queue, encoder, &imported, range)
                 .map_err(|e| MediaFailure::Failed(e.to_string()))?,
         };
         let converted = convert_format_scaled(
@@ -2076,6 +2104,15 @@ impl MediaCache {
     /// Bytes of converted textures held (images and decoded frames).
     pub fn texture_bytes(&self) -> u64 {
         self.bytes
+    }
+
+    /// Drops the stills read whole (not at a view's size). A viewer's
+    /// settled paused frame reads them as an export does and keeps none of
+    /// them after it: held, large originals cost gigabytes.
+    pub fn release_whole_images(&mut self) {
+        self.images.retain(|key, _| key.edge.is_some());
+        self.image_seen.retain(|key, _| key.edge.is_some());
+        self.recount();
     }
 
     /// Keeps the stills within `budget`, oldest first. What the last frame

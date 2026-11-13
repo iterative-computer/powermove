@@ -97,12 +97,42 @@ impl FrameSpec {
             1.
         }
     }
+    /// Whether this frame is the final picture of its time: a capture, or
+    /// a paused frame of the whole composition at its own size (the
+    /// refinement a paused viewer settles on, or a frame on a drawable of
+    /// exactly that size). It is drawn from the sources and with the effect
+    /// passes an export draws with, so it is the picture a rendered frame
+    /// on disk holds: a paused picture is the same before and after its
+    /// range is rendered. Every other viewer frame is a preview, and a
+    /// paused one is never replaced by the frame on disk.
+    pub(crate) fn final_picture(&self, scene: &Scene) -> bool {
+        self.exact
+            || (self.moment == Moment::Paused
+                && (self.whole_composition(scene).is_some()
+                    || (self.scale == 1. && self.fills_composition(scene))))
+    }
+    /// Whether the drawable is the whole composition at its own size.
+    fn fills_composition(&self, scene: &Scene) -> bool {
+        self.output.crop.is_none()
+            && composition_size(scene) == Some(Size::new(self.output.width, self.output.height))
+    }
+    /// Whether a paused frame of this output settles on the final picture
+    /// ([`Self::final_picture`]), at once or by its refinement: where the
+    /// frame on disk may be shown for it. A reduced quality never does.
+    pub(crate) fn settles_final(&self, scene: &Scene) -> bool {
+        let refined = FrameSpec {
+            scale: Self::paused_full_scale(scene, &self.output),
+            ..*self
+        };
+        self.scale >= 1.
+            && (refined.whole_composition(scene).is_some() || self.fills_composition(scene))
+    }
     /// Whether stills are read at the view's resolution (ImageIO's
-    /// filtered thumbnail of the original): every viewer frame, captures
-    /// excepted. Full-resolution stills held for paused frames cost
-    /// gigabytes on large images for no visible difference.
-    pub(crate) fn preview_stills(&self) -> bool {
-        !self.exact
+    /// filtered thumbnail of the original): every preview frame. A final
+    /// picture reads the originals, which the engine lets go of once it is
+    /// drawn (held, they cost gigabytes on large images).
+    pub(crate) fn preview_stills(&self, scene: &Scene) -> bool {
+        !self.final_picture(scene)
     }
     /// Whether video frames are converted at the view's resolution: only
     /// for frames a final picture replaces, playing and dragged ones. A
@@ -171,11 +201,15 @@ impl FrameSpec {
             MotionBlurKind::Export
         });
         request.sampling = self.sampling();
-        // A capture reads the exact picture: final output, as an export
-        // (effects at the composition's density, `pm_render::plan`).
-        if self.exact {
+        // A capture and a settled paused frame are the final picture:
+        // final output, as an export (effects at the composition's density
+        // and over the whole frame, `pm_render::plan`).
+        if self.final_picture(scene) {
             request.output_kind = pm_render::OutputKind::Final;
         }
+        // 3D stays at the viewer's own tier (Fast or Quality Preview; a
+        // capture asks for Final itself): a paused frame is not a delivery.
+        request.viewer = true;
         #[cfg(test)]
         SAMPLED
             .lock()
@@ -321,8 +355,16 @@ impl DiskUpload {
         self.time == time && disk.held(scene, time) == Some(self.held)
     }
 }
+/// A set of media files as the engine last looked at them.
+struct MediaSeen {
+    media: Arc<pm_export::render::MediaPaths>,
+    /// Their stamps' digest ([`crate::render_cache::media_identity`]).
+    identity: u64,
+    looked: Instant,
+}
 struct CachedFrame {
     key: crate::policy::CacheKey,
+    composition: String,
     surface: Arc<ExportedSurface>,
     failures: Arc<[LayerFailure]>,
 }
@@ -352,11 +394,24 @@ pub struct Engine {
     pub(crate) fonts: Option<pm_render::text::host::RenderFonts>,
     font_generation: Option<u64>,
     cache: VecDeque<CachedFrame>,
+    /// The media of the scenes drawn lately ([`Engine::observed_inputs`]).
+    media_seen: Vec<MediaSeen>,
     offscreen: Option<metal::Texture>,
     /// A capture of an SDR view: the frame presented without the delivery clip.
     capture_target: Option<metal::Texture>,
     pub cache_enabled: bool,
-    studio_content: Option<(usize, u64)>,
+    studio_content: Option<(
+        usize,
+        u64,
+        String,
+        crate::studio::Preview,
+        u64,
+        Option<u64>,
+        u64,
+    )>,
+    pub(crate) studio_progress: Option<crate::studio::RefineObserver>,
+    studio_preview: crate::studio::Preview,
+    studio_view: crate::studio::ViewCamera,
     /// Set by the device's lost callback or an internal GPU error: the
     /// worker rebuilds the engine on a new device.
     lost: Arc<AtomicBool>,
@@ -513,6 +568,7 @@ impl Engine {
     fn release_project_memory_inner(&mut self) {
         self.release_idle_memory_inner();
         self.renderer.release_project_memory();
+        self.media_seen.clear();
         self.compat_document = None;
         self.resources = Arc::default();
         self.studio_content = None;
@@ -647,6 +703,9 @@ impl Engine {
         next.resources = self.resources.clone();
         next.mastering = self.mastering;
         next.cache_enabled = self.cache_enabled;
+        next.studio_preview = self.studio_preview;
+        next.studio_progress = self.studio_progress.clone();
+        next.studio_view = self.studio_view.clone();
         if let Some(fonts) = &self.fonts {
             next.set_fonts(fonts.clone());
         }
@@ -795,12 +854,16 @@ impl Engine {
             pipeline,
             pool: Vec::with_capacity(4),
             cache: VecDeque::with_capacity(4),
+            media_seen: Vec::new(),
             offscreen: None,
             capture_target: None,
             cache_enabled: true,
             strip: None,
             refine_bands: 0,
             studio_content: None,
+            studio_progress: None,
+            studio_preview: crate::studio::Preview::debug_default().map_err(anyhow::Error::msg)?,
+            studio_view: crate::studio::ViewCamera::Active,
             lost,
             failed,
             waker,
@@ -868,6 +931,89 @@ impl Engine {
     }
     pub fn clear_cache(&mut self) {
         self.cache.clear();
+    }
+    /// A settled paused frame read its stills whole, as an export does. Its
+    /// picture is kept; the originals are not (a capture's stay within the
+    /// image budget, for the capture after it).
+    fn release_final_stills(&mut self, scene: &Scene, spec: &FrameSpec) {
+        if !spec.exact && spec.final_picture(scene) {
+            self.renderer.release_whole_stills();
+        }
+    }
+    /// The key a frame of `spec` is kept in memory under.
+    fn cache_key(
+        &mut self,
+        scene: &Scene,
+        spec: &FrameSpec,
+        size: Size,
+    ) -> crate::policy::CacheKey {
+        crate::policy::CacheKey {
+            content: scene.content,
+            revision: scene.doc.revision(),
+            time: spec.time.get(),
+            width: size.width,
+            height: size.height,
+            crop: spec.output.crop,
+            moment: spec.moment,
+            scale: spec.scale.to_bits(),
+            sampling: spec.sampling(),
+            inputs: self.observed_inputs(scene),
+            studio_preview: self.studio_preview,
+            studio_view: self.studio_view.key(),
+        }
+    }
+    /// What a frame of `scene` reads besides its document, as observed: its
+    /// media files (looked at every 2 s, as the disk render cache looks)
+    /// and the override wrappers answering. A frame kept in memory is the
+    /// picture of one such state, as a frame on disk is: a file saved again
+    /// by another app is another state, whose frames are drawn. (Fonts and
+    /// the output tone retire every kept frame when they change.)
+    fn observed_inputs(&mut self, scene: &Scene) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let media = self.observed_media(scene);
+        let overrides = self
+            .compat_document
+            .as_ref()
+            .filter(|store| store.producing_now())
+            .map(|store| store.cache_identity());
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        (media, overrides).hash(&mut hash);
+        hash.finish()
+    }
+    /// The stamps of `scene`'s media files, as observed (looked at every
+    /// 2 s). The 3D source is attached for one such state too: it keeps
+    /// each model and environment file it has read.
+    fn observed_media(&mut self, scene: &Scene) -> u64 {
+        let at = self
+            .media_seen
+            .iter()
+            .position(|seen| Arc::ptr_eq(&seen.media, &scene.media) || seen.media == scene.media);
+        let fresh = at.is_some_and(|at| {
+            self.media_seen[at].looked.elapsed() < crate::render_cache::MEDIA_RECHECK
+        });
+        if let (Some(at), true) = (at, fresh) {
+            self.media_seen[at].identity
+        } else {
+            let identity = match &self.disk {
+                Some(disk) => disk.media_identity(&scene.media),
+                None => crate::render_cache::media_identity(&scene.media, None),
+            };
+            let before = at.map(|at| self.media_seen.remove(at).identity);
+            if before.is_some_and(|before| before != identity) {
+                // Kept draws name their files, not what was in them.
+                self.renderer.clear_draw_reuse();
+            }
+            // A main viewer and a popout, each playing and paused.
+            if self.media_seen.len() >= 4 {
+                self.media_seen.remove(0);
+            }
+            self.media_seen.push(MediaSeen {
+                media: scene.media.clone(),
+                identity,
+                looked: Instant::now(),
+            });
+            identity
+        }
     }
     /// Changes when a frame a scrub or playback render missed has decoded.
     /// The frame about to be drawn stops waiting for a still being read
@@ -937,7 +1083,7 @@ impl Engine {
     /// a clip entering the playhead does not stall the frame that meets it.
     /// The video draws planned at `time`: (layer, instance).
     pub fn prepare(&mut self, scene: &Scene, time: Ticks, spec: FrameSpec) -> Vec<(String, u64)> {
-        if self.sync_studio(scene).is_err() {
+        if self.sync_studio(scene, time).is_err() {
             return Vec::new();
         }
         let Ok(request) = spec.request(scene) else {
@@ -947,7 +1093,7 @@ impl Engine {
         // stills at the size it draws them, paused or playing; video at the
         // view's size only while playing or dragging).
         self.renderer
-            .set_preview_media(spec.preview_stills(), spec.preview_video());
+            .set_preview_media(spec.preview_stills(scene), spec.preview_video());
         // A plan that cannot be built reports through the frame itself.
         self.renderer
             .prepare_media(
@@ -977,9 +1123,50 @@ impl Engine {
         }
         self.resources = resources;
     }
-    fn sync_studio(&mut self, scene: &Scene) -> Result<()> {
-        let key = (Arc::as_ptr(&scene.doc) as usize, scene.content);
-        if self.studio_content != Some(key) {
+    /// Each viewer supplies its tier before rendering on this shared worker.
+    /// Frame cache identities include the tier, independently for each view.
+    pub fn studio_preview(&mut self, preview: crate::studio::Preview) {
+        self.studio_preview = preview;
+    }
+    pub fn studio_camera(&mut self, camera: crate::studio::ViewCamera) {
+        self.studio_view = camera;
+    }
+    #[cfg(feature = "kernel")]
+    pub(crate) fn start_export_calibration(
+        &mut self, scene: &Scene, time: Ticks, size: Size, frames: u64, render_scale:f32,
+    ) -> Result<crate::export_estimate::Calibration> {
+        self.sync_studio(scene, time)?;
+        crate::export_estimate::Calibration::new(
+            self.gpu.device.clone(), self.gpu.queue.clone(), scene, time, size, frames,render_scale,
+            self.renderer.definitions(), self.fonts.as_ref(),
+        ).map_err(anyhow::Error::msg)
+    }
+    pub(crate) fn pick_surface(
+        &mut self,
+        scene: &Scene,
+        request: &crate::studio::SceneRequest,
+        point: [f32; 2],
+    ) -> Result<Option<pm_render::scene3d::provider::SurfaceHit>> {
+        self.sync_studio(
+            scene,
+            Ticks::new(request.ticks).map_err(|e| anyhow::anyhow!("{e:?}"))?,
+        )?;
+        self.renderer
+            .pick_studio_surface(request, point[0], point[1])
+            .map_err(anyhow::Error::msg)
+    }
+    fn sync_studio(&mut self, scene: &Scene, time: Ticks) -> Result<()> {
+        let key = (
+            Arc::as_ptr(&scene.doc) as usize,
+            scene.content,
+            scene.comp.clone(),
+            self.studio_preview,
+            self.studio_view.key(),
+            self.fonts.as_ref().map(|f| f.generation()),
+            // A model or environment file saved again is read again.
+            self.observed_media(scene),
+        );
+        if self.studio_content.as_ref() != Some(&key) {
             // A bad contribution draws nothing and is reported; frames carry on.
             // A compiler slot that was busy is retried, never reported as broken.
             let busy = |e: &str| e.contains("compiler-busy");
@@ -1014,7 +1201,23 @@ impl Engine {
             }
             self.definition_failure = failures.first().map(|failure| failure.message.clone());
             #[cfg(feature = "kernel")]
-            crate::studio::attach(&mut self.renderer, scene.doc.clone(), scene.media.as_ref());
+            crate::studio::attach_with_camera_fonts_progress(
+                &mut self.renderer,
+                scene.doc.clone(),
+                scene.media.as_ref(),
+                &crate::studio::SceneRequest {
+                    composition: scene.comp.clone(),
+                    revision: scene.doc.revision(),
+                    ticks: time.get(),
+                    width: 1,
+                    height: 1,
+                },
+                self.studio_preview,
+                self.studio_view.clone(),
+                self.fonts.as_ref(),
+                self.studio_progress.clone(),
+            )
+            .map_err(anyhow::Error::msg)?;
             // A document's first frame compiles the frame and text pipelines
             // it draws with, so no frame met while playing does (built ones
             // are kept: later documents pay nothing).
@@ -1066,7 +1269,7 @@ impl Engine {
         self.renderer.set_preview_media(false, false);
         self.last_frame = Instant::now();
         self.idle_released = false;
-        self.sync_studio(scene)?;
+        self.sync_studio(scene, time)?;
         self.sync_fonts();
         let mut request = pm_render::RenderRequest::sized(size, Precision::Float16);
         request.export = true;
@@ -1126,30 +1329,25 @@ impl Engine {
             let mut t = trace.lock().unwrap();
             t.enter_ms = (now() - t.worker_start) * 1e3;
         }
-        self.sync_studio(scene)?;
+        self.sync_studio(scene, spec.time)?;
         self.sync_fonts();
         self.gpu.device.poll(wgpu::PollType::Poll)?;
         let FrameSpec { time, output, .. } = spec;
         let size = spec.size_in(scene);
         let drawn_whole = spec.whole_composition(scene).is_some();
         let hdr = self.sync_hdr(scene);
-        let key = crate::policy::CacheKey {
-            content: scene.content,
-            revision: scene.doc.revision(),
-            time: time.get(),
-            width: size.width,
-            height: size.height,
-            crop: output.crop,
-            moment: spec.moment,
-            scale: spec.scale.to_bits(),
-            sampling: spec.sampling(),
-        };
-        // A revision or size change retires all old cached frames. Leases held
-        // by submitted consumers still protect their storage until completion.
+        let key = self.cache_key(scene, &spec, size);
+        // A revision, size or observed-input change retires all old cached
+        // frames. Leases held by submitted consumers still protect their
+        // storage until completion.
         self.cache
             .retain(|c| c.key.content != key.content || c.key.same_content(key));
         let hit = (self.cache_enabled && !spec.exact)
-            .then(|| self.cache.iter().position(|c| c.key == key))
+            .then(|| {
+                self.cache
+                    .iter()
+                    .position(|c| c.key == key && c.composition == scene.comp)
+            })
             .flatten();
         let mut stand_ins = false;
         let mut compat_late = Vec::new();
@@ -1173,23 +1371,14 @@ impl Engine {
             Moment::Scrub => std::time::Duration::ZERO,
         };
         // A paused frame shows the frame on disk only where it would draw
-        // that very picture itself: the whole composition at its own size
-        // (its refinement at the paused Full scale, or a drawable that is
-        // the composition's size). Where a paused frame is drawn otherwise
-        // (zoomed in, or so far out that Full is bounded to the drawable),
-        // it is drawn as ever: whether a frame is rendered on disk never
-        // changes a paused picture.
-        let paused_whole = || {
-            let full = FrameSpec::paused_full_scale(scene, &output);
-            let refined = FrameSpec {
-                scale: full,
-                ..spec
-            };
-            refined.whole_composition(scene).is_some()
-                || (output.crop.is_none()
-                    && composition_size(scene) == Some(Size::new(output.width, output.height)))
-        };
-        let as_drawn = spec.moment != Moment::Paused || paused_whole();
+        // that very picture itself: the final picture of the whole
+        // composition at its own size (its refinement at the paused Full
+        // scale, or a drawable that is the composition's size). Where a
+        // paused frame is drawn otherwise (zoomed in, at a reduced quality,
+        // or so far out that Full is bounded to the drawable), it is drawn
+        // as ever: whether a frame is rendered on disk never changes a
+        // paused picture.
+        let as_drawn = spec.moment != Moment::Paused || spec.settles_final(scene);
         let fits = |size: &Size| as_drawn && canvas.0 <= size.width && canvas.1 <= size.height;
         let asked = std::time::Instant::now();
         // Uploaded in the slack after the frame before: nothing to read.
@@ -1278,7 +1467,7 @@ impl Engine {
                 // PM_ABL_PREVIEW=0 turns preview-size media off (measurement only).
                 let preview = pm_media::decode::diag::knob("PM_ABL_PREVIEW") != Some(0);
                 self.renderer.set_preview_media(
-                    preview && spec.preview_stills(),
+                    preview && spec.preview_stills(scene),
                     preview && spec.preview_video(),
                 );
                 self.renderer.set_draw_reuse(!spec.exact);
@@ -1332,6 +1521,7 @@ impl Engine {
                     .unwrap_or_default();
                 let rendered = rendered?;
                 self.renderer.trim_submitted_frame_caches();
+                self.release_final_stills(scene, &spec);
                 if let Some(error) = self.failed.lock().unwrap().take() {
                     bail!("The GPU refused this frame: {error}");
                 }
@@ -1344,6 +1534,7 @@ impl Engine {
                 if self.cache_enabled && !spec.exact && !stand_ins {
                     self.cache.push_back(CachedFrame {
                         key,
+                        composition: scene.comp.clone(),
                         surface: surface.clone(),
                         failures: failures.clone(),
                     });
@@ -1425,9 +1616,9 @@ impl Engine {
             None => [0., 0., output.width as f32, output.height as f32],
         };
         // A capture reads the engine's frame, not the display's picture: the
-        // SDR delivery clip (mode 3) is presentation only, so a capture of an
-        // SDR view is drawn again without it.
-        let unclipped_capture = capture && params.output[0] == 3.;
+        // SDR delivery clip (mode 3) and the channel view are presentation
+        // only, so a capture of such a view is drawn again without them.
+        let unclipped_capture = capture && (params.output[0] == 3. || params.channels != 0);
         if unclipped_capture
             && self.capture_target.as_ref().is_none_or(|t| {
                 t.width() != output.width as u64 || t.height() != output.height as u64
@@ -1494,7 +1685,12 @@ impl Engine {
             present(
                 target,
                 &crate::OverlayParams {
-                    output: [0.; 4],
+                    output: if params.output[0] == 3. {
+                        [0.; 4]
+                    } else {
+                        params.output
+                    },
+                    channels: 0,
                     ..params
                 },
             );
@@ -1591,21 +1787,15 @@ impl Engine {
         if !self.cache_enabled {
             return Ok(true);
         }
-        self.sync_studio(scene)?;
+        self.sync_studio(scene, spec.time)?;
         self.sync_fonts();
         let size = spec.size_in(scene);
-        let key = crate::policy::CacheKey {
-            content: scene.content,
-            revision: scene.doc.revision(),
-            time: spec.time.get(),
-            width: size.width,
-            height: size.height,
-            crop: spec.output.crop,
-            moment: spec.moment,
-            scale: spec.scale.to_bits(),
-            sampling: spec.sampling(),
-        };
-        if self.cache.iter().any(|c| c.key == key) {
+        let key = self.cache_key(scene, &spec, size);
+        if self
+            .cache
+            .iter()
+            .any(|c| c.key == key && c.composition == scene.comp)
+        {
             return Ok(true);
         }
         let mut request = spec.request(scene)?;
@@ -1628,7 +1818,7 @@ impl Engine {
         let surface = self.cache_surface(size)?;
         // Drawn as `frame` draws this spec: the cached picture stands for it.
         self.renderer
-            .set_preview_media(spec.preview_stills(), spec.preview_video());
+            .set_preview_media(spec.preview_stills(scene), spec.preview_video());
         self.renderer.set_draw_reuse(!spec.exact);
         self.renderer.set_scrub(false);
         self.renderer.set_playback(None);
@@ -1640,6 +1830,7 @@ impl Engine {
             scene, spec.time, &request, area, &surface, costs, total, stop,
         );
         self.renderer.set_isolate_layers(false);
+        self.release_final_stills(scene, &spec);
         let late = self
             .compat_document
             .as_ref()
@@ -1657,6 +1848,7 @@ impl Engine {
         if late.is_empty() {
             self.cache.push_back(CachedFrame {
                 key,
+                composition: scene.comp.clone(),
                 surface,
                 failures: failures.into(),
             });
@@ -1776,7 +1968,7 @@ impl Engine {
     /// The raster override answers a frame at `time` would need and that
     /// are not answered yet, from its plan alone (playback's look-ahead).
     pub fn compat_needs(&mut self, scene: &Scene, time: Ticks, spec: FrameSpec) -> Vec<CompatNeed> {
-        if self.compat_document.is_none() || self.sync_studio(scene).is_err() {
+        if self.compat_document.is_none() || self.sync_studio(scene, time).is_err() {
             return Vec::new();
         }
         let Ok(request) = spec.request(scene) else {
@@ -2666,9 +2858,18 @@ mod viewer_output_tests {
         spec: FrameSpec,
         mastering: Mastering,
     ) -> ([f64; 3], Option<[f64; 3]>) {
+        draw_with(engine, scene, spec, mastering, &Default::default())
+    }
+    fn draw_with(
+        engine: &mut Engine,
+        scene: &Scene,
+        spec: FrameSpec,
+        mastering: Mastering,
+        overlays: &crate::OverlayGeometry,
+    ) -> ([f64; 3], Option<[f64; 3]>) {
         engine.mastering = mastering;
         let sub = engine
-            .frame(scene, spec, None, &Default::default(), true, Arc::default())
+            .frame(scene, spec, None, overlays, true, Arc::default())
             .unwrap()
             .unwrap();
         sub.commit();
@@ -2768,6 +2969,85 @@ mod viewer_output_tests {
             picture_hash(36, 64, &shown),
             hash(&shown),
             "the size counts"
+        );
+    }
+    /// The channel view is the viewer's alone: the presented picture shows a
+    /// channel (or alpha) as grey, while a capture of the same frame is the
+    /// engine's frame, the same as with the channel view off.
+    #[test]
+    fn the_channel_view_is_shown_and_never_captured() {
+        use crate::{Channels, OverlayGeometry};
+        let ch = |v: f64| format!(r#"{{"v":{v},"kf":[],"expr":null}}"#);
+        let transform = [
+            ("position.x", 0.),
+            ("position.y", 0.),
+            ("anchor.x", 0.),
+            ("anchor.y", 0.),
+            ("scale.x", 100.),
+            ("scale.y", 100.),
+            ("rotation", 0.),
+            ("opacity", 100.),
+        ]
+        .map(|(k, v)| format!(r#""{k}":{}"#, ch(v)))
+        .join(",");
+        let project = format!(
+            r##"{{"id":"P","name":"P","compId":"C","compName":"C","w":64,"h":36,"fps":30,"dur":1,"bg":"#000000",
+            "layers":[{{"id":"a","type":"solid","name":"a","from":0,"dur":1,"on":true,"solo":false,"mblur":false,
+            "p":{{{transform}}},"fx":[],"masks":[],"d":{{"color":"#CC401A","w":64,"h":36}}}}],
+            "comps":{{}},"assets":{{}},"markers":[],"work":[0,1],"params":{{}}}}"##
+        );
+        let scene = Scene {
+            doc: Arc::new(pm_model::Document::new(
+                Some(pm_model::canonical::canonical_project(
+                    pm_model::json::parse(&project).unwrap(),
+                )),
+                1,
+            )),
+            comp: "C".into(),
+            media: Default::default(),
+            content: 1,
+        };
+        let mut engine = Engine::new(Gpu::new("channel-view-test").unwrap()).unwrap();
+        let spec = FrameSpec::exact(Ticks::ZERO, output(64, 36));
+        let (rgb, _) = draw(&mut engine, &scene, spec, Mastering::Edr);
+        assert!(
+            rgb[0] > rgb[1] && rgb[1] > rgb[2],
+            "a red-orange solid: {rgb:?}"
+        );
+        let mut shown = vec![];
+        for mode in [
+            Channels::Red,
+            Channels::Green,
+            Channels::Blue,
+            Channels::Alpha,
+            Channels::AlphaOverlay,
+        ] {
+            let overlays = OverlayGeometry::default().with_channels(mode);
+            let (captured, presented) =
+                draw_with(&mut engine, &scene, spec, Mastering::Edr, &overlays);
+            assert!(
+                captured.iter().zip(rgb).all(|(c, r)| (*c - r).abs() < 1e-3),
+                "{mode:?}: a capture is the engine's frame: {captured:?} vs {rgb:?}"
+            );
+            shown.push((mode, presented.expect("the presented picture")));
+        }
+        let grey = |p: [f64; 3]| (p[0] - p[1]).abs() < 2e-3 && (p[1] - p[2]).abs() < 2e-3;
+        for (mode, p) in &shown[..4] {
+            assert!(grey(*p), "{mode:?} shows grey: {p:?}");
+        }
+        // Red, green and blue in the order the solid holds them; an opaque
+        // solid's alpha is white; nothing is transparent, so the overlay is
+        // the picture.
+        assert!(shown[0].1[0] > shown[1].1[0] && shown[1].1[0] > shown[2].1[0]);
+        assert!((shown[3].1[0] - 1.).abs() < 2e-3, "alpha: {:?}", shown[3].1);
+        assert!(
+            shown[4]
+                .1
+                .iter()
+                .zip(rgb)
+                .all(|(p, r)| (*p - r).abs() < 2e-3),
+            "alpha overlay over an opaque picture: {:?}",
+            shown[4].1
         );
     }
     /// The SDR view shows a colour past white as every SDR file delivers it
@@ -2940,14 +3220,18 @@ mod frame_cache_tests {
     }
     /// A playing frame draws a reduced still with the final resampler, as the
     /// paused frame of the same time and density does: footage and
-    /// precomps don't sharpen when playback stops.
+    /// precomps don't sharpen when playback stops. (On a drawable half the
+    /// composition's size: the paused frame at the drawable's density is
+    /// the picture shown at once, a preview as the playing frame is. At the
+    /// composition's own size a paused frame is the final picture, drawn
+    /// from the original still.)
     #[test]
     fn playing_and_paused_frames_resample_alike() {
         let dir = tempfile::tempdir().unwrap();
         let scene = scene(&stripes(dir.path()));
         let output = Output {
-            width: 128,
-            height: 72,
+            width: 64,
+            height: 36,
             display: 0,
             headroom: 1.,
             crop: None,
@@ -3037,6 +3321,60 @@ mod frame_cache_tests {
         assert_eq!(from, 1, "the upload is of the still as it was");
         assert_ne!(drawn, rendered);
     }
+    /// A paused frame at a reduced quality is drawn as ever although its
+    /// frame is rendered: the frame on disk is the final picture, which a
+    /// reduced frame is not, and whether a frame is rendered never changes
+    /// a paused picture.
+    #[test]
+    fn a_reduced_paused_frame_is_never_replaced_by_the_frame_on_disk() {
+        use crate::render_cache::DiskFrames;
+        let dir = tempfile::tempdir().unwrap();
+        let scene = scene(&stripes(dir.path()));
+        let disk = DiskFrames::default();
+        disk.set_storage(Some((dir.path().join("frames"), u64::MAX)))
+            .unwrap();
+        assert!(disk.observe(&scene, &[], None, None, None, 1, Ticks::ZERO));
+        disk.test_ready();
+        let at = disk.test_put(3, 0.25);
+        let mut engine = Engine::new(Gpu::new("reduced-paused").unwrap()).unwrap();
+        engine.disk = Some(disk.clone());
+        // Whether a paused frame at `scale` came from disk (2) or was drawn (1).
+        let mut from = |scale: f64| {
+            let spec = FrameSpec {
+                exact: false,
+                scale,
+                ..FrameSpec::exact(
+                    at,
+                    Output {
+                        width: 128,
+                        height: 72,
+                        display: 0,
+                        headroom: 1.,
+                        crop: None,
+                    },
+                )
+            };
+            let trace = Arc::new(std::sync::Mutex::new(Trace::default()));
+            let sub = engine
+                .frame(&scene, spec, None, &Default::default(), true, trace.clone())
+                .unwrap()
+                .unwrap();
+            sub.commit();
+            sub.complete().unwrap();
+            sub.pixels();
+            trace.lock().unwrap().disk
+        };
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while from(1.) != 2 {
+            assert!(
+                Instant::now() < deadline,
+                "the frame on disk was never read"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(from(0.5), 1, "a half-resolution paused frame is drawn");
+        assert_eq!(from(1.), 2, "at Full the frame on disk is the picture");
+    }
     /// Two dragged frames of one render size at one time but different
     /// densities (output 256 at half resolution, output 128 at full) take
     /// different resamplers: the second is drawn for itself, as a cold
@@ -3071,6 +3409,172 @@ mod frame_cache_tests {
         let mut engine = Engine::new(Gpu::new("cache-identity").unwrap()).unwrap();
         drawn(&mut engine, &scene, reduced);
         assert_eq!(drawn(&mut engine, &scene, full), want);
+    }
+    /// A model file saved again by another app (the document untouched):
+    /// the frame drawn after the stamps are looked at again is of the new
+    /// file, not the geometry the 3D renderer had read before.
+    #[cfg(feature = "kernel")]
+    #[test]
+    fn a_model_saved_again_is_read_again() {
+        use serde_json::json;
+        // One sphere of radius 1, `squash` as tall as it is wide (an import
+        // is framed to its bounds, so a uniform scale would show nothing).
+        fn glb(squash: f64) -> Vec<u8> {
+            let pm_model::Value::Object(source) = pm_scene3d::to_model(
+                &json!({"primitive":"sphere","parameters":{"radius":1,"segments":24}}),
+            ) else {
+                unreachable!()
+            };
+            let g = pm_render::scene3d::model::source_of(&source)
+                .unwrap()
+                .geometry();
+            let mut bin = vec![];
+            for value in &g.positions {
+                bin.extend(value.to_le_bytes());
+            }
+            let normals = bin.len();
+            for value in &g.normals {
+                bin.extend(value.to_le_bytes());
+            }
+            let indices = bin.len();
+            for value in &g.indices {
+                bin.extend(value.to_le_bytes());
+            }
+            let end = bin.len();
+            while !bin.len().is_multiple_of(4) {
+                bin.push(0);
+            }
+            let mut header = serde_json::to_vec(&json!({
+                "asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],
+                "nodes":[{"name":"Ball","mesh":0,"scale":[1,squash,1]}],
+                "buffers":[{"byteLength":bin.len()}],
+                "bufferViews":[
+                    {"buffer":0,"byteOffset":0,"byteLength":normals},
+                    {"buffer":0,"byteOffset":normals,"byteLength":indices-normals},
+                    {"buffer":0,"byteOffset":indices,"byteLength":end-indices}],
+                "accessors":[
+                    {"bufferView":0,"componentType":5126,"count":g.positions.len()/3,"type":"VEC3","min":[-1,-1,-1],"max":[1,1,1]},
+                    {"bufferView":1,"componentType":5126,"count":g.normals.len()/3,"type":"VEC3"},
+                    {"bufferView":2,"componentType":5125,"count":g.indices.len(),"type":"SCALAR"}],
+                "materials":[{"name":"Matte","pbrMetallicRoughness":{"baseColorFactor":[0.9,0.9,0.9,1],"metallicFactor":0,"roughnessFactor":0.9}}],
+                "meshes":[{"primitives":[{"attributes":{"POSITION":0,"NORMAL":1},"indices":2,"material":0}]}]
+            }))
+            .unwrap();
+            while !header.len().is_multiple_of(4) {
+                header.push(b' ');
+            }
+            let mut out = vec![];
+            for word in [
+                0x46546c67u32,
+                2,
+                (12 + 8 + header.len() + 8 + bin.len()) as u32,
+                header.len() as u32,
+                0x4e4f534a,
+            ] {
+                out.extend(word.to_le_bytes());
+            }
+            out.extend(header);
+            out.extend((bin.len() as u32).to_le_bytes());
+            out.extend(0x004e4942u32.to_le_bytes());
+            out.extend(bin);
+            out
+        }
+        use pm_scene3d::{schema::Role, service::new_layer};
+        let mut comp = json!({"id":"test","w":64,"h":64,"fps":30,"dur":1,"backgroundFill":{"type":"none"},"layers":[]});
+        let layer = |id, role, data, props| {
+            new_layer(&comp, id, id, role, data, props, true, None, 0.).unwrap()
+        };
+        let layers = vec![
+            layer(
+                "camera",
+                Role::Camera,
+                json!({"camera":{"p":{"fov":41.1120904,"targetX":0,"targetY":0,"targetZ":0}},"environment":{"p":{"ambient":1}}}),
+                json!({"position.x":0,"position.y":0,"position.z":5}),
+            ),
+            layer(
+                "light",
+                Role::Light,
+                json!({"light":{"type":"sun","p":{"intensity":3}}}),
+                json!({}),
+            ),
+            layer(
+                "ball",
+                Role::Object,
+                json!({"object":{"source":{"assetId":"model"},"useSourceMaterials":true}}),
+                json!({"position.x":0,"position.y":0,"position.z":0}),
+            ),
+        ];
+        comp["layers"] = json!(layers);
+        let project = json!({"id":"project","compId":"test","comps":{"test":comp},
+            "assets":{"model":{"id":"model","kind":"model","format":"glb","name":"Ball"}}});
+        let doc = pm_kernel::DocumentStore::new_untitled(
+            pm_model::json::parse(&project.to_string()).unwrap(),
+        )
+        .snapshot()
+        .document;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("model.glb");
+        std::fs::write(&path, glb(1.)).unwrap();
+        let mut media = pm_export::render::MediaPaths::default();
+        media.paths.insert("model".into(), path.clone());
+        let scene = Scene {
+            doc,
+            comp: "test".into(),
+            media: Arc::new(media),
+            content: 1,
+        };
+        let mut engine = Engine::new(Gpu::new("model-saved-again").unwrap()).unwrap();
+        // How much of the 64×64 frame the ball covers.
+        let covered = |engine: &mut Engine| {
+            let spec = FrameSpec::exact(
+                Ticks::ZERO,
+                Output {
+                    width: 64,
+                    height: 64,
+                    display: 0,
+                    headroom: 1.,
+                    crop: None,
+                },
+            );
+            let deadline = Instant::now() + Duration::from_secs(60);
+            loop {
+                let trace = Arc::new(std::sync::Mutex::new(Trace::default()));
+                match engine.frame(&scene, spec, None, &Default::default(), true, trace) {
+                    Ok(Some(sub)) => {
+                        sub.commit();
+                        sub.complete().unwrap();
+                        if !sub.stand_ins {
+                            assert!(sub.failures.is_empty(), "{:?}", sub.failures);
+                            return sub
+                                .pixels()
+                                .iter()
+                                .filter(|p| p.iter().sum::<f64>() > 0.05)
+                                .count();
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => assert!(e.is::<CompilerBusy>(), "{e:#}"),
+                }
+                assert!(Instant::now() < deadline, "the frame never settled");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        let whole = covered(&mut engine);
+        assert!(whole > 200, "the ball is in the picture: {whole} pixels");
+        // Another app saves a much flatter ball over it.
+        std::fs::write(&path, glb(0.2)).unwrap();
+        // Stamps are looked at again after `MEDIA_RECHECK`.
+        for seen in &mut engine.media_seen {
+            seen.looked = seen
+                .looked
+                .checked_sub(crate::render_cache::MEDIA_RECHECK * 2)
+                .unwrap();
+        }
+        let flat = covered(&mut engine);
+        assert!(
+            flat * 2 < whole,
+            "the saved file is drawn: {flat} pixels, {whole} before"
+        );
     }
 }
 #[cfg(test)]

@@ -95,11 +95,18 @@ impl Target {
         }))
     }
 }
+/// Where `typed` stops parsing, in its own UTF-16 code units (the editor
+/// underlines it); `None` when it parses or the reason names no place.
+pub fn problem_at(typed: &str) -> Option<usize> {
+    let e = pm_expr::Expression::parse(typed, pm_expr::Dialect::Native).err()?;
+    e.location().map(|l| l.offset)
+}
 /// The line under the field while typing: the problem, or that it is valid.
 pub fn status(typed: &str) -> (String, bool) {
     let source = typed.trim();
+    // An empty editor removes the expression: nothing to say about it.
     if source.is_empty() {
-        return (HINT.into(), false);
+        return (String::new(), false);
     }
     match expression_diagnostic(source) {
         Some(problem) => (problem, true),
@@ -135,8 +142,15 @@ impl Controller {
                 match action.as_str() {
                     "cancel" => break,
                     "changed:expression" => {
-                        let (text, bad) = status(&open.text("expression"));
+                        let typed = open.text("expression");
+                        let (text, bad) = status(&typed);
                         open.describe("expression", &text, if bad { danger } else { muted });
+                        // The place the parser stopped, underlined in the editor.
+                        open.mark(
+                            "expression",
+                            bad.then(|| problem_at(&typed)).flatten(),
+                            danger,
+                        );
                         open.enable("apply", !bad);
                     }
                     "apply" => {
@@ -215,5 +229,18 @@ mod tests {
             panic!()
         };
         assert_eq!(commands.len(), 2, "both axes of the row");
+    }
+}
+
+#[cfg(test)]
+mod place_tests {
+    /// The editor underlines where the typed text stops parsing, counted in
+    /// the typed text (leading space included); a valid one marks nothing.
+    #[test]
+    fn the_editor_marks_where_parsing_stopped() {
+        assert_eq!(super::problem_at("1 +"), Some(3));
+        assert_eq!(super::problem_at("  1 +"), Some(5));
+        assert_eq!(super::problem_at("wiggle(2,\n 20) @"), Some(15));
+        assert_eq!(super::problem_at("1 + 1"), None);
     }
 }

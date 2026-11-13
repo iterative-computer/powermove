@@ -16,6 +16,10 @@ mod marquee;
 pub mod pen;
 #[path = "snap.rs"]
 mod snap;
+#[path = "gizmo3d.rs"]
+pub mod studio3d;
+#[path = "viewer_rulers.rs"]
+pub mod viewer_rulers;
 #[path = "text_edit.rs"]
 pub mod text;
 
@@ -160,6 +164,17 @@ pub trait Host: 'static {
     fn text_input(&self, _: &str, _: &mut Window, _: &mut App) -> Option<Rc<dyn text::TextInput>> {
         None
     }
+    /// The viewer's Free View for Studio 3D layers; `None` is the shot.
+    fn studio_view(&self, _: Option<pm_engine_service::studio::FreeView>, _: &mut App) {}
+    /// The engine's surface pick at normalized composition coordinates, on
+    /// the frame on screen. `None` when there's no viewer frame to ask.
+    fn pick_surface(
+        &self,
+        _: [f32; 2],
+        _: &App,
+    ) -> Option<async_channel::Receiver<Result<pm_engine_service::SurfaceReply, String>>> {
+        None
+    }
 }
 /// One selected layer's pose at the current time, in composition pixels.
 #[derive(Clone, Debug)]
@@ -237,6 +252,7 @@ enum Job {
     SelectLayers(Vec<String>),
 }
 pub struct GizmoSurface {
+    studio: studio3d::State,
     kernel: KernelHandle,
     project: String,
     tokens: pm_design::Tokens,
@@ -255,6 +271,12 @@ pub struct GizmoSurface {
     picks: usize,
     controls: bool,
     panning: Option<Point<Pixels>>,
+    /// Space is held over the viewer: a press pans whatever the tool, and
+    /// whether it did decides if the key's release plays.
+    space_hand: bool,
+    space_panned: bool,
+    /// View ▸ Show Rulers and Show Grid, and the guides pulled from a ruler.
+    rulers: viewer_rulers::Rulers,
     cursor: CursorStyle,
     refreshing: bool,
     /// A Shape tool drag: where it started and the box drawn so far.
@@ -493,6 +515,7 @@ impl GizmoSurface {
         host: Rc<dyn Host>,
     ) -> Self {
         Self {
+            studio: Default::default(),
             kernel,
             project,
             tokens,
@@ -509,6 +532,9 @@ impl GizmoSurface {
             picks: 0,
             controls: true,
             panning: None,
+            space_hand: false,
+            space_panned: false,
+            rulers: Default::default(),
             cursor: CursorStyle::Arrow,
             refreshing: false,
             sketch: None,
@@ -564,16 +590,79 @@ impl GizmoSurface {
             self.host.time(cx),
         );
         cx.spawn(async move |this, cx| {
-            let poses = cx
+            let read = cx
                 .background_executor()
                 .spawn(async move {
                     let p = kernel.published(&project)?;
-                    read_at(&p, time)
+                    // 3D layers get 3D handles; their 2D boxes would mislead.
+                    let mut scene = pm_panel_studio3d::viewport::scene(&p, time).ok();
+                    let mut poses = read_at(&p, time).unwrap_or_default();
+                    // Extruded text and shapes are 3D too: their box in the
+                    // scene, from the layer's flat box, its z and its depth.
+                    if let Some(sc) = scene.as_mut() {
+                        for pose in poses.iter().filter(|pose| is_extruded(&p, &pose.id)) {
+                            if let Some(item) = extruded_item(&p, pose, time, sc.width, sc.height) {
+                                sc.items.push(item);
+                            }
+                        }
+                    }
+                    let three_d: Vec<String> = scene
+                        .as_ref()
+                        .map(|s| s.items.iter().map(|i| i.id.clone()).collect())
+                        .unwrap_or_default();
+                    // Extruded text and shapes are drawn by the 3D renderer too:
+                    // their flat box would sit somewhere else.
+                    poses.retain(|pose| {
+                        !three_d.contains(&pose.id)
+                            && !is_studio(&p, &pose.id)
+                            && !is_extruded(&p, &pose.id)
+                    });
+                    let selected = p
+                        .selection
+                        .layers()
+                        .iter()
+                        .filter(|id| three_d.contains(id))
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    let ui = |k: &str| {
+                        p.ui_state
+                            .viewer
+                            .get(k)
+                            .and_then(pm_model::Value::as_str)
+                            .map(str::to_owned)
+                    };
+                    Some((
+                        poses,
+                        scene,
+                        selected,
+                        ui("studioTool"),
+                        ui("studioLook"),
+                        ui("studioAxes"),
+                        (ui("studioLightKind"), ui("studioLightAdd"), ui("studioLightAim")),
+                    ))
                 })
                 .await;
             let _ = this.update(cx, |s, cx| {
                 if s.latest == ticket {
-                    s.poses = Arc::new(poses.unwrap_or_default());
+                    let (poses, scene, selected, tool, look, axes, (kind, add, aim)) =
+                        read.unwrap_or((vec![], None, vec![], None, None, None, (None, None, None)));
+                    s.studio.light_aim = aim.unwrap_or_else(|| "reflect".into());
+                    s.studio.object_axes = axes.as_deref() == Some("object");
+                    s.studio.light_kind = kind.unwrap_or_default();
+                    s.studio.light_add = add.as_deref() == Some("on");
+                    s.poses = Arc::new(poses);
+                    let had = s.studio.scene.is_some();
+                    let free_look = look.as_deref() == Some("free");
+                    let changed_look = free_look != s.studio.free_look;
+                    s.studio.scene = scene.map(Arc::new);
+                    s.studio.selected = selected;
+                    s.studio.tool = studio3d::Tool::parse(tool.as_deref());
+                    if !s.studio.busy() {
+                        s.studio.free_look = free_look;
+                    }
+                    if changed_look || had != s.studio.scene.is_some() {
+                        s.studio_push_view(cx);
+                    }
                     s.draw(cx);
                 }
             });
@@ -608,6 +697,10 @@ impl GizmoSurface {
                 });
             }
         }
+        if self.controls && !editing {
+            lines.extend(self.studio_lines(frame));
+        }
+        lines.truncate(pm_engine_service::OverlayGeometry::MAX_LINES);
         self.host.overlay(lines, cx);
     }
     fn to_comp(&self, position: Point<Pixels>, frame: ViewFrame) -> [f64; 2] {
@@ -620,8 +713,70 @@ impl GizmoSurface {
     fn stem(&self, scale: f64) -> f64 {
         self.tokens.metrics.rotation_stem as f64 / scale
     }
+    /// Whether the pointer is over the viewer now (Space held there pans).
+    pub fn pointer_over(&self, window: &Window) -> bool {
+        window.is_window_active()
+            && window.is_window_hovered()
+            && self.bounds.contains(&window.mouse_position())
+    }
+    /// View ▸ Show Rulers / Show Grid.
+    pub fn set_rulers(&mut self, shown: bool, grid: bool, cx: &mut Context<Self>) {
+        self.rulers.shown = shown;
+        self.rulers.grid = grid;
+        cx.notify();
+    }
+    /// View ▸ Clear Guides.
+    pub fn clear_guides(&mut self, cx: &mut Context<Self>) {
+        self.rulers.guides.clear();
+        self.rulers.dragging = None;
+        cx.notify();
+    }
+    /// The ruler guides, in composition pixels.
+    #[cfg(test)]
+    pub fn ruler_guides(&self) -> &[viewer_rulers::RulerGuide] {
+        &self.rulers.guides
+    }
+    /// Space went down over the viewer: the hand, until it comes up.
+    pub fn arm_space(&mut self, cx: &mut Context<Self>) {
+        self.space_hand = true;
+        self.space_panned = false;
+        self.set_cursor(CursorStyle::OpenHand, cx);
+    }
+    /// Space came up: the tool returns; true when the hand panned (then the
+    /// key does not play).
+    pub fn release_space(&mut self, window: &Window, cx: &mut Context<Self>) -> bool {
+        let panned = std::mem::take(&mut self.space_panned);
+        self.space_hand = false;
+        self.panning = None;
+        self.hover(window.mouse_position(), cx);
+        panned
+    }
+    fn set_cursor(&mut self, cursor: CursorStyle, cx: &mut Context<Self>) {
+        if cursor != self.cursor {
+            self.cursor = cursor;
+            cx.notify();
+        }
+    }
+    /// Panning with the middle button, whatever the tool.
+    fn on_middle(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
+        self.panning = Some(event.position);
+        self.set_cursor(CursorStyle::ClosedHand, cx);
+    }
     /// The cursor promises what a press here does.
     fn hover(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        if self.rulers.shown && self.rulers.pointer != Some(position) {
+            self.rulers.pointer = Some(position);
+            cx.notify();
+        }
+        if self.space_hand {
+            let hand = if self.panning.is_some() {
+                CursorStyle::ClosedHand
+            } else {
+                CursorStyle::OpenHand
+            };
+            self.set_cursor(hand, cx);
+            return;
+        }
         let Some(frame) = self.host.frame(self.bounds, cx) else {
             return;
         };
@@ -631,11 +786,20 @@ impl GizmoSurface {
             && self
                 .text_session()
                 .is_some_and(|s| s.contains(at, frame.scale));
+        // A 3D handle under the pointer lights up (3d-studio.md §5).
+        if matches!(tool, Tool::Select) && self.studio_hover(at, frame) {
+            self.draw(cx);
+        }
+        let ruler = self.rulers_cursor(position, frame);
         let cursor = match tool {
+            _ if ruler.is_some() => ruler.unwrap_or(CursorStyle::Arrow),
             _ if in_text => CursorStyle::IBeam,
             Tool::Hand => CursorStyle::OpenHand,
             Tool::Text => CursorStyle::IBeam,
             Tool::Anchor | Tool::Zoom | Tool::Shape | Tool::Pen => CursorStyle::Crosshair,
+            Tool::Select if self.studio_cursor(at, frame).is_some() => {
+                self.studio_cursor(at, frame).unwrap()
+            }
             _ => match self.handle_at(at, frame.scale) {
                 Some(Hit::Handle(index)) => self
                     .handle_pose()
@@ -681,6 +845,17 @@ impl GizmoSurface {
         let Some(frame) = self.host.frame(self.bounds, cx) else {
             return;
         };
+        // Space held over the viewer: the hand, whatever the tool.
+        if self.space_hand {
+            self.panning = Some(event.position);
+            self.set_cursor(CursorStyle::ClosedHand, cx);
+            return;
+        }
+        // A ruler makes a guide; a guide is carried.
+        if self.rulers_down(event.position, frame) {
+            cx.notify();
+            return;
+        }
         let at = self.to_comp(event.position, frame);
         let time = self.host.time(cx);
         let mut tool = self.host.tool(cx);
@@ -693,6 +868,11 @@ impl GizmoSurface {
             }
             self.finish_text(false, cx);
             tool = Tool::Select;
+        }
+        if (tool == Tool::Select || event.modifiers.alt && self.studio.active())
+            && self.studio_down(event, at, frame, cx)
+        {
+            return;
         }
         let start = |hit, click| Drag {
             hit,
@@ -848,13 +1028,20 @@ impl GizmoSurface {
     /// rules, off the main thread. The answer arrives while the press may be held.
     fn pick(&mut self, press: Press, cx: &mut Context<Self>) {
         let (kernel, project) = (self.kernel.clone(), self.project.clone());
+        // The 2D picker can't measure Studio 3D layers; their own picking ran
+        // first, so a 2D failure over a 3D scene is empty canvas.
+        let studio = self.studio.active();
         self.picks += 1;
         cx.spawn(async move |this, cx| {
             let poses = cx
                 .background_executor()
                 .spawn(async move {
                     let p = kernel.published(&project)?;
-                    let target = pick_target(&p, press)?;
+                    let target = match pick_target(&p, press) {
+                        Some(target) => target,
+                        None if studio => None,
+                        None => return None,
+                    };
                     let selected = p.selection.layers();
                     let ids = match &target {
                         Some(id) if press.shift && selected.contains(id) => {
@@ -919,6 +1106,9 @@ impl GizmoSurface {
         .detach();
     }
     fn on_wheel(&mut self, event: &ScrollWheelEvent, line: Pixels, cx: &mut Context<Self>) {
+        if self.studio_wheel(event, line, cx) {
+            return;
+        }
         let delta = event.delta.pixel_delta(line);
         let m = event.modifiers;
         let (dx, dy) = (f32::from(delta.x) as f64, f32::from(delta.y) as f64);
@@ -940,8 +1130,21 @@ impl GizmoSurface {
         }
     }
     fn on_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        if self.rulers.dragging.is_some()
+            && let Some(frame) = self.host.frame(self.bounds, cx)
+            && self.rulers_move(event.position, frame)
+        {
+            cx.notify();
+            return;
+        }
+        if self.studio_move(event, cx) {
+            return;
+        }
         if let Some(last) = self.panning {
             self.panning = Some(event.position);
+            if event.position != last {
+                self.space_panned |= self.space_hand;
+            }
             self.host.navigate(Navigate::Pan(event.position - last), cx);
             return;
         }
@@ -1076,7 +1279,25 @@ impl GizmoSurface {
     }
     fn on_up(&mut self, commit: bool, window: Option<&mut Window>, cx: &mut Context<Self>) {
         self.picking = None;
-        self.panning = None;
+        if self.rulers.dragging.is_some() {
+            let at = window
+                .as_ref()
+                .map_or(Point::default(), |w| w.mouse_position());
+            self.rulers_up(at);
+            cx.notify();
+            return;
+        }
+        if self.panning.take().is_some() {
+            let open = if self.space_hand || self.host.tool(cx) == Tool::Hand {
+                CursorStyle::OpenHand
+            } else {
+                CursorStyle::Arrow
+            };
+            self.set_cursor(open, cx);
+        }
+        if self.studio_up(commit, cx) {
+            return;
+        }
         if !self.guides.is_empty() {
             self.guides.clear();
             cx.notify();
@@ -1118,6 +1339,9 @@ impl GizmoSurface {
         }
         if self.pen_up(false, cx) || self.marquee_up(false, cx) {
             return true;
+        }
+        if self.studio.busy() {
+            return self.studio_up(false, cx);
         }
         if self.drag.is_none() && self.sketch.is_none() && self.text_sketch.is_none() {
             return false;
@@ -1309,7 +1533,11 @@ impl GizmoSurface {
                     },
                     Err(error) => s.host.report(error, cx),
                 }
-                if s.queue.is_empty() && s.drag.is_none() && s.pen_drag.is_none() {
+                if s.queue.is_empty()
+                    && s.drag.is_none()
+                    && s.pen_drag.is_none()
+                    && !s.studio.busy()
+                {
                     s.gesture = None;
                 }
                 s.pump(cx);
@@ -1896,6 +2124,11 @@ fn pick_target(p: &pm_kernel::Published, press: Press) -> Option<Option<String>>
     let Some(id) = hit.layer_id else {
         return Some(None);
     };
+    // A 3D layer draws over the whole frame; its own picking ran first, so
+    // a 2D hit on one is empty canvas.
+    if is_studio(p, &id) {
+        return Some(None);
+    }
     if press.deep {
         return Some(Some(id));
     }
@@ -2006,10 +2239,23 @@ impl Render for GizmoSurface {
                 cx.listener(|s, event: &MouseDownEvent, window, cx| s.on_down(event, window, cx)),
             )
             .on_mouse_down(
+                MouseButton::Middle,
+                cx.listener(|s, event: &MouseDownEvent, _, cx| {
+                    if let Some(frame) = s.host.frame(s.bounds, cx) {
+                        let at = s.to_comp(event.position, frame);
+                        s.studio_down(event, at, frame, cx);
+                    }
+                }),
+            )
+            .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(|s, event: &MouseDownEvent, window, cx| {
                     s.on_context(event, window, cx);
                 }),
+            )
+            .on_mouse_down(
+                MouseButton::Middle,
+                cx.listener(|s, event: &MouseDownEvent, _, cx| s.on_middle(event, cx)),
             )
             .on_scroll_wheel(cx.listener(|s, event: &ScrollWheelEvent, window, cx| {
                 s.on_wheel(event, window.line_height(), cx);
@@ -2034,6 +2280,7 @@ impl Render for GizmoSurface {
                                 s.marquee_paint(frame, window);
                                 s.guides_paint(frame, window);
                                 s.text_paint(frame, window);
+                                s.rulers_paint(frame, window, cx);
                             }
                         });
                         let moved = this.clone();
@@ -2054,4 +2301,85 @@ impl Render for GizmoSurface {
                 .size_full(),
             )
     }
+}
+
+/// A Studio 3D layer (model, light, camera) by its definition.
+/// An extruded layer as a 3D item: the engine maps composition pixels into
+/// the scene with `u = 6 / height` units per pixel, x centred, y up, z out
+/// of the screen (`studio/extrusion.rs`); its depth runs back from its z.
+fn extruded_item(
+    p: &pm_kernel::Published,
+    pose: &Pose,
+    time: f64,
+    width: f64,
+    height: f64,
+) -> Option<pm_panel_studio3d::viewport::Item> {
+    let mut mirror = QueryMirror::new(p);
+    let mut q = |k: &str, d: f64| {
+        mirror
+            .queries()
+            .evaluate(None, &pose.id, k, time)
+            .ok()
+            .and_then(|v| v.as_f64())
+            .unwrap_or(d)
+    };
+    let position = [q("position.x", 0.), q("position.y", 0.), q("position.z", 0.)];
+    let rotation = [q("rotation.x", 0.), q("rotation.y", 0.), q("rotation", 0.)];
+    let scale = [q("scale.x", 100.), q("scale.y", 100.), q("scale.z", 100.)];
+    let depth = q("geo.depth", 0.).max(0.);
+    let u = 6. / height.max(1.);
+    let to_scene = |x: f64, y: f64, z: f64| [x * u - width * u / 2., 3. - y * u, -z * u];
+    let mut lo = [f64::MAX; 3];
+    let mut hi = [f64::MIN; 3];
+    for c in pose.corners {
+        for z in [position[2], position[2] + depth] {
+            let s = to_scene(c[0], c[1], z);
+            for a in 0..3 {
+                lo[a] = lo[a].min(s[a]);
+                hi[a] = hi[a].max(s[a]);
+            }
+        }
+    }
+    let name = p
+        .snapshot
+        .root()
+        .and_then(|root| {
+            let at = pm_kernel::model::find_layer(root, &pose.id)?;
+            let l = pm_kernel::model::layer_at(root, &at)?.to_value();
+            l.get("name").and_then(pm_model::Value::as_str).map(str::to_owned)
+        })
+        .unwrap_or_default();
+    Some(pm_panel_studio3d::viewport::Item {
+        id: pose.id.clone(),
+        role: pm_scene3d::schema::Role::Object,
+        name,
+        locked: pose.locked,
+        bounds: pm_scene3d::navigation::Bounds { min: lo, max: hi },
+        pivot: to_scene(position[0], position[1], position[2]),
+        target: None,
+        light: None,
+        position,
+        rotation,
+        scale,
+        pixels: Some(u),
+    })
+}
+/// A text or shape layer the 3D renderer draws with depth.
+pub(crate) fn is_extruded(p: &pm_kernel::Published, id: &str) -> bool {
+    p.snapshot.root().is_some_and(|root| {
+        pm_kernel::model::find_layer(root, id)
+            .and_then(|at| pm_kernel::model::layer_at(root, &at))
+            .map(|l| pm_scene3d::from_model(&l.to_value()).unwrap_or_default())
+            .is_some_and(|l| pm_scene3d::extrusion::enabled(&l))
+    })
+}
+pub(crate) fn is_studio(p: &pm_kernel::Published, id: &str) -> bool {
+    p.snapshot.root().is_some_and(|root| {
+        pm_kernel::model::find_layer(root, id)
+            .and_then(|at| pm_kernel::model::layer_at(root, &at))
+            .and_then(|l| l.get("d"))
+            .and_then(|d| d.get("definition"))
+            .and_then(|d| d.to_value().as_str().map(str::to_owned))
+            .is_some_and(|d| d.starts_with("powermove.3d."))
+    })
 }

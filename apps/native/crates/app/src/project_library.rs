@@ -281,6 +281,9 @@ impl ProjectLibrary {
                 }
             }
             HostEffect::IntegrationGap(gap) => eprintln!("Project Library: {gap}"),
+            HostEffect::Diagnostic(detail) => {
+                crate::error_log::shared(cx).borrow_mut().push("Open", &detail);
+            }
         }
     }
     fn show_new_project(&mut self, cx: &mut Context<Self>) {
@@ -1485,6 +1488,7 @@ impl Render for ProjectLibrary {
                         tint: None,
                         symbol: Some("plus"),
                         glass: true,
+                        well: false,
                     },
                     &tokens,
                     window,
@@ -1896,6 +1900,7 @@ impl Render for ProjectLibrary {
                                 tint,
                                 symbol: None,
                                 glass: false,
+                                well: false,
                             },
                             &tokens,
                             window,

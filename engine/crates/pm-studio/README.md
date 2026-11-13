@@ -1,8 +1,9 @@
 # pm-studio
 
 Studio, Powermove's product-shot renderer. Design and roadmap:
-`docs/3d-studio-redesign.md`. This crate is **Phase 0**: one
-GPU path tracer serving every quality tier, measured on product scenes.
+`docs/3d-studio-redesign.md`. One GPU path tracer serves every quality tier,
+the desktop's native host and its WebGPU fallback. The measurements below
+retain the original Phase 0 product-scene baseline.
 
 ## What it renders
 
@@ -18,8 +19,8 @@ GPU path tracer serving every quality tier, measured on product scenes.
   reference film) and a floor that only catches shadows and contact
   occlusion.
 - A thin-lens camera (focal length, f-stop, focus point).
-- Near-mirror coats (cover glass, lacquer) are traced on every sample, so
-  their reflections never sparkle.
+- Final/Refine trace full coat paths and attenuate emission through the coat.
+  Live splits near-mirror coats (cover glass, lacquer) to stabilize highlights.
 - Exposure → Khronos PBR Neutral → sRGB.
 
 ## Tiers
@@ -28,7 +29,7 @@ GPU path tracer serving every quality tier, measured on product scenes.
 |---|---|
 | Live | Half resolution, 1 sample, 2 bounces, cheaper floor shadows; edge-aware à-trous denoise of the noisy part only (direct screen emission is exact) |
 | Refine | Accumulates 1-sample slices while nothing changes |
-| Final | Fixed samples per frame, 8 bounces; optionally denoised by Open Image Denoise |
+| Final | Adaptive samples with a minimum floor, maximum ceiling and time budget; 8 bounces and Open Image Denoise |
 
 ## Run
 
@@ -93,8 +94,11 @@ with the specular weight, as in OpenPBR).
 ### Final denoising (Open Image Denoise)
 
 With the `oidn` feature, `Renderer::finish_with` runs Intel Open Image
-Denoise (Apache-2.0) on Final frames, guided by first-hit albedo and normal
-images traced with the same camera. The backdrop's shadow shading is
+Denoise (Apache-2.0) on Refine/Final frames. Its 64 stratified guide rays
+follow near-specular reflection/refraction to the first rough surface, rather
+than treating front glass as the visible detail. Both auxiliary images are
+prefiltered before HDR/high-quality filtering with `cleanAux`; `inputScale`
+uses OIDN's automatic HDR scale on linear, pre-exposure radiance. The backdrop's shadow shading is
 denoised too; the screen's emission is added afterwards, so it stays exact.
 
 ```sh
@@ -102,9 +106,43 @@ brew install open-image-denoise     # or set OIDN_DIR to an OIDN 2.x install
 cargo run --release -p pm-studio --features oidn --bin studio-spike -- --out /tmp/studio --scene hero --final-spp 16
 ```
 
-This writes `<scene>-final-oidn.png` beside `<scene>-final.png`. At 960×540
-on an M5, 16 samples plus denoising (≈ 0.25 s) is cleaner than 256 samples
-without it.
+This writes `<scene>-final-oidn.png` beside `<scene>-final.png`; the CLI's
+explicit sample count is a diagnostic override. Desktop exports raise legacy
+8–16 spp settings to a 512–1024 sample budget divided among shutter images,
+with a dispatch floor of 256 samples per shutter image (bounded by that image's
+ceiling). Individual pixels may stop after 64 samples (128 for lens or fog
+scenes). A filling caustic photon
+map needs 512 samples before per-pixel stopping is trusted; the frame's sample
+ceiling and time budget still apply. Offscreen stills use a
+256-sample ceiling; exports and agent captures use Final. Unprepared legacy
+synchronous preview readbacks retain their four-sample fast path;
+prepared agent/export captures use these quality
+budgets on both native and WebGPU backends.
+Quality requests enable per-pixel relative/absolute-error stopping; a time
+budget is checked between GPU submissions after the sample floor (20 seconds
+for a Final shutter image, 10 seconds for an offscreen still). Refine remains
+interruptible. Masks reuse the completed trace instead of extending the budget.
+
+Sequential exports can reproject the denoised result, with depth/normal/object
+rejection and a local color clamp. Near-specular pixels reject first-surface
+history: reflected/refracted details do not have that surface's motion vector.
+Seeks, cuts, geometry/material changes and quality changes reset history.
+The photon map is bootstrapped before camera sampling; sparse nonzero bins
+retain their energy. The Final clamp limits indirect contributions while
+leaving direct highlights intact. No radius-shrinking photon estimator or
+unconditional glossy blur is applied.
+
+`engine/tools/denoise-quality.py` replays native inputs captured by the opt-in
+`studio-denoising.spec.ts`, renders raw high-spp references plus chrome,
+materials and room-fog corpus scenes, and records SSIM, ΔE00, timings, frozen-
+scene temporal RMS, and comparison crops outside Git. The small GPU tests in
+`tests/denoising_quality.rs` guard refracted detail against 2048 spp, guide
+transport in both traversal paths and rejection of glass temporal history.
+References use an independent random stream. Room fog uses 16384 raw samples:
+its 2048-sample reference still contains scattering noise, which penalizes a
+clean image's SSIM. The quality thresholds stay the same. Raw references above
+4096 samples accumulate in equal 4096-sample requests; no denoising or adaptive
+stopping is applied to them.
 
 Scenes: `hero` (flat lay with stylus), `edge` (thin silhouette turning to
 face the camera), `macro` (shallow focus across the display corner), `back`
@@ -141,7 +179,9 @@ above.
   Final at 256 samples should drop well under 2 s per 1080p frame.
 - Caustics come from a photon grid (`photons` in `trace.wgsl`); very sharp
   focus lines (a lens's hot spot) are softened to the grid's cell size.
-- No multiple-scattering energy compensation, specular anti-aliasing,
-  motion blur or OIDN denoising for Final.
-- Not wired into the editor: the viewer bridge, layers, the Studio UI and
-  agent operations are Phases 1–2.
+- Isotropic unfilmed metals have multiple-scattering energy compensation;
+  anisotropic/film/dielectric compensation, specular anti-aliasing and
+  motion blur remain open. Final OIDN denoising is available with `oidn`.
+- The desktop viewer, exports and agent captures use this renderer. Document
+  and agent contracts are in `apps/desktop/docs/STUDIO.md`; implementation
+  coverage and remaining authoring gaps are in `docs/studio/parity.md`.

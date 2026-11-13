@@ -135,14 +135,180 @@ pub fn main_effects() -> &'static MainEffects {
         let mut main: MainEffects = serde_json::from_str(include_str!("main-effects.json"))
             .expect("pinned main effect definitions");
         add_lut_revision(&mut main);
+        add_unclipped_revisions(&mut main);
+        crate::grade::add(&mut main);
         main
     })
 }
 
+/// A revision of `id` made here and not in main: the pinned shader with each
+/// `(from, to)` replaced once. Its parameters stay main's, with the default
+/// of each `(key, value)` in `defaults` changed. The definition it replaces
+/// stays as history, so an effect saved with it draws as it did.
+fn revise(main: &mut MainEffects, id: &str, edits: &[(&str, &str)], defaults: &[(&str, Value)]) {
+    let revision = main
+        .effects
+        .iter_mut()
+        .find(|e| e.id == id)
+        .expect("a pinned effect");
+    let version = effect_version(revision.metadata.get("version")).expect("a pinned version");
+    let mut history = revision.clone();
+    history
+        .metadata
+        .insert("version".into(), Value::from(version));
+    history.metadata.remove("legacy");
+    let old_frag = revision.frag.clone();
+    for (from, to) in edits {
+        assert_eq!(revision.frag.matches(from).count(), 1, "{id}: {from}");
+        revision.frag = revision.frag.replacen(from, to, 1);
+    }
+    for (key, value) in defaults {
+        let param = revision
+            .params
+            .iter_mut()
+            .find(|p| p.k == *key)
+            .unwrap_or_else(|| panic!("{id} has no parameter {key}"));
+        param.def = value.clone();
+    }
+    revision
+        .metadata
+        .insert("version".into(), Value::from(version + 1));
+    let legacy = revision
+        .metadata
+        .entry("legacy")
+        .or_insert_with(|| Value::Array(vec![]));
+    legacy
+        .as_array_mut()
+        .expect("a list of historical definitions")
+        .push(serde_json::to_value(history).expect("a serializable definition"));
+    let assembled = &main
+        .shaders
+        .iter()
+        .find(|s| s.id == id && s.version == version)
+        .expect("the pinned program")
+        .source;
+    assert_eq!(assembled.matches(&old_frag).count(), 1, "{id}");
+    let source = assembled.replacen(&old_frag, &revision.frag, 1);
+    main.shaders.push(EffectShader {
+        id: id.to_owned(),
+        version: version + 1,
+        source,
+    });
+}
+
+/// E and its inverse for a colour revision's shader, every real number in.
+const E_GLSL: &str = "float pm_e_dec(float v){float m=abs(v);float l=m<=.04045?m/12.92:pow((m+.055)/1.055,2.4);return v<0.?-l:l;}
+float pm_e_enc(float l){float m=abs(l);float e=m<=.0031308?12.92*m:1.055*pow(m,1./2.4)-.055;return l<0.?-e:e;}
+";
+
+/// Revisions that stop clipping colour a float project holds: light above
+/// white and the negative components of colours outside Rec.709. The shipped
+/// shaders clipped them (to 0..8, 0..1 or 0..4), which an 8-bit canvas hid.
+/// Color's exposure also becomes a stop of light (a gain in linear light,
+/// not on encoded values), its hue turn keeps those colours, a faintly
+/// covered pixel is graded like any other, and its neutral setting changes
+/// nothing.
+fn add_unclipped_revisions(main: &mut MainEffects) {
+    let main_fn = format!("{E_GLSL}void main(){{");
+    revise(
+        main,
+        "color",
+        &[
+            ("void main(){", &main_fn),
+            (
+                "x *= pow(2., u_p0);",
+                "if (u_p0 != 0.) { float g = pow(2., u_p0); x = vec3(pm_e_enc(pm_e_dec(x.r)*g), pm_e_enc(pm_e_dec(x.g)*g), pm_e_enc(pm_e_dec(x.b)*g)); }",
+            ),
+            (
+                "x = (x - .5) * (1. + u_p1/100.) + .5;",
+                "if (u_p1 != 0.) x = (x - .5) * (1. + u_p1/100.) + .5;",
+            ),
+            (
+                "float l = luma(x); x = mix(vec3(l), x, 1. + u_p2/100.);",
+                "if (u_p2 != 0.) { float l = luma(x); x = mix(vec3(l), x, 1. + u_p2/100.); }",
+            ),
+            // Hue turns the colour about its own grey, between its smallest
+            // and largest channel: the HSV turn for a colour inside 0..1, and
+            // the same turn for one with a negative or above-white channel.
+            (
+                "if (abs(u_p3) > .01) { vec3 hsv = rgb2hsv(max(x,0.)); hsv.x = fract(hsv.x + u_p3/360.); x = hsv2rgb(hsv); }",
+                "if (abs(u_p3) > .01) { float lo = min(x.r, min(x.g, x.b)), d = max(x.r, max(x.g, x.b)) - lo; if (d > 0.) x = lo + d * hue2rgb(fract(rgb2hsv((x - lo) / d).x + u_p3/360.)); }",
+            ),
+            // Any pixel with coverage is graded, however faint.
+            (
+                "if (c.a < .0005) { o = c; return; }",
+                "if (c.a <= 0.) { o = c; return; }",
+            ),
+            (
+                "o = vec4(clamp(x,0.,8.) * c.a, c.a);",
+                "o = vec4(x * c.a, c.a);",
+            ),
+        ],
+        &[],
+    );
+    revise(
+        main,
+        "channelMixer",
+        &[(
+            "o = vec4(clamp(mixed, 0., 1.) * c.a, c.a);",
+            "o = vec4(mixed * c.a, c.a);",
+        )],
+        &[],
+    );
+    revise(
+        main,
+        "sharpen",
+        &[(
+            "o = vec4(clamp(c.rgb + (c.rgb - b.rgb*.25) * (u_p0/100.), 0., 4.), c.a);",
+            "o = vec4(c.rgb + (c.rgb - b.rgb*.25) * (u_p0/100.), c.a);",
+        )],
+        &[],
+    );
+    revise(
+        main,
+        "grain",
+        &[(
+            "o = vec4(clamp(c.rgb + n * (u_p0/100.) * c.a, 0., 8.), c.a);",
+            "o = vec4(c.rgb + n * (u_p0/100.) * c.a, c.a);",
+        )],
+        &[],
+    );
+    // An untouched Levels passes light above white and colour outside the
+    // output range: its clip switches start off (After Effects' are off in a
+    // 32-bit project; here every depth's intermediates are float).
+    for id in ["levels", "levelsIndividual"] {
+        revise(
+            main,
+            id,
+            &[],
+            &[
+                ("clipBlack", Value::Bool(false)),
+                ("clipWhite", Value::Bool(false)),
+            ],
+        );
+    }
+    // Any pixel with coverage is graded, however faint.
+    revise(
+        main,
+        "duotone",
+        &[(
+            "if (c.a < .0005) { o = c; return; }",
+            "if (c.a <= 0.) { o = c; return; }",
+        )],
+        &[],
+    );
+    revise(
+        main,
+        "posterize",
+        &[("if (c.a<.0005){o=c;return;}", "if (c.a<=0.){o=c;return;}")],
+        &[],
+    );
+}
+
 /// The Apply Color LUT program, including its stated input and output spaces.
 const LUT_SOURCE: &str = include_str!("apply-color-lut.glsl");
-const LUT_SPACES: [&str; 9] = [
-    "Working",
+const LUT_SPACES: [&str; 15] = [
+    "Project Display (Rec.709)",
     "Rec.709 Linear",
     "Apple Log (Rec.2020)",
     "S-Log3 (S-Gamut3.Cine)",
@@ -151,11 +317,19 @@ const LUT_SPACES: [&str; 9] = [
     "LogC3 (AWG3)",
     "LogC4 (AWG4)",
     "PQ (Rec.2020)",
+    "HLG (Rec.2020)",
+    "ACEScct (AP1)",
+    "RED Log3G10 (REDWideGamutRGB)",
+    "Blackmagic Film Gen 5 (Wide Gamut Gen 5)",
+    "F-Log (F-Gamut)",
+    "N-Log (N-Gamut)",
 ];
 
 /// Revision 2 of Apply Color LUT, added here and not in main: tetrahedral
-/// cubes, 1D shapers and stated colour spaces. Revision 1 stays exact for files
-/// that saved it; new effects take revision 2.
+/// cubes, 1D shapers and a stated encoding the table is applied on (the
+/// project's display encoding unless a camera's is chosen). A table that
+/// changes nothing returns the pixel's own bits. Revision 1 stays exact for
+/// files that saved it; new effects take revision 2.
 fn add_lut_revision(main: &mut MainEffects) {
     let revision = main
         .effects
@@ -184,6 +358,8 @@ fn add_lut_revision(main: &mut MainEffects) {
     revision.params.push(space("inputSpace", "Input Space"));
     revision.params.push(space("outputSpace", "Output Space"));
     revision.metadata.insert("version".into(), Value::from(2));
+    // A grading tool: the Color panel lists it (`grade`).
+    revision.metadata.insert("grade".into(), Value::Bool(true));
     revision.metadata.insert(
         "legacy".into(),
         Value::Array(vec![

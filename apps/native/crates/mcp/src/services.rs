@@ -86,6 +86,8 @@ pub struct VideoOptions {
     pub audio: bool,
     pub motion_blur: bool,
     pub alpha: bool,
+    pub studio_quality: Option<Value>,
+    pub studio_render_scale:Option<f32>,
 }
 impl VideoOptions {
     pub fn parse(a: &Value) -> Result<Self> {
@@ -94,6 +96,10 @@ impl VideoOptions {
         if alpha && format != "prores" {
             return Err(Error::invalid("Transparent video requires ProRes."));
         }
+        let studio_render_scale=a.get("studioRenderScale").map(|v|
+            v.as_f64().filter(|v|v.is_finite() && *v>0. && *v<=1.).map(|v|v as f32).filter(|v|*v>0.)
+                .ok_or_else(||Error::invalid("Studio render scale must be greater than zero and at most one"))
+        ).transpose()?;
         Ok(Self {
             name: a["name"].as_str().map(str::to_owned),
             format,
@@ -101,6 +107,8 @@ impl VideoOptions {
             audio: a["audio"].as_bool().unwrap_or(true),
             motion_blur: a["motionBlur"].as_bool().unwrap_or(true),
             alpha,
+            studio_quality: a.get("studioQuality").cloned(),
+            studio_render_scale,
         })
     }
 }

@@ -1573,6 +1573,7 @@ pub fn events() -> Vec<Envelope> {
                 height: 360,
                 jpeg: Bytes(vec![0xFF, 0xD8, 0xFF, 0xD9]),
             }),
+            checking: None,
         })),
         event(Event::BlenderProgress(BlenderProgress {
             job: "blender-1".into(),

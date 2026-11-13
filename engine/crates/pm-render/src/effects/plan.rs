@@ -318,7 +318,25 @@ pub(crate) fn effect_steps_raster<'d>(
     scale: (f64, f64),
     prefix: Option<usize>,
     raster: Option<crate::composite::effects::SourceRaster>,
+    measure: Option<&mut dyn pm_eval::text_geom::TextMeasure>,
+) -> JsResult<Result<Vec<EffectStep>, Feature>> {
+    effect_steps_frame(
+        scope, effects, layer, time, scale, prefix, raster, measure, None,
+    )
+}
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn effect_steps_frame<'d>(
+    scope: &mut Scope<'_, 'd>,
+    effects: &Effects,
+    layer: &'d Node,
+    time: f64,
+    scale: (f64, f64),
+    prefix: Option<usize>,
+    raster: Option<crate::composite::effects::SourceRaster>,
     mut measure: Option<&mut dyn pm_eval::text_geom::TextMeasure>,
+    // A layer captured as a 3D material: its effects read the capture's
+    // space, not the layer's place in the composition.
+    space: Option<crate::composite::effects::OwnerSpace>,
 ) -> JsResult<Result<Vec<EffectStep>, Feature>> {
     let mut steps = Vec::new();
     let mut refused = None;
@@ -416,7 +434,10 @@ pub(crate) fn effect_steps_raster<'d>(
             })
         {
             match raster.map_or_else(
-                || owner(scope, layer, time, scale, &mut measure),
+                || match space {
+                    Some(space) => owner_in_space(scope, layer, time, space),
+                    None => owner(scope, layer, time, scale, &mut measure),
+                },
                 |r| Ok(Ok(r.owner())),
             )? {
                 Ok(owner) => step.owner = Some(std::sync::Arc::new(owner)),
@@ -474,7 +495,7 @@ pub(crate) fn effect_steps_raster<'d>(
                                     step.assets.push((param.k.clone(), asset.clone()))
                                 }
                                 Some(Err(e)) => {
-                                    refuse(Feature::Definition(e.clone()));
+                                    refuse(Feature::EffectAsset(e.clone()));
                                     failed = true;
                                 }
                                 None => {
@@ -805,6 +826,74 @@ pub(crate) fn owner<'d>(
         bounds: [0., 0., size[0], size[1]],
         pixel_scale: pm_fx_defs::spatial::kernel_scale(Some(world), [scale.0, scale.1]),
     }))
+}
+
+/// The owner of a layer captured as a 3D material: the capture's own
+/// transform and, where the capture owns the layer, its bounds.
+fn owner_in_space<'d>(
+    scope: &mut Scope<'_, 'd>,
+    layer: &'d Node,
+    time: f64,
+    space: crate::composite::effects::OwnerSpace,
+) -> JsResult<Result<Owner, Feature>> {
+    let refuse = |message: &str| Ok(Err(Feature::Definition(message.into())));
+    let (bounds, offset) = match space.bounds {
+        Some(b) => (
+            pm_eval::space3d::Rect {
+                x0: b.x,
+                y0: b.y,
+                x1: b.x + b.width,
+                y1: b.y + b.height,
+            },
+            Default::default(),
+        ),
+        None => {
+            let Some(bounds) = scope.size_bounds(layer, time)? else {
+                return refuse("effect owner bounds unavailable");
+            };
+            (bounds, scope.size_anchor_offset(layer, time)?)
+        }
+    };
+    let world = space.world;
+    if world.iter().any(|v| !v.is_finite()) {
+        return refuse("effect owner transform is non-finite");
+    }
+    let Some(inv) = pm_eval::transform::invert(&world) else {
+        return refuse("effect owner transform is singular");
+    };
+    if inv.iter().any(|v| !v.is_finite()) {
+        return refuse("effect owner inverse is non-finite");
+    }
+    let (w, h) = (bounds.x1 - bounds.x0, bounds.y1 - bounds.y0);
+    if w <= 0. || h <= 0. || ![w, h].iter().all(|v| v.is_finite()) {
+        return refuse("effect owner bounds are empty");
+    }
+    let owner = Owner {
+        valid: true,
+        uv: [
+            (inv[0] / w) as f32,
+            (inv[1] / h) as f32,
+            0.,
+            (inv[2] / w) as f32,
+            (inv[3] / h) as f32,
+            0.,
+            ((inv[4] - bounds.x0 + offset.x) / w) as f32,
+            ((inv[5] - bounds.y0 + offset.y) / h) as f32,
+            1.,
+        ],
+        size: [w, h],
+        bounds: [bounds.x0 - offset.x, bounds.y0 - offset.y, w, h],
+        pixel_scale: pm_fx_defs::spatial::kernel_scale(Some(world), [1., 1.]),
+    };
+    if owner
+        .uv
+        .iter()
+        .chain(&super::resources::from_uv(&owner))
+        .any(|v| !v.is_finite())
+    {
+        return refuse("effect owner exceeds GPU coordinate precision");
+    }
+    Ok(Ok(owner))
 }
 
 #[cfg(test)]

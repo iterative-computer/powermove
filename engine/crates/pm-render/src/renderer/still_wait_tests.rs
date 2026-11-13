@@ -138,6 +138,7 @@ fn render(
             failures: r.failures.clone(),
             svg_fallbacks: Vec::new(),
             seconds: r.seconds,
+            footage: r.footage.clone(),
         };
         (r, frame)
     });

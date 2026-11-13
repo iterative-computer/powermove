@@ -143,6 +143,15 @@ impl Label {
             _ => Self::Gray,
         }
     }
+    /// Studio 3D layers are `extension` layers told apart by their definition
+    /// (3d-studio.md §1): models on blue, lights and cameras on gray.
+    pub fn for_layer(kind: &str, definition: Option<&str>) -> Self {
+        match display_kind(kind, definition) {
+            "model3d" => Self::Blue,
+            "light3d" | "camera3d" => Self::Gray,
+            other => Self::for_kind(other),
+        }
+    }
     /// The `colors.labels.*` field name.
     pub fn name(self) -> &'static str {
         pm_design::Labels::NAMES[self as usize]
@@ -651,6 +660,13 @@ impl Scene {
     pub fn scroll_for(&self, id: &str) -> Option<f64> {
         self.positions.get(id).map(|i| self.tops[*i])
     }
+    /// The first row edge at or after a content-space y (the end of the last
+    /// row is one): where a pane under the rows starts without cutting one.
+    pub fn edge_from(&self, y: f64) -> Option<f64> {
+        self.tops
+            .get(self.tops.partition_point(|top| *top < y))
+            .copied()
+    }
     /// Content height of all rows, for scroll clamping.
     pub fn content_height(&self) -> f64 {
         self.tops.last().copied().unwrap_or(0.)
@@ -767,6 +783,11 @@ impl Scene {
             ax.push(json!({"id":row.id,"role":"row","label":row.accessibility_label,"rowIndex":i,"rowCount":self.total(),"selected":row.selected,"depth":row.depth,"focusable":false}));
         }
         // Outside the work area: veil track pixels only, after clips and keys.
+        // Names stand over the veil: it fades the strips toward the ground,
+        // and a name has to read there as well as inside the work area (on
+        // the palest strips of the light canvas a veiled name did not).
+        let (veil, veil_alpha) = t.work_area_veil();
+        let names = ops.len();
         for (side, (a, b)) in [
             (v.layer_column, v.x(self.work_area.0)),
             (v.x(self.work_area.1), v.width),
@@ -775,15 +796,20 @@ impl Scene {
         .enumerate()
         {
             if let Some(r) = span(a, b, m.ruler as f64, v.height - m.ruler as f64, v) {
-                let mut o = Op::new(
-                    format!("work-area-veil:{side}"),
-                    "rect",
-                    r,
-                    c.panel_secondary,
-                );
-                o.opacity = 0.3;
+                let mut o = Op::new(format!("work-area-veil:{side}"), "rect", r, veil);
+                o.opacity = veil_alpha as f64;
                 ops.push(o);
             }
+        }
+        if ops.len() > names {
+            let named = |o: &Op| {
+                o.shape == "text"
+                    && (o.id.starts_with("clip-content:") || o.id.starts_with("cue-text:"))
+            };
+            let (over, mut under): (Vec<Op>, Vec<Op>) =
+                std::mem::take(&mut ops).into_iter().partition(named);
+            under.extend(over);
+            ops = under;
         }
         // The layer column's edge, over row fills and clips: a hairline (the
         // resize handle's mark).
@@ -2202,5 +2228,15 @@ mod key_cover_tests {
         );
         assert_eq!(ops.len(), keys.len());
         assert_eq!(ops[1].id, format!("key:{}", json!(["L1", "a"])));
+    }
+}
+
+/// The kind a row's badge and clip read as: a Studio 3D layer by its role.
+pub fn display_kind<'a>(kind: &'a str, definition: Option<&str>) -> &'a str {
+    match (kind, definition) {
+        ("extension", Some("powermove.3d.object")) => "model3d",
+        ("extension", Some("powermove.3d.light")) => "light3d",
+        ("extension", Some("powermove.3d.camera")) => "camera3d",
+        _ => kind,
     }
 }

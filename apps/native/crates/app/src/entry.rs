@@ -48,6 +48,22 @@ pub fn receive(urls: Vec<String>, cx: &mut App) {
             pm_shell::send_menu_command(command);
             continue;
         }
+        // `review/scroll/<built-in window>/<points>`: a sheet taller than
+        // its window, scrolled down by that much (a window in the background
+        // gets no wheel events, so reviews reach its lower rows here).
+        #[cfg(debug_assertions)]
+        if let Some(rest) = raw.strip_prefix("powermove://review/scroll/") {
+            if let Some((panel, by)) = rest.split_once('/')
+                && let Ok(by) = by.parse::<f32>()
+            {
+                for controller in editors(cx) {
+                    if let Some(view) = controller.read(cx).builtins.views.get(panel).cloned() {
+                        view.update(cx, |v, cx| v.review_scroll_by(by, cx));
+                    }
+                }
+            }
+            continue;
+        }
         #[cfg(debug_assertions)]
         if let Some(rest) = raw.strip_prefix("powermove://review/skim/") {
             let editors = cx.default_global::<Entries>().editors.clone();

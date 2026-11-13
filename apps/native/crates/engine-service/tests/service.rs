@@ -130,6 +130,7 @@ fn transport_jkl_pause_seek_step_and_loop() {
 #[test]
 fn cache_key_includes_every_content_coordinate() {
     let k = policy::CacheKey {
+        studio_preview: studio::Preview::Live,
         content: 1,
         revision: 3,
         time: 7,
@@ -139,9 +140,18 @@ fn cache_key_includes_every_content_coordinate() {
         moment: policy::Moment::Paused,
         scale: 1f64.to_bits(),
         sampling: pm_render::sampling::Sampling::Final,
+        studio_view: 0,
+        inputs: 5,
     };
     for other in [
+        policy::CacheKey {
+            studio_preview: studio::Preview::Refine,
+            ..k
+        },
         policy::CacheKey { content: 2, ..k },
+        policy::CacheKey { studio_view:1, ..k },
+        // A media file saved again by another app.
+        policy::CacheKey { inputs: 6, ..k },
         policy::CacheKey { revision: 4, ..k },
         policy::CacheKey { width: 101, ..k },
         policy::CacheKey { height: 101, ..k },
@@ -205,6 +215,13 @@ fn export_resolver_never_silently_uses_proxies() {
         Some("original.mov")
     );
     assert_eq!(c.export_paths(true).paths["a"].to_str(), Some("proxy.mov"));
+    // A draft's proxy is named with its original, so Interpret Footage is
+    // carried to it as the proxy's maker left it; a file drawn as itself
+    // (an original, or a proxy whose original is gone) names none.
+    assert!(c.export_paths(false).originals.is_empty());
+    let draft = c.export_paths(true).originals;
+    assert_eq!(draft.len(), 1);
+    assert_eq!(draft["a"].to_str(), Some("original.mov"));
 }
 #[test]
 fn headless_pixels_equal_export_reference_and_overlays_share_pass() {
@@ -279,6 +296,24 @@ fn closing_a_project_returns_every_reported_cache_to_empty() {
     );
 }
 
+/// The service's cache counters once it has released a closed project
+/// (the release is counted when it is complete, device renewal included;
+/// the bound is only for a worker that never gets there).
+fn released(service: &EngineService) -> memory::CacheUsage {
+    let start = Instant::now();
+    loop {
+        let usage = service.memory_usage();
+        if usage.project_releases > 0 {
+            return usage;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(120),
+            "the closed project was never released: {usage:?}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 #[test]
 fn retiring_the_last_view_releases_its_document_and_shared_caches() {
     let service =
@@ -291,21 +326,13 @@ fn retiring_the_last_view_releases_its_document_and_shared_caches() {
         .unwrap();
     wait_frame(&v, v.stamp().unwrap());
     v.retire();
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let u = service.memory_usage();
-        if u.resident_bytes() == 0 && document.upgrade().is_none() {
-            assert!(results.is_closed(), "closed viewer retained its scope tap");
-            assert_eq!(u.decoder_sessions, 0);
-            assert_eq!(u.decoder_pool_free_bytes, 0);
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "closed document/caches retained: {u:?}"
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    // The release is counted once it is done: by then everything is gone.
+    let u = released(&service);
+    assert_eq!(u.resident_bytes(), 0, "closed caches retained: {u:?}");
+    assert!(document.upgrade().is_none(), "closed document retained");
+    assert!(results.is_closed(), "closed viewer retained its scope tap");
+    assert_eq!(u.decoder_sessions, 0);
+    assert_eq!(u.decoder_pool_free_bytes, 0);
 }
 
 /// A paused playhead in a rendered range shows the rendered frame: its
@@ -431,11 +458,11 @@ fn closing_the_last_view_retires_device_pools_and_reopens_with_identical_exact_p
     let pixels = wait_frame(&first, first.stamp().unwrap()).pixels.unwrap();
     assert!(service.memory_usage().targets_created > 0);
     first.retire();
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while service.memory_usage().targets_created != 0 {
-        assert!(Instant::now() < deadline, "old device pools stayed live");
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    assert_eq!(
+        released(&service).targets_created,
+        0,
+        "old device pools stayed live"
+    );
     let reopened = service.viewer(config(input)).unwrap();
     reopened.capture_next().unwrap();
     assert_eq!(
@@ -583,6 +610,7 @@ fn worker_exact_cache_and_revision_resize_retirement() {
     wait_frame(&v, v.stamp().unwrap());
     // Separate content/session at the same revision cannot collide.
     let b = service.viewer(config(snapshot())).unwrap();
+    b.studio_preview(studio::Preview::Refine).unwrap();
     assert!(!wait_frame(&b, b.stamp().unwrap()).cache_hit);
     v.retire();
     b.retire();
@@ -595,6 +623,7 @@ fn two_viewers_keep_each_others_cached_frames() {
     let service = EngineService::start(pm_gpu::Gpu::new("two-viewers-test").unwrap()).unwrap();
     let a = service.viewer(config(snapshot())).unwrap();
     let b = service.viewer(config(snapshot())).unwrap();
+    b.studio_preview(studio::Preview::Refine).unwrap();
     wait_frame(&a, a.stamp().unwrap());
     wait_frame(&b, b.stamp().unwrap());
     let seek = |v: &pm_engine_service::Viewer, seconds| {
@@ -617,6 +646,63 @@ fn two_viewers_keep_each_others_cached_frames() {
     }
     a.retire();
     b.retire();
+}
+#[test]
+fn composition_identity_cannot_reuse_other_pixels_at_one_content_revision() {
+    let snapshot = snapshot();
+    let original = snapshot.open_comp().unwrap();
+    let mut project: serde_json::Value = serde_json::from_str(
+        &pm_model::json::to_canonical_string(&snapshot.document.to_value().unwrap()),
+    )
+    .unwrap();
+    let mut alternate = project["comps"][&original].clone();
+    alternate["id"] = serde_json::json!("alternate");
+    for layer in alternate["layers"].as_array_mut().unwrap() {
+        layer["d"]["color"] = serde_json::json!("#00FF00");
+    }
+    project["comps"]["alternate"] = alternate;
+    let document = Arc::new(pm_model::Document::new(
+        Some(pm_model::json::parse(&project.to_string()).unwrap()),
+        1,
+    ));
+    let scene = Scene {
+        doc: document,
+        comp: original,
+        media: Default::default(),
+        content: 1,
+    };
+    let mut h = Headless::new().unwrap();
+    let size = Size::new(64, 36);
+    let red = h
+        .frame(&scene, Ticks::ZERO, size, &Default::default())
+        .unwrap();
+    let green = h
+        .frame(
+            &Scene {
+                comp: "alternate".into(),
+                ..scene.clone()
+            },
+            Ticks::ZERO,
+            size,
+            &Default::default(),
+        )
+        .unwrap();
+    assert!(red.iter().flatten().any(|v| *v > 0.5));
+    let difference = red
+        .iter()
+        .zip(&green)
+        .flat_map(|(a, b)| (0..3).map(move |i| (a[i] - b[i]).abs()))
+        .sum::<f64>()
+        / (red.len() * 3) as f64;
+    assert!(
+        difference > 0.01,
+        "distinct composition pixels differ by {difference}"
+    );
+    assert_eq!(
+        red,
+        h.frame(&scene, Ticks::ZERO, size, &Default::default())
+            .unwrap()
+    );
 }
 #[test]
 fn worker_evaluates_locked_geometry_at_the_rendered_time() {
@@ -703,7 +789,7 @@ fn the_scope_tap_settles_on_the_frame_on_screen() {
         let deadline = Instant::now() + timeout;
         loop {
             if let Ok(frame) = inbox.try_recv() {
-                return Some(frame.unwrap().waveform);
+                return Some(frame.unwrap());
             }
             if Instant::now() > deadline {
                 return None;
@@ -711,22 +797,32 @@ fn the_scope_tap_settles_on_the_frame_on_screen() {
             std::thread::sleep(Duration::from_millis(2));
         }
     };
+    // A paused picture is shown at once at the drawable's size, then
+    // refined at the composition's: each is analyzed, and the scope ends on
+    // the refinement, the picture that stays on screen.
+    let refined = |frame: &pm_render::scopes::ScopeFrame| frame.pixels == 640 * 360;
+    let settled_on = || loop {
+        let frame = next(Duration::from_secs(20)).expect("the paused picture is analyzed");
+        if refined(&frame) {
+            return frame;
+        }
+    };
     let (start, end) = (Ticks::ZERO, Ticks::new(2 * TICKS_PER_SECOND).unwrap());
     v.scrub(end).unwrap();
     wait_frame(&v, v.stamp().unwrap());
-    let mut settled = next(Duration::from_secs(20)).expect("a paused frame is analyzed");
-    while let Some(later) = next(Duration::from_millis(300)) {
-        settled = later;
-    }
-    // The first frame takes the interval's analysis. The next arrives inside
-    // it, and nothing renders after that.
+    let settled = settled_on();
     v.scrub(start).unwrap();
     wait_frame(&v, v.stamp().unwrap());
-    let first = next(Duration::from_secs(20)).expect("the first frame is analyzed");
+    let first = settled_on();
     assert_ne!(first, settled, "the two frames must differ");
+    // Back on the first time: whatever was still being analyzed, the scope
+    // ends on that time's picture again, and stays on it.
     v.scrub(end).unwrap();
     wait_frame(&v, v.stamp().unwrap());
-    assert_eq!(next(Duration::from_secs(20)), Some(settled));
+    while settled_on() != settled {}
+    while let Some(later) = next(Duration::from_millis(500)) {
+        assert!(later == settled, "the scope left the picture on screen");
+    }
     v.scopes(None).unwrap();
 }
 
@@ -735,7 +831,16 @@ fn paused_notifications_are_coalesced_and_resource_pins_retire_cache() {
     let service = EngineService::start(pm_gpu::Gpu::new("status-resource-test").unwrap()).unwrap();
     let rx = service.notifications();
     let v = service.viewer(config(snapshot())).unwrap();
-    wait_frame(&v, v.stamp().unwrap());
+    // A paused picture is drawn at the drawable's size, then once more at
+    // the composition's: the service is quiet after the one that stays.
+    loop {
+        let stamp = v.stamp().unwrap();
+        wait_frame(&v, stamp);
+        std::thread::sleep(Duration::from_millis(100));
+        if v.stamp() == Some(stamp) {
+            break;
+        }
+    }
     while rx.try_recv().is_ok() {}
     std::thread::sleep(Duration::from_millis(30));
     assert!(

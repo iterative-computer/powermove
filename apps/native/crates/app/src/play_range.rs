@@ -111,6 +111,8 @@ impl Controller {
         if self.running() {
             self.shape_run();
         }
+        // The viewer bar's Loop shows the choice.
+        self.update_builtins(cx);
         cx.notify();
     }
     /// A run is asked for or in progress. The clock reads stopped for a
@@ -163,7 +165,8 @@ impl Controller {
             _ => {}
         }
         let Some(v) = &self.viewer else { return false };
-        match v.command(command) {
+        // Measured through the frame it presents.
+        match v.command_at(command, Self::event_time()) {
             Ok(()) => true,
             Err(e) => {
                 self.message = e.to_string();

@@ -194,9 +194,7 @@ pub fn interpret(
     ];
     // FFmpeg reports matrix 0 (RGB) for untagged RGB codecs too; only an
     // RGB pixel format keeps it.
-    let rgb_format = info.pix_fmt.starts_with("gbr")
-        || info.pix_fmt.starts_with("rgb")
-        || info.pix_fmt.starts_with("bgr");
+    let rgb_format = crate::ff::rgb_pixel_format(&info.pix_fmt);
     if tagged.matrix == Some(0) && !rgb_format {
         tagged.matrix = None;
         from[2] = None;

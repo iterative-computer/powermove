@@ -289,6 +289,7 @@ impl Controller {
             }
             let worker_job = job.clone();
             let executor = cx.background_executor().clone();
+            let began = std::time::Instant::now();
             let result = cx.background_executor().spawn(async move {
                 execute(
                     frozen,
@@ -323,7 +324,15 @@ impl Controller {
                             let name = std::path::Path::new(path)
                                 .file_name()
                                 .map_or_else(|| path.clone(), |n| n.to_string_lossy().into_owned());
-                            v.note(format!("Exported {name}"), cx);
+                            // A long export ends while the user is
+                            // elsewhere: the line stays until something
+                            // replaces it, and the Dock icon asks once.
+                            if began.elapsed() > std::time::Duration::from_secs(30) {
+                                v.message = format!("Exported {name}");
+                                crate::platform::request_attention();
+                            } else {
+                                v.note(format!("Exported {name}"), cx);
+                            }
                         }
                         Err(_) => v.close_export_sheet(cx),
                     }
@@ -448,7 +457,7 @@ async fn execute(
             let offline = !error.offline.is_empty();
             observe(
                 &runtime,
-                json!({"phase":"failed","message":error.message,"offline":offline}),
+                json!({"phase":"failed","message":plain_failure(&error.message),"offline":offline}),
             )
             .await
         }
@@ -582,6 +591,15 @@ async fn execute_inner(
     .map_err(|e| e.to_string())?;
     request.resources = (*frozen.resources).clone();
     request.without_offline = frozen.without_offline;
+    // The sheet's per-export 3D quality; the composition's saved one otherwise.
+    request.studio_quality = frozen
+        .options
+        .opaque
+        .get("studioQuality")
+        .filter(|q| q.as_str().is_some_and(|q| q != "composition"))
+        .cloned();
+    request.studio_render_scale=frozen.options.opaque.get("studioReducedSize")
+        .and_then(serde_json::Value::as_bool).filter(|v|*v).map(|_|0.75);
     let mut session = pm_engine_service::jobs::JobSession::new(request);
     // Its raster overrides answer from this publication, whatever is edited meanwhile.
     if let Some(overrides) = engine.overrides {
@@ -649,8 +667,21 @@ async fn execute_inner(
             .map_err(|e| format!("{e:?}"))?;
         let run = if job.cancel.load(Ordering::Acquire) {
             json!({"phase":"cancelling"})
+        } else if status.state == JobState::Running
+            && let Some(checked) = status.checking
+        {
+            // Every frame is encoded: the written file is being checked.
+            let checked = (checked * planned.frames as f64).round() as u64;
+            json!({"phase":"checking","frame":checked,"total":planned.frames,"elapsed":started.elapsed().as_secs_f64()})
         } else if status.state == JobState::Running {
-            json!({"phase":"rendering","frame":frame,"total":planned.frames,"elapsed":started.elapsed().as_secs_f64()})
+            let elapsed = started.elapsed().as_secs_f64();
+            let mut run = json!({"phase":"rendering","frame":frame,"total":planned.frames,"elapsed":elapsed});
+            // The sheet says "About N min left" from the pace so far (it
+            // waits for a few frames before trusting it).
+            if frame > 0 && frame < planned.frames {
+                run["eta"] = json!(elapsed / frame as f64 * (planned.frames - frame) as f64);
+            }
+            run
         } else {
             json!({"phase":"preparing"})
         };
@@ -744,4 +775,17 @@ mod agent_tests {
         export.finish(Err("Missing media: clip.mov".into()));
         assert_eq!(row("agent-test-failed").state, TaskState::Failed);
     }
+}
+
+/// The sheet says what happened in words; the engine's own wording stays in
+/// the log. A render worker that dies (crash, out of memory, killed) reports
+/// only that it ended without a result.
+fn plain_failure(message: &str) -> String {
+    if message.contains("without a terminal status") {
+        eprintln!("Export: {message}");
+        return "The renderer stopped unexpectedly. Try again; if it stops again, \
+                use a lower 3D Quality or a smaller size."
+            .into();
+    }
+    message.into()
 }

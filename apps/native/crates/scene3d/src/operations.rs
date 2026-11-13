@@ -7,6 +7,16 @@ use crate::{
 use serde_json::{Value, json};
 #[derive(Clone, Debug, PartialEq)]
 pub enum Action {
+    /// Scratch-only content staging. The kernel validates the final compound
+    /// state before publication, after normal channel/autokey commands.
+    StagedData {
+        id: String,
+        data: Value,
+    },
+    Extrusion { id: String, data: Value, enable_three_d: bool },
+    RenderQuality {
+        quality: Value,
+    },
     Add {
         id: String,
         name: String,
@@ -185,6 +195,24 @@ pub fn plan(
     let operation = args["operation"]
         .as_str()
         .ok_or_else(|| Error("Missing 3D operation".into()))?;
+    if crate::extrusion::OPERATIONS.contains(&operation) {
+        return crate::extrusion::plan(comp, args, selection);
+    }
+    if [
+        "set_world",
+        "add_fog",
+        "update_fog",
+        "add_terrain",
+        "update_terrain",
+        "add_scatter",
+        "update_scatter",
+        "set_material_options",
+        "set_render_quality",
+    ]
+    .contains(&operation)
+    {
+        return crate::contract::plan(comp, args, selection, uid);
+    }
     if [
         "apply_material",
         "light_highlight",
@@ -218,6 +246,22 @@ pub fn plan(
         .as_array()
         .ok_or_else(|| Error("Composition has no layers".into()))?;
     let mut actions = vec![];
+    // Legacy sample-count commands and composition policy are one atomic edit,
+    // as on Studio's source branch. Reads of old documents keep Production's
+    // default without rewriting their serialized camera data.
+    if operation == "set_environment" && args["patch"].get("samples").is_some() {
+        let samples = args["patch"]["samples"]
+            .as_f64()
+            .filter(|v| v.is_finite() && v.fract() == 0. && (1. ..=4096.).contains(v))
+            .ok_or_else(|| Error("Invalid Studio sample count".into()))?;
+        let current = crate::quality::get(comp)?;
+        let quality = crate::quality::resolve(
+            &current,
+            &json!({"maxSamples":samples,"minSamples":current["minSamples"].as_f64().unwrap().min(samples)}),
+        )?;
+        actions.push(Action::RenderQuality { quality });
+    }
+
     if operation == "create" && args.get("scene").is_some() {
         let scene = schema::parse_scene(args["scene"].clone())?;
         let mut mapping = std::collections::HashMap::new();

@@ -488,3 +488,35 @@ test("60000 selection renders the same bounded rows and preserves stable IDs on 
     await f.session.dispose();
   }
 });
+
+test("the Time section's three actions send their section actions", async () => {
+  const s = snapshot();
+  s.sections.push({
+    id: "time",
+    title: "Time",
+    collapsed: false,
+    rows: [],
+    actions: ["time-remap", "freeze-frame", "reverse"],
+  });
+  const f = fixture(s),
+    p = new Probe();
+  await f.session.start();
+  try {
+    await p.render(<InspectorPanel session={f.session} />);
+    expect(p.result.diagnostics).toEqual([]);
+    for (const action of ["time-remap", "freeze-frame", "reverse"] as const) {
+      await p.drive(`section-action:time:${action}`, "click");
+      expect(f.model.intents).toContainEqual({
+        type: "section-action",
+        section: "time",
+        action,
+      });
+    }
+    expect(p.named("Freeze Frame").id).toBe(
+      p.node("section-action:time:freeze-frame").id,
+    );
+  } finally {
+    await p.dispose();
+    await f.session.dispose();
+  }
+});
