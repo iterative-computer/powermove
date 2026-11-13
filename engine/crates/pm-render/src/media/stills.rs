@@ -529,8 +529,15 @@ mod tests {
         prefetch.request(&path, (stamp.0, stamp.1 + 1), ask, &pool);
         settle(&mut prefetch);
         assert_eq!(prefetch.ready.len(), 1);
-        let stall = prefetch.stall.clone();
-        let guard = stall.lock().unwrap();
+        // A thread holds the worker's stall until told to let go.
+        let (stall, (locked, held), (go, release)) = (prefetch.stall.clone(), channel(), channel());
+        let holder = std::thread::spawn(move || {
+            let _guard = stall.lock().unwrap();
+            locked.send(()).unwrap();
+            release.recv().unwrap();
+            std::thread::sleep(Duration::from_millis(100));
+        });
+        held.recv().unwrap();
         prefetch.request(&path, stamp, ask, &pool);
         prefetch.request(&path, (stamp.0, stamp.1 + 2), ask, &pool);
         while prefetch.progress.lock().unwrap().decoding.is_none() {
@@ -544,17 +551,14 @@ mod tests {
                 .is_none()
         );
         assert!(prefetch.take(&path, stamp, ask, None).is_none());
-        let release = std::thread::spawn(move || {
-            let _guard = guard;
-            std::thread::sleep(Duration::from_millis(100));
-        });
-        // `guard` moved to a thread that lets the decode run in 100 ms.
+        // The decode runs 100 ms after this; the frame waits for it.
+        go.send(()).unwrap();
         prefetch.wait_for_decoding(&path, stamp, ask);
         assert!(
             prefetch.take(&path, stamp, ask, None).is_some(),
             "the decode in progress reached the frame"
         );
-        release.join().unwrap();
+        holder.join().unwrap();
         settle(&mut prefetch);
         assert!(prefetch.progress.lock().unwrap().wanted.is_none());
     }
