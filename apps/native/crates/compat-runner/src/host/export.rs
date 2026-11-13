@@ -43,6 +43,8 @@ pub(super) enum RunInput {
     Page(Value),
     Dom,
     Booted,
+    /// Its extensions' load settled (or began again).
+    Settled,
     Unresponsive(u64),
     /// The page settled these faces (loaded or not).
     FontsLoaded(Value),
@@ -148,6 +150,10 @@ struct Events {
     reading: AtomicBool,
     page_missed: AtomicBool,
     dom_pending: AtomicBool,
+    /// Its extensions' load has settled: what an activation left running (a
+    /// timer, a fetch) and registers or decides from has finished, as for a
+    /// window's realm. Until then no frame is asked of it.
+    settled: AtomicBool,
     /// Extensions that did not start here, by id.
     failed: Mutex<BTreeSet<String>>,
     /// A layout read the page did not answer: the export cannot be drawn right.
@@ -174,6 +180,12 @@ impl RealmEvents for Arc<Events> {
     fn dom_ready(&self) {
         if !self.dom_pending.swap(true, Ordering::AcqRel) {
             let _ = self.inbox.send(RunInput::Dom);
+        }
+    }
+    fn contributions(&self, value: Value) {
+        let settled = value["settled"] != false;
+        if self.settled.swap(settled, Ordering::AcqRel) != settled {
+            let _ = self.inbox.send(RunInput::Settled);
         }
     }
     fn ready(&self) {
@@ -256,6 +268,7 @@ pub(super) fn run(start: Start, inbox: Sender<RunInput>, input: Receiver<RunInpu
         reading: AtomicBool::new(false),
         page_missed: AtomicBool::new(start.pageless),
         dom_pending: AtomicBool::new(false),
+        settled: AtomicBool::new(false),
         failed: Mutex::default(),
         layout_failed: AtomicBool::new(false),
     });
@@ -287,6 +300,7 @@ pub(super) fn run(start: Start, inbox: Sender<RunInput>, input: Receiver<RunInpu
         match input.recv_timeout(wait) {
             Ok(RunInput::Ask(batch, needs)) => run.ask(batch, needs),
             Ok(RunInput::Booted) => run.booted(),
+            Ok(RunInput::Settled) => (),
             Ok(RunInput::Dom) => run.drain_dom(),
             Ok(RunInput::Page(message)) => run.page(message),
             Ok(RunInput::Unresponsive(execution)) => run.unresponsive(execution),
@@ -397,11 +411,14 @@ impl Run {
             );
         }
     }
-    /// Booted, and its page is reading (or will not come).
+    /// Booted and settled, and its page is reading (or will not come).
     fn ready(&self) -> bool {
         let Some(booted) = self.booted else {
             return false;
         };
+        if !self.events.settled.load(Ordering::Acquire) {
+            return false;
+        }
         if self.events.reading.load(Ordering::Acquire) || self.start.pageless {
             return true;
         }
