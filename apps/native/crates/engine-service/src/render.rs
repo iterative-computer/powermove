@@ -856,6 +856,9 @@ impl Engine {
         let media = if let (Some(at), true) = (at, fresh) {
             self.media_seen[at].identity()
         } else {
+            // With the media, the font files read: one rewritten in place
+            // counts as a change of the installed fonts.
+            pm_text::system_fonts::refresh();
             let seen = MediaSeen {
                 media: scene.media.clone(),
                 stamps: match &self.disk {

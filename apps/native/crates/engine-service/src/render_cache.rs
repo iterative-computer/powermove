@@ -2442,6 +2442,10 @@ impl IndexerShared {
         if stale() {
             return;
         }
+        // A font file rewritten under this process is read again first (a
+        // change of the installed fonts like any other: the font generation
+        // moves and the state is observed again).
+        pm_text::system_fonts::refresh();
         let fonts = pm_text::system_fonts::Inventory::current();
         let fingerprint = fingerprint(&source, &identity, &fonts);
         let source = Source {
@@ -2651,16 +2655,20 @@ fn media_content(path: &Path, hash: &mut blake3::Hasher) {
 /// The fonts text can resolve to (`pm_text::system_fonts::Inventory`):
 /// every font file CoreText has registered (installed for the system or
 /// the user, activated from anywhere else, or registered by the process),
-/// with its length and modification time. The list is current as soon as a
+/// with its version. The list is current as soon as a
 /// font is installed or removed; the font generation observes again when
 /// it changes, and a fill draws with the very list its keys were taken
 /// from (`Source::fonts`).
 fn fonts_identity(fonts: &pm_text::system_fonts::Inventory, hash: &mut blake3::Hasher) {
-    for (path, len, modified) in &fonts.0 {
+    for (path, version) in &fonts.0 {
         hash.update(path.as_os_str().as_encoded_bytes());
         hash.update(&[0]);
-        hash.update(&len.to_le_bytes());
-        hash.update(&u128::from(*modified).to_le_bytes());
+        hash.update(&version.len.to_le_bytes());
+        hash.update(&version.modified.to_le_bytes());
+        hash.update(&version.device.to_le_bytes());
+        hash.update(&version.inode.to_le_bytes());
+        hash.update(&version.changed.0.to_le_bytes());
+        hash.update(&version.changed.1.to_le_bytes());
     }
 }
 

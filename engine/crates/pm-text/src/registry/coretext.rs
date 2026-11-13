@@ -843,13 +843,15 @@ impl CoreTextRegistry {
             return Some(f.clone());
         }
         let meta = std::fs::metadata(path).ok()?;
-        let modified = meta
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let key = source_key(&path.to_string_lossy(), meta.len(), modified);
+        let version = crate::file_version::FileVersion::read(&meta);
+        // One blob per version of the file: a rewrite in place that keeps
+        // its length and puts its modification time back is another font.
+        let changed = (version.changed.0 as u128) * 1_000_000_000 + version.changed.1 as u128;
+        let key = source_key(
+            &path.to_string_lossy(),
+            version.len,
+            (changed << 64) | u128::from(version.modified),
+        );
         // System fonts and root-owned fonts only an administrator can write
         // (`/Library/Fonts`: SF Pro alone is 26 MB) are mapped, clean pages
         // macOS can drop; other files are read, so a font the user's own
@@ -866,6 +868,9 @@ impl CoreTextRegistry {
         self.blobs.insert(key.clone(), data.clone());
         self.files
             .insert(path.to_path_buf(), (data.clone(), key.clone()));
+        // Whoever holds work to these bytes sees the file change under them
+        // (`system_fonts::refresh`, `system_fonts::Fence`).
+        crate::system_fonts::note_read(path, version);
         Some((data, key))
     }
 

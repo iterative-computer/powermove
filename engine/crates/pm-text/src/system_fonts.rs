@@ -5,8 +5,14 @@
 //! resolved before a change, its generation and the broker's move on, so
 //! every renderer installs fresh fonts and nothing keyed on the generation
 //! (a frame cache) outlives the fonts it was drawn with.
+//!
+//! A font file rewritten in place by its owner's tool changes no
+//! registration, so CoreText says nothing: the registries note the version
+//! of each file they read ([`note_read`]), and [`refresh`] counts a file
+//! that is another version now as a change like any other.
 
-use std::path::PathBuf;
+use crate::file_version::FileVersion;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -21,8 +27,54 @@ pub fn epoch() -> u64 {
     EPOCH.load(Ordering::Acquire)
 }
 
+/// Font files the registries of this process have read, each with the
+/// version read.
+static READ: Mutex<Vec<(PathBuf, FileVersion)>> = Mutex::new(Vec::new());
+/// How many times the installed fonts were listed ([`available_files`]).
+static LISTINGS: AtomicU64 = AtomicU64::new(0);
+
+/// A registry read the font file at `path` when it was `version` (it keeps
+/// those bytes until the installed fonts change).
+pub fn note_read(path: &Path, version: FileVersion) {
+    let mut read = READ.lock().unwrap_or_else(|e| e.into_inner());
+    match read.iter_mut().find(|(p, _)| p == path) {
+        Some(known) => known.1 = version,
+        None => read.push((path.to_owned(), version)),
+    }
+}
+
+/// The font files read so far, with the version each was read at.
+pub fn files_read() -> Vec<(PathBuf, FileVersion)> {
+    READ.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// Looks at the font files read so far (one look each, whatever is
+/// installed): a file that is another version now was rewritten or replaced
+/// without any registration changing, and counts as a change of the
+/// installed fonts ([`changed`]): the registries read it again. Whether any
+/// was. Safe on any thread; listeners run on it.
+pub fn refresh() -> bool {
+    let stale = {
+        let mut read = READ.lock().unwrap_or_else(|e| e.into_inner());
+        let before = read.len();
+        read.retain(|(path, version)| FileVersion::of(path) == Some(*version));
+        read.len() != before
+    };
+    if stale {
+        changed();
+    }
+    stale
+}
+
+/// How many times the installed fonts have been listed in this process
+/// ([`available_files`]: every installed font file, hundreds of them).
+pub fn listings() -> u64 {
+    LISTINGS.load(Ordering::Relaxed)
+}
+
 /// Calls `listener` after every change, on the thread that saw it (the main
-/// thread; it must not block), for as long as it answers true.
+/// thread for CoreText's own; it must not block), for as long as it answers
+/// true.
 pub fn on_change(listener: impl Fn() -> bool + Send + Sync + 'static) {
     watch();
     LISTENERS
@@ -79,6 +131,7 @@ pub fn watch() {
 /// session fonts, fonts activated from anywhere else, and those the process
 /// registered. Current at once after a change (the notification follows).
 pub fn available_files() -> Vec<PathBuf> {
+    LISTINGS.fetch_add(1, Ordering::Relaxed);
     #[cfg(all(target_os = "macos", feature = "system"))]
     {
         use objc2_core_foundation::CFURL;
@@ -93,28 +146,41 @@ pub fn available_files() -> Vec<PathBuf> {
     Vec::new()
 }
 
+/// Delivers CoreText's pending change notifications ([`watch`]): runs the
+/// calling thread's run loop until it has nothing ready. For the main
+/// thread of a process that has no run loop of its own (a job's child).
+pub fn pump() {
+    #[cfg(all(target_os = "macos", feature = "system"))]
+    {
+        use objc2_core_foundation::{CFRunLoop, CFRunLoopRunResult, kCFRunLoopDefaultMode};
+        // A handful of turns at most: each handles one ready source.
+        for _ in 0..64 {
+            let turned = CFRunLoop::run_in_mode(unsafe { kCFRunLoopDefaultMode }, 0., true);
+            if turned != CFRunLoopRunResult::HandledSource {
+                break;
+            }
+        }
+    }
+}
+
 /// The font files CoreText resolves from at one moment, each with its
-/// length and modification time (nanoseconds): the fonts a render can
-/// resolve to, by stable identity. A render in another process draws with
-/// the same fonts when that process's inventory is this one
-/// ([`Inventory::adopt`]).
+/// version ([`FileVersion`]; the empty one for a file that cannot be looked
+/// at): the fonts a render can resolve to, by stable identity. A render in
+/// another process draws with the same fonts when that process's inventory
+/// is this one ([`Inventory::adopt`]) and stays it ([`Fence`]).
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct Inventory(pub Vec<(PathBuf, u64, u64)>);
+pub struct Inventory(pub Vec<(PathBuf, FileVersion)>);
 
 impl Inventory {
-    /// This process's fonts now ([`available_files`]).
+    /// This process's fonts now ([`available_files`]): a look at every
+    /// installed font file.
     pub fn current() -> Self {
         Inventory(
             available_files()
                 .into_iter()
                 .map(|path| {
-                    let meta = std::fs::metadata(&path).ok();
-                    let modified = meta
-                        .as_ref()
-                        .and_then(|m| m.modified().ok())
-                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                        .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX));
-                    (path, meta.map_or(0, |m| m.len()), modified)
+                    let version = FileVersion::of(&path).unwrap_or_default();
+                    (path, version)
                 })
                 .collect(),
         )
@@ -140,7 +206,7 @@ impl Inventory {
     }
 
     /// Whether this process's fonts are these now; if not, the first
-    /// difference.
+    /// difference. A look at every installed font file.
     pub fn verify(&self) -> Result<(), String> {
         let now = Self::current();
         if now == *self {
@@ -148,7 +214,7 @@ impl Inventory {
         }
         let (ours, theirs): (std::collections::HashSet<_>, std::collections::HashSet<_>) =
             (now.0.iter().collect(), self.0.iter().collect());
-        let name = |f: Option<&&(PathBuf, u64, u64)>| f.map(|f| f.0.display().to_string());
+        let name = |f: Option<&&(PathBuf, FileVersion)>| f.map(|f| f.0.display().to_string());
         Err(
             match (
                 name(theirs.difference(&ours).min()),
@@ -159,6 +225,50 @@ impl Inventory {
                 (None, None) => "the font list is in another order".to_owned(),
             },
         )
+    }
+}
+
+/// Holds a job to the fonts it was asked to draw with, from the moment it
+/// is made (when this process's inventory is the one asked for:
+/// [`Inventory::adopt`], and then [`Inventory::verify`] once more after the
+/// fence stands). [`Fence::hold`] is asked after each unit of work, before
+/// its result is kept: whatever was drawn while the fence held was drawn
+/// with those fonts.
+pub struct Fence {
+    asked: std::collections::HashMap<PathBuf, FileVersion>,
+    epoch: u64,
+}
+
+impl Fence {
+    /// Stands from now: call with pending change notifications delivered
+    /// ([`pump`], or a running main run loop).
+    pub fn new(asked: &Inventory) -> Self {
+        Self {
+            asked: asked.0.iter().cloned().collect(),
+            epoch: epoch(),
+        }
+    }
+
+    /// Whether the fonts are still the ones asked for; if not, why. The
+    /// installed fonts have not changed since the fence was made: the
+    /// count of changes is compared, never the list, so a font installed
+    /// and removed again in between does not pass. And every font file this
+    /// process has read is the version asked for (when it is among the
+    /// installed ones) and is that version still. One look per font file
+    /// read, whatever is installed; call with pending notifications
+    /// delivered.
+    pub fn hold(&self) -> Result<(), String> {
+        if epoch() != self.epoch {
+            return Err("the installed fonts changed".to_owned());
+        }
+        for (path, read) in files_read() {
+            if self.asked.get(&path).is_some_and(|asked| *asked != read)
+                || FileVersion::of(&path) != Some(read)
+            {
+                return Err(format!("{} is not the file it was", path.display()));
+            }
+        }
+        Ok(())
     }
 }
 

@@ -464,7 +464,12 @@ impl ExportRequest {
             without_offline: false,
             preview: false,
             cache: None,
-            fonts: Some(pm_text::system_fonts::Inventory::current()),
+            fonts: Some({
+                // A font file rewritten under this process is read again
+                // first: the list names the fonts the viewer draws with.
+                pm_text::system_fonts::refresh();
+                pm_text::system_fonts::Inventory::current()
+            }),
         })
     }
 }
@@ -858,27 +863,47 @@ pub fn run_child() -> Result<()> {
         Ok(())
     };
     emit(status(&request.job, JobState::Running, 0., None, None))?;
-    // Before the registry looks: fonts the app activated for itself.
-    let frozen_fonts = request.fonts.take();
-    if let Some(Err(why)) = frozen_fonts.as_ref().map(|fonts| fonts.adopt()) {
-        eprintln!("the job's fonts differ from the app's: {why}");
-        emit(status(
-            &request.job,
-            JobState::Failed,
-            0.,
-            None,
-            Some(FONTS_CHANGED.into()),
-        ))?;
-        return Ok(());
-    }
-    // CoreText registry stays on main; rendering waits only on this serviced
-    // broker, never on GPUI or a Node event loop.
-    let mut font_service = pm_text::host::FontService::new().map_err(anyhow::Error::msg)?;
-    let broker = pm_text::host::FontBroker::new();
     // This windowless host serves the broker below when an ask wakes it. A
     // registered wake admits requests; without it layout fails immediately
     // and can lose text glyphs.
     let (wake, woken) = std::sync::mpsc::sync_channel(1);
+    // Before the registry looks: fonts the app activated for itself. Then
+    // the fence stands: this process's fonts are the ones asked for (its
+    // own registrations delivered, the list looked at once more), and
+    // whatever the job draws is kept only while they still are.
+    pm_text::system_fonts::watch();
+    let job_fonts = request.fonts.take().map(|asked| {
+        asked.adopt()?;
+        pm_text::system_fonts::pump();
+        let fence = pm_text::system_fonts::Fence::new(&asked);
+        asked.verify()?;
+        Ok::<_, String>(Arc::new(JobFonts {
+            fence,
+            wake: wake.clone(),
+            turns: Arc::default(),
+            changed: AtomicBool::new(false),
+        }))
+    });
+    let job_fonts = match job_fonts.transpose() {
+        Ok(fonts) => fonts,
+        Err(why) => {
+            eprintln!("the job's fonts differ from the app's: {why}");
+            emit(status(
+                &request.job,
+                JobState::Failed,
+                0.,
+                None,
+                Some(FONTS_CHANGED.into()),
+            ))?;
+            return Ok(());
+        }
+    };
+    let fenced = job_fonts.clone();
+    let turns = job_fonts.as_ref().map(|fonts| fonts.turns.clone());
+    // CoreText registry stays on main; rendering waits only on this serviced
+    // broker, never on GPUI or a Node event loop.
+    let mut font_service = pm_text::host::FontService::new().map_err(anyhow::Error::msg)?;
+    let broker = pm_text::host::FontBroker::new();
     let asked = wake.clone();
     broker.set_wake(Arc::new(move || {
         let _ = asked.try_send(());
@@ -1044,7 +1069,7 @@ pub fn run_child() -> Result<()> {
                 &mut |frame| {
                     let _ = send(&mut std::io::stdout().lock(), &ChildMessage::Frame(frame));
                 },
-                frozen_fonts.as_ref(),
+                job_fonts.as_deref(),
                 &rasters.deferred_us,
                 // Stored frames are exported ones: the export's request.
                 &pm_export::render::frame_request(
@@ -1065,7 +1090,10 @@ pub fn run_child() -> Result<()> {
             seed: 1,
         };
         let plan = pm_export::render::plan_export_for(&job, &renderer)?;
-        let sink = pm_export::render::sink_for(&plan)?;
+        let sink = FencedSink {
+            inner: pm_export::render::sink_for(&plan)?,
+            fonts: job_fonts,
+        };
         let delivered = pm_export::render::run_export_into(
             &mut renderer,
             &job,
@@ -1085,7 +1113,18 @@ pub fn run_child() -> Result<()> {
         )?;
         Ok(delivered.path)
     });
-    while !finished.load(Ordering::Acquire) && woken.recv().is_ok() {
+    while !finished.load(Ordering::Acquire) {
+        // A turn at least every 50 ms: CoreText posts its font change
+        // notification on this thread's run loop, which nothing else runs.
+        if woken.recv_timeout(std::time::Duration::from_millis(50))
+            == Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
+        {
+            break;
+        }
+        pm_text::system_fonts::pump();
+        if let Some(turns) = &turns {
+            turns.fetch_add(1, Ordering::AcqRel);
+        }
         pm_text::host::serve(&mut font_service, broker.take_asks());
     }
     let result = worker
@@ -1117,6 +1156,16 @@ pub fn run_child() -> Result<()> {
         Err(_) if cancel.load(Ordering::Acquire) => {
             emit(status(&job_id, JobState::Cancelled, 0., None, None))?
         }
+        // Its output was dropped unpublished, as for any failure.
+        Err(_) if fenced.is_some_and(|fonts| fonts.changed.load(Ordering::Acquire)) => {
+            emit(status(
+                &job_id,
+                JobState::Failed,
+                0.,
+                None,
+                Some(FONTS_CHANGED.into()),
+            ))?
+        }
         Err(ref e) if let Some(refusal) = e.downcast_ref::<OfflineRefusal>() => emit(JobStatus {
             error: Some(refusal.error(&job_id)),
             ..status(&job_id, JobState::Failed, 0., None, None)
@@ -1131,6 +1180,97 @@ pub fn run_child() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// A job's fonts held to the ones it was asked to draw with
+/// ([`pm_text::system_fonts::Fence`]), asked from the job's worker thread.
+/// CoreText's change notifications arrive on the main thread, which is
+/// asked to deliver what is pending before the fence is looked at.
+struct JobFonts {
+    fence: pm_text::system_fonts::Fence,
+    wake: std::sync::mpsc::SyncSender<()>,
+    /// The main thread's turns of its run loop so far.
+    turns: Arc<AtomicU64>,
+    /// The fence did not hold: why the job failed.
+    changed: AtomicBool,
+}
+impl JobFonts {
+    /// Whether what was drawn until now was drawn with the fonts asked
+    /// for: after each rendered unit, before it is kept (a frame stored in
+    /// the render cache, a frame handed to an export's sink, the export
+    /// published). One look per font file the job has read, however many
+    /// are installed.
+    fn hold(&self) -> Result<(), String> {
+        // Two turns: the second began after this was asked.
+        let turn = self.turns.load(Ordering::Acquire) + 2;
+        let asked = std::time::Instant::now();
+        while self.turns.load(Ordering::Acquire) < turn {
+            let _ = self.wake.try_send(());
+            if asked.elapsed() > std::time::Duration::from_secs(10) {
+                self.changed.store(true, Ordering::Release);
+                return Err("the font service's thread did not answer".to_owned());
+            }
+            std::thread::sleep(std::time::Duration::from_micros(200));
+        }
+        self.fence.hold().inspect_err(|why| {
+            eprintln!("the job's fonts changed while it rendered: {why}");
+            self.changed.store(true, Ordering::Release);
+        })
+    }
+}
+
+/// An export's sink behind the job's font fence: a frame reaches the
+/// encoder, and the output is published, only while the fonts are the ones
+/// the export was asked to draw with. (A frame arrives here after its
+/// render; a change during the render of the frames after it is met at
+/// theirs, and at the end.)
+struct FencedSink<S> {
+    inner: S,
+    fonts: Option<Arc<JobFonts>>,
+}
+impl<S> FencedSink<S> {
+    fn hold(&self) -> std::result::Result<(), pm_export::Error> {
+        match self.fonts.as_ref().map(|fonts| fonts.hold()) {
+            Some(Err(_)) => Err(pm_export::Error::InvalidFrame(FONTS_CHANGED.into())),
+            _ => Ok(()),
+        }
+    }
+}
+impl<S: pm_export::Sink> pm_export::Sink for FencedSink<S> {
+    type Output = S::Output;
+    fn video(
+        &mut self,
+        index: u64,
+        input: &pm_export::EncoderInput,
+    ) -> std::result::Result<(), pm_export::Error> {
+        self.hold()?;
+        self.inner.video(index, input)
+    }
+    fn video_owned(
+        &mut self,
+        index: u64,
+        input: pm_export::EncoderInput,
+    ) -> std::result::Result<(), pm_export::Error> {
+        self.hold()?;
+        self.inner.video_owned(index, input)
+    }
+    fn audio(&mut self, interleaved: &[f32]) -> std::result::Result<(), pm_export::Error> {
+        self.inner.audio(interleaved)
+    }
+    fn idle(&mut self) -> std::result::Result<(), pm_export::Error> {
+        self.inner.idle()
+    }
+    fn finish(self) -> std::result::Result<Self::Output, pm_export::Error> {
+        self.hold()?;
+        self.inner.finish()
+    }
+    fn finish_with_cancel(
+        self,
+        cancel: &AtomicBool,
+    ) -> std::result::Result<Self::Output, pm_export::Error> {
+        self.hold()?;
+        self.inner.finish_with_cancel(cancel)
+    }
 }
 
 /// Set when the export worker ends, however it ends: the disk watch stops,
@@ -1347,7 +1487,7 @@ fn fill_cache(
     cancel: &AtomicBool,
     progress: &mut dyn FnMut(f64),
     report: &mut dyn FnMut(crate::render_cache::FrameReport),
-    fonts: Option<&pm_text::system_fonts::Inventory>,
+    fonts: Option<&JobFonts>,
     deferred: &AtomicU64,
     export_request: &pm_render::RenderRequest,
 ) -> Result<PathBuf> {
@@ -1482,10 +1622,10 @@ fn fill_cache(
         if free_bytes(&fill.dir)? < DISK_RESERVE + bytes.len() as u64 {
             anyhow::bail!(DISK_FULL);
         }
-        // The frame's key was taken from these fonts: drawn while a font
-        // was installed or removed, it is not that key's picture.
-        if let Some(Err(why)) = fonts.map(|fonts| fonts.verify()) {
-            eprintln!("fonts changed while rendering: {why}");
+        // The frame's key was taken from the fonts asked for: drawn while
+        // a font was installed, removed or rewritten, it is not that key's
+        // picture.
+        if let Some(Err(_)) = fonts.map(|fonts| fonts.hold()) {
             anyhow::bail!(FONTS_CHANGED);
         }
         cache
