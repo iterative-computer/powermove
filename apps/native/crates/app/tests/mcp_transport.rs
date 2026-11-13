@@ -1,4 +1,5 @@
 //! Real app executable, disposable profile and a read-only corpus source.
+use base64::Engine as _;
 use serde_json::{Value, json};
 use std::{
     io::{BufRead, BufReader, Write},
@@ -207,14 +208,24 @@ fn export_video_and_render_frames_reach_the_production_engine_job() {
         "apply_commands",
         json!({"commands":[{"type":"add_layer","id":"solid","layerType":"solid","name":"Solid"}]}),
     );
-    let frames = client.rpc(
-        "tools/call",
-        json!({"name":"render_frames","arguments":{"times":[0],"width":160}}),
-    );
-    assert_eq!(frames["isError"], false, "{frames}");
-    let image = &frames["content"][1];
-    assert_eq!(image["mimeType"], "image/png");
-    assert!(image["data"].as_str().unwrap().starts_with("iVBOR"));
+    // The width is a ceiling, as in Electron's snapshot: downscale large
+    // compositions, but keep smaller ones on their original pixel grid.
+    for (width, expected) in [(160, (160, 90)), (1280, (320, 180))] {
+        let frames = client.rpc(
+            "tools/call",
+            json!({"name":"render_frames","arguments":{"times":[0],"width":width}}),
+        );
+        assert_eq!(frames["isError"], false, "{frames}");
+        let image = &frames["content"][1];
+        assert_eq!(image["mimeType"], "image/png");
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(image["data"].as_str().unwrap())
+            .unwrap();
+        let png = png::Decoder::new(std::io::Cursor::new(bytes))
+            .read_info()
+            .unwrap();
+        assert_eq!((png.info().width, png.info().height), expected);
+    }
     let exported = client.tool("export_video", json!({"audio":false}));
     let path = std::path::Path::new(exported["path"].as_str().unwrap());
     assert!(path.starts_with(profile.join("exports")));

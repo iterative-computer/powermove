@@ -87,6 +87,8 @@ pub type Choose = Box<dyn FnOnce(Option<usize>, &mut App)>;
 #[derive(Clone, Debug)]
 enum Spec {
     Layers,
+    /// Option-drag: copies follow the pointer, the originals stay.
+    Duplicate,
     Trim(Edge),
     Offset,
     Ripple(Edge),
@@ -440,6 +442,17 @@ impl TimelineSurface {
         shift: bool,
         cx: &mut Context<Self>,
     ) {
+        // The time scale is this surface's own view, not the model's: the
+        // keys zoom as the bottom bar's ends do.
+        use pm_panel_timeline::footer::ZOOM_STEP;
+        match id {
+            // The playhead is the caller's: this runs inside the editor's own
+            // command, where asking it for the time is not allowed.
+            "timeline.zoomIn" => return self.zoom_about(self.view.pps * ZOOM_STEP, time, cx),
+            "timeline.zoomOut" => return self.zoom_about(self.view.pps / ZOOM_STEP, time, cx),
+            "timeline.fit" => return self.fit_time(cx),
+            _ => {}
+        }
         self.queue.push_back(Job::Command {
             id: id.into(),
             time,
@@ -447,6 +460,17 @@ impl TimelineSurface {
             shift,
         });
         self.pump(cx);
+    }
+    /// Menu checkmarks: the timeline shows tracks, and clips snap in them.
+    pub fn toggles(&self) -> (bool, bool) {
+        (
+            self.model.mode == TimelineMode::Tracks,
+            !self.model.track_snap_disabled,
+        )
+    }
+    /// View ▸ Hide Shy Layers is on.
+    pub fn hides_shy(&self) -> bool {
+        self.model.hide_shy
     }
     /// The keyframe clipboard payload, or nothing with no keys selected.
     pub fn copied_keys(&self) -> Vec<pm_panel_timeline::ClipboardTrack> {
@@ -483,6 +507,21 @@ impl TimelineSurface {
             self.view.scroll_time = 0.;
             self.changed(true, cx);
         }
+    }
+    /// View ▸ Merge Selected Curves is on.
+    pub fn graph_merged(&self) -> bool {
+        self.model.graph_merge
+    }
+    /// Fit Selected Curves: the span from the graph's first key to its last
+    /// fills the time area, with a little room at both ends.
+    fn fit_span(&mut self, first: f64, last: f64, cx: &mut Context<Self>) {
+        const ROOM: f64 = 24.;
+        let width = f32::from(self.bounds.size.width) as f64 - self.view.layer_column - 2. * ROOM;
+        let frame = 1. / self.model.index.fps.max(1.);
+        self.view.pps = (width.max(1.) / (last - first).max(frame)).clamp(PPS.0, PPS.1);
+        self.view.scroll_time = (first - ROOM / self.view.pps).max(self.model.index.minimum_time());
+        self.fitted = true;
+        self.changed(true, cx);
     }
     fn zoom_at(&mut self, x: f64, factor: f64, cx: &mut Context<Self>) {
         let anchor = self.view.scroll_time + (x - self.view.layer_column) / self.view.pps;
@@ -557,9 +596,14 @@ impl TimelineSurface {
     /// Zooms to `pps` about the playhead when it is on screen, else about
     /// the middle of the tracks.
     fn zoom_to(&mut self, pps: f64, cx: &mut Context<Self>) {
+        let time = self.delegate.time(cx);
+        self.zoom_about(pps, time, cx);
+    }
+    /// [`Self::zoom_to`] with the playhead at `time`.
+    fn zoom_about(&mut self, pps: f64, time: f64, cx: &mut Context<Self>) {
         let width = f32::from(self.bounds.size.width) as f64;
         let column = self.view.layer_column;
-        let playhead = column + (self.delegate.time(cx) - self.view.scroll_time) * self.view.pps;
+        let playhead = column + (time - self.view.scroll_time) * self.view.pps;
         let about = if playhead >= column && playhead <= width {
             playhead
         } else {
@@ -716,6 +760,7 @@ impl TimelineSurface {
                         for effect in effects {
                             match effect {
                                 HostEffect::Seek(time) => s.delegate.seek(time, cx),
+                                HostEffect::FitCurves(first, last) => s.fit_span(first, last, cx),
                                 other => s.delegate.effect(other, cx),
                             }
                         }
@@ -1187,14 +1232,17 @@ impl TimelineSurface {
                 }
                 None if mods.command() && mods.alt => Spec::Offset,
                 None if tracks && mods.control => Spec::Slip,
-                None if tracks && mods.alt => Spec::Slide,
+                None if tracks && mods.alt && mods.shift => Spec::Slide,
+                // Option-drag duplicates, as in Premiere, Final Cut and
+                // Resolve (Slide took Option alone before; it has Shift now).
+                None if mods.alt => Spec::Duplicate,
                 None => Spec::Layers,
             };
             let selected = self.model.selection.contains(&layer);
             // Pro-edit modifiers choose the tool; they must not toggle selection.
             let picking = if matches!(
                 spec,
-                Spec::Ripple(_) | Spec::Roll(_) | Spec::Slip | Spec::Slide
+                Spec::Ripple(_) | Spec::Roll(_) | Spec::Slip | Spec::Slide | Spec::Duplicate
             ) {
                 Mods::default()
             } else {
@@ -1650,11 +1698,7 @@ impl TimelineSurface {
             (MenuContext::Graph { .. }, _) => at("graph", None),
             _ => at("empty", None),
         };
-        let mut items = self.model.menu(&context);
-        // Graph Fit and Merge have no host. Never offer them live.
-        for item in &mut items {
-            item.enabled &= !matches!(item.id, "graph.fit" | "graph.merge");
-        }
+        let items = self.model.menu(&context);
         let ids: Vec<&'static str> = items.iter().map(|i| i.id).collect();
         let rows = items
             .iter()
@@ -1835,6 +1879,16 @@ impl TimelineSurface {
             .and_then(|a| self.graph_ops(a))
             .unwrap_or_default()
     }
+    /// Points a second, the time at the time area's left edge, and the
+    /// time area's width less the room Fit Selected Curves leaves.
+    #[cfg(test)]
+    pub fn time_view(&self) -> (f64, f64, f64) {
+        (
+            self.view.pps,
+            self.view.scroll_time,
+            f32::from(self.bounds.size.width) as f64 - self.view.layer_column - 48.,
+        )
+    }
     #[cfg(test)]
     pub fn graph(&self) -> Option<Arc<Graph>> {
         self.graph.clone()
@@ -1929,8 +1983,19 @@ async fn run(client: &mut TimelineClient, job: Job) -> Result<Vec<HostEffect>, S
             Ok(vec![])
         }
         Job::Finish(commit) => {
-            if client.active_drag().is_some() {
+            if let Some(drag) = client.active_drag() {
+                let copies = drag.copies().map(<[String]>::to_vec);
                 client.finish_drag(commit).await.map_err(text)?;
+                // An Option-drag leaves its copies selected.
+                if let (true, Some(ids)) = (commit, copies) {
+                    client
+                        .dispatch(Plan {
+                            calls: vec![SelectionCall::Layers { ids, add: false }.into()],
+                            ..Default::default()
+                        })
+                        .await
+                        .map_err(text)?;
+                }
             }
             Ok(vec![])
         }
@@ -2078,6 +2143,28 @@ fn drag_kind(model: &TimelineModel, spec: Spec, time: f64) -> Result<DragKind, S
     };
     Ok(match spec {
         Spec::Layers => DragKind::Layers { ids },
+        Spec::Duplicate => {
+            // A selected group brings its members: only the tops are copied.
+            let inside = |id: &str| {
+                let mut at = model.index.layer(id).and_then(|l| l.group.clone());
+                for _ in 0..256 {
+                    let Some(group) = at else { return false };
+                    if ids.contains(&group) {
+                        return true;
+                    }
+                    at = model.index.layer(&group).and_then(|l| l.group.clone());
+                }
+                false
+            };
+            let tops: Vec<String> = ids.iter().filter(|id| !inside(id)).cloned().collect();
+            if tops.is_empty() {
+                return Err("Select a layer first".into());
+            }
+            DragKind::DuplicateLayers {
+                new_ids: tops.iter().map(|_| pm_kernel::new_id("L")).collect(),
+                ids: tops,
+            }
+        }
         Spec::Trim(Edge::In) => DragKind::TrimIn { ids },
         Spec::Trim(Edge::Out) => DragKind::TrimOut { ids },
         Spec::Offset => DragKind::QuickOffsetLayers { ids },

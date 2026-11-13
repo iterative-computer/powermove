@@ -129,7 +129,7 @@ fn review_library_row(rest: &str, cx: &mut App) {
     }
 }
 
-/// `<drop|sequence|figma|answer>/<paths>`, percent-encoded and newline-separated,
+/// `<drop|sequence|figma|answer|pasteboard>/<paths>`, percent-encoded and newline-separated,
 /// on the first editor: what a Finder drop on the window, or the open panel of
 /// File ▸ Import Image Sequence…, hands over; `answer` is what the next open
 /// panel (Import, Locate File…) returns. The system open panel takes no
@@ -145,6 +145,12 @@ fn review_files(rest: &str, cx: &mut App) {
         .unwrap_or_default();
     if route == "answer" {
         crate::platform::answer_next_open_panel(paths);
+        return;
+    }
+    // Paste reads the pasteboard named here (none: the general one again).
+    if route == "pasteboard" {
+        let name = paths.first().map(|p| p.to_string_lossy().into_owned());
+        crate::platform::review_pasteboard(name.filter(|n| !n.is_empty()));
         return;
     }
     let route = route.to_owned();

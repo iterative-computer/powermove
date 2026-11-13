@@ -442,6 +442,11 @@ impl Editor {
                 .as_ref()
                 .map(|i| i.disabled(cx))
                 .unwrap_or_default(),
+            checked: self
+                .integration
+                .as_ref()
+                .map(|i| i.checked(cx))
+                .unwrap_or_default(),
         }
     }
     fn dock_visible(&self, id: &str) -> bool {

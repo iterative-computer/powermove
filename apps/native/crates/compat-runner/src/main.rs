@@ -54,6 +54,7 @@ fn store(input: &Value) -> std::result::Result<Value, Box<dyn std::error::Error 
         wake: std::sync::Arc::new(|| ()),
         frames: None,
         rasters: None,
+        vars: None,
     });
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     while !host.is_ready() && std::time::Instant::now() < deadline {
@@ -99,6 +100,7 @@ fn definitions(
         wake: std::sync::Arc::new(|| ()),
         frames: None,
         rasters: None,
+        vars: None,
     });
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
     while !host.is_ready() && std::time::Instant::now() < deadline {
@@ -155,6 +157,7 @@ fn profile(input: &Value) -> std::result::Result<Value, Box<dyn std::error::Erro
         wake: std::sync::Arc::new(|| ()),
         frames: None,
         rasters: None,
+        vars: None,
     });
     let wait = input["seconds"].as_u64().unwrap_or(120);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait);

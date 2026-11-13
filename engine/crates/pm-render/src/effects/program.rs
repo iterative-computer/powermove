@@ -22,6 +22,37 @@ use std::collections::HashMap;
 use pm_glsl::reflect::{Block, Scalar, UniformType};
 use pm_glsl::{FRAGMENT_SET, Failure, FailureStage, Program, SAMPLER_BINDING_OFFSET, VERTEX_SET};
 
+/// Electron's ordinary effect inputs: LINEAR min/mag, CLAMP_TO_EDGE,
+/// nearest mip level. Ordinary targets have only level zero; spatial effects
+/// explicitly prepare a pyramid before using this sampler.
+pub(crate) fn sampler_descriptor() -> wgpu::SamplerDescriptor<'static> {
+    wgpu::SamplerDescriptor {
+        label: Some("pm linear clamp"),
+        address_mode_u: wgpu::AddressMode::ClampToEdge,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        address_mode_w: wgpu::AddressMode::ClampToEdge,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+        ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod sampler_tests {
+    #[test]
+    fn ordinary_effect_texture_parameters_match_webgl() {
+        let d = super::sampler_descriptor();
+        assert_eq!(d.min_filter, wgpu::FilterMode::Linear);
+        assert_eq!(d.mag_filter, wgpu::FilterMode::Linear);
+        assert_eq!(d.mipmap_filter, wgpu::MipmapFilterMode::Nearest);
+        assert_eq!(d.address_mode_u, wgpu::AddressMode::ClampToEdge);
+        assert_eq!(d.address_mode_v, wgpu::AddressMode::ClampToEdge);
+        assert_eq!(d.anisotropy_clamp, 1);
+        assert_eq!(d.compare, None);
+    }
+}
+
 /// A `glUniform*` call as the compositor issues it.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Call {

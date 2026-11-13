@@ -1520,3 +1520,58 @@ fn a_selection_in_a_zero_size_or_far_off_composition_publishes_drawable_overlays
         "the selection really produced lines that cannot be drawn"
     );
 }
+/// Option-drag in the viewer: the layer stays and a copy takes the move,
+/// selected; one Undo step removes it.
+#[gpui::test]
+fn option_dragging_the_body_leaves_the_layer_and_moves_a_copy(cx: &mut TestAppContext) {
+    let mut s = stage(cx);
+    let layers = |s: &Stage| {
+        let p = s.rig.kernel.published(PROJECT).unwrap();
+        pm_kernel::model::list_layers(p.snapshot.root().unwrap(), None)
+    };
+    let position = |s: &Stage, id: &str| {
+        let p = s.rig.kernel.published(PROJECT).unwrap();
+        ["position.x", "position.y"].map(|channel| {
+            pm_kernel::QueryMirror::new(&p)
+                .queries()
+                .evaluate(None, id, channel, 0.)
+                .unwrap()
+                .as_f64()
+                .unwrap()
+        })
+    };
+    let original = layers(&s)[0].id.clone();
+    let before = position(&s, &original);
+    let (body, ..) = s.points();
+    let at = s.point_of([body[0] + 30., body[1] + 30.]);
+    let option = Modifiers {
+        alt: true,
+        ..Modifiers::none()
+    };
+    s.drag(cx, at, point(px(40.), px(-10.)), option);
+    let after = layers(&s);
+    assert_eq!(after.len(), 2, "one copy");
+    assert_eq!(position(&s, &original), before, "the layer stays");
+    let copy = after.iter().find(|l| l.id != original).unwrap().id.clone();
+    assert_eq!(position(&s, &copy), [before[0] + 40., before[1] - 10.]);
+    let p = s.rig.kernel.published(PROJECT).unwrap();
+    assert_eq!(
+        p.selection.layers(),
+        std::slice::from_ref(&copy),
+        "the copy is selected"
+    );
+    assert_eq!(p.history.undo_label.as_deref(), Some("Duplicate"));
+    drop(p);
+    // The copy was the selection, so Undo leaves no box to wait for.
+    s.rig
+        .kernel
+        .call(
+            PROJECT,
+            Request::new(Caller::native(), Call::History(HistoryCall::Undo)),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    assert_eq!(layers(&s).len(), 1, "one Undo step");
+    assert_eq!(position(&s, &original), before);
+}

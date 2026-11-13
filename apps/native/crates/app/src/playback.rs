@@ -235,9 +235,10 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                 }
                 v.tick_builtins(cx);
                 let scale=v.host.borrow().window.backingScaleFactor();
-                if let Some(clock)=status.clock { v.sync_popout(&clock); }
+                if let Some(clock)=status.clock { v.watch_run(&clock); v.sync_popout(&clock); }
                 if let Some(clock)=status.clock {
-                    let playing=clock.state==pm_protocol::clock::TransportState::Playing;
+                    // Shuttling is a run too: the live timecode shows at every speed.
+                    let playing=clock.state!=pm_protocol::clock::TransportState::Stopped;
                     let fraction=(clock.media_time.get()as f64/pm_protocol::common::TICKS_PER_SECOND as f64/v.duration).clamp(0.,1.);
                     let _=layers.update(MainThreadMarker::new().unwrap(),&clock,clock.host_time,v.rate,fraction,std::array::from_fn(|i|status.levels.as_ref().and_then(|l|l.master.peak.get(i)).copied().unwrap_or(0.) as f64));
                     let host=v.host.borrow();

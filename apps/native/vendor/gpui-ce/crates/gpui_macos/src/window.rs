@@ -847,6 +847,14 @@ struct MacWindowState {
     force_render_pending: bool,
     /// GPUI painted since hosted views were last placed.
     painted: bool,
+    /// Drawables from the layer, taken off the main thread, for frames
+    /// that present with the slot transaction.
+    #[cfg(not(feature = "wgpu"))]
+    direct_source: Option<renderer::DrawableSource>,
+    /// The window is in the direct pace (see `composition::Pace`) since a
+    /// frame moved a hosted view; when the last one did.
+    #[cfg(not(feature = "wgpu"))]
+    direct_moved: Option<std::time::Instant>,
     request_frame_callback: Option<Box<dyn FnMut(RequestFrameOptions)>>,
     event_callback: Option<Box<dyn FnMut(PlatformInput) -> gpui::DispatchEventResult>>,
     activate_callback: Option<Box<dyn FnMut(bool)>>,
@@ -1044,7 +1052,9 @@ impl MacWindowState {
                 if self.ca_display_link.is_none() {
                     let link: Retained<Objc2Object>;
                     #[cfg(not(feature = "wgpu"))]
-                    if std::env::var_os("PM_GPUI_CA_DISPLAY_LINK").is_none() {
+                    if std::env::var_os("PM_GPUI_CA_DISPLAY_LINK").is_none()
+                        && self.direct_moved.is_none()
+                    {
                         let allocated: *mut Objc2Object =
                             msg_send![class!(CAMetalDisplayLink), alloc];
                         let raw: *mut Objc2Object = msg_send![allocated, initWithMetalLayer: self.renderer.layer_ptr() as ObjcId];
@@ -1096,6 +1106,48 @@ impl MacWindowState {
         if let Some(frame_source) = self.frame_source.as_mut() {
             frame_source.stop();
         }
+    }
+
+    /// From the link pace to the direct one: the `CAMetalDisplayLink` goes,
+    /// a plain display link keeps the frame callback, and drawables come
+    /// from the layer through `DrawableSource` (asked for here, taken when
+    /// they have arrived). Stays until `leave_direct`.
+    #[cfg(not(feature = "wgpu"))]
+    fn enter_direct(&mut self) {
+        self.renderer.set_display_link_drawable(None);
+        self.release_display_link_for_sync_present();
+        self.renderer.set_presents_with_transaction(true);
+        if self.direct_source.is_none()
+            && let Some(layer) = self.renderer.layer()
+        {
+            self.direct_source = Some(renderer::DrawableSource::new(layer.to_owned()));
+        }
+        if let Some(source) = self.direct_source.as_mut() {
+            source.request();
+        }
+        self.direct_moved = Some(std::time::Instant::now());
+        self.start_display_link();
+    }
+
+    /// Back to the link pace once nothing has moved for a while. The layer
+    /// must not be asked for a drawable while a `CAMetalDisplayLink` owns
+    /// it, so this waits until none is on its way.
+    #[cfg(not(feature = "wgpu"))]
+    fn leave_direct(&mut self) {
+        let Some(moved) = self.direct_moved else {
+            return;
+        };
+        let idle = self.direct_source.as_mut().is_none_or(|source| source.idle());
+        if !crate::composition::leaves_direct(moved.elapsed(), self.force_render_pending, idle) {
+            return;
+        }
+        if let Some(source) = self.direct_source.as_mut() {
+            source.release();
+        }
+        self.direct_moved = None;
+        self.release_display_link_for_sync_present();
+        self.renderer.set_presents_with_transaction(false);
+        self.start_display_link();
     }
 
     fn stop_display_link(&mut self) {
@@ -1359,6 +1411,10 @@ impl MacWindow {
                 renderer,
                 force_render_pending: false,
                 painted: false,
+                #[cfg(not(feature = "wgpu"))]
+                direct_source: None,
+                #[cfg(not(feature = "wgpu"))]
+                direct_moved: None,
                 request_frame_callback: None,
                 event_callback: None,
                 activate_callback: None,
@@ -1679,6 +1735,7 @@ impl Drop for MacWindow {
                 let _: () = msg_send![&*link, invalidate];
             }
         }
+        crate::composition::forget_paints(this.native_view.as_ptr() as usize);
         unsafe {
             this.native_window.setDelegate_(NIL);
         }
@@ -2300,74 +2357,159 @@ impl PlatformWindow for MacWindow {
     }
 
     fn painted(&self) {
-        self.0.lock().painted = true;
+        let mut this = self.0.lock();
+        this.painted = true;
+        crate::composition::painted(this.native_view.as_ptr() as usize);
     }
 
+    #[cfg(feature = "wgpu")]
     fn draw(&self, scene: &gpui::Scene) {
         let mut this = self.0.lock();
-        // Hosted views move in the frame that carries the scene they were
-        // laid out with: a frame with no drawable to reach (a link drawable
-        // of the size before a resize, a draw outside the link's update)
-        // moves nothing and is painted again on the next update.
-        #[cfg(not(feature = "wgpu"))]
-        if !this.renderer.drawable_ready() {
+        let painted = std::mem::take(&mut this.painted);
+        let transaction =
+            crate::composition::present(this.native_view.as_ptr() as usize, painted);
+        if this.renderer.draw(scene) {
             this.force_render_pending = true;
-            return;
+        }
+        drop(this);
+        drop(transaction);
+    }
+
+    /// Powermove P-120. A frame decides what it does before a hosted view is
+    /// touched (`composition::step`), so the main thread never waits for a
+    /// drawable and hosted views move only in the frame that carries the
+    /// scene they were laid out with:
+    /// - nothing would move: the scene goes into the link's drawable and the
+    ///   main thread waits for nothing;
+    /// - something would move: a link's drawable is shown at the link's own
+    ///   time, frames after a transaction committed now, so the window
+    ///   changes to drawables taken from the layer (off the main thread) and
+    ///   presented with the slot transaction, and stays there until nothing
+    ///   has moved for `composition::DIRECT_LINGER`;
+    /// - no drawable of the window's size in hand: nothing is drawn and
+    ///   nothing moves; the next update tries again.
+    #[cfg(not(feature = "wgpu"))]
+    fn draw(&self, scene: &gpui::Scene) {
+        use crate::composition::{Pace, Step};
+        let mut this = self.0.lock();
+        let traced = gpui_apple::metal_renderer::present_trace().then(std::time::Instant::now);
+        let trace = |path: &str, moved: bool, acquire: f64| {
+            if let Some(at) = traced {
+                eprintln!(
+                    r#"PM_GPUI_DRAW {{"at":{:.4},"path":"{path}","moved":{moved},"ms":{:.3},"acquire_ms":{acquire:.3}}}"#,
+                    objc2_quartz_core::CACurrentMediaTime(),
+                    at.elapsed().as_secs_f64() * 1000.,
+                );
+            }
+        };
+        let view = this.native_view.as_ptr() as usize;
+        let size = this.renderer.drawable_size();
+        // AppKit's own synchronous paints (live resize, a tab coming forward)
+        // must show now: they keep asking the layer, with its timeout.
+        let forced = this.sync_present_requested;
+        let mut path = "link";
+        if forced {
+            path = "sync";
+            // In the direct pace the one in hand serves if it fits. (In the
+            // link pace the source stays unasked: a link is made again
+            // right after this paint.)
+            if this.direct_moved.is_some()
+                && let Some(drawable) = this.direct_source.as_mut().and_then(|s| s.take(size))
+            {
+                this.renderer.set_display_link_drawable(Some(drawable));
+            }
+        } else {
+            let pace = if this.direct_moved.is_some() {
+                Pace::Direct
+            } else {
+                Pace::Link
+            };
+            let (link, pending, in_hand) = match pace {
+                Pace::Direct => {
+                    let drawable = this.direct_source.as_mut().and_then(|s| s.take(size));
+                    let in_hand = drawable.is_some();
+                    this.renderer.set_display_link_drawable(drawable);
+                    (renderer::LinkDrawable::Wait, false, in_hand)
+                }
+                Pace::Link => {
+                    let link = this.renderer.drawable_ready();
+                    // Only a link's drawable is late for a transaction.
+                    let pending = link == renderer::LinkDrawable::Ready
+                        && this.renderer.display_link_bound()
+                        && crate::composition::pending(view, this.painted);
+                    (link, pending, false)
+                }
+            };
+            match crate::composition::step(pace, link, pending, in_hand) {
+                Step::Link => {}
+                Step::Direct => path = "direct",
+                Step::Defer => {
+                    this.force_render_pending = true;
+                    drop(this);
+                    return trace("defer", false, 0.);
+                }
+                Step::EnterDirect => {
+                    this.enter_direct();
+                    this.force_render_pending = true;
+                    drop(this);
+                    return trace("enter", false, 0.);
+                }
+            }
         }
         // A scene shown again (GPUI keeps presenting for a moment after fast
         // input) staged nothing new: hosted views stay as its paint put them.
         let painted = std::mem::take(&mut this.painted);
-        let transaction =
-            crate::composition::present(this.native_view.as_ptr() as usize, painted);
-        // Powermove P-120: block on the transaction only when slot geometry moved
-        // (or AppKit is painting synchronously), and reset it on every other frame.
-        #[cfg(not(feature = "wgpu"))]
-        {
-            let now = std::time::Instant::now();
-            let continuous = this
-                .last_draw
-                .is_some_and(|t| now.duration_since(t) < crate::composition::CONTINUOUS_FRAME);
-            this.last_draw = Some(now);
-            let sync = crate::composition::presents_with_transaction(
-                this.sync_present_requested,
+        let transaction = crate::composition::present(view, painted);
+        let moved = transaction.as_ref().is_some_and(|t| t.moved());
+        let now = std::time::Instant::now();
+        let continuous = this
+            .last_draw
+            .is_some_and(|t| now.duration_since(t) < crate::composition::CONTINUOUS_FRAME);
+        this.last_draw = Some(now);
+        let direct = this.direct_moved.is_some();
+        let sync = direct
+            || crate::composition::presents_with_transaction(
+                forced,
                 transaction.as_ref(),
                 continuous && std::env::var_os("PM_GPUI_ASYNC_PRESENT").is_none(),
                 this.ca_display_link.is_some(),
             );
-            this.renderer.set_presents_with_transaction(sync);
-        }
-        // A link's drawable reaches the screen at the link's own time, frames
-        // after a transaction committed now: a frame that moved hosted views
-        // would show them in their new places over the previous scene. Such
-        // a frame takes its drawable from the layer, as AppKit's synchronous
-        // paints do, and the link starts again after it.
-        #[cfg(not(feature = "wgpu"))]
-        let relink = this.ca_display_link.is_some()
-            && transaction.as_ref().is_some_and(|t| t.moved());
-        #[cfg(not(feature = "wgpu"))]
-        if relink {
+        this.renderer.set_presents_with_transaction(sync);
+        // A host that cannot say beforehand that it will move (it gave no
+        // `composition::set_pending`) has moved its views by now, under a
+        // link. This one frame asks the layer on the main thread, as AppKit's
+        // synchronous paints do (the layer's timeout bounds the wait), and
+        // the window is direct from here on.
+        let late = !forced && !direct && moved && this.renderer.display_link_bound();
+        if late {
+            path = "late";
             this.renderer.set_display_link_drawable(None);
             this.release_display_link_for_sync_present();
         }
-        #[cfg(feature = "wgpu")]
-        if this.renderer.draw(scene) {
-            this.force_render_pending = true;
-        }
-        #[cfg(not(feature = "wgpu"))]
         if !this.renderer.draw(scene) {
-            // No link-supplied drawable while a CAMetalDisplayLink owns the
-            // layer: the link's next update paints this scene.
+            // No drawable (a link owns the layer and this draw is outside
+            // its update, or the layer gave none): the next update paints
+            // this scene.
             this.force_render_pending = true;
         }
-        #[cfg(not(feature = "wgpu"))]
-        if relink {
-            this.start_display_link();
+        if late {
+            this.enter_direct();
+        } else if direct {
+            if moved {
+                this.direct_moved = Some(now);
+            }
+            // The next frame's drawable, so it has arrived by then.
+            if let Some(source) = this.direct_source.as_mut() {
+                source.request();
+            }
         }
+        let acquire = this.renderer.acquire_seconds * 1000.;
         // Committing the slot transaction runs AppKit's display cycle, which
         // calls back into this window (cursor rects take this lock): release
         // the lock first, or the main thread deadlocks on itself.
         drop(this);
         drop(transaction);
+        trace(path, moved, acquire);
     }
 
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
@@ -3523,6 +3665,12 @@ fn update_window_scale_factor(window_state: &Arc<Mutex<MacWindowState>>) {
     }
 
     lock.renderer.update_drawable_size(drawable_size);
+    #[cfg(not(feature = "wgpu"))]
+    if lock.direct_moved.is_some()
+        && let Some(source) = lock.direct_source.as_mut()
+    {
+        source.resized();
+    }
 
     if let Some(mut callback) = lock.resize_callback.take() {
         let content_size = lock.content_size();
@@ -3601,7 +3749,11 @@ unsafe extern "C" fn window_did_change_key_status(this: &Objc2Object, selector: 
 
                 let mut lock = window_state.lock();
                 lock.request_frame_callback = Some(callback);
-                lock.renderer.set_presents_with_transaction(false);
+                #[cfg(not(feature = "wgpu"))]
+                let direct = lock.direct_moved.is_some();
+                #[cfg(feature = "wgpu")]
+                let direct = false;
+                lock.renderer.set_presents_with_transaction(direct);
                 lock.sync_present_requested = false;
                 lock.start_display_link();
             }
@@ -3704,6 +3856,12 @@ unsafe extern "C" fn set_frame_size(this: &Objc2Object, _: Sel, size: NSSize) {
     let scale_factor = lock.scale_factor();
     let drawable_size = new_size.to_device_pixels(scale_factor);
     lock.renderer.update_drawable_size(drawable_size);
+    #[cfg(not(feature = "wgpu"))]
+    if lock.direct_moved.is_some()
+        && let Some(source) = lock.direct_source.as_mut()
+    {
+        source.resized();
+    }
 
     if let Some(mut callback) = lock.resize_callback.take() {
         let content_size = lock.content_size();
@@ -3727,7 +3885,11 @@ unsafe extern "C" fn display_layer(this: &Objc2Object, _: Sel, _: ObjcId) {
 
         let mut lock = window_state.lock();
         lock.request_frame_callback = Some(callback);
-        lock.renderer.set_presents_with_transaction(false);
+        #[cfg(not(feature = "wgpu"))]
+        let direct = lock.direct_moved.is_some();
+        #[cfg(feature = "wgpu")]
+        let direct = false;
+        lock.renderer.set_presents_with_transaction(direct);
         lock.sync_present_requested = false;
         lock.start_display_link();
     }
@@ -3801,6 +3963,8 @@ extern "C" fn step(view: *mut c_void) {
             // intermediates until it draws again.
             #[cfg(not(feature = "wgpu"))]
             lock.renderer.release_idle_targets(IDLE_TARGETS);
+            #[cfg(not(feature = "wgpu"))]
+            lock.leave_direct();
         }
     }
 }

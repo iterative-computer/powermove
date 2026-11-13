@@ -430,7 +430,16 @@ impl KernelAdapter {
         let _ = self.kernel.call_blocking(&self.project, request);
     }
     fn reply(&mut self, ack: Ack) -> Result<Value> {
-        let mut result = match ack.reply {
+        let mut result = self.outcome(ack)?;
+        result["publication"] = self.publication()?;
+        Ok(result)
+    }
+    /// What a call answered, without the publication. A step whose reply the
+    /// realm never sees must not take the publication either: that is where
+    /// the realm learns its own writes landed, and the next reply it does
+    /// see would carry no trace of them.
+    fn outcome(&mut self, ack: Ack) -> Result<Value> {
+        let result = match ack.reply {
             Reply::Unit | Reply::Applied { .. } => json!({}),
             Reply::Selection(selection) => json!({"value":selection_wire(&selection)}),
             Reply::Bool(value) => json!({"value":value}),
@@ -446,7 +455,6 @@ impl KernelAdapter {
             Reply::Throw(error) => json!({"error":{"code":"Rejected","message":error.to_string()}}),
             _ => return Err(Error::Invalid("unsupported kernel reply")),
         };
-        result["publication"] = self.publication()?;
         Ok(result)
     }
     pub fn handle_name(&self, number: u64) -> Option<String> {
@@ -707,7 +715,17 @@ impl KernelAdapter {
             }
             "edit.mutateFinish" => {
                 let write = self.direct_write(args, &p)?;
-                let written = self.execute(txid, write)?;
+                // The write and the commit are one reply to the realm: the
+                // commit's publication carries the write's operations.
+                if self.frozen.is_some() {
+                    return Err(Error::Host(FROZEN.into()));
+                }
+                let request = Request::new(self.caller, write).with_txid(txid);
+                let ack = self
+                    .kernel
+                    .call_blocking(&self.project, request)
+                    .map_err(|e| Error::Host(e.to_string()))?;
+                let written = self.outcome(ack)?;
                 if written.get("error").is_some() {
                     // A rollback that fails leaves the entry open: report that.
                     let rolled = self.step(HistoryCall::Rollback.into())?;

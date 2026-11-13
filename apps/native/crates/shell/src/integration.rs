@@ -36,6 +36,10 @@ pub trait Integration {
     fn disabled(&self, _cx: &App) -> std::collections::BTreeSet<String> {
         Default::default()
     }
+    /// Toggle commands that are on now: their menu rows carry a checkmark.
+    fn checked(&self, _cx: &App) -> std::collections::BTreeSet<String> {
+        Default::default()
+    }
     /// True when a native surface below GPUI draws this panel's body. The shell
     /// leaves the body transparent and routes its pointer events to that surface.
     fn native_panel(&self, _id: &str, _cx: &App) -> bool {

@@ -92,7 +92,7 @@ fn keymap_matches_every_w1_cell() {
         .collect();
     let bindings = shipped();
     // The 195 W1 cells, then native additions (`main.*`, `native.*` ids).
-    assert_eq!(bindings.len(), 202);
+    assert_eq!(bindings.len(), 228);
     assert_eq!(rows.len(), 195);
     for (row, b) in rows.iter().zip(bindings) {
         let c: Vec<_> = row.split('|').map(str::trim).collect();
@@ -150,7 +150,12 @@ fn key(token: u64, chord: &str) -> Key {
 #[test]
 fn declines_replay_in_order_and_bypasses_do_not_wait() {
     let mut r = Resolver::new();
+    // The shuttle is offered first; stopped, it declines to the shipped key.
     let out = r.submit(key(1, "j"));
+    assert!(
+        matches!(&out[0],Effect::Dispatch{command,class:Class::MayDecline,..}if command=="shuttleBackward")
+    );
+    let out = r.resolve(1, false);
     assert!(
         matches!(&out[0],Effect::Dispatch{command,class:Class::MayDecline,..}if command=="prevVisibleEvent")
     );
@@ -180,10 +185,16 @@ fn field_priority_repeat_and_extension_decline() {
     assert!(matches!(&r.submit(k)[0],Effect::Dispatch{command,..}if command=="save"));
     r.resolve(2, false);
     r.replayed(2);
-    let mut k = key(3, "j");
+    // A held K has no repeating binding; a held J reaches only the shuttle.
+    let mut k = key(3, "k");
     k.repeat = true;
     assert_eq!(r.submit(k), [Effect::Replay(3)]);
     r.replayed(3);
+    let mut k = key(5, "j");
+    k.repeat = true;
+    assert!(matches!(&r.submit(k)[0],Effect::Dispatch{command,..}if command=="shuttleBackward"));
+    assert_eq!(r.resolve(5, false), [Effect::Replay(5)]);
+    r.replayed(5);
     let mut extension = shipped()[0].clone();
     extension.command = "extension.test".into();
     extension.priority = -1;
