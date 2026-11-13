@@ -495,12 +495,14 @@ fn medium_direct(p:vec3f,rd:vec3f,g:f32)->vec3f {
   return e;
 }
 fn medium_direct_live(p:vec3f,rd:vec3f,g:f32)->vec3f {
-  // Keep the inexpensive two-direction ambient approximation, but external
-  // light must traverse the same finite atmosphere as practical lights.
-  // Omitting that extinction lit the interior of an opaque 10 km fog sphere.
+  // Legacy hemisphere ambient approximates the local diffuse radiation
+  // field, including unresolved multiple scattering. Attenuating that field
+  // a second time turns a conservative white volume black in Live. Actual
+  // HDRI/sky illumination and practical lights retain their external paths.
   let up=vec3f(0.,1.,0.);
-  var e=(environment(rd)*medium_transmittance(p,rd,BIG)
-    +environment(up)*medium_transmittance(p,up,BIG))*0.5;
+  var e=(environment(rd)+environment(up))*0.5;
+  if(map_count()>0u){e=(environment(rd)*medium_transmittance(p,rd,BIG)
+    +environment(up)*medium_transmittance(p,up,BIG))*0.5;}
   if(P.counts.x>0u){let li=choose_light(p);let l=sample_light(light_at(li),p);
     if(l.pdf>0.){e+=l.radiance*transmittance(p,l.dir,l.dist)*phase_hg(dot(rd,l.dir),g)/(l.pdf*light_selection_pdf(li,p));}}
   return e;
@@ -1630,11 +1632,13 @@ fn path(px: vec2f)->Sample {
     if(any(volume_absorption>vec3f(0.))){tp*=exp(-volume_absorption*min(max(segment,0.),1e6));}
     if(medium_majorant()>0.){
       if(P.opts.x!=0u){
-        let end=tracking_segment(ro,rd,segment).y;let dt=end/2.;
-        if(primary){
+        let occupied=tracking_segment(ro,rd,segment);let end=occupied.y;
+        let begin=occupied.x;let dt=max(0.,end-begin)/2.;
+        if(primary && dt>0.){
           for(var step=0u;step<2u;step++){
-            let point=ro+rd*((f32(step)+rnd())*dt);let med=medium_at(point);
-            let tr=exp(-live_optical_depth(ro+rd*(f32(step)*dt),rd,dt));
+            let start=begin+f32(step)*dt;
+            let point=ro+rd*(start+rnd()*dt);let med=medium_at(point);
+            let tr=exp(-live_optical_depth(ro+rd*start,rd,dt));
             s.radiance+=limit_indirect(tp*med.albedo*(1.-tr)*medium_direct_live(point,rd,med.g),b);tp*=tr;
           }
         }else{tp*=exp(-live_optical_depth(ro,rd,end));}
