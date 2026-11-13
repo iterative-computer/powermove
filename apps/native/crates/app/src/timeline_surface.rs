@@ -2555,36 +2555,50 @@ impl Cull {
             || b.y + b.height <= -MARGIN
     }
 }
-/// A strip's rim: a ring inside its edge, then the same ring again over the
-/// top edge and its corners only, so the light is brightest there.
+/// A strip's rim, each part as (colour, alpha). In one colour (the dark
+/// canvas's light): a ring inside the edge, then the same ring again over
+/// the top edge and its corners, so the light is brightest there. In two
+/// (the light canvas's deeper rim under a light top edge): the top's ring
+/// over the top edge and its corners, the side's below them.
 fn strip_rim(
     area: Bounds<Pixels>,
     radius: Pixels,
     width: Pixels,
     smoothing: f32,
-    side: Rgba,
-    top: Rgba,
+    side: (u32, f32),
+    top: (u32, f32),
     window: &mut Window,
 ) {
-    let ring = |color: Rgba| {
+    let ring = |(rgb, alpha): (u32, f32)| {
         PaintQuad::new(area)
-            .border_color(color)
+            .border_color(rgba(
+                (rgb << 8) | (alpha.clamp(0., 1.) * 255.).round() as u32,
+            ))
             .border_widths(width)
             .corner_radii(radius)
             .corner_smoothing(smoothing)
     };
-    window.paint_quad(ring(side));
     let band = Bounds::new(area.origin, size(area.size.width, radius + width));
-    window.with_content_mask(
-        Some(ContentMask {
-            bounds: band,
-            fade_out: Default::default(),
-        }),
-        |window| window.paint_quad(ring(top)),
-    );
+    let masked = |bounds, quad: PaintQuad, window: &mut Window| {
+        window.with_content_mask(
+            Some(ContentMask {
+                bounds,
+                fade_out: Default::default(),
+            }),
+            |window| window.paint_quad(quad),
+        )
+    };
+    if side.0 == top.0 {
+        window.paint_quad(ring(side));
+        masked(band, ring((top.0, top.1 - side.1)), window);
+    } else {
+        let below = Bounds::from_corners(point(area.origin.x, band.bottom()), area.bottom_right());
+        masked(below, ring(side), window);
+        masked(band, ring(top), window);
+    }
 }
-/// The strip under the pointer: its rim brightens toward white (nothing else
-/// changes) and the trim grip stands inside the nearer edge.
+/// The strip under the pointer: its rim in the hover state (lighter on the
+/// dark canvas, deeper on the light one; nothing else changes) and the trim grip stands inside the nearer edge.
 fn strip_hover(op: &Op, pointer_x: f64, origin: Point<Pixels>, t: &Tokens, window: &mut Window) {
     let b = op.bounds;
     let area = Bounds::new(
@@ -2592,15 +2606,14 @@ fn strip_hover(op: &Op, pointer_x: f64, origin: Point<Pixels>, t: &Tokens, windo
         size(px(b.width as f32), px(b.height as f32)),
     );
     let hover = t.strip(op.color, pm_design::StripState::Hover);
-    let tint = |(rgb, a): (u32, f32)| rgba((rgb << 8) | (a.clamp(0., 1.) * 255.).round() as u32);
     let radius = px(op.radius as f32).min(area.size.height / 2.);
     strip_rim(
         area,
         radius,
         px(t.metrics.border),
         t.radius.smoothing,
-        tint(hover.rim),
-        tint((hover.rim_top.0, hover.rim_top.1 - hover.rim.1)),
+        hover.rim,
+        hover.rim_top,
         window,
     );
     let grip = t.trim_grip();
@@ -2738,11 +2751,8 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
                 (radius - inset).max(px(0.)),
                 rim,
                 smoothing,
-                tint(hex("rim"), number("rimAlpha")),
-                tint(
-                    hex("rimTop"),
-                    (number("rimTopAlpha") - number("rimAlpha")).max(0.),
-                ),
+                (hex("rim"), number("rimAlpha") as f32),
+                (hex("rimTop"), number("rimTopAlpha") as f32),
                 window,
             );
         }

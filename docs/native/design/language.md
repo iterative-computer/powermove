@@ -321,29 +321,44 @@ top between a resize and the next paint.
 
 ## Timeline strips
 
-`Tokens::strip(layer colour, StripState)`: a slab of tinted glass on the solid
-timeline canvas, the same in both appearances (a clip is an object with its
-own colour). The band a name stands on is deep and saturated; light gathers in
-the foot below it (`glow`, from `GLOW_FROM` of the way down), so the slab is
-luminous without costing the name its contrast. Labels are the palest tint of
-the hue that holds 4.5:1 on the body under them (`under_label`). A 1 px rim of
-light in the strip's hue runs inside the edge, brightest along the top and
-round its corners, faint down the sides, with no outline; corners are
-continuous and about a quarter of the strip's height (`strip_radius`); an even
-`strip_gap` parts neighbours; the ruler's grid reads through the body as a
-top-lit highlight: brightest at the strip's top edge and gone by the middle
-of its height (`grid`, `GRID_FADE`), with the faint full-height line showing
-only between rows. The foot gathers as much light as the hue allows while a
-label still holds 4.5:1 under a name (a pale layer colour takes less). A waveform is a soft filled shape in a paler tone standing on the
-foot; silence draws nothing. A collapsed layer's keys are small marks in the
-foot, under the name. Hover brightens and whitens the rim and shows the trim
-grip (`trim_grip`) inside the nearer edge, with the name starting clear of it.
-Selection is a 2 px white ring: at the edge on a dark canvas, inside a band of
-the strip's own colour on a light one (`rim_inset`). Dragging lifts it;
-disabled drops chroma and opacity. Rows are 30 pt (v1's height), so a strip is
-26 pt. Ruler labels stand over a small dot with a faint line down the tracks.
-`Tokens::playhead` is a hairline with a round head. Strips are drawn by the
-timeline renderer, never system views.
+`Tokens::strip(layer colour, StripState)` (`crates/design/src/strip.rs`): a
+slab of tinted glass on the solid timeline canvas, derived from the layer's
+hue for the appearance it stands in. Only the hue is shared; every value
+below lives in pm-design, none in the timeline's code.
+
+- Dark canvas (the body of `Tokens::strip`): a deep, saturated band a name
+  stands on (L 0.39, chroma 0.15) opening into a luminous foot (L 0.52 plus
+  `glow` from `GLOW_FROM` of the way down, as much as the hue allows while a
+  white-ish name still holds 4.5:1). A 1 px rim of light in the hue, brightest
+  along the top and round its corners, no outline. Names are the palest tint
+  of the hue that holds 4.5:1 on the body under them (`under_label`). Hover
+  brightens and whitens the rim; selection is a 2 px white ring at the edge
+  on a body a step brighter.
+- Light canvas (`Tokens::strip_light`, values in `LIGHT`): a pale tint of
+  the hue the canvas shows through (top L 0.84, foot L 0.895, chroma 0.10,
+  90 % opaque), lit toward white in the foot. A 1 px rim in a deeper shade
+  of the hue (L 0.58) with a light edge along the top. Names are a dark
+  shade of the hue (from L 0.38 down until 4.5:1 on the body's deepest
+  part), waveforms and marks a mid shade (L 0.54). Hover deepens the rim;
+  selection is a 2 px ring in the hue's deepest shade (L 0.42) on a body a
+  step deeper and fuller. A neutral layer (null, camera) is light grey glass.
+- Both: disabled (hidden, muted, offline) drops chroma and opacity, so the
+  strip fades toward the canvas; outside the work area the tracks are veiled
+  with the canvas's own second step, so strips there fade toward the ground
+  in either appearance; dragging lifts the strip on a shadow. Corners are
+  continuous and about a quarter of the strip's height (`strip_radius`); an
+  even `strip_gap` parts neighbours; the ruler's grid reads through the body
+  as a line strongest at the strip's top edge and gone by the middle of its
+  height (`grid`, `GRID_FADE`): light on the dark canvas, the rim's shade on
+  the light one. The trim grip (`trim_grip`) is white on dark strips and the
+  ink on light ones. Increase Contrast flattens the body and outlines it
+  (white on a deep body in dark, the ink on a pale body in light).
+- A waveform is a soft filled shape standing on the foot; silence draws
+  nothing. A collapsed layer's keys are small marks in the foot, under the
+  name. Rows are 30 pt (v1's height), so a strip is 26 pt. `Tokens::playhead`
+  is a hairline in the ink with a round head. The kind badge in the layer
+  column takes `colors.labels.*`, which are per-appearance too. Strips are
+  drawn by the timeline renderer, never system views.
 
 ## Timeline
 
