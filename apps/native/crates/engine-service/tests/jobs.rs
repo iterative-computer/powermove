@@ -720,6 +720,7 @@ fn a_child_message_the_parent_cannot_use_fails_the_export_at_once() {
         path: None,
         error: None,
         preview: None,
+        checking: None,
     })
     .unwrap();
     another["type"] = "status".into();

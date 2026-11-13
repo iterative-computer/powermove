@@ -5,6 +5,7 @@ export const sections = [
   "project",
   "memory",
   "general",
+  "shortcuts",
   "media",
   "accounts",
   "transcription",
@@ -26,6 +27,12 @@ export const sectionCopy: Record<
     title: "General",
     description: "How Powermove looks and works on this Mac.",
     symbol: "gearshape",
+  },
+  shortcuts: {
+    title: "Shortcuts",
+    description:
+      "Keys for every command. Start from After Effects, Premiere Pro, Final Cut Pro or DaVinci Resolve, then change any of them.",
+    symbol: "keyboard",
   },
   media: {
     title: "Media",

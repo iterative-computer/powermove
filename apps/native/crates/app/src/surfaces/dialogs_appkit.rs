@@ -127,6 +127,7 @@ pub fn precompose_sheet(
     sheet.button("confirm", "Pre-compose", true, true, false);
     sheet.footer(&["cancel", "confirm"], None);
     let (done, result) = async_channel::bounded(1);
+    let cancelled = done.clone();
     let target: Retained<PrecomposeTarget> = unsafe {
         msg_send![
             super(PrecomposeTarget::alloc(mtm).set_ivars(PrecomposeState {
@@ -141,7 +142,9 @@ pub fn precompose_sheet(
     // SAFETY: `control:` is implemented and the caller holds the target until
     // the result arrives, which is after the sheet ends.
     unsafe { sheet.bind(&target, sel!(control:)) };
-    sheet.present(owner, Some("name"));
+    sheet.present(owner, Some("name"), move || {
+        let _ = cancelled.try_send(None);
+    });
     *target.ivars().sheet.borrow_mut() = Some(sheet);
     PrecomposeSheet { target, result }
 }

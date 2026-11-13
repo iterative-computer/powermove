@@ -17,7 +17,10 @@ const state: ViewerSnapshot = {
     revision: c.baseRevision + 1,
   }));
   await root.render(
-    <ViewerPanel state={state} actions={{ drive() {}, open() {} }} />,
+    <ViewerPanel
+      state={state}
+      actions={{ drive() {}, open() {}, command() {} }}
+    />,
   );
   const result = {
     revision: root.inspect().revision,

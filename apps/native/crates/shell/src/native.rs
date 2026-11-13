@@ -1885,6 +1885,10 @@ pub struct Host {
     registration: Option<gpui_macos::composition::CompositionRegistration>,
     monitor: Option<Retained<AnyObject>>,
     resolver: Resolver,
+    /// Extension rows, kept apart so a new keymap replaces only the base.
+    contributed: Vec<crate::keyboard::Binding>,
+    /// The next key pressed goes to Settings › Shortcuts, not to a command.
+    recording: bool,
     events: HashMap<u64, Retained<NSEvent>>,
     /// Commands owed when a held key comes up, by key code ([`Host::on_release`]).
     releases: Rc<RefCell<HashMap<u16, Command>>>,
@@ -1952,7 +1956,7 @@ fn shortcut_glyphs() -> HashMap<String, String> {
                 .or_insert_with(|| menu::glyphs(&i.chord));
         }
     }
-    for b in crate::keyboard::shipped() {
+    for b in crate::keymap::current() {
         if !b.chord.starts_with("ctrl+") {
             map.entry(menu::palette_command(&b.command, &b.args))
                 .or_insert_with(|| menu::glyphs(&b.chord));
@@ -2072,7 +2076,9 @@ impl Host {
             observer: None,
             registration: None,
             monitor: None,
-            resolver: Resolver::new(),
+            resolver: Resolver::with(crate::keymap::current()),
+            contributed: vec![],
+            recording: false,
             events: HashMap::new(),
             releases: Default::default(),
             up_early: Default::default(),
@@ -2226,6 +2232,15 @@ impl Host {
                             }
                             return event.as_ptr();
                         }
+                    }
+                    // Settings › Shortcuts is taking a key: it comes from
+                    // whichever of the app's windows is key (Settings is its own).
+                    if e.r#type() == NSEventType::KeyDown && host.borrow().recording {
+                        let key = chord(e);
+                        let mut h = host.borrow_mut();
+                        h.recording = false;
+                        h.send_command("shortcuts.recorded", vec![serde_json::json!(key)]);
+                        return std::ptr::null_mut();
                     }
                     if e.windowNumber() != window.windowNumber() {
                         return event.as_ptr();
@@ -3263,10 +3278,30 @@ impl Host {
         zoom_limit(dimensions, self.window.backingScaleFactor())
     }
     pub fn add_bindings(&mut self, bindings: impl IntoIterator<Item = crate::keyboard::Binding>) {
-        self.resolver.bindings.extend(bindings);
+        self.contributed.extend(bindings);
+        self.rebuild_bindings(crate::keymap::current());
+    }
+    fn rebuild_bindings(&mut self, base: Vec<crate::keyboard::Binding>) {
+        self.resolver.bindings = base;
+        self.resolver
+            .bindings
+            .extend(self.contributed.iter().cloned());
         self.resolver
             .bindings
             .sort_by_key(|b| std::cmp::Reverse(b.priority));
+    }
+    /// A new keymap: keys resolve against `table` (with the extensions'
+    /// rows), and the menu bar and palette show its keys.
+    pub fn set_keymap(&mut self, table: Vec<crate::keyboard::Binding>) {
+        crate::keymap::set_current(table.clone());
+        self.rebuild_bindings(table);
+        self.palette.borrow_mut().shortcuts = shortcut_glyphs();
+        install_menus();
+    }
+    /// The next key pressed is sent as `shortcuts.recorded` with its chord
+    /// (Escape included, which cancels) instead of running anything.
+    pub fn record_next_key(&mut self, on: bool) {
+        self.recording = on;
     }
     /// The view native surfaces install beside the viewer, below GPUI.
     pub fn native_container(&self) -> Retained<NSView> {
@@ -3277,7 +3312,7 @@ impl Host {
         owner: &str,
         bindings: impl IntoIterator<Item = crate::keyboard::Binding>,
     ) {
-        self.resolver.bindings.retain(|b| !b.id.starts_with(owner));
+        self.contributed.retain(|b| !b.id.starts_with(owner));
         self.add_bindings(bindings);
     }
     pub fn viewer_layer(&self) -> metal::MetalLayer {
@@ -3636,7 +3671,9 @@ impl Host {
     /// Return = Save (the accent default button), Esc = Cancel. Save sends
     /// `layout:save:<name>`.
     pub fn prompt_workspace_name(&self, workspace: &str) {
-        if self.window.attachedSheet().is_some() {
+        if self.window.attachedSheet().is_some()
+            || gpui_macos::child_window::sheet_pending(&self.window)
+        {
             return;
         }
         let sheet = workspace_sheet(&self.tokens, &format!("{workspace} Copy"));
@@ -3658,8 +3695,13 @@ impl Host {
                 });
             }
         });
-        self.window
-            .beginSheet_completionHandler(&sheet.window, Some(&handler));
+        let (on, shown) = (self.window.clone(), sheet.window.clone());
+        gpui_macos::child_window::sheet(
+            &self.window,
+            &sheet.window,
+            move || on.beginSheet_completionHandler(&shown, Some(&handler)),
+            || {},
+        );
         sheet.window.makeFirstResponder(Some(&sheet.field));
         *self.sheet.borrow_mut() = Some(sheet);
     }
@@ -3668,7 +3710,9 @@ impl Host {
     /// (else the reason shows above the buttons, and nothing changes), then
     /// sends `layout:define` with the text and the definition it started from.
     pub fn edit_workspace_definition(&self, json: &str) {
-        if self.window.attachedSheet().is_some() {
+        if self.window.attachedSheet().is_some()
+            || gpui_macos::child_window::sheet_pending(&self.window)
+        {
             return;
         }
         let target = definition_sheet(&self.tokens, json);
@@ -3685,8 +3729,13 @@ impl Host {
                 });
             }
         });
-        self.window
-            .beginSheet_completionHandler(&window, Some(&handler));
+        let (on, shown) = (self.window.clone(), window.clone());
+        gpui_macos::child_window::sheet(
+            &self.window,
+            &window,
+            move || on.beginSheet_completionHandler(&shown, Some(&handler)),
+            || {},
+        );
         window.makeFirstResponder(Some(&target.ivars().text));
         *self.definition.borrow_mut() = Some(target);
     }
@@ -5183,6 +5232,8 @@ fn animate(
 }
 pub fn install_menus() {
     let mtm = MainThreadMarker::new().unwrap();
+    // Built again when the keymap changes: the old menus' delegates go.
+    MENU_DELEGATES.with(|v| v.borrow_mut().clear());
     let app = NSApplication::sharedApplication(mtm);
     let root = NSMenu::new(mtm);
     let mut commands: Vec<(String, Vec<serde_json::Value>)> = vec![];

@@ -339,26 +339,10 @@ impl Backend {
             display.push(row);
         }
         frame["window"]["rows"] = json!(display);
-        let frames = (time * fps).round().max(0.) as u64;
-        let nominal = fps.round().max(1.) as u64;
-        let sec = frames / nominal;
-        frame["graphEmpty"] = json!(
-            !client
-                .model
-                .index
-                .layers
-                .iter()
-                .any(|l| l.channels.iter().any(|c| !c.keys.is_empty()))
-        );
+        let (timecode, spoken) = timecode(time, fps);
         frame["playing"] = json!(playing);
-        frame["timecode"] = json!(format!(
-            "{:02}:{:02}:{:02}:{:02}",
-            sec / 3600,
-            sec / 60 % 60,
-            sec % 60,
-            frames % nominal
-        ));
-        frame["spokenTime"] = json!(format!("{sec} seconds, {} frames", frames % nominal));
+        frame["timecode"] = json!(timecode);
+        frame["spokenTime"] = json!(spoken);
         if self.native.timeline_editor == Some(TimelineEditor::Time) {
             frame["timeEditor"] = json!({"value":frame["timecode"],"binding":editor_field});
         }
@@ -437,8 +421,25 @@ impl Backend {
                 Some((vm.stamp.clone(), viewport, effective, projection.clone()));
             projection
         };
+        // The bar's transport: the same time, run and loop the timeline's
+        // header shows (one state); while playing the time is a native layer.
+        let time = self.time().clamp(0., vm.transport.duration);
+        let (now, spoken) = timecode(time, vm.transport.fps);
+        let transport = json!({
+            "time": time,
+            "timecode": now,
+            "spokenTime": spoken,
+            "duration": timecode(vm.transport.duration, vm.transport.fps).0,
+            "playing": self.native.facts["playing"].as_bool().unwrap_or(false),
+            "looping": self.native.facts["looping"].as_bool().unwrap_or(false),
+        });
+        // The channel view's command (`viewer.showRGB`, `viewer.showRed`…).
+        let channels = self.native.facts["channels"]
+            .as_str()
+            .unwrap_or("viewer.showRGB")
+            .to_owned();
         Ok(
-            json!({"model":model,"host":{"presentation":"Docked","frame":{"resource":null,"loading":self.native.facts["frameLoading"].as_bool().unwrap_or(false),"failed":self.native.facts["frameFailed"].as_bool().unwrap_or(false)},"source":null,"interaction":"idle"}}),
+            json!({"model":model,"host":{"presentation":"Docked","frame":{"resource":null,"loading":self.native.facts["frameLoading"].as_bool().unwrap_or(false),"failed":self.native.facts["frameFailed"].as_bool().unwrap_or(false)},"source":null,"interaction":"idle","transport":transport,"channels":channels}}),
         )
     }
     pub(crate) fn project_view(&mut self, request: Option<Value>) -> Result<Value, String> {
@@ -660,7 +661,10 @@ impl Backend {
         let speech = crate::speech::status();
         let speech_rows = speech.as_ref().map(crate::speech::rows).unwrap_or_default();
         let mut publication = json!({"revision":self.native.settings_sequence,"multiWindow":true,"rows":accounts,"extensions":extensions,"extensionsState":"ready",
-            "speech":speech.as_ref().map(crate::speech::models).unwrap_or_default()});
+            "speech":speech.as_ref().map(crate::speech::models).unwrap_or_default(),
+            // Settings › Shortcuts, built by the app from the keymap it uses.
+            "shortcuts":self.native.facts["shortcuts"]});
+        let shortcut_rows = self.shortcut_rows()?;
         if let Some(rows) = publication["rows"].as_array_mut() {
             rows.extend(speech_rows.iter().cloned());
         }
@@ -696,6 +700,10 @@ impl Backend {
             }).collect::<Vec<_>>();
             publication["memory"] =
                 json!({"enabled":pm_model::memory::enabled(&root),"entries":entries});
+        }
+        // Settings › Shortcuts shows with or without a project.
+        if let Some(rows) = publication["rows"].as_array_mut() {
+            rows.extend(shortcut_rows);
         }
         // Targets stay here: recorded for this revision, not published.
         let mut targets = serde_json::Map::new();
@@ -999,6 +1007,9 @@ impl Backend {
                 "depth",
                 "dynamicRange",
                 "useProxies",
+                "colorTag",
+                "timecode",
+                "audioCoding",
                 "preset",
                 "presetName"
             ]))?;
@@ -1140,7 +1151,7 @@ impl Backend {
                 | "export.closeFailure"
         ) && matches!(
             self.native.export["run"]["phase"].as_str(),
-            Some("choosingDestination" | "preparing" | "rendering" | "cancelling")
+            Some("choosingDestination" | "preparing" | "rendering" | "checking" | "cancelling")
         ) {
             return Err("Export is in progress".into());
         }
@@ -1592,6 +1603,24 @@ fn archived(entry: &pm_kernel::state::ExtensionEntry) -> bool {
         .and_then(|r| r.get("archived"))
         .and_then(pm_model::Value::as_bool)
         == Some(true)
+}
+
+/// A time as the transport shows it (`00:00:02:15`: hours, minutes, seconds,
+/// frames at the composition's rate), and as it is spoken.
+pub(crate) fn timecode(time: f64, fps: f64) -> (String, String) {
+    let frames = (time * fps).round().max(0.) as u64;
+    let nominal = fps.round().max(1.) as u64;
+    let sec = frames / nominal;
+    (
+        format!(
+            "{:02}:{:02}:{:02}:{:02}",
+            sec / 3600,
+            sec / 60 % 60,
+            sec % 60,
+            frames % nominal
+        ),
+        format!("{sec} seconds, {} frames", frames % nominal),
+    )
 }
 
 #[cfg(test)]

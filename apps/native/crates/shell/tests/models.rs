@@ -92,7 +92,7 @@ fn keymap_matches_every_w1_cell() {
         .collect();
     let bindings = shipped();
     // The 195 W1 cells, then native additions (`main.*`, `native.*` ids).
-    assert_eq!(bindings.len(), 228);
+    assert_eq!(bindings.len(), 250);
     assert_eq!(rows.len(), 195);
     for (row, b) in rows.iter().zip(bindings) {
         let c: Vec<_> = row.split('|').map(str::trim).collect();

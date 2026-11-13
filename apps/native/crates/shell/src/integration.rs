@@ -17,11 +17,14 @@ pub trait Integration {
         cx: &mut App,
     ) -> Option<AnyElement>;
     /// Content for panel `id`'s 32 pt header, replacing the shell's title
-    /// (a tab group keeps its tab strip). `None` = the shell's header.
+    /// (a tab group keeps its tab strip, and then `tabbed`: the tab names
+    /// the panel, so its header leaves out its own title). `None` = the
+    /// shell's header.
     fn header(
         &self,
         _id: &str,
         _bounds: Rect,
+        _tabbed: bool,
         _window: &mut Window,
         _cx: &mut App,
     ) -> Option<AnyElement> {

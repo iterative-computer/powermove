@@ -27,6 +27,9 @@ pub struct Host {
     /// Where the shell last placed the timeline panel, and its header height;
     /// `None` while it isn't drawn. The native playhead and timecode follow it.
     pub timeline_place: Option<(pm_shell::layout::Rect, f32)>,
+    /// The viewer panel's rect (its bar is the top `metrics.header`), for the
+    /// bar's native timecode layer while playing.
+    pub viewer_place: Option<pm_shell::layout::Rect>,
     frame_outline: crate::playback::FrameOutline,
     pub gizmos: Option<Entity<crate::gizmo::GizmoSurface>>,
     /// The window's open panels, and closed built-ins whose isolates are going.
@@ -46,6 +49,8 @@ pub struct Host {
     /// MCP panel tools).
     pub window_sizes: BTreeMap<String, (f32, f32)>,
     opening_windows: BTreeSet<String>,
+    /// The Settings page the next show asks for (Keyboard Shortcuts…).
+    pub settings_page: Option<String>,
     pub export_job: Option<crate::export_coordinator::Job>,
     pub export_retry: Option<crate::export_coordinator::Frozen>,
     pub export_tasks: Arc<std::sync::Mutex<pm_promedia::tasks::BackgroundTasks>>,
@@ -408,8 +413,9 @@ impl Controller {
             .map(|s| s.effective_quality)
             .filter(|q| *q > 0.)
             .unwrap_or(1.);
-        json!({"time":self.time(),"playing":playing,"effectiveQuality":effective,"stage":self.view.stage,"light":self.host.borrow().tokens.scheme==pm_design::Scheme::Light,
-            "mediaSettings":self.media_settings_fact(),"cloud":crate::cloud::fact(cx),"provider":crate::providers::fact(cx),"agentClients":crate::agent_clients::fact(cx),
+        json!({"time":self.time(),"playing":playing,"looping":self.playback.looping,
+            "channels":crate::viewer2::CHANNELS.iter().find(|(m, _, _)| *m == self.channels).map_or("viewer.showRGB", |(_, _, c)| c),"effectiveQuality":effective,"stage":self.view.stage,"light":self.host.borrow().tokens.scheme==pm_design::Scheme::Light,
+            "mediaSettings":self.media_settings_fact(),"shortcuts":self.shortcuts_page,"cloud":crate::cloud::fact(cx),"provider":crate::providers::fact(cx),"agentClients":crate::agent_clients::fact(cx),
             // The Agent panel is a popover while its own window is open, a docked panel otherwise.
             "agentPopover":self.builtins.opening_windows.contains("agent")
                 || self.builtins.windows.get("agent").is_some_and(|w| cx.windows().contains(w))})
@@ -443,6 +449,7 @@ impl Controller {
                 .any(|view| view.update(cx, |view, cx| view.cancel_gesture(cx)))
     }
     pub fn update_builtins(&mut self, cx: &mut Context<Self>) {
+        self.sync_keymap();
         self.start_builtins(cx);
         self.probe_builtin_media(cx);
         if self.builtins.updating {
@@ -668,6 +675,7 @@ impl Controller {
             self.builtins.timeline_place = Some((bounds, t.metrics.header));
         }
         if id == "viewer" {
+            self.builtins.viewer_place = Some(bounds);
             let body_h = (bounds.h - t.metrics.header).max(1.);
             let stage = [bounds.w as f64, body_h as f64];
             if self.view.stage != stage {
@@ -675,7 +683,15 @@ impl Controller {
                 self.view.stage = stage;
                 cx.defer_in(window, |v, _, cx| v.update_builtins(cx));
             }
-            let fit = crate::panels::fit_scale(bounds.w, body_h, self.dimensions, t.metrics.inset);
+            // Shown rulers take a band along the top and the leading edge;
+            // the composition fits inside them.
+            let inset = t.metrics.inset
+                + if self.rulers {
+                    t.metrics.viewer_ruler
+                } else {
+                    0.
+                };
+            let fit = crate::panels::fit_scale(bounds.w, body_h, self.dimensions, inset);
             let scale = self.view.zoom.unwrap_or(fit).min(self.zoom_limit());
             if self.view.scale.replace(scale) != scale
                 && let Some(gizmos) = &self.builtins.gizmos
@@ -715,6 +731,7 @@ impl Controller {
         &mut self,
         id: &str,
         bounds: pm_shell::layout::Rect,
+        tabbed: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
@@ -728,8 +745,10 @@ impl Controller {
             .builtins
             .headers
             .entry(id.into())
-            .or_insert_with(|| cx.new(|cx| crate::v4_view::HeaderView::new(view, cx)));
-        Some(div().w_full().child(header.clone()).into_any_element())
+            .or_insert_with(|| cx.new(|cx| crate::v4_view::HeaderView::new(view, cx)))
+            .clone();
+        header.update(cx, |h, cx| h.set_tabbed(tabbed, cx));
+        Some(div().w_full().child(header).into_any_element())
     }
     /// Settings › General › Bring My Workspace…: Settings gives way to the
     /// Agent panel, where a new thread asks for the After Effects workspace.
@@ -787,6 +806,18 @@ impl Controller {
         if let Some(existing) = self.builtins.windows.get(id).copied()
             && existing.update(cx, |_, w, _| w.activate()).is_ok()
         {
+            if id == "settings"
+                && let Some(page) = self.builtins.settings_page.take()
+                && let Some(runtime) = self.builtins.runtime.clone()
+            {
+                cx.background_executor()
+                    .spawn(async move {
+                        if let Ok(ticket) = runtime.show_section("settings", &page) {
+                            let _ = ticket.await;
+                        }
+                    })
+                    .detach();
+            }
             return;
         }
         let Some(runtime) = self.builtins.runtime.clone() else {
@@ -836,12 +867,19 @@ impl Controller {
         // Controller update so the window can acquire its published panel safely.
         // The panel's first publication in this window already knows where it is shown.
         let facts = self.facts(cx);
+        let page = (id == "settings")
+            .then(|| self.builtins.settings_page.take())
+            .flatten();
         cx.spawn(async move |this, cx| {
             let told = runtime.clone();
             cx.background_executor()
                 .spawn(async move { told.update_facts(facts) })
                 .await;
-            if let Ok(ticket) = runtime.show(&id) {
+            let shown = match &page {
+                Some(page) => runtime.show_section(&id, page),
+                None => runtime.show(&id),
+            };
+            if let Ok(ticket) = shown {
                 let _ = ticket.await;
             }
             let current = this
@@ -1320,11 +1358,32 @@ impl Controller {
         self.host.borrow().viewer_zoom_limit(self.dimensions)
     }
     /// One Zoom In or Zoom Out step from what is on screen.
-    pub(crate) fn step_zoom(&mut self, factor: f64, cx: &mut Context<Self>) {
-        use pm_panel_viewerchrome::{ZOOM_MAX, ZOOM_MIN};
-        let top = ZOOM_MAX.min(self.zoom_limit()).max(ZOOM_MIN);
-        let zoom = (self.view.scale.get() * factor).clamp(ZOOM_MIN, top);
-        self.view.place(Some(zoom), self.view.pan);
+    /// Zooms from the keyboard or a menu: about the point under the pointer
+    /// when it is over the viewer, else about the viewer's middle. With
+    /// `to`, to that zoom (100 %, 200 %); else by `factor`.
+    pub(crate) fn step_zoom(
+        &mut self,
+        factor: f64,
+        to: Option<f64>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        let center = self.viewer_center();
+        let over = self
+            .builtins
+            .gizmos
+            .as_ref()
+            .is_some_and(|g| g.read(cx).pointer_over(window));
+        let at = if over {
+            window.mouse_position()
+        } else {
+            center
+        };
+        let current = self.view.scale.get();
+        let factor = to.map_or(factor, |to| to / current.max(f64::MIN_POSITIVE));
+        let limit = self.zoom_limit();
+        self.view
+            .navigate(crate::gizmo::Navigate::Zoom { factor, at }, center, limit);
         self.write_view(None, cx);
     }
     /// Writes the placement now or after `after`, replacing any write not yet

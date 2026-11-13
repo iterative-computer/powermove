@@ -17,8 +17,11 @@ for (const [key, value] of [
   const held = Object.create(null);
   const { engine } = runtime;
   const { freeze, keys } = Object;
+  // A load carries every value its records have now: what an earlier load
+  // brought (a value since removed, an extension since gone) is dropped.
   const take = (token) => {
     const staged = engine("extension.vars", { token });
+    for (const id of keys(held)) delete held[id];
     for (const id of keys(staged)) held[id] = freeze(staged[id]);
   };
   // The host's entries for a load: an extension cannot replace them to see a
@@ -96,7 +99,9 @@ globalThis.__compat = {
           session: { panel: "compat", generation: 1 },
           realmGlobal: globalThis,
           send: (batch) => call("dom.batch", { batch }),
-          measureSync: (request) => call("dom.measureSync", { request }),
+          // Whether the read is part of a raster answer: only those place pixels.
+          measureSync: (request) =>
+            call("dom.measureSync", { request, answering: this.answering > 0 }),
           requestAnimationFrame: globalThis.__extcheckClock
             ? requestAnimationFrame
             : (fn) =>
@@ -120,7 +125,12 @@ globalThis.__compat = {
     const ask = (request) =>
       new Promise((resolve) => {
         const token = ++asked;
-        asks.set(token, resolve);
+        // The answer continues the load that asked (see `__work`).
+        const answered = globalThis.__work.hold();
+        asks.set(token, (value) => {
+          answered();
+          resolve(value);
+        });
         call("ui.request", { ...request, token });
       });
     this.answer = (token, value) => {
@@ -284,7 +294,17 @@ globalThis.__compat = {
     /** `ask`: `{revision}` for the viewer; `{revision, exact}` for a one-frame
      * look (an agent's still), which only this exact revision answers; nothing
      * for an export, whose own realm holds its frozen project (`export.rs`). */
+    /** Raster answers running now (a layout read in one places pixels). */
+    this.answering = 0;
     this.answerRasters = (batch, needs, ask = {}) => {
+      this.answering += 1;
+      try {
+        answerRasters(batch, needs, ask);
+      } finally {
+        this.answering -= 1;
+      }
+    };
+    const answerRasters = (batch, needs, ask) => {
       const realm = this.realm;
       const layerIn = layerIndex();
       const answers = needs.map((need) => {
@@ -367,7 +387,14 @@ globalThis.__compat = {
         if (settled.has(key)) return Promise.resolve();
         if (!pending.has(key)) {
           let resolve;
-          const promise = new Promise((done) => (resolve = done));
+          const answered = globalThis.__work.hold();
+          const promise = new Promise(
+            (done) =>
+              (resolve = () => {
+                answered();
+                done();
+              }),
+          );
           pending.set(key, { promise, resolve });
           fresh.push(face);
         }
@@ -777,41 +804,56 @@ globalThis.__compat = {
         PM.sel.layers = PM.sel.layers.filter((id) => !ids.includes(id));
         PM.bus.emit("layers");
       };
-      // The effects and transitions extensions registered here, by type.
-      // Built-in ones are drawn natively and have no definition in this realm.
-      const view = (registry) =>
-        new Proxy(
+      // The shipped app's legacy tables: every effect and transition by
+      // type, each as the complete shader main assembled (`toLegacyFx`). What
+      // an extension registered here wins over the app's own definition of
+      // the same type; the app's own are asked of the host once, when first
+      // read (they are drawn natively and never run here).
+      let own;
+      const builtin = (kind) => (own ??= call("definitions.builtin"))[kind];
+      const view = (registry, kind, legacy) => {
+        const made = new WeakMap();
+        const definition = (type) =>
+          typeof type === "string"
+            ? (registry.get(type) ??
+              (Object.hasOwn(builtin(kind), type) ? builtin(kind)[type] : undefined))
+            : undefined;
+        const read = (type) => {
+          const item = definition(type);
+          if (!item) return undefined;
+          if (!made.has(item)) made.set(item, legacy(item));
+          return made.get(item);
+        };
+        return new Proxy(
           {},
           {
-            get: (_, type) => (typeof type === "string" ? registry.get(type) : undefined),
-            has: (_, type) => typeof type === "string" && registry.has(type),
-            ownKeys: () => registry.ids(),
+            get: (_, type) => read(type),
+            has: (_, type) => !!definition(type),
+            ownKeys: () => [...new Set([...registry.ids(), ...Object.keys(builtin(kind))])],
             getOwnPropertyDescriptor: (_, type) =>
-              typeof type === "string" && registry.has(type)
-                ? { value: registry.get(type), enumerable: true, configurable: true }
+              definition(type)
+                ? { value: read(type), enumerable: true, configurable: true }
                 : undefined,
           },
         );
-      PM.FX = view(kernel.effects);
-      PM.TRANSITIONS = view(kernel.transitions);
-      PM.effectDef = (effect) => kernel.effects.get(typeof effect === "string" ? effect : effect?.type);
-      PM.transitionDef = (type) => kernel.transitions.get(type);
-      const undefinedHere = (member, type) =>
-        new Error(
-          `${member}: no definition of "${type}" is available to extensions in this version of Powermove`,
-        );
+      };
+      PM.FX = view(kernel.effects, "effects", PowermoveCompat.legacyEffect);
+      PM.TRANSITIONS = view(kernel.transitions, "transitions", PowermoveCompat.legacyTransition);
+      PM.effectDef = (effect) => PM.FX[typeof effect === "string" ? effect : effect?.type];
+      PM.transitionDef = (type) => PM.TRANSITIONS[type];
+      // As the shipped app: null for a type nobody provides.
       PM.mkEffect = (type) => {
-        const definition = PM.effectDef(type);
-        if (!definition) throw undefinedHere("PM.mkEffect", type);
+        const definition = PM.FX[type];
+        if (!definition) return null;
         const effect = { id: PM.uid("f"), type, on: true, p: {} };
-        for (const param of definition.params ?? []) effect.p[param.k] = PM.P(param.def);
+        for (const param of definition.params) effect.p[param.k] = PM.P(param.def);
         return effect;
       };
       PM.mkTransition = (type) => {
         const definition = PM.transitionDef(type);
-        if (!definition) throw undefinedHere("PM.mkTransition", type);
+        if (!definition) return null;
         const transition = { type, dur: 0.5, p: {} };
-        for (const param of definition.params ?? []) transition.p[param.k] = PM.P(param.def);
+        for (const param of definition.params) transition.p[param.k] = PM.P(param.def);
         return transition;
       };
       // `// @param default min max` annotations as inspector-ready uniforms.
@@ -1262,6 +1304,7 @@ globalThis.__compat = {
       // its manifest declares (apiVersion 2+); a key without one is absent.
       // The host chose them from the manifests it read (`__compatHost`).
       vars: (record) => varsOf(record.id),
+      work: globalThis.__work,
       document: this.dom?.document,
     });
     this.realm.PM.Kernel.loader = this.loader;

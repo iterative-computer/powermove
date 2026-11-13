@@ -199,10 +199,10 @@ impl<'s> Parser<'s> {
     pub fn parse(mut self) -> Result<Node, SyntaxError> {
         let value = self.expression(Minimum::Number(0), 0)?;
         if !matches!(self.token.tok, Tok::Eof) {
-            return Err(SyntaxError(format!(
-                "Unexpected token at {}",
-                self.token.at
-            )));
+            return Err(SyntaxError::at(
+                format!("Unexpected token at {}", self.token.at),
+                self.token.at,
+            ));
         }
         Ok(value)
     }
@@ -210,7 +210,7 @@ impl<'s> Parser<'s> {
     fn node(&mut self, value: Node, depth: usize) -> Result<Node, SyntaxError> {
         self.nodes += 1;
         if self.nodes > MAX_NODES || depth > MAX_DEPTH {
-            return Err(SyntaxError("Expression is too complex".into()));
+            return Err(SyntaxError::plain("Expression is too complex"));
         }
         Ok(value)
     }
@@ -230,10 +230,10 @@ impl<'s> Parser<'s> {
 
     fn require(&mut self, value: &str) -> Result<(), SyntaxError> {
         if !self.take(value)? {
-            return Err(SyntaxError(format!(
-                "Expected {value} at {}",
-                self.token.at
-            )));
+            return Err(SyntaxError::at(
+                format!("Expected {value} at {}", self.token.at),
+                self.token.at,
+            ));
         }
         Ok(())
     }
@@ -314,10 +314,10 @@ impl<'s> Parser<'s> {
                     self.require(")")?;
                     inner
                 } else {
-                    return Err(SyntaxError(format!(
-                        "Expected a value at {}",
-                        self.token.at
-                    )));
+                    return Err(SyntaxError::at(
+                        format!("Expected a value at {}", self.token.at),
+                        self.token.at,
+                    ));
                 }
             }
         };
@@ -325,10 +325,10 @@ impl<'s> Parser<'s> {
         loop {
             if self.take(".")? {
                 let Tok::Ident(_) = &self.token.tok else {
-                    return Err(SyntaxError(format!(
-                        "Expected a property at {}",
-                        self.token.at
-                    )));
+                    return Err(SyntaxError::at(
+                        format!("Expected a property at {}", self.token.at),
+                        self.token.at,
+                    ));
                 };
                 let Tok::Ident(name) = self.advance()?.tok else {
                     unreachable!()
@@ -347,8 +347,8 @@ impl<'s> Parser<'s> {
                 if !self.take(")")? {
                     loop {
                         if args.len() >= MAX_CALL_ARGS {
-                            return Err(SyntaxError(
-                                "Expression call has too many arguments".into(),
+                            return Err(SyntaxError::plain(
+                                "Expression call has too many arguments",
                             ));
                         }
                         args.push(self.expression(Minimum::Number(0), depth + 1)?);
@@ -390,13 +390,18 @@ impl Parser<'_> {
             if matches!(self.token.tok, Tok::Number(_) | Tok::Str(_) | Tok::Ident(_)) {
                 return match self.advance() {
                     Err(error) => error,
-                    Ok(_) => SyntaxError("Expression is too complex".into()),
+                    Ok(_) => SyntaxError::plain("Expression is too complex"),
                 };
             }
             match self.take("(") {
                 Err(error) => return error,
                 Ok(true) => continue,
-                Ok(false) => return SyntaxError(format!("Expected a value at {}", self.token.at)),
+                Ok(false) => {
+                    return SyntaxError::at(
+                        format!("Expected a value at {}", self.token.at),
+                        self.token.at,
+                    );
+                }
             }
         }
     }

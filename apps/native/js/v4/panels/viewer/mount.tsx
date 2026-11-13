@@ -11,6 +11,11 @@ export async function mount(env: BuiltinEnv): Promise<Mounted> {
     open: () => {
       void platform("command", { name: "open", args: [] }).catch(report);
     },
+    // The app's own commands (transport, view toggles): one command and one
+    // state with the menus, the keymap and the timeline's header.
+    command: (name: string) => {
+      void platform("command", { name, args: [] }).catch(report);
+    },
     onError: report,
   });
 }

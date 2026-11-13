@@ -27,6 +27,14 @@ pub struct TextField {
     /// No well of its own: the field sits inside a control that draws one
     /// (the search field).
     bare: bool,
+    /// Source text, in this family: one line least, and the face is kept
+    /// when the tokens change.
+    code: Option<String>,
+    /// The value's ink at rest, when it is not the text ink (a value an
+    /// expression drives).
+    ink: Option<u32>,
+    /// The width the editor was last given, to count its wrapped lines.
+    width: Rc<std::cell::Cell<f32>>,
 }
 impl EventEmitter<TextEvent> for TextField {}
 /// Whether `window` can host a native field (an AppKit window, not a
@@ -96,11 +104,59 @@ impl TextField {
             host_value: 0,
             fill: false,
             bare: false,
+            code: None,
+            ink: None,
+            width: Rc::default(),
         }
+    }
+    /// The lines a multi-line field shows: its text as it wraps in the
+    /// field's width, between two and [`MULTILINE_MOST`] (a line of source
+    /// counts from one). Past the most, the editor scrolls.
+    fn lines(&self, window: &mut Window) -> f32 {
+        let text = self.slot.value();
+        let size = px(self.tokens.typography.body);
+        let room = self.width.get() - 2. * MULTILINE_TEXT_ORIGIN.0;
+        let mut lines = 0usize;
+        for line in text.split('\n') {
+            lines += 1;
+            if self.code.is_some() {
+                // The fixed-width face: every character is this wide.
+                let across = (room / (f32::from(size) * MONO_ADVANCE)).floor().max(1.);
+                lines += ((line.chars().count() as f32 / across).ceil() as usize).saturating_sub(1);
+            } else if room > 0. && !line.is_empty() {
+                let style = window.text_style();
+                let font = Font {
+                    family: pm_design::TEXT_FONT.into(),
+                    ..style.font()
+                };
+                let run = TextRun {
+                    len: line.len(),
+                    font,
+                    color: style.color,
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                    letter_spacing: None,
+                };
+                let width = window
+                    .text_system()
+                    .shape_line(line.to_owned().into(), size, &[run])
+                    .width;
+                lines += (f32::from(width) / room).floor() as usize;
+            }
+        }
+        let least = if self.code.is_some() { 1 } else { 2 };
+        lines.clamp(least, MULTILINE_MOST) as f32
     }
     /// A multiline editor in `family` (code editors use the mono face) that
     /// fills its parent's height.
     pub fn code_editor(&mut self, family: &str) {
+        self.set_code(family);
+        self.fill = true;
+    }
+    /// Source text in `family` (the mono face): no spelling marks,
+    /// corrections or smart substitutions. The field keeps its own height.
+    pub fn set_code(&mut self, family: &str) {
         let size = self.tokens.typography.body as f64;
         // The family's PostScript face when installed, else Menlo (always is).
         let face = [
@@ -130,7 +186,11 @@ impl TextField {
             view.setAutomaticTextReplacementEnabled(false);
             view.setGrammarCheckingEnabled(false);
         }
-        self.fill = true;
+        self.code = Some(family.into());
+    }
+    /// The value's ink while it is not being edited; `None` is the text ink.
+    pub fn set_ink(&mut self, ink: Option<u32>) {
+        self.ink = ink;
     }
     /// The editor fills its container's height (a notes pane) instead of
     /// four rows.
@@ -176,8 +236,14 @@ impl TextField {
         cx.notify();
     }
     pub fn set_tokens(&mut self, tokens: pm_design::Tokens) {
-        self.slot.set_font_size(tokens.typography.body as f64);
+        let resized = self.tokens.typography.body != tokens.typography.body;
         self.tokens = tokens;
+        match self.code.clone() {
+            // A source field keeps its face at the new size.
+            Some(family) if resized => self.set_code(&family),
+            Some(_) => {}
+            None => self.slot.set_font_size(self.tokens.typography.body as f64),
+        }
     }
     /// The panel marks a value its host set (`metadata.hostValue`, rising
     /// with each one): that value replaces the text even while the person is
@@ -217,21 +283,34 @@ impl TextField {
 /// Where a multi-line native editor draws its first glyph, from its own
 /// corner: the text container inset plus the line fragment padding.
 const MULTILINE_TEXT_ORIGIN: (f32, f32) = (9., 3.);
+/// How far under a dense well's top its one-line editor starts, so the
+/// text being edited stands on the baseline of the value drawn at rest.
+const DENSE_EDIT_DROP: f32 = 3.;
+/// A character's advance in the fixed-width face, in ems.
+const MONO_ADVANCE: f32 = 0.602;
+/// The most lines a multi-line field grows to before it scrolls.
+const MULTILINE_MOST: usize = 6;
 impl Render for TextField {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let slot = self.slot.clone();
+        let multiline = (self.kind == TextKind::Multiline && !self.fill && !self.bare)
+            .then(|| self.lines(window));
+        let seen = self.width.clone();
+        let entity = cx.entity().downgrade();
         let dense = matches!(self.kind, TextKind::DenseText | TextKind::DenseNumber);
         let editing = self.slot.is_editing();
         let (t, bare) = (&self.tokens, self.bare);
         let single = !matches!(self.kind, TextKind::Composer | TextKind::Multiline) && !self.fill;
         // A well is a soft ink fill with no outline; while it is edited a
         // neutral ring marks it (never the accent).
+        // The ring is inside the well's edge: panels are translucent, and
+        // an outer shadow would show through under the whole well.
         let ring = BoxShadow {
             color: crate::kit::ink(t.colors.focus, 1.).into(),
             offset: point(px(0.), px(0.)),
             blur_radius: px(0.),
             spread_radius: px(t.metrics.border),
-            inset: false,
+            inset: true,
         };
         div()
             .id("native-text")
@@ -247,8 +326,12 @@ impl Render for TextField {
                 } else if bare {
                     // One line, so the control around it can centre the text.
                     (self.tokens.typography.body * 1.35).ceil()
-                } else if self.kind == TextKind::Multiline {
-                    self.tokens.metrics.row * 4.
+                } else if let Some(lines) = multiline {
+                    // As tall as its lines: the text view's line height and
+                    // its inset above and below.
+                    (lines * (self.tokens.typography.body * 1.3).ceil()
+                        + 2. * MULTILINE_TEXT_ORIGIN.1)
+                        .max(self.tokens.metrics.field)
                 } else {
                     self.tokens.metrics.field
                 }))
@@ -270,9 +353,14 @@ impl Render for TextField {
                     t.metrics.control_radius
                 }))
                 .bg(crate::kit::ink(t.colors.text, t.translucency.hover))
+                // A step deeper under the pointer: the well takes input.
+                .when(!editing, |d| {
+                    let over = crate::kit::ink(t.colors.text, t.translucency.selected);
+                    d.hover_style(move |s| s.bg(over))
+                })
                 .when(editing, |d| d.shadow(vec![ring]))
             })
-            .text_color(rgb(self.tokens.colors.text))
+            .text_color(rgb(self.ink.unwrap_or(self.tokens.colors.text)))
             .text_size(px(self.tokens.typography.body))
             .font_family(pm_design::TEXT_FONT)
             .on_mouse_down(
@@ -319,7 +407,12 @@ impl Render for TextField {
             .child(
                 canvas(
                     |_, _, _| (),
-                    move |bounds, _, window, _| {
+                    move |bounds, _, window, cx| {
+                        // A new width wraps the text anew: count again.
+                        let width = f32::from(bounds.size.width);
+                        if multiline.is_some() && (seen.replace(width) - width).abs() > 0.5 {
+                            let _ = entity.update(cx, |_, cx| cx.notify());
+                        }
                         let mask = window.content_mask().bounds;
                         let rect = |b: Bounds<Pixels>| {
                             NSRect::new(
@@ -334,6 +427,15 @@ impl Render for TextField {
                             )
                         };
                         // Same content rectangle and token-sized native font in either mode.
+                        // A one-line field sets its text at its top; the
+                        // value drawn at rest is centred in the well. The
+                        // editor stands lower by the difference, so a value
+                        // does not jump when it is clicked.
+                        let mut bounds = bounds;
+                        if dense {
+                            bounds.origin.y += px(DENSE_EDIT_DROP);
+                            bounds.size.height -= px(DENSE_EDIT_DROP);
+                        }
                         slot.stage(rect(bounds), rect(mask));
                     },
                 )

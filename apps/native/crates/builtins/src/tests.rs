@@ -791,6 +791,106 @@ fn the_distribute_buttons_space_three_selected_layers_as_one_undo_step() {
     );
 }
 
+/// Properties ▸ Time (`RetimingSection.svelte`): Time Remap, Freeze Frame
+/// and Reverse on a video layer, then its remapping rows.
+#[test]
+fn the_time_section_remaps_freezes_and_reverses_a_video_layer() {
+    let actor = KernelActor::spawn(KernelConfig::default());
+    let project = json!({"id":"synthetic","name":"Synthetic","compId":"c","w":640,"h":360,"fps":30,"dur":10,
+        "bg":"#000000","assets":{"v1":{"id":"v1","kind":"video","name":"clip.mov","dur":20}},"comps":{},
+        "layers":[
+            {"id":"clip","type":"video","name":"Clip","from":2,"dur":3,"on":true,
+             "d":{"asset":"v1","fit":"cover","trim":5,"speed":1,"w":64,"h":36},"p":{"opacity":{"v":100,"kf":[]}},"fx":[]},
+            {"id":"box","type":"shape","name":"Box","from":0,"dur":10,"on":true,
+             "d":{"w":40,"h":40},"p":{"opacity":{"v":100,"kf":[]}},"fx":[]}]});
+    let kernel = actor.handle();
+    kernel
+        .open(
+            "synthetic",
+            OpenSource::Untitled(pm_model::json::parse(&project.to_string()).unwrap()),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    let select = |id: &str| {
+        kernel
+            .call(
+                "synthetic",
+                Request::new(
+                    Caller::native(),
+                    SelectionCall::Layers {
+                        ids: vec![id.to_owned()],
+                        add: false,
+                    },
+                ),
+            )
+            .wait()
+            .unwrap()
+            .unwrap();
+    };
+    let identity = pm_surface::host_api::Identity {
+        realm: "inspector".into(),
+        generation: 1,
+        project: "synthetic".into(),
+    };
+    let mut backend = data::Backend::new(kernel.clone(), identity, "inspector", false).unwrap();
+    let time_section = |backend: &mut data::Backend| {
+        let snapshot = backend.inspector_snapshot().unwrap();
+        snapshot["sections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["id"] == "time")
+            .cloned()
+    };
+    // A shape has no Time section.
+    select("box");
+    assert!(time_section(&mut backend).is_none());
+    select("clip");
+    let section = time_section(&mut backend).expect("a video layer has Time");
+    assert_eq!(section["title"], "Time");
+    assert_eq!(
+        section["actions"],
+        json!(["time-remap", "freeze-frame", "reverse"])
+    );
+    assert_eq!(
+        section["rows"],
+        json!([]),
+        "no remapping rows before remapping"
+    );
+    let Ok(models::NativeCommand::Kernel(request)) = backend.native_command(
+        "panel.inspector",
+        &json!({"type":"section-action","section":"time","action":"freeze-frame"}),
+    ) else {
+        panic!("Freeze Frame edits the project")
+    };
+    kernel.call("synthetic", request).wait().unwrap().unwrap();
+    let published = kernel.published("synthetic").unwrap();
+    assert_eq!(
+        published.history.undo_label.as_deref(),
+        Some("Freeze Frame")
+    );
+    let root = published.snapshot.root().unwrap();
+    let at = pm_kernel::model::find_layer(root, "clip").unwrap();
+    let clip = pm_kernel::model::layer_at(root, &at).unwrap().to_value();
+    let keys = clip
+        .get("d")
+        .and_then(|d| d.get("sourceTime"))
+        .and_then(|s| s.get("kf"));
+    assert_eq!(
+        keys.and_then(pm_model::Value::as_array).map(Vec::len),
+        Some(1)
+    );
+    let section = time_section(&mut backend).unwrap();
+    let rows: Vec<&str> = section["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|r| r["label"].as_str())
+        .collect();
+    assert_eq!(rows, ["Time Remap", "Source Time"]);
+}
+
 #[test]
 fn render_presets_use_the_legacy_actor_key_and_archive_same_name_records() {
     let actor = actor();
@@ -3847,4 +3947,109 @@ fn mods_show_in_finder_and_delete_reach_the_app_only_for_what_this_mac_installed
         let (_, platform) = perform(json!({"type":kind,"id":"builtin.panel"}));
         assert!(platform.is_empty());
     }
+}
+
+/// Settings › Shortcuts: the app's page reaches the publication with its
+/// preset row, and every action on it goes to the app, which owns the keymap.
+#[test]
+fn the_shortcuts_page_publishes_the_apps_page_and_hands_its_actions_to_the_app() {
+    let actor = actor();
+    let identity = pm_surface::host_api::Identity {
+        realm: "settings".into(),
+        generation: 1,
+        project: "synthetic".into(),
+    };
+    let mut backend = data::Backend::new(actor.handle(), identity, "settings", false).unwrap();
+    backend.native.facts = json!({"shortcuts":{"preset":"after-effects","changed":false,"stamp":1,
+        "presets":[{"v":"after-effects","label":"After Effects"},{"v":"premiere-pro","label":"Premiere Pro"}],
+        "rows":[{"id":"rippleTrimIn","menu":"Layer","label":"Ripple Trim In Point to Playhead",
+            "keys":["⌥⇧["],"chords":["alt+shift+["],"changed":false,"fixed":false,"recording":false}],
+        "conflicts":[]}});
+    let publication = backend.settings_snapshot().unwrap();
+    assert_eq!(publication["shortcuts"]["rows"][0]["id"], "rippleTrimIn");
+    let row = |id: &str| {
+        publication["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["id"] == id)
+            .cloned()
+            .unwrap_or_else(|| panic!("no {id} row"))
+    };
+    assert_eq!(row("shortcuts.preset")["control"], "choice");
+    assert_eq!(row("shortcuts.preset")["value"], "after-effects");
+    assert!(row("shortcuts.preset")["binding"].is_string());
+    assert_eq!(
+        row("shortcuts.resetAll")["disabled"],
+        true,
+        "nothing to reset"
+    );
+    let revision = publication["revision"].clone();
+    for (action, op) in [
+        (
+            json!({"type":"write","id":"shortcuts.preset","value":"premiere-pro"}),
+            "preset",
+        ),
+        (
+            json!({"type":"row","id":"shortcuts.import","action":"shortcuts.import"}),
+            "import",
+        ),
+        (
+            json!({"type":"row","id":"shortcuts.export","action":"shortcuts.export"}),
+            "export",
+        ),
+        (
+            json!({"type":"shortcut","op":"record","id":"rippleTrimIn"}),
+            "record",
+        ),
+    ] {
+        backend.native.platform.clear();
+        backend
+            .native_command(
+                "panel.settings",
+                &json!({"revision":revision,"action":action}),
+            )
+            .unwrap_or_else(|e| panic!("{action}: {e}"));
+        let sent = backend
+            .native
+            .platform
+            .iter()
+            .find(|(kind, r)| kind == "command" && r["name"] == "shortcuts")
+            .map(|(_, r)| r["args"][0]["op"].clone());
+        assert_eq!(sent, Some(json!(op)), "{action}");
+    }
+    // A click from an older publication still changes a listed command.
+    backend.native.platform.clear();
+    backend
+        .native_command(
+            "panel.settings",
+            &json!({"revision":0,"action":{"type":"shortcut","op":"record","id":"rippleTrimIn"}}),
+        )
+        .expect("a stale click on a listed command applies");
+    assert!(
+        backend
+            .native_command(
+                "panel.settings",
+                &json!({"revision":0,"action":{"type":"shortcut","op":"record","id":"save"}}),
+            )
+            .is_err(),
+        "a command the page does not list is refused"
+    );
+    // So does a preset chosen on an older publication.
+    backend.native.platform.clear();
+    backend
+        .native_command(
+            "panel.settings",
+            &json!({"revision":0,"action":{"type":"write","id":"shortcuts.preset","value":"premiere-pro"}}),
+        )
+        .expect("a stale preset choice applies");
+    // A preset the page does not offer is refused here.
+    assert!(
+        backend
+            .native_command(
+                "panel.settings",
+                &json!({"revision":revision,"action":{"type":"write","id":"shortcuts.preset","value":"avid"}}),
+            )
+            .is_err()
+    );
 }

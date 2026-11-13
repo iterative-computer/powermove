@@ -102,6 +102,11 @@ pub struct Controller {
     pub notes: crate::notes_panel::State,
     pub safe_areas: bool,
     pub guides: bool,
+    /// What the viewer shows of the picture (display only).
+    pub channels: pm_engine_service::Channels,
+    /// View ▸ Show Rulers and Show Grid.
+    pub rulers: bool,
+    pub grid: bool,
     pub skimming: crate::skimming::Skimming,
     pub shuttle: crate::shuttle::Shuttle,
     pub playback: crate::play_range::Playback,
@@ -177,6 +182,13 @@ pub struct Controller {
         Option<crate::media_import::ExtensionImport>,
     )>,
     pub(crate) importing: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// Settings › Shortcuts: the row whose next key is being taken, the
+    /// state revision and keymap value this window's keys follow, and the
+    /// page as last built (`stamp` changes with it).
+    pub(crate) shortcut_recording: Option<String>,
+    pub(crate) keymap_revision: Option<u64>,
+    pub(crate) keymap_seen: Option<pm_model::Value>,
+    pub(crate) shortcuts_page: serde_json::Value,
     /// Arrow-key nudges less than [`NUDGE_IDLE`] apart are one undo step
     /// (keymap.ts): the history mark taken before the first, and the timer
     /// that squashes the burst once the keys rest.
@@ -333,6 +345,7 @@ impl pm_shell::integration::Integration for Bridge {
             if snapping {
                 on.insert("timeline.toggleSnapping".to_owned());
             }
+            on.insert(timeline.read(cx).edit_tool().command());
             if timeline.read(cx).graph_merged() {
                 on.insert("graph.merge".to_owned());
             }
@@ -397,12 +410,27 @@ impl pm_shell::integration::Integration for Bridge {
         self.0.update(cx, |v, cx| {
             // Each layout pass places the timeline again, if it draws it.
             v.builtins.timeline_place = None;
+            v.builtins.viewer_place = None;
             v.sync_extension_panels(open);
             v.sync_parking(open, cx);
         });
     }
     fn shown_panels(&self, shown: &[&str], cx: &mut App) {
-        self.0.update(cx, |v, _| v.hide_extension_panels(shown));
+        self.0.update(cx, |v, _| {
+            v.hide_extension_panels(shown);
+            // A panel not on screen (another one maximised, a workspace
+            // without it) leaves no native playhead or timecode behind.
+            let mut gone = false;
+            if !shown.contains(&"timeline") {
+                gone |= v.builtins.timeline_place.take().is_some();
+            }
+            if !shown.contains(&"viewer") {
+                gone |= v.builtins.viewer_place.take().is_some();
+            }
+            if gone && let Some(wake) = &v.playback_wake {
+                let _ = wake.try_send(());
+            }
+        });
     }
     fn panel_menu(
         &self,
@@ -418,6 +446,7 @@ impl pm_shell::integration::Integration for Bridge {
         &self,
         id: &str,
         bounds: pm_shell::layout::Rect,
+        tabbed: bool,
         w: &mut Window,
         cx: &mut App,
     ) -> Option<AnyElement> {
@@ -425,7 +454,7 @@ impl pm_shell::integration::Integration for Bridge {
             if id == "scopes" {
                 return Some(v.scopes_header(cx));
             }
-            v.builtin_header(id, bounds, w, cx)
+            v.builtin_header(id, bounds, tabbed, w, cx)
         })
     }
     fn project_id(&self, cx: &App) -> Option<String> {
@@ -668,6 +697,9 @@ impl Controller {
             notes: Default::default(),
             safe_areas: false,
             guides: false,
+            channels: Default::default(),
+            rulers: false,
+            grid: false,
             skimming: Default::default(),
             shuttle: Default::default(),
             playback: Default::default(),
@@ -714,6 +746,10 @@ impl Controller {
             close_after_save: None,
             imports: Default::default(),
             importing: None,
+            shortcut_recording: None,
+            keymap_revision: None,
+            keymap_seen: None,
+            shortcuts_page: serde_json::Value::Null,
             nudge_mark: None,
             nudge_idle: None,
         }
@@ -2503,6 +2539,33 @@ impl Controller {
         if crate::generated_panel::pick(self, &cmd.name, cx) {
             return true;
         }
+        match cmd.name.as_str() {
+            "shortcuts" => {
+                let action = cmd.args.first().cloned().unwrap_or_default();
+                self.shortcuts_action(&action, window, cx);
+                return true;
+            }
+            "shortcuts.recorded" => {
+                let chord = cmd
+                    .args
+                    .first()
+                    .and_then(|c| c.as_str())
+                    .unwrap_or_default();
+                self.shortcut_recorded(chord, cx);
+                return true;
+            }
+            // V (or A in the Final Cut and Resolve keys) is the Selection tool
+            // everywhere: the timeline's edit tool goes back to Selection too.
+            "toolSelect" => {
+                if let Some(timeline) = self.builtins.timeline.clone() {
+                    let time = self.time();
+                    timeline.update(cx, |t, cx| {
+                        t.command("timeline.tool:selection", time, None, false, cx)
+                    });
+                }
+            }
+            _ => {}
+        }
         if let Some(id) = cmd.name.strip_prefix("takeRestore:") {
             self.restore_take(id, cx);
             return true;
@@ -2617,6 +2680,15 @@ impl Controller {
             // The viewer's View-menu actions, for the palette and for keys.
             "viewer.safeAreas"
             | "viewer.guides"
+            | "viewer.showRGB"
+            | "viewer.showRed"
+            | "viewer.showGreen"
+            | "viewer.showBlue"
+            | "viewer.showAlpha"
+            | "viewer.showAlphaOverlay"
+            | "viewer.rulers"
+            | "viewer.grid"
+            | "viewer.clearGuides"
             | "viewer.popout"
             | "viewer.toggleProxies"
             | "viewer.renderSelection"
@@ -2883,6 +2955,11 @@ impl Controller {
                 }
             }
             // Settings, at the open project's own page.
+            // Edit ▸ Keyboard Shortcuts… (After Effects' place for it).
+            "keyboardShortcuts" => {
+                self.builtins.settings_page = Some("shortcuts".into());
+                self.show_builtin("settings", window, cx);
+            }
             "projectSettings" => {
                 if self.published.is_none() {
                     return false;
@@ -2894,12 +2971,10 @@ impl Controller {
                     });
                 }
             }
-            "actualSize" => {
-                self.view.place(Some(1.), self.view.pan);
-                self.write_view(None, cx);
-            }
-            "zoomIn" => self.step_zoom(1.25, cx),
-            "zoomOut" => self.step_zoom(0.8, cx),
+            "actualSize" => self.step_zoom(1., Some(1.), window, cx),
+            "viewer.zoom200" => self.step_zoom(1., Some(2.), window, cx),
+            "zoomIn" => self.step_zoom(1.25, None, window, cx),
+            "zoomOut" => self.step_zoom(0.8, None, window, cx),
             "shuttleBackward" | "shuttleStop" | "shuttleForward" | "shuttleRelease" => {
                 use crate::shuttle::Press;
                 use pm_engine_service::transport::ShuttleKey;
@@ -2948,6 +3023,38 @@ impl Controller {
                 return handled;
             }
             "toggleLoop" => self.toggle_loop(cx),
+            // Space came up after arming the hand over the viewer: it plays
+            // only if the hand did not pan (After Effects' rule).
+            "viewer.spaceUp" => {
+                let panned = self
+                    .builtins
+                    .gizmos
+                    .clone()
+                    .is_some_and(|g| g.update(cx, |g, cx| g.release_space(window, cx)));
+                if !panned {
+                    self.host.borrow().send_command("play", vec![]);
+                }
+            }
+            // Space held over the viewer is the hand: Play waits for the key
+            // to come up (no drag) instead of starting on the way down.
+            "play"
+                if cmd.token.is_some()
+                    && self.viewer.is_some()
+                    && self
+                        .builtins
+                        .gizmos
+                        .as_ref()
+                        .is_some_and(|g| g.read(cx).pointer_over(window))
+                    && self.host.borrow().on_release(
+                        cmd.token.unwrap(),
+                        "viewer.spaceUp",
+                        vec![],
+                    ) =>
+            {
+                if let Some(g) = self.builtins.gizmos.clone() {
+                    g.update(cx, |g, cx| g.arm_space(cx));
+                }
+            }
             "play" | "prevFrame" | "nextFrame" | "stepFrames" | "gotoStart" | "gotoEnd" => {
                 // Final Cut: Space plays from the skimmer, only while the
                 // pointer is over the timeline now; otherwise from the playhead.

@@ -27,8 +27,45 @@ import { InspectorSession } from "./session";
 
 const well = {
   background: token("colors.field"),
-  borderRadius: token("metrics.control_radius"),
+  borderRadius: token("metrics.inner_radius"),
 };
+const menuWell = {
+  ...well,
+  color: token("colors.text"),
+  fontSize: token("typography.body"),
+};
+/** What a well that opens a menu shows: its value, then the pop-up's
+ * chevrons at the trailing end. */
+function menuValue(value: string | null) {
+  return [
+    <text
+      key="value"
+      style={{
+        flexGrow: 1,
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+        whiteSpace: "nowrap",
+      }}
+    >
+      {value ?? ""}
+    </text>,
+    <text
+      key="chevrons"
+      attr={{ symbol: "chevron.up.chevron.down" }}
+      style={{
+        color: token("colors.text"),
+        symbolSize: token("metrics.symbol_inline"),
+      }}
+    />,
+  ];
+}
+const problem = {
+  color: token("colors.danger"),
+  fontSize: token("typography.minimum"),
+};
+/** The gutter a row's keyframe mark stands in, kept by rows that have none,
+ * so every label of the panel starts on one x. */
+const gutter = <div role="presentation" />;
 const column = { display: "flex", flexDirection: "column" };
 const horizontal = {
   display: "flex",
@@ -40,6 +77,23 @@ const sectionActions: Record<SectionAction, string> = {
   animator: "Add Text Animator",
   "release-precomp": "Release Pre-comp",
   "refresh-fonts": "Refresh Fonts",
+  "time-remap": "Time Remap",
+  "freeze-frame": "Freeze Frame",
+  reverse: "Reverse",
+};
+const sectionSymbols: Partial<Record<SectionAction, string>> = {
+  "refresh-fonts": "arrow.clockwise",
+  // Time's three share the heading row: short words, no glyph, so they fit
+  // beside "Time" in a narrow panel (their labels keep the full names).
+  "time-remap": "",
+  "freeze-frame": "",
+  reverse: "",
+};
+/** What a heading action shows when its full name would not fit. */
+const sectionShort: Partial<Record<SectionAction, string>> = {
+  "time-remap": "Remap",
+  "freeze-frame": "Freeze",
+  reverse: "Reverse",
 };
 export const alignmentButtons: {
   id: Alignment;
@@ -196,8 +250,8 @@ function AlignmentStrip({
       style={{
         ...horizontal,
         gap: token("metrics.gap"),
-        paddingTop: token("metrics.gap"),
-        paddingBottom: token("metrics.gap"),
+        height: token("metrics.row"),
+        minHeight: token("metrics.row"),
         paddingLeft: token("metrics.inset"),
         paddingRight: token("metrics.inset"),
       }}
@@ -216,14 +270,17 @@ function AlignmentStrip({
     >
       {[alignmentButtons.slice(0, 3), alignmentButtons.slice(3)].map(
         (group, index) => (
-          // Two wells of three, sharing the row (v1's two button groups).
+          // Two wells of three equal cells, sharing the row (v1's two
+          // button groups).
           <div
             key={index}
             style={{
               ...horizontal,
               ...well,
               flexGrow: 1,
-              justifyContent: "space-between",
+              // Cells keep the pointer's least target, so the strip's
+              // wells are that high.
+              height: token("metrics.hit"),
             }}
           >
             {group.map((button) => (
@@ -233,6 +290,10 @@ function AlignmentStrip({
                 label={button.label}
                 tooltip={`${button.label}\nTo composition`}
                 symbol={button.symbol}
+                style={{
+                  flexGrow: 1,
+                  symbolSize: token("metrics.symbol_inline"),
+                }}
                 disabled={target.first.locked}
                 tabIndex={alignmentButtons[focused].id === button.id ? 0 : -1}
                 onActivate={() =>
@@ -361,12 +422,14 @@ function Field({
         <Action
           {...common}
           disabled={bound.disabled}
-          style={well}
-          children={
+          // A well that opens a menu: the value in the text ink and the
+          // pop-up's chevrons at its trailing end.
+          style={menuWell}
+          children={menuValue(
             typeof control.value === "string" && control.value
               ? control.value
-              : null
-          }
+              : null,
+          )}
           onActivate={(event) =>
             session.nativeRequest({
               type: "font-menu",
@@ -401,8 +464,8 @@ function Field({
         <Action
           {...common}
           disabled={bound.disabled}
-          style={well}
-          children={control.description}
+          style={menuWell}
+          children={menuValue(control.description)}
           onActivate={(event) =>
             session.nativeRequest({
               type: "fill-popover",
@@ -458,7 +521,9 @@ function Property({
     >
       <InspectorRow
         label={row.label}
-        title={row.locked ? "Locked layers can’t be edited." : row.label}
+        // The label is its own tooltip when it is cut; the row says only
+        // why it cannot be edited.
+        title={row.locked ? "Locked layers can’t be edited." : undefined}
         // A multi-line editor grows its row; the label and diamond sit at its top.
         style={
           row.control.kind === "text" && row.control.multiline
@@ -478,7 +543,6 @@ function Property({
               label={`Keyframe, ${row.label}`}
               value={keyValue}
               disabled={disabled}
-              active={row.animation !== "static"}
               // One small mark whose shape says the state, as the timeline's:
               // outline = static, half = animated, filled = key at playhead.
               symbol={
@@ -502,27 +566,24 @@ function Property({
                 })
               }
             />
-          ) : row.control.kind === "status" ? (
-            // A fact row keeps the keyframe column, so its label lines up.
-            <div
-              role="presentation"
-              style={{
-                width: token("metrics.hit"),
-                minWidth: token("metrics.hit"),
-              }}
-            />
-          ) : null
+          ) : (
+            gutter
+          )
         }
         trailing={
           row.linked !== undefined ? (
             <Action
               id={`link:${row.id}`}
-              symbol={row.linked ? "link" : "link.slash"}
+              // One glyph (the system has no slashed link: it drew
+              // nothing); its ink says linked or not.
+              symbol="link"
               label="Lock aspect ratio"
               tooltip={row.linked ? "Unlock Aspect Ratio" : "Lock Aspect Ratio"}
-              active={row.linked}
-              // Linked is a state, not an alert: the glyph stays neutral.
-              style={{ color: token("colors.secondary") }}
+              value={row.linked ? "linked" : "not linked"}
+              style={{
+                color: token(row.linked ? "colors.secondary" : "colors.faint"),
+                symbolSize: token("metrics.symbol_inline"),
+              }}
               disabled={disabled}
               onActivate={() =>
                 session.send({
@@ -537,41 +598,37 @@ function Property({
       >
         <Field row={row} session={session} />
       </InspectorRow>
-      {row.expression ? (
-        <InspectorRow label="Expression">
-          <TextField
-            id={`expression:${row.id}`}
-            label={`Expression for ${row.label}`}
-            binding={row.expression.binding.handle}
-            value={row.expression.source}
-            disabled={disabled || !session.ready(row.expression.binding.handle)}
-            title={row.expression.error ?? "Expression is valid"}
-          />
-        </InspectorRow>
-      ) : null}
-      {row.expression?.error ? (
-        <text
-          role="status"
-          style={{
-            color: token("colors.danger"),
-            fontSize: token("typography.minimum"),
-          }}
-        >
-          {row.expression.error}
-        </text>
-      ) : null}
-      {row.error ? (
-        <text
-          role="status"
-          style={{
-            color: token("colors.danger"),
-            fontSize: token("typography.minimum"),
-          }}
-        >
-          {row.error.kind === "number"
-            ? "Enter a number."
-            : `Enter a value from ${row.error.min} to ${row.error.max}.`}
-        </text>
+      {row.expression || row.error ? (
+        // Under its row, from the label's x to the panel's inset: the
+        // expression in the fixed-width face, as many lines as it has, and
+        // what is wrong with it or with the value. A valid one says nothing.
+        <div data-pm-slot="detail" style={column}>
+          {row.expression ? (
+            <TextField
+              id={`expression:${row.id}`}
+              label={`Expression for ${row.label}`}
+              binding={row.expression.binding.handle}
+              value={row.expression.source}
+              multiline
+              metadata={{ code: true }}
+              disabled={
+                disabled || !session.ready(row.expression.binding.handle)
+              }
+            />
+          ) : null}
+          {row.expression?.error ? (
+            <text role="status" style={problem}>
+              {row.expression.error}
+            </text>
+          ) : null}
+          {row.error ? (
+            <text role="status" style={problem}>
+              {row.error.kind === "number"
+                ? "Enter a number."
+                : `Enter a value from ${row.error.min} to ${row.error.max}.`}
+            </text>
+          ) : null}
+        </div>
       ) : null}
     </div>
   );
@@ -589,6 +646,47 @@ export function InspectorPanel({
   );
   const snapshot = session.inspect();
   const target = snapshot.target;
+  // A section's own action: a quiet text action at the trailing edge of its
+  // heading (design language, Properties).
+  const sectionAction = (
+    section: (typeof snapshot.sections)[number],
+    action: SectionAction,
+    several: boolean,
+  ) => (
+    <Action
+      key={action}
+      id={
+        several
+          ? `section-action:${section.id}:${action}`
+          : `section-action:${section.id}`
+      }
+      label={sectionActions[action]}
+      symbol={sectionSymbols[action] ?? "plus"}
+      children={sectionShort[action] ?? sectionActions[action]}
+      style={{
+        gap: token("metrics.border"),
+        paddingLeft: token("metrics.gap"),
+        paddingRight: token("metrics.gap"),
+        color: token("colors.muted"),
+        fontSize: token("typography.label"),
+        symbolSize: token("metrics.symbol_inline"),
+      }}
+      disabled={target.kind === "layers" && target.first.locked}
+      onActivate={(event) =>
+        action === "animator"
+          ? session.nativeRequest({
+              type: "animator-menu",
+              anchor: event.currentTarget,
+              items: section.presets ?? [],
+            })
+          : session.send({
+              type: "section-action",
+              section: section.id,
+              action,
+            })
+      }
+    />
+  );
   const [drop, setDrop] = useState(false);
   const canDrop =
     target.kind === "layers" &&
@@ -619,9 +717,11 @@ export function InspectorPanel({
               }
               style={{
                 ...horizontal,
-                gap: token("metrics.gap"),
+                gap: token("metrics.inner_radius"),
                 height: token("metrics.row"),
-                marginTop: token("metrics.gap"),
+                minHeight: token("metrics.row"),
+                // Clear of the header's rule.
+                marginTop: token("metrics.pill_inset"),
                 paddingLeft: token("metrics.inset"),
                 paddingRight: token("metrics.inset"),
               }}
@@ -630,8 +730,11 @@ export function InspectorPanel({
                 title={target.first.name}
                 style={{
                   color: token("colors.text"),
-                  fontSize: token("typography.title"),
+                  fontSize: token("typography.label"),
                   fontWeight: token("typography.semibold_weight"),
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
                 }}
               >
                 {target.count > 1
@@ -641,7 +744,8 @@ export function InspectorPanel({
               <text
                 style={{
                   color: token("colors.muted"),
-                  fontSize: token("typography.title"),
+                  fontSize: token("typography.label"),
+                  whiteSpace: "nowrap",
                 }}
               >
                 {`· ${target.count > 1 ? (target.sharedType ?? "Mixed") : target.first.typeLabel}`}
@@ -673,52 +777,25 @@ export function InspectorPanel({
                 collapsed: !open,
               })
             }
+            accessory={
+              section.actions ? (
+                // Several actions (Time) stand in a row at the trailing edge.
+                <div style={{ ...horizontal, gap: token("metrics.border") }}>
+                  {section.actions.map((action) =>
+                    sectionAction(section, action, true),
+                  )}
+                </div>
+              ) : section.action ? (
+                sectionAction(section, section.action, false)
+              ) : undefined
+            }
           >
-            {section.action ? (
-              // A quiet text action on the label inset (it drew as an empty
-              // button: no symbol, no title).
-              <div
-                style={{
-                  ...horizontal,
-                  paddingLeft: token("metrics.inset"),
-                  paddingRight: token("metrics.inset"),
-                }}
-              >
-                <Action
-                  id={`section-action:${section.id}`}
-                  label={sectionActions[section.action]}
-                  symbol={
-                    section.action === "refresh-fonts"
-                      ? "arrow.clockwise"
-                      : "plus"
-                  }
-                  children={sectionActions[section.action]}
-                  style={{
-                    gap: token("metrics.inner_radius"),
-                    paddingLeft: token("metrics.inner_radius"),
-                    paddingRight: token("metrics.gap"),
-                    fontSize: token("typography.label"),
-                    symbolSize: token("metrics.symbol_inline"),
-                  }}
-                  disabled={target.kind === "layers" && target.first.locked}
-                  onActivate={(event) =>
-                    section.action === "animator"
-                      ? session.nativeRequest({
-                          type: "animator-menu",
-                          anchor: event.currentTarget,
-                          items: section.presets ?? [],
-                        })
-                      : session.send({
-                          type: "section-action",
-                          section: section.id,
-                          action: section.action!,
-                        })
-                  }
-                />
-              </div>
-            ) : null}
             {section.animators?.map((animator) => (
-              <InspectorRow key={animator.id} label={animator.name}>
+              <InspectorRow
+                key={animator.id}
+                label={animator.name}
+                leading={gutter}
+              >
                 <Action
                   id={`remove-animator:${animator.id}`}
                   label={`Remove ${animator.name}`}
@@ -735,7 +812,7 @@ export function InspectorPanel({
               </InspectorRow>
             ))}
             {section.masks?.flatMap((mask) => [
-              <InspectorRow key={mask.id} label={mask.name}>
+              <InspectorRow key={mask.id} label={mask.name} leading={gutter}>
                 <Action
                   id={`remove-mask:${mask.id}`}
                   label={`Remove ${mask.name}`}
@@ -763,7 +840,7 @@ export function InspectorPanel({
               fontSize: token("typography.minimum"),
               paddingLeft: token("metrics.inset"),
               paddingRight: token("metrics.inset"),
-              paddingTop: token("metrics.gap"),
+              paddingTop: token("metrics.inset"),
             }}
           >
             Select a layer to edit its properties.

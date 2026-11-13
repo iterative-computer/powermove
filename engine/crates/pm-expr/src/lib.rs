@@ -64,7 +64,7 @@ pub use diagnostic::{
 pub use eval::EvalError;
 pub use general::GeneralBinding;
 pub use host::{Host, JsonHost, JsonRef, Shape};
-pub use lexer::SyntaxError;
+pub use lexer::{Location, SyntaxError};
 pub use parser::{MAX_CALL_ARGS, MAX_DEPTH, MAX_NODES, MAX_SOURCE_CHARS};
 pub use string::JsStr;
 pub use value::{
@@ -144,6 +144,17 @@ impl std::fmt::Display for CompileError {
 
 impl std::error::Error for CompileError {}
 
+impl CompileError {
+    /// Where the source fails to parse, when the reason names a place (the
+    /// message is unchanged: it still ends "at <offset>").
+    pub fn location(&self) -> Option<Location> {
+        match self {
+            CompileError::Syntax(e) => e.location(),
+            CompileError::Length => None,
+        }
+    }
+}
+
 /// The result of an evaluation and what it read.
 #[derive(Clone, Debug)]
 pub struct Evaluation<O> {
@@ -206,7 +217,7 @@ impl Expression {
         if units.is_empty() || units.len() > MAX_SOURCE_CHARS {
             return Err(CompileError::Length);
         }
-        let tree = parser::parse(units).map_err(CompileError::Syntax)?;
+        let tree = parser::parse(units).map_err(|e| CompileError::Syntax(e.locate(units)))?;
         let numeric = numeric::Numeric::compile(&tree, dialect).map(Arc::new);
         Ok(Expression {
             program: Arc::new(Program::compile(&tree)),

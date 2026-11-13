@@ -484,6 +484,7 @@ fn status(
             )
         }),
         preview: None,
+        checking: None,
     }
 }
 /// A file missing from an image sequence read in place stops the export
@@ -1080,13 +1081,12 @@ pub fn run_child() -> Result<()> {
             &gate,
             &cancel,
             &mut |p| {
-                let _ = emit(status(
-                    &request.job,
-                    JobState::Running,
-                    p.fraction(),
-                    None,
-                    None,
-                ));
+                let _ = emit(JobStatus {
+                    checking: p
+                        .checked
+                        .map(|c| (c as f64 / p.frames.max(1) as f64).min(1.0)),
+                    ..status(&request.job, JobState::Running, p.fraction(), None, None)
+                });
             },
         )
         .map_err(missing_frame)?;

@@ -5150,6 +5150,7 @@ dependencies = [
  "pm-engine-service",
  "pm-eval",
  "pm-export",
+ "pm-expr",
  "pm-first-launch",
  "pm-gpu",
  "pm-kernel",

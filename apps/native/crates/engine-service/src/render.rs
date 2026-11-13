@@ -1416,9 +1416,9 @@ impl Engine {
             None => [0., 0., output.width as f32, output.height as f32],
         };
         // A capture reads the engine's frame, not the display's picture: the
-        // SDR delivery clip (mode 3) is presentation only, so a capture of an
-        // SDR view is drawn again without it.
-        let unclipped_capture = capture && params.output[0] == 3.;
+        // SDR delivery clip (mode 3) and the channel view are presentation
+        // only, so a capture of such a view is drawn again without them.
+        let unclipped_capture = capture && (params.output[0] == 3. || params.channels != 0);
         if unclipped_capture
             && self.capture_target.as_ref().is_none_or(|t| {
                 t.width() != output.width as u64 || t.height() != output.height as u64
@@ -1485,7 +1485,12 @@ impl Engine {
             present(
                 target,
                 &crate::OverlayParams {
-                    output: [0.; 4],
+                    output: if params.output[0] == 3. {
+                        [0.; 4]
+                    } else {
+                        params.output
+                    },
+                    channels: 0,
                     ..params
                 },
             );
@@ -2635,9 +2640,18 @@ mod viewer_output_tests {
         spec: FrameSpec,
         mastering: Mastering,
     ) -> ([f64; 3], Option<[f64; 3]>) {
+        draw_with(engine, scene, spec, mastering, &Default::default())
+    }
+    fn draw_with(
+        engine: &mut Engine,
+        scene: &Scene,
+        spec: FrameSpec,
+        mastering: Mastering,
+        overlays: &crate::OverlayGeometry,
+    ) -> ([f64; 3], Option<[f64; 3]>) {
         engine.mastering = mastering;
         let sub = engine
-            .frame(scene, spec, None, &Default::default(), true, Arc::default())
+            .frame(scene, spec, None, overlays, true, Arc::default())
             .unwrap()
             .unwrap();
         sub.commit();
@@ -2682,6 +2696,85 @@ mod viewer_output_tests {
         assert!(
             captured.iter().zip(edr).all(|(c, e)| (*c - e).abs() < 0.01),
             "a capture is the engine's frame: {captured:?} vs {edr:?}"
+        );
+    }
+    /// The channel view is the viewer's alone: the presented picture shows a
+    /// channel (or alpha) as grey, while a capture of the same frame is the
+    /// engine's frame, the same as with the channel view off.
+    #[test]
+    fn the_channel_view_is_shown_and_never_captured() {
+        use crate::{Channels, OverlayGeometry};
+        let ch = |v: f64| format!(r#"{{"v":{v},"kf":[],"expr":null}}"#);
+        let transform = [
+            ("position.x", 0.),
+            ("position.y", 0.),
+            ("anchor.x", 0.),
+            ("anchor.y", 0.),
+            ("scale.x", 100.),
+            ("scale.y", 100.),
+            ("rotation", 0.),
+            ("opacity", 100.),
+        ]
+        .map(|(k, v)| format!(r#""{k}":{}"#, ch(v)))
+        .join(",");
+        let project = format!(
+            r##"{{"id":"P","name":"P","compId":"C","compName":"C","w":64,"h":36,"fps":30,"dur":1,"bg":"#000000",
+            "layers":[{{"id":"a","type":"solid","name":"a","from":0,"dur":1,"on":true,"solo":false,"mblur":false,
+            "p":{{{transform}}},"fx":[],"masks":[],"d":{{"color":"#CC401A","w":64,"h":36}}}}],
+            "comps":{{}},"assets":{{}},"markers":[],"work":[0,1],"params":{{}}}}"##
+        );
+        let scene = Scene {
+            doc: Arc::new(pm_model::Document::new(
+                Some(pm_model::canonical::canonical_project(
+                    pm_model::json::parse(&project).unwrap(),
+                )),
+                1,
+            )),
+            comp: "C".into(),
+            media: Default::default(),
+            content: 1,
+        };
+        let mut engine = Engine::new(Gpu::new("channel-view-test").unwrap()).unwrap();
+        let spec = FrameSpec::exact(Ticks::ZERO, output(64, 36));
+        let (rgb, _) = draw(&mut engine, &scene, spec, Mastering::Edr);
+        assert!(
+            rgb[0] > rgb[1] && rgb[1] > rgb[2],
+            "a red-orange solid: {rgb:?}"
+        );
+        let mut shown = vec![];
+        for mode in [
+            Channels::Red,
+            Channels::Green,
+            Channels::Blue,
+            Channels::Alpha,
+            Channels::AlphaOverlay,
+        ] {
+            let overlays = OverlayGeometry::default().with_channels(mode);
+            let (captured, presented) =
+                draw_with(&mut engine, &scene, spec, Mastering::Edr, &overlays);
+            assert!(
+                captured.iter().zip(rgb).all(|(c, r)| (*c - r).abs() < 1e-3),
+                "{mode:?}: a capture is the engine's frame: {captured:?} vs {rgb:?}"
+            );
+            shown.push((mode, presented.expect("the presented picture")));
+        }
+        let grey = |p: [f64; 3]| (p[0] - p[1]).abs() < 2e-3 && (p[1] - p[2]).abs() < 2e-3;
+        for (mode, p) in &shown[..4] {
+            assert!(grey(*p), "{mode:?} shows grey: {p:?}");
+        }
+        // Red, green and blue in the order the solid holds them; an opaque
+        // solid's alpha is white; nothing is transparent, so the overlay is
+        // the picture.
+        assert!(shown[0].1[0] > shown[1].1[0] && shown[1].1[0] > shown[2].1[0]);
+        assert!((shown[3].1[0] - 1.).abs() < 2e-3, "alpha: {:?}", shown[3].1);
+        assert!(
+            shown[4]
+                .1
+                .iter()
+                .zip(rgb)
+                .all(|(p, r)| (*p - r).abs() < 2e-3),
+            "alpha overlay over an opaque picture: {:?}",
+            shown[4].1
         );
     }
     /// The SDR view shows a colour past white as every SDR file delivers it

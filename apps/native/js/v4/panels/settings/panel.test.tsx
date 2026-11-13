@@ -188,6 +188,50 @@ const stateCases: [string, (model: SettingsModel) => void | Promise<void>][] = [
       model.show();
     },
   ],
+  [
+    // Settings › Shortcuts: a changed command, one taking a key, a menu
+    // bar key, one with no key, and a key two commands share.
+    "shortcuts",
+    (model) => {
+      const row = (id: string, label: string, keys: string[], patch = {}) => ({
+        id,
+        menu: "Layer",
+        label,
+        keys,
+        chords: [],
+        changed: false,
+        fixed: false,
+        recording: false,
+        ...patch,
+      });
+      model.publish({
+        ...model.publication,
+        revision: 2,
+        shortcuts: {
+          preset: "premiere-pro",
+          changed: true,
+          rows: [
+            row("rippleTrimIn", "Ripple Trim In Point to Playhead", ["Q"], {
+              changed: true,
+            }),
+            row("extendEdit", "Extend Edit to Playhead", ["E"], {
+              recording: true,
+            }),
+            row("save", "Save", ["⌘S"], { menu: "File", fixed: true }),
+            row("prevEdge", "Previous Edge", [], { menu: "Playback" }),
+          ],
+          conflicts: [
+            {
+              keys: "⌥⇧S",
+              chord: "alt+shift+s",
+              labels: ["Add or Remove Scale Keyframe", "Audio Skimming"],
+            },
+          ],
+        },
+      });
+      model.show("shortcuts");
+    },
+  ],
 ];
 for (const [state, prepare] of stateCases)
   test(`${state}: six-op tree snapshot passes the real Rust wire and kit validators`, async () => {

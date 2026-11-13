@@ -100,6 +100,16 @@ impl<A: Clone + 'static> Alert<A> {
         window: &NSWindow,
         configure: impl FnOnce(&NSAlert),
     ) -> async_channel::Receiver<Option<A>> {
+        // A development lane launch in the background: a question nobody can
+        // see takes its Escape choice at once (none: dismissed), so nothing,
+        // a quit least of all, waits on it. A normal launch always asks.
+        if gpui_macos::child_window::would_hold() {
+            let (tx, rx) = async_channel::bounded(1);
+            let escape = self.buttons.iter().find(|b| b.key == Key::Escape);
+            let _ = tx.try_send(escape.map(|b| b.action.clone()));
+            eprintln!("powermove: a question in the background answered itself (lane launch)");
+            return rx;
+        }
         let mtm = MainThreadMarker::new().expect("NSAlert must be presented on main");
         let native = NSAlert::new(mtm);
         native.setMessageText(&NSString::from_str(&self.message));
