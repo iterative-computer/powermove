@@ -1,0 +1,1262 @@
+//! Viewer interaction for Studio 3D layers (3d-studio.md §2, §4–6): Free View
+//! navigation, click-to-select by picking, move/rotate/scale handles and the
+//! Light tool. Handles are drawn by the host from the worker's viewport model,
+//! as engine overlay lines, on the frame they're pressed. Every drag is one
+//! kernel gesture; navigation never edits the document or Undo.
+use super::{GizmoSurface, Job, ViewFrame, set};
+use gpui::*;
+use pm_engine_service::{OverlayLine, studio::FreeView};
+use pm_kernel::{Caller, Command, Request, Scene3dCommand, SelectionCall};
+use pm_panel_studio3d::viewport::{Eye, Item, Scene};
+use pm_scene3d::navigation::{
+    Pose as View, Vec3, add, dolly, dot, length, mul, normalize, orbit, pan, sub,
+};
+use pm_scene3d::schema::Role;
+use std::sync::Arc;
+
+/// The viewer's 3D tool (UI state `studioTool`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Tool {
+    #[default]
+    Move,
+    Rotate,
+    Scale,
+    Orbit,
+    Pan,
+    Zoom,
+    Light,
+}
+impl Tool {
+    pub fn parse(s: Option<&str>) -> Self {
+        match s {
+            Some("rotate") => Self::Rotate,
+            Some("scale") => Self::Scale,
+            Some("orbit") => Self::Orbit,
+            Some("pan") => Self::Pan,
+            Some("zoom") => Self::Zoom,
+            Some("light") => Self::Light,
+            _ => Self::Move,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum Handle {
+    Axis(usize),
+    /// Inside the object: move in the view plane.
+    Plane,
+    /// The square between two axes: move in that plane (index of its normal).
+    Pair(usize),
+    Ring(usize),
+    Uniform,
+}
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Nav {
+    Orbit,
+    Pan,
+    Dolly,
+}
+struct NavDrag {
+    mode: Nav,
+    start: View,
+    origin: Point<Pixels>,
+}
+struct Drag {
+    handle: Handle,
+    origin: [f64; 2],
+    screen: Point<Pixels>,
+    eye: Eye,
+    pivot: Vec3,
+    /// World length of one handle (axis length), for scaling deltas.
+    length: f64,
+    items: Vec<Item>,
+    active: bool,
+    time: f64,
+    /// How far a move has carried the pivot, so the handle follows.
+    offset: Vec3,
+    /// The handle axes when the press began (scene or object).
+    basis: [Vec3; 3],
+}
+struct LightOrbit {
+    id: String,
+    start: View,
+    origin: Point<Pixels>,
+    active: bool,
+    time: f64,
+}
+#[derive(Default)]
+pub struct State {
+    pub scene: Option<Arc<Scene>>,
+    /// The 3D layers in the selection.
+    pub selected: Vec<String>,
+    pub tool: Tool,
+    /// Looking through Free View rather than the shot (UI state `studioLook`).
+    pub free_look: bool,
+    pub free: Option<View>,
+    /// Handles follow the object's own axes (UI state `studioAxes`).
+    pub object_axes: bool,
+    /// The Light panel's kind to add and whether Add is armed (UI state
+    /// `studioLightKind`, `studioLightAdd`).
+    pub light_kind: String,
+    pub light_add: bool,
+    /// How a click aims the selected light (UI state `studioLightAim`):
+    /// `reflect` puts its highlight there, `direct` faces it there, `orbit`
+    /// drags it around what it lights.
+    pub light_aim: String,
+    light_orbit: Option<LightOrbit>,
+    /// The handle under the pointer, drawn in text colour (§5).
+    pub(super) hover: Option<Handle>,
+    nav: Option<NavDrag>,
+    drag: Option<Drag>,
+}
+fn rgb(c: u32) -> [f32; 4] {
+    let ch = |s: u32| ((c >> s) & 255) as f32 / 255.;
+    [ch(16), ch(8), ch(0), 1.]
+}
+const AXES: [Vec3; 3] = [[1., 0., 0.], [0., 1., 0.], [0., 0., 1.]];
+fn dist_segment(p: [f64; 2], a: [f64; 2], b: [f64; 2]) -> f64 {
+    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+    let l2 = dx * dx + dy * dy;
+    let t = if l2 < 1e-12 {
+        0.
+    } else {
+        (((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / l2).clamp(0., 1.)
+    };
+    (p[0] - a[0] - t * dx).hypot(p[1] - a[1] - t * dy)
+}
+/// A scene-space move as the layer's position channels: scene units for
+/// Studio layers; pixels with y and z flipped for extruded text and shapes.
+fn channel_delta(item: &Item, w: Vec3) -> Vec3 {
+    match item.pixels {
+        Some(u) if u > 0. => [w[0] / u, -w[1] / u, -w[2] / u],
+        _ => w,
+    }
+}
+/// The layer's own axes: the columns of Rz·Ry·Rx, the order the
+/// evaluator composes `rotation`, `rotation.y` and `rotation.x`.
+pub(super) fn object_basis(rotation: Vec3) -> [Vec3; 3] {
+    let (x, y, z) = (
+        rotation[0].to_radians(),
+        rotation[1].to_radians(),
+        rotation[2].to_radians(),
+    );
+    let (sx, cx) = x.sin_cos();
+    let (sy, cy) = y.sin_cos();
+    let (sz, cz) = z.sin_cos();
+    // R = Rz * Ry * Rx; column i is where axis i points.
+    let m = [
+        [cz * cy, cz * sy * sx - sz * cx, cz * sy * cx + sz * sx],
+        [sz * cy, sz * sy * sx + cz * cx, sz * sy * cx - cz * sx],
+        [-sy, cy * sx, cy * cx],
+    ];
+    std::array::from_fn(|c| [m[0][c], m[1][c], m[2][c]])
+}
+/// Points around the ring perpendicular to `basis[axis]`, radius `r`.
+fn ring(pivot: Vec3, basis: &[Vec3; 3], axis: usize, r: f64, n: usize) -> Vec<Vec3> {
+    let (u, v) = (basis[(axis + 1) % 3], basis[(axis + 2) % 3]);
+    (0..=n)
+        .map(|i| {
+            let a = i as f64 / n as f64 * std::f64::consts::TAU;
+            add(pivot, add(mul(u, r * a.cos()), mul(v, r * a.sin())))
+        })
+        .collect()
+}
+impl State {
+    pub fn active(&self) -> bool {
+        self.scene.is_some()
+    }
+    pub fn busy(&self) -> bool {
+        self.nav.is_some() || self.drag.is_some() || self.light_orbit.is_some()
+    }
+    fn view(&self) -> Option<View> {
+        let scene = self.scene.as_ref()?;
+        Some(if self.free_look {
+            self.free.unwrap_or(scene.shot)
+        } else {
+            scene.shot
+        })
+    }
+    fn eye(&self) -> Option<Eye> {
+        let scene = self.scene.as_ref()?;
+        Some(scene.eye(self.view()))
+    }
+    /// Unlocked selected items the current tool can move.
+    fn movable(&self) -> Vec<Item> {
+        let Some(scene) = &self.scene else {
+            return vec![];
+        };
+        scene
+            .items
+            .iter()
+            .filter(|i| self.selected.contains(&i.id) && !i.locked)
+            .filter(|i| match (i.role, i.light.as_deref(), self.tool) {
+                // A Sun only turns; a Bulb only moves (3d-studio.md §2).
+                (Role::Light, Some("sun"), Tool::Move | Tool::Scale) => false,
+                (Role::Light, Some("point"), Tool::Rotate | Tool::Scale) => false,
+                (Role::Light, _, Tool::Scale) => false,
+                _ => true,
+            })
+            .cloned()
+            .collect()
+    }
+    /// Handle axes: the scene's, or with Object Axes the first selected
+    /// layer's own.
+    pub(super) fn basis(&self) -> [Vec3; 3] {
+        match self.movable().first() {
+            Some(item) if self.object_axes => object_basis(item.rotation),
+            _ => AXES,
+        }
+    }
+    fn pivot(items: &[Item]) -> Option<Vec3> {
+        if items.is_empty() {
+            return None;
+        }
+        let sum = items.iter().fold([0.; 3], |a, i| add(a, i.pivot));
+        Some(mul(sum, 1. / items.len() as f64))
+    }
+}
+
+impl GizmoSurface {
+    /// The viewer worker sees this viewer's Free View, or the shot.
+    pub(super) fn studio_push_view(&mut self, cx: &mut Context<Self>) {
+        let view = if self.studio.free_look {
+            self.studio.free.map(|v| FreeView {
+                eye: v.position,
+                target: v.target,
+                zoom: v.zoom,
+            })
+        } else {
+            None
+        };
+        self.host.studio_view(view, cx);
+    }
+    /// Writes a viewer UI key (`studioLook`, `studioTool`): not the document.
+    pub(super) fn studio_ui(&self, key: &'static str, value: &'static str, cx: &mut Context<Self>) {
+        let (kernel, project) = (self.kernel.clone(), self.project.clone());
+        cx.background_executor()
+            .spawn(async move {
+                let Some(p) = kernel.published(&project) else {
+                    return;
+                };
+                if p.ui_state.viewer.get(key).and_then(pm_model::Value::as_str) == Some(value) {
+                    return;
+                }
+                let mut ui = p.ui_state.clone();
+                if let Some(v) = ui.viewer.as_object_mut() {
+                    v.insert(key, pm_model::Value::from(value));
+                }
+                let state = kernel.state();
+                let _ = kernel
+                    .state_transaction(pm_kernel::state::StateTransaction {
+                        expected_revision: Some(state.revision),
+                        ops: vec![pm_kernel::state::StateOp::Ui { project, next: ui }],
+                    })
+                    .await;
+            })
+            .detach();
+    }
+    /// Switch to Free View, starting from the shot.
+    fn studio_go_free(&mut self, cx: &mut Context<Self>) {
+        if !self.studio.free_look {
+            self.studio.free_look = true;
+            if self.studio.free.is_none() {
+                self.studio.free = self.studio.scene.as_ref().map(|s| s.shot);
+            }
+            self.studio_ui("studioLook", "free", cx);
+        }
+    }
+    /// A viewer 3D setting from View ▸ 3D (`look`, `tool`, `axes`, `views`,
+    /// `tier`) or `frame`, as the viewer bar's controls write it.
+    pub fn studio_setting(&mut self, group: &str, value: &str, cx: &mut Context<Self>) {
+        const LOOKS: &[&str] = &["camera", "free"];
+        const TOOLS: &[&str] = &["move", "rotate", "scale", "orbit", "pan", "zoom", "light"];
+        const AXES_: &[&str] = &["scene", "object"];
+        const VIEWS: &[&str] = &["1", "2", "4"];
+        const TIERS: &[&str] = &["live", "refine"];
+        let (key, allowed) = match group {
+            "frame" => return self.studio_frame(cx),
+            "look" => ("studioLook", LOOKS),
+            "tool" => ("studioTool", TOOLS),
+            "axes" => ("studioAxes", AXES_),
+            "views" => ("studioViews", VIEWS),
+            "tier" => ("studioTier", TIERS),
+            _ => return,
+        };
+        if let Some(v) = allowed.iter().find(|a| **a == value) {
+            if key == "studioLook" && *v == "free" {
+                self.studio_go_free(cx);
+                self.studio_push_view(cx);
+                return;
+            }
+            self.studio_ui(key, v, cx);
+        }
+    }
+    /// Whether the composition shows Studio 3D layers (F frames them).
+    pub fn studio_active(&self) -> bool {
+        self.studio.active()
+    }
+    /// Frame (F): Free View fits the selection, or everything.
+    pub fn studio_frame(&mut self, cx: &mut Context<Self>) {
+        let Some(scene) = self.studio.scene.clone() else {
+            return;
+        };
+        let from = self.studio.view().unwrap_or(scene.shot);
+        if let Some(pose) = pm_panel_studio3d::viewport::framed(&scene, from, &self.studio.selected)
+        {
+            self.studio_go_free(cx);
+            self.studio.free = Some(pose);
+            self.studio_push_view(cx);
+            self.draw(cx);
+        }
+    }
+    /// Lines for the 3D selection and its handles, in normalized frame space.
+    pub(super) fn studio_lines(&self, frame: ViewFrame) -> Vec<OverlayLine> {
+        let mut lines = vec![];
+        let (Some(scene), Some(eye)) = (&self.studio.scene, self.studio.eye()) else {
+            return lines;
+        };
+        let [w, h] = frame.size;
+        let t = &self.tokens;
+        let mut push = |a: [f64; 2], b: [f64; 2], color: [f32; 4]| {
+            lines.push(OverlayLine {
+                ends: [a[0] / w, a[1] / h, b[0] / w, b[1] / h].map(|v| v as f32),
+                color,
+            });
+        };
+        let accent = rgb(t.colors.accent);
+        // During a drag only the active handle stays (§5), with its guide.
+        let drag = self.studio.drag.as_ref().filter(|d| d.active);
+        for item in scene
+            .items
+            .iter()
+            .filter(|i| self.studio.selected.contains(&i.id))
+        {
+            if drag.is_some() {
+                break;
+            }
+            let b = item.bounds;
+            let corner = |n: usize| -> Vec3 {
+                std::array::from_fn(|i| {
+                    if n & (1 << i) == 0 {
+                        b.min[i]
+                    } else {
+                        b.max[i]
+                    }
+                })
+            };
+            for (a, c) in [
+                (0, 1),
+                (2, 3),
+                (4, 5),
+                (6, 7),
+                (0, 2),
+                (1, 3),
+                (4, 6),
+                (5, 7),
+                (0, 4),
+                (1, 5),
+                (2, 6),
+                (3, 7),
+            ] {
+                if let (Some((pa, _)), Some((pb, _))) =
+                    (eye.project(corner(a)), eye.project(corner(c)))
+                {
+                    push(pa, pb, accent);
+                }
+            }
+        }
+        let items = self.studio.movable();
+        let Some(pivot) = State::pivot(&items) else {
+            return lines;
+        };
+        let pivot = drag.map_or(pivot, |d| add(d.pivot, d.offset));
+        if matches!(
+            self.studio.tool,
+            Tool::Orbit | Tool::Pan | Tool::Zoom | Tool::Light
+        ) {
+            return lines;
+        }
+        let Some((c, _)) = eye.project(pivot) else {
+            return lines;
+        };
+        let axis_px = t.metrics.rotation_stem as f64 * 4. / frame.scale;
+        let len = axis_px * eye.units_per_pixel(pivot);
+        let colors = [
+            t.colors.scope_red,
+            t.colors.scope_green,
+            t.colors.scope_blue,
+        ]
+        .map(rgb);
+        let half = t.metrics.gizmo_handle as f64 / 2. / frame.scale;
+        let square = |p: [f64; 2], color, push: &mut dyn FnMut([f64; 2], [f64; 2], [f32; 4])| {
+            let q = [
+                [p[0] - half, p[1] - half],
+                [p[0] + half, p[1] - half],
+                [p[0] + half, p[1] + half],
+                [p[0] - half, p[1] + half],
+            ];
+            for i in 0..4 {
+                push(q[i], q[(i + 1) % 4], color);
+            }
+        };
+        let active = drag.map(|d| d.handle);
+        let basis = drag.map_or_else(|| self.studio.basis(), |d| d.basis);
+        let ink = rgb(t.colors.text);
+        let hover = self.studio.hover.filter(|_| drag.is_none());
+        let tint = |h: Handle, c: [f32; 4]| if hover == Some(h) { ink } else { c };
+        // Each axis carries its letter beyond the tip, so colour isn't the
+        // only cue (§5), drawn as strokes at the minimum type size.
+        let letter = |i: usize, tip: [f64; 2], from: [f64; 2], color, push: &mut dyn FnMut([f64; 2], [f64; 2], [f32; 4])| {
+            let (dx, dy) = (tip[0] - from[0], tip[1] - from[1]);
+            let l = dx.hypot(dy).max(1e-6);
+            let g = t.typography.minimum as f64 / frame.scale;
+            let o = [tip[0] + dx / l * g * 1.2, tip[1] + dy / l * g * 1.2];
+            let (hw, hh) = (g * 0.3, g * 0.4);
+            let p = |x: f64, y: f64| [o[0] + x * hw, o[1] + y * hh];
+            match i {
+                0 => {
+                    push(p(-1., -1.), p(1., 1.), color);
+                    push(p(1., -1.), p(-1., 1.), color);
+                }
+                1 => {
+                    push(p(-1., -1.), p(0., 0.), color);
+                    push(p(1., -1.), p(0., 0.), color);
+                    push(p(0., 0.), p(0., 1.), color);
+                }
+                _ => {
+                    push(p(-1., -1.), p(1., -1.), color);
+                    push(p(1., -1.), p(-1., 1.), color);
+                    push(p(-1., 1.), p(1., 1.), color);
+                }
+            }
+        };
+        match self.studio.tool {
+            Tool::Move | Tool::Scale => {
+                if self.studio.tool == Tool::Move {
+                    // Plane squares between each pair of axes, in the colour
+                    // of the axis they hold still, at pasteboard opacity.
+                    for k in 0..3 {
+                        if active.is_some_and(|h| h != Handle::Pair(k)) {
+                            continue;
+                        }
+                        let (a, b) = (basis[(k + 1) % 3], basis[(k + 2) % 3]);
+                        let corner = |u: f64, v: f64| {
+                            eye.project(add(pivot, add(mul(a, len * u), mul(b, len * v))))
+                                .map(|p| p.0)
+                        };
+                        let q = [
+                            corner(0.22, 0.22),
+                            corner(0.42, 0.22),
+                            corner(0.42, 0.42),
+                            corner(0.22, 0.42),
+                        ];
+                        let mut color = tint(Handle::Pair(k), colors[k]);
+                        if hover != Some(Handle::Pair(k)) {
+                            color[3] = t.metrics.pasteboard_opacity;
+                        }
+                        if q.iter().all(Option::is_some) {
+                            for e in 0..4 {
+                                push(q[e].unwrap(), q[(e + 1) % 4].unwrap(), color);
+                            }
+                        }
+                    }
+                }
+                for (i, axis) in basis.iter().enumerate() {
+                    if active.is_some_and(|h| h != Handle::Axis(i)) {
+                        continue;
+                    }
+                    let Some((tip, _)) = eye.project(add(pivot, mul(*axis, len))) else {
+                        continue;
+                    };
+                    let color = tint(Handle::Axis(i), colors[i]);
+                    push(c, tip, color);
+                    letter(i, tip, c, color, &mut push);
+                    if self.studio.tool == Tool::Move {
+                        // Arrowhead: two short strokes back from the tip.
+                        let (dx, dy) = (tip[0] - c[0], tip[1] - c[1]);
+                        let l = dx.hypot(dy).max(1e-6);
+                        let (ux, uy) = (dx / l, dy / l);
+                        let s = half * 2.;
+                        push(
+                            tip,
+                            [
+                                tip[0] - ux * s - uy * s * 0.6,
+                                tip[1] - uy * s + ux * s * 0.6,
+                            ],
+                            color,
+                        );
+                        push(
+                            tip,
+                            [
+                                tip[0] - ux * s + uy * s * 0.6,
+                                tip[1] - uy * s - ux * s * 0.6,
+                            ],
+                            color,
+                        );
+                    } else {
+                        square(tip, color, &mut push);
+                    }
+                }
+                if self.studio.tool == Tool::Scale && active.is_none_or(|h| h == Handle::Uniform) {
+                    square(c, tint(Handle::Uniform, accent), &mut push);
+                }
+            }
+            Tool::Rotate => {
+                let pivot_depth = eye.project(pivot).map_or(0., |p| p.1);
+                for i in 0..3 {
+                    if active.is_some_and(|h| h != Handle::Ring(i)) {
+                        continue;
+                    }
+                    let pts = ring(pivot, &basis, i, len, 28);
+                    let color = tint(Handle::Ring(i), colors[i]);
+                    for k in 0..pts.len() - 1 {
+                        let (Some((a, za)), Some((b, zb))) =
+                            (eye.project(pts[k]), eye.project(pts[k + 1]))
+                        else {
+                            continue;
+                        };
+                        // The back half hides, except the ring being dragged.
+                        if active.is_none() && (za + zb) / 2. > pivot_depth + len * 0.05 {
+                            continue;
+                        }
+                        push(a, b, color);
+                    }
+                    // The letter sits beyond the ring's front-most point on
+                    // the screen-right side.
+                    if active.is_none()
+                        && let Some((p, _)) = eye.project(add(pivot, mul(basis[(i + 1) % 3], len)))
+                    {
+                        letter(i, p, c, color, &mut push);
+                    }
+                }
+            }
+            _ => {}
+        }
+        lines
+    }
+    /// Which handle is under a composition point.
+    fn studio_handle(&self, at: [f64; 2], frame: ViewFrame) -> Option<Handle> {
+        let eye = self.studio.eye()?;
+        let items = self.studio.movable();
+        let pivot = State::pivot(&items)?;
+        let (c, _) = eye.project(pivot)?;
+        let reach = self.tokens.metrics.hit as f64 / 2. / frame.scale;
+        let axis_px = self.tokens.metrics.rotation_stem as f64 * 4. / frame.scale;
+        let len = axis_px * eye.units_per_pixel(pivot);
+        let mut best: Option<(f64, Handle)> = None;
+        let mut take = |d: f64, h| {
+            if d <= reach && best.is_none_or(|(b, _)| d < b) {
+                best = Some((d, h));
+            }
+        };
+        let basis = self.studio.basis();
+        match self.studio.tool {
+            Tool::Move | Tool::Scale => {
+                if self.studio.tool == Tool::Scale {
+                    take((at[0] - c[0]).hypot(at[1] - c[1]) * 0.9, Handle::Uniform);
+                }
+                if self.studio.tool == Tool::Move {
+                    for k in 0..3 {
+                        let (a, b) = (basis[(k + 1) % 3], basis[(k + 2) % 3]);
+                        if let Some((m, _)) =
+                            eye.project(add(pivot, add(mul(a, len * 0.32), mul(b, len * 0.32))))
+                        {
+                            // Inside its square counts as on it.
+                            take((at[0] - m[0]).hypot(at[1] - m[1]) * 0.8, Handle::Pair(k));
+                        }
+                    }
+                }
+                for (i, axis) in basis.iter().enumerate() {
+                    if let Some((tip, _)) = eye.project(add(pivot, mul(*axis, len))) {
+                        take(dist_segment(at, c, tip), Handle::Axis(i));
+                    }
+                }
+            }
+            Tool::Rotate => {
+                for i in 0..3 {
+                    let pts = ring(pivot, &basis, i, len, 28);
+                    for k in 0..pts.len() - 1 {
+                        if let (Some((a, _)), Some((b, _))) =
+                            (eye.project(pts[k]), eye.project(pts[k + 1]))
+                        {
+                            take(dist_segment(at, a, b), Handle::Ring(i));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        best.map(|(_, h)| h).or_else(|| {
+            // Inside a selected object's projected box: move in the view plane.
+            (self.studio.tool == Tool::Move
+                && items.iter().any(|i| {
+                    let ray = eye.ray(at);
+                    let only = Scene {
+                        items: vec![i.clone()],
+                        ..(**self.studio.scene.as_ref().unwrap()).clone()
+                    };
+                    only.pick(&ray).is_some()
+                }))
+            .then_some(Handle::Plane)
+        })
+    }
+    /// A press in the viewer while the composition has 3D layers. `true`
+    /// when the 3D layer took it.
+    pub(super) fn studio_down(
+        &mut self,
+        event: &MouseDownEvent,
+        at: [f64; 2],
+        frame: ViewFrame,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.studio.active() {
+            return false;
+        }
+        let middle = event.button == MouseButton::Middle;
+        let alt = event.modifiers.alt;
+        let nav = if middle || alt {
+            Some(if event.modifiers.shift {
+                Nav::Pan
+            } else {
+                Nav::Orbit
+            })
+        } else {
+            match self.studio.tool {
+                Tool::Orbit => Some(Nav::Orbit),
+                Tool::Pan => Some(Nav::Pan),
+                Tool::Zoom => Some(Nav::Dolly),
+                _ => None,
+            }
+        };
+        if let Some(mode) = nav {
+            self.studio_go_free(cx);
+            let start = self
+                .studio
+                .view()
+                .unwrap_or(self.studio.scene.as_ref().unwrap().shot);
+            self.studio.nav = Some(NavDrag {
+                mode,
+                start,
+                origin: event.position,
+            });
+            self.cursor = if mode == Nav::Dolly {
+                CursorStyle::ResizeUpDown
+            } else {
+                CursorStyle::ClosedHand
+            };
+            cx.notify();
+            return true;
+        }
+        let Some(eye) = self.studio.eye() else {
+            return false;
+        };
+        if self.studio.tool == Tool::Light && self.studio.light_aim == "orbit" {
+            // Orbit: drag the selected light around what it lights.
+            let light = self.studio.scene.as_ref().and_then(|s| {
+                s.items
+                    .iter()
+                    .find(|i| {
+                        i.role == Role::Light && self.studio.selected.contains(&i.id) && !i.locked
+                    })
+                    .cloned()
+            });
+            if let Some(light) = light
+                && let Some(target) = light.target
+            {
+                self.studio.light_orbit = Some(LightOrbit {
+                    id: light.id,
+                    start: View {
+                        position: light.pivot,
+                        target,
+                        zoom: 1.,
+                    },
+                    origin: event.position,
+                    active: false,
+                    time: self.host.time(cx),
+                });
+                self.cursor = CursorStyle::ClosedHand;
+                cx.notify();
+                return true;
+            }
+            self.host.report("Select a light to orbit it.".into(), cx);
+            return true;
+        }
+        if self.studio.tool == Tool::Light {
+            // The engine's surface (models, terrain) with its true normal;
+            // the box pick when no frame can answer.
+            let uv = [
+                (at[0] / frame.size[0]) as f32,
+                (at[1] / frame.size[1]) as f32,
+            ];
+            if let Some(rx) = self.host.pick_surface(uv, cx) {
+                cx.spawn(async move |this, cx| {
+                    let reply = rx.recv().await;
+                    let _ = this.update(cx, |s, cx| match reply {
+                        Ok(Ok(reply)) => match reply.hit {
+                            Some(h) => {
+                                let f = |v: [f32; 3]| v.map(f64::from);
+                                s.studio_light_at(eye, f(h.point), normalize(f(h.normal)), cx)
+                            }
+                            None => s
+                                .host
+                                .report("Click a model to put light there.".into(), cx),
+                        },
+                        _ => s.studio_light(eye, at, cx),
+                    });
+                })
+                .detach();
+            } else {
+                self.studio_light(eye, at, cx);
+            }
+            return true;
+        }
+        if let Some(handle) = self.studio_handle(at, frame) {
+            let items = self.studio.movable();
+            let pivot = State::pivot(&items).unwrap_or([0.; 3]);
+            let axis_px = self.tokens.metrics.rotation_stem as f64 * 4. / frame.scale;
+            self.studio.drag = Some(Drag {
+                handle,
+                origin: at,
+                screen: event.position,
+                eye,
+                pivot,
+                length: axis_px * eye.units_per_pixel(pivot),
+                items,
+                active: false,
+                time: self.host.time(cx),
+                offset: [0.; 3],
+                basis: self.studio.basis(),
+            });
+            self.studio.hover = None;
+            return true;
+        }
+        // Click to select. Lights have no surface, so their markers are
+        // tested here; everything else asks the engine's surface query, with
+        // the box pick as the fallback while no frame can answer.
+        let scene = self.studio.scene.clone().unwrap();
+        let shift = event.modifiers.shift;
+        let lights = Scene {
+            items: scene
+                .items
+                .iter()
+                .filter(|i| i.role == Role::Light)
+                .cloned()
+                .collect(),
+            ..(*scene).clone()
+        };
+        if let Some(hit) = lights.pick(&eye.ray(at)) {
+            self.studio_select(hit.id, shift, cx);
+            return true;
+        }
+        let uv = [
+            (at[0] / frame.size[0]) as f32,
+            (at[1] / frame.size[1]) as f32,
+        ];
+        if let Some(rx) = self.host.pick_surface(uv, cx) {
+            cx.spawn(async move |this, cx| {
+                let reply = rx.recv().await;
+                let _ = this.update(cx, |s, cx| match reply {
+                    Ok(Ok(reply)) => match reply.hit {
+                        Some(hit) => s.studio_select(hit.layer, shift, cx),
+                        None if !shift => {
+                            s.queue.push_back(Job::Select(None));
+                            s.pump(cx);
+                        }
+                        None => {}
+                    },
+                    // A stale frame: the box pick answers instead.
+                    _ => {
+                        let hit = s.studio.scene.clone().and_then(|sc| sc.pick(&eye.ray(at)));
+                        if let Some(hit) = hit {
+                            s.studio_select(hit.id, shift, cx);
+                        }
+                    }
+                });
+            })
+            .detach();
+            return true;
+        }
+        let Some(hit) = scene.pick(&eye.ray(at)) else {
+            return false;
+        };
+        self.studio_select(hit.id, shift, cx);
+        true
+    }
+    /// Select a layer the pointer found; ⇧ adds or removes it.
+    fn studio_select(&mut self, id: String, shift: bool, cx: &mut Context<Self>) {
+        let (kernel, project) = (self.kernel.clone(), self.project.clone());
+        let ids = if shift && self.studio.selected.contains(&id) {
+            self.studio
+                .selected
+                .iter()
+                .filter(|s| **s != id)
+                .cloned()
+                .collect()
+        } else {
+            vec![id.clone()]
+        };
+        let add = shift && !self.studio.selected.contains(&id);
+        cx.background_executor()
+            .spawn(async move {
+                kernel
+                    .call(
+                        &project,
+                        Request::new(Caller::native(), SelectionCall::Layers { ids, add }),
+                    )
+                    .await;
+            })
+            .detach();
+    }
+    /// Light tool: aim the selected light at the point, or add a Softbox
+    /// whose highlight lands there (Reflect, §6).
+    fn studio_light(&mut self, eye: Eye, at: [f64; 2], cx: &mut Context<Self>) {
+        let Some(scene) = self.studio.scene.clone() else {
+            return;
+        };
+        let models = Scene {
+            items: scene
+                .items
+                .iter()
+                .filter(|i| i.role == Role::Object)
+                .cloned()
+                .collect(),
+            ..(*scene).clone()
+        };
+        let Some(hit) = models.pick(&eye.ray(at)) else {
+            self.host
+                .report("Click a model to put light there.".into(), cx);
+            return;
+        };
+        self.studio_light_at(eye, hit.point, hit.normal, cx);
+    }
+    fn studio_light_at(&mut self, eye: Eye, point: Vec3, normal: Vec3, cx: &mut Context<Self>) {
+        let Some(scene) = self.studio.scene.clone() else {
+            return;
+        };
+        struct At {
+            point: Vec3,
+            normal: Vec3,
+        }
+        let hit = At { point, normal };
+        let viewer = eye.pose.position;
+        let time = self.host.time(cx);
+        // Add armed adds even with a light selected; otherwise the selected
+        // light is aimed.
+        let light = scene
+            .items
+            .iter()
+            .find(|i| i.role == Role::Light && self.studio.selected.contains(&i.id) && !i.locked)
+            .filter(|_| !self.studio.light_add);
+        let kind = match self.studio.light_kind.as_str() {
+            k @ ("spot" | "point" | "sun") => k,
+            _ => "area",
+        };
+        let name = match kind {
+            "spot" => "Spotlight",
+            "point" => "Bulb",
+            "sun" => "Sun",
+            _ => "Softbox",
+        };
+        let comp = None;
+        // A mirror placement can land under the ground (a side face seen from
+        // above); a light there lights nothing, so it stays above the floor.
+        // Values are rounded so the transform wells read cleanly.
+        let place = |p: Vec3| -> Vec3 {
+            let r = |v: f64| (v * 100.).round() / 100.;
+            [r(p[0]), r(p[1].max(hit.point[1].max(0.) + 0.5)), r(p[2])]
+        };
+        let (label, args, select) = if let Some(light) = light {
+            let distance = length(sub(light.pivot, light.target.unwrap_or(hit.point))).max(1.);
+            // Direct faces the light at the point, along the surface; Reflect
+            // places it so its highlight lands there.
+            let placed = if self.studio.light_aim == "direct" {
+                Ok(add(hit.point, mul(normalize(hit.normal), distance)))
+            } else {
+                pm_scene3d::light_tool::highlight_placement(hit.point, hit.normal, viewer, distance)
+            };
+            let Ok(p) = placed else {
+                return;
+            };
+            let p = place(p);
+            (
+                "Aim Light",
+                serde_json::json!({"operation":"update_light","target":light.id,"patch":{"p":{
+                    "x":p[0],"y":p[1],"z":p[2],
+                    "targetX":(hit.point[0]*100.).round()/100.,"targetY":(hit.point[1]*100.).round()/100.,"targetZ":(hit.point[2]*100.).round()/100.}}}),
+                None,
+            )
+        } else {
+            let distance = (length(sub(viewer, hit.point)) * 0.6).clamp(1.5, 12.);
+            let Ok(p) = pm_scene3d::light_tool::highlight_placement(
+                hit.point, hit.normal, viewer, distance,
+            ) else {
+                return;
+            };
+            let p = place(p);
+            let id = pm_kernel::new_id("L");
+            let size = ((distance * 0.6) * 10.).round() / 10.;
+            let mut light = serde_json::json!({"type":kind,"p":{
+                "x":p[0],"y":p[1],"z":p[2],
+                "targetX":(hit.point[0]*100.).round()/100.,"targetY":(hit.point[1]*100.).round()/100.,"targetZ":(hit.point[2]*100.).round()/100.}});
+            if kind == "area" {
+                light["p"]["width"] = serde_json::json!(size);
+                light["p"]["height"] = serde_json::json!(((size * 0.62) * 10.).round() / 10.);
+                light["p"]["intensity"] = serde_json::json!(6);
+            }
+            if self.studio.light_add {
+                // Add is one click.
+                self.studio_ui("studioLightAdd", "off", cx);
+            }
+            (
+                match kind {
+                    "spot" => "Add Spotlight",
+                    "point" => "Add Bulb",
+                    "sun" => "Add Sun",
+                    _ => "Add Softbox",
+                },
+                serde_json::json!({"operation":"add_light","id":id,"name":name,"light":light}),
+                Some(id),
+            )
+        };
+        let command: Command = Scene3dCommand::Apply {
+            comp,
+            args: pm_scene3d::to_model(&args),
+            selection: vec![],
+            time,
+            autokey: false,
+        }
+        .into();
+        self.queue
+            .push_back(Job::Transact(label, vec![command], select));
+        self.pump(cx);
+    }
+    /// Pointer motion while a 3D press is held. `true` when it was ours.
+    pub(super) fn studio_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) -> bool {
+        if let Some(lo) = self.studio.light_orbit.as_mut() {
+            let d = event.position - lo.origin;
+            let (dx, dy) = (f32::from(d.x) as f64, f32::from(d.y) as f64);
+            if !lo.active {
+                if dx.hypot(dy) < self.tokens.metrics.drag_threshold as f64 {
+                    return true;
+                }
+                lo.active = true;
+                self.queue.push_back(Job::Begin("Orbit Light"));
+            }
+            let fine = if event.modifiers.shift { 0.1 } else { 1. };
+            let pose = orbit(lo.start, dx * fine, dy * fine);
+            let r = |v: f64| (v * 100.).round() / 100.;
+            let command: Command = Scene3dCommand::Apply {
+                comp: None,
+                args: pm_scene3d::to_model(&serde_json::json!({"operation":"update_light","target":lo.id,
+                    "patch":{"p":{"x":r(pose.position[0]),"y":r(pose.position[1]),"z":r(pose.position[2])}}})),
+                selection: vec![],
+                time: lo.time,
+                autokey: false,
+            }
+            .into();
+            self.queue.push_back(Job::Step(vec![command], true));
+            self.pump(cx);
+            return true;
+        }
+        if let Some(nav) = &self.studio.nav {
+            let (Some(scene), Some(frame)) =
+                (self.studio.scene.clone(), self.host.frame(self.bounds, cx))
+            else {
+                return true;
+            };
+            let d = event.position - nav.origin;
+            let (dx, dy) = (f32::from(d.x) as f64, f32::from(d.y) as f64);
+            let fine = if event.modifiers.shift && nav.mode != Nav::Pan {
+                0.1
+            } else {
+                1.
+            };
+            let eye = scene.eye(Some(nav.start));
+            let pose = match nav.mode {
+                Nav::Orbit => orbit(nav.start, dx * fine, dy * fine),
+                Nav::Pan => {
+                    let (right, up) = eye.right_up();
+                    let height = frame.size[1] * frame.scale;
+                    pan(nav.start, dx, dy, scene.lens, height, right, up)
+                }
+                Nav::Dolly => dolly(nav.start, dy * fine, scene.lens),
+            };
+            self.studio.free = Some(pose);
+            self.studio_push_view(cx);
+            self.draw(cx);
+            return true;
+        }
+        let Some(frame) = self.host.frame(self.bounds, cx) else {
+            return self.studio.drag.is_some();
+        };
+        let Some(drag) = self.studio.drag.as_mut() else {
+            return false;
+        };
+        let moved = event.position - drag.screen;
+        if !drag.active {
+            if f32::from(moved.x).hypot(f32::from(moved.y)) < self.tokens.metrics.drag_threshold {
+                return true;
+            }
+            drag.active = true;
+            let plural = drag.items.len() > 1;
+            self.queue
+                .push_back(Job::Begin(match (drag.handle, plural) {
+                    (Handle::Ring(_), false) => "Rotate 3D Layer",
+                    (Handle::Ring(_), true) => "Rotate 3D Layers",
+                    (Handle::Uniform, false) | (Handle::Axis(_), false)
+                        if self.studio.tool == Tool::Scale =>
+                    {
+                        "Scale 3D Layer"
+                    }
+                    (Handle::Uniform, true) | (Handle::Axis(_), true)
+                        if self.studio.tool == Tool::Scale =>
+                    {
+                        "Scale 3D Layers"
+                    }
+                    (_, false) => "Move 3D Layer",
+                    (_, true) => "Move 3D Layers",
+                }));
+        }
+        let at = [
+            f32::from(event.position.x - frame.origin.x) as f64 / frame.scale,
+            f32::from(event.position.y - frame.origin.y) as f64 / frame.scale,
+        ];
+        let fine = if event.modifiers.shift { 0.1 } else { 1. };
+        let snap = event.modifiers.control || event.modifiers.platform;
+        let d = [
+            (at[0] - drag.origin[0]) * fine,
+            (at[1] - drag.origin[1]) * fine,
+        ];
+        let eye = drag.eye;
+        let tool = self.studio.tool;
+        let mut commands = vec![];
+        let mut offset = [0.; 3];
+        let basis = drag.basis;
+        let screen_axis = |i: usize| -> Option<[f64; 2]> {
+            let (c, _) = eye.project(drag.pivot)?;
+            let (t, _) = eye.project(add(drag.pivot, mul(basis[i], drag.length)))?;
+            Some([t[0] - c[0], t[1] - c[1]])
+        };
+        let along = |i: usize| -> f64 {
+            screen_axis(i).map_or(0., |s| {
+                let l2 = (s[0] * s[0] + s[1] * s[1]).max(1e-9);
+                (d[0] * s[0] + d[1] * s[1]) / l2
+            })
+        };
+        for item in &drag.items {
+            let id = item.id.as_str();
+            match (drag.handle, tool) {
+                (Handle::Axis(i), Tool::Move) => {
+                    let mut t = along(i) * drag.length;
+                    if snap {
+                        t = t.round();
+                    }
+                    let w = mul(basis[i], t);
+                    let c = channel_delta(item, w);
+                    for (a, key) in ["position.x", "position.y", "position.z"]
+                        .iter()
+                        .enumerate()
+                    {
+                        // An axis the move doesn't touch keeps its keyframes.
+                        if w[a].abs() > 1e-9 || a == i {
+                            commands.push(set(id, key, item.position[a] + c[a], drag.time));
+                        }
+                    }
+                    offset = w;
+                }
+                (Handle::Pair(k), _) => {
+                    // Where the pointer's ray meets the plane through the
+                    // pivot that holds axis k still.
+                    let n = basis[k];
+                    let meet = |p: [f64; 2]| -> Option<Vec3> {
+                        let ray = eye.ray(p);
+                        let den = dot(ray.dir, n);
+                        if den.abs() < 1e-6 {
+                            return None;
+                        }
+                        let s = dot(sub(drag.pivot, ray.origin), n) / den;
+                        Some(add(ray.origin, mul(ray.dir, s)))
+                    };
+                    let now = [drag.origin[0] + d[0], drag.origin[1] + d[1]];
+                    let (Some(a), Some(b)) = (meet(drag.origin), meet(now)) else {
+                        continue;
+                    };
+                    let mut w = sub(b, a);
+                    if snap {
+                        w = w.map(f64::round);
+                    }
+                    let c = channel_delta(item, w);
+                    for (a, key) in ["position.x", "position.y", "position.z"]
+                        .iter()
+                        .enumerate()
+                    {
+                        commands.push(set(id, key, item.position[a] + c[a], drag.time));
+                    }
+                    offset = w;
+                }
+                (Handle::Plane, _) => {
+                    let upp = eye.units_per_pixel(drag.pivot);
+                    let (r, u) = eye.right_up();
+                    let mut w = add(mul(r, d[0] * upp), mul(u, -d[1] * upp));
+                    if snap {
+                        w = w.map(f64::round);
+                    }
+                    let c = channel_delta(item, w);
+                    for (i, key) in ["position.x", "position.y", "position.z"]
+                        .iter()
+                        .enumerate()
+                    {
+                        commands.push(set(id, key, item.position[i] + c[i], drag.time));
+                    }
+                    offset = w;
+                }
+                (Handle::Ring(i), _) => {
+                    let Some((c, _)) = eye.project(drag.pivot) else {
+                        continue;
+                    };
+                    let a = [drag.origin[0] - c[0], drag.origin[1] - c[1]];
+                    let b = [at[0] - c[0], at[1] - c[1]];
+                    let mut deg = (a[0] * b[1] - a[1] * b[0])
+                        .atan2(a[0] * b[0] + a[1] * b[1])
+                        .to_degrees()
+                        * fine;
+                    // Screen angles turn the other way when the axis faces us.
+                    let f = normalize(sub(eye.pose.target, eye.pose.position));
+                    if dot(basis[i], f) < 0. {
+                        deg = -deg;
+                    }
+                    if snap {
+                        deg = (deg / 15.).round() * 15.;
+                    }
+                    // Composition space is the scene turned 180° about X:
+                    // Y and Z turn the other way in its channels.
+                    if item.pixels.is_some() && i > 0 {
+                        deg = -deg;
+                    }
+                    let key = ["rotation.x", "rotation.y", "rotation"][i];
+                    commands.push(set(id, key, item.rotation[i] - deg, drag.time));
+                }
+                (Handle::Axis(i), Tool::Scale) => {
+                    let mut k = (1. + along(i)).max(0.01);
+                    if snap {
+                        k = (k * 10.).round() / 10.;
+                    }
+                    let key = ["scale.x", "scale.y", "scale.z"][i];
+                    commands.push(set(id, key, item.scale[i] * k, drag.time));
+                }
+                (Handle::Uniform, _) => {
+                    let mut k = ((d[0] - d[1]) * 0.01).exp();
+                    if snap {
+                        k = (k * 10.).round() / 10.;
+                    }
+                    for (i, key) in ["scale.x", "scale.y", "scale.z"].iter().enumerate() {
+                        commands.push(set(id, key, item.scale[i] * k.max(0.01), drag.time));
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let Some(drag) = self.studio.drag.as_mut() {
+            drag.offset = offset;
+        }
+        self.queue.push_back(Job::Step(commands, true));
+        self.pump(cx);
+        self.draw(cx);
+        true
+    }
+    /// Release. `true` when a 3D press was held.
+    pub(super) fn studio_up(&mut self, commit: bool, cx: &mut Context<Self>) -> bool {
+        if let Some(orbit) = self.studio.light_orbit.take() {
+            if orbit.active {
+                self.queue.push_back(Job::Finish(commit));
+                self.pump(cx);
+            }
+            self.cursor = CursorStyle::Arrow;
+            cx.notify();
+            return true;
+        }
+        if let Some(nav) = self.studio.nav.take() {
+            if !commit {
+                // Esc returns the view to where the gesture began.
+                self.studio.free = Some(nav.start);
+                self.studio_push_view(cx);
+            }
+            self.cursor = CursorStyle::Arrow;
+            cx.notify();
+            self.draw(cx);
+            return true;
+        }
+        let Some(drag) = self.studio.drag.take() else {
+            return false;
+        };
+        if drag.active {
+            self.queue.push_back(Job::Finish(commit));
+            self.pump(cx);
+        }
+        self.draw(cx);
+        true
+    }
+    /// ⌥-scroll dollies anywhere; plain scroll dollies with the Zoom tool.
+    pub(super) fn studio_wheel(
+        &mut self,
+        event: &ScrollWheelEvent,
+        line: Pixels,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(scene) = self.studio.scene.clone() else {
+            return false;
+        };
+        if !(event.modifiers.alt || self.studio.tool == Tool::Zoom) {
+            return false;
+        }
+        let dy = f32::from(event.delta.pixel_delta(line).y) as f64;
+        self.studio_go_free(cx);
+        let start = self.studio.view().unwrap_or(scene.shot);
+        let fine = if event.modifiers.shift { 0.1 } else { 1. };
+        self.studio.free = Some(dolly(start, -dy * fine, scene.lens));
+        self.studio_push_view(cx);
+        self.draw(cx);
+        true
+    }
+    /// Tracks the handle under the pointer; `true` when it changed, so the
+    /// overlay redraws with that handle in text colour.
+    pub(super) fn studio_hover(&mut self, at: [f64; 2], frame: ViewFrame) -> bool {
+        let next = if self.studio.active() && !self.studio.busy() {
+            self.studio_handle(at, frame).filter(|h| *h != Handle::Plane)
+        } else {
+            None
+        };
+        let changed = next != self.studio.hover;
+        self.studio.hover = next;
+        changed
+    }
+    /// The cursor promises what a press does over the 3D view.
+    pub(super) fn studio_cursor(&self, at: [f64; 2], frame: ViewFrame) -> Option<CursorStyle> {
+        if !self.studio.active() {
+            return None;
+        }
+        Some(match self.studio.tool {
+            Tool::Orbit | Tool::Pan => CursorStyle::OpenHand,
+            Tool::Zoom => CursorStyle::ResizeUpDown,
+            Tool::Light => {
+                let eye = self.studio.eye()?;
+                let scene = self.studio.scene.as_ref()?;
+                let hit = scene.pick(&eye.ray(at)).filter(|h| {
+                    scene
+                        .items
+                        .iter()
+                        .any(|i| i.id == h.id && i.role == Role::Object)
+                });
+                if hit.is_some() {
+                    CursorStyle::Crosshair
+                } else {
+                    CursorStyle::Arrow
+                }
+            }
+            _ => match self.studio_handle(at, frame) {
+                Some(Handle::Plane) => CursorStyle::OpenHand,
+                Some(_) => CursorStyle::PointingHand,
+                None => return None,
+            },
+        })
+    }
+}

@@ -3495,15 +3495,51 @@ fn properties_show_the_3d_section_for_models_lights_and_cameras() {
     let (mut model, p) = publish(&mut presenter, "model");
     assert_eq!(
         titles(&p),
-        ["Model", "Material", "Coat and Glass", "Surface", "Emission"]
+        [
+            "Model",
+            "Material",
+            "Coat and Glass",
+            "Surface",
+            "Emission",
+            "Texture Maps",
+            "Material Options"
+        ]
     );
-    assert_eq!(
-        labels(&p, "Model"),
-        ["Source", "Cast Shadows", "Receive Shadows"]
-    );
+    // A 3D layer is named for what it is and has no 2D canvas rows.
+    assert_eq!(p["target"]["first"]["typeLabel"], "3D Shape");
+    assert_eq!(p["target"]["first"]["studio"], true);
+    assert!(row(&p, "content.w").is_none());
+    // The shadow switches only show while one is off (AE 27 Material Options
+    // replace them).
+    assert_eq!(labels(&p, "Model"), ["Source"]);
     assert_eq!(
         labels(&p, "Material"),
-        ["Screen", "Color", "Roughness", "Metalness", "Opacity"]
+        [
+            "Finish",
+            "Screen",
+            "Color",
+            "Roughness",
+            "Metalness",
+            "Opacity"
+        ]
+    );
+    assert_eq!(row(&p, "3d.finish").unwrap()["hidden"], true);
+    let shelf = p["sections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["title"] == "Material")
+        .unwrap()["finishes"]
+        .clone();
+    assert_eq!(shelf.as_array().unwrap().len(), 11);
+    assert_eq!(
+        labels(&p, "Material Options"),
+        [
+            "Casts Shadows",
+            "Accepts Shadows",
+            "Accepts Lights",
+            "Appears in Reflections"
+        ]
     );
     assert_eq!(row(&p, "3d.source").unwrap()["control"]["value"], "Cube");
     let roughness = row(&p, "m.roughness").unwrap();
@@ -3513,15 +3549,41 @@ fn properties_show_the_3d_section_for_models_lights_and_cameras() {
     write(
         &presenter,
         &mut model,
-        &row(&p, "3d.castShadow").unwrap(),
-        json!(false),
+        &row(&p, "3d.options.castsShadows").unwrap(),
+        json!("only"),
+    );
+    write(
+        &presenter,
+        &mut model,
+        &row(&p, "3d.finish").unwrap(),
+        json!("gold"),
     );
     let (_, p) = publish(&mut presenter, "model");
     assert_eq!(
+        row(&p, "3d.options.castsShadows").unwrap()["control"]["value"],
+        "only"
+    );
+    // The finish wrote its own roughness over the earlier edit.
+    assert_ne!(
         row(&p, "m.roughness").unwrap()["control"]["axes"][0]["value"],
         0.5
     );
-    assert_eq!(row(&p, "3d.castShadow").unwrap()["control"]["value"], false);
+    let transform = p["sections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == "transform")
+        .unwrap()
+        .clone();
+    assert_eq!(
+        transform["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["control"]["axes"].as_array().unwrap().len())
+            .collect::<Vec<_>>(),
+        [3, 3, 3]
+    );
 
     let (mut model, p) = publish(&mut presenter, "lamp");
     assert_eq!(titles(&p), ["Light"]);
@@ -3588,10 +3650,61 @@ fn properties_show_the_3d_section_for_models_lights_and_cameras() {
     );
     let (_, p) = publish(&mut presenter, "cam");
     assert_eq!(labels(&p, "Camera")[1], "Zoom");
-    assert_eq!(row(&p, "3d.samples").unwrap()["disabled"], true);
-    // A 2D layer has no 3D section.
-    let (_, p) = publish(&mut presenter, "a");
-    assert!(titles(&p).is_empty());
+    // The camera shows the composition's Render Quality, not a second sampler.
+    assert!(row(&p, "3d.samples").is_none());
+    assert_eq!(
+        row(&p, "3d.scene.quality").unwrap()["control"]["value"],
+        "production"
+    );
+    // With nothing selected, the composition's 3D Scene section sets quality
+    // and sky for the whole scene.
+    kernel
+        .call(
+            "synthetic",
+            Request::new(
+                Caller::native(),
+                SelectionCall::Layers {
+                    ids: vec![],
+                    add: false,
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    let mut model = pm_panel_inspector::Inspector::new(
+        kernel.published("synthetic").unwrap(),
+        Default::default(),
+    );
+    let p = presenter.snapshot(&mut model, 0., false).unwrap();
+    let scene = row(&p, "3d.scene.quality").unwrap();
+    write(&presenter, &mut model, &scene, json!("final"));
+    let p = presenter.snapshot(&mut model, 0., false).unwrap();
+    assert_eq!(
+        row(&p, "3d.scene.quality").unwrap()["control"]["value"],
+        "final"
+    );
+    assert_eq!(row(&p, "3d.scene.sky").unwrap()["control"]["value"], "none");
+    // A 2D shape has no 3D section, only Extrude, off.
+    let (mut model, p) = publish(&mut presenter, "a");
+    assert_eq!(titles(&p), ["Extrude"]);
+    let on = row(&p, "3d.extrude.enabled").unwrap();
+    assert_eq!(on["control"]["value"], false);
+    // One click: depth from the artwork's size, a rounded bevel and four
+    // surfaces, the composition already being lit.
+    write(&presenter, &mut model, &on, json!(true));
+    let p = presenter.snapshot(&mut model, 0., false).unwrap();
+    assert_eq!(titles(&p), ["Extrude", "Front", "Bevel", "Side", "Back"]);
+    assert_eq!(
+        row(&p, "geo.depth").unwrap()["control"]["axes"][0]["value"],
+        32.
+    );
+    assert_eq!(
+        row(&p, "3d.extrude.bevelStyle").unwrap()["control"]["value"],
+        "convex"
+    );
+    // The face is a stored channel now, keyframeable like any property.
+    assert!(row(&p, "ms.front.roughness").is_some());
 }
 
 #[test]

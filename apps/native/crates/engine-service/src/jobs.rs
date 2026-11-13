@@ -61,7 +61,24 @@ pub struct ExportRequest {
     /// a file (`crate::render_cache`).
     #[serde(default)]
     pub cache: Option<crate::render_cache::CacheFill>,
+    /// Studio preset or quality patch for this export's root composition.
+    /// Omitted jobs use saved composition quality (or legacy camera samples).
+    #[serde(default)]
+    pub studio_quality: Option<serde_json::Value>,
+    /// Explicit 3D-only render fraction. Omitted is full size; never automatic.
+    #[serde(default)]
+    pub studio_render_scale:Option<f32>,
+    /// The fonts the asking process resolves from. The job draws with
+    /// exactly these (a font activated for the app alone included) or
+    /// fails: an export is the viewer's picture, and a frame rendered into
+    /// the cache is stored under a key taken from these fonts.
+    #[serde(default)]
+    pub fonts: Option<pm_text::system_fonts::Inventory>,
 }
+/// A job whose process cannot draw with the fonts it was asked to
+/// ([`ExportRequest::fonts`]), or whose fonts changed while it rendered.
+pub const FONTS_CHANGED: &str =
+    "Rendering stopped because the fonts on this Mac changed. Try again.";
 
 /// Export children running now (render cache fills not counted).
 static EXPORTS_RUNNING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -460,6 +477,9 @@ impl ExportRequest {
             without_offline: false,
             preview: false,
             cache: None,
+            fonts: Some(pm_text::system_fonts::Inventory::current()),
+            studio_quality: None,
+            studio_render_scale:None,
         })
     }
 }
@@ -804,7 +824,7 @@ pub fn run_child() -> Result<()> {
     let ParentMessage::Start(request) = serde_json::from_str(&first)? else {
         anyhow::bail!("the export request did not come first");
     };
-    let request = *request;
+    let mut request = *request;
     let cancel = Arc::new(AtomicBool::new(false));
     request.resources.validate()?;
     let (grant, permits) = std::sync::mpsc::channel();
@@ -854,6 +874,19 @@ pub fn run_child() -> Result<()> {
         Ok(())
     };
     emit(status(&request.job, JobState::Running, 0., None, None))?;
+    // Before the registry looks: fonts the app activated for itself.
+    let frozen_fonts = request.fonts.take();
+    if let Some(Err(why)) = frozen_fonts.as_ref().map(|fonts| fonts.adopt()) {
+        eprintln!("the job's fonts differ from the app's: {why}");
+        emit(status(
+            &request.job,
+            JobState::Failed,
+            0.,
+            None,
+            Some(FONTS_CHANGED.into()),
+        ))?;
+        return Ok(());
+    }
     // CoreText registry stays on main; rendering waits only on this serviced
     // broker, never on GPUI or a Node event loop.
     let mut font_service = pm_text::host::FontService::new().map_err(anyhow::Error::msg)?;
@@ -1016,7 +1049,10 @@ pub fn run_child() -> Result<()> {
             anyhow::bail!("{}", failure.message);
         }
         #[cfg(feature = "kernel")]
-        crate::studio::attach(&mut renderer, Arc::new(doc.clone()), &media);
+        crate::studio::attach_with_export_options_fonts(
+            &mut renderer,Arc::new(doc.clone()),&media,composition.as_str(),
+            request.studio_quality,request.studio_render_scale.unwrap_or(1.),Some(&fonts),
+        ).map_err(anyhow::Error::msg)?;
         fonts.sync(&mut renderer, &mut None);
         if let Some(fill) = fill {
             let job = request.job.clone();
@@ -1034,6 +1070,7 @@ pub fn run_child() -> Result<()> {
                 &mut |frame| {
                     let _ = send(&mut std::io::stdout().lock(), &ChildMessage::Frame(frame));
                 },
+                frozen_fonts.as_ref(),
                 &rasters.deferred_us,
                 // Stored frames are exported ones: the export's request.
                 &pm_export::render::frame_request(
@@ -1335,6 +1372,7 @@ fn fill_cache(
     cancel: &AtomicBool,
     progress: &mut dyn FnMut(f64),
     report: &mut dyn FnMut(crate::render_cache::FrameReport),
+    fonts: Option<&pm_text::system_fonts::Inventory>,
     deferred: &AtomicU64,
     export_request: &pm_render::RenderRequest,
 ) -> Result<PathBuf> {
@@ -1468,6 +1506,12 @@ fn fill_cache(
     let store = |frame: &crate::render_cache::CacheFrame, bytes: &[u8]| -> Result<()> {
         if free_bytes(&fill.dir)? < DISK_RESERVE + bytes.len() as u64 {
             anyhow::bail!(DISK_FULL);
+        }
+        // The frame's key was taken from these fonts: drawn while a font
+        // was installed or removed, it is not that key's picture.
+        if let Some(Err(why)) = fonts.map(|fonts| fonts.verify()) {
+            eprintln!("fonts changed while rendering: {why}");
+            anyhow::bail!(FONTS_CHANGED);
         }
         cache
             .put(&frame.key, bytes)

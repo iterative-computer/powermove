@@ -14,6 +14,47 @@ export interface ViewerModel {
   showControls: boolean;
   empty: boolean;
   selectionCount: number;
+  /** Present when the composition has Studio 3D layers: the preview tier. */
+  studio?: {
+    tier: "live" | "refine";
+    tool?: "move" | "rotate" | "scale" | "orbit" | "pan" | "zoom" | "light";
+    look?: "camera" | "free";
+    /** Handles follow the scene's axes or the object's own. */
+    axes?: "scene" | "object";
+    /** Panes in the viewer: one, two side by side, or four. */
+    views?: "1" | "2" | "4";
+    /** The viewer is narrower than the 3D group: show one pull-down. */
+    compact?: boolean;
+    /** The Light tool's panel (3d-studio.md §6), while Light is the tool. */
+    light?: {
+      settings: { aim: string; add: boolean; kind: string };
+      hint?: string;
+      name?: string;
+      kind?: string;
+      locked?: boolean;
+      rows: {
+        id: string;
+        label: string;
+        value: number;
+        min: number;
+        max: number;
+        log: boolean;
+        tooltip: string;
+      }[];
+    };
+    lightKind?: string;
+    lightAim?: "reflect" | "direct" | "orbit";
+    /** Quality's refinement (3d-studio.md §3 status capsule). */
+    refine?: {
+      samplesDone: number;
+      samplesTarget: number;
+      stage: "sampling" | "denoising" | "complete";
+    };
+    /** Quality, paused, before the first progress report. */
+    pending?: boolean;
+    /** "guided" when this build has no Open Image Denoise (the engine's own filter). */
+    denoiser?: "oidn" | "guided";
+  } | null;
 }
 /** Observed host facts, never inferred from an enqueued intent. No pixel data. */
 export interface ViewerHostFacts {
@@ -87,6 +128,8 @@ export function snapshot(value: unknown): ViewerSnapshot {
     finite(m.effectiveQuality);
     if (m.effectiveQuality < 0.25 || m.effectiveQuality > 1)
       throw new RangeError("Invalid effective quality");
+    if (m.studio !== undefined && m.studio !== null)
+      oneOf(record(m.studio).tier, ["live", "refine"]);
     finite(m.selectionCount);
     if (!Number.isSafeInteger(m.selectionCount) || m.selectionCount < 0)
       throw new RangeError("Invalid selection count");

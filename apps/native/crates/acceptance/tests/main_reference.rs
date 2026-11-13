@@ -43,7 +43,13 @@ fn source_snapshots_pin_main_without_discarding_legacy_rosters() {
 fn active_reference_reports_actual_main_failures_and_keeps_compatibility_separate() {
     let r =
         main_reference::run(&Catalog::embedded().unwrap(), &Filter::default(), &[], None).unwrap();
-    assert_eq!(r.exit_code(true), 2);
+    let failing: Vec<_> = r
+        .cases
+        .iter()
+        .filter(|c| c.status == Status::Fail)
+        .map(|c| (&c.id, &c.reason))
+        .collect();
+    assert_eq!(r.exit_code(true), 2, "failing cases: {failing:?}");
     let retired = r
         .cases
         .iter()
@@ -315,12 +321,46 @@ fn studio_overlays_preserve_all_main_operations_and_unrelated_contracts() {
             for field in ["required", "additionalProperties", "type"] {
                 assert_eq!(base[field], studio[field]);
             }
+            // 19 product-film operations, then the native Studio ones: world,
+            // fog, terrain, scatter, material options, render quality,
+            // extrusion and per-surface materials.
             assert_eq!(
                 studio["properties"]["operation"]["enum"]
                     .as_array()
                     .unwrap()
                     .len(),
-                19
+                33
+            );
+        } else if tool["name"] == "export_video" {
+            // A per-export 3D quality and render scale; everything else as main.
+            let (base, studio) = (&tool["inputSchema"], &actual["inputSchema"]);
+            for (field, schema) in base["properties"].as_object().unwrap() {
+                assert_eq!(schema, &studio["properties"][field], "{field}");
+            }
+            for field in ["required", "additionalProperties", "type"] {
+                assert_eq!(base[field], studio[field]);
+            }
+            let added: Vec<_> = studio["properties"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .filter(|k| base["properties"].get(k.as_str()).is_none())
+                .collect();
+            assert_eq!(added, ["studioQuality", "studioRenderScale"]);
+            assert!(
+                actual["description"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with(tool["description"].as_str().unwrap())
+            );
+        } else if tool["name"] == "get_3d_scene" {
+            // Native Studio readback only adds to the description.
+            assert_eq!(tool["inputSchema"], actual["inputSchema"]);
+            assert!(
+                actual["description"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with(tool["description"].as_str().unwrap())
             );
         } else {
             assert_eq!(tool, actual);

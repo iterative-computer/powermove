@@ -111,6 +111,11 @@ pub struct Controller {
     pub shuttle: crate::shuttle::Shuttle,
     pub playback: crate::play_range::Playback,
     pub popout: Option<crate::viewer2::Popout>,
+    /// Studio 3D views beyond the first (3d-studio.md §2).
+    pub studio_panes: Vec<crate::studio_panes::Pane>,
+    pub studio_pane_targets: Vec<objc2::rc::Retained<objc2_foundation::NSObject>>,
+    pub studio_pane_sender: Option<async_channel::Sender<(usize, isize)>>,
+    pub studio_pane_scene: Option<(u64, Option<Arc<pm_panel_studio3d::viewport::Scene>>)>,
     /// The Render Selection waiting to start, by count: asking again
     /// replaces the one that waits.
     pub(crate) render_wait: u64,
@@ -704,6 +709,10 @@ impl Controller {
             shuttle: Default::default(),
             playback: Default::default(),
             popout: None,
+            studio_panes: vec![],
+            studio_pane_targets: vec![],
+            studio_pane_sender: None,
+            studio_pane_scene: None,
             render_wait: 0,
             resource_feed,
             main_output: Default::default(),
@@ -917,6 +926,9 @@ impl Controller {
         {
             self.message = format!("Popout viewer: {e}");
         }
+        self.publish_studio_panes(&p);
+        // A changed Views setting splits the viewer now, not at the next frame.
+        self.sync_studio_panes(cx);
         {
             let _span = crate::diag::span("refresh.mirror");
             if let Some(m) = &mut self.mirror {
@@ -1247,6 +1259,16 @@ impl Controller {
         cx: &mut Context<Self>,
     ) {
         let revision = self.published.as_ref().map(|p| p.revision());
+        self.run_layer_plan_at(plan, revision, cx);
+    }
+    /// A plan made from a publication newer than the window's (an import that
+    /// just landed): it is checked against that revision instead.
+    pub(crate) fn run_layer_plan_at(
+        &mut self,
+        plan: crate::layer_commands::Plan,
+        revision: Option<u64>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(call) = crate::layer_commands::transaction(&plan, revision) else {
             if let Some(ids) = plan.select {
                 self.call(SelectionCall::Layers { ids, add: false }.into(), cx);
@@ -2631,6 +2653,88 @@ impl Controller {
             return true;
         }
         if matches!(cmd.name.as_str(), "deselect" | "cancel") && self.cancel_gesture(cx) {
+            return true;
+        }
+        // View ▸ 3D ▸ Frame and the viewer bar's Frame: Free View fits the
+        // selection, or everything.
+        // F reveals a mask's Feather in 2D (AE); with nothing or only 3D
+        // layers selected in a 3D composition it frames the view (§4).
+        if cmd.name == "timeline.revealProperty:f"
+            && cmd.args.is_empty()
+            && let (Some(g), Some(p)) = (self.builtins.gizmos.clone(), self.published.clone())
+            && g.read(cx).studio_active()
+            && p.selection
+                .layers()
+                .iter()
+                .all(|id| crate::gizmo::is_studio(&p, id))
+        {
+            cx.defer(move |cx| g.update(cx, |g, cx| g.studio_frame(cx)));
+            return true;
+        }
+        match cmd.name.as_str() {
+            // The Light panel's sliders: one Undo per pull ("Light Brightness").
+            "studio.light" => {
+                let Some(p) = self.published.clone() else {
+                    return true;
+                };
+                let key = cmd.args.first().and_then(|a| a.as_str()).unwrap_or("");
+                let value = cmd.args.get(1).cloned().unwrap_or_default();
+                match pm_panel_studio3d::properties::command(
+                    &p,
+                    self.time(),
+                    &format!("light.adjust.{key}"),
+                    value,
+                ) {
+                    Ok((label, commands)) => self.run_layer_plan(
+                        crate::layer_commands::Plan {
+                            label,
+                            commands,
+                            select: None,
+                            count_keys: None,
+                        },
+                        cx,
+                    ),
+                    Err(e) => {
+                        self.message = e.to_string();
+                        cx.notify();
+                    }
+                }
+                return true;
+            }
+            // View ▸ 3D: the viewer's 3D group as menu items.
+            "studio.view" => {
+                let arg = |i: usize| {
+                    cmd.args
+                        .get(i)
+                        .and_then(|a| a.as_str())
+                        .unwrap_or("")
+                        .to_owned()
+                };
+                let (group, value) = (arg(0), arg(1));
+                if let Some(g) = self.builtins.gizmos.clone() {
+                    cx.defer(move |cx| g.update(cx, |g, cx| g.studio_setting(&group, &value, cx)));
+                }
+                return true;
+            }
+            _ => {}
+        }
+        if cmd.name == "studio.frame" {
+            // The gizmo reads the Controller, so it runs after this update.
+            if let Some(g) = self.builtins.gizmos.clone() {
+                cx.defer(move |cx| g.update(cx, |g, cx| g.studio_frame(cx)));
+            }
+            return true;
+        }
+        // The viewer's context menu names its New 3D kind in the command.
+        if let Some(kind) = cmd.name.strip_prefix("new3d:") {
+            if kind == "import" {
+                self.pick_models(cx);
+                return true;
+            }
+            return self.run_plan("new3d", &[serde_json::json!(kind)], cx);
+        }
+        if cmd.name == "new3d" && cmd.args.first().and_then(|a| a.as_str()) == Some("import") {
+            self.pick_models(cx);
             return true;
         }
         use crate::layer_commands::Route;

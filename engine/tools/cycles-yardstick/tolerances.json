@@ -1,0 +1,65 @@
+{
+  "description": "All 11 scenes: 128x72 drift alarms, not a parity claim. Margins cover low-sample noise and explicitly labeled model differences; exposure is bounded separately.",
+  "size": "128x72",
+  "studio_samples": 128,
+  "cycles_samples": 256,
+  "scenes": {
+    "hero": {
+      "max_mean_delta_e": 2.0,
+      "min_ssim": 0.97,
+      "max_abs_exposure_ev": 0.2
+    },
+    "edge": {
+      "max_mean_delta_e": 3.2,
+      "min_ssim": 0.95,
+      "max_abs_exposure_ev": 0.2
+    },
+    "macro": {
+      "max_mean_delta_e": 2.5,
+      "min_ssim": 0.86,
+      "max_abs_exposure_ev": 0.2
+    },
+    "back": {
+      "max_mean_delta_e": 1.0,
+      "min_ssim": 0.96,
+      "max_abs_exposure_ev": 0.2
+    },
+    "chrome": {
+      "max_mean_delta_e": 3.25,
+      "min_ssim": 0.8,
+      "max_abs_exposure_ev": 0.3
+    },
+    "materials": {
+      "max_mean_delta_e": 5.0,
+      "min_ssim": 0.83,
+      "max_abs_exposure_ev": 0.25
+    },
+    "caustics": {
+      "max_mean_delta_e": 4.0,
+      "min_ssim": 0.7,
+      "max_abs_exposure_ev": 0.3
+    },
+    "wet": {
+      "max_mean_delta_e": 2.0,
+      "min_ssim": 0.88,
+      "max_abs_exposure_ev": 0.2
+    },
+    "env-room": {
+      "max_mean_delta_e": 7.5,
+      "min_ssim": 0.3,
+      "max_abs_exposure_ev": 0.25
+    },
+    "env-street": {
+      "max_mean_delta_e": 6.0,
+      "min_ssim": 0.5,
+      "max_abs_exposure_ev": 0.5
+    },
+    "env-landscape": {
+      "studio_samples": 384,
+      "cycles_samples": 768,
+      "max_mean_delta_e": 3.5,
+      "min_ssim": 0.8,
+      "max_abs_exposure_ev": 0.25
+    }
+  }
+}

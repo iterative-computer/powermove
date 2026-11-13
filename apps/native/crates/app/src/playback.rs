@@ -193,6 +193,7 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
     // out): set when it changes, cleared only while no other message
     // replaced it.
     let mut shown = None::<String>;
+    let mut studio_status = None;
     let mut measured = None::<(f32, Slot)>;
     cx.spawn(async move|cx| {
         loop {
@@ -222,6 +223,11 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                 }
                 if let Some((target, interval)) = ticks.borrow_mut().take() { let _=viewer.display_tick(target, interval); }
                 let status=viewer.status();
+                let next_studio_status=(status.refine_progress,status.export_estimate.clone());
+                if studio_status.as_ref()!=Some(&next_studio_status) {
+                    studio_status=Some(next_studio_status);
+                    v.update_builtins(cx);
+                }
                 v.tell_presented(status.frame.as_ref());
                 // Run through the audio-start wait too: its vsync phase places the start.
                 link.set_paused(!status.wants_display);
@@ -232,8 +238,10 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                         crate::error_log::shared(cx).borrow_mut().push("Viewer",e);
                         format!("Viewer: {first} Details are in Window ▸ Error Log.")
                     }
-                }).or_else(||status.notice());
+                }).or_else(||failures_line(&status, v.published.as_deref())).or_else(||status.notice());
                 if line!=shown {
+                    // Layers newly left out (or back): Properties marks them.
+                    v.update_builtins(cx);
                     match &line {
                         Some(text)=>{v.message=text.clone();cx.notify();}
                         None if shown.as_ref()==Some(&v.message)=>{v.message.clear();cx.notify();}
@@ -243,7 +251,8 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                 }
                 v.tick_builtins(cx);
                 let scale=v.host.borrow().window.backingScaleFactor();
-                if let Some(clock)=status.clock { v.watch_run(&clock); v.sync_popout(&clock); }
+                if let Some(clock)=status.clock { v.watch_run(&clock); v.sync_popout(&clock); v.sync_studio_pane_clock(&clock); }
+                v.sync_studio_panes(cx);
                 if let Some(clock)=status.clock {
                     // Shuttling is a run too: the live timecode shows at every speed.
                     let playing=clock.state!=pm_protocol::clock::TransportState::Stopped;
@@ -305,4 +314,36 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
         drop(playhead);
         unsafe {let _:()=msg_send![&*layers.timecode,removeFromSuperlayer];let _:()=msg_send![&*layers.playhead,removeFromSuperlayer];let _:()=msg_send![&*viewer_time,removeFromSuperlayer];}
     }).detach();
+}
+
+/// The status line for layers a frame leaves out, by name, pointing at
+/// where the reason is (Properties shows each layer's own, in words).
+fn failures_line(
+    status: &pm_engine_service::ViewerStatus,
+    published: Option<&pm_kernel::Published>,
+) -> Option<String> {
+    let mut ids: Vec<&str> = vec![];
+    for f in &status.layer_failures {
+        if !ids.contains(&f.layer.as_str()) {
+            ids.push(&f.layer);
+        }
+    }
+    let first = *ids.first()?;
+    let name = published
+        .and_then(|p| {
+            let root = p.snapshot.root()?;
+            let at = pm_kernel::model::find_layer(root, first)?;
+            let layer = pm_kernel::model::layer_at(root, &at)?.to_value();
+            layer
+                .get("name")
+                .and_then(pm_model::Value::as_str)
+                .map(str::to_owned)
+        })
+        .filter(|n| !n.is_empty());
+    Some(match (ids.len(), name) {
+        (1, Some(name)) => format!("“{name}” isn’t drawn. Select it to see why in Properties."),
+        (1, None) => "1 layer isn’t drawn. Select it to see why in Properties.".into(),
+        (n, Some(name)) => format!("“{name}” and {} more aren’t drawn. Select one to see why in Properties.", n - 1),
+        (n, None) => format!("{n} layers aren’t drawn. Select one to see why in Properties."),
+    })
 }

@@ -1219,6 +1219,7 @@ pub fn frame_request(
         },
         sampling: pm_render::sampling::Sampling::Final,
         output_kind: OutputKind::Final,
+        viewer: false,
         origin: None,
         output_tone,
     }

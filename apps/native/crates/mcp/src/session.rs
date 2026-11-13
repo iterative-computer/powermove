@@ -758,14 +758,14 @@ impl McpSession {
                     )));
                 }
                 let default_label = if name == "edit_3d" {
-                    "Edit 3D Layers"
+                    crate::scene3d::label(&args)
                 } else {
-                    "Agent composition edit"
+                    "Agent composition edit".to_owned()
                 };
                 let label = args["label"]
                     .as_str()
                     .filter(|s| !s.trim().is_empty())
-                    .unwrap_or(default_label)
+                    .unwrap_or(&default_label)
                     .trim()
                     .chars()
                     .take(80)
