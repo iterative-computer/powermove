@@ -1171,3 +1171,95 @@ fn import_folder_is_live_in_the_file_menu_and_keeps_the_folders_as_media_folders
     desk.redo();
     read(&desk.published());
 }
+
+#[test]
+fn pasting_a_copied_picture_or_file_makes_a_layer_at_the_playhead_stored_with_the_project() {
+    // Command-V reaches Paste, which asks the pasteboard for media before
+    // the app's own clipboard (`Controller::paste_clipboard`).
+    let (command, args) = crate::layer_commands::commands_tests::dispatch("cmd+v");
+    assert_eq!(route(&command, &args), Some(Route::Paste));
+    let desk = Desk::new(project(vec![shape("a")]));
+    let authored = |desk: &Desk| {
+        let mut document = desk.document();
+        document
+            .as_object_mut()
+            .unwrap()
+            .remove("nativeMediaVersions");
+        document
+    };
+    let before = authored(&desk);
+    let panels = pm_builtins::Builtins::new(desk.kernel(), &desk.session.project, || {}).unwrap();
+    let import = |request: pm_builtins::media_import::ImportRequest| {
+        panels
+            .import_media(
+                desk.published().snapshot.doc_id,
+                desk.dir.path(),
+                request,
+                &std::sync::atomic::AtomicBool::new(false),
+            )
+            .unwrap()
+    };
+    // A screenshot on the pasteboard: staged as a PNG, imported at 2 s.
+    let picture = crate::mcp_services::png(&[9; 4 * 32 * 18], 32, 18).unwrap();
+    let (dir, path) = crate::media_import::stage_pasted_image(picture, true).unwrap();
+    let outcome = import(pm_builtins::media_import::ImportRequest {
+        paths: vec![path],
+        place_at: Some(2.),
+        staged: Some(dir),
+        ..Default::default()
+    });
+    assert_eq!(outcome.imported, ["Pasted Image.png"]);
+    let read = |published: &Published, id: &str, asset_name: &str| {
+        let layer = layer_of(published, id);
+        let text = |v: &Value, key: &str| v.get(key).and_then(Value::as_str).map(str::to_owned);
+        assert_eq!(text(&layer, "type").as_deref(), Some("image"));
+        assert_eq!(layer.get("from").and_then(Value::as_f64), Some(2.));
+        let asset = text(layer.get("d").unwrap(), "asset").unwrap();
+        let root = published.snapshot.root().unwrap().to_value();
+        let record = root.get("assets").and_then(|a| a.get(&asset)).unwrap();
+        assert_eq!(text(record, "name").as_deref(), Some(asset_name));
+        // The bytes are kept by the project, as an import keeps them.
+        assert!(
+            published.media.get(&asset).is_some(),
+            "{asset} has its bytes"
+        );
+        text(record, "sourcePath")
+    };
+    let pasted = desk.selected().pop().expect("the pasted layer is selected");
+    // It came from the pasteboard: there is no file on disk to relink to.
+    assert_eq!(read(&desk.published(), &pasted, "Pasted Image.png"), None);
+    assert_eq!(desk.layers().len(), 2);
+    read(&desk.reopened().published, &pasted, "Pasted Image.png");
+    // One undo step removes the layer and its media; redo brings both back.
+    desk.undo();
+    assert_eq!(authored(&desk), before);
+    desk.redo();
+    read(&desk.published(), &pasted, "Pasted Image.png");
+
+    // A file copied in Finder: the same, from the file where it lies.
+    let source = tempfile::tempdir().unwrap();
+    let still = source.path().join("Plate.png");
+    std::fs::write(
+        &still,
+        crate::mcp_services::png(&[200, 40, 40, 255], 1, 1).unwrap(),
+    )
+    .unwrap();
+    let notes = source.path().join("notes.txt");
+    std::fs::write(&notes, b"words").unwrap();
+    assert!(crate::media_import::pasted_files_hold_media(&[
+        notes.clone(),
+        still.clone()
+    ]));
+    // Copied files with no media among them are left to the app's own paste.
+    assert!(!crate::media_import::pasted_files_hold_media(&[notes]));
+    import(pm_builtins::media_import::ImportRequest {
+        paths: vec![still.clone()],
+        place_at: Some(2.),
+        ..Default::default()
+    });
+    let pasted = desk.selected().pop().unwrap();
+    assert_eq!(
+        read(&desk.published(), &pasted, "Plate.png").as_deref(),
+        Some(&*still.to_string_lossy())
+    );
+}

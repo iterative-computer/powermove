@@ -1156,6 +1156,11 @@ impl Controller {
         if self.paste_figma(cx) {
             return true;
         }
+        // Then media copied elsewhere. Copying layers or keyframes here
+        // replaces it on the pasteboard, so the newest copy is what pastes.
+        if self.paste_media(cx) {
+            return true;
+        }
         let time = self.time();
         match self.clipboard.clone() {
             Clipboard::Empty => false,

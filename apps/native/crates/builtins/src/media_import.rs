@@ -533,11 +533,13 @@ impl Builtins {
                 if let Some(folder) = folder_of.get(&path) {
                     asset["folder"] = json!(folder);
                 }
+                // Generated in scratch: no source file to relink to.
+                if (encoded.is_some() || request.staged.is_some())
+                    && let Some(asset) = asset.as_object_mut()
+                {
+                    asset.remove("sourcePath");
+                }
                 if let Some(encoded) = &encoded {
-                    // Generated in scratch: no source file to relink to.
-                    if let Some(asset) = asset.as_object_mut() {
-                        asset.remove("sourcePath");
-                    }
                     asset["fps"] = json!(encoded.fps);
                     asset["imageSequence"] = json!({"fps": encoded.fps, "frames": encoded.frames});
                 }
