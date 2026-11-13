@@ -1,19 +1,23 @@
 //! P-CHILD: every child window (GPUI pop-ups and floating windows such as the
 //! Agent popover, the command palette and field menu, the colour panel) sits at
 //! the normal level, hides while the app is inactive and never joins every
-//! Space, so none can float over other applications. Runs on the main thread
-//! with activation prohibited and never orders a window on screen.
+//! Space, so none can float over other applications. A sheet asked for while
+//! the app is inactive waits for activation instead of ordering its window
+//! front. Runs on the main thread with activation prohibited; the only
+//! windows it orders in stand far off screen.
 #[cfg(target_os = "macos")]
 fn main() {
     use gpui_macos::child_window::{
-        apply, attach, follows_policy, forget, is_pending, show, show_pending,
+        apply, attach, follows_policy, forget, forget_sheet, is_pending, sheet, sheet_pending,
+        show, show_pending,
     };
-    use objc2::{MainThreadMarker, MainThreadOnly};
+    use objc2::{MainThreadMarker, MainThreadOnly, Message};
     use objc2_app_kit::{
         NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSColorPanel, NSPanel,
         NSPopUpMenuWindowLevel, NSWindow, NSWindowCollectionBehavior, NSWindowStyleMask,
     };
     use objc2_foundation::{NSPoint, NSRect, NSSize};
+    use std::{cell::Cell, rc::Rc};
 
     let mtm = MainThreadMarker::new().expect("runs on the main thread (harness = false)");
     let app = NSApplication::sharedApplication(mtm);
@@ -124,6 +128,109 @@ fn main() {
     waiting.orderOut(None);
     assert!(!waiting.isVisible());
 
+    // A sheet asked for while the app is inactive: nothing begins, no window
+    // moves, it waits; forgotten or with its window closed, it is dropped
+    // (what waits on its answer sees it cancelled); with its window open it
+    // begins once the app is active.
+    struct Dropped(Rc<Cell<bool>>);
+    impl Drop for Dropped {
+        fn drop(&mut self) {
+            self.0.set(true);
+        }
+    }
+    let on = window(NSWindowStyleMask::Titled);
+    let asked = |sheet_window: &NSWindow| {
+        let (began, dropped) = (Rc::new(Cell::new(false)), Rc::new(Cell::new(false)));
+        let (b, guard) = (began.clone(), Dropped(dropped.clone()));
+        let (parent, shown) = (on.clone(), sheet_window.retain());
+        let now = sheet(&on, sheet_window, move || {
+            let _keep = &guard;
+            parent.beginSheet_completionHandler(&shown, None);
+            b.set(true);
+        });
+        assert!(!now, "an inactive app begins no sheet");
+        (began, dropped)
+    };
+    let sheet_window = window(NSWindowStyleMask::Titled);
+    let (began, dropped) = asked(&sheet_window);
+    assert!(sheet_pending(&on) && !began.get() && !dropped.get());
+    assert!(on.attachedSheet().is_none() && sheet_window.sheetParent().is_none());
+    assert!(
+        !on.isVisible() && !sheet_window.isVisible(),
+        "no window moved"
+    );
+    forget_sheet(&sheet_window);
+    assert!(
+        !sheet_pending(&on) && dropped.get() && !began.get(),
+        "forgotten: dropped"
+    );
+    let (began, dropped) = asked(&sheet_window);
+    show_pending();
+    assert!(
+        !sheet_pending(&on) && dropped.get() && !began.get(),
+        "its window is not open: dropped on activation"
+    );
+    on.orderBack(None);
+    let (began, _) = asked(&sheet_window);
+    assert!(on.attachedSheet().is_none(), "still waiting while inactive");
+    show_pending();
+    assert!(
+        began.get() && !sheet_pending(&on),
+        "begins once the app is active"
+    );
+    assert!(
+        on.attachedSheet()
+            .is_some_and(|s| std::ptr::eq(&*s, &*sheet_window)),
+        "on the window that asked"
+    );
+    on.endSheet(&sheet_window);
+    on.orderOut(None);
+
+    // Every sheet in the app goes through that gate: no source begins one
+    // directly. (The gate itself is child_window.rs.)
+    let native = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut roots = vec![native.join("vendor/gpui-ce/crates/gpui_macos/src")];
+    for crate_dir in std::fs::read_dir(native.join("crates")).unwrap().flatten() {
+        roots.push(crate_dir.path().join("src"));
+    }
+    let mut sites = 0;
+    while let Some(dir) = roots.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for path in entries.flatten().map(|e| e.path()) {
+            if path.is_dir() {
+                roots.push(path);
+                continue;
+            }
+            if path.extension().is_none_or(|e| e != "rs") || path.ends_with("child_window.rs") {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).unwrap();
+            for (at, _) in source
+                .match_indices("beginSheet")
+                .chain(source.match_indices("beginCriticalSheet"))
+            {
+                let mut end = (at + 300).min(source.len());
+                while !source.is_char_boundary(end) {
+                    end -= 1;
+                }
+                let mut start = at.saturating_sub(600);
+                while !source.is_char_boundary(start) {
+                    start += 1;
+                }
+                let around = &source[start..end];
+                assert!(
+                    around.contains("child_window::sheet(") || around.contains("SHEET_GATE.get()"),
+                    "{} begins a sheet outside child_window::sheet",
+                    path.display()
+                );
+                sites += 1;
+            }
+        }
+    }
+    assert!(sites >= 8, "the scan found the app's sheets ({sites})");
+
     // Nothing orders a window front directly: every show goes through
     // child_window (active-only for child windows, behind other apps while
     // the app is inactive for the rest).
@@ -197,7 +304,7 @@ fn main() {
         );
     }
     println!(
-        "child_windows: {checked} window kinds, the inactive-app queue and {} creation sites keep the policy",
+        "child_windows: {checked} window kinds, the inactive-app queue, {sites} sheet sites and {} creation sites keep the policy",
         sources.len()
     );
 }

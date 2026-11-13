@@ -47,6 +47,18 @@ impl Controller {
                     view.update(cx, |v, cx| v.review_send(semantic, event, cx));
                 }
             }
+            // Development builds: a panel's scroller put some points down
+            // its content (`reviewScrollTo:<panel>:<points>`).
+            #[cfg(debug_assertions)]
+            command if command.starts_with("reviewScrollTo:") => {
+                let mut parts = command.splitn(3, ':').skip(1);
+                if let (Some(panel), Some(Ok(points))) =
+                    (parts.next(), parts.next().map(str::parse::<f32>))
+                    && let Some(view) = self.builtins.views.get(panel).cloned()
+                {
+                    view.update(cx, |v, cx| v.review_scroll_to(points, cx));
+                }
+            }
             // Development builds: a panel's scroller swept for some seconds
             // (`reviewScroll:<panel>:<seconds>`).
             #[cfg(debug_assertions)]
@@ -99,6 +111,7 @@ impl Controller {
             }
             "newComposition" => self.composition_sheet(false, None, cx),
             "compositionSettings" => self.composition_sheet(true, None, cx),
+            "interpretFootage" => self.interpret_footage_sheet(cx),
             command if crate::keyframe_sheets::Kind::of(command).is_some() => {
                 self.keyframe_sheet(crate::keyframe_sheets::Kind::of(command).unwrap(), cx)
             }

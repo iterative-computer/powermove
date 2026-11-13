@@ -597,6 +597,280 @@ fn interpret_overrides_change_the_reading() {
     assert!(straight.chunks_exact(4).any(|p| p[3] < 0.5));
 }
 
+/// A clip whose range flag is wrong, as full-range cameras and screen
+/// recorders write them: 8-bit Y′CbCr holding codes over the whole 0..255,
+/// in a file that says limited. Four grey bands; `luma(frame)` gives their
+/// codes. Stored lossless (FFV1), so the file holds exactly these codes.
+fn mistagged_clip(dir: &Path, frames: usize, luma: impl Fn(usize) -> [u8; 4]) -> PathBuf {
+    let (w, h) = (64usize, 48usize);
+    let mut raw = Vec::new();
+    for n in 0..frames {
+        let bands = luma(n);
+        for _ in 0..h {
+            for x in 0..w {
+                raw.push(bands[x / 16]);
+            }
+        }
+        raw.extend(std::iter::repeat_n(128u8, w * h / 2));
+    }
+    let input = dir.join("codes.yuv");
+    std::fs::write(&input, raw).unwrap();
+    let output = dir.join("mistagged.mkv");
+    let ffmpeg = PathBuf::from(
+        std::env::var_os("PM_FFMPEG_DIR").expect("source engine/env.sh before this test"),
+    )
+    .join("bin/ffmpeg");
+    let status = std::process::Command::new(ffmpeg)
+        .args(["-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "yuv420p"])
+        .args(["-s", "64x48", "-r", "25", "-i"])
+        .arg(&input)
+        .args(["-c:v", "ffv1", "-color_range", "tv"])
+        .arg(&output)
+        .status()
+        .unwrap();
+    assert!(status.success(), "ffmpeg wrote the clip");
+    output
+}
+
+/// Interpret Footage › Range reaches the numbers: the codes are read as the
+/// chosen range, on the ordinary path and through deinterlacing, and the
+/// file's own flag is used when nothing is chosen.
+#[test]
+fn a_range_override_reads_the_codes_the_file_holds() {
+    let dir = tempfile::tempdir().unwrap();
+    let luma = |n: usize| [16 + n as u8, 128 - 4 * n as u8, 235, 255 - n as u8];
+    let moving = mistagged_clip(dir.path(), 8, luma);
+    let (w, h) = (64u32, 48u32);
+    let mut r = Renderer::headless().unwrap();
+    let frame = |r: &mut Renderer, path: &Path, interpret: Option<Value>, t: f64| {
+        let (doc, res) = document(path, (w, h), 25.0, interpret);
+        let pixels = render(r, &doc, (w, h), t, &res);
+        let at = |band: usize| {
+            let o = ((h as usize / 2) * w as usize + band * 16 + 8) * 4;
+            [pixels[o], pixels[o + 1], pixels[o + 2]].map(f64::from)
+        };
+        [at(0), at(1), at(2), at(3)]
+    };
+    let check = |what: &str, got: [[f64; 3]; 4], n: usize, read: &dyn Fn(f64) -> f64| {
+        for (band, code) in luma(n).into_iter().enumerate() {
+            let expected = read(f64::from(code));
+            for value in got[band] {
+                assert!(
+                    (value - expected).abs() < 2e-5,
+                    "{what}, frame {n}, code {code}: {value}, expected {expected}"
+                );
+            }
+        }
+    };
+    let limited = |code: f64| (code - 16.) / 219.;
+    let full = |code: f64| code / 255.;
+    for n in [0, 3] {
+        let t = n as f64 / 25. + 0.01;
+        check(
+            "as the file says",
+            frame(&mut r, &moving, None, t),
+            n,
+            &limited,
+        );
+        let chosen = frame(&mut r, &moving, Some(json!({ "range": "limited" })), t);
+        check("limited chosen", chosen, n, &limited);
+        let chosen = frame(&mut r, &moving, Some(json!({ "range": "full" })), t);
+        check("full chosen", chosen, n, &full);
+        // Back to Automatic after the override: the earlier frame is not kept.
+        check(
+            "automatic again",
+            frame(&mut r, &moving, None, t),
+            n,
+            &limited,
+        );
+    }
+    // Through deinterlacing (a held picture, so every field shows it).
+    let held = mistagged_clip(dir.path(), 8, |_| luma(2));
+    for (interpret, read) in [
+        (
+            json!({ "fieldOrder": "topFirst" }),
+            &limited as &dyn Fn(f64) -> f64,
+        ),
+        (json!({ "fieldOrder": "topFirst", "range": "full" }), &full),
+        (
+            json!({ "fieldOrder": "bottomFirst", "range": "full" }),
+            &full,
+        ),
+    ] {
+        let got = frame(&mut r, &held, Some(interpret.clone()), 0.13);
+        check(&interpret.to_string(), got, 2, read);
+    }
+}
+
+/// A proxy really made from `original` by the app's generator (ProRes Proxy
+/// at full size), or the generator's refusal.
+fn proxy_of(dir: &Path, original: &Path) -> PathBuf {
+    use pm_protocol::priority::{ProxyFormat, ProxySize};
+    let codecs = PathBuf::from(
+        std::env::var_os("PM_FFMPEG_DIR").expect("source engine/env.sh before this test"),
+    )
+    .join("bin");
+    let store = pm_proxy::ProxyStore::open(dir.join("store")).unwrap();
+    let cancel = std::sync::atomic::AtomicBool::new(false);
+    let hash = blake3::hash(&std::fs::read(original).unwrap())
+        .to_hex()
+        .to_string();
+    pm_proxy::generate_with_disk_probe(
+        pm_proxy::GenerationRequest {
+            source: original,
+            source_hash: &hash,
+            format: ProxyFormat::ProResProxy,
+            size: ProxySize::Full,
+            ffmpeg: &codecs.join("ffmpeg"),
+            ffprobe: &codecs.join("ffprobe"),
+            store: &store,
+            control: pm_proxy::GenerationControl {
+                cancel: &cancel,
+                pause: &|| false,
+                on_pause: &|_| {},
+                on_progress: &|_| {},
+            },
+        },
+        &|_: &Path| -> pm_proxy::Result<(u64, u64)> { Ok((40 << 30, 100 << 30)) },
+    )
+    .unwrap_or_else(|e| panic!("the generator made no proxy of {}: {e}", original.display()))
+    .stored
+    .path
+}
+
+/// Interpret Footage describes the original file. A proxy of a Y′CbCr
+/// original holds the original's codes, so a corrected range reads the proxy
+/// as it reads the original, before and after the correction. A proxy of an
+/// R′G′B′ original was converted to Y′CbCr by the generator, with the matrix
+/// and range it tagged: the asset's matrix or range, which do nothing on the
+/// original, do not misread the proxy.
+#[test]
+fn an_interpretation_reads_a_generated_proxy_as_it_reads_the_original() {
+    let dir = tempfile::tempdir().unwrap();
+    let (w, h) = (64u32, 48u32);
+    let mut r = Renderer::headless().unwrap();
+    // The centre of each of the four bands.
+    let bands =
+        |r: &mut Renderer, original: &Path, proxy: Option<&Path>, interpret: Option<Value>| {
+            let (doc, mut res) = document(proxy.unwrap_or(original), (w, h), 25.0, interpret);
+            if proxy.is_some() {
+                res.originals.insert("clip".into(), original.to_path_buf());
+            }
+            let pixels = render(r, &doc, (w, h), 0.01, &res);
+            let at = |band: usize| {
+                let o = ((h as usize / 2) * w as usize + band * 16 + 8) * 4;
+                [pixels[o], pixels[o + 1], pixels[o + 2]].map(f64::from)
+            };
+            [at(0), at(1), at(2), at(3)]
+        };
+    let apart = |a: [[f64; 3]; 4], b: [[f64; 3]; 4]| {
+        a.iter()
+            .flatten()
+            .zip(b.iter().flatten())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0., f64::max)
+    };
+    // ProRes Proxy on flat bands, 10-bit codes clipped to 4..1019.
+    const CODEC: f64 = 0.012;
+
+    // Y′CbCr holding full-range codes in a file that says limited.
+    let luma = [24u8, 120, 235, 250];
+    let camera = mistagged_clip(dir.path(), 8, |_| luma);
+    let camera_proxy = proxy_of(dir.path(), &camera);
+    for interpret in [None, Some(json!({ "range": "full" })), None] {
+        let original = bands(&mut r, &camera, None, interpret.clone());
+        let proxy = bands(&mut r, &camera, Some(&camera_proxy), interpret.clone());
+        let d = apart(original, proxy);
+        eprintln!("Y′CbCr original, {interpret:?}: proxy {d:.4} from the original");
+        assert!(
+            d < CODEC,
+            "{interpret:?}: proxy {proxy:?}, original {original:?}"
+        );
+        let read = |code: u8| match interpret {
+            Some(_) => f64::from(code) / 255.,
+            None => (f64::from(code) - 16.) / 219.,
+        };
+        for (band, code) in luma.into_iter().enumerate() {
+            assert!(
+                (original[band][1] - read(code)).abs() < 2e-5,
+                "{interpret:?}: code {code} read as {}",
+                original[band][1]
+            );
+        }
+    }
+
+    // R′G′B′ tagged Rec.2020: saturated bands, where a wrong matrix shows.
+    let colours = [
+        [200u8, 40, 40],
+        [40, 200, 40],
+        [40, 40, 200],
+        [128, 128, 128],
+    ];
+    let mut raw = Vec::new();
+    for _ in 0..8 * h as usize {
+        for x in 0..w as usize {
+            raw.extend(colours[x / 16]);
+        }
+    }
+    let input = dir.path().join("rgb.raw");
+    std::fs::write(&input, raw).unwrap();
+    // QuickTime Animation, tagged as such files are (a Y′CbCr matrix in the
+    // tag, R′G′B′ in the samples).
+    let graphics = dir.path().join("graphics.mov");
+    let ffmpeg = PathBuf::from(std::env::var_os("PM_FFMPEG_DIR").unwrap()).join("bin/ffmpeg");
+    let status = std::process::Command::new(ffmpeg)
+        .args(["-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24"])
+        .args(["-s", "64x48", "-r", "25", "-i"])
+        .arg(&input)
+        .args([
+            "-vf",
+            "setparams=color_primaries=bt2020:color_trc=bt709:colorspace=bt2020nc",
+        ])
+        .args([
+            "-c:v",
+            "qtrle",
+            "-pix_fmt",
+            "rgb24",
+            "-movflags",
+            "+write_colr",
+        ])
+        .arg(&graphics)
+        .status()
+        .unwrap();
+    assert!(status.success(), "ffmpeg wrote the clip");
+    let graphics_proxy = proxy_of(dir.path(), &graphics);
+    let plain = bands(&mut r, &graphics, None, None);
+    for interpret in [
+        None,
+        Some(json!({ "matrix": "identity" })),
+        Some(json!({ "matrix": "bt601", "range": "full" })),
+        None,
+    ] {
+        let original = bands(&mut r, &graphics, None, interpret.clone());
+        assert!(
+            apart(original, plain) < 1e-6,
+            "{interpret:?}: an R′G′B′ file has no matrix or range to reread"
+        );
+        let proxy = bands(&mut r, &graphics, Some(&graphics_proxy), interpret.clone());
+        let d = apart(original, proxy);
+        eprintln!("R′G′B′ original, {interpret:?}: proxy {d:.4} from the original");
+        assert!(
+            d < CODEC,
+            "{interpret:?}: proxy {proxy:?}, original {original:?}"
+        );
+    }
+    // The other members still reach the proxy: a transfer chosen for the
+    // asset rereads original and proxy alike.
+    let log = Some(json!({ "transfer": "gamma22", "matrix": "identity" }));
+    let original = bands(&mut r, &graphics, None, log.clone());
+    assert!(
+        apart(original, plain) > 0.01,
+        "the transfer changes the reading"
+    );
+    let proxy = bands(&mut r, &graphics, Some(&graphics_proxy), log);
+    assert!(apart(original, proxy) < CODEC, "{proxy:?} {original:?}");
+}
+
 #[test]
 fn a_conformed_rate_shows_frame_n_at_n_over_rate() {
     let Some(path) = formats("video/vfr.mp4") else {

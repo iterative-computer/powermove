@@ -3636,7 +3636,9 @@ impl Host {
     /// Return = Save (the accent default button), Esc = Cancel. Save sends
     /// `layout:save:<name>`.
     pub fn prompt_workspace_name(&self, workspace: &str) {
-        if self.window.attachedSheet().is_some() {
+        if self.window.attachedSheet().is_some()
+            || gpui_macos::child_window::sheet_pending(&self.window)
+        {
             return;
         }
         let sheet = workspace_sheet(&self.tokens, &format!("{workspace} Copy"));
@@ -3658,8 +3660,11 @@ impl Host {
                 });
             }
         });
-        self.window
-            .beginSheet_completionHandler(&sheet.window, Some(&handler));
+        // Only while the app is active (a sheet orders its window front).
+        let (on, shown) = (self.window.clone(), sheet.window.clone());
+        gpui_macos::child_window::sheet(&self.window, &sheet.window, move || {
+            on.beginSheet_completionHandler(&shown, Some(&handler));
+        });
         sheet.window.makeFirstResponder(Some(&sheet.field));
         *self.sheet.borrow_mut() = Some(sheet);
     }
@@ -3668,7 +3673,9 @@ impl Host {
     /// (else the reason shows above the buttons, and nothing changes), then
     /// sends `layout:define` with the text and the definition it started from.
     pub fn edit_workspace_definition(&self, json: &str) {
-        if self.window.attachedSheet().is_some() {
+        if self.window.attachedSheet().is_some()
+            || gpui_macos::child_window::sheet_pending(&self.window)
+        {
             return;
         }
         let target = definition_sheet(&self.tokens, json);
@@ -3685,8 +3692,10 @@ impl Host {
                 });
             }
         });
-        self.window
-            .beginSheet_completionHandler(&window, Some(&handler));
+        let (on, shown) = (self.window.clone(), window.clone());
+        gpui_macos::child_window::sheet(&self.window, &window, move || {
+            on.beginSheet_completionHandler(&shown, Some(&handler));
+        });
         window.makeFirstResponder(Some(&target.ivars().text));
         *self.definition.borrow_mut() = Some(target);
     }

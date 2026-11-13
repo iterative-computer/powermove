@@ -40,6 +40,16 @@ pub struct Graph {
     pub grid: Vec<(f64, String)>,
     pub selection: Option<Rect>,
 }
+/// What a graph with no curve in it says.
+pub const EMPTY: &str = "Select an animated property to see its curve.";
+/// The note in the middle of a graph `region` that has no curve.
+pub fn empty_note(region: Rect, t: &Tokens) -> Op {
+    let mut note = Op::new("graph-empty", "text", region, t.colors.muted);
+    note.text = Some(EMPTY.into());
+    note.font_size = t.typography.body as f64;
+    note.detail = json!({"align":"center"});
+    note
+}
 fn valid(p: Point) -> bool {
     p.seconds.is_finite() && p.value.is_finite()
 }

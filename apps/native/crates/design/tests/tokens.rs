@@ -100,6 +100,14 @@ const STATES: [StripState; 5] = [
     StripState::Dragging,
     StripState::Disabled,
 ];
+/// A hidden or muted layer's name is quieter, and still reads.
+fn floor(state: StripState) -> f64 {
+    if state == StripState::Disabled {
+        3.
+    } else {
+        4.5
+    }
+}
 #[test]
 fn strip_labels_read_on_every_layer_colour_and_state() {
     for scheme in [Scheme::Light, Scheme::Dark] {
@@ -119,15 +127,22 @@ fn strip_labels_read_on_every_layer_colour_and_state() {
                     // luminous foot below that carries no text.
                     for ground in [m.top, m.under_label].map(|c| mix(t.colors.panel, c, m.opacity))
                     {
-                        let floor = if state == StripState::Disabled {
-                            3.
-                        } else {
-                            4.5
-                        };
                         assert!(
-                            contrast(m.foreground, ground) >= floor,
+                            contrast(m.foreground, ground) >= floor(state),
                             "{scheme:?} {fill:06x} {state:?}: {:.2}",
                             contrast(m.foreground, ground)
+                        );
+                    }
+                    // Outside the work area the body is veiled and the name
+                    // is not: it reads there too.
+                    let (veil, alpha) = t.work_area_veil();
+                    for ground in [m.top, m.under_label].map(|c| mix(t.colors.panel, c, m.opacity))
+                    {
+                        let veiled = mix(ground, veil, alpha);
+                        assert!(
+                            contrast(m.foreground, veiled) >= floor(state),
+                            "{scheme:?} {fill:06x} {state:?} veiled: {:.2}",
+                            contrast(m.foreground, veiled)
                         );
                     }
                     if increase_contrast {
