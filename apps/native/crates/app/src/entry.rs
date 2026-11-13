@@ -58,7 +58,7 @@ pub fn receive(urls: Vec<String>, cx: &mut App) {
             {
                 for controller in editors(cx) {
                     if let Some(view) = controller.read(cx).builtins.views.get(panel).cloned() {
-                        view.update(cx, |v, cx| v.review_scroll(by, cx));
+                        view.update(cx, |v, cx| v.review_scroll_by(by, cx));
                     }
                 }
             }

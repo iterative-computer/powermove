@@ -930,7 +930,7 @@ impl SurfaceView {
     /// Development builds: every scroll region of the view moved down by
     /// `by` points (`review/scroll`).
     #[cfg(debug_assertions)]
-    pub fn review_scroll(&mut self, by: f32, cx: &mut Context<Self>) {
+    pub fn review_scroll_by(&mut self, by: f32, cx: &mut Context<Self>) {
         for scroll in self.scrolls.values() {
             let offset = scroll.offset();
             let most = scroll.max_offset().y;
