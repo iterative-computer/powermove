@@ -1688,7 +1688,12 @@ fn native_content_quad<'d>(
             let bh = js::or_number(js::get(&d, "h"), hf);
             let fit = js::string(js::get(&d, "fit"));
             let uv = fit_uv(&fit, sw, sh, bw, bh);
-            let interpret = crate::footage::interpretation(record);
+            let mut interpret = crate::footage::interpretation(record);
+            // Drawn from a proxy or optimized copy: the interpretation as
+            // the copy carries it.
+            if let Some(original) = b.assets.original(&asset_id).filter(|o| *o != path) {
+                interpret = interpret.and_then(|i| crate::footage::for_copy(i, &original));
+            }
             let source = if ty == "video" {
                 // Inside motion-blur samples video keeps the center time's
                 // frame (`crate::motion`).

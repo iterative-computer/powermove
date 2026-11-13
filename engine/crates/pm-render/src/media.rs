@@ -329,6 +329,17 @@ fn per_stamp<T: Clone>(
     Some(v)
 }
 
+/// Whether `path`'s video is stored as R′G′B′ (`CodecInfo::is_rgb`); `None`
+/// when the file is offline or has no video. Read once per file stamp.
+pub(crate) fn stores_rgb(path: &Path) -> Option<bool> {
+    static CACHE: StampCache<Option<bool>> = OnceLock::new();
+    per_stamp(&CACHE, path, || {
+        let source = MediaSource::open(path).ok()?;
+        Some(source.probe.video.as_ref()?.codec.is_rgb())
+    })
+    .flatten()
+}
+
 fn offline(path: &Path) -> String {
     format!("{} is offline", path.display())
 }
