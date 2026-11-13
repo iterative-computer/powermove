@@ -2420,8 +2420,7 @@ mod lifetime_tests {
         });
         let why = engine
             .settle_now(&scene(crate::settle::PANICS), spec, || false)
-            .err()
-            .expect("the picture fails")
+            .expect_err("the picture fails")
             .to_string();
         answered.store(true, std::sync::atomic::Ordering::Release);
         assert!(why.contains("a settled picture panicked"), "{why}");

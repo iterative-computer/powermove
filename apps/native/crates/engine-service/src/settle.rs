@@ -210,8 +210,10 @@ struct Shared {
     abort: Arc<AtomicBool>,
     /// The picture sent and not answered yet: what fails if the thread
     /// ends before it answers.
-    inflight: Mutex<Option<(crate::policy::CacheKey, Scene, Arc<ExportedSurface>, f64)>>,
+    inflight: Mutex<Option<Owed>>,
 }
+/// A picture sent to the thread: its key, scene and surface, and when.
+type Owed = (crate::policy::CacheKey, Scene, Arc<ExportedSurface>, f64);
 impl Shared {
     /// The thread is ending: the picture it owes fails with `why`.
     fn end(&self, why: &str, waker: &Waker) {
