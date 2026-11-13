@@ -609,7 +609,7 @@ impl Kernel {
                 Ok(ShellReply::Kept(Vec::new()))
             }
             ShellCall::Leftovers(path) => Ok(ShellReply::Leftovers(
-                project_io::leftovers(&path, &self.host())
+                project_io::leftovers(&path)
                     .iter()
                     .map(leftover_row)
                     .collect(),

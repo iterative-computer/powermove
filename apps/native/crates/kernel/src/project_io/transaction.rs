@@ -1224,10 +1224,11 @@ pub enum Undecided {
     /// The save is going on right now: the process that began it is
     /// running on this machine. Its files are not for anyone else to move.
     Active,
-    /// The save was begun on another machine, on a volume other machines
-    /// write. From here it cannot be told whether that machine crashed or
-    /// is still at it, so nothing is settled unasked: the person is told
-    /// who and since when, and chooses.
+    /// The save was begun on another machine. From here it cannot be told
+    /// whether that machine crashed or is still at it (its files reach this
+    /// one on a shared volume, or in a folder on this machine's own disk
+    /// that a sync client fills), so nothing is settled unasked: the person
+    /// is told who and since when, and chooses.
     Elsewhere,
     /// Not undecided: a whole version a save's record proves (read now, it
     /// holds exactly the bytes the record names), offered when the file at
@@ -1236,10 +1237,13 @@ pub enum Undecided {
 }
 
 /// Whose save `record` is, where that keeps recovery from acting on it.
-fn held_by_another(record: &Record, destination: &Path, host: &Host) -> Option<Undecided> {
+/// Another machine's is never acted on unasked, whatever the volume: that
+/// a folder is on a local disk does not say no other machine writes it (a
+/// sync client does), and nothing read here says that machine has stopped.
+fn held_by_another(record: &Record) -> Option<Undecided> {
     if record.owner.is_alive_here() && !record.owner.is_this_process() {
         Some(Undecided::Active)
-    } else if !record.owner.is_here() && host.shared_volume(destination) {
+    } else if !record.owner.is_here() {
         Some(Undecided::Elsewhere)
     } else {
         None
@@ -1333,7 +1337,7 @@ pub(crate) fn settle(destination: &Path, host: &Host) -> Settled {
     // grants one; nothing is asked for when there is nothing to settle.
     let settle_all = |left: &mut Vec<LeftAside>, undecided: &mut Vec<Leftover>| {
         for record in &records {
-            let unresolved = if let Some(held) = held_by_another(record, destination, host) {
+            let unresolved = if let Some(held) = held_by_another(record) {
                 Some(held)
             } else if several {
                 Some(Undecided::Several)
@@ -1693,7 +1697,7 @@ fn take_back_copies(record: &Record, destination: &Path, tx: &mut Transaction) {
 
 /// The files recovery left for the person to choose from ([`Settled`]'s
 /// `undecided`), without moving anything.
-pub(crate) fn leftovers(destination: &Path, host: &Host) -> Vec<Leftover> {
+pub(crate) fn leftovers(destination: &Path) -> Vec<Leftover> {
     let (records, unreadable) = records_of(destination);
     let records: Vec<_> = records.into_iter().filter(|r| !r.only_retains()).collect();
     let mut found: Vec<_> = unreadable
@@ -1706,7 +1710,7 @@ pub(crate) fn leftovers(destination: &Path, host: &Host) -> Vec<Leftover> {
         Undecided::Unknown
     };
     for record in &records {
-        let why = held_by_another(record, destination, host).unwrap_or(why);
+        let why = held_by_another(record).unwrap_or(why);
         for (path, role) in [(&record.aside, "previous"), (&record.staged, "saving")] {
             if !record.retains(path) && matches!(lstat_file(path), Ok(Some(_))) {
                 found.push(leftover(path, role, why, Some(record)));
@@ -1717,7 +1721,7 @@ pub(crate) fn leftovers(destination: &Path, host: &Host) -> Vec<Leftover> {
     // private name, retained, or kept beside the project), for when the file
     // under the project's name does not open.
     for record in records_of(destination).0 {
-        if held_by_another(&record, destination, host) == Some(Undecided::Active) {
+        if held_by_another(&record) == Some(Undecided::Active) {
             continue;
         }
         for path in proven_candidates(&record) {
@@ -1812,7 +1816,7 @@ fn use_leftover_now(
             ProjectIoError::Invalid("That file is not one a save of this project left.".into())
         })?;
     // A save that is going on right now is not for anyone to choose from.
-    if held_by_another(record, destination, host) == Some(Undecided::Active) {
+    if held_by_another(record) == Some(Undecided::Active) {
         return Err(ProjectIoError::Invalid(
             "This project is being saved right now by another copy of Powermove on this Mac."
                 .into(),

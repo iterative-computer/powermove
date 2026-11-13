@@ -2306,15 +2306,16 @@ fn a_save_in_progress_in_another_live_process_is_never_recovered() {
     assert_eq!(visible_siblings(&file), [""; 0].map(Path::new));
     assert_eq!(private_leftovers(&file), [""; 0]);
 }
-/// On a volume other computers write, a save begun on another computer and
-/// not finished may be a crash or may still be going on (a lock there is
-/// only believed for a while). It is never settled unasked: the open says
-/// which computer, which user and since when, nothing is moved, and the
-/// person chooses. The same leftovers on a drive only this Mac writes (it
-/// was carried over from the other computer) are settled as any others.
+/// A save begun on another computer and not finished may be a crash or may
+/// still be going on: its files reach this Mac on a volume both write, or
+/// in a folder on this Mac's own disk that a sync client fills from the
+/// other computer while it is still saving. Nothing here can tell which,
+/// and what recovery moved would sync back into that save. So it is never
+/// settled unasked, wherever the folder is: the open says which computer,
+/// which user and since when, nothing is moved, and the person chooses.
 #[test]
-fn a_save_begun_on_another_computer_on_a_shared_volume_is_never_settled_unasked() {
-    for shared in [true, false] {
+fn a_save_begun_on_another_computer_is_never_settled_unasked() {
+    {
         let dir = common::TempDir::new("elsewhere");
         fs::create_dir_all(dir.path("job")).unwrap();
         let file = dir.path("job/cut.pmv");
@@ -2333,20 +2334,14 @@ fn a_save_begun_on_another_computer_on_a_shared_volume_is_never_settled_unasked(
         assert_eq!(killed.status.code(), Some(0));
         let before = tree(&dir.path("job"));
         let mut k = kernel(&dir.path("my-profile"));
-        k.set_publish_hooks(pm_kernel::project_io::PublishHooks {
-            shared_volume: shared,
-            ..child_disk("no-exclusive")
-        });
+        // A folder on this Mac's own disk (the test's): no flag says
+        // that another computer writes it.
+        k.set_publish_hooks(child_disk("no-exclusive"));
         let opened = k.shell(ShellCall::PrepareOpen {
             id: "P".into(),
             source: SessionSource::File(file.clone()),
             electron_profile: None,
         });
-        if !shared {
-            opened.expect("carried over on a drive: settled like any cut-short save");
-            assert_eq!(fs::read(&file).unwrap(), original);
-            continue;
-        }
         let refused = opened.expect_err("another computer's save").to_string();
         assert!(
             refused.contains("studio-mac-2") && refused.contains("Nothing was moved"),

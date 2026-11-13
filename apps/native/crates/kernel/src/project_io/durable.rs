@@ -793,8 +793,6 @@ pub struct PublishHooks {
     /// The save's record says it was written on this machine (its name and
     /// identifier) instead of the real one.
     pub owner_host: Option<String>,
-    /// The project's volume is one other machines write (a network share).
-    pub shared_volume: bool,
     /// While set, the volume answers the exchange with success and only
     /// renames, as [`Self::exchange_renames`]: a volume whose behaviour
     /// changed while the app ran (unmounted, and another mounted in its
@@ -847,7 +845,6 @@ impl std::fmt::Debug for PublishHooks {
             .field("before_install", &self.before_install.is_some())
             .field("after_judged", &self.after_judged.is_some())
             .field("owner_host", &self.owner_host)
-            .field("shared_volume", &self.shared_volume)
             .field("weak_exchange", &self.weak_exchange.is_some())
             .field("step", &self.step.is_some())
             .field("folder_sync", &self.folder_sync.is_some())
@@ -1855,11 +1852,6 @@ pub(crate) struct Host<'a> {
 }
 
 impl Host<'_> {
-    /// Whether other machines write the volume `path` is on.
-    pub fn shared_volume(&self, path: &Path) -> bool {
-        self.hooks.shared_volume || !crate::locks::is_local_volume(path)
-    }
-
     /// Runs `work` once, inside a coordinated write of `path` where the
     /// host has a coordinator and it grants one ([`WriteCoordinator`]).
     pub fn coordinated(&self, path: &Path, work: &mut dyn FnMut(bool)) {
