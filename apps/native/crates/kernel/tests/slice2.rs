@@ -1517,6 +1517,66 @@ fn a_version_that_lands_while_the_replaced_one_is_retained_is_never_taken_for_th
         );
     }
 }
+/// Another program writes its own version into the very file the save just
+/// installed (through the name, the same file) while the save is still
+/// judging and retaining the version it replaced. The file under the name
+/// is the installed one by its number, but no longer by its bytes: the save
+/// must not certify it with its own hash. The save fails, what was written
+/// stays under the name untouched, and the session's work stays unsaved and
+/// journalled, so Close and a reopen still have it.
+#[test]
+fn work_written_into_the_installed_file_before_the_save_ends_is_never_taken_for_the_save() {
+    let mut disks = vec![("an atomic exchange", Default::default())];
+    disks.extend(disks_without_an_exchange());
+    for (disk, hooks) in disks {
+        let dir = common::TempDir::new("written-into");
+        fs::create_dir_all(dir.path("job")).unwrap();
+        let file = dir.path("job/cut.pmv");
+        fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+        let other = fs::read(common::ts_fixture("save-as.pmv")).unwrap();
+        let native = dir.path("native");
+        let mut k = kernel(&native);
+        let (session, _) = open_file(&mut k, &file);
+        rename_comp(&mut k, "P", "One");
+        let once = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (written, project) = (other.clone(), file.clone());
+        k.set_publish_hooks(pm_kernel::project_io::PublishHooks {
+            after_judged: Some(std::sync::Arc::new(move |_| {
+                if !once.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    write_through(&project, &written);
+                }
+            })),
+            ..hooks.clone()
+        });
+        let plan = k
+            .prepare_session_save(session.clone(), None, false)
+            .unwrap();
+        let saved = k.finish_session_save(plan.run());
+        assert!(
+            saved.is_err(),
+            "{disk}: the file under the name is not this save's: {saved:?}"
+        );
+        assert_eq!(
+            fs::read(&file).unwrap(),
+            other,
+            "{disk}: what was written stays, untouched"
+        );
+        k.set_publish_hooks(hooks.clone());
+        let ShellReply::Closed { recovery_copy } = k.shell(ShellCall::Close(session)).unwrap()
+        else {
+            panic!()
+        };
+        assert!(
+            recovery_copy.is_some() || live_sessions(&native, "P") > 0,
+            "{disk}: Close does not forget the work"
+        );
+        assert_eq!(
+            fs::read(&file).unwrap(),
+            other,
+            "{disk}: nor replace the file"
+        );
+    }
+}
 /// A folder sync that really fails fails the save. "This volume has no
 /// folder sync" is believed only from the two answers that mean it, only
 /// when the folder gave that answer as the save began, and the plain sync

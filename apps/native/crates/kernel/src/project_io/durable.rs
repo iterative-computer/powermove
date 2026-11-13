@@ -1422,9 +1422,12 @@ fn installed_at(
     if !stat.same_identity(&named) {
         return None;
     }
+    // Read through the descriptor that is then held, and only believed for
+    // the state it was read in: the same stat after the read as before it.
     let ours = ours(&stat)
         || (stat.size == size
-            && hash_reader(&file, destination).is_ok_and(|h| hex(&h.finalize()) == new_hash));
+            && hash_reader(&file, destination).is_ok_and(|h| hex(&h.finalize()) == new_hash)
+            && file.metadata().is_ok_and(|after| stat_of(&after) == stat));
     ours.then_some(Installed { file, stat })
 }
 
@@ -1460,26 +1463,30 @@ fn confirm_installed(
 
 /// The last look, after everything the save did once its file was installed
 /// (judging, retaining and pruning earlier versions): the name must still
-/// hold the installed file. Another writer may have put a version there in
-/// the meantime; that version is never adopted with this save's hash. Then
-/// this save's bytes, read from the descriptor held since the install
-/// (which keeps them even where the name no longer does), are kept beside
-/// the project under a plain name, the record says so and knows the version
-/// now under the name, and the save fails ([`ProjectIoError::KeptBeside`]):
-/// the session keeps its work, its journal and its unsaved state.
+/// hold the installed file, as it was when it was installed. Another writer
+/// may have put a version there in the meantime, or written its own into
+/// that very file; neither is ever adopted with this save's hash: the name
+/// must hold a file with the stat captured at the install, or one that is
+/// read now and holds exactly this save's bytes. Otherwise this save's
+/// bytes, read from the descriptor held since the install (which keeps them
+/// where the name no longer does, and is not copied when it was itself
+/// written into), are kept beside the project under a plain name, the
+/// record says so and knows the version now under the name, and the save
+/// fails ([`ProjectIoError::KeptBeside`], or
+/// [`ProjectIoError::ChangedOnDisk`] when there is nothing of this save
+/// left to keep): the session keeps its work, its journal and its unsaved
+/// state.
 fn still_installed(
     tx: &mut Transaction,
     destination: &Path,
     installed: Installed,
     new_hash: &str,
 ) -> Result<Installed, ProjectIoError> {
-    let now = installed
-        .file
-        .metadata()
-        .map(|m| stat_of(&m))
-        .unwrap_or(installed.stat);
-    // Untouched since the install: the very same stat as the held file.
-    if let Some(again) = installed_at(destination, |at| at.same_file(&now), now.size, new_hash) {
+    // Untouched since the install: the very stat captured then. A stat
+    // that moved since (a write into the file, or only its times) is
+    // believed by its bytes alone.
+    let then = &installed.stat;
+    if let Some(again) = installed_at(destination, |at| at.same_file(then), then.size, new_hash) {
         return Ok(again);
     }
     let kept = (|| {
