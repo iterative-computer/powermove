@@ -806,6 +806,8 @@ struct Library {
 struct Opened {
     /// A pending capture still has media to bring in.
     media: bool,
+    /// The person chose Bring My Workspace on the last step.
+    bring_workspace: bool,
     /// The merge before the attach stopped.
     later_failed: bool,
 }
@@ -998,6 +1000,8 @@ impl Driver {
         if opened.later_failed {
             log.borrow_mut().tell("Library", LATER_FAILED);
         }
+        // The editor that opens next starts the transfer (`firstRunWorkspace`).
+        note_workspace_request(opened.bring_workspace);
         (self.finish)(cx);
         if let Some(handle) = self.window.borrow_mut().take() {
             let _ = handle.update(cx, |_, window, _| window.remove_window());
@@ -1025,6 +1029,7 @@ impl Library {
                 })?;
             *self.server.lock().unwrap() = Some(server);
         }
+        let choices_bring_workspace = choices.as_ref().is_some_and(requests_workspace);
         if let Some(choices) = choices {
             std::fs::create_dir_all(&self.plan.profile)?;
             if let Some(provider) = choices["agent"]["provider"].as_str() {
@@ -1041,6 +1046,7 @@ impl Library {
             write_marker(&self.plan.profile, &choices)?;
         }
         Ok(Opened {
+            bring_workspace: choices_bring_workspace,
             media: *later.as_ref().unwrap_or(&false),
             later_failed: later.is_err(),
         })
@@ -1070,6 +1076,23 @@ impl Library {
         })
         .detach();
     }
+}
+/// The choices ask to bring the After Effects workspace (v1's
+/// `workspaceImport`).
+pub fn requests_workspace(choices: &serde_json::Value) -> bool {
+    choices["workspaceImport"] == "after-effects"
+}
+thread_local! {
+    /// Bring My Workspace was chosen and no editor has taken it yet.
+    static WORKSPACE_REQUEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+/// The library opened after onboarding; `on`: Bring My Workspace was chosen.
+pub(crate) fn note_workspace_request(on: bool) {
+    WORKSPACE_REQUEST.with(|r| r.set(on));
+}
+/// The first-run request for the workspace transfer, taken once.
+pub fn take_workspace_request() -> bool {
+    WORKSPACE_REQUEST.with(|r| r.replace(false))
 }
 thread_local! {
     static CHIME: RefCell<Option<objc2::rc::Retained<objc2_app_kit::NSSound>>> =
