@@ -312,11 +312,16 @@ fn open_editor_window(
 /// captures reach Settings, sheets and the palette without the menu bar or focus.
 /// Development builds: `pointer:x:y`, `click:x:y`, `dblclick:x:y` and
 /// `drag:x:y:x:y` (window points) as GPUI input, so a review can hover,
-/// click and drag without the real pointer. False for any other name.
+/// click and drag without the real pointer; `press:x:y`, `move:x:y` and
+/// `release:x:y` split a drag so a capture can see it under way. False for
+/// any other name.
 pub(crate) fn review_pointer(name: &str, window: &mut Window, cx: &mut App) -> bool {
     let mut parts = name.split(':');
     let kind = parts.next().unwrap_or_default();
-    if !matches!(kind, "pointer" | "click" | "dblclick" | "drag") {
+    if !matches!(
+        kind,
+        "pointer" | "click" | "dblclick" | "drag" | "press" | "move" | "release"
+    ) {
         return false;
     }
     let at: Vec<f32> = parts.filter_map(|v| v.parse().ok()).collect();
@@ -349,6 +354,23 @@ pub(crate) fn review_pointer(name: &str, window: &mut Window, cx: &mut App) -> b
             click_count,
         })
     };
+    match kind {
+        "press" => {
+            window.dispatch_event(moved(position, false), cx);
+            window.dispatch_event(down(position, 1), cx);
+            return true;
+        }
+        "move" => {
+            window.dispatch_event(moved(position, true), cx);
+            return true;
+        }
+        "release" => {
+            window.dispatch_event(moved(position, true), cx);
+            window.dispatch_event(up(position, 1), cx);
+            return true;
+        }
+        _ => {}
+    }
     window.dispatch_event(moved(position, false), cx);
     match kind {
         "drag" => {

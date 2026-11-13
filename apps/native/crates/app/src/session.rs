@@ -390,7 +390,21 @@ impl pm_shell::integration::Integration for Bridge {
         });
     }
     fn shown_panels(&self, shown: &[&str], cx: &mut App) {
-        self.0.update(cx, |v, _| v.hide_extension_panels(shown));
+        self.0.update(cx, |v, _| {
+            v.hide_extension_panels(shown);
+            // A panel not on screen (another one maximised, a workspace
+            // without it) leaves no native playhead or timecode behind.
+            let mut gone = false;
+            if !shown.contains(&"timeline") {
+                gone |= v.builtins.timeline_place.take().is_some();
+            }
+            if !shown.contains(&"viewer") {
+                gone |= v.builtins.viewer_place.take().is_some();
+            }
+            if gone && let Some(wake) = &v.playback_wake {
+                let _ = wake.try_send(());
+            }
+        });
     }
     fn panel_menu(
         &self,
@@ -406,6 +420,7 @@ impl pm_shell::integration::Integration for Bridge {
         &self,
         id: &str,
         bounds: pm_shell::layout::Rect,
+        tabbed: bool,
         w: &mut Window,
         cx: &mut App,
     ) -> Option<AnyElement> {
@@ -413,7 +428,7 @@ impl pm_shell::integration::Integration for Bridge {
             if id == "scopes" {
                 return Some(v.scopes_header(cx));
             }
-            v.builtin_header(id, bounds, w, cx)
+            v.builtin_header(id, bounds, tabbed, w, cx)
         })
     }
     fn project_id(&self, cx: &App) -> Option<String> {

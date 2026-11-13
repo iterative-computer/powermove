@@ -936,3 +936,86 @@ fn a_long_export_notice_wraps_and_never_squeezes_the_buttons(cx: &mut TestAppCon
     );
     assert!(summary.size.height > cancel.size.height, "the notice wraps");
 }
+
+/// A panel in a tab group: its tab names it, so its header leaves out its
+/// own title (the duplicate "Project" beside the tabs) and keeps its actions.
+#[gpui::test]
+fn a_tabbed_panel_header_leaves_out_its_title(cx: &mut TestAppContext) {
+    let rig = rig("viewer", 1);
+    let _ = publication(&rig);
+    let mut ops = node_ops(
+        1,
+        0,
+        "div",
+        json!({"style":{"width":400,"height":200}}),
+        &[],
+    );
+    ops.extend(node_ops(2, 1, "div", json!({"data-pm-slot":"header"}), &[]));
+    // As a panel writes it: a styled text holding its words.
+    ops.extend(node_ops(
+        3,
+        2,
+        "text",
+        json!({"style":{"fontSize":{"token":"typography.title"}}}),
+        &[],
+    ));
+    ops.extend(node_ops(4, 3, "text", json!({}), &[]));
+    ops.push(Op::SetText {
+        id: 4,
+        text: "Project".into(),
+    });
+    ops.extend(node_ops(
+        5,
+        2,
+        "button",
+        json!({"id":"search","data-pm-component":"toolbar-item","label":"Search Media"}),
+        &["click"],
+    ));
+    let (view, vcx) = window(cx, &rig, synthetic(&rig, ops), Default::default());
+    vcx.run_until_parked();
+    let (header, title) = view.read_with(&vcx, |v, _| {
+        let header = v.prepared.header;
+        (header, header.and_then(|h| v.header_title(h)))
+    });
+    assert_eq!(header, Some(2));
+    assert_eq!(title, Some(3), "the title is its first text, not a control");
+}
+
+/// A tooltip says what is not in view: a row titled with the name it
+/// already shows has none; an icon-only control keeps its title.
+#[gpui::test]
+fn a_tooltip_never_repeats_the_text_in_view(cx: &mut TestAppContext) {
+    let rig = rig("viewer", 1);
+    let _ = publication(&rig);
+    let mut ops = node_ops(
+        1,
+        0,
+        "div",
+        json!({"style":{"width":400,"height":200}}),
+        &[],
+    );
+    ops.extend(node_ops(
+        2,
+        1,
+        "div",
+        json!({"title":"Gaussian Blur","data-pm-component":"list-item","label":"Gaussian Blur"}),
+        &["click"],
+    ));
+    ops.extend(node_ops(3, 2, "text", json!({}), &[]));
+    ops.push(Op::SetText {
+        id: 3,
+        text: "Gaussian Blur".into(),
+    });
+    ops.extend(node_ops(
+        4,
+        1,
+        "button",
+        json!({"title":"Reset Effect","data-pm-component":"toolbar-item","label":"Reset Gaussian Blur","metadata":{"symbol":"arrow.counterclockwise"}}),
+        &["click"],
+    ));
+    let (view, vcx) = window(cx, &rig, synthetic(&rig, ops), Default::default());
+    vcx.run_until_parked();
+    let shown = view.read_with(&vcx, |v, _| (v.shown_text(2, 3), v.shown_text(4, 3)));
+    assert_eq!(shown.0, "Gaussian Blur", "the title is in view: no tooltip");
+    assert_eq!(shown.1, "", "an icon says nothing: its title stays");
+}
