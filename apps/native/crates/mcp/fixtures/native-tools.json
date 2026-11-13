@@ -1,0 +1,26 @@
+[
+  {
+    "name": "list_commands",
+    "description": "List every command a person can run in this window: the menu bar's, the command palette's and the keyboard's, each with its id, arguments, label, menu, current keys, and whether it can run now (\"enabled\") and is switched on (\"checked\", for toggles such as Loop Playback, Snapping, the viewer's channels and overlays, and the timeline's edit tool). Filter by text in the label, menu or id with \"query\". Run one with run_command.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "query": {"type": "string", "maxLength": 200}
+      }
+    }
+  },
+  {
+    "name": "run_command",
+    "description": "Run one command exactly as the menu bar, the command palette or its key runs it in the attached project's window: playback (play, toggleLoop, gotoStart, stepFrames [n], shuttleForward), the work area (workIn, workOut, resetWorkArea), editing on the selection (rippleTrimIn, extendEdit, slipLayers [frames], slideLayer [frames], rippleDelete, liftWorkArea, timeRemapLayers, freezeFrame, reverseLayers, precompose), the timeline (graph, graph.value, timeline.tool:ripple, timeline.toggleSnapping), the viewer's toggles (viewer.grid, viewer.rulers, viewer.showAlpha) and Settings' keys (shortcuts with {op:\"set\", value: keymap}). Use list_commands for ids, arguments and whether a command can run now. Commands that act on the selection use the project's selection (select_layers first) and the playhead (seek_to). It refuses commands that would close windows, quit, or open a file panel or sheet.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["command"],
+      "properties": {
+        "command": {"type": "string", "minLength": 1, "maxLength": 200},
+        "args": {"type": "array", "maxItems": 8}
+      }
+    }
+  }
+]
