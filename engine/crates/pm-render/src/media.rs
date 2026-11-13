@@ -1183,6 +1183,24 @@ struct FrameKey {
 /// headless renders, and the viewer before the host grants a lease.
 pub const DEFAULT_FRAME_CACHE: usize = 64 << 20;
 
+/// The video frame cache's and the still look-ahead's parts of one decoded
+/// frame allowance: half each while a playing frame reads stills ahead,
+/// otherwise the stills keep a small part for a still about to enter.
+fn still_share(lease: MediaLease, look_ahead: bool) -> (MediaLease, usize) {
+    let stills = if look_ahead {
+        lease.frame_cache / 2
+    } else {
+        stills::MAX_READY_BYTES.min(lease.frame_cache / 2)
+    };
+    (
+        MediaLease {
+            frame_cache: lease.frame_cache - stills,
+            ..lease
+        },
+        stills,
+    )
+}
+
 /// Media state kept across frames: decoded and converted stills, video
 /// sources and sessions, and the last converted frame of each source.
 pub struct MediaCache {
@@ -1190,6 +1208,11 @@ pub struct MediaCache {
     service: Arc<DecodeService>,
     lease: Mutex<MediaLease>,
     idle_media: bool,
+    /// A playing frame reads stills ahead: the still look-ahead holds half
+    /// of the decoded frame allowance ([`still_share`]).
+    look_ahead: bool,
+    /// Sequence files found unreadable as they were drawn ([`MediaCache::landed`]).
+    unreadable: u64,
     background: Option<prewarm::BackgroundPrepare>,
     /// Display frames decode on workers (docs/engine/scrub.md); export
     /// frames decode here, on the caller's thread.
@@ -1275,6 +1298,8 @@ impl MediaCache {
                 decoders: 32 << 20,
             }),
             idle_media: false,
+            look_ahead: false,
+            unreadable: 0,
             background: None,
             scrub: false,
             playback: None,
@@ -2160,22 +2185,43 @@ impl MediaCache {
     /// service: the frame cache evicts down to `lease.frame_cache` at once
     /// and idle decoders close past `lease.decoders`. Returns what the
     /// service holds afterwards.
-    pub fn apply_lease(&self, lease: MediaLease) -> MediaUsage {
+    pub fn apply_lease(&mut self, lease: MediaLease) -> MediaUsage {
         *self.lease.lock().unwrap() = lease;
-        // Stills decoded ahead are decoded frames as well: they share the
-        // decoded frame cache's allowance.
-        self.stills.set_limit(lease.frame_cache);
-        self.service.apply_lease(lease)
+        self.apply_shares()
     }
 
-    /// What the decode service holds (frame cache, decoders, sessions).
+    /// Divides the decoded frame allowance between the video frame cache
+    /// and the stills decoded ahead: together they hold at most the lease.
+    fn apply_shares(&mut self) -> MediaUsage {
+        let lease = *self.lease.lock().unwrap();
+        let (frames, stills) = still_share(lease, self.look_ahead);
+        self.stills.set_limit(stills);
+        self.service.apply_lease(frames);
+        self.media_usage()
+    }
+
+    /// What the decode service holds (frame cache, decoders, sessions),
+    /// with the stills decoded ahead counted as frames.
     pub fn media_usage(&self) -> MediaUsage {
-        self.service.usage()
+        let mut usage = self.service.usage();
+        usage.frame_cache += self.stills.held();
+        usage
     }
 
-    pub(crate) fn begin_frame(&mut self) {
+    /// Starts a frame; `look_ahead`: a playing frame that reads ahead.
+    /// When play stops, the stills decoded ahead are given back.
+    pub(crate) fn begin_frame(&mut self, look_ahead: bool) {
+        if look_ahead != self.look_ahead {
+            self.look_ahead = look_ahead;
+            if !look_ahead {
+                self.stills.clear();
+            }
+            if !self.idle_media {
+                self.apply_shares();
+            }
+        }
         if self.idle_media {
-            self.service.apply_lease(*self.lease.lock().unwrap());
+            self.apply_shares();
             self.idle_media = false;
         }
         self.frame_epoch = self.frame_epoch.wrapping_add(1);
@@ -2192,6 +2238,8 @@ impl MediaCache {
 
     /// Queue-owned GPU references remain valid; this only drops cache handles.
     pub fn release_idle_frames(&mut self) {
+        self.stills.clear();
+        self.stills.set_limit(0);
         self.frames.clear();
         self.retired_frames.clear();
         self.free_frames.clear();
@@ -2250,6 +2298,33 @@ impl MediaCache {
 #[cfg(test)]
 #[path = "media/source_storage_tests.rs"]
 mod source_storage_tests;
+
+#[cfg(test)]
+mod still_share_tests {
+    use super::*;
+
+    /// The video frame cache and the stills decoded ahead share one
+    /// decoded frame allowance: their parts sum to it, playing or not.
+    #[test]
+    fn stills_ahead_and_video_frames_share_one_allowance() {
+        let lease = MediaLease {
+            frame_cache: 512 << 20,
+            decoders: 64 << 20,
+        };
+        for look_ahead in [false, true] {
+            let (frames, stills) = still_share(lease, look_ahead);
+            assert_eq!(frames.frame_cache + stills, lease.frame_cache);
+            assert_eq!(frames.decoders, lease.decoders);
+        }
+        assert_eq!(still_share(lease, true).1, 256 << 20);
+        assert_eq!(still_share(lease, false).1, stills::MAX_READY_BYTES);
+        let none = MediaLease {
+            frame_cache: 0,
+            decoders: 0,
+        };
+        assert_eq!(still_share(none, true), (none, 0));
+    }
+}
 
 #[cfg(test)]
 mod stamp_frame_tests {

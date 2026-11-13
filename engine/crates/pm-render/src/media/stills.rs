@@ -34,11 +34,11 @@ pub(crate) struct StillAsk {
 /// Stills queued or waiting for their frame at once (eight UHD 16-bit
 /// frames are 530 MB; more than its workers decode in a second).
 const MAX_READY: usize = 8;
-/// The decoded bytes held at most until the engine leases more, counted
-/// from the moment a worker decodes a still, so stills on their way to the
-/// frame count too (a UHD 16-bit RGBA still is 66 MB). The engine's media
-/// lease raises it to the decoded frame cache's share ([`StillPrefetch::set_limit`]).
-const MAX_READY_BYTES: usize = 24 << 20;
+/// The decoded bytes held at most until the engine leases a share of its
+/// decoded frame allowance ([`StillPrefetch::set_limit`]), counting stills
+/// queued for decoding (at the size of the last one decoded), decoding and
+/// on their way to the frame (a UHD 16-bit RGBA still is 66 MB).
+pub(crate) const MAX_READY_BYTES: usize = 24 << 20;
 /// Decode workers: a playing image sequence needs several stills decoded
 /// at once to keep up (one UHD 16-bit PNG takes longer than a frame).
 fn workers() -> usize {
@@ -70,7 +70,10 @@ struct Claims {
 pub(crate) struct StillPrefetch {
     worker: Option<Worker>,
     claims: Arc<std::sync::Mutex<Claims>>,
-    pending: HashSet<StillKey>,
+    /// Queued and decoding stills, each with the bytes it was admitted at.
+    pending: HashMap<StillKey, usize>,
+    /// The size of the last still decoded: what the next is admitted at.
+    last_bytes: Option<usize>,
     /// Decoded stills and when they were last asked for.
     ready: HashMap<StillKey, (Decoded, Instant)>,
     /// Bytes of decoded stills, ready or still in the channel.
@@ -85,7 +88,7 @@ impl Default for StillPrefetch {
     }
 }
 
-fn bytes(still: &StillImage) -> usize {
+fn bytes_of(still: &StillImage) -> usize {
     still.frame.format.visible_bytes()
 }
 
@@ -120,7 +123,7 @@ fn decode(key: &StillKey, pool: &FramePool, held: &AtomicUsize, limit: usize) ->
         (None, None) => pm_media::image::read(path, pool).map(|s| (s, None)),
     };
     decoded.ok().filter(|(still, _)| {
-        let size = bytes(still);
+        let size = bytes_of(still);
         held.fetch_update(Ordering::AcqRel, Ordering::Acquire, |h| {
             (h + size <= limit).then_some(h + size)
         })
@@ -133,7 +136,8 @@ impl StillPrefetch {
         Self {
             worker: None,
             claims: Default::default(),
-            pending: HashSet::new(),
+            pending: HashMap::new(),
+            last_bytes: None,
             ready: HashMap::new(),
             held: Arc::new(AtomicUsize::new(0)),
             limit: Arc::new(AtomicUsize::new(limit)),
@@ -141,10 +145,45 @@ impl StillPrefetch {
         }
     }
 
-    /// Holds up to `bytes` of decoded stills (never less than the default).
-    pub(crate) fn set_limit(&self, bytes: usize) {
-        self.limit
-            .store(bytes.max(MAX_READY_BYTES), Ordering::Release);
+    /// Holds up to `bytes` of decoded stills: a lower allowance gives the
+    /// stills held beyond it back now, those asked for longest ago first.
+    pub(crate) fn set_limit(&mut self, bytes: usize) {
+        self.limit.store(bytes, Ordering::Release);
+        self.drain();
+        let mut by_age: Vec<(StillKey, Instant)> =
+            self.ready.iter().map(|(k, (_, asked))| (k.clone(), *asked)).collect();
+        by_age.sort_by_key(|(_, asked)| *asked);
+        for (key, _) in by_age {
+            if self.held.load(Ordering::Acquire) <= bytes {
+                break;
+            }
+            if let Some(((still, _), _)) = self.ready.remove(&key) {
+                self.held.fetch_sub(bytes_of(&still), Ordering::AcqRel);
+            }
+        }
+    }
+
+    /// Bytes of decoded stills held (ready, or decoded and on their way).
+    pub(crate) fn held(&self) -> usize {
+        self.held.load(Ordering::Acquire)
+    }
+
+    /// Play stopped: every still decoded ahead is given back, queued ones
+    /// are not decoded, and ones decoding now are dropped as they land.
+    pub(crate) fn clear(&mut self) {
+        self.drain();
+        {
+            let mut claims = self.claims.lock().unwrap();
+            for key in self.pending.keys() {
+                if !claims.started.contains(key) {
+                    claims.dropped.insert(key.clone());
+                }
+            }
+        }
+        self.pending.clear();
+        for ((still, _), _) in std::mem::take(&mut self.ready).into_values() {
+            self.held.fetch_sub(bytes_of(&still), Ordering::AcqRel);
+        }
     }
 
     /// Queues `path` at `stamp` for decoding as `ask` reads it, unless it is
@@ -162,7 +201,19 @@ impl StillPrefetch {
             *asked = Instant::now();
             return;
         }
-        if self.pending.contains(&key) || self.pending.len() + self.ready.len() >= MAX_READY {
+        if self.pending.contains_key(&key) || self.pending.len() + self.ready.len() >= MAX_READY {
+            return;
+        }
+        // Admitted before it is decoded: at the last still's size, beside
+        // the held and queued ones; with no size known yet, alone.
+        let queued: usize = self.pending.values().sum();
+        let admitted = match self.last_bytes {
+            None if !self.pending.is_empty() => return,
+            None => 0,
+            Some(size) => size,
+        };
+        if self.held.load(Ordering::Acquire) + queued + admitted > self.limit.load(Ordering::Acquire)
+        {
             return;
         }
         if self.worker.is_none() {
@@ -216,7 +267,7 @@ impl StillPrefetch {
         if let Some(worker) = &self.worker
             && worker.ask.send(key.clone()).is_ok()
         {
-            self.pending.insert(key);
+            self.pending.insert(key, admitted);
         }
     }
 
@@ -236,7 +287,7 @@ impl StillPrefetch {
             return None;
         }
         let ((still, _), _) = self.ready.remove(&key)?;
-        self.held.fetch_sub(bytes(&still), Ordering::AcqRel);
+        self.held.fetch_sub(bytes_of(&still), Ordering::AcqRel);
         Some(still)
     }
 
@@ -248,7 +299,7 @@ impl StillPrefetch {
     pub(crate) fn finish_pending(&mut self, path: &Path, stamp: (u64, u128), ask: StillAsk) {
         self.drain();
         let key = (path.to_path_buf(), stamp.0, stamp.1, ask);
-        if !self.pending.contains(&key) {
+        if !self.pending.contains_key(&key) {
             return;
         }
         {
@@ -259,7 +310,7 @@ impl StillPrefetch {
             }
         }
         let deadline = Instant::now() + Duration::from_secs(2);
-        while self.pending.contains(&key) && Instant::now() < deadline {
+        while self.pending.contains_key(&key) && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(1));
             self.drain();
         }
@@ -278,9 +329,16 @@ impl StillPrefetch {
         let now = Instant::now();
         if let Some(worker) = &self.worker {
             while let Ok((key, still)) = worker.answers.try_recv() {
-                self.pending.remove(&key);
-                if let Some(still) = still {
+                let Some(still) = still else {
+                    self.pending.remove(&key);
+                    continue;
+                };
+                self.last_bytes = Some(bytes_of(&still.0));
+                if self.pending.remove(&key).is_some() {
                     self.ready.insert(key, (still, now));
+                } else {
+                    // Dropped while it decoded (play stopped).
+                    self.held.fetch_sub(bytes_of(&still.0), Ordering::AcqRel);
                 }
             }
         }
@@ -288,7 +346,7 @@ impl StillPrefetch {
         self.ready.retain(|_, ((still, _), asked)| {
             let keep = now.duration_since(*asked) < ttl;
             if !keep {
-                held.fetch_sub(bytes(still), Ordering::AcqRel);
+                held.fetch_sub(bytes_of(still), Ordering::AcqRel);
             }
             keep
         });
@@ -463,25 +521,65 @@ mod tests {
         assert_eq!(prefetch.held.load(Ordering::Acquire), 0);
     }
 
-    /// The byte bound counts a still from its decode: one that does not fit
-    /// never reaches the ready set, and the held bytes stay within it.
+    /// Admission comes before the decode: once a still's size is known,
+    /// only the stills that fit beside the held and queued ones are queued
+    /// (a worker's decode allocates the whole still before it is counted).
+    /// While no size is known, one still at a time.
     #[test]
-    fn decoded_stills_are_bounded_before_they_queue() {
+    fn only_stills_that_fit_are_decoded() {
         let (path, stamp) = fixture();
         let pool = FramePool::new(0);
-        let one = bytes(&pm_media::image::read(&path, &pool).unwrap());
+        let one = bytes_of(&pm_media::image::read(&path, &pool).unwrap());
         let mut prefetch = StillPrefetch::with_limits(one * 2, READY_TTL);
-        for n in 0..4u128 {
+        for n in 0..3u128 {
             prefetch.request(&path, (stamp.0, stamp.1 + n), StillAsk::default(), &pool);
         }
+        assert_eq!(prefetch.pending.len(), 1, "no size known yet: one decode");
         settle(&mut prefetch);
-        assert_eq!(prefetch.ready.len(), 2, "two fit");
+        for n in 1..6u128 {
+            prefetch.request(&path, (stamp.0, stamp.1 + n), StillAsk::default(), &pool);
+        }
+        assert_eq!(prefetch.pending.len(), 1, "one more fits beside the held one");
+        settle(&mut prefetch);
+        assert_eq!(prefetch.ready.len(), 2);
         assert_eq!(prefetch.held.load(Ordering::Acquire), one * 2);
+    }
+
+    /// A lower allowance gives held stills back at once (the oldest asked
+    /// for first), down to nothing; play stopping drops them all, and
+    /// stills still decoding when it stopped are dropped as they arrive.
+    #[test]
+    fn a_lower_allowance_or_a_stop_gives_stills_back_at_once() {
+        let (path, stamp) = fixture();
+        let pool = FramePool::new(0);
+        let one = bytes_of(&pm_media::image::read(&path, &pool).unwrap());
+        let mut prefetch = StillPrefetch::with_limits(one * 4, READY_TTL);
+        for n in 0..4u128 {
+            prefetch.request(&path, (stamp.0, stamp.1 + n), StillAsk::default(), &pool);
+            settle(&mut prefetch);
+        }
+        assert_eq!(prefetch.held.load(Ordering::Acquire), one * 4);
+        prefetch.set_limit(one * 2);
+        assert_eq!(prefetch.held.load(Ordering::Acquire), one * 2);
+        assert_eq!(prefetch.ready.len(), 2);
         assert!(
             prefetch
-                .take(&path, stamp, StillAsk::default(), None)
-                .is_some()
+                .take(&path, (stamp.0, stamp.1 + 3), StillAsk::default(), None)
+                .is_some(),
+            "the latest asked for is kept"
         );
-        assert_eq!(prefetch.held.load(Ordering::Acquire), one);
+        prefetch.set_limit(0);
+        assert_eq!(prefetch.held.load(Ordering::Acquire), 0);
+        assert!(prefetch.ready.is_empty());
+
+        prefetch.set_limit(one * 4);
+        prefetch.request(&path, (stamp.0, stamp.1 + 9), StillAsk::default(), &pool);
+        prefetch.clear();
+        assert!(prefetch.pending.is_empty() && prefetch.ready.is_empty());
+        // The decode that was running lands later and is not kept.
+        std::thread::sleep(Duration::from_millis(500));
+        prefetch.drain();
+        assert!(prefetch.ready.is_empty());
+        assert_eq!(prefetch.held.load(Ordering::Acquire), 0);
     }
 }
