@@ -29,19 +29,36 @@ mod pool {
     use std::sync::mpsc::{Receiver, Sender, channel};
     use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
-    /// One call's work, shared with helpers by address. The caller waits
-    /// for every helper it handed this to before the borrow ends.
+    /// One call's work, shared with helpers by address. A helper runs it
+    /// only while the call is open, and the caller closes it and waits for
+    /// the helpers that started it before the borrow ends.
     struct Task {
         work: *const (dyn Fn() + Sync),
         qos: u32,
-        left: Arc<(
-            Mutex<(usize, Option<Box<dyn std::any::Any + Send>>)>,
-            Condvar,
-        )>,
+        call: Arc<Call>,
     }
-    // SAFETY: `work` points at a `Sync` closure that outlives every use (the
-    // caller blocks until `left` reaches zero).
+    // SAFETY: `work` points at a `Sync` closure that outlives every use: a
+    // helper reads it only after counting itself in `running` while the call
+    // is open, and the caller closes the call and waits for `running` to
+    // reach zero before returning.
     unsafe impl Send for Task {}
+
+    #[derive(Default)]
+    struct Call {
+        state: Mutex<CallState>,
+        done: Condvar,
+    }
+
+    #[derive(Default)]
+    struct CallState {
+        /// Helpers inside `work`.
+        running: usize,
+        /// The caller finished: a helper that dequeues the task now skips
+        /// it. A helper busy with another caller's work (another renderer)
+        /// is never waited for.
+        closed: bool,
+        panic: Option<Box<dyn std::any::Any + Send>>,
+    }
 
     struct Pool {
         helpers: Mutex<Vec<Sender<Task>>>,
@@ -58,18 +75,24 @@ mod pool {
                         .name(format!("pm-render-helper-{i}"))
                         .spawn(move || {
                             for task in rx {
+                                {
+                                    let mut state = task.call.state.lock().unwrap();
+                                    if state.closed {
+                                        continue;
+                                    }
+                                    state.running += 1;
+                                }
                                 super::qos::adopt(task.qos);
                                 // SAFETY: see `Task`.
                                 let work = unsafe { &*task.work };
                                 let result =
                                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(work));
-                                let (lock, done) = &*task.left;
-                                let mut left = lock.lock().unwrap();
-                                left.0 -= 1;
+                                let mut state = task.call.state.lock().unwrap();
+                                state.running -= 1;
                                 if let Err(panic) = result {
-                                    left.1.get_or_insert(panic);
+                                    state.panic.get_or_insert(panic);
                                 }
-                                done.notify_all();
+                                task.call.done.notify_all();
                             }
                         })
                         .ok()
@@ -96,7 +119,7 @@ mod pool {
             }
             results.lock().unwrap().extend(done);
         };
-        let left = Arc::new((Mutex::new((0usize, None)), Condvar::new()));
+        let call = Arc::new(Call::default());
         let work_ref: &(dyn Fn() + Sync) = &work;
         // SAFETY: erases the borrow's lifetime; `wait` below outlives every use.
         let ptr: *const (dyn Fn() + Sync) = unsafe { std::mem::transmute(work_ref) };
@@ -105,32 +128,28 @@ mod pool {
             if let Ok(helpers) = pool().helpers.try_lock() {
                 let wanted = n.saturating_sub(1).min(helpers.len());
                 for tx in helpers.iter().take(wanted) {
-                    left.0.lock().unwrap().0 += 1;
-                    if tx
-                        .send(Task {
-                            work: ptr,
-                            qos,
-                            left: left.clone(),
-                        })
-                        .is_err()
-                    {
-                        left.0.lock().unwrap().0 -= 1;
-                    }
+                    // A helper gone (its thread failed) is simply not asked.
+                    let _ = tx.send(Task {
+                        work: ptr,
+                        qos,
+                        call: call.clone(),
+                    });
                 }
             }
         }
         // The caller's own share must not unwind while helpers still read
-        // `work`: wait for them first, then rethrow.
+        // `work`: close the call, wait for the helpers inside it, then
+        // rethrow. Every index is taken once the caller's share returns.
         let mine = std::panic::catch_unwind(std::panic::AssertUnwindSafe(&work));
-        let (lock, done) = &*left;
-        let mut state = lock.lock().unwrap();
-        while state.0 > 0 {
-            state = done.wait(state).unwrap();
+        let mut state = call.state.lock().unwrap();
+        state.closed = true;
+        while state.running > 0 {
+            state = call.done.wait(state).unwrap();
         }
         if let Err(panic) = mine {
             std::panic::resume_unwind(panic);
         }
-        if let Some(panic) = state.1.take() {
+        if let Some(panic) = state.panic.take() {
             std::panic::resume_unwind(panic);
         }
         drop(state);
@@ -200,6 +219,90 @@ mod pool_tests {
             seen.len(),
             pm_model::parallel::workers()
         );
+    }
+
+    /// Two renderers share the helpers. A second caller whose helpers are
+    /// busy with the first caller's work does its own share and returns: it
+    /// never waits for the other caller's work (it waited for all of it).
+    #[test]
+    fn a_second_caller_never_waits_for_the_first_callers_work() {
+        use std::sync::{Condvar, Mutex};
+        use std::time::{Duration, Instant};
+        /// Holds every item of the first call until opened.
+        #[derive(Default)]
+        struct Gate {
+            state: Mutex<(usize, bool)>,
+            turn: Condvar,
+        }
+        impl Gate {
+            fn enter(&self) {
+                let mut g = self.state.lock().unwrap();
+                g.0 += 1;
+                self.turn.notify_all();
+                while !g.1 {
+                    g = self.turn.wait(g).unwrap();
+                }
+            }
+            fn started(&self, n: usize) -> bool {
+                let g = self.state.lock().unwrap();
+                let (g, _) = self
+                    .turn
+                    .wait_timeout_while(g, Duration::from_secs(2), |g| g.0 < n)
+                    .unwrap();
+                g.0 >= n
+            }
+            fn open(&self) {
+                self.state.lock().unwrap().1 = true;
+                self.turn.notify_all();
+            }
+        }
+        /// Opens the gate however the attempt ends.
+        struct Opens<'a>(&'a Gate);
+        impl Drop for Opens<'_> {
+            fn drop(&mut self) {
+                self.0.open();
+            }
+        }
+        let workers = pm_model::parallel::workers();
+        if workers < 2 {
+            return;
+        }
+        // Another test asking for the helpers at the same instant makes the
+        // first call run alone: that attempt proves nothing, try again.
+        for _ in 0..20 {
+            let gate = Gate::default();
+            let attempt = std::thread::scope(|s| {
+                let opens = Opens(&gate);
+                let first = s.spawn(|| {
+                    super::map(4 * workers, |i| {
+                        gate.enter();
+                        i
+                    })
+                });
+                // The first caller and at least one helper are held.
+                if !gate.started(2) {
+                    return None;
+                }
+                let second = s.spawn(|| super::map(8, |i| i * 2));
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while !second.is_finished() && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                let on_its_own = second.is_finished();
+                drop(opens);
+                assert_eq!(first.join().unwrap(), (0..4 * workers).collect::<Vec<_>>());
+                Some((on_its_own, second.join().unwrap()))
+            });
+            if let Some((on_its_own, second)) = attempt {
+                assert!(
+                    on_its_own,
+                    "the second call waited for the first call's work"
+                );
+                assert_eq!(second, (0..8).map(|i| i * 2).collect::<Vec<_>>());
+                return;
+            }
+        }
+        panic!("no helper ever started the first call");
     }
 }
 
