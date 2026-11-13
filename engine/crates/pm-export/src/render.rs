@@ -583,6 +583,20 @@ impl Timeline {
         Ticks::new(self.schedule().tick(n)).expect("schedule clamps document ticks")
     }
 
+    /// Composition time of the grid's frame `n`, counted from the export's
+    /// first frame to either side of it.
+    pub fn tick_at(&self, n: i64) -> Ticks {
+        Ticks::new(self.schedule().tick_at(n)).expect("schedule clamps document ticks")
+    }
+
+    /// The frames of a composition `seconds` long on the export's grid,
+    /// numbered from the export's first frame (`None`: no such length).
+    pub fn composition_frames(&self, seconds: f64) -> Option<std::ops::Range<i64>> {
+        let end = seconds * TICKS_PER_SECOND as f64;
+        (end.is_finite() && end >= 0.0 && end <= crate::schedule::MAX_DOCUMENT_TICK as f64)
+            .then(|| self.schedule().grid(end.round() as i64))
+    }
+
     /// Project samples `[first, end)` of export frame `n` at `rate` Hz.
     pub fn samples(&self, n: u64, sample_rate: u32) -> (i64, i64) {
         self.schedule().samples(n, sample_rate)
@@ -1509,13 +1523,19 @@ where
     } = plan;
     let working = spec.working;
     let frames = spec.frames;
-    // One chroma decimation for each continuous piece of picture.
-    let mut policy = crate::chroma_policy::ChromaPolicy::new(crate::chroma_policy::Delivery {
-        format: spec.input_format(),
-        tags: spec.tags,
-        tone_mapped: request.output_tone.is_some(),
-        postprocessed: frame_post.is_some(),
-    });
+    // One chroma decimation for each continuous piece of the composition's
+    // picture, whatever range of it is exported.
+    let mut policy = crate::chroma_policy::ChromaPolicy::new(
+        crate::chroma_policy::Delivery {
+            format: spec.input_format(),
+            tags: spec.tags,
+            tone_mapped: request.output_tone.is_some(),
+            postprocessed: frame_post.is_some(),
+        },
+        pm_eval::Comp::resolve(&document, &job.composition)
+            .ok()
+            .and_then(|comp| timeline.composition_frames(comp.duration())),
+    );
     let pass = pass_key(job.seed, request.output_size);
     let mut pipeline = Pipeline::new(spec, sink)?;
     let mut mixer = audio.map(|a| {
@@ -1717,7 +1737,7 @@ where
             };
             // Frames are delivered in order; a piece of untouched footage
             // is looked along, by its plans alone, at its first frame.
-            let chroma = policy.frame(n, frames, f.footage, renderer, &mut |renderer, m| {
+            let chroma = policy.frame(n, f.footage, renderer, &mut |renderer, m| {
                 if cancel.load(Ordering::Relaxed) {
                     return None;
                 }
@@ -1725,7 +1745,7 @@ where
                     .footage(
                         &document,
                         &job.composition,
-                        timeline.tick(m),
+                        timeline.tick_at(m),
                         &request,
                         &*job.media,
                     )

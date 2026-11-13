@@ -890,6 +890,158 @@ fn an_untouched_clip_keeps_its_chroma_up_to_a_cut_to_a_touched_one() {
 }
 
 // ---------------------------------------------------------------------------
+// The same composition frames, whatever range is exported
+// ---------------------------------------------------------------------------
+
+/// The encoder inputs of composition frames `range` (of the eight-frame
+/// test composition) exported to ProRes 422 HQ.
+fn deliver_range(
+    layers: Vec<Value>,
+    clips: &[(&str, &std::path::Path)],
+    range: std::ops::Range<u64>,
+) -> Vec<EncoderInput> {
+    let mut settings = settings(
+        ExportFormat::ProRes {
+            profile: WireProRes::Hq,
+        },
+        8,
+    );
+    let tick = |n: u64| Ticks::new(n as i64 * TICKS_PER_SECOND / 24).unwrap();
+    settings.range = TickRange {
+        start: tick(range.start),
+        end: tick(range.end),
+    };
+    let (delivered, _) = deliver_and_filter(layers, clips, settings, |_| {}, None);
+    assert_eq!(delivered.len() as u64, range.end - range.start);
+    delivered
+}
+
+/// The samples (luma and chroma) differing between two encoder inputs.
+fn samples_differing(a: &EncoderInput, b: &EncoderInput) -> usize {
+    let (a, b) = (a.planes[0].u16().unwrap(), b.planes[0].u16().unwrap());
+    assert_eq!(a.len(), b.len());
+    a.iter().zip(b).filter(|(a, b)| a != b).count()
+}
+
+/// Every split of the composition's eight frames into exported ranges
+/// hands the encoder the frames the whole export does.
+fn every_range_delivers_the_whole_exports_frames(
+    label: &str,
+    layers: impl Fn() -> Vec<Value>,
+    clips: &[(&str, &std::path::Path)],
+    ranges: &[std::ops::Range<u64>],
+) -> Vec<EncoderInput> {
+    let whole = deliver_range(layers(), clips, 0..8);
+    for range in ranges {
+        let part = deliver_range(layers(), clips, range.clone());
+        let differing: Vec<usize> = part
+            .iter()
+            .zip(&whole[range.start as usize..])
+            .map(|(a, b)| samples_differing(a, b))
+            .collect();
+        let worst = part
+            .iter()
+            .zip(&whole[range.start as usize..])
+            .map(|(a, b)| planes_differ(a, b))
+            .fold(0.0, f64::max);
+        eprintln!(
+            "MEASURE {label}: frames {range:?} exported alone against the same frames of the whole export: samples differing per frame {differing:?}, worst {worst:.1} codes (10-bit)"
+        );
+        assert!(
+            differing.iter().all(|d| *d == 0),
+            "{label}: frames {range:?} exported alone differ from the whole export's: {differing:?} samples, {worst:.1} codes"
+        );
+    }
+    whole
+}
+
+#[test]
+fn a_work_area_after_a_fade_delivers_the_whole_exports_frames() {
+    let dir = scratch("range-fade");
+    let source = dir.join("clip.mov");
+    still_clip(&source, Codec::ProRes(ProResProfile::Hq), busy_still);
+    // 96 % to 99 %, then 100 % for the last four frames.
+    let layers = || {
+        let mut clip = clip_layer("v", "clip", 0, 8);
+        set(&mut clip, "opacity", held(8, |n| (96 + n).min(100) as f64));
+        vec![clip]
+    };
+    // After the fade; from inside it; the two halves that join into the
+    // whole; a range ending inside the held part.
+    let whole = every_range_delivers_the_whole_exports_frames(
+        "a work area after a fade",
+        layers,
+        &[("clip", &source)],
+        &[4..8, 2..8, 0..4, 5..7, 7..8],
+    );
+    // The whole export filters the run (the fade is part of it).
+    let own = source_planes(&source);
+    assert!(chroma_step(&planes(&whole[6]), &own, 1.0, |_, _| true) > 8.0);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_work_area_before_a_title_delivers_the_whole_exports_frames() {
+    let dir = scratch("range-title");
+    let source = dir.join("clip.mov");
+    still_clip(&source, Codec::ProRes(ProResProfile::Hq), busy_still);
+    // A 16 × 8 title over the footage in the last three frames.
+    let layers = || {
+        let mut title = layer(
+            "title",
+            "solid",
+            json!({ "color": "#FFFFFF", "w": 16, "h": 8 }),
+            0.0,
+            0.0,
+            3.0 / 24.0,
+        );
+        title["from"] = json!(5.0 / 24.0);
+        vec![clip_layer("v", "clip", 0, 8), title]
+    };
+    let whole = every_range_delivers_the_whole_exports_frames(
+        "a work area before a title",
+        layers,
+        &[("clip", &source)],
+        &[0..4, 4..8, 1..3, 0..1, 3..6],
+    );
+    let own = source_planes(&source);
+    assert!(chroma_step(&planes(&whole[1]), &own, 1.0, |_, _| true) > 8.0);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_work_area_inside_untouched_footage_keeps_its_chroma() {
+    let dir = scratch("range-clean");
+    let (a, b) = (dir.join("a.mov"), dir.join("b.mov"));
+    still_clip(&a, Codec::ProRes(ProResProfile::Hq), busy_still);
+    still_clip(&b, Codec::ProRes(ProResProfile::Hq), |x, y| {
+        busy(x + 3, y + 1, 2)
+    });
+    // A clip that fades for three frames, a cut, then an untouched clip to
+    // the composition's end.
+    let layers = || {
+        let mut first = clip_layer("a", "clip", 0, 3);
+        set(&mut first, "opacity", held(3, |n| 90.0 + n as f64));
+        vec![first, clip_layer("b", "other", 3, 5)]
+    };
+    let clips: [(&str, &std::path::Path); 2] = [("clip", &a), ("other", &b)];
+    let whole = every_range_delivers_the_whole_exports_frames(
+        "a work area inside untouched footage",
+        layers,
+        &clips,
+        &[3..8, 5..7, 1..5, 4..8],
+    );
+    // The untouched clip's run ends at the cut behind it: its chroma is its
+    // source's in every range, and the faded clip is filtered.
+    let other = source_planes(&b);
+    let kept: Vec<f64> = (3..8)
+        .map(|n| chroma_step(&planes(&whole[n]), &other, 1.0, |_, _| true))
+        .collect();
+    assert!(kept.iter().all(|s| *s == 0.0), "{kept:.1?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
 // The inverse only when delivery leaves the footage's colour as it is
 // ---------------------------------------------------------------------------
 
