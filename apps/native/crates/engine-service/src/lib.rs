@@ -3074,7 +3074,10 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 || wanted
                 || ask.is_some()
                 || settling.is_some()
-                || runtime.values().any(|r| r.transport.running()),
+                || runtime.values().any(|r| r.transport.running())
+                // An export estimate measures this GPU: fills wait for it,
+                // as for an export.
+                || state.views.values().any(|v| v.export_estimate.is_some()),
         );
         // Its slices give those pictures the GPU first, and a playing
         // viewer's frames their room.
