@@ -47,6 +47,9 @@ impl Format {
             "quality" => matches!(self, Self::Mp4 | Self::Webm),
             "audio" => self.video(),
             "alpha" => matches!(self, Self::Prores | Self::Png | Self::Still),
+            "colorTag" => matches!(self, Self::Prores | Self::Mp4),
+            // A timecode track and PCM are QuickTime's.
+            "timecode" | "audioCoding" => self == Self::Prores,
             _ => true,
         }
     }
@@ -116,6 +119,40 @@ impl DynamicRange {
         *self == Self::Sdr
     }
 }
+/// The label an SDR video carries. Either way the picture is the same codes:
+/// the choice is what a player or a grading suite is told.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ColorTag {
+    /// "Rec.709 (QuickTime and Safari)": sRGB transfer (1-13-1), as v1 writes.
+    #[default]
+    #[serde(rename = "rec709QuickTime")]
+    QuickTime,
+    /// "Rec.709": BT.709 transfer (1-1-1), as broadcast and colour-managed
+    /// timelines expect.
+    #[serde(rename = "rec709")]
+    Rec709,
+}
+impl ColorTag {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+/// How a QuickTime export codes its sound. Older settings have none: 24-bit.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AudioCoding {
+    #[serde(rename = "pcm16")]
+    Pcm16,
+    #[default]
+    #[serde(rename = "pcm24")]
+    Pcm24,
+    #[serde(rename = "pcmFloat")]
+    PcmFloat,
+}
+impl AudioCoding {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Scale {
@@ -150,6 +187,16 @@ pub struct Options {
     /// export always reads originals.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub use_proxies: bool,
+    /// The colour label of an SDR ProRes or MP4.
+    #[serde(default, skip_serializing_if = "ColorTag::is_default")]
+    pub color_tag: ColorTag,
+    /// The start timecode of a QuickTime export, `HH:MM:SS:FF` (`;FF` for
+    /// drop-frame). Empty: the composition's own time at the first frame.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub timecode: String,
+    /// The sound coding of a QuickTime export.
+    #[serde(default, skip_serializing_if = "AudioCoding::is_default")]
+    pub audio_coding: AudioCoding,
     /// Migration/extension fields survive every remember/preset round trip.
     #[serde(flatten)]
     pub opaque: BTreeMap<String, Value>,
@@ -176,6 +223,9 @@ impl Options {
             depth: eight(),
             dynamic_range: DynamicRange::default(),
             use_proxies: false,
+            color_tag: ColorTag::default(),
+            timecode: String::new(),
+            audio_coding: AudioCoding::default(),
             opaque: BTreeMap::new(),
         }
     }
@@ -203,19 +253,58 @@ impl Options {
         }
         Ok(())
     }
+    /// The start timecode as the engine takes it, checked against the export
+    /// rate: every field in range, drop-frame only where the rate has it.
+    fn start_timecode(&self) -> Result<pm_protocol::priority::ExportTimecode, String> {
+        let rate = pm_time::rate_from_document(None, self.fps)
+            .map_err(|e| e.to_string())?
+            .rate;
+        let drop_frame = self.timecode.contains(';');
+        let format = if drop_frame {
+            pm_time::TimecodeFormat::drop_frame(rate)
+                .map_err(|_| "Drop-frame timecode (;) needs 29.97 or 59.94 fps.".to_string())?
+        } else {
+            pm_time::TimecodeFormat::non_drop(rate)
+        };
+        format
+            .parse(&self.timecode)
+            .map_err(|_| "Start timecode must be HH:MM:SS:FF at this frame rate.".to_string())?;
+        Ok(pm_protocol::priority::ExportTimecode {
+            start: self.timecode.clone(),
+            drop_frame,
+            reel: None,
+        })
+    }
     /// Effective field support, without modifying dormant authored options.
     /// Engine JobSpec mapping must use this intent (straight alpha, original
     /// media only). PMV uses save_project instead.
     pub fn intent(&self, has_audio: bool, caption_layers: usize) -> Result<Intent, String> {
         self.validate()?;
         let f = self.format;
+        let audio = f.reads("audio") && has_audio && self.audio;
+        let dynamic_range = if matches!(self.format, Format::Prores | Format::Mp4) {
+            self.dynamic_range
+        } else {
+            DynamicRange::Sdr
+        };
         Ok(Intent {
             options: self.clone(),
-            audio: f.reads("audio") && has_audio && self.audio,
-            dynamic_range: if matches!(self.format, Format::Prores | Format::Mp4) {
-                self.dynamic_range
+            audio,
+            dynamic_range,
+            color_tag: if f.reads("colorTag") && dynamic_range.is_sdr() {
+                self.color_tag
             } else {
-                DynamicRange::Sdr
+                ColorTag::default()
+            },
+            timecode: if f.reads("timecode") && !self.timecode.is_empty() {
+                Some(self.start_timecode()?)
+            } else {
+                None
+            },
+            audio_coding: if f.reads("audioCoding") && audio {
+                self.audio_coding
+            } else {
+                AudioCoding::default()
             },
             straight_alpha: f.reads("alpha")
                 && (f != Format::Prores || self.profile.engine().supports_alpha())
@@ -284,6 +373,9 @@ pub struct Intent {
     pub options: Options,
     pub audio: bool,
     pub dynamic_range: DynamicRange,
+    pub color_tag: ColorTag,
+    pub timecode: Option<pm_protocol::priority::ExportTimecode>,
+    pub audio_coding: AudioCoding,
     pub straight_alpha: bool,
     pub motion_blur: bool,
     pub burn_captions: bool,
@@ -326,6 +418,9 @@ impl Intent {
             Format::Still => ExportFormat::PngStill { sixteen_bit },
         };
         planned.color = match self.dynamic_range {
+            DynamicRange::Sdr if self.color_tag == ColorTag::Rec709 => {
+                pm_protocol::color::OutputColor::Rec709Broadcast
+            }
             DynamicRange::Sdr => planned.color,
             DynamicRange::Pq => pm_protocol::color::OutputColor::Rec2100Pq,
             DynamicRange::Hlg => pm_protocol::color::OutputColor::Rec2100Hlg,
@@ -350,6 +445,12 @@ impl Intent {
                 self.options.format,
                 Format::Prores | Format::Mp4 | Format::Webm | Format::Png
             );
+        planned.delivery.timecode = self.timecode.clone();
+        planned.delivery.audio_coding = match self.audio_coding {
+            AudioCoding::Pcm24 => None,
+            AudioCoding::Pcm16 => Some(pm_protocol::priority::AudioCoding::Pcm16),
+            AudioCoding::PcmFloat => Some(pm_protocol::priority::AudioCoding::PcmFloat),
+        };
         planned.delivery.hide_captions = !self.burn_captions;
         planned.delivery.preview = true;
         // Still-frame timing is entirely the planner's (current playhead).

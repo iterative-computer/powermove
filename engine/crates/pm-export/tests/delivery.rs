@@ -516,9 +516,9 @@ fn delivery_options_reach_the_file() {
         if codec == "lpcm" {
             assert_eq!((a.bits_per_channel, a.float), (bits, float), "{coding:?}");
         }
-        // The mix length: ceil(range × 48000) for the one-second range,
-        // though its 30 frames at 29.97 fps last 1.001 s.
-        assert_eq!(a.samples, 48_000, "{coding:?}");
+        // The mix length is the frames' span: 30 frames at 29.97 fps last
+        // 1.001 s, 48,048 samples.
+        assert_eq!(a.samples, 48_048, "{coding:?}");
         let tc = r.timecode.as_ref().unwrap();
         // 01:00:00;00 at 29.97 drop-frame is frame 107892.
         assert_eq!(

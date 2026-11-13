@@ -176,8 +176,8 @@ through; clipping happens only at output.
   against the linear upsampler (35 CV on an H.264 round trip, failing
   invariant (1)). `VERTICAL_420` is `[−1, 3, 3, −1] / 4` on rows 2y − 1 to
   2y + 2, the exact inverse of linear upsampling, also at clamped edges.
-  `pm-export`'s `420v` conversion uses it (a minimal change in that lane's
-  `convert.rs`).
+  `pm-export` uses it only for untouched footage; rendered frames take the
+  band-limited `TENT_COSITED` / `TENT_CENTERED` kernels.
 - `pm_color::alpha`: section 9's premultiplication rules (identity inputs use
   premultiplied sources as they are; other inputs unpremultiply guarded below
   α = 1/4096, transform, re-premultiply; additive pixels are never

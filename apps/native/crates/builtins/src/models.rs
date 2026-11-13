@@ -991,6 +991,9 @@ impl Backend {
                 "depth",
                 "dynamicRange",
                 "useProxies",
+                "colorTag",
+                "timecode",
+                "audioCoding",
                 "preset",
                 "presetName"
             ]))?;
@@ -1132,7 +1135,7 @@ impl Backend {
                 | "export.closeFailure"
         ) && matches!(
             self.native.export["run"]["phase"].as_str(),
-            Some("choosingDestination" | "preparing" | "rendering" | "cancelling")
+            Some("choosingDestination" | "preparing" | "rendering" | "checking" | "cancelling")
         ) {
             return Err("Export is in progress".into());
         }
