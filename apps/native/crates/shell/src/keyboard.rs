@@ -108,8 +108,12 @@ fn matches(binding: &Binding, key: &Key) -> bool {
 }
 impl Resolver {
     pub fn new() -> Self {
+        Self::with(shipped())
+    }
+    /// A resolver over `bindings` (the shell gives it the keymap in use).
+    pub fn with(bindings: Vec<Binding>) -> Self {
         Self {
-            bindings: crate::keymap::current(),
+            bindings,
             ..Default::default()
         }
     }

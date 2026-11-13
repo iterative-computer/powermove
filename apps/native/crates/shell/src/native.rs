@@ -2076,7 +2076,7 @@ impl Host {
             observer: None,
             registration: None,
             monitor: None,
-            resolver: Resolver::new(),
+            resolver: Resolver::with(crate::keymap::current()),
             contributed: vec![],
             recording: false,
             events: HashMap::new(),
