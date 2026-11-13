@@ -551,6 +551,11 @@ fn compile(
             compiled.sheet = compiled.sheet.bg(well(t));
         }
     }
+    // The hex beside it draws no well of its own, with or without an editor
+    // (a locked layer's hex is the dimmed value with no editor).
+    if in_colour && component == Some(Component::TextField) {
+        compiled.sheet.background = None;
+    }
     let in_row = node
         .parent
         .and_then(|p| surface.node(p))

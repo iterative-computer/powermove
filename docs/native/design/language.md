@@ -336,6 +336,10 @@ panels built from `InspectorRow`), from the kit, so a panel never sets it:
   panel; the value column takes the rest and is never under
   `metrics.value_column`. A trailing control (a scale's link) stands
   outside the value column.
+- A split value (Position, Scale, Anchor Point) is two wells with no X or
+  Y letters: the values first, as After Effects shows them; the row's
+  label names the property. A locked layer shows each value once, dimmed,
+  in the same wells.
 - Three ranks, one size apart at most: the panel's title (Title), then the
   layer's name and section headings (Label: 12 medium, text ink; the kind
   after the name in the muted ink), then row labels (Body, secondary ink)

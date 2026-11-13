@@ -1761,6 +1761,12 @@ impl SurfaceView {
             )
             .into_any_element()
     }
+    /// Whether a node's number is drawn with it (scrub values and wells with
+    /// no editor). A disabled field draws its value once, dimmed, through
+    /// [`Self::disabled_field_text`], so not here too.
+    pub(crate) fn draws_number(&self, node: &NodeView) -> bool {
+        node.number.is_some() && self.disabled_field_text(node).is_none()
+    }
     /// What a disabled text or number field shows: its value as the editor
     /// would (number precision, then the unit).
     pub(crate) fn disabled_field_text(&self, node: &NodeView) -> Option<String> {
@@ -2251,7 +2257,7 @@ impl SurfaceView {
         if let Some(text) = &node.text {
             element = element.child(text.clone());
         }
-        if let Some(number) = node.number {
+        if let Some(number) = node.number.filter(|_| self.draws_number(node)) {
             let shown = self
                 .scrub_shown
                 .filter(|(id, _)| *id == node.id)
