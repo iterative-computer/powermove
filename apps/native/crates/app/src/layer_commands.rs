@@ -220,6 +220,8 @@ fn timeline_owned(name: &str) -> bool {
             | "graph"
             | "timeline.adjacentKeyframe:prev"
             | "timeline.adjacentKeyframe:next"
+            | "prevVisibleEvent"
+            | "nextVisibleEvent"
             | "timeline.revealAll"
     ) || name.starts_with("timeline.revealProperty:")
 }

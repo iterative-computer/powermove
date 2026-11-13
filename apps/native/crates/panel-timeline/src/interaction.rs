@@ -258,32 +258,28 @@ impl TimelineModel {
             "timeline.adjacentKeyframe:prev" | "timeline.adjacentKeyframe:next" => self
                 .adjacent_key(if id.ends_with("prev") { -1 } else { 1 }, time, None)
                 .map_or_else(Plan::default, Plan::seek),
+            // The stops After Effects counts as visible: the composition's
+            // ends, the work area's, markers, layer ends and keyframes.
             "prevVisibleEvent" | "nextVisibleEvent" => {
-                let direction = if id.starts_with("prev") { -1 } else { 1 };
-                let mut events = vec![0., duration];
+                let mut events = vec![0., duration, self.index.work[0], self.index.work[1]];
+                events.extend(self.index.markers.iter().map(|m| m.time));
                 for l in &self.index.layers {
                     events.extend([l.from, l.from + l.duration]);
                     for c in &l.channels {
                         events.extend(c.keys.iter().map(|k| l.from + k.time));
                     }
                 }
+                events.retain(|t| t.is_finite() && *t >= 0. && *t <= duration);
                 for e in &mut events {
-                    *e = (*e * 10000.).round() / 10000.;
+                    *e = (*e * 1e6).round() / 1e6;
                 }
                 events.sort_by(f64::total_cmp);
-                let next = if direction > 0 {
-                    events
-                        .into_iter()
-                        .find(|t| *t > time + 1e-4)
-                        .unwrap_or(duration)
+                let next = if id.starts_with("next") {
+                    events.into_iter().find(|t| *t > time + 1e-5)
                 } else {
-                    events
-                        .into_iter()
-                        .rev()
-                        .find(|t| *t < time - 1e-4)
-                        .unwrap_or(0.)
+                    events.into_iter().rev().find(|t| *t < time - 1e-5)
                 };
-                Plan::seek(next)
+                next.map_or_else(Plan::default, Plan::seek)
             }
             "gotoLayerIn" | "gotoLayerOut" => {
                 let selected: Vec<_> = self

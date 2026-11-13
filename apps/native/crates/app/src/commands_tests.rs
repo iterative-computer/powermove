@@ -319,6 +319,32 @@ fn layer_keys_step_the_playhead_and_reveal_keys_show_properties(cx: &mut TestApp
     press(&mut s, cx, "t");
     assert!(rows(&s) > collapsed, "T reveals Opacity");
 }
+/// J and K, stopped: the shuttle declines and the keys walk every stop in
+/// the timeline (the shipped `timelineEventTimes`), not only layer ends.
+#[gpui::test]
+fn j_and_k_stop_on_keyframes_markers_and_the_work_area(cx: &mut TestAppContext) {
+    let project = r##"{"id":"integration","name":"Stops","compId":"c","w":640,"h":360,"fps":30,"dur":10,"bg":"#000000","assets":{},"comps":{},"work":[1,6],"markers":[{"id":"m1","t":4}],"layers":[{"id":"l0","type":"shape","name":"Box","from":0.5,"dur":8,"on":true,"p":{"opacity":{"v":100,"kf":[{"i":"k1","t":1.5,"v":0},{"i":"k2","t":2.5,"v":100}]},"x":{"v":10,"kf":[]},"y":{"v":20,"kf":[]},"sx":{"v":100,"kf":[]},"sy":{"v":100,"kf":[]},"r":{"v":0,"kf":[]}},"d":{"w":100,"h":100},"fx":[]}]}"##;
+    let mut s = stage_project(cx, project.into());
+    assert_eq!(dispatch("k").0, "nextVisibleEvent");
+    assert_eq!(dispatch("j").0, "prevVisibleEvent");
+    let mut stops = vec![];
+    for _ in 0..8 {
+        press(&mut s, cx, "k");
+        stops.push(*s.recorder.time.borrow());
+    }
+    // Layer in, work-area start, a key (layer time 1.5 s), a key, the
+    // marker, the work area's end, layer out, the composition's end.
+    assert_eq!(stops, [0.5, 1., 2., 3., 4., 6., 8.5, 10.]);
+    // K at the last stop stays; J walks them back to the start.
+    press(&mut s, cx, "k");
+    assert_eq!(*s.recorder.time.borrow(), 10.);
+    let mut back = vec![];
+    for _ in 0..8 {
+        press(&mut s, cx, "j");
+        back.push(*s.recorder.time.borrow());
+    }
+    assert_eq!(back, [8.5, 6., 4., 3., 2., 1., 0.5, 0.]);
+}
 #[gpui::test]
 fn layer_paste_plans_a_copy_at_the_playhead_and_undo_removes_it(cx: &mut TestAppContext) {
     let mut s = stage(cx, 1);
