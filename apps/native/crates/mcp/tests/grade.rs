@@ -145,3 +145,69 @@ fn every_color_panel_action_has_an_agent_route() {
     ]);
     assert!(f.fx().iter().all(|fx| fx["type"] != "colorCurves"));
 }
+
+/// Relinking a LUT, as Load LUT… does for a person: the existing Apply Color
+/// LUT takes the new asset in place, keeping its identity, encodings and its
+/// animated Amount, in one Undo step.
+#[test]
+fn an_agent_relinks_the_lut_of_an_existing_effect() {
+    let f = Fixture::new();
+    let lut = f.agent(vec![
+        json!({"type":"add_effect","target":"clip","effect":"applyColorLut",
+        "inputs":{"lut":{"kind":"asset","assetId":"gone"}},
+        "parameters":{"inputSpace":10,"outputSpace":4}}),
+    ])[0]["effectId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    f.agent(vec![
+        json!({"type":"replace_keyframes","target":"clip","path":format!("{lut}.amount"),
+            "keyframes":[{"time":0,"value":20},{"time":1,"value":80}]}),
+    ]);
+    let before = f.fx()[0].clone();
+    let result = f.agent(vec![
+        json!({"type":"set_effect","target":"clip","effect":lut,
+        "patch":{"inputs":{"lut":{"kind":"asset","assetId":"replacement"}}}}),
+    ]);
+    assert_eq!(result[0]["effectId"], lut.as_str());
+    let after = f.fx();
+    assert_eq!(after.len(), 1, "relinked in place, not added");
+    let relinked = &after[0];
+    assert_eq!(relinked["id"], lut.as_str());
+    assert_eq!(relinked["inputs"]["lut"]["assetId"], "replacement");
+    assert_eq!(relinked["p"], before["p"], "values and keys kept");
+    assert_eq!(relinked["p"]["amount"]["kf"].as_array().unwrap().len(), 2);
+    assert_eq!(relinked["p"]["inputSpace"]["v"], 10);
+    // A reference that is not a reference is refused by the kernel's check.
+    let project = f.host.lock().unwrap().read_document(&f.id).unwrap();
+    let state = pm_kernel::state::StateSnapshot::seeded();
+    let bad = pm_mcp::commands::plan_with_definitions(
+        &project,
+        &[],
+        &[json!({"type":"set_effect","target":"clip","effect":lut,
+            "patch":{"inputs":{"lut":{"kind":"asset","assetId":""}}}})],
+        0.,
+        Some(&state),
+    )
+    .and_then(|batch| {
+        let mut h = f.host.lock().unwrap();
+        let revision = h.revision(&f.id).unwrap();
+        h.apply_commands(
+            &f.id,
+            batch.commands,
+            "Grade",
+            pm_kernel::Origin::Agent,
+            revision,
+            907,
+        )
+    });
+    assert!(bad.is_err(), "an empty asset id is refused");
+    assert_eq!(f.fx()[0]["inputs"]["lut"]["assetId"], "replacement");
+    // One Undo returns the old link.
+    f.host
+        .lock()
+        .unwrap()
+        .undo(&f.id, pm_kernel::Origin::Agent, 907)
+        .unwrap();
+    assert_eq!(f.fx()[0], before);
+}

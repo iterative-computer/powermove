@@ -830,7 +830,7 @@ fn plan_on(
                     .ok_or_else(|| Error::invalid("Effect patch must be an object"))?;
                 if object
                     .keys()
-                    .any(|k| !["enabled", "open", "index"].contains(&k.as_str()))
+                    .any(|k| !["enabled", "open", "index", "inputs"].contains(&k.as_str()))
                 {
                     return Err(Error::invalid("Unsupported effect field"));
                 }
