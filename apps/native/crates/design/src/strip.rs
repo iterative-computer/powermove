@@ -75,7 +75,8 @@ pub struct Strip {
     pub primary: u32,
 }
 
-/// The playhead: a 1 px line with a round head in the ruler.
+/// The playhead, as v1 (Electron) draws it: a 1 px accent line under an
+/// accent pin (flat top, pointed foot) resting on the foot of the ruler.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Playhead {
     pub color: u32,
@@ -83,7 +84,10 @@ pub struct Playhead {
     /// strips of any hue, as (colour, alpha).
     pub halo: (u32, f32),
     pub line: f32,
+    /// The pin's width and height (pt).
     pub head: f32,
+    /// The gap between the pin's point and the foot of the ruler (pt).
+    pub head_foot: f32,
 }
 
 /// The trim grip: a short rounded pill inside the hovered strip's near edge.
@@ -350,10 +354,12 @@ impl Tokens {
     }
     pub fn playhead(&self) -> Playhead {
         Playhead {
-            color: self.colors.text,
+            // Powermove orange, as v1: the ruler's one bright mark.
+            color: self.colors.accent,
             halo: (self.colors.panel, 0.6),
             line: self.metrics.border,
-            head: 9.,
+            head: 11.,
+            head_foot: 1.,
         }
     }
     pub fn trim_grip(&self) -> TrimGrip {

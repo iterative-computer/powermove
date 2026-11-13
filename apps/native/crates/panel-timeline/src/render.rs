@@ -1774,28 +1774,25 @@ impl Frame {
         if x < v.layer_column || x > v.width {
             return Ok(vec![]);
         }
-        // pm-design `playhead`: a hairline with a round head resting in the
-        // ruler; it passes over everything.
+        // pm-design `playhead` (v1's): a hairline under a pin whose point
+        // rests on the foot of the ruler; it passes over everything.
         let p = t.playhead();
         let (line, d) = (p.line as f64, p.head as f64);
-        let top = (t.metrics.ruler as f64 - d - 3.).max(0.);
+        let top = (t.metrics.ruler as f64 - p.head_foot as f64 - d).max(0.);
         let mut head = Op::new(
             "playhead-head",
             "ph-head",
             Rect::new(x - d / 2., top, d, d),
             p.color,
         );
-        head.detail = json!({"topRadius":d / 2.,"bottomRadius":d / 2.});
+        head.detail = json!({"pin":true});
+        // The line starts inside the pin, just above its point.
+        let from = top + d - 1.;
         Ok(vec![
             Op::new(
                 "playhead-line",
                 "rect",
-                Rect::new(
-                    x - line / 2.,
-                    top + d / 2.,
-                    line,
-                    (v.height - top - d / 2.).max(0.),
-                ),
+                Rect::new(x - line / 2., from, line, (v.height - from).max(0.)),
                 p.color,
             ),
             head,

@@ -89,7 +89,12 @@ impl Controller {
         }
     }
     pub fn toggle_skimming(&mut self, cx: &mut Context<Self>) {
-        self.skimming.on = !self.skimming.on;
+        self.set_skimming(!self.skimming.on, cx);
+    }
+    /// Settings › General › Timeline › Hover to Scrub, and View ▸ Skimming:
+    /// one saved choice.
+    pub fn set_skimming(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.skimming.on = on;
         save(self.profile.clone(), self.skimming.on, self.skimming.audio);
         self.apply_skimming(cx);
     }

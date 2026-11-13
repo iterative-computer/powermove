@@ -3780,6 +3780,67 @@ fn powermove_account_rows_and_actions_reach_the_app_through_settings() {
         assert!(backend.native.platform.is_empty());
     }
 }
+/// Settings › General › Timeline › Hover to Scrub: the app's skimming choice
+/// (View ▸ Skimming), on until turned off, shown with or without a project,
+/// written through the app, and republished when the menu changes it.
+#[test]
+fn hover_to_scrub_is_a_settings_switch_that_follows_and_drives_skimming() {
+    let actor = actor();
+    let identity = pm_surface::host_api::Identity {
+        realm: "settings".into(),
+        generation: 1,
+        project: "synthetic".into(),
+    };
+    let mut backend = data::Backend::new(actor.handle(), identity, "settings", false).unwrap();
+    let skim = |p: &Value| {
+        p["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["id"] == "timeline.skimming")
+            .cloned()
+            .unwrap()
+    };
+    // Never chosen: on, as hovering has always scrubbed.
+    let first = backend.settings_snapshot().unwrap();
+    let row = skim(&first);
+    assert_eq!(row["control"], "switch");
+    assert_eq!(row["section"], "general");
+    assert_eq!(row["label"], "Hover to Scrub");
+    assert_eq!(row["value"], true);
+    assert!(row["binding"].as_str().is_some_and(|b| !b.is_empty()));
+    // Turned off in Settings: the app is told, and the row shows it at once.
+    backend.native.platform.clear();
+    let models::NativeCommand::Value(after) = backend
+        .native_command(
+            "panel.settings",
+            &json!({"revision":first["revision"],"action":{"type":"write","id":"timeline.skimming","value":false}}),
+        )
+        .unwrap()
+    else {
+        panic!("the new publication")
+    };
+    assert_eq!(
+        backend.native.platform,
+        [("command".to_owned(), json!({ "name": "skimmingOff" }))]
+    );
+    assert_eq!(skim(&after)["value"], false);
+    // Only on or off.
+    let latest = backend.settings_snapshot().unwrap();
+    assert!(
+        backend
+            .native_command(
+                "panel.settings",
+                &json!({"revision":latest["revision"],"action":{"type":"write","id":"timeline.skimming","value":"yes"}}),
+            )
+            .is_err()
+    );
+    // View ▸ Skimming turned it back on: a new publication shows it.
+    backend.native.facts["skimming"] = json!(true);
+    let menu = backend.settings_snapshot().unwrap();
+    assert_ne!(menu["revision"], latest["revision"]);
+    assert_eq!(skim(&menu)["value"], true);
+}
 /// A press from an older Settings publication acts only on the account or
 /// provider that publication showed: provider B replacing A, or another
 /// account signing in, refuses a stale Disconnect / Sign Out / Delete.

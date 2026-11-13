@@ -665,7 +665,15 @@ fn compile(
     }
     let selected = node.props.get("aria-selected") == Some(&Value::Bool(true))
         || node.props.get("state").and_then(|s| s.get("selected")) == Some(&Value::Bool(true));
-    if selected {
+    // A tab that marks its selection with a rule of its own (the Timeline's
+    // composition tabs, as v1) takes no selected ground.
+    let ruled = node
+        .props
+        .get("metadata")
+        .and_then(|m| m.get("selectionMark"))
+        .and_then(Value::as_str)
+        == Some("rule");
+    if selected && !ruled {
         compiled.sheet = compiled.sheet.bg(rgb(t.colors.selected_fill));
     }
     let header_id = node.props.get("id").and_then(Value::as_str);
