@@ -11,6 +11,11 @@ pub struct Equivalent {
 pub fn equivalents() -> Vec<Equivalent> {
     serde_json::from_str(include_str!("../data/menu-equivalents.json")).unwrap()
 }
+/// A command whose key the menu bar itself matches (Save, Undo): its key is
+/// not the keymap's to change.
+pub fn is_equivalent(command: &str) -> bool {
+    equivalents().iter().any(|e| e.command == command)
+}
 #[derive(Clone, Debug)]
 pub struct Item {
     pub label: String,
@@ -64,7 +69,7 @@ pub const DISPLAY_ONLY: [&str; 3] = ["Layer", "Timeline", "tools"];
 pub const SUBMENUS: [&str; 4] = ["openRecent", "workspaces", "panels", "tools"];
 /// Items of the View ▸ Tools submenu, in toolbar order (registry chords).
 pub fn tools() -> Vec<Item> {
-    let keymap = crate::keyboard::shipped();
+    let keymap = crate::keymap::current();
     [
         ("Select", "toolSelect"),
         ("Hand", "toolHand"),
@@ -87,7 +92,7 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
     };
     let sep = || Item::command("", "", "");
     // Registry-only commands, labelled for the menu bar, with their W1 chords.
-    let keymap = crate::keyboard::shipped();
+    let keymap = crate::keymap::current();
     let r = |label: &str, command: &str| Item::registered(&keymap, label, command, json!([]));
     let r_args = |label: &str, command: &str, args| Item::registered(&keymap, label, command, args);
     let k = Item::command;
@@ -151,6 +156,8 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
                 k("Ripple Delete", "rippleDelete", ""),
                 k("Lift Work Area", "liftWorkArea", ""),
                 k("Extract Work Area", "extractWorkArea", ""),
+                sep(),
+                k("Keyboard Shortcuts…", "keyboardShortcuts", ""),
                 m("contextSelectAll"),
                 r("Deselect All", "deselect"),
                 sep(),
@@ -396,7 +403,7 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
 /// is built beside them; align and distribute are buttons in Properties):
 /// the palette lists them under the menu named, with their keys.
 pub fn extras() -> Vec<(&'static str, Item)> {
-    let keymap = crate::keyboard::shipped();
+    let keymap = crate::keymap::current();
     let view =
         |label: &str, command: &str| ("View", Item::registered(&keymap, label, command, json!([])));
     let layer = |label: &str, command: &str, how: &str| {

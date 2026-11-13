@@ -1,6 +1,6 @@
 //! Kernel-owned facts and contribution metadata. No DOM, JS closures or runtime.
 use crate::{
-    library::{LibraryError, LibraryStore, STATIC_KEYS},
+    library::{LibraryError, LibraryStore, NATIVE_KEYS, STATIC_KEYS},
     tx::Writer,
 };
 use pm_model::json::{Value, parse};
@@ -113,7 +113,7 @@ impl StateSnapshot {
     }
     pub fn load(store: &LibraryStore) -> Result<Self, LibraryError> {
         let mut s = Self::seeded();
-        for key in STATIC_KEYS {
+        for key in STATIC_KEYS.into_iter().chain(NATIVE_KEYS) {
             if is_setting(key)
                 && let Some(v) = store.read(key)?
             {
@@ -323,8 +323,9 @@ impl StateSnapshot {
     }
 }
 pub fn is_setting(key: &str) -> bool {
-    (STATIC_KEYS.contains(&key)
-        && !["projects", "projectTrash", "autosave", "takes"].contains(&key))
+    NATIVE_KEYS.contains(&key)
+        || (STATIC_KEYS.contains(&key)
+            && !["projects", "projectTrash", "autosave", "takes"].contains(&key))
         || matches!(crate::library::parse_key(key), Some(crate::library::StoreKey::Dynamic { prefix, .. }) if matches!(prefix.as_str(), "agentModel" | "agentThreads" | "agentAttachment" | "ext"))
 }
 fn workspace_id(record: &Value) -> Option<&str> {

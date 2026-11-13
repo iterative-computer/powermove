@@ -36,7 +36,8 @@ fn undo(s: &mut Stage, cx: &mut TestAppContext) {
 /// The first routed command a chord reaches; earlier bindings decline, as
 /// `blurField` does outside a text field.
 pub(crate) fn dispatch(chord: &str) -> (String, Vec<serde_json::Value>) {
-    let mut resolver = Resolver::new();
+    // The keys the shell resolves: the keymap in use on this thread.
+    let mut resolver = Resolver::with(pm_shell::keymap::current());
     let mut effects = resolver.submit(Key {
         token: 1,
         chord: chord.into(),
