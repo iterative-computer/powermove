@@ -1744,6 +1744,12 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             None
         }
     });
+    // Diagnostic (traced viewers, `PM_ENGINE_TRACE_PICTURES=1`): every
+    // playing frame is read back as it was drawn and its row carries a hash
+    // of the pixels, so two builds can be compared playing frame by playing
+    // frame. The readback costs time: never on in a timing run.
+    let trace_pictures =
+        recorder.is_some() && std::env::var_os("PM_ENGINE_TRACE_PICTURES").is_some();
     // Diagnostic A/B only: the pre-latency-pass schedule (re-present every
     // tick, picture for the target vsync, unaligned audio start).
     let legacy = std::env::var("PM_ENGINE_PRESENT").as_deref() == Ok("legacy");
@@ -1943,6 +1949,11 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             }
             if let Some(v) = state.views.get_mut(&f.id) {
                 let t = f.submission.trace.lock().unwrap();
+                // A playing frame read back for the trace alone: not a capture.
+                let traced_picture = trace_pictures
+                    && f.spec.moment == Moment::Playing
+                    && f.submission.readback.is_some();
+                let captured = f.submission.readback.is_some() && !traced_picture;
                 if let Some(recorder) = &recorder {
                     let mut row = serde_json::json!({"display":t.display,"worker":t.worker_start,"completed":t.completed,"commit":t.commit,
                         "input":f.input,"audio_host":f.audio_host,"time":f.spec.time.get(),"scale":f.spec.scale,"moment":format!("{:?}",f.spec.moment),"disk":t.disk,"disk_wait_ms":t.disk_wait_ms,"enter_ms":t.enter_ms,"disk_upload_ms":t.disk_upload_ms,"cache_hit":t.cache_hit,
@@ -1964,6 +1975,13 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                             "stand_ins": f.submission.stand_ins, "late_layers": f.late_layers,
                             "skipped_targets": v.status.skipped_targets, "held_frames": v.status.held_frames,
                             "render_gpu_ms": render_gpu_ms,
+                            "picture": traced_picture.then(|| {
+                                let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+                                for c in f.submission.pixels().iter().flatten() {
+                                    hash = (hash ^ c.to_bits()).wrapping_mul(0x0000_0100_0000_01b3);
+                                }
+                                format!("{hash:016x}")
+                            }),
                         }),
                     ) {
                         row.extend(more);
@@ -1973,18 +1991,10 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                             Some("viewer diagnostic trace overflow/disconnected".into());
                     }
                 }
-                if v.stamp != f.stamp
-                    && !only_moved(
-                        v,
-                        f.stamp,
-                        f.moves,
-                        f.spec.moment,
-                        f.submission.readback.is_some(),
-                    )
-                {
+                if v.stamp != f.stamp && !only_moved(v, f.stamp, f.moves, f.spec.moment, captured) {
                     v.status.stale_rejections += 1;
                     // Its readback is for a stamp no one shows: ask again.
-                    v.capture |= f.submission.readback.is_some();
+                    v.capture |= captured;
                     continue;
                 }
                 if represent && v.commands.is_empty() {
@@ -2005,18 +2015,23 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 // Captured pixels are delivered only from an exact frame: a
                 // paused, full-resolution picture with no stand-in and no
                 // disk frame. Anything else is asked again.
-                let readback = f.submission.readback.as_ref().filter(|_| {
-                    let exact = f.spec.exact
-                        && f.spec.moment == Moment::Paused
-                        && f.spec.scale >= 1.
-                        && !f.submission.stand_ins
-                        && t.disk != 2;
-                    if !exact {
-                        v.capture = true;
-                        v.dirty = true;
-                    }
-                    exact
-                });
+                let readback = f
+                    .submission
+                    .readback
+                    .as_ref()
+                    .filter(|_| captured)
+                    .filter(|_| {
+                        let exact = f.spec.exact
+                            && f.spec.moment == Moment::Paused
+                            && f.spec.scale >= 1.
+                            && !f.submission.stand_ins
+                            && t.disk != 2;
+                        if !exact {
+                            v.capture = true;
+                            v.dirty = true;
+                        }
+                        exact
+                    });
                 v.status.frame = Some(FrameReport {
                     stamp: f.stamp,
                     time: f.spec.time,
@@ -2658,7 +2673,8 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 Ok(true) => provider
                     .map_or_else(|| Ok(overlays), |p| p(&scene.doc, &scene.comp, spec.time))
                     .and_then(|overlays| {
-                        engine.frame(&scene, spec, layer.as_ref(), &overlays, capture, trace)
+                        let read = capture || (trace_pictures && spec.moment == Moment::Playing);
+                        engine.frame(&scene, spec, layer.as_ref(), &overlays, read, trace)
                     }),
                 // Given way: the newer picture is drawn next.
                 Ok(false) => Ok(None),
