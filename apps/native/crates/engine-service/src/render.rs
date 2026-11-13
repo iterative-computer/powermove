@@ -541,6 +541,8 @@ impl Engine {
         if let Some(disk) = &self.disk {
             disk.memory_pressure(crate::memory::pressure());
         }
+        self.renderer
+            .set_memory_pressure(crate::memory::pressure() == crate::memory::Pressure::Critical);
         let request = self.memory_request.swap(u64::MAX, Ordering::AcqRel);
         let surfaces = self.memory_usage().surface_bytes;
         let share = self.memory_client.grant();
@@ -1300,6 +1302,7 @@ impl Engine {
                     if let Some(work) = work {
                         t.work = pm_perf::snapshot().since(&work);
                     }
+                    t.images_over = self.renderer.image_over_budget();
                 }
                 self.renderer.set_scrub(false);
                 self.renderer.set_playback(None);

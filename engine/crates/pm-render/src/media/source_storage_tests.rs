@@ -94,7 +94,7 @@ fn a_still_keeps_each_size_it_was_read_at() {
 }
 
 /// A still larger than the whole image budget stays while frames keep
-/// drawing it (it was decoded again for every frame), goes once two frames
+/// drawing it (it was decoded again for every frame), goes once frames
 /// passed without it, and a budget of zero releases it at once.
 #[test]
 fn a_still_larger_than_the_budget_stays_while_frames_draw_it() {
@@ -1043,4 +1043,116 @@ fn packed_still_fusion_matches_separate_normalization_byte_for_byte() {
             }
         }
     }
+}
+
+/// `n` distinct 256x256 PNG stills in a directory of their own.
+fn distinct_stills(n: u8) -> (tempfile::TempDir, Vec<PathBuf>) {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = (0..n)
+        .map(|i| {
+            let path = dir.path().join(format!("still-{i}.png"));
+            let rgba: Vec<u8> = (0..256u32 * 256)
+                .flat_map(|p| [i.wrapping_mul(37), (p % 256) as u8, (p / 256) as u8, 255])
+                .collect();
+            let mut encoder = png::Encoder::new(std::fs::File::create(&path).unwrap(), 256, 256);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder
+                .write_header()
+                .unwrap()
+                .write_image_data(&rgba)
+                .unwrap();
+            path
+        })
+        .collect();
+    (dir, paths)
+}
+
+/// One frame of the media cache reading `paths`: the stills it decoded.
+fn image_frame(
+    gpu: &pm_gpu::Gpu,
+    pipelines: &Pipelines,
+    media: &mut MediaCache,
+    paths: &[&PathBuf],
+) -> u64 {
+    media.begin_frame();
+    let before = pm_perf::snapshot();
+    let mut encoder = gpu.device.create_command_encoder(&Default::default());
+    for path in paths {
+        media
+            .image(
+                &gpu.device,
+                &gpu.queue,
+                pipelines,
+                &mut encoder,
+                path,
+                WorkingEncoding::Standard,
+                Precision::Float16,
+                None,
+            )
+            .unwrap();
+    }
+    gpu.queue.submit([encoder.finish()]);
+    media.flush();
+    pm_perf::snapshot()
+        .since(&before)
+        .get(pm_perf::Counter::StillDecodes)
+}
+
+/// Over a small budget, the stills kept are the frame being drawn's own:
+/// the frame before gives way (two adjacent frames that read different
+/// stills do not keep both sets), a frame that reads the same stills again
+/// decodes nothing, and a frame whose own stills exceed the budget says so.
+#[test]
+fn over_budget_only_the_frame_being_drawn_keeps_its_stills() {
+    let gpu = pm_gpu::Gpu::new("image floor").unwrap();
+    let pipelines = Pipelines::new(&gpu.device);
+    let (_dir, s) = distinct_stills(4);
+    let mut media = MediaCache::new(&gpu.device);
+    media.trim_images(1);
+    assert!(image_frame(&gpu, &pipelines, &mut media, &[&s[0], &s[1]]) > 0);
+    let one = media.image_bytes() / 2;
+    assert!(one > 1);
+    assert_eq!(media.image_over_budget(), Some((2 * one, 1)));
+    assert!(image_frame(&gpu, &pipelines, &mut media, &[&s[2], &s[3]]) > 0);
+    assert_eq!(
+        media.image_bytes(),
+        2 * one,
+        "the frame before kept its stills beside this frame's"
+    );
+    assert_eq!(
+        image_frame(&gpu, &pipelines, &mut media, &[&s[2], &s[3]]),
+        0,
+        "the next frame reads them again without a decode"
+    );
+    // Within the budget nothing is said, and the frame before stays.
+    media.trim_images(64 * one);
+    assert!(image_frame(&gpu, &pipelines, &mut media, &[&s[0]]) > 0);
+    assert_eq!(media.image_over_budget(), None);
+    assert!(image_frame(&gpu, &pipelines, &mut media, &[&s[1]]) > 0);
+    assert_eq!(
+        image_frame(&gpu, &pipelines, &mut media, &[&s[0], &s[1]]),
+        0
+    );
+}
+
+/// Under critical memory pressure a frame's stills, its own too, go down to
+/// the budget once its commands are submitted.
+#[test]
+fn critical_pressure_lets_go_of_stills_after_the_frame() {
+    let gpu = pm_gpu::Gpu::new("image pressure").unwrap();
+    let pipelines = Pipelines::new(&gpu.device);
+    let (_dir, s) = distinct_stills(2);
+    let mut media = MediaCache::new(&gpu.device);
+    media.trim_images(1);
+    media.set_image_pressure(true);
+    assert!(image_frame(&gpu, &pipelines, &mut media, &[&s[0], &s[1]]) > 0);
+    assert_eq!(media.image_bytes(), 0);
+    assert!(
+        media.image_over_budget().is_some(),
+        "still an over-budget frame"
+    );
+    media.set_image_pressure(false);
+    assert!(image_frame(&gpu, &pipelines, &mut media, &[&s[0]]) > 0);
+    assert!(media.image_bytes() > 0, "kept while frames draw it");
 }

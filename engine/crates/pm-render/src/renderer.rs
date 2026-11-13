@@ -7,6 +7,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 mod chrome;
+#[cfg(test)]
+mod image_budget_tests;
 mod layer_raster;
 mod media_prepare;
 mod source;
@@ -1379,6 +1381,16 @@ impl Renderer {
 
     pub fn set_image_cache_budget(&mut self, bytes: u64) {
         self.media.trim_images(bytes);
+    }
+    /// Critical memory pressure: after each frame is submitted, its stills
+    /// too go down to the image budget.
+    pub fn set_memory_pressure(&mut self, critical: bool) {
+        self.media.set_image_pressure(critical);
+    }
+    /// The last frame's own stills exceeded the image budget: their bytes
+    /// and the budget (an over-budget frame, kept while it drew).
+    pub fn image_over_budget(&self) -> Option<(u64, u64)> {
+        self.media.image_over_budget()
     }
     pub fn set_converted_frame_budget(&mut self, bytes: u64) {
         self.media.trim_frames(bytes);

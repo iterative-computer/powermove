@@ -317,6 +317,9 @@ pub struct ViewerStatus {
     pub missing_effects: Vec<pm_render::effects::versions::MissingEffect>,
     /// Playing frames with a stand-in for a decode that missed its allowance.
     pub stand_in_frames: u64,
+    /// Frames whose own stills exceeded the engine's image grant: drawn, and
+    /// kept while drawn, over budget (the trace row says by how much).
+    pub over_budget_frames: u64,
     /// Auto's current playing resolution, for the viewer chrome.
     pub effective_quality: f64,
     /// Playing or waiting for the audio epoch: the host should keep its
@@ -1969,13 +1972,15 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 // A playing frame read back for the trace alone: not a capture.
                 let traced_picture = f.picture_only && f.submission.readback.is_some();
                 let captured = f.submission.readback.is_some() && !f.picture_only;
+                v.status.over_budget_frames += u64::from(t.images_over.is_some());
                 if let Some(recorder) = &recorder {
                     let mut row = serde_json::json!({"display":t.display,"worker":t.worker_start,"completed":t.completed,"commit":t.commit,
                         "input":f.input,"audio_host":f.audio_host,"time":f.spec.time.get(),"scale":f.spec.scale,"moment":format!("{:?}",f.spec.moment),"disk":t.disk,"disk_wait_ms":t.disk_wait_ms,"enter_ms":t.enter_ms,"disk_upload_ms":t.disk_upload_ms,"cache_hit":t.cache_hit,
                         "stale":v.stamp != f.stamp,"viewer_id":f.id,"generation":f.stamp.generation,"revision":f.stamp.revision,"sequence":f.stamp.sequence,"gpu_ok":t.gpu_ok,
                         "request":f.pipeline.request,"actor_ms":f.pipeline.actor_ms,"publication_ms":f.pipeline.publication_ms,
                         "bumps":bumps_snapshot(),"present_requested":t.present_requested,"render_start":t.render_start,"render_submitted":t.render_submitted,"render_cpu_ms":t.render_cpu_ms,"work":serde_json::from_str::<serde_json::Value>(&t.work.to_json()).unwrap_or_default(),"drawable_asked":t.drawable_asked,"drawable_acquired":t.drawable_acquired,
-                        "encode_end":t.encode_end,"scheduled":t.scheduled,"gpu_start":t.gpu_start,"gpu_done":t.gpu_done,"callback":t.display_callback,"target":t.target,"requested":t.requested,"predicted":t.predicted});
+                        "encode_end":t.encode_end,"scheduled":t.scheduled,"gpu_start":t.gpu_start,"gpu_done":t.gpu_done,"callback":t.display_callback,"target":t.target,"requested":t.requested,"predicted":t.predicted,
+                        "images_over":t.images_over});
                     // The render's own GPU time: from when the GPU was free
                     // for it (its submission, or the frame before leaving
                     // the GPU: one queue, in order) to the present pass.
