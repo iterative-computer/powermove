@@ -136,6 +136,7 @@ pub fn main_effects() -> &'static MainEffects {
             .expect("pinned main effect definitions");
         add_lut_revision(&mut main);
         add_unclipped_revisions(&mut main);
+        crate::grade::add(&mut main);
         main
     })
 }

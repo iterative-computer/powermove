@@ -318,6 +318,14 @@ fn colour_effects_grade_the_straight_colour_of_a_transparent_pixel() {
         ("posterize", json!({})),
         ("blackWhite", json!({})),
         ("grain", json!({"amount":50})),
+        (
+            "colorWheels",
+            json!({"liftMaster":0.05,"gammaRed":0.2,"gainBlue":1.2,"saturation":130,"temperature":20}),
+        ),
+        (
+            "colorCurves",
+            json!({"count":3,"x1":0.5,"y1":0.65,"x2":1,"y2":1}),
+        ),
     ] {
         let opaque = pixel(
             &mut renderer,
