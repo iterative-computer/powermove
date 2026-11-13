@@ -2062,5 +2062,25 @@
     "in_fields": false,
     "repeat": false,
     "loose": false
+  },
+  {
+    "id": "native.newNull",
+    "chord": "cmd+alt+shift+y",
+    "command": "newNull",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "native.newNull.ctrl",
+    "chord": "ctrl+alt+shift+y",
+    "command": "newNull",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
   }
 ]

@@ -222,10 +222,11 @@ pub fn layer_menu_rows() -> Vec<serde_json::Value> {
         .collect()
 }
 /// Commands [`command_plan`] answers.
-pub const PLANNED: [&str; 24] = [
+pub const PLANNED: [&str; 25] = [
     "newSolid",
     "newShape",
     "newAdjustment",
+    "newNull",
     "selectAll",
     "selectPreviousLayer",
     "selectNextLayer",
@@ -257,29 +258,47 @@ fn selection_plan(ids: Vec<String>) -> Plan {
         select: Some(ids),
     }
 }
+/// A number of the open composition (`w`, `h`, `fps`, `dur`): the one being
+/// edited, which is not the project's own while a pre-comp is open.
+fn comp_number(published: &Published, key: &str) -> Option<f64> {
+    let root = published.snapshot.root()?;
+    let open = pm_kernel::model::open_comp_id(root);
+    pm_kernel::model::comp_node(root, open.as_deref())
+        .or_else(|| pm_kernel::model::comp_node(root, None))?
+        .get(key)?
+        .to_value()
+        .as_f64()
+}
 fn new_layer(published: &Published, kind: &str, name: &str, centred: bool, time: f64) -> Plan {
+    let label = if kind == "null" {
+        "New Null Object".to_owned()
+    } else {
+        format!("New {name}")
+    };
     let id = new_id("L");
     let mut properties = Map::new();
     if centred {
-        let size = |key: &str| {
-            published
-                .snapshot
-                .root()
-                .and_then(|root| pm_kernel::model::comp_node(root, None))
-                .and_then(|comp| comp.get(key))
-                .and_then(|value| value.to_value().as_f64())
-                .unwrap_or(0.)
-        };
+        let size = |key: &str| comp_number(published, key).unwrap_or(0.);
         properties.insert("position.x", Value::Number(size("w") / 2.));
         properties.insert("position.y", Value::Number(size("h") / 2.));
     }
+    // From the playhead's frame to the composition's end, a second at least
+    // (`addLayer` in shortcuts.ts).
+    let (from, duration) = comp_number(published, "fps")
+        .filter(|fps| *fps > 0.)
+        .zip(comp_number(published, "dur"))
+        .map(|(fps, dur)| {
+            let from = (time * fps).round() / fps;
+            (Some(from), Some((dur - from).max(1.)))
+        })
+        .unwrap_or((None, None));
     let add = AddLayer {
         id: id.clone(),
         layer_type: kind.into(),
         comp: None,
         name: Some(name.into()),
-        from: None,
-        duration: None,
+        from,
+        duration,
         content: Map::new(),
         properties,
         color: None,
@@ -294,10 +313,7 @@ fn new_layer(published: &Published, kind: &str, name: &str, centred: bool, time:
     };
     Plan {
         select: Some(vec![id]),
-        ..plain(
-            &format!("New {name}"),
-            vec![LayerCommand::Add(Box::new(add)).into()],
-        )
+        ..plain(&label, vec![LayerCommand::Add(Box::new(add)).into()])
     }
 }
 /// `selectAdjacentLayer`: the stack's neighbour, or the far end with no selection.
@@ -458,6 +474,8 @@ pub fn command_plan(
             false,
             time,
         )),
+        // A null is made at the composition's centre, as v1's command did.
+        "newNull" => Some(new_layer(published, "null", "Null", true, time)),
         "selectAll" => Some(selection_plan(
             layers.iter().map(|l| l.id.clone()).collect(),
         )),
@@ -752,7 +770,7 @@ pub fn precompose_plan(published: &Published, draft: &PrecomposeDraft, time: f64
 
 #[cfg(test)]
 #[path = "commands_tests.rs"]
-mod commands_tests;
+pub(crate) mod commands_tests;
 #[cfg(test)]
 #[path = "layer_commands_tests.rs"]
 mod tests;

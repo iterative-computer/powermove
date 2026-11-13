@@ -62,6 +62,8 @@ mod panel_bridge;
 mod panel_capture_tests;
 mod panel_library;
 mod panels;
+#[cfg(test)]
+mod parity_tests;
 mod perf_gate;
 mod perf_panel;
 mod platform;

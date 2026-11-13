@@ -197,6 +197,7 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
                 r("New Solid", "newSolid"),
                 r("New Shape", "newShape"),
                 r("New Adjustment Layer", "newAdjustment"),
+                r("New Null Object", "newNull"),
                 sep(),
                 r("Group", "groupLayers"),
                 r("Ungroup", "ungroupLayers"),
