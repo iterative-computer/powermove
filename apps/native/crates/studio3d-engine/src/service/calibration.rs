@@ -15,6 +15,7 @@ pub struct Probe {
 }
 #[derive(Clone, Debug, Default)]
 pub struct Measurement {
+    pub backend: &'static str,
     pub samples: u32,
     pub average_samples: f64,
     pub cap_fraction: f64,
@@ -164,6 +165,10 @@ impl StudioService {
                         )
                     }),
                 )?;
+                m.backend = match d.backend() {
+                    crate::oidn::Backend::Cpu => "cpu",
+                    crate::oidn::Backend::Metal => "metal",
+                };
                 m.beauty_pixels = d.timings().beauty_pixels;
                 (m.projected_beauty_pixels, m.beauty_layers) = projected.get();
                 Ok(())
@@ -232,6 +237,7 @@ fn projected_beauty_area(color: &[f32], w: u32, h: u32, target: (u32, u32), crop
 /// can cover several cropped contributions in one composition.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DenoiseModel {
+    pub backend: &'static str,
     pub guide_fixed: f64,
     pub guide_pixel: f64,
     pub beauty_fixed: f64,
@@ -246,16 +252,33 @@ impl DenoiseModel {
     }
 }
 pub struct DenoiseProbe {
+    backend: Option<&'static str>,
     half: bool,
     stage: usize,
     measurements: Vec<(f64, f64, f64)>,
 }
 #[cfg(feature = "oidn")]
-thread_local! {static MODELS:std::cell::RefCell<[Option<DenoiseModel>;2]>=const{std::cell::RefCell::new([None,None])};}
+thread_local! {static MODELS:std::cell::RefCell<[Option<DenoiseModel>;4]>=const{std::cell::RefCell::new([None;4])};}
+#[cfg(feature = "oidn")]
+fn denoise_backend() -> Result<&'static str, String> {
+    DENOISER.with(|slot| {
+        let mut slot = slot
+            .try_borrow_mut()
+            .map_err(|_| "Reentrant Studio denoise calibration")?;
+        if slot.is_none() {
+            *slot = Some(crate::oidn::Denoiser::new()?);
+        }
+        Ok(match slot.as_ref().unwrap().backend() {
+            crate::oidn::Backend::Cpu => "cpu",
+            crate::oidn::Backend::Metal => "metal",
+        })
+    })
+}
 impl DenoiseProbe {
     pub fn new(half: bool) -> Self {
         Self {
             half,
+            backend: None,
             stage: 0,
             measurements: vec![],
         }
@@ -272,9 +295,16 @@ impl DenoiseProbe {
         if cancel.load(Ordering::Relaxed) != epoch {
             return Err("export estimate cancelled by input".into());
         }
-        // The DENOISER and this cache share one worker/session and therefore
-        // one selected device/backend. Never share CPU coefficients with Metal.
-        if let Some(model) = MODELS.with(|m| m.borrow()[usize::from(self.half)]) {
+        let backend = denoise_backend()?;
+        if self.backend.is_some_and(|previous| previous != backend) {
+            self.stage = 0;
+            self.measurements.clear();
+        }
+        self.backend = Some(backend);
+        // A recoverable Metal failure can switch this worker to CPU. Never
+        // reuse a curve from the other backend or combine their measurements.
+        let key = usize::from(backend == "metal") * 2 + usize::from(self.half);
+        if let Some(model) = MODELS.with(|m| m.borrow()[key]) {
             return Ok(Some(model));
         }
         let (w, h) = if self.stage < 2 {
@@ -313,6 +343,12 @@ impl DenoiseProbe {
             result?;
             Ok(d.timings())
         })?;
+        if denoise_backend()? != backend {
+            self.stage = 0;
+            self.measurements.clear();
+            self.backend = None;
+            return Ok(None);
+        }
         if self.stage % 2 == 1 {
             self.measurements.push((
                 (w * h) as f64,
@@ -333,12 +369,13 @@ impl DenoiseProbe {
         let (gf, gp) = affine(g0, g1);
         let (bf, bp) = affine(b0, b1);
         let model = DenoiseModel {
+            backend,
             guide_fixed: gf,
             guide_pixel: gp,
             beauty_fixed: bf,
             beauty_pixel: bp,
         };
-        MODELS.with(|m| m.borrow_mut()[usize::from(self.half)] = Some(model));
+        MODELS.with(|m| m.borrow_mut()[key] = Some(model));
         Ok(Some(model))
     }
     #[cfg(not(feature = "oidn"))]
@@ -466,6 +503,7 @@ mod tests {
     #[test]
     fn fixed_denoise_overhead_is_not_multiplied_by_image_area() {
         let model = DenoiseModel {
+            backend: "cpu",
             guide_fixed: 10.,
             guide_pixel: 0.001,
             beauty_fixed: 5.,

@@ -50,6 +50,7 @@ pub struct PresetEstimate {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CalibrationTiming {
+    pub denoise_backend: String,
     pub projected_beauty_pixels: f64,
     pub beauty_layers: f64,
     pub denoise_guide_fixed_ms: f64,
@@ -270,6 +271,13 @@ fn project(
     {
         return Err("invalid measured export timing".into());
     }
+    if preset != "draft"
+        && measurements
+            .iter()
+            .any(|m| !m.backend.is_empty() && m.backend != model.backend)
+    {
+        return Err("Denoiser backend changed during calibration; request a new estimate".into());
+    }
     let weighted = |get: fn(&Measurement) -> f64| {
         (get(&measurements[0]) + 4. * get(&measurements[1]) + get(&measurements[2])) / 6.
     };
@@ -311,6 +319,11 @@ fn project(
         frame_ms: frame,
         total_ms: total,
         calibration: CalibrationTiming {
+            denoise_backend: if preset == "draft" {
+                "none".into()
+            } else {
+                model.backend.into()
+            },
             projected_beauty_pixels: beauty,
             beauty_layers: layers,
             denoise_guide_fixed_ms: model.guide_fixed,
@@ -808,6 +821,7 @@ mod tests {
         ];
         m[0].photon_ms = 30.;
         let model = DenoiseModel {
+            backend: "cpu",
             guide_fixed: 10.,
             guide_pixel: 0.01,
             beauty_fixed: 5.,
@@ -817,6 +831,12 @@ mod tests {
         assert_eq!(p.photon_setup_ms, 1.);
         assert_eq!(p.oidn_ms, 27.);
         assert_eq!(p.calibration.average_samples, 20.);
+        assert_eq!(p.calibration.denoise_backend, "cpu");
+        m[1].backend = "metal";
+        assert!(project("production", 8, 128, &m, model, 4., 400., 30).is_err(),
+            "a CPU cost model must not project measurements from Metal");
+        m[1].backend = "cpu";
+        assert!(project("production", 8, 128, &m, model, 4., 400., 30).is_ok());
         m[1].photon_ms = 30.;
         m[2].photon_ms = 30.;
         assert_eq!(

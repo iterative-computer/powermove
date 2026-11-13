@@ -2,6 +2,46 @@
 //! stable ID; a compositor consumes per-layer textures from the shared trace.
 use crate::extract::{Extracted, Extractor, SceneInput, SceneRequest, SceneSource};
 use crate::gpu::{PresentTarget, Renderer};
+
+#[derive(Clone)]
+struct GeometryIdentity {
+    shape: [usize; 3],
+    // Strong references make pointer identity safe across immutable snapshots:
+    // neither address reuse nor Arc::make_mut can hide a geometry edit.
+    instances: Vec<crate::extract::MeshInstance>,
+}
+impl GeometryIdentity {
+    fn shape(e: &Extracted) -> [usize; 3] {
+        [e.tlas_capacity, e.prepared.sdata.len(), e.prepared.materials.len()]
+    }
+    fn matches(&self, input: &SceneInput, e: &Extracted) -> bool {
+        use std::sync::Arc;
+        self.shape == Self::shape(e) && self.instances.len() == input.instances.len()
+            && self.instances.iter().zip(&input.instances).all(|(a,b)| {
+                a.layer==b.layer && Arc::ptr_eq(&a.mesh,&b.mesh)
+                    && match (&a.attributes,&b.attributes) {
+                        (Some(a),Some(b)) => Arc::ptr_eq(a,b),
+                        (None,None) => true,
+                        _ => false,
+                    }
+                    && a.material == b.material
+                    && a.material_palette == b.material_palette
+            })
+    }
+}
+fn geometry_content(e: &Extracted) -> Vec<u8> {
+    let mut key = Vec::new();
+    for size in GeometryIdentity::shape(e) { key.extend_from_slice(&(size as u64).to_le_bytes()); }
+    for data in [
+        bytemuck::cast_slice(&e.prepared.positions),
+        bytemuck::cast_slice(&e.prepared.tris),
+        bytemuck::cast_slice(&e.prepared.nodes[e.tlas_capacity..]),
+    ] {
+        key.extend_from_slice(&(data.len() as u64).to_le_bytes());
+        key.extend_from_slice(data);
+    }
+    key
+}
 pub mod calibration;
 #[cfg(feature = "oidn")]
 thread_local! { static DENOISER: std::cell::RefCell<Option<crate::oidn::Denoiser>> = const { std::cell::RefCell::new(None) }; }
@@ -74,6 +114,7 @@ pub struct StudioService {
     previous: Option<(SceneRequest, Vec<u8>)>,
     previous_tier: Option<Tier>,
     geometry_key: Vec<u8>,
+    geometry_identity: Option<GeometryIdentity>,
     resource_start: usize,
     geometry_uploads: u64,
     scene_updates: u64,
@@ -201,9 +242,17 @@ impl StudioService {
         let live_guided = input.view.orthographic_span.is_some() || extracted.prepared.materials.iter().any(|m| {
             m.policy[3] == 1. && (m.policy[1] as u32 & 16) != 0
         });
-        // Compare exact bytes, including resources, instead of trusting a revision
-        // or a lossy/partial scene key. No stale frame survives a material edit.
-        let (mut key, resource_start) = content(&input, &extracted);
+        // Camera/instance motion retains immutable geometry. On a new identity,
+        // compare all geometry bytes once, preserving reuse even for a caller
+        // that replaces an Arc with byte-identical data. Dynamic resources are
+        // still compared exactly every frame, independently of revision IDs.
+        let identical_geometry = self.geometry_identity.as_ref()
+            .is_some_and(|identity| identity.matches(&input,&extracted));
+        let geometry_key = (!identical_geometry).then(||geometry_content(&extracted));
+        let geometry_changed = self.geometry_uploads == 0
+            || geometry_key.as_ref().is_some_and(|key| *key != self.geometry_key);
+        let epoch = self.geometry_uploads + u64::from(geometry_changed);
+        let (mut key, resource_start) = content(&input, &extracted, epoch);
         key.extend_from_slice(format!("{auxiliary:?}").as_bytes());
         let mut outputs: Vec<_> = extracted
             .layers
@@ -250,23 +299,6 @@ impl StudioService {
                 return Err("Studio scene exceeds the device storage-buffer limit".into());
             }
         }
-        let mut geometry_key = Vec::new();
-        for size in [
-            extracted.tlas_capacity,
-            extracted.prepared.sdata.len(),
-            extracted.prepared.materials.len(),
-        ] {
-            geometry_key.extend_from_slice(&(size as u64).to_le_bytes());
-        }
-        for data in [
-            bytemuck::cast_slice(&extracted.prepared.positions),
-            bytemuck::cast_slice(&extracted.prepared.tris),
-            bytemuck::cast_slice(&extracted.prepared.nodes[extracted.tlas_capacity..]),
-        ] {
-            geometry_key.extend_from_slice(&(data.len() as u64).to_le_bytes());
-            geometry_key.extend_from_slice(data);
-        }
-        let geometry_changed = self.geometry_key != geometry_key || self.geometry_uploads == 0;
         let changed = self
             .previous
             .as_ref()
@@ -283,7 +315,12 @@ impl StudioService {
             );
             self.geometry_uploads += u64::from(geometry_changed);
             self.scene_updates += 1;
-            self.geometry_key = geometry_key;
+            if let Some(key) = geometry_key { self.geometry_key = key; }
+        }
+        if !identical_geometry {
+            self.geometry_identity = Some(GeometryIdentity {
+                shape: GeometryIdentity::shape(&extracted), instances: input.instances.clone(),
+            });
         }
         let texture_key = texture_key(input.maps.as_ref());
         if self.texture_key.as_ref() != Some(&texture_key) {
@@ -559,7 +596,7 @@ fn texture_key(maps: Option<&crate::extract::TextureMaps>) -> Vec<u8> {
     key
 }
 
-fn content(input: &SceneInput, e: &Extracted) -> (Vec<u8>, usize) {
+fn content(input: &SceneInput, e: &Extracted, geometry_epoch: u64) -> (Vec<u8>, usize) {
     let p = &e.prepared;
     let mut key = format!(
         "{:?}{:?}{:?}{:?}{:?}{}{}:{}",
@@ -575,10 +612,12 @@ fn content(input: &SceneInput, e: &Extracted) -> (Vec<u8>, usize) {
     .into_bytes();
     key.extend_from_slice(format!("{:?}", input.view).as_bytes());
     let resource_start = key.len();
+    // The epoch is backed by immutable identity plus an exact-byte fallback,
+    // never a partial hash. Keep only the changing TLAS here, not another copy
+    // of every vertex, triangle and BLAS node in the scene.
+    key.extend_from_slice(&geometry_epoch.to_le_bytes());
     for data in [
-        bytemuck::cast_slice(&p.positions),
-        bytemuck::cast_slice(&p.tris),
-        bytemuck::cast_slice(&p.nodes),
+        bytemuck::cast_slice(&p.nodes[..e.tlas_capacity]),
         bytemuck::cast_slice(&p.materials),
         bytemuck::cast_slice(&p.sdata),
     ] {

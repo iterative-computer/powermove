@@ -48,6 +48,12 @@ for name in codex claude; do
     echo "  install it, or set $(echo "$name" | tr a-z A-Z)_BINARY to an executable (release pins: Codex 0.159.1, Claude 2.1.280)" >&2
   fi
 done
+# A linked OIDN runtime is required at launch, including in export children.
+# Bundle both device backends and refuse incompatible deployment targets.
+if otool -L "$binary" | grep -Fq libOpenImageDenoise; then
+  : "${OIDN_DIR:?Set OIDN_DIR to a Metal-enabled OIDN install with CPU fallback}"
+  python3 "$(dirname "$0")/bundle-oidn.py" "$app" --oidn-dir "$OIDN_DIR"
+fi
 xcrun actool "$here/Assets.xcassets" --compile "$app/Contents/Resources" \
   --platform macosx --minimum-deployment-target 14.0 --accent-color AccentColor \
   --output-partial-info-plist "$out/assets-info.plist" >/dev/null

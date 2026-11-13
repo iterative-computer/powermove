@@ -2669,9 +2669,11 @@ falling within −20%/+30% of that point, with any miss recorded honestly.
 Calibration changes are still under validation at this checkpoint.
 
 The designer's round-6 branch is merged for the next combined native build.
-Its additional real-content findings remain tracked: headless Auto Studio
-requires loaded model geometry, and a requested highlight can reflect toward
-a point below the floor. Neither is counted as fixed by the visual fixes above.
+Its additional real-content findings are assigned to the separate command-fix
+lane: headless Auto Studio requires loaded model geometry, and a requested
+highlight can reflect toward a point below the floor. These engine changes
+do not claim to fix those commands; the green command-fix branch is scheduled
+to merge for final regression.
 
 The Production trace projection uses a fixed resolution correction of
 **0.695**, fitted once by least squares through the origin on trace cost
@@ -2716,3 +2718,130 @@ by document stamp, content generation, time range, preset set and render size.
 The four-preset state/command contract is unchanged; no panel or control was
 added by the engine lane. The focused queue, model, crop and sample-parity
 regressions pass; cancellation of a late reply is also checked before landing.
+
+### GPU OIDN re-acceptance: deployment compatibility and calibration
+
+The OIDN 2.5.1 / oneTBB 2023.2 runtime has been rebuilt for the native
+application's macOS 14 deployment target. All five dylib load-command minima
+are compatible: the four OIDN libraries declare macOS 11.0 and TBB declares
+14.0. Both explicit CPU type 1 and Metal type 5 passed RT-plus-guide smoke
+execution on the M5. This verifies the load commands and execution on this
+machine; it does not claim testing on an actual macOS 14 installation.
+
+Rebuild provenance: OIDN 2.5.1 source archive SHA-256
+`e71fd043a70f1cc80e301d1b90df6c1f536098c4dd94baa612742f6db3369c36`,
+oneTBB v2023.2.0 archive
+`80cb62e62defeee67ea1885a6f72d97ac81404f8fde9cded62fb51524808a30c`,
+and ISPC 1.30.0 macOS arm64 archive
+`01b05547ee3bed3a428c1ba2e72ec98743c8ad848c7db11c725bcd1e77889626`.
+Both CMake configurations use arm64, Release and
+`CMAKE_OSX_DEPLOYMENT_TARGET=14.0`, with `MACOSX_DEPLOYMENT_TARGET=14.0`
+in the environment. TBB disables tests, allocator/proxy, HWLOC auto-search
+and TCM. OIDN enables CPU, BNNS and Metal, disables SYCL/CUDA/HIP and
+RTLightmap, and enables `OIDN_INSTALL_DEPENDENCIES` / `OIDN_ZIP_MODE`.
+Its `TBB_ROOT` / `TBB_DIR` point at that rebuilt TBB install, and
+`ISPC_EXECUTABLE` points at the pinned compiler. Build/install each component
+under the shared build lock. Audit every installed dylib with `otool -l`
+and `otool -L`; bundle with `OIDN_DIR` set to the verified install:
+`apps/native/scripts/bundle-dev.sh <native-binary> <output-directory>`.
+The helper rejects incompatible minima instead of silently shipping the old
+macOS-27 TBB.
+
+The integration prefers Metal with OIDN-owned device buffers. An allocation,
+filter or readback error retries the untouched input on explicit CPU type 1;
+cancellation returns without publishing partial GPU output. Beauty RGB is
+published only after all contribution layers succeed, preserving alpha and
+extra channels. The bundle helper includes the frontend, core, CPU device,
+Metal device and TBB libraries, their aliases and notices, relocates their
+install names, and rejects a library whose minimum exceeds the app target.
+
+The affine denoise calibration is cached separately for CPU and Metal, and
+for full- and half-resolution guides. Backend changes during calibration
+restart the two-size fit; mixed-device frame measurements cannot produce an
+estimate. The UI contract remains `frameMs` / `totalMs` min/max, with the
+actual denoiser backend available in calibration metadata.
+
+The real-export timing tool now records actual backend, fallback, per-filter
+and transfer timings, geometry/texture uploads, scene updates and BLAS builds.
+Gate runs omit sample-count and per-step diagnostic readbacks. Immutable mesh
+and attribute identities avoid per-frame geometry-byte comparisons; a new
+identity still receives an exact-byte comparison so copy-on-write mesh edits
+and material changes cannot reuse stale geometry or pixels.
+
+The focused integration run passes 21 tests: five engine-service lifetime /
+estimate tests, nine OIDN unit tests, two explicit Metal/CPU tolerance and
+cancellation tests, three calibration tests and two geometry-reuse pixel
+tests. The CPU/Metal display-space comparison across three image / guide /
+quality configurations measures RMS 0.000232–0.000276 and p99
+0.000663–0.000832, below the respective 0.003 and 0.01 tolerances. The
+unchanged full-HD image gates remain separate requirements. The native
+application builds in 5m43s. A moved app bundle passes both CPU and Metal
+estimate probes after all development OIDN paths are removed; every
+non-Draft preset reports the requested backend. This verifies the five-library
+bundle's relocation and execution, not execution on an actual macOS 14 host.
+
+The first current-build Metal product export renders 30 full-size 1080p
+frames at **3.532 s/frame**, above the 3 s budget. Trace averages 2452 ms,
+OIDN 676 ms, guides/readback 165 ms and scene preparation 11 ms; worker total
+is 3317 ms. Geometry uploads remain 1 and BLAS builds 2 for every frame,
+confirming camera-only reuse. No sample-count or per-step diagnostic readbacks
+are enabled. Kernel footprint sampling ran alongside this export. Its
+simultaneously observed process-tree peak is **3.114 GiB physical footprint**
+and **0.580 GiB RSS**; these overlap and must not be added. Editing, chrome,
+environment and two-project memory trends remain unmeasured in this build.
+
+The same scene's Metal pre-export point estimate is **2.531 s/frame**;
+actual time is 39.5% higher, outside the approved +30% point gate and the
+current displayed upper bound. This is an accuracy miss, not a pass based on
+the earlier CPU fit. CPU controls and hero/chrome Metal real-30 measurements
+remain pending. Per-layer beauty-filter reuse and limiting extra catcher
+observations to caustic transport are follow-up candidates, not changes in
+this tested baseline. GPU OIDN is retained under the owner's explicit
+re-acceptance; completion of this performance round is not claimed here.
+
+### iPad walkthrough: motion blur follow-up
+
+Fast 3D moves visibly strobe in the iPad reconstruction. This finding is
+known, post-v1 until a moving-object/camera image regression verifies the
+actual exported shutter coverage. Passing `motionBlur: true` to export is
+not sufficient evidence: the generic compositor also requires each layer's
+`mblur` switch (`LayerPatch.motionBlur` through native commands/MCP). That
+path already creates time-offset Studio requests and divides the ray budget
+among the shutter samples. The preset's separate `motionBlurSamples` control
+is still documented as pending. The engine's more efficient shared
+`begin_shutter` / `accumulate_shutter_guides` / `end_shutter` accumulation is
+used by the Electron host and is not called by native Studio. No defaults or
+UI controls are changed in this lane.
+
+The command-fix lane owns the walkthrough's sun, recovery, connection/library
+lock, headless geometry, highlight and import-scale issues. Its green changes
+are scheduled to merge for final regression.
+
+### Chrome floor grain: receiver convergence and photon targeting
+
+The new fixed lower-left floor ROI reproduced a failure that the whole-frame
+average had hidden. At 192×128, the original Production Metal render had
+floor noise 0.006068, bias p95 0.013539 and two-seed difference 0.006768,
+against the unchanged 0.006 / 0.012 / 0.006 limits. Most catcher pixels stopped
+near 16 samples. Raising that minimum alone to 24 improved flicker but still
+failed noise and bias, so that change alone was not accepted.
+
+Production now gives both the analytic catcher and matte mesh receivers of
+caustic light at least 24 observations, subject to the requested ceiling.
+The independent MC reference policy remains unchanged. Area-light photons in
+analytic-catcher scenes sample the conservative scene-bound cone when the
+emitter is outside it, with `Le × area × cos(theta) × solid_angle` weight.
+Every retained caustic first hits real scene geometry; paths outside that
+cone cannot contribute. Inside/near emitters, ill-conditioned cones, finite
+mesh receiver scenes and the reference policy retain the original proposal.
+This increases useful photon density without clamping bright paths or
+changing the photon budget, grid storage, image targets or reference bytes.
+
+The revised small Metal floor check passes: noise 0.005907, bias 0.009778,
+flicker 0.005508. Current-source CPU checks pass all four Production fixtures;
+its chrome floor measures 0.005936 / 0.009320 / 0.005586 respectively. The
+finite-floor glass bias also improves from 0.012001 to 0.011024 after the
+matte-receiver observation safeguard. The observation regression covers BVH
+and hardware RT, both analytic and mesh receivers, and continued adaptive
+stopping in quiet regions. Full-HD and exported-frame verification remain
+pending; these small results do not certify the full-size finding.
