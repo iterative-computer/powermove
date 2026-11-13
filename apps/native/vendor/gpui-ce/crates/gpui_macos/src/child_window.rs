@@ -6,14 +6,15 @@
 //! window at it floats over every other app, and an app that was never active
 //! never deactivates, so it stayed there.
 //!
-//! Sheets follow the same rule ([`sheet`]): AppKit's `beginSheet` orders the
-//! parent window front, so an inactive app's window rose above every other
-//! app's but the front one, and macOS then activated the app as soon as the
-//! front app left.
+//! Sheets go through [`sheet`]. A normal launch begins them at once, exactly
+//! as AppKit does. A development lane launch ([`hold_sheets_while_inactive`])
+//! holds them while the app is inactive: `beginSheet` orders the parent
+//! window front, which put a lane window under the owner's front window and
+//! let macOS activate the lane app when his front app left.
 use objc2::{MainThreadMarker, rc::Weak};
 use objc2_app_kit::{
-    NSApplication, NSApplicationDidBecomeActiveNotification, NSNormalWindowLevel,
-    NSRequestUserAttentionType, NSWindow, NSWindowCollectionBehavior, NSWindowOrderingMode,
+    NSApplication, NSApplicationDidBecomeActiveNotification, NSNormalWindowLevel, NSWindow,
+    NSWindowCollectionBehavior, NSWindowOrderingMode,
 };
 use objc2_foundation::{NSNotification, NSNotificationCenter};
 use std::{cell::RefCell, ptr::NonNull};
@@ -56,8 +57,6 @@ thread_local! {
     /// Child windows asked to show while the app was inactive (`key`: make it
     /// key too), and the observer that shows them once the app is active.
     static PENDING: RefCell<Vec<Pending>> = const { RefCell::new(Vec::new()) };
-    /// Sheets asked for while the app was inactive ([`sheet`]).
-    static SHEETS: RefCell<Vec<HeldSheet>> = const { RefCell::new(Vec::new()) };
     static OBSERVER: RefCell<Option<objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2_foundation::NSObjectProtocol>>>> =
         const { RefCell::new(None) };
 }
@@ -105,112 +104,6 @@ fn observe_activation() {
     });
 }
 
-/// A sheet waiting for its app to become active: the window it goes on, the
-/// sheet's own window, and the call that begins it.
-struct HeldSheet {
-    parent: Weak<NSWindow>,
-    sheet: Weak<NSWindow>,
-    begin: Box<dyn FnOnce()>,
-}
-
-/// Begins a sheet only while its app is active; `begin` makes the AppKit
-/// call (`beginSheet`, an alert's or a save panel's
-/// `beginSheetModalForWindow`) that puts `sheet` on `parent`.
-///
-/// `beginSheet` orders its parent window front. An inactive app's window
-/// ordered front lands right under the other app's front window, and macOS
-/// activates the app as soon as that app leaves the front. So a sheet asked
-/// for while the app is inactive waits, attached to nothing and with no
-/// window moved, and begins when the person brings the app forward; the
-/// Dock icon bounces once to say a question waits. If its parent closed
-/// meanwhile, or the sheet window went away, `begin` is dropped: whatever
-/// waits on the sheet's answer sees it cancelled. Returns whether it began
-/// now.
-pub fn sheet(parent: &NSWindow, sheet: &NSWindow, begin: impl FnOnce() + 'static) -> bool {
-    let Some(mtm) = MainThreadMarker::new() else {
-        return false;
-    };
-    let app = NSApplication::sharedApplication(mtm);
-    if app.isActive() {
-        begin();
-        return true;
-    }
-    forget_sheet(sheet);
-    SHEETS.with(|s| {
-        s.borrow_mut().push(HeldSheet {
-            parent: Weak::from(parent),
-            sheet: Weak::from(sheet),
-            begin: Box::new(begin),
-        })
-    });
-    app.requestUserAttention(NSRequestUserAttentionType::InformationalRequest);
-    observe_activation();
-    #[cfg(debug_assertions)]
-    {
-        eprintln!("powermove: a sheet waits for the app to become active");
-        review_sheet(sheet, parent);
-    }
-    false
-}
-
-/// Whether a sheet waits for the app to become active before it goes on
-/// `parent` (a view that shows one sheet at a time asks this as well as
-/// `attachedSheet`).
-pub fn sheet_pending(parent: &NSWindow) -> bool {
-    SHEETS.with(|s| {
-        s.borrow()
-            .iter()
-            .any(|h| h.parent.load().is_some_and(|p| std::ptr::eq(&*p, parent)))
-    })
-}
-
-/// Drops a waiting sheet (its owner closed or dismissed it before it began);
-/// dropping its `begin` cancels whatever waits on its answer.
-pub fn forget_sheet(sheet: &NSWindow) {
-    let dropped: Vec<HeldSheet> = SHEETS.with(|s| {
-        let mut s = s.borrow_mut();
-        let (gone, kept) = std::mem::take(&mut *s)
-            .into_iter()
-            .partition(|h| h.sheet.load().is_none_or(|w| std::ptr::eq(&*w, sheet)));
-        *s = kept;
-        gone
-    });
-    for held in &dropped {
-        if let Some(window) = held.sheet.load() {
-            take_down(&window);
-        }
-    }
-    // Dropped outside the borrow: a dropped answer may run code that asks
-    // for another sheet.
-    drop(dropped);
-}
-
-/// Begins the sheets that waited for the app to become active, oldest first.
-/// One whose parent closed or hid is dropped; one whose parent is in the
-/// Dock waits on.
-fn begin_held_sheets() {
-    let held = SHEETS.with(|s| std::mem::take(&mut *s.borrow_mut()));
-    let mut still = Vec::new();
-    for entry in held {
-        let (Some(parent), Some(sheet)) = (entry.parent.load(), entry.sheet.load()) else {
-            continue;
-        };
-        take_down(&sheet);
-        if parent.isVisible() {
-            (entry.begin)();
-        } else if parent.isMiniaturized() {
-            still.push(entry);
-        }
-    }
-    if !still.is_empty() {
-        SHEETS.with(|s| {
-            let mut s = s.borrow_mut();
-            still.append(&mut s);
-            *s = still;
-        });
-    }
-}
-
 /// A development build launched for a review (`PM_NATIVE_REVIEW_OPEN`)
 /// stands a child window just above its own parent while the app is in the
 /// background, so a capture can see it. It is ordered relative to its
@@ -227,32 +120,6 @@ pub fn review_show(window: &NSWindow, parent: &NSWindow) {
     }
     window.setHidesOnDeactivate(false);
     window.orderWindow_relativeTo(NSWindowOrderingMode::Above, parent.windowNumber());
-}
-
-/// A development build launched for a review (`PM_NATIVE_REVIEW_OPEN`)
-/// stands a waiting sheet where it will hang, at the top of its window's
-/// content, ordered just above that window and never front, so a capture can
-/// see it while the app stays in the background. It is taken down before it
-/// begins or when it is dropped.
-#[cfg(debug_assertions)]
-fn review_sheet(sheet: &NSWindow, parent: &NSWindow) {
-    if std::env::var_os("PM_NATIVE_REVIEW_OPEN").is_none() || !parent.isVisible() {
-        return;
-    }
-    let (frame, own) = (parent.frame(), sheet.frame());
-    let top = frame.origin.y + parent.contentLayoutRect().size.height;
-    sheet.setFrameOrigin(objc2_foundation::NSPoint::new(
-        frame.origin.x + (frame.size.width - own.size.width) / 2.,
-        top - own.size.height,
-    ));
-    sheet.orderWindow_relativeTo(NSWindowOrderingMode::Above, parent.windowNumber());
-}
-
-/// Takes down a waiting sheet a review stood up ([`review_sheet`]).
-fn take_down(sheet: &NSWindow) {
-    if sheet.isVisible() && sheet.sheetParent().is_none() {
-        sheet.orderOut(None);
-    }
 }
 
 /// Whether a child window waits for its app to become active.
@@ -288,7 +155,8 @@ pub fn show_pending() {
             order_front(&window, entry.key);
         }
     }
-    begin_held_sheets();
+    #[cfg(debug_assertions)]
+    held::begin_all();
 }
 
 /// Shows any of the app's windows the way a Mac app may while another app is
@@ -331,4 +199,259 @@ pub fn follows_policy(window: &NSWindow) -> bool {
         && !window.collectionBehavior().intersects(
             NSWindowCollectionBehavior::CanJoinAllSpaces | NSWindowCollectionBehavior::Stationary,
         )
+}
+
+/// Begins a sheet: `begin` makes the AppKit call (`beginSheet`, an alert's
+/// or a file panel's `beginSheetModalForWindow`) that puts `sheet` on
+/// `parent`. In a normal launch that happens at once, as AppKit does, and
+/// `cancel` is dropped unused. In a development lane launch
+/// ([`hold_sheets_while_inactive`]) a sheet asked for while the app is
+/// inactive waits, attached to nothing and with no window moved, and begins
+/// when the app becomes active (or its minimised window comes back); if it
+/// never begins (forgotten by its owner, its window closed) `cancel` runs,
+/// so whatever waits on its answer hears that it was cancelled. Returns
+/// whether it began now.
+pub fn sheet(
+    parent: &NSWindow,
+    sheet: &NSWindow,
+    begin: impl FnOnce() + 'static,
+    cancel: impl FnOnce() + 'static,
+) -> bool {
+    #[cfg(debug_assertions)]
+    if would_hold() {
+        eprintln!("powermove: a sheet waits for the app to become active (lane launch)");
+        held::push(parent, sheet, Box::new(begin), Box::new(cancel));
+        return false;
+    }
+    let _ = (parent, sheet, cancel);
+    begin();
+    true
+}
+
+/// Development lane launches only: from now on, a sheet asked for while the
+/// app is inactive waits for it to become active (see [`sheet`]). Set once,
+/// in process, by the development launch flag the lane launcher passes;
+/// never by the environment. Release builds have no such mode.
+#[cfg(debug_assertions)]
+pub fn hold_sheets_while_inactive(stage_for_review: bool) {
+    held::MODE.with(|m| m.set(if stage_for_review { 2 } else { 1 }));
+}
+
+/// Whether a sheet asked for now would wait (a lane launch, app inactive).
+/// An alert answers itself instead in that case: a question nobody can see
+/// takes its Escape choice, so nothing (a quit) waits on it.
+pub fn would_hold() -> bool {
+    #[cfg(debug_assertions)]
+    {
+        held::MODE.with(|m| m.get()) > 0
+            && MainThreadMarker::new()
+                .is_some_and(|mtm| !NSApplication::sharedApplication(mtm).isActive())
+    }
+    #[cfg(not(debug_assertions))]
+    false
+}
+
+/// Whether a sheet waits to go on `parent` (a view that shows one sheet at a
+/// time asks this as well as `attachedSheet`). Always false in a normal launch.
+pub fn sheet_pending(parent: &NSWindow) -> bool {
+    #[cfg(debug_assertions)]
+    {
+        held::pending_on(parent)
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = parent;
+        false
+    }
+}
+
+/// The owner closed or dismissed a sheet before it began: its waiting entry
+/// goes and its `cancel` runs. Nothing in a normal launch.
+pub fn forget_sheet(sheet: &NSWindow) {
+    #[cfg(debug_assertions)]
+    held::forget(|h| h.sheet_is(sheet));
+    #[cfg(not(debug_assertions))]
+    let _ = sheet;
+}
+
+/// A window is going away: every sheet waiting to go on it is cancelled.
+pub fn forget_sheets_on(parent: &NSWindow) {
+    #[cfg(debug_assertions)]
+    held::forget(|h| h.parent_is(parent));
+    #[cfg(not(debug_assertions))]
+    let _ = parent;
+}
+
+/// Whether a window's return from the Dock wakes the sheets waiting on it
+/// (development lane launches; registered with the first waiting sheet).
+#[cfg(debug_assertions)]
+pub fn restore_observed() -> bool {
+    held::RESTORE.with(|o| o.borrow().is_some())
+}
+
+/// The development lane's waiting sheets.
+#[cfg(debug_assertions)]
+mod held {
+    use super::*;
+    use objc2::rc::Retained;
+    use objc2_app_kit::NSWindowDidDeminiaturizeNotification;
+    use std::cell::Cell;
+
+    thread_local! {
+        /// 0: a normal launch; 1: hold while inactive; 2: and stand a
+        /// waiting sheet above its window for review captures.
+        pub(super) static MODE: Cell<u8> = const { Cell::new(0) };
+        static SHEETS: RefCell<Vec<Held>> = const { RefCell::new(Vec::new()) };
+        pub(super) static RESTORE: RefCell<Option<Retained<objc2::runtime::ProtocolObject<dyn objc2_foundation::NSObjectProtocol>>>> =
+            const { RefCell::new(None) };
+    }
+
+    pub(super) struct Held {
+        parent: Weak<NSWindow>,
+        sheet: Weak<NSWindow>,
+        begin: Option<Box<dyn FnOnce()>>,
+        cancel: Option<Box<dyn FnOnce()>>,
+    }
+    impl Held {
+        pub(super) fn sheet_is(&self, w: &NSWindow) -> bool {
+            self.sheet.load().is_none_or(|s| std::ptr::eq(&*s, w))
+        }
+        pub(super) fn parent_is(&self, w: &NSWindow) -> bool {
+            self.parent.load().is_none_or(|p| std::ptr::eq(&*p, w))
+        }
+    }
+    /// Dropped without beginning: its owner hears it was cancelled.
+    impl Drop for Held {
+        fn drop(&mut self) {
+            if self.begin.is_some()
+                && let Some(cancel) = self.cancel.take()
+            {
+                cancel();
+            }
+        }
+    }
+
+    pub(super) fn push(
+        parent: &NSWindow,
+        sheet: &NSWindow,
+        begin: Box<dyn FnOnce()>,
+        cancel: Box<dyn FnOnce()>,
+    ) {
+        forget(|h| h.sheet_is(sheet));
+        SHEETS.with(|s| {
+            s.borrow_mut().push(Held {
+                parent: Weak::from(parent),
+                sheet: Weak::from(sheet),
+                begin: Some(begin),
+                cancel: Some(cancel),
+            })
+        });
+        observe_activation();
+        observe_restore();
+        if MODE.with(|m| m.get()) == 2 {
+            stage(sheet, parent);
+        }
+    }
+
+    pub(super) fn pending_on(parent: &NSWindow) -> bool {
+        SHEETS.with(|s| {
+            s.borrow()
+                .iter()
+                .any(|h| h.parent.load().is_some_and(|p| std::ptr::eq(&*p, parent)))
+        })
+    }
+
+    /// Removes the entries `which` matches; each one's `cancel` runs after
+    /// the queue is released (a cancelled answer may ask for another sheet).
+    pub(super) fn forget(which: impl Fn(&Held) -> bool) {
+        let gone: Vec<Held> = SHEETS.with(|s| {
+            let mut s = s.borrow_mut();
+            let (gone, kept) = std::mem::take(&mut *s).into_iter().partition(|h| which(h));
+            *s = kept;
+            gone
+        });
+        for h in &gone {
+            if let Some(w) = h.sheet.load() {
+                take_down(&w);
+            }
+        }
+        drop(gone);
+    }
+
+    /// The app became active: every waiting sheet whose window is open
+    /// begins, oldest first; one whose window is in the Dock waits for it
+    /// to come back; one whose window closed is cancelled.
+    pub(super) fn begin_all() {
+        let held = SHEETS.with(|s| std::mem::take(&mut *s.borrow_mut()));
+        let mut still = Vec::new();
+        for mut entry in held {
+            let (Some(parent), Some(sheet)) = (entry.parent.load(), entry.sheet.load()) else {
+                continue;
+            };
+            if parent.isVisible() {
+                take_down(&sheet);
+                if let Some(begin) = entry.begin.take() {
+                    begin();
+                }
+            } else if parent.isMiniaturized() {
+                still.push(entry);
+            }
+        }
+        if !still.is_empty() {
+            SHEETS.with(|s| {
+                let mut s = s.borrow_mut();
+                still.append(&mut s);
+                *s = still;
+            });
+        }
+    }
+
+    /// A window comes back from the Dock while the app is active: the sheets
+    /// waiting on it begin.
+    fn observe_restore() {
+        RESTORE.with(|o| {
+            if o.borrow().is_some() {
+                return;
+            }
+            let block = block2::RcBlock::new(|_: NonNull<NSNotification>| {
+                if MainThreadMarker::new()
+                    .is_some_and(|mtm| NSApplication::sharedApplication(mtm).isActive())
+                {
+                    begin_all();
+                }
+            });
+            let token = unsafe {
+                NSNotificationCenter::defaultCenter().addObserverForName_object_queue_usingBlock(
+                    Some(NSWindowDidDeminiaturizeNotification),
+                    None,
+                    None,
+                    &block,
+                )
+            };
+            *o.borrow_mut() = Some(token);
+        });
+    }
+
+    /// Review captures (the launch's `--open`): a waiting sheet stands where
+    /// it will hang, at the top of its window's content, ordered just above
+    /// that window and never front, so a background capture sees it.
+    fn stage(sheet: &NSWindow, parent: &NSWindow) {
+        if !parent.isVisible() {
+            return;
+        }
+        let (frame, own) = (parent.frame(), sheet.frame());
+        let top = frame.origin.y + parent.contentLayoutRect().size.height;
+        sheet.setFrameOrigin(objc2_foundation::NSPoint::new(
+            frame.origin.x + (frame.size.width - own.size.width) / 2.,
+            top - own.size.height,
+        ));
+        sheet.orderWindow_relativeTo(NSWindowOrderingMode::Above, parent.windowNumber());
+    }
+
+    /// Takes down a staged sheet before it begins or when it is cancelled.
+    fn take_down(sheet: &NSWindow) {
+        if sheet.isVisible() && sheet.sheetParent().is_none() {
+            sheet.orderOut(None);
+        }
+    }
 }
