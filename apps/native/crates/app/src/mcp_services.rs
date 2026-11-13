@@ -314,7 +314,19 @@ impl EngineJobs {
             entry.overrides.register();
             entry.host.clone()
         };
-        let (generation, value) = host.wait_contributions(Duration::from_secs(60))?;
+        // Cancel reaches this wait too; a load no realm will finish answers
+        // with its failure instead of a minute's wait.
+        let (generation, value) = host
+            .wait_contributions(Duration::from_secs(60), stop)
+            .map_err(|error| match error {
+                pm_runtime_v8::Error::Host(message)
+                    if message == pm_compat_runner::host::WAIT_STOPPED =>
+                {
+                    anyhow::anyhow!(CAPTURE_STOPPED)
+                }
+                pm_runtime_v8::Error::Host(message) => anyhow::anyhow!(message),
+                error => anyhow::anyhow!(error),
+            })?;
         Ok(Arc::new(pm_engine_service::resources::ResourceSnapshot {
             generation,
             definitions: crate::extensions::definitions(&value),

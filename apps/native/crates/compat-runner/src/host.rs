@@ -234,6 +234,9 @@ struct Published {
     /// published yet, so nothing has settled.
     starting: Vec<(String, String)>,
     activations: usize,
+    /// Why no realm will finish the load (a restart that could not start,
+    /// repeated failures): what a job waiting for it is told.
+    failed: Option<String>,
     /// The realm generation drawing now, 0 with none. Its page is keyed by this.
     view: u64,
     revision: u64,
@@ -682,6 +685,9 @@ impl RasterInbox {
     }
 }
 
+/// What [`ExtensionHost::wait_contributions`] answers when its caller stopped it.
+pub const WAIT_STOPPED: &str = "The wait for extensions was stopped";
+
 /// Opt-in load timings on stderr (`PM_NATIVE_MAIN_TRACE=1`), seconds since
 /// this process's first trace line.
 fn trace(value: Value) {
@@ -775,8 +781,24 @@ impl ExtensionHost {
     }
     /// A worker's definition pin after activation, including confined Store
     /// helpers. No DOM page or AppKit is needed. Never deliver a partial boot.
-    pub fn wait_contributions(&self, timeout: Duration) -> Result<(u64, Arc<Value>)> {
-        let started = std::time::Instant::now();
+    /// `stop` (a cancelled export, a stopped capture) ends the wait at once;
+    /// a load no realm will finish ends it with that failure, by name.
+    pub fn wait_contributions(
+        &self,
+        timeout: Duration,
+        stop: &dyn Fn() -> bool,
+    ) -> Result<(u64, Arc<Value>)> {
+        const POLL: Duration = Duration::from_millis(50);
+        let deadline = std::time::Instant::now() + timeout;
+        let unfinished = |what: &str| -> Result<()> {
+            if stop() {
+                return Err(Error::Host(WAIT_STOPPED.into()));
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(Error::Host(what.into()));
+            }
+            Ok(())
+        };
         // Fence saved enable changes and disk reloads on the owner before
         // reading its publication. A request immediately after Disable must
         // not pin the definitions from before that change.
@@ -784,20 +806,32 @@ impl ExtensionHost {
         self.inbox
             .send(Input::Sync(tx))
             .map_err(|_| Error::Host("The extension host stopped".into()))?;
-        rx.recv_timeout(timeout)
-            .map_err(|_| Error::Host("Extensions did not finish starting".into()))?;
-        let (published, _) = self
-            .shared
-            .changed
-            .wait_timeout_while(
-                self.shared.published.lock().unwrap(),
-                timeout.saturating_sub(started.elapsed()),
-                // Ready, and nothing still loading (a Store helper, a reload).
-                |p| !p.ready || !p.publication().settled,
-            )
-            .unwrap();
-        if !published.ready || !published.publication().settled {
-            return Err(Error::Host("Extensions did not finish starting".into()));
+        loop {
+            match rx.recv_timeout(POLL) {
+                Ok(()) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    unfinished("Extensions did not finish starting")?
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(Error::Host("The extension host stopped".into()));
+                }
+            }
+        }
+        let mut published = self.shared.published.lock().unwrap();
+        loop {
+            if let Some(failure) = &published.failed {
+                return Err(Error::Host(failure.clone()));
+            }
+            // Ready, and nothing still loading (a Store helper, a reload).
+            if published.ready && published.publication().settled {
+                break;
+            }
+            unfinished("Extensions did not finish starting")?;
+            published = self.shared.changed.wait_timeout(published, POLL).unwrap().0;
+        }
+        // The cancel may have come as the load settled.
+        if stop() {
+            return Err(Error::Host(WAIT_STOPPED.into()));
         }
         Ok((
             published.revision,
@@ -2173,6 +2207,7 @@ impl Owner {
             p.view = view;
             p.activations = 1;
             p.ready = false;
+            p.failed = None;
         });
         Ok(())
     }
@@ -2371,7 +2406,7 @@ impl Owner {
         self.retire_realm();
         // What the retired realm contributed went with it: nothing of it is
         // settled until the realm that replaces it has loaded.
-        self.publish_without_realm(false);
+        self.publish_without_realm(None);
         // Repeated failures nobody can name stop the realm; a Stop that turns
         // its culprit off is not a loop.
         if culprit.is_none() {
@@ -2397,13 +2432,9 @@ impl Owner {
             });
         }
         if self.restarts > MAX_RESTARTS {
-            self.publish_without_realm(true);
-            self.shared.update(|p| {
-                p.toasts.push(
-                    "Extensions stopped after repeated failures. Reopen the project to retry."
-                        .into(),
-                )
-            });
+            self.publish_without_realm(Some(
+                "Extensions stopped after repeated failures. Reopen the project to retry.".into(),
+            ));
             self.publish_records();
             return;
         }
@@ -2417,23 +2448,29 @@ impl Owner {
             // No realm will finish this load: it has failed, by name, and
             // nothing waits for it (held frames, exports, stills).
             Err(error) => {
-                self.publish_without_realm(true);
-                self.shared.update(|p| {
-                    p.toasts
-                        .push(format!("Extensions could not start: {error}"))
-                });
+                self.publish_without_realm(Some(format!("Extensions could not start: {error}")));
                 self.publish_records();
             }
         }
     }
     /// The contributions with no trusted realm behind them: the helpers'
-    /// stay. `settled` is false while a realm that will load is starting.
-    fn publish_without_realm(&self, settled: bool) {
-        let mut value = json!({"settled": settled, "commands": [], "panels": [], "effects": [],
-            "transitions": [], "layers": [], "definitions": []});
+    /// stay. Without a `failure` a realm that will load is starting and
+    /// nothing has settled. With one, no realm will finish the load: it is
+    /// settled and ready as it stands, in one publication, the person is
+    /// told, and a job waiting for it is answered with the failure.
+    fn publish_without_realm(&self, failure: Option<String>) {
+        let mut value = json!({"settled": failure.is_some(), "commands": [], "panels": [],
+            "effects": [], "transitions": [], "layers": [], "definitions": []});
         merge_store(&mut value, &self.shared.store.lock().unwrap());
-        self.shared
-            .update(|p| p.contributions = Some(Arc::new(value)));
+        self.shared.update(|p| {
+            p.contributions = Some(Arc::new(value));
+            if let Some(failure) = failure {
+                p.ready = true;
+                p.activations = 0;
+                p.toasts.push(failure.clone());
+                p.failed = Some(failure);
+            }
+        });
     }
 }
 
@@ -4050,6 +4087,19 @@ mod tests {
         };
         *FAIL_START.lock().unwrap() = None;
         assert!(settled.loading.is_empty());
+        // A job without a window hears the failure by name, at once: no
+        // realm will ever finish this load.
+        assert!(fixture.host.is_ready(), "nothing is still starting");
+        let asked = Instant::now();
+        let answer = fixture
+            .host
+            .wait_contributions(Duration::from_secs(30), &|| false);
+        let failure = answer.err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(
+            failure.contains("Extensions could not start: "),
+            "the failure by name: {failure}"
+        );
+        assert!(asked.elapsed() < Duration::from_secs(2));
         let definitions = settled
             .contributions
             .as_ref()
