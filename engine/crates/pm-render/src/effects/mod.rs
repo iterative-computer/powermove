@@ -177,6 +177,8 @@ pub struct Effects {
     /// ranges of shared chunks (a buffer per pass per frame before); here
     /// so the effect runner's mid-frame submit can flush them.
     pub(crate) uniforms: crate::exec::UniformPool,
+    /// The frame runs in time slices (`crate::slices`).
+    pub(crate) slices: Option<crate::slices::Slices>,
     /// Effects and transitions only the fallback runner draws
     /// ([`fallback`]).
     pub fallback: fallback::EffectFallback,
@@ -376,6 +378,7 @@ impl Effects {
             context,
             watchdog: Watchdog::default(),
             uniforms: crate::exec::UniformPool::default(),
+            slices: None,
             fallback: Default::default(),
             dummies: Default::default(),
             simple: Default::default(),

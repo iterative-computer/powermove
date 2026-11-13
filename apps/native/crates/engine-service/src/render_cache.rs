@@ -3326,7 +3326,7 @@ mod tests {
         loop {
             let trace = Arc::new(Mutex::new(crate::trace::Trace::default()));
             let sub = engine
-                .frame(scene, spec, None, &Default::default(), true, trace.clone())
+                .frame_settled(scene, spec, None, &Default::default(), true, trace.clone())
                 .unwrap()
                 .unwrap();
             sub.commit();
@@ -3488,14 +3488,7 @@ mod tests {
                     settled: true,
                     ..fast
                 };
-                if settled.scale > 1. {
-                    let mut costs = crate::jobs::Costs::default();
-                    assert!(
-                        engine
-                            .refine(scene, settled, &mut costs, &|| false)
-                            .unwrap()
-                    );
-                }
+                assert!(engine.settle_now(scene, settled, || false).unwrap());
                 shown(&mut engine, settled)
             })
             .collect()
@@ -3881,7 +3874,7 @@ mod tests {
         };
         assert!(settled.final_picture(&scene));
         let sub = engine
-            .frame(
+            .frame_settled(
                 &scene,
                 settled,
                 None,

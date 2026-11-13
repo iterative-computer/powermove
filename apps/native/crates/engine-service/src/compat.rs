@@ -894,6 +894,38 @@ impl CompatRasters for CompatStore {
     }
 }
 
+/// A document's answers as a renderer beside the viewer's reads them (a
+/// paused viewer's settled picture, `crate::settle`): the exact answer or
+/// none, whatever the frame the viewer's own renderer is drawing lets
+/// stand in.
+pub(crate) struct ExactAnswers(pub Arc<CompatStore>);
+impl CompatRasters for ExactAnswers {
+    fn producing(&self, source: CompatSource) -> bool {
+        self.0.producing(source)
+    }
+    fn answer(
+        &self,
+        composition: &str,
+        layer: &str,
+        time: f64,
+        scale: f64,
+        source: CompatSource,
+        crop: Option<PixelRect>,
+    ) -> CompatAnswer {
+        if source != CompatSource::RasterOverride {
+            return CompatAnswer::Native;
+        }
+        let ticks = pm_render::compat::ticks_of(time).get();
+        let answers = self.0.answers.lock().unwrap();
+        let key = key(composition, layer, ticks, scale, crop);
+        match (answers.map.get(&key), answers.failed.get(&key)) {
+            (Some(answer), _) => answer.clone(),
+            (None, Some(message)) => CompatAnswer::Failed(message.clone()),
+            (None, None) => CompatAnswer::Missing,
+        }
+    }
+}
+
 /// A realm canvas as an override's raster: premultiplied RGBA8 rows (the
 /// engine's fast upload path), the quad's size and anchor in layer pixels,
 /// and the part of the canvas it samples.

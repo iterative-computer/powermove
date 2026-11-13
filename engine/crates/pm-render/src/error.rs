@@ -49,6 +49,10 @@ pub enum RenderError {
     /// (`effects::watchdog::Policy::Job`): the message names it.
     #[error("{0}")]
     Watchdog(String),
+    /// A frame drawn in slices gave way to something newer
+    /// (`crate::slices`). The targets are left untouched.
+    #[error("the frame gave way before it was finished")]
+    Abandoned,
 }
 
 /// An SVG image layer drawn by the declared resvg fallback (RGBA8 at

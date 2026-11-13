@@ -131,12 +131,19 @@ const UNDER: f64 = 0.2;
 /// A dragged playhead waits this long without moving before its frame is
 /// drawn again exact (After Effects' adaptive resolution).
 pub const SCRUB_SETTLE_SECONDS: f64 = 0.1;
-/// How long a paused picture has been on screen, with no viewer asking for
-/// anything newer, before its settled picture is drawn
-/// (`FrameSpec::final_picture`): one whole final frame, which nothing can
-/// interrupt once its draw has begun. A click through the timeline or a held
-/// arrow key never starts one.
+/// How long a paused picture has been on screen, its viewer asking for
+/// nothing newer, before its settled picture is asked for
+/// (`FrameSpec::final_picture`, drawn by `crate::settle`): a click through
+/// the timeline or a held arrow key never starts one.
 pub const SETTLE_IDLE_SECONDS: f64 = 0.3;
+/// The GPU time one slice of a settled picture may take: what a picture
+/// someone waits for can find ahead of it on the GPU. About a preview frame
+/// of a light composition, a small share of one of a heavy one.
+pub const SETTLE_SLICE_SECONDS: f64 = 0.006;
+/// The longest a slice waits for the worker's pictures (a viewer being
+/// drawn, a playing viewer's next frame): past it the slice goes, so a
+/// paused viewer settles in bounded time while another plays or is dragged.
+pub const SETTLE_HOLD_SECONDS: f64 = 0.05;
 
 /// Auto's adaptive resolution, which applies only while the playhead is
 /// dragged (After Effects' Adaptive Resolution): a full-resolution still that

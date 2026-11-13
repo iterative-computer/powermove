@@ -1250,6 +1250,19 @@ impl Renderer {
             .collect(&self.device, &self.queue, false);
     }
 
+    /// Draws the following frames in time slices (`crate::slices`): a
+    /// renderer drawing behind interactive ones never holds the GPU for
+    /// longer than a slice, and gives way when its gate says so. `None`:
+    /// each frame is one submission.
+    pub fn set_slices(&mut self, slices: Option<crate::slices::Slices>) {
+        self.effects.slices = slices;
+    }
+
+    /// The slices of the frames drawn since they were set.
+    pub fn slices_mut(&mut self) -> Option<&mut crate::slices::Slices> {
+        self.effects.slices.as_mut()
+    }
+
     /// Records `bracket` around every following frame's commands (`None`:
     /// nothing).
     pub fn set_bracket(&mut self, bracket: Option<Arc<dyn CommandBracket>>) {
@@ -2218,6 +2231,9 @@ impl Renderer {
         self.effects.fallback.pending.clear();
         self.effects.fallback.fatal = None;
         self.effects.fallback.blocked = false;
+        if let Some(slices) = &mut self.effects.slices {
+            slices.begin_frame();
+        }
         let (legend, taken, unsupported, exec_failures, timer, pending) = {
             self.effects.uniforms.reset();
             self.binds.begin_frame();
@@ -2309,11 +2325,14 @@ impl Renderer {
                 exec.unsupported = unsupported;
             }
             let held = exec.effects.watchdog.take_held();
+            // A frame that gave way never reaches the caller's target.
+            let abandoned = exec.effects.slices.as_ref().is_some_and(|s| s.stopped());
             let complete = exec.unsupported.is_empty()
                 && exec.fallback_pending.is_empty()
                 && exec.effects.fallback.pending.is_empty()
                 && exec.effects.fallback.fatal.is_none()
-                && !held;
+                && !held
+                && !abandoned;
             if complete && pooled_gl_rows.is_some() {
                 exec.finish_color(
                     &mut encoder,
@@ -2371,15 +2390,31 @@ impl Renderer {
             copy.record(&mut encoder, &target.texture);
         }
         self.effects.uniforms.flush(&self.queue);
-        self.queue.submit([encoder.finish()]);
+        // The last slice of a frame drawn in slices is admitted and waited
+        // for as the ones before it: the frame is done when this returns.
+        if let Some(slices) = &mut self.effects.slices {
+            slices.admit();
+        }
+        let last = self.queue.submit([encoder.finish()]);
         self.effects.watchdog.submitted(&self.queue);
+        let abandoned = if let Some(slices) = &mut self.effects.slices {
+            let (device, queue, watchdog) = (&self.device, &self.queue, &mut self.effects.watchdog);
+            slices.submitted(device, last, || {
+                if watchdog.frames_in_flight() > 0 {
+                    watchdog.collect(device, queue, false);
+                }
+            });
+            slices.stopped()
+        } else {
+            false
+        };
         self.binds.end_frame();
         for t in taken {
             self.pool.give(t);
         }
         let mut scene3d_meta = crate::scene3d::metadata::collect(&plan, &self.scene3d);
         if prefix {
-            if unsupported.is_empty() && pending.is_empty() {
+            if unsupported.is_empty() && pending.is_empty() && !abandoned {
                 self.prefix.remember(std::mem::take(&mut plan.draws));
             } else {
                 self.prefix.clear(&mut self.pool);
@@ -2400,6 +2435,9 @@ impl Renderer {
             }
             out
         };
+        if abandoned {
+            return Err(RenderError::Abandoned);
+        }
         if !unsupported.is_empty() {
             return Err(RenderError::Unsupported(unsupported));
         }
