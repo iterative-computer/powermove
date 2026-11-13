@@ -83,29 +83,81 @@ pub(crate) fn run(args: &[std::ffi::OsString]) -> anyhow::Result<()> {
         end: None,
         audio: false,
     })?;
-    let stamp = viewer
-        .stamp()
-        .ok_or_else(|| anyhow::anyhow!("viewer has no scene stamp"))?;
     let time = Ticks::new((seconds * 705600000.).round() as i64)?;
-    let receive =
-        viewer.estimate_studio_export_scaled(stamp, time, Size::new(1920, 1080), frames, scale)?;
     let start = Instant::now();
-    let result = loop {
-        match receive.try_recv() {
-            Ok(result) => break result.map_err(anyhow::Error::msg),
-            Err(async_channel::TryRecvError::Empty)
-                if start.elapsed() < Duration::from_secs(180) =>
+    let result: anyhow::Result<_> = (|| {
+        'request: loop {
+            anyhow::ensure!(
+                start.elapsed() < Duration::from_secs(180),
+                "estimate did not settle: status {:?}",
+                viewer.status()
+            );
+            let stamp = viewer
+                .stamp()
+                .ok_or_else(|| anyhow::anyhow!("viewer has no scene stamp"))?;
+            // The initial paused picture can be refined at composition size.
+            // Ask only after a frame for the current stamp has landed, and
+            // retry that refinement if it supersedes the queued measurement.
+            if !viewer
+                .status()
+                .frame
+                .is_some_and(|frame| frame.stamp == stamp)
             {
-                std::thread::sleep(Duration::from_millis(10))
+                std::thread::sleep(Duration::from_millis(10));
+                continue;
             }
-            Err(error) => {
-                break Err(anyhow::anyhow!(
-                    "estimate did not settle: {error}; status {:?}",
-                    viewer.status()
-                ));
+            let refined = || {
+                viewer.stamp().is_some_and(|next| {
+                    next.generation == stamp.generation
+                        && next.doc_id == stamp.doc_id
+                        && next.revision == stamp.revision
+                        && next.sequence > stamp.sequence
+                })
+            };
+            let receive = match viewer.estimate_studio_export_scaled(
+                stamp,
+                time,
+                Size::new(1920, 1080),
+                frames,
+                scale,
+            ) {
+                Ok(receive) => receive,
+                Err(error)
+                    if error.to_string() == "export estimate scene is stale" && refined() =>
+                {
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            loop {
+                match receive.try_recv() {
+                    Ok(Ok(estimate)) => return Ok(estimate),
+                    Ok(Err(error))
+                        if matches!(
+                            error.as_str(),
+                            "export estimate scene changed before calibration"
+                                | "export estimate scene changed before completion"
+                        ) && refined() =>
+                    {
+                        eprintln!(
+                            "Initial viewer refinement superseded the estimate; requesting the current scene"
+                        );
+                        continue 'request;
+                    }
+                    Ok(Err(error)) => return Err(anyhow::Error::msg(error)),
+                    Err(async_channel::TryRecvError::Empty)
+                        if start.elapsed() < Duration::from_secs(180) =>
+                    {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => anyhow::bail!(
+                        "estimate did not settle: {error}; status {:?}",
+                        viewer.status()
+                    ),
+                }
             }
         }
-    };
+    })();
     viewer.retire();
     let estimate = result?;
     let json = serde_json::to_string_pretty(&estimate)?;
