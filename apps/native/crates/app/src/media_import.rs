@@ -284,6 +284,36 @@ impl Controller {
         })
         .detach();
     }
+    /// `PM.MediaStore.get`: the original file of a project asset, held like a
+    /// picked file (read only when the extension reads it), or null.
+    pub(crate) fn media_file_for_extension(
+        &mut self,
+        answer: u64,
+        asset: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let path = self.media.originals.get(asset).cloned();
+        let executor = cx.background_executor().clone();
+        cx.spawn(async move |this, cx| {
+            let file = executor
+                .spawn(async move {
+                    let path = path?;
+                    let meta = std::fs::metadata(&path).ok().filter(|m| m.is_file())?;
+                    let name = path.file_name()?.to_string_lossy().into_owned();
+                    let kind = pm_builtins::media_import::classify(&path).map(|(_, mime)| mime);
+                    let token = pm_compat_runner::files::hold_picked(path);
+                    Some(json!({"token":token.to_string(),"name":name,"type":kind.unwrap_or_default(),
+                        "size":meta.len(),"lastModified":0}))
+                })
+                .await;
+            let _ = this.update(cx, |v, _| {
+                if let Some(host) = &v.extensions.host {
+                    host.answer(answer, file.unwrap_or(serde_json::Value::Null));
+                }
+            });
+        })
+        .detach();
+    }
     /// The encode's progress line in the status bar until the import ends.
     fn show_sequence_progress(
         &mut self,

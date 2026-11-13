@@ -106,6 +106,12 @@ pub struct Controller {
     pub shuttle: crate::shuttle::Shuttle,
     pub playback: crate::play_range::Playback,
     pub popout: Option<crate::viewer2::Popout>,
+    /// The Render Selection waiting to start, by count: asking again
+    /// replaces the one that waits.
+    pub(crate) render_wait: u64,
+    /// This window's extension resources as they change: every viewer of the
+    /// window (the editor's, the popout's) is attached and follows them.
+    pub resource_feed: pm_engine_service::resources::ResourceFeed,
     /// The editor viewer's last configured output (size, display, headroom).
     pub main_output: Rc<std::cell::Cell<Option<pm_engine_service::Output>>>,
     pub selected: Option<String>,
@@ -603,9 +609,14 @@ impl Controller {
         host.borrow().set_viewer_label("Composition viewer");
         let mut builtins = crate::builtins::Host::default();
         builtins.export_tasks = crate::export_coordinator::tasks();
+        // A viewer made before the window's extensions start draws their
+        // first state (still loading), not an empty settled one.
+        let extensions = crate::extensions::Extensions::default();
+        let resource_feed =
+            pm_engine_service::resources::ResourceFeed::new(extensions.resources.clone());
         Self {
             builtins,
-            extensions: Default::default(),
+            extensions,
             font_broker: None,
             composition_views: Default::default(),
             kernel,
@@ -655,6 +666,8 @@ impl Controller {
             shuttle: Default::default(),
             playback: Default::default(),
             popout: None,
+            render_wait: 0,
+            resource_feed,
             main_output: Default::default(),
             selected: None,
             // The status bar holds facts, not instructions (review shell 2 #11).
@@ -2042,6 +2055,9 @@ impl Controller {
                 let _ = viewer.adapt_drags(true);
                 let _ = viewer.skim_audio(self.skimming.on && self.skimming.audio);
                 self.skimming.at = None;
+                if let Err(error) = self.resource_feed.attach(&viewer) {
+                    self.message = error.to_string();
+                }
                 self.viewer = Some(viewer)
             }
             Err(e) => {
@@ -2049,7 +2065,6 @@ impl Controller {
                 self.message = format!("Viewer failed: {e}")
             }
         }
-        self.apply_extension_resources();
     }
     /// MCP placed a project in this window (open_project, create_project): an
     /// empty window shows it; a window that shows a project keeps it and the
