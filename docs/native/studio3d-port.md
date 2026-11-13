@@ -2672,3 +2672,47 @@ The designer's round-6 branch is merged for the next combined native build.
 Its additional real-content findings remain tracked: headless Auto Studio
 requires loaded model geometry, and a requested highlight can reflect toward
 a point below the floor. Neither is counted as fixed by the visual fixes above.
+
+The Production trace projection uses a fixed resolution correction of
+**0.695**, fitted once by least squares through the origin on trace cost
+alone. Denoising, encoding and sample-statistics readbacks are not fitted into
+that coefficient. Chrome is held out of the fit.
+
+| Fit scene | Actual adaptive low-res mean spp | Pixels at cap | Raw full-size trace projection | Measured real-30 trace |
+| --- | ---: | ---: | ---: | ---: |
+| Product | 19.683 | 0.318% | 2479.752 ms | 1979.977 ms |
+| Hero | 17.207 | 0.577% | 1938.610 ms | 1019.655 ms |
+
+The unrounded coefficient is 0.6950945054. The hero trace sample comes from
+the earlier profiled 30-frame export; its sample-count readback happens after
+the trace timer and is excluded from this trace-only fit. New gate exports
+must still disable that diagnostic readback. Other presets retain correction
+1 and are explicitly labelled as extrapolations. The fitted combined build
+passes (40.7 s), and the first held-out check passes without changing the
+coefficient:
+
+
+| Production estimate check | Point estimate | Measured real-30 export | Actual relative to estimate | Point gate / displayed band |
+| --- | ---: | ---: | ---: | --- |
+| Product | 2.636 s/frame | 2.996 s/frame | +13.6% | PASS / inside |
+| Hero | 2.324 s/frame | 2.182 s/frame | −6.1% | PASS / inside |
+| Chrome, held out | 9.394 s/frame | 11.043 s/frame | +17.5% | PASS / inside |
+
+The hero and chrome comparisons use the earlier CPU 30-frame exports, which
+included separate diagnostic sample-statistics readbacks. Their overall times
+are conservative comparisons, not new unprofiled speed gates. The trace-only
+fit excludes that readback. Fresh CPU/Metal real exports will repeat the
+accuracy check after runtime integration. No coefficient was adjusted using
+chrome. The estimator predicts guide work and beauty work separately, with
+the existing 64-pixel beauty context halo projected at the full requested
+render size. It does not multiply that halo by the image-area ratio.
+
+The calibration uses the actual preset convergence rule on first/middle/last
+frames at up to 480×270, yields between four-sample passes, and checks input
+cancellation during OIDN. One background pipeline initialization is permitted
+per worker; completion and failure both wake the worker, without an idle spin.
+A cache hit supersedes queued/in-flight estimates and is keyed conservatively
+by document stamp, content generation, time range, preset set and render size.
+The four-preset state/command contract is unchanged; no panel or control was
+added by the engine lane. The focused queue, model, crop and sample-parity
+regressions pass; cancellation of a late reply is also checked before landing.

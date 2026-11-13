@@ -2,6 +2,9 @@
 //! stable ID; a compositor consumes per-layer textures from the shared trace.
 use crate::extract::{Extracted, Extractor, SceneInput, SceneRequest, SceneSource};
 use crate::gpu::{PresentTarget, Renderer};
+pub mod calibration;
+#[cfg(feature = "oidn")]
+thread_local! { static DENOISER: std::cell::RefCell<Option<crate::oidn::Denoiser>> = const { std::cell::RefCell::new(None) }; }
 
 pub use pm_render::scene3d::provider::{Denoise, Tier};
 pub use pm_render::scene3d::provider::SurfaceHit;
@@ -771,7 +774,6 @@ fn prepare_oidn(
 ) -> Result<(), String> {
     // Handles and RefCells stay on their worker. One cache follows that
     // thread's lifetime, including immutable document/source replacement.
-    thread_local! { static DENOISER: std::cell::RefCell<Option<crate::oidn::Denoiser>> = const { std::cell::RefCell::new(None) }; }
     DENOISER.with(|slot| {
         let mut slot = slot
             .try_borrow_mut()
