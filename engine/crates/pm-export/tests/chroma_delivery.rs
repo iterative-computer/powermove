@@ -540,3 +540,333 @@ fn untouched_420_footage_keeps_its_chroma_and_a_moved_clip_is_filtered() {
     assert!(worst(&moved) > 8.0);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---------------------------------------------------------------------------
+// One chroma decimation for each continuous piece of picture
+// ---------------------------------------------------------------------------
+
+/// A source clip written by the exporter: `picture(x, y)` in every frame
+/// (intra-coded, so every frame decodes to the same values).
+fn still_clip(path: &std::path::Path, codec: Codec, picture: impl Fn(u32, u32) -> [f32; 3]) {
+    let frames = 8u64;
+    let spec = ExportSpec {
+        width: W,
+        height: H,
+        rate: Rate::FPS_24,
+        frames,
+        codec,
+        container: Container::Mov,
+        tags: ColorTags::Rec709QuickTime,
+        alpha: AlphaOutput::None,
+        working: WorkingEncoding::Standard,
+        dither: Dither::Off,
+        audio: None,
+        timecode: None,
+        destination: path.to_path_buf(),
+        overwrite: Overwrite::Replace,
+        mode: None,
+    };
+    let rgba: Vec<f32> = (0..H)
+        .flat_map(|y| (0..W).map(move |x| (x, y)))
+        .flat_map(|(x, y)| {
+            let [r, g, b] = picture(x, y);
+            [r, g, b, 1.0]
+        })
+        .collect();
+    let mut writer = pm_export::export(spec).unwrap();
+    for _ in 0..frames {
+        writer
+            .push_frame(&WorkingFrame {
+                width: W,
+                height: H,
+                rgba: &rgba,
+            })
+            .unwrap();
+    }
+    writer.finish().unwrap();
+}
+
+/// A video layer showing `asset` 1:1 over the whole frame from frame `from`
+/// for `frames` frames.
+fn clip_layer(id: &str, asset: &str, from: u64, frames: u64) -> Value {
+    let mut l = layer(
+        id,
+        "video",
+        json!({ "asset": asset, "fit": "stretch", "w": W, "h": H, "trim": 0, "speed": 1 }),
+        f64::from(W) / 2.0,
+        f64::from(H) / 2.0,
+        frames as f64 / 24.0,
+    );
+    l["from"] = json!(from as f64 / 24.0);
+    l
+}
+
+/// The encoder input of every frame of `layers` (bottom to top) exported to
+/// ProRes 422 HQ through the job engine.
+fn deliver(layers: Vec<Value>, clips: &[(&str, &std::path::Path)], frames: u64) -> Vec<Planes> {
+    deliver_as(
+        layers,
+        clips,
+        settings(
+            ExportFormat::ProRes {
+                profile: WireProRes::Hq,
+            },
+            frames,
+        ),
+        |_| {},
+    )
+}
+
+fn deliver_as(
+    layers: Vec<Value>,
+    clips: &[(&str, &std::path::Path)],
+    settings: ExportSettings,
+    edit: impl Fn(&mut Value),
+) -> Vec<Planes> {
+    let (delivered, _) = deliver_and_filter(layers, clips, settings, edit, None);
+    delivered.iter().map(planes).collect()
+}
+
+/// Every frame's encoder input as the job delivers it, and the same
+/// rendered (and postprocessed) frames decimated band-limited.
+fn deliver_and_filter(
+    layers: Vec<Value>,
+    clips: &[(&str, &std::path::Path)],
+    settings: ExportSettings,
+    edit: impl Fn(&mut Value),
+    post: Option<Arc<dyn FramePost>>,
+) -> (Vec<EncoderInput>, Vec<EncoderInput>) {
+    let dur = 8.0 / 24.0;
+    // The document lists layers top first.
+    let mut doc = project(W, H, dur, no_fill(), layers.into_iter().rev().collect());
+    doc["fps"] = json!(24);
+    doc["colorDepth"] = json!(32);
+    let mut media = MediaPaths::default();
+    for (id, path) in clips {
+        asset(&mut doc, id, "video", "mov", W, H, dur);
+        media.insert(*id, path.to_path_buf());
+    }
+    edit(&mut doc);
+    let job = ExportJob {
+        document: Arc::new(load(&doc)),
+        composition: "Ptest-root".into(),
+        settings,
+        media: Arc::new(media),
+        destination: PathBuf::from("/unused.mov"),
+        overwrite: Overwrite::Fail,
+        mode: None,
+        seed: 3,
+    };
+    let planned = || {
+        let mut plan = plan_export(&job).unwrap_or_else(|e| panic!("{e}"));
+        plan.frame_post = post.clone();
+        plan
+    };
+    let mut renderer = Renderer::headless().unwrap();
+    let cancel = AtomicBool::new(false);
+    let delivered = run_export_into(
+        &mut renderer,
+        &job,
+        planned(),
+        MemorySink::default(),
+        &Unrestricted,
+        &cancel,
+        &mut |_| {},
+    )
+    .unwrap()
+    .frames;
+    let plan = planned();
+    let size = plan.request.output_size;
+    let filtered = (0..plan.timeline.frames)
+        .map(|n| {
+            let time = plan.timeline.tick(n);
+            let read = render_frame(
+                &mut renderer,
+                &plan.document,
+                &job.composition,
+                time,
+                &plan.request,
+                &job.media,
+                &Unrestricted,
+                pass_key(job.seed, size),
+                &cancel,
+            )
+            .unwrap();
+            let rgba = match &post {
+                None => read.rgba,
+                Some(post) => post
+                    .frame(n, time, W, H, plan.spec.working, read.rgba)
+                    .unwrap(),
+            };
+            pm_export::convert::convert_tagged(
+                &WorkingFrame {
+                    width: W,
+                    height: H,
+                    rgba: &rgba,
+                },
+                plan.spec.input_format(),
+                &pm_export::convert::ConvertParams {
+                    working: plan.spec.working,
+                    alpha: plan.spec.alpha,
+                    tags: plan.spec.tags,
+                    dither: false,
+                    frame: n as u32,
+                },
+                plan.spec.tags,
+                pm_export::convert::Chroma::Filtered,
+            )
+            .unwrap()
+        })
+        .collect();
+    (delivered, filtered)
+}
+
+/// The largest chroma difference between two frames, in codes, over the
+/// chroma samples `keep` selects, with `b` scaled by `gain`.
+fn chroma_step(a: &Planes, b: &Planes, gain: f64, keep: impl Fn(usize, usize) -> bool) -> f64 {
+    let mut worst = 0.0f64;
+    for cy in 0..a.ch {
+        for cx in 0..a.cw {
+            if keep(cx, cy) {
+                let (p, q) = (a.chroma[cy * a.cw + cx], b.chroma[cy * a.cw + cx]);
+                worst = worst
+                    .max((p[0] - gain * q[0]).abs() / a.code)
+                    .max((p[1] - gain * q[1]).abs() / a.code);
+            }
+        }
+    }
+    worst
+}
+
+fn busy_still(x: u32, y: u32) -> [f32; 3] {
+    busy(x, y, 0)
+}
+
+/// The decoded 4:2:2 source's own chroma.
+fn source_planes(path: &std::path::Path) -> Planes {
+    planes(
+        &decode_frame(
+            path,
+            0,
+            video_timing(Rate::FPS_24).unwrap(),
+            InputFormat::V216,
+        )
+        .unwrap(),
+    )
+}
+
+#[test]
+fn a_fade_reaching_full_opacity_does_not_change_chroma_sharpness() {
+    let dir = scratch("fade");
+    let source = dir.join("clip.mov");
+    still_clip(&source, Codec::ProRes(ProResProfile::Hq), busy_still);
+    // 96 % to 100 % over black, then held: one continuous piece of picture.
+    let opacity = |n: u64| (96 + n).min(100) as f64;
+    let frames = 8;
+    let mut clip = clip_layer("v", "clip", 0, frames);
+    set(&mut clip, "opacity", held(frames, opacity));
+    let out = deliver(vec![clip], &[("clip", &source)], frames);
+    let steps: Vec<f64> = (0..frames as usize - 1)
+        .map(|n| {
+            let gain = opacity(n as u64) / opacity(n as u64 + 1);
+            chroma_step(&out[n], &out[n + 1], gain, |_, _| true)
+        })
+        .collect();
+    eprintln!(
+        "MEASURE fade 96..100 % then held, 4:2:2 footage to ProRes 422 HQ: chroma step between frames beyond the opacity change {steps:.1?} codes (10-bit)"
+    );
+    for (n, step) in steps.iter().enumerate() {
+        assert!(
+            *step <= 1.5,
+            "chroma changes by {step:.1} codes between frames {n} and {} beyond the fade itself",
+            n + 1
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_title_entering_over_footage_does_not_change_the_footage_chroma() {
+    let dir = scratch("title");
+    let source = dir.join("clip.mov");
+    still_clip(&source, Codec::ProRes(ProResProfile::Hq), busy_still);
+    let frames = 8;
+    // A 16 × 8 title in the top-left corner from frame 3 to frame 5.
+    let mut title = layer(
+        "title",
+        "solid",
+        json!({ "color": "#FFFFFF", "w": 16, "h": 8 }),
+        0.0,
+        0.0,
+        3.0 / 24.0,
+    );
+    title["from"] = json!(3.0 / 24.0);
+    let out = deliver(
+        vec![clip_layer("v", "clip", 0, frames), title],
+        &[("clip", &source)],
+        frames,
+    );
+    // Away from the title the picture is the same in every frame.
+    let away = |cx: usize, cy: usize| cx >= 12 || cy >= 12;
+    let steps: Vec<f64> = (0..frames as usize - 1)
+        .map(|n| chroma_step(&out[n], &out[n + 1], 1.0, away))
+        .collect();
+    eprintln!(
+        "MEASURE title over footage in frames 3..6 of 8: footage chroma step between frames {steps:.1?} codes (10-bit)"
+    );
+    assert!(
+        steps.iter().all(|s| *s <= 1.0),
+        "footage chroma changes as the title enters or leaves: {steps:.1?}"
+    );
+    // The title is in the picture: the frames differ under it.
+    assert!(chroma_step(&out[2], &out[3], 1.0, |cx, cy| cx < 6 && cy < 6) > 8.0);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_untouched_clip_keeps_its_chroma_up_to_a_cut_to_a_touched_one() {
+    let dir = scratch("cut");
+    let (a, b) = (dir.join("a.mov"), dir.join("b.mov"));
+    still_clip(&a, Codec::ProRes(ProResProfile::Hq), busy_still);
+    still_clip(&b, Codec::ProRes(ProResProfile::Hq), |x, y| {
+        busy(x + 3, y + 1, 2)
+    });
+    let frames = 8;
+    // Clip A alone for four frames, then a cut to clip B, which fades in
+    // its last two frames (keyframe times count from the layer's start).
+    let mut second = clip_layer("b", "other", 4, 4);
+    set(
+        &mut second,
+        "opacity",
+        held(4, |n| if n < 2 { 100.0 } else { 90.0 }),
+    );
+    let out = deliver(
+        vec![clip_layer("a", "clip", 0, 4), second],
+        &[("clip", &a), ("other", &b)],
+        frames,
+    );
+    let own = source_planes(&a);
+    let first: Vec<f64> = (0..4)
+        .map(|n| chroma_step(&out[n], &own, 1.0, |_, _| true))
+        .collect();
+    eprintln!("MEASURE untouched clip before a cut: chroma from its source {first:.1?} codes");
+    assert!(
+        first.iter().all(|s| *s == 0.0),
+        "the untouched clip's chroma is its source's, exactly: {first:.1?}"
+    );
+    // The second clip is one piece of picture: filtered from its first frame.
+    let other = source_planes(&b);
+    let second: Vec<f64> = (4..8)
+        .map(|n| chroma_step(&out[n], &other, 1.0, |_, _| true))
+        .collect();
+    eprintln!(
+        "MEASURE the clip after the cut, fading in its last frames: chroma from its source {second:.1?} codes"
+    );
+    assert!(second[0] > 8.0, "{second:.1?}");
+    assert!(chroma_step(&out[4], &out[5], 1.0, |_, _| true) <= 1.0);
+    assert!(
+        chroma_step(&out[5], &out[7], 1.0, |_, _| true) > 4.0,
+        "the fade is in the file"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

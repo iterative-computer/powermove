@@ -21,6 +21,8 @@
 //!   offline mix, and the encoder above.
 
 pub mod atomic;
+#[cfg(all(feature = "engine", target_os = "macos"))]
+pub mod chroma_policy;
 pub mod convert;
 pub mod dither;
 #[cfg(all(feature = "engine", target_os = "macos"))]

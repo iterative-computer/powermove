@@ -299,6 +299,8 @@ pub struct ReadFrame {
     pub height: u32,
     /// Layers that failed and drew nothing (section 8 isolation).
     pub failures: Vec<pm_render::LayerFailure>,
+    /// The footage in the picture, from the plan the frame was drawn with.
+    pub footage: pm_render::FrameFootage,
 }
 
 /// Waits for the frame's commands, the watchdog looking on
@@ -443,6 +445,8 @@ fn render_bands(
         rgba.clear();
     }
     let mut failures = Vec::new();
+    // Every band is drawn from the same plan of the whole frame.
+    let mut footage = None;
     let mut y = 0u32;
     while y < h {
         if cancel.load(Ordering::Relaxed) {
@@ -527,6 +531,7 @@ fn render_bands(
             }
         }
         failures.append(&mut frame.failures);
+        footage.get_or_insert_with(|| std::mem::take(&mut frame.footage));
         renderer.recycle(frame);
         y += band;
     }
@@ -535,6 +540,7 @@ fn render_bands(
         width: w,
         height: h,
         failures,
+        footage: footage.unwrap_or_default(),
     })
 }
 
@@ -1452,61 +1458,6 @@ enum Rendered {
     Failed(JobError),
 }
 
-/// How frame `time`'s chroma is decimated for `format`: by the exact inverse
-/// of the renderer's upsampling when the frame is untouched footage (one
-/// opaque video source drawn 1:1 over the whole output, read as its file
-/// says, [`Renderer::pass_through`]) whose chroma the renderer upsampled at
-/// the output's horizontal factor and siting, in the output's primaries,
-/// matrix and transfer; band-limited otherwise.
-fn chroma_of(
-    renderer: &mut Renderer,
-    document: &Document,
-    composition: &str,
-    time: Ticks,
-    request: &RenderRequest,
-    media: &dyn pm_render::AssetResolver,
-    format: crate::settings::InputFormat,
-) -> Chroma {
-    use crate::settings::InputFormat as F;
-    use pm_protocol::color::{
-        AlphaMode, ChromaSiting, MatrixCoefficients, Primaries, Subsampling, Transfer,
-    };
-    let rows_subsampled = match format {
-        F::V216 => false,
-        F::V420 | F::X420 | F::V0a8 | F::I420 | F::I420a => true,
-        F::Y416 | F::Rgba8 | F::Rgba16 => return Chroma::Filtered,
-    };
-    let Ok(Some(candidate)) = renderer.pass_through(document, composition, time, request, media)
-    else {
-        return Chroma::Filtered;
-    };
-    let facts = candidate.facts;
-    if !(facts.single_source && facts.untransformed && facts.effect_free) {
-        return Chroma::Filtered;
-    }
-    let Ok(source) = renderer.video_color(&candidate.path) else {
-        return Chroma::Filtered;
-    };
-    // Rows of a 4:2:0 output are the inverse of the renderer's linear
-    // upsampling only for a 4:2:0 source centred between rows (type 0);
-    // a 4:2:2 output keeps the rendered rows and needs only the columns.
-    let sited = match source.subsampling {
-        Subsampling::S420 => source.siting == ChromaSiting::Left,
-        Subsampling::S422 => !rows_subsampled && source.siting.horizontally_cosited(),
-        Subsampling::S444 => false,
-    };
-    if sited
-        && matches!(source.alpha, AlphaMode::Opaque)
-        && source.primaries == Primaries::Bt709
-        && source.matrix == MatrixCoefficients::Bt709
-        && source.transfer == Transfer::DisplayE
-    {
-        Chroma::Footage
-    } else {
-        Chroma::Filtered
-    }
-}
-
 /// Runs a planned export into `sink`: renders on this thread, converts,
 /// mixes, and encodes on a second one. `progress` sees each encoded frame.
 #[allow(clippy::too_many_arguments)]
@@ -1556,7 +1507,10 @@ where
     } = plan;
     let working = spec.working;
     let frames = spec.frames;
-    let input_format = spec.input_format();
+    // One chroma decimation for each continuous piece of picture.
+    let mut policy = crate::chroma_policy::ChromaPolicy::new(crate::chroma_policy::Delivery {
+        format: spec.input_format(),
+    });
     let pass = pass_key(job.seed, request.output_size);
     let mut pipeline = Pipeline::new(spec, sink)?;
     let mut mixer = audio.map(|a| {
@@ -1699,7 +1653,7 @@ where
         let total_units = h.div_ceil(BAND_ROWS);
         // The frame submitted whole whose pixels are still on their way
         // back (`GpuGate::overlaps`), and the readback slots it uses.
-        let mut flight: Option<(u64, Chroma, InFlight<'_>)> = None;
+        let mut flight: Option<(u64, InFlight<'_>)> = None;
         // A `frame:rendered` pass or a raster override may carry state from
         // one frame into the next (an extension's handler, its canvas): such
         // exports render each frame only after the one before is finished,
@@ -1719,9 +1673,9 @@ where
         };
         // A read frame, checked and finished as the exporting window leaves
         // it, to the encoder in order. False: the encoder is gone.
-        let deliver = |n: u64,
-                       chroma: Chroma,
-                       read: Result<ReadFrame, JobError>|
+        let mut deliver = |renderer: &mut Renderer,
+                           n: u64,
+                           read: Result<ReadFrame, JobError>|
          -> Result<bool, JobError> {
             let mut f = read?;
             // A renderer that leaves failing layers out drew the rest.
@@ -1753,6 +1707,22 @@ where
                 None => f.rgba,
                 Some(post) => post.frame(n, timeline.tick(n), w, h, working, f.rgba)?,
             };
+            // Frames are delivered in order; a piece of untouched footage
+            // is looked along, by its plans alone, at its first frame.
+            let chroma = policy.frame(n, frames, f.footage, renderer, &mut |renderer, m| {
+                if cancel.load(Ordering::Relaxed) {
+                    return None;
+                }
+                renderer
+                    .footage(
+                        &document,
+                        &job.composition,
+                        timeline.tick(m),
+                        &request,
+                        &*job.media,
+                    )
+                    .ok()
+            });
             Ok(tx.send(Rendered::Frame(n, rgba, chroma)).is_ok())
         };
         for n in 0..frames {
@@ -1766,15 +1736,6 @@ where
             // the encoder is gone).
             let step = (|| -> Result<Option<bool>, JobError> {
                 let time = timeline.tick(n);
-                let chroma = chroma_of(
-                    renderer,
-                    &document,
-                    &job.composition,
-                    time,
-                    &request,
-                    &*job.media,
-                    input_format,
-                );
                 if !overlap {
                     let read = render_frame_output(
                         renderer,
@@ -1790,7 +1751,7 @@ where
                         pixels(sent),
                         None,
                     );
-                    return deliver(n, chroma, read).map(Some);
+                    return deliver(renderer, n, read).map(Some);
                 }
                 let units = gate
                     .admit(pass, total_units, cancel)
@@ -1811,18 +1772,18 @@ where
                         units,
                         &mut ring,
                     )?;
-                    return match flight.replace((n, chroma, next)) {
-                        Some((m, chroma, prev)) => {
+                    return match flight.replace((n, next)) {
+                        Some((m, prev)) => {
                             let read = finish_whole(renderer, prev, &mut ring, pixels(sent), w, h);
-                            deliver(m, chroma, read).map(Some)
+                            deliver(renderer, m, read).map(Some)
                         }
                         None => Ok(None),
                     };
                 }
                 // Admitted in bands: the frame before goes first.
-                if let Some((m, chroma, prev)) = flight.take() {
+                if let Some((m, prev)) = flight.take() {
                     let read = finish_whole(renderer, prev, &mut ring, pixels(sent), w, h);
-                    if !deliver(m, chroma, read)? {
+                    if !deliver(renderer, m, read)? {
                         return Ok(Some(false));
                     }
                     sent += 1;
@@ -1841,7 +1802,7 @@ where
                     pixels(sent),
                     Some(units),
                 );
-                deliver(n, chroma, read).map(Some)
+                deliver(renderer, n, read).map(Some)
             })();
             render_ns += frame_started.elapsed().as_nanos();
             match step {
@@ -1855,12 +1816,12 @@ where
             }
         }
         if render_error.is_none()
-            && let Some((m, chroma, prev)) = flight.take()
+            && let Some((m, prev)) = flight.take()
         {
             // Every frame is judged before the last one's pixels go.
             renderer.wait_idle();
             let read = finish_whole(renderer, prev, &mut ring, pixels(sent), w, h);
-            if let Err(e) = deliver(m, chroma, read) {
+            if let Err(e) = deliver(renderer, m, read) {
                 render_error = Some(e);
             }
         }
@@ -2000,12 +1961,14 @@ fn finish_whole(
     read.map_err(|e| JobError::Render(e.to_string()))?
         .map_err(|e| JobError::Render(e.to_string()))?;
     let failures = std::mem::take(&mut frame.failures);
+    let footage = std::mem::take(&mut frame.footage);
     renderer.recycle(frame);
     Ok(ReadFrame {
         rgba,
         width,
         height,
         failures,
+        footage,
     })
 }
 
