@@ -178,14 +178,10 @@ impl StillPrefetch {
                 let Ok(handle) = std::thread::Builder::new()
                     .name("pm-still-prefetch".into())
                     .spawn(move || {
-                        loop {
-                            let Ok(key) = asks
-                                .lock()
-                                .map_err(drop)
-                                .and_then(|a| a.recv().map_err(drop))
-                            else {
-                                break;
-                            };
+                        // The queue's lock is held only while waiting for
+                        // the next request, never while decoding.
+                        let next = || asks.lock().ok().and_then(|a| a.recv().ok());
+                        while let Some(key) = next() {
                             let skip = {
                                 let mut c = claims.lock().unwrap();
                                 let skip = c.dropped.remove(&key);

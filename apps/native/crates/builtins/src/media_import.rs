@@ -1201,7 +1201,7 @@ mod tests {
             relinked.summary(),
             "Imported shot.[0001-0007].png · frames 1–7, were 1–6 · frame 3 missing"
         );
-        assert_eq!(relinked.assets, [id.clone()]);
+        assert_eq!(relinked.assets, std::slice::from_ref(&id));
         let published = f.actor.handle().published("p").unwrap();
         let root = published.snapshot.root().unwrap().to_value();
         let asset = root.get("assets").unwrap().get(&id).unwrap();
