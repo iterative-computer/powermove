@@ -2,8 +2,11 @@
 
 Upstream: crates.io `wgpu` 30.0.1 (git `40f4a34ebaf56f9a046231f54125ad046239d3f3`,
 `wgpu/`), MIT OR Apache-2.0 (`LICENSE.MIT`, `LICENSE.APACHE`). Patched in through
-`[patch.crates-io]` in `engine/Cargo.toml`; `wgpu-core`, `wgpu-hal` and
-`wgpu-types` are unchanged from crates.io.
+`[patch.crates-io]` in both workspaces that build the engine: `engine/Cargo.toml`
+and `apps/native/Cargo.toml` (the app and the engine's own tests run the same
+wgpu source). Each workspace's `Cargo.lock` then lists `wgpu` 30.0.1 without a
+registry source or checksum and with `pm-perf` among its dependencies.
+`wgpu-core`, `wgpu-hal` and `wgpu-types` are unchanged from crates.io.
 
 The only change: deterministic work counters (`pm-perf`, `docs/engine/perfbench.md`).
 
@@ -25,4 +28,6 @@ Not counted: `create_texture_from_hal` and `create_buffer_from_hal` (they wrap
 memory made elsewhere, such as IOSurface imports), and anything done below
 wgpu (`wgpu-hal` or Metal directly, as `pm-gpu`'s `decode_in`, `bridge_out`
 and `device.rs` do). To move to a new wgpu: copy the new release's crate here, re-apply
-the marked lines (`grep -rn "Powermove: pm-perf" src`), and keep `pm_counters.rs`.
+the marked lines (`grep -rn "Powermove: pm-perf" src`), keep `pm_counters.rs`, and
+refresh both lock files (`cargo update -p wgpu` in `engine` and in `apps/native`):
+the two patch entries point at this one folder, so the update is made once.

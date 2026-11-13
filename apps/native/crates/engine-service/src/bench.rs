@@ -514,8 +514,8 @@ pub fn run() -> anyhow::Result<()> {
         let mut seen = None;
         let started = Instant::now();
         let mut collect = |out: &mut Vec<f64>,
-                       asked: &std::collections::HashMap<i64, f64>,
-                       seen: &mut Option<(i64, u64)>| {
+                           asked: &std::collections::HashMap<i64, f64>,
+                           seen: &mut Option<(i64, u64)>| {
             if let Some(f) = viewer.status().frame
                 && let Some(done) = f.completion_host_seconds
                 && seen != &Some((f.time.get(), f.stamp.sequence))
@@ -628,7 +628,10 @@ pub fn run() -> anyhow::Result<()> {
             }
             lat.sort_by(f64::total_cmp);
             let during: Vec<_> = shown.iter().filter(|s| s.0 < total).collect();
-            let mut gaps: Vec<f64> = during.windows(2).map(|w| (w[1].0 - w[0].0) * 1000.).collect();
+            let mut gaps: Vec<f64> = during
+                .windows(2)
+                .map(|w| (w[1].0 - w[0].0) * 1000.)
+                .collect();
             gaps.sort_by(f64::total_cmp);
             let stand = during.iter().filter(|s| s.2).count();
             out.insert(name.into(), json!({"fps":fps,"seconds":total,"positions_asked":asked.len(),
@@ -652,7 +655,10 @@ pub fn run() -> anyhow::Result<()> {
         // Keep the original single-drag fields for earlier readers.
         let mut forward = out.get("drag").cloned().unwrap_or_default();
         if let Some(m) = forward.as_object_mut() {
-            m.insert("back".into(), out.get("drag_back").cloned().unwrap_or_default());
+            m.insert(
+                "back".into(),
+                out.get("drag_back").cloned().unwrap_or_default(),
+            );
         }
         forward
     } else {
@@ -827,11 +833,12 @@ fn fill_range(
         let frame = pm_engine_service::frame_codec::decode(payload, width, height)
             .ok_or_else(|| anyhow::anyhow!("a frame does not decode"))?;
         reads.push(t.elapsed().as_secs_f64() * 1000.);
-        anyhow::ensure!(frame.len() == width as usize * height as usize * 16);
+        // Half-float RGBA, as the viewer uploads it: 8 bytes a pixel.
+        anyhow::ensure!(frame.len() == width as usize * height as usize * 8);
         bytes += data.len() as u64;
     }
     reads.sort_by(f64::total_cmp);
-    let raw = u64::from(width) * u64::from(height) * 16;
+    let raw = u64::from(width) * u64::from(height) * 8;
     Ok(json!({"queued":queued,"fill_s":fill_s,"frames":files.len(),
         "bytes_per_frame":bytes / (files.len().max(1) as u64),"raw_bytes_per_frame":raw,
         "read_ms":{"p50":percentile(&reads,0.5),"p95":percentile(&reads,0.95),"max":reads.last()}}))

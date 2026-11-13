@@ -690,6 +690,19 @@ impl CompatStore {
             self.answers.lock().unwrap().in_flight = None;
         }
     }
+    /// The realm's measured time per need, the batch in flight (its age and
+    /// size), the needs waiting behind it and the override layers of the
+    /// last look-ahead frame: a traced viewer's after-frame row.
+    pub(crate) fn trace(&self) -> serde_json::Value {
+        let answers = self.answers.lock().unwrap();
+        serde_json::json!({
+            "per_need_ms": answers.per_need.map(|d| d.as_secs_f64() * 1e3),
+            "in_flight_ms": answers.in_flight.map(|(at, _)| at.elapsed().as_secs_f64() * 1e3),
+            "in_flight": answers.in_flight.map(|(_, n)| n),
+            "queued": answers.queued.len(),
+            "layers": answers.layers,
+        })
+    }
     /// One frame of the open composition, in ticks.
     pub(crate) fn frame_ticks(&self) -> i64 {
         self.answers.lock().unwrap().frame

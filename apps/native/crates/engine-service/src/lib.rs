@@ -1485,6 +1485,8 @@ struct Flight {
     /// A playing frame's index and key in the disk render cache: gaps
     /// between played frames are dropped frames (`DiskFrames::dropped`).
     played: Option<(i64, [u8; 32])>,
+    /// Override layers this frame drew from an earlier answer.
+    late_layers: usize,
 }
 /// A jump of more frames than this (2 s at 24 fps) between played frames
 /// is a seek, not a stall; a short seek taken for one only renders more.
@@ -1757,6 +1759,8 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
     // tick, picture for the target vsync, unaligned audio start).
     let legacy = std::env::var("PM_ENGINE_PRESENT").as_deref() == Ok("legacy");
     let mut cursor = 0;
+    // Traced viewers: when the last retired frame's present pass left the GPU.
+    let mut gpu_free = 0f64;
     let (mut rebuilt_at, mut backoff) = (None::<std::time::Instant>, Duration::ZERO);
     loop {
         // Objects Metal and Core Animation autorelease on this thread outside
@@ -1950,13 +1954,35 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             }
             if let Some(v) = state.views.get_mut(&f.id) {
                 let t = f.submission.trace.lock().unwrap();
-                if let Some(recorder) = &recorder && !recorder.record(serde_json::json!({"display":t.display,"worker":t.worker_start,"completed":t.completed,"commit":t.commit,
+                if let Some(recorder) = &recorder {
+                    let mut row = serde_json::json!({"display":t.display,"worker":t.worker_start,"completed":t.completed,"commit":t.commit,
                         "input":f.input,"audio_host":f.audio_host,"time":f.spec.time.get(),"scale":f.spec.scale,"moment":format!("{:?}",f.spec.moment),"disk":t.disk,"disk_wait_ms":t.disk_wait_ms,"enter_ms":t.enter_ms,"disk_upload_ms":t.disk_upload_ms,"cache_hit":t.cache_hit,
                         "stale":v.stamp != f.stamp,"viewer_id":f.id,"generation":f.stamp.generation,"revision":f.stamp.revision,"sequence":f.stamp.sequence,"gpu_ok":t.gpu_ok,
                         "request":f.pipeline.request,"actor_ms":f.pipeline.actor_ms,"publication_ms":f.pipeline.publication_ms,
                         "bumps":bumps_snapshot(),"present_requested":t.present_requested,"render_start":t.render_start,"render_submitted":t.render_submitted,"render_cpu_ms":t.render_cpu_ms,"work":serde_json::from_str::<serde_json::Value>(&t.work.to_json()).unwrap_or_default(),"drawable_asked":t.drawable_asked,"drawable_acquired":t.drawable_acquired,
-                        "encode_end":t.encode_end,"scheduled":t.scheduled,"gpu_start":t.gpu_start,"gpu_done":t.gpu_done,"callback":t.display_callback,"target":t.target,"requested":t.requested,"predicted":t.predicted})) {
-                    v.status.error = Some("viewer diagnostic trace overflow/disconnected".into());
+                        "encode_end":t.encode_end,"scheduled":t.scheduled,"gpu_start":t.gpu_start,"gpu_done":t.gpu_done,"callback":t.display_callback,"target":t.target,"requested":t.requested,"predicted":t.predicted});
+                    // The render's own GPU time: from when the GPU was free
+                    // for it (its submission, or the frame before leaving
+                    // the GPU: one queue, in order) to the present pass.
+                    let render_gpu_ms = (t.render_submitted > 0. && t.gpu_start > 0.)
+                        .then(|| (t.gpu_start - t.render_submitted.max(gpu_free)) * 1e3);
+                    gpu_free = gpu_free.max(t.gpu_done);
+                    let r = runtime.get(&f.id);
+                    if let (Some(row), serde_json::Value::Object(more)) = (
+                        row.as_object_mut(),
+                        serde_json::json!({
+                            "interval": r.map(|r| r.interval), "ahead": r.map(|r| r.ahead),
+                            "stand_ins": f.submission.stand_ins, "late_layers": f.late_layers,
+                            "skipped_targets": v.status.skipped_targets, "held_frames": v.status.held_frames,
+                            "render_gpu_ms": render_gpu_ms,
+                        }),
+                    ) {
+                        row.extend(more);
+                    }
+                    if !recorder.record(row) {
+                        v.status.error =
+                            Some("viewer diagnostic trace overflow/disconnected".into());
+                    }
                 }
                 if v.stamp != f.stamp
                     && !only_moved(
@@ -2254,6 +2280,14 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 a.send(audio::AudioCtl::SkimAudio(on));
             }
             let sample = r.transport.poll((now * 1e6) as i64);
+            if let Some((waited, fallback)) = r.transport.started.take()
+                && let Some(recorder) = &recorder
+            {
+                recorder.record(serde_json::json!({
+                    "audio_start": true, "at": now, "viewer_id": id,
+                    "wait_ms": waited as f64 / 1e3, "fallback": fallback,
+                }));
+            }
             changed |= v
                 .status
                 .clock
@@ -2774,6 +2808,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                             audio_host,
                             pipeline,
                             played,
+                            late_layers,
                         });
                     }
                     Ok(None) => {
@@ -2878,26 +2913,49 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             }
             state.notify();
             drop(state);
+            // Traced viewers: what this thread does after a playing frame
+            // before it can take the next one.
+            let after = (recorder.is_some() && spec.moment == Moment::Playing).then(trace::now);
+            let (mut asked, mut uploaded) = (0., 0.);
             if spec.moment == Moment::Playing {
                 let rate = runtime.get(&id).map(|r| r.transport.rate());
                 ask_ahead(&mut engine, &shared.disk, &scene, spec, rate);
+                if after.is_some() {
+                    asked = trace::now();
+                }
                 // The next frame, if it is rendered, is uploaded in this
                 // frame's slack instead of at its own turn.
                 let step = frame_ticks * i64::from(rate.map_or(1, |r| r.num.signum()));
                 if let Ok(next) = Ticks::new(spec.time.get() + step) {
                     engine.upload_ahead(&scene, next);
                 }
+                if after.is_some() {
+                    uploaded = trace::now();
+                }
             }
             // A frame rendered on disk is read, not drawn: planning it and
             // opening its media ahead would only hold this thread (a quarter
             // of a second on a heavy project) while frames are due.
+            let mut prepared = None;
             if let Some(at) = prepare_at.filter(|at| !shared.disk.rendered(&scene, *at)) {
                 let videos = engine.prepare(&scene, at, spec);
                 if let Some(r) = runtime.get_mut(&id) {
                     r.lookahead.planned(at, videos, frame_ticks);
                 }
+                prepared = Some("ahead");
             } else if let Some(at) = refine_at.filter(|at| !shared.disk.rendered(&scene, *at)) {
                 engine.prepare(&scene, at, spec);
+                prepared = Some("entry");
+            }
+            if let (Some(recorder), Some(start)) = (&recorder, after) {
+                recorder.record(serde_json::json!({
+                    "after_frame": true, "at": start, "time": spec.time.get(), "viewer_id": id,
+                    "ask_ahead_ms": (asked - start) * 1e3,
+                    "upload_ahead_ms": (uploaded - asked) * 1e3,
+                    "prepare_ms": (trace::now() - uploaded) * 1e3,
+                    "prepared": prepared,
+                    "realm": engine.compat().map(|store| store.trace()),
+                }));
             }
         } else {
             let waiting = runtime
