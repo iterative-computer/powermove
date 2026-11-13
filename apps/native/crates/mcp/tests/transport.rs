@@ -131,6 +131,36 @@ fn refused_port_is_archived_even_when_pid_is_alive() {
 }
 
 #[test]
+fn headless_startup_cleans_dead_pid_or_refused_socket_before_selecting_proxy() {
+    for dead_pid in [true, false] {
+        let profile = Profile::new();
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let original = descriptor(if dead_pid { exited_pid() } else { std::process::id() }, port);
+        if !dead_pid { drop(listener); }
+        profile.write(&original);
+        assert!(!pm_mcp::transport::has_running_host(&profile.0).unwrap());
+        assert!(!profile.descriptor().exists());
+        assert_eq!(fs::read(&profile.archives()[0]).unwrap(), original);
+        profile.start().unwrap().shutdown();
+    }
+}
+
+#[test]
+fn headless_startup_preserves_a_live_host_and_accepts_a_fresh_profile() {
+    let profile = Profile::new();
+    assert!(!pm_mcp::transport::has_running_host(&profile.0).unwrap());
+    let mut server = profile.start().unwrap();
+    let original = fs::read(profile.descriptor()).unwrap();
+    assert!(pm_mcp::transport::has_running_host(&profile.0).unwrap());
+    assert_eq!(fs::read(profile.descriptor()).unwrap(), original);
+    assert!(profile.archives().is_empty());
+    server.shutdown();
+    fs::remove_dir_all(profile.0.join("mcp")).unwrap();
+    assert!(!pm_mcp::transport::has_running_host(&profile.0).unwrap());
+}
+
+#[test]
 fn corrupt_json_is_archived_byte_for_byte() {
     let profile = Profile::new();
     let original = b"{torn synthetic descriptor\xff";
