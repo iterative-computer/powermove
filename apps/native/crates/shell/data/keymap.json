@@ -2352,5 +2352,85 @@
     "in_fields": false,
     "repeat": false,
     "loose": false
+  },
+  {
+    "id": "native.showRed",
+    "chord": "alt+1",
+    "command": "viewer.showRed",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "native.showGreen",
+    "chord": "alt+2",
+    "command": "viewer.showGreen",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "native.showBlue",
+    "chord": "alt+3",
+    "command": "viewer.showBlue",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "native.showAlpha",
+    "chord": "alt+4",
+    "command": "viewer.showAlpha",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "native.showAlphaOverlay",
+    "chord": "alt+5",
+    "command": "viewer.showAlphaOverlay",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "native.zoom200",
+    "chord": "cmd+2",
+    "command": "viewer.zoom200",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "native.rulers",
+    "chord": "cmd+r",
+    "command": "viewer.rulers",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "native.grid",
+    "chord": "cmd+'",
+    "command": "viewer.grid",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
   }
 ]

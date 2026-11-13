@@ -314,6 +314,7 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
                 m("zoomIn"),
                 m("zoomOut"),
                 m("actualSize"),
+                k("Zoom to 200%", "viewer.zoom200", ""),
                 m("fitComposition"),
                 k("Fit Composition and Timeline", "fitView", ""),
                 m("toggleLayerControls"),
@@ -387,8 +388,17 @@ pub fn extras() -> Vec<(&'static str, Item)> {
         )
     };
     vec![
+        view("Show Rulers", "viewer.rulers"),
+        view("Show Grid", "viewer.grid"),
+        view("Clear Guides", "viewer.clearGuides"),
         view("Show Safe Areas", "viewer.safeAreas"),
         view("Show Guides", "viewer.guides"),
+        view("Show RGB", "viewer.showRGB"),
+        view("Show Red Channel", "viewer.showRed"),
+        view("Show Green Channel", "viewer.showGreen"),
+        view("Show Blue Channel", "viewer.showBlue"),
+        view("Show Alpha Channel", "viewer.showAlpha"),
+        view("Show Alpha Overlay", "viewer.showAlphaOverlay"),
         view("Popout Viewer", "viewer.popout"),
         view("Toggle Proxies", "viewer.toggleProxies"),
         view("Skimming", "toggleSkimming"),

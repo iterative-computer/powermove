@@ -1575,3 +1575,92 @@ fn option_dragging_the_body_leaves_the_layer_and_moves_a_copy(cx: &mut TestAppCo
     assert_eq!(layers(&s).len(), 1, "one Undo step");
     assert_eq!(position(&s, &original), before);
 }
+
+/// View ▸ Show Rulers: a press in the top ruler makes a horizontal guide
+/// that follows the pointer and settles on the composition's centre within
+/// reach; dragged back into the ruler it goes.
+#[gpui::test]
+fn a_guide_comes_out_of_a_ruler_settles_and_goes_back(cx: &mut TestAppContext) {
+    use crate::gizmo::viewer_rulers::{Axis, RulerGuide};
+    let mut s = stage(cx);
+    s.surface
+        .update(&mut s.vcx, |g, cx| g.set_rulers(true, false, cx));
+    let origin = bounds(&mut s.vcx, "viewer.gizmos").origin;
+    let none = Modifiers::none();
+    // The top band is the ruler's height; the frame starts 20 pt in.
+    let ruler = origin + point(px(100.), px(8.));
+    s.vcx.simulate_mouse_down(ruler, MouseButton::Left, none);
+    // 178 composition pixels down is 2 from the centre of a 360 tall frame.
+    let near_centre = origin + point(px(100.), px(20. + 178.));
+    s.vcx
+        .simulate_mouse_move(near_centre, MouseButton::Left, none);
+    s.vcx
+        .simulate_mouse_up(near_centre, MouseButton::Left, none);
+    let guides = s
+        .surface
+        .read_with(&s.vcx, |g, _| g.ruler_guides().to_vec());
+    assert_eq!(
+        guides,
+        vec![RulerGuide {
+            axis: Axis::Horizontal,
+            at: 180.
+        }]
+    );
+    assert!(
+        s.recorder.navigation.borrow().is_empty(),
+        "a guide drag moves no view"
+    );
+    // Back into the ruler: gone.
+    let on_guide = origin + point(px(300.), px(20. + 180.));
+    s.vcx.simulate_mouse_down(on_guide, MouseButton::Left, none);
+    s.vcx.simulate_mouse_move(ruler, MouseButton::Left, none);
+    s.vcx.simulate_mouse_up(ruler, MouseButton::Left, none);
+    assert!(
+        s.surface
+            .read_with(&s.vcx, |g, _| g.ruler_guides().is_empty())
+    );
+}
+
+/// The middle button pans whatever the tool; Space held over the viewer is
+/// the hand, and its release says whether it panned (then it does not play).
+#[gpui::test]
+fn the_middle_button_and_space_pan_whatever_the_tool(cx: &mut TestAppContext) {
+    let mut s = stage(cx);
+    let none = Modifiers::none();
+    let from = s.point_of([10., 10.]);
+    let to = from + point(px(30.), px(12.));
+    s.vcx.simulate_mouse_down(from, MouseButton::Middle, none);
+    s.vcx.simulate_mouse_move(to, MouseButton::Middle, none);
+    s.vcx.simulate_mouse_up(to, MouseButton::Middle, none);
+    let pans = |s: &Stage| {
+        s.recorder
+            .navigation
+            .borrow()
+            .iter()
+            .filter(|n| matches!(n, Navigate::Pan(_)))
+            .count()
+    };
+    assert!(pans(&s) >= 1, "the middle button pans");
+    let before = pans(&s);
+    let surface = s.surface.clone();
+    s.vcx
+        .update(|_, cx| surface.update(cx, |g, cx| g.arm_space(cx)));
+    s.drag(cx, from, point(px(25.), px(0.)), none);
+    assert!(
+        pans(&s) > before,
+        "Space and a press pan, not move the layer"
+    );
+    let surface = s.surface.clone();
+    let panned = s
+        .vcx
+        .update(|window, cx| surface.update(cx, |g, cx| g.release_space(window, cx)));
+    assert!(panned, "it panned: the release does not play");
+    let surface = s.surface.clone();
+    s.vcx
+        .update(|_, cx| surface.update(cx, |g, cx| g.arm_space(cx)));
+    let surface = s.surface.clone();
+    let panned = s
+        .vcx
+        .update(|window, cx| surface.update(cx, |g, cx| g.release_space(window, cx)));
+    assert!(!panned, "no drag: the release plays");
+}

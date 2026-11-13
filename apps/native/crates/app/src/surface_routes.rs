@@ -420,6 +420,7 @@ impl Controller {
         }
         // The timeline's playhead layers follow its place: none under Home.
         self.builtins.timeline_place = None;
+        self.builtins.viewer_place = None;
         let library = self.library(cx)?;
         let active = self.session.as_ref().map(|s| s.project.clone());
         // Home's own thumbnails: the cache under this profile, and the frame

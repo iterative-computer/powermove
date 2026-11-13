@@ -156,6 +156,19 @@ const NATIVE_BINDINGS: &[(&str, &str, &str, &str)] = &[
     ),
     ("native.safeAreas", "'", "viewer.safeAreas", "[]"),
     ("native.guides", "cmd+;", "viewer.guides", "[]"),
+    ("native.zoom200", "cmd+2", "viewer.zoom200", "[]"),
+    ("native.rulers", "cmd+r", "viewer.rulers", "[]"),
+    ("native.grid", "cmd+'", "viewer.grid", "[]"),
+    ("native.showRed", "alt+1", "viewer.showRed", "[]"),
+    ("native.showGreen", "alt+2", "viewer.showGreen", "[]"),
+    ("native.showBlue", "alt+3", "viewer.showBlue", "[]"),
+    ("native.showAlpha", "alt+4", "viewer.showAlpha", "[]"),
+    (
+        "native.showAlphaOverlay",
+        "alt+5",
+        "viewer.showAlphaOverlay",
+        "[]",
+    ),
     (
         "native.projectSettings",
         "cmd+shift+,",
@@ -164,10 +177,10 @@ const NATIVE_BINDINGS: &[(&str, &str, &str, &str)] = &[
     ),
 ];
 #[test]
-fn all_228_real_bindings_under_seven_routing_contexts() {
+fn every_shipped_binding_under_seven_routing_contexts() {
     let c = pm_acceptance::catalog::Catalog::embedded().unwrap();
     let shipped = keyboard::production::shipped();
-    assert_eq!(shipped.len(), 228);
+    assert_eq!(shipped.len(), 236);
     assert_eq!(c.bindings.len() + NATIVE_BINDINGS.len(), shipped.len());
     for real in &shipped {
         let binding = match c.bindings.iter().find(|b| b.id == real.id) {

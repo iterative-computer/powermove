@@ -1002,6 +1002,9 @@ fn the_palette_lists_commands_with_arguments_and_commands_outside_the_menus() {
     for (label, command) in [
         ("Show Safe Areas", "viewer.safeAreas"),
         ("Show Guides", "viewer.guides"),
+        ("Show RGB", "viewer.showRGB"),
+        ("Show Red Channel", "viewer.showRed"),
+        ("Show Alpha Overlay", "viewer.showAlphaOverlay"),
         ("Popout Viewer", "viewer.popout"),
         ("Toggle Proxies", "viewer.toggleProxies"),
         ("Skimming", "toggleSkimming"),
@@ -1027,6 +1030,16 @@ fn the_palette_lists_commands_with_arguments_and_commands_outside_the_menus() {
     };
     assert_eq!(chord("viewer.safeAreas"), Some("'"));
     assert_eq!(chord("viewer.guides"), Some("cmd+;"));
+    // And its channel keys: ⌥1 to ⌥4, the overlay ⌥5.
+    for (command, key) in [
+        ("viewer.showRed", "alt+1"),
+        ("viewer.showGreen", "alt+2"),
+        ("viewer.showBlue", "alt+3"),
+        ("viewer.showAlpha", "alt+4"),
+        ("viewer.showAlphaOverlay", "alt+5"),
+    ] {
+        assert_eq!(chord(command), Some(key), "{command}");
+    }
     // No row is listed twice.
     let mut commands: Vec<&String> = rows.iter().map(|(_, c, _)| c).collect();
     let all = commands.len();
