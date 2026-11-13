@@ -45,6 +45,11 @@ pub struct FrameSpec {
     /// The exact picture is read (a capture): the final resampler, whatever
     /// the moment and scale.
     pub exact: bool,
+    /// The settled picture of a paused frame whose drawable is the
+    /// composition's own size: the final picture, drawn once the viewer
+    /// has rested, after the preview of the same time and size
+    /// ([`Self::final_picture`]).
+    pub settled: bool,
 }
 impl FrameSpec {
     pub fn exact(time: Ticks, output: Output) -> Self {
@@ -55,6 +60,7 @@ impl FrameSpec {
             scale: 1.,
             decode_deadline: None,
             exact: true,
+            settled: false,
         }
     }
     /// A paused frame at Full shows the composition as an export draws it:
@@ -98,21 +104,29 @@ impl FrameSpec {
         }
     }
     /// Whether this frame is the final picture of its time: a capture, or
-    /// a paused frame of the whole composition at its own size (the
-    /// refinement a paused viewer settles on, or a frame on a drawable of
-    /// exactly that size). It is drawn from the sources and with the effect
-    /// passes an export draws with, so it is the picture a rendered frame
-    /// on disk holds: a paused picture is the same before and after its
-    /// range is rendered. Every other viewer frame is a preview, and a
-    /// paused one is never replaced by the frame on disk.
+    /// the picture a paused viewer settles on, the whole composition at its
+    /// own size (the refinement above the drawable's size, or the settled
+    /// frame of a drawable of exactly that size). It is drawn from the
+    /// sources and with the effect passes an export draws with, so it is
+    /// the picture a rendered frame on disk holds: a paused picture is the
+    /// same before and after its range is rendered. Every other viewer
+    /// frame is a preview (the picture a paused viewer shows at once, kept
+    /// until the settled one is ready), and a paused one is never replaced
+    /// by the frame on disk.
     pub(crate) fn final_picture(&self, scene: &Scene) -> bool {
         self.exact
             || (self.moment == Moment::Paused
                 && (self.whole_composition(scene).is_some()
-                    || (self.scale == 1. && self.fills_composition(scene))))
+                    || (self.settled && self.scale == 1. && self.fills_composition(scene))))
+    }
+    /// Whether a paused frame of this output is followed by a settled one
+    /// ([`Self::final_picture`]): its refinement at the composition's size,
+    /// or the final picture on a drawable of that size.
+    pub(crate) fn settles(&self, scene: &Scene) -> bool {
+        Self::paused_full_scale(scene, &self.output) > 1. || self.fills_composition(scene)
     }
     /// Whether the drawable is the whole composition at its own size.
-    fn fills_composition(&self, scene: &Scene) -> bool {
+    pub(crate) fn fills_composition(&self, scene: &Scene) -> bool {
         self.output.crop.is_none()
             && composition_size(scene) == Some(Size::new(self.output.width, self.output.height))
     }
@@ -814,6 +828,7 @@ impl Engine {
             moment: spec.moment,
             scale: spec.scale.to_bits(),
             sampling: spec.sampling(),
+            finished: spec.final_picture(scene),
             inputs: self.observed_inputs(scene),
         }
     }
@@ -1499,15 +1514,17 @@ impl Engine {
             }
         })
     }
-    /// Draws a paused picture's refinement (`spec`, at the composition's
-    /// size) into the frame cache in bands, as background fills submit
-    /// them ([`crate::jobs::Costs`]): each band is waited for, then `stop`
-    /// is asked, so a newer interaction waits behind at most one band
-    /// (Metal cannot preempt a submission). Where bands cost about a whole
-    /// frame (each band builds the frame's plan; a precomp renders whole for
-    /// any region), the rest draws whole, and so do later refinements with
-    /// the same `costs`. The
-    /// next [`Engine::frame`] of `spec` presents it from the cache.
+    /// Draws a paused picture's settled frame (`spec`: its refinement at
+    /// the composition's size) into the frame cache in bands, as
+    /// background fills submit them ([`crate::jobs::Costs`]): `stop` is
+    /// asked before each band and every few milliseconds while a band is
+    /// on the GPU, so the worker never waits behind a submission once
+    /// something newer asked (Metal cannot preempt the submission itself:
+    /// what follows on the GPU waits behind at most that one). Where bands
+    /// cost about a whole frame (each band builds the frame's plan; a
+    /// precomp or an effect chain renders whole for any region), the frame
+    /// draws whole, and so do later ones with the same `costs`. The next
+    /// [`Engine::frame`] of `spec` presents it from the cache.
     /// `Ok(false)`: stopped; `Ok(true)`: the frame will find it, or draws
     /// it itself (a cache that's off, a stand-in that isn't exact).
     pub fn refine(
@@ -1619,7 +1636,7 @@ impl Engine {
         let mut failures = Vec::new();
         let mut y = 0;
         while y < area.height {
-            if y > 0 && stop() {
+            if stop() {
                 return Ok(None);
             }
             let remaining = (area.height - y).div_ceil(BAND_ROWS);
@@ -1678,7 +1695,9 @@ impl Engine {
                 self.gpu.queue.submit([encoder.finish()]);
                 rendered
             };
-            self.renderer.wait_idle();
+            if !self.wait_submitted(stop) {
+                return Ok(None);
+            }
             if let Some(error) = self.failed.lock().unwrap().take() {
                 bail!("The GPU refused this frame: {error}");
             }
@@ -1695,6 +1714,33 @@ impl Engine {
             y += rows;
         }
         Ok(Some(failures))
+    }
+    /// Waits until the GPU has finished what was submitted, asking `stop`
+    /// every few milliseconds: false when it said so first (the submission
+    /// runs on; nobody waits for it).
+    fn wait_submitted(&mut self, stop: &dyn Fn() -> bool) -> bool {
+        let mut waited = 0;
+        loop {
+            let done = self.gpu.device.poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: Some(Duration::from_millis(4)),
+            });
+            if !matches!(done, Err(wgpu::PollError::Timeout)) {
+                break;
+            }
+            if stop() {
+                return false;
+            }
+            // As `Renderer::wait_idle` looks: a frame that runs away is
+            // seen running.
+            waited += 1;
+            if waited % 25 == 0 {
+                self.renderer.watchdog_watch();
+            }
+        }
+        // Nothing left to wait for: the hang guard judges what ended.
+        self.renderer.wait_idle();
+        true
     }
     /// The raster override answers a frame at `time` would need and that
     /// are not answered yet, from its plan alone (playback's look-ahead).

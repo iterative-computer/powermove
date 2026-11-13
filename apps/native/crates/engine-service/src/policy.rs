@@ -95,6 +95,9 @@ pub struct CacheKey {
     pub scale: u64,
     /// The resampler the frame was drawn with.
     pub sampling: pm_render::sampling::Sampling,
+    /// The final picture (`FrameSpec::final_picture`), not its preview at
+    /// the same size.
+    pub finished: bool,
     /// What the frame read besides its document, as observed when it was
     /// drawn: its media files' stamps and the override wrappers answering.
     pub inputs: u64,
@@ -128,6 +131,12 @@ const UNDER: f64 = 0.2;
 /// A dragged playhead waits this long without moving before its frame is
 /// drawn again exact (After Effects' adaptive resolution).
 pub const SCRUB_SETTLE_SECONDS: f64 = 0.1;
+/// How long a paused picture has been on screen, with no viewer asking for
+/// anything newer, before its settled picture is drawn
+/// (`FrameSpec::final_picture`): one whole final frame, which nothing can
+/// interrupt once its draw has begun. A click through the timeline or a held
+/// arrow key never starts one.
+pub const SETTLE_IDLE_SECONDS: f64 = 0.3;
 
 /// Auto's adaptive resolution, which applies only while the playhead is
 /// dragged (After Effects' Adaptive Resolution): a full-resolution still that

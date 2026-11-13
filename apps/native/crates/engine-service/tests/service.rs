@@ -126,6 +126,7 @@ fn cache_key_includes_every_content_coordinate() {
         moment: policy::Moment::Paused,
         scale: 1f64.to_bits(),
         sampling: pm_render::sampling::Sampling::Final,
+        finished: false,
         inputs: 5,
     };
     for other in [

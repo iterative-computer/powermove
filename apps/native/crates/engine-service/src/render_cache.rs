@@ -3284,25 +3284,26 @@ mod tests {
                     exact: false,
                     ..FrameSpec::exact(second(), output)
                 };
-                let full = FrameSpec::paused_full_scale(scene, &output);
-                if full <= 1. {
-                    return shown(&mut engine, fast);
-                }
+                // As the worker draws a paused frame: its preview at once
+                // (or the frame on disk), then its settled picture.
                 let first = shown(&mut engine, fast);
-                if first.0 {
+                if first.0 || !fast.settles(scene) {
                     return first;
                 }
-                let refined = FrameSpec {
-                    scale: full,
+                let settled = FrameSpec {
+                    scale: FrameSpec::paused_full_scale(scene, &output),
+                    settled: true,
                     ..fast
                 };
-                let mut costs = crate::jobs::Costs::default();
-                assert!(
-                    engine
-                        .refine(scene, refined, &mut costs, &|| false)
-                        .unwrap()
-                );
-                shown(&mut engine, refined)
+                if settled.scale > 1. {
+                    let mut costs = crate::jobs::Costs::default();
+                    assert!(
+                        engine
+                            .refine(scene, settled, &mut costs, &|| false)
+                            .unwrap()
+                    );
+                }
+                shown(&mut engine, settled)
             })
             .collect()
     }
