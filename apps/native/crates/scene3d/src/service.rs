@@ -264,7 +264,14 @@ pub fn composition(comp: &Value, time: f64, ev: &mut impl Evaluator) -> Result<V
             o["parent"] = Value::Null;
         }
     }
-    if lights.is_empty() {
+    // Keep legacy unlit scenes' studio sun, but an authored World already
+    // defines the lighting (including an intentionally dark/zero-intensity
+    // World). Its background visibility does not disable its illumination.
+    let world_lighting = objects.iter().any(|o| {
+        o["p"]["visible"] != false
+            && matches!(o["world"]["mode"].as_str(), Some("sky" | "hdri"))
+    });
+    if lights.is_empty() && !world_lighting {
         let mut id = "default_sun".to_string();
         while ids.contains(&id) {
             id.push('x');
