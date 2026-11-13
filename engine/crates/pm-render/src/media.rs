@@ -1365,21 +1365,35 @@ impl MediaCache {
             |e: pm_media::MediaError| MediaFailure::Failed(format!("{}: {e}", path.display()));
         let none = Interpretation::default();
         let interp = interpret.unwrap_or(&none);
+        // A still seen for the first time is decoded once: its facts are
+        // read from that decode (a worker's decode gave them otherwise).
+        let mut whole = None;
+        if known_still_facts(path).is_none() {
+            pm_perf::bump(pm_perf::Counter::StillDecodes);
+            whole = pm_media::image::read(path, &self.pool).ok();
+            let _ = still_facts_from(path, whole.as_ref());
+        }
         probe_interpreted_image(path, interp).map_err(issue)?;
         let facts = still_facts(path).map_err(issue)?;
         let preview = edge.filter(|_| facts.previewed(ask.interpreted));
-        // Decoded ahead by the worker as this frame reads it, or here.
+        // Decoded ahead by a worker as this frame reads it, or here.
         let mut still = match self.stills.take(path, (len, modified), ask, preview) {
             Some(still) => still,
-            None => {
-                pm_perf::bump(pm_perf::Counter::StillDecodes);
-                match preview {
-                    Some(edge) => pm_media::image::imageio::read_preview(path, &self.pool, edge)
-                        .or_else(|_| pm_media::image::read(path, &self.pool)),
-                    None => pm_media::image::read(path, &self.pool),
+            None => match (preview, whole) {
+                (None, Some(whole)) => whole,
+                (Some(edge), whole) => {
+                    pm_media::image::imageio::read_preview(path, &self.pool, edge).or_else(|e| {
+                        whole
+                            .ok_or(e)
+                            .or_else(|_| pm_media::image::read(path, &self.pool))
+                    })
                 }
-                .map_err(failed)?
-            }
+                .map_err(failed)?,
+                (None, None) => {
+                    pm_perf::bump(pm_perf::Counter::StillDecodes);
+                    pm_media::image::read(path, &self.pool).map_err(failed)?
+                }
+            },
         };
         let mut read = interpreted_image_color(&still, interp).map_err(issue)?;
         if self.hdr_light {

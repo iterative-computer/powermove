@@ -779,11 +779,12 @@ fn a_playing_sequence_reads_its_next_files_ahead() {
             // Workers finish between frames, as they do while a frame is shown.
             assert!(renderer.finish_media_preparation().is_empty());
         }
+        // A file the frame reads itself is decoded once, never again for
+        // its facts.
         if ahead {
-            assert!(decodes[0] >= 1, "{decodes:?}");
-            assert_eq!(&decodes[1..], [0, 0], "decoded ahead");
+            assert_eq!(decodes, [1, 0, 0], "decoded ahead");
         } else {
-            assert!(decodes.iter().all(|&d| d >= 1), "paused: {decodes:?}");
+            assert_eq!(decodes, [1, 1, 1], "paused");
         }
     }
 }

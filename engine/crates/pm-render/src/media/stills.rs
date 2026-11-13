@@ -31,8 +31,9 @@ pub(crate) struct StillAsk {
     pub interpreted: bool,
 }
 
-/// Stills queued or waiting for their frame at once.
-const MAX_READY: usize = 12;
+/// Stills queued or waiting for their frame at once (eight UHD 16-bit
+/// frames are 530 MB; more than its workers decode in a second).
+const MAX_READY: usize = 8;
 /// The decoded bytes held at most until the engine leases more, counted
 /// from the moment a worker decodes a still, so stills on their way to the
 /// frame count too (a UHD 16-bit RGBA still is 66 MB). The engine's media
@@ -58,8 +59,17 @@ struct Worker {
     _threads: Vec<JoinHandle<()>>,
 }
 
+/// Requests a worker is decoding now, and queued ones the frame decoded
+/// itself (a worker skips those).
+#[derive(Default)]
+struct Claims {
+    started: HashSet<StillKey>,
+    dropped: HashSet<StillKey>,
+}
+
 pub(crate) struct StillPrefetch {
     worker: Option<Worker>,
+    claims: Arc<std::sync::Mutex<Claims>>,
     pending: HashSet<StillKey>,
     /// Decoded stills and when they were last asked for.
     ready: HashMap<StillKey, (Decoded, Instant)>,
@@ -122,6 +132,7 @@ impl StillPrefetch {
     fn with_limits(limit: usize, ttl: Duration) -> Self {
         Self {
             worker: None,
+            claims: Default::default(),
             pending: HashSet::new(),
             ready: HashMap::new(),
             held: Arc::new(AtomicUsize::new(0)),
@@ -163,6 +174,7 @@ impl StillPrefetch {
                 let (asks, done) = (asks.clone(), done.clone());
                 let pool = pool.clone();
                 let (held, limit) = (self.held.clone(), self.limit.clone());
+                let claims = self.claims.clone();
                 let Ok(handle) = std::thread::Builder::new()
                     .name("pm-still-prefetch".into())
                     .spawn(move || {
@@ -174,7 +186,18 @@ impl StillPrefetch {
                             else {
                                 break;
                             };
-                            let still = decode(&key, &pool, &held, limit.load(Ordering::Acquire));
+                            let skip = {
+                                let mut c = claims.lock().unwrap();
+                                let skip = c.dropped.remove(&key);
+                                if !skip {
+                                    c.started.insert(key.clone());
+                                }
+                                skip
+                            };
+                            let still = (!skip)
+                                .then(|| decode(&key, &pool, &held, limit.load(Ordering::Acquire)))
+                                .flatten();
+                            claims.lock().unwrap().started.remove(&key);
                             if done.send((key, still)).is_err() {
                                 break;
                             }
@@ -221,12 +244,24 @@ impl StillPrefetch {
         Some(still)
     }
 
-    /// Waits for the still a worker is decoding for `path` at `stamp` and
-    /// `ask` (up to two seconds), so the frame about to draw it does not
-    /// decode it a second time beside the worker.
+    /// Waits for the still a worker has started decoding for `path` at
+    /// `stamp` and `ask` (up to two seconds), so the frame about to draw it
+    /// does not decode it a second time beside the worker. One still queued
+    /// behind others (the playhead jumped) is the frame's to decode now: the
+    /// worker skips it.
     pub(crate) fn finish_pending(&mut self, path: &Path, stamp: (u64, u128), ask: StillAsk) {
         self.drain();
         let key = (path.to_path_buf(), stamp.0, stamp.1, ask);
+        if !self.pending.contains(&key) {
+            return;
+        }
+        {
+            let mut claims = self.claims.lock().unwrap();
+            if !claims.started.contains(&key) {
+                claims.dropped.insert(key);
+                return;
+            }
+        }
         let deadline = Instant::now() + Duration::from_secs(2);
         while self.pending.contains(&key) && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(1));
