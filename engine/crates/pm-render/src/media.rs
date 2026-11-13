@@ -1127,8 +1127,13 @@ pub struct MediaCache {
     /// frames, then video layers take stand-ins ([`Want::Playback`]).
     pub playback: Option<std::time::Instant>,
     /// The frame (presented index in its source) of each video layer drawn
-    /// with a stand-in since the list was reset.
+    /// with a stand-in since the list was reset (0 for a still drawn from
+    /// an earlier picture of it).
     pub stand_ins: Vec<usize>,
+    /// A still of this frame was not ready ([`MediaFailure::Pending`]).
+    pub(crate) still_pending: bool,
+    /// What says the frame being drawn is superseded (viewer frames).
+    pub(crate) interrupt: Option<Interrupt>,
     /// Converted video frames replaced during the current render, and those
     /// replaced earlier (free to overwrite: every read of them is
     /// submitted). A UHD frame converts into 66 MB (`rgba16float`).
@@ -1176,7 +1181,21 @@ pub struct MediaCache {
 pub enum MediaFailure {
     Unsupported(Feature),
     Failed(String),
+    /// A still whose decode on the prefetch worker outlasted the frame's
+    /// wait, with no earlier picture of it to show: the frame is held
+    /// ([`crate::RenderError::MediaPending`]) and drawn again when it lands.
+    Pending,
 }
+
+/// How long an exact frame (paused, a capture) waits for a still the
+/// prefetch worker is decoding before it is held and drawn again when the
+/// decode lands: longer than a playing frame's budget, short enough that a
+/// read that stalls never holds the one render thread.
+const EXACT_STILL_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// The frame being drawn is superseded once this counter moves past the
+/// value it was armed at (a seek, a new revision, its viewer closing).
+pub type Interrupt = (Arc<std::sync::atomic::AtomicU64>, u64);
 
 impl MediaCache {
     pub fn new(device: &wgpu::Device) -> MediaCache {
@@ -1202,6 +1221,8 @@ impl MediaCache {
             scrub: false,
             playback: None,
             stand_ins: Vec::new(),
+            still_pending: false,
+            interrupt: None,
             retired_frames: Vec::new(),
             free_frames: Vec::new(),
             importer: DecodeImporter::new(device).ok(),
@@ -1300,8 +1321,35 @@ impl MediaCache {
             edge,
             interpreted: interpret.is_some(),
         };
-        // Before the probe: its first read of a file is a decode too.
-        self.stills.wait_for_decoding(path, (len, modified), ask);
+        // Before the probe: its first read of a file is a decode too. A
+        // playing frame waits until its deadline, a scrubbed one not at all,
+        // an exact one a little longer unless it is superseded.
+        let now = std::time::Instant::now();
+        let (until, stand_in) = match self.playback {
+            Some(deadline) => (deadline, true),
+            None if self.scrub => (now, true),
+            None => (now + EXACT_STILL_WAIT, false),
+        };
+        let interrupt = self.interrupt.clone();
+        let cancelled = move || {
+            interrupt
+                .as_ref()
+                .is_some_and(|(at, armed)| at.load(std::sync::atomic::Ordering::Acquire) != *armed)
+        };
+        if self
+            .stills
+            .wait_for_decoding(path, (len, modified), ask, until, &cancelled)
+            == stills::Waited::Pending
+        {
+            // What it has: an earlier picture of this still (another size,
+            // the file before it changed), as video stands in.
+            if stand_in && let Some(t) = self.earlier_picture(&key) {
+                self.stand_ins.push(0);
+                return Ok(t);
+            }
+            self.still_pending = true;
+            return Err(MediaFailure::Pending);
+        }
         probe_interpreted_image(path, interp).map_err(issue)?;
         let facts = still_facts(path).map_err(issue)?;
         let preview = edge.filter(|_| facts.previewed(ask.interpreted));
@@ -1424,6 +1472,41 @@ impl MediaCache {
         self.trim_images(self.image_budget);
         self.recount();
         Ok(target)
+    }
+
+    /// A converted picture of the same file read the same way as `key`, at
+    /// another size or of the file before it changed: the largest.
+    fn earlier_picture(&self, key: &ImageKey) -> Option<Target> {
+        self.images
+            .iter()
+            .filter(|(k, _)| {
+                k.path == key.path
+                    && k.precision == key.precision
+                    && k.reading == key.reading
+                    && k.linear == key.linear
+                    && k.hdr_light == key.hdr_light
+            })
+            .max_by_key(|(k, _)| {
+                (
+                    (k.len, k.modified) == (key.len, key.modified),
+                    k.edge.unwrap_or(u32::MAX),
+                )
+            })
+            .map(|(_, t)| t.clone())
+    }
+
+    /// A still of the frame about to be drawn whose decode an earlier frame
+    /// gave up on and which has no earlier picture to stand in (or a frame
+    /// that may not show one): the frame is held before any of it is drawn.
+    pub(crate) fn still_held(&mut self, path: &Path) -> bool {
+        let Some(stamp) = stamp(path) else {
+            return false;
+        };
+        if !self.stills.pending(path, stamp) {
+            return false;
+        }
+        let stands_in = self.playback.is_some() || self.scrub;
+        !(stands_in && self.images.keys().any(|k| k.path == path))
     }
 
     /// Decodes the still at `path` on a worker when no converted texture of
@@ -2062,9 +2145,21 @@ impl MediaCache {
             .find_map(|(target, revision)| (&target.texture == texture).then_some(*revision))
     }
 
-    /// Changes whenever a display frame a scrub asked for has decoded.
+    /// Changes whenever a display frame a scrub asked for has decoded, or a
+    /// still a frame gave up waiting for.
     pub fn landed(&self) -> u64 {
-        self.viewer.landed()
+        self.viewer.landed().wrapping_add(self.stills.landed())
+    }
+
+    /// Tests: holds the still prefetch worker inside its next decode.
+    #[cfg(test)]
+    pub(crate) fn still_stall(&self) -> Arc<Mutex<()>> {
+        self.stills.stall()
+    }
+    /// Tests: the prefetch worker is inside a decode.
+    #[cfg(test)]
+    pub(crate) fn still_decoding(&self) -> bool {
+        self.stills.decoding()
     }
 
     /// The display decode workers' counters.
@@ -2098,6 +2193,7 @@ impl MediaCache {
             self.idle_media = false;
         }
         self.frame_epoch = self.frame_epoch.wrapping_add(1);
+        self.still_pending = false;
         let frame = self.frame_epoch;
         self.frames.retain(|key, _| {
             self.frame_seen

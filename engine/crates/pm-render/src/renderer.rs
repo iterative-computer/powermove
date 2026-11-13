@@ -11,6 +11,8 @@ mod layer_raster;
 mod media_prepare;
 mod source;
 mod source_video;
+#[cfg(test)]
+mod still_wait_tests;
 pub use layer_raster::{LayerPixels, LayerRaster};
 pub use media_prepare::MediaPreparation;
 
@@ -1473,6 +1475,13 @@ impl Renderer {
         self.media.playback = deadline;
     }
 
+    /// Viewer frames: a frame that waits for a still being read stops
+    /// waiting once `interrupt` moves past the value it carries (the frame
+    /// is superseded or its viewer closed). `None` outside viewer frames.
+    pub fn set_interrupt(&mut self, interrupt: Option<crate::media::Interrupt>) {
+        self.media.interrupt = interrupt;
+    }
+
     /// Viewer frames: a layer this renderer cannot draw becomes a
     /// [`LayerFailure`] and the rest of the frame is drawn. Exports never set
     /// this: a delivered file refuses to omit a layer.
@@ -2161,6 +2170,13 @@ impl Renderer {
         if !build.compat_missing.is_empty() {
             return Err(RenderError::CompatPending(build.compat_missing));
         }
+        // A still an earlier frame gave up waiting for is still being read:
+        // held before any of the frame is drawn, so a retry costs a plan.
+        if !request.export
+            && media_prepare::any_still(&plan, &mut |path| self.media.still_held(path))
+        {
+            return Err(RenderError::MediaPending);
+        }
         let region = request.region.map(|r| Region {
             x: r.x,
             y: r.y,
@@ -2293,7 +2309,8 @@ impl Renderer {
                 exec.unsupported = unsupported;
             }
             let held = exec.effects.watchdog.take_held();
-            let complete = exec.unsupported.is_empty()
+            let complete = !exec.media.still_pending
+                && exec.unsupported.is_empty()
                 && exec.fallback_pending.is_empty()
                 && exec.effects.fallback.pending.is_empty()
                 && exec.effects.fallback.fatal.is_none()
@@ -2363,7 +2380,7 @@ impl Renderer {
         }
         let mut scene3d_meta = crate::scene3d::metadata::collect(&plan, &self.scene3d);
         if prefix {
-            if unsupported.is_empty() && pending.is_empty() {
+            if unsupported.is_empty() && pending.is_empty() && !self.media.still_pending {
                 self.prefix.remember(std::mem::take(&mut plan.draws));
             } else {
                 self.prefix.clear(&mut self.pool);
@@ -2409,6 +2426,9 @@ impl Renderer {
                 pending.iter().map(|r| (**r).clone()).collect(),
             ));
         }
+        if self.media.still_pending {
+            return Err(RenderError::MediaPending);
+        }
         Ok(Rendered {
             scene3d_meta,
             quads,
@@ -2445,6 +2465,7 @@ impl Renderer {
                 }])
             }
             crate::media::MediaFailure::Failed(m) => RenderError::Media(m),
+            crate::media::MediaFailure::Pending => RenderError::MediaPending,
         })
     }
 

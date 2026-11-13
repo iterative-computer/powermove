@@ -80,6 +80,7 @@ impl Renderer {
             .map_err(|e| match e {
                 crate::media::MediaFailure::Unsupported(feature) => feature.to_string(),
                 crate::media::MediaFailure::Failed(message) => message,
+                crate::media::MediaFailure::Pending => "The source is still being read".into(),
             })?
         else {
             return Ok(None);

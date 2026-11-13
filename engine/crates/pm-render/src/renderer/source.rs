@@ -582,5 +582,6 @@ fn media_error(e: MediaFailure) -> String {
     match e {
         MediaFailure::Failed(message) => message,
         MediaFailure::Unsupported(feature) => format!("Unsupported source: {feature:?}"),
+        MediaFailure::Pending => "The still is still being read".to_owned(),
     }
 }

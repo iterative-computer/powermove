@@ -40,6 +40,12 @@ pub enum RenderError {
     /// caller renders again once `Renderer::watchdog_holding` is false.
     #[error("waiting for the GPU watchdog to judge a frame that has not finished")]
     WatchdogPending,
+    /// A still this frame draws is still being read on the prefetch worker
+    /// past the frame's wait, with no earlier picture of it to show
+    /// (`media::MediaFailure::Pending`). Nothing was presented; the caller
+    /// renders again once `Renderer::media_landed` changes.
+    #[error("an image file is being read")]
+    MediaPending,
     /// A program only the WebGL fallback runner draws could not be drawn
     /// by a runner the renderer waits on (a job: no window to run it, its
     /// context was lost); the message names it.

@@ -300,6 +300,7 @@ pub(crate) fn transient(error: &anyhow::Error) -> bool {
                 RenderError::WatchdogPending
                     | RenderError::CompatPending(_)
                     | RenderError::ShaderFallbackPending(_)
+                    | RenderError::MediaPending
             )
         )
 }
@@ -849,6 +850,11 @@ impl Engine {
         self.cache.clear();
     }
     /// Changes when a frame a scrub or playback render missed has decoded.
+    /// The frame about to be drawn stops waiting for a still being read
+    /// once `interrupt` moves (`pm_render::media::Interrupt`).
+    pub fn set_interrupt(&mut self, interrupt: Option<pm_render::media::Interrupt>) {
+        self.renderer.set_interrupt(interrupt);
+    }
     pub fn media_landed(&self) -> u64 {
         self.renderer.media_landed()
     }

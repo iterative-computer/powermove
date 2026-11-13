@@ -553,6 +553,10 @@ struct Shared {
     /// Times a closed document's caches were released (`CacheUsage`).
     project_releases: std::sync::atomic::AtomicU64,
     wake: std::sync::mpsc::SyncSender<()>,
+    /// Moves when a frame being drawn is superseded (a transport command, a
+    /// new revision, other media or quality, a viewer closing): a frame
+    /// waiting for a still being read stops waiting.
+    superseded: Arc<std::sync::atomic::AtomicU64>,
     interactive: jobs::Activity,
     /// The worker engine's current Metal device; a GPU loss replaces it.
     device: Mutex<metal::Device>,
@@ -580,6 +584,10 @@ struct Shared {
     slow_frames: std::sync::atomic::AtomicBool,
 }
 impl Shared {
+    fn supersede(&self) {
+        self.superseded
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }
     /// The fonts changed: every viewer draws again, under a new stamp.
     fn fonts_changed(&self) {
         let mut state = self.state.lock().unwrap();
@@ -659,6 +667,7 @@ impl Viewer {
                     publication_ms,
                 };
                 v.config.snapshot = snapshot;
+                self.shared.supersede();
                 v.stamp.revision = v.config.snapshot.revision;
                 v.stamp.sequence += 1;
                 bump_site(line!(), "");
@@ -682,6 +691,7 @@ impl Viewer {
             .get_mut(&self.id)
             .ok_or_else(|| anyhow::anyhow!("viewer retired"))?;
         (v.paths, v.paused_paths) = viewer_media(&media, v.media_mode);
+        self.shared.supersede();
         v.status.proxied = media.proxied(v.media_mode);
         v.config.media = media;
         v.content = content;
@@ -704,6 +714,7 @@ impl Viewer {
             return Ok(());
         }
         v.media_mode = mode;
+        self.shared.supersede();
         (v.paths, v.paused_paths) = viewer_media(&v.config.media, mode);
         v.status.proxied = v.config.media.proxied(mode);
         v.content = content;
@@ -887,7 +898,9 @@ impl Viewer {
     pub fn command(&self, cmd: TransportCommand) -> Result<()> {
         use pm_protocol::validate::Validate;
         cmd.validate().map_err(|e| anyhow::anyhow!("{e:?}"))?;
-        self.edit(|v| v.enqueue(cmd))
+        self.edit(|v| v.enqueue(cmd))?;
+        self.shared.supersede();
+        Ok(())
     }
     /// The Mixer's monitor solo: only these top-level layers are heard
     /// (empty: every strip). Meters still read every strip.
@@ -1056,6 +1069,7 @@ impl Viewer {
     }
     /// This view left `State::views`: its scope tap goes, the worker wakes.
     fn retired(&self) {
+        self.shared.supersede();
         let mut scopes = self.shared.scopes.lock().unwrap();
         if scopes.as_ref().is_some_and(|(id, _)| *id == self.id) {
             *scopes = None;
@@ -1124,6 +1138,7 @@ impl EngineService {
             memory: Mutex::default(),
             project_releases: Default::default(),
             wake,
+            superseded: Default::default(),
             interactive: jobs::Activity::default(),
             device: Mutex::new(device),
             scopes: Mutex::new(None),
@@ -2349,6 +2364,8 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             if r.stand_in.is_some_and(|at| at != landed) {
                 r.stand_in = None;
                 v.dirty = !playing || v.dirty;
+                // A frame held for a still being read draws at once.
+                r.not_before = r.not_before.min(now);
             }
             // The playhead stopped on a frame dragged at reduced resolution.
             // A new picture of the same time: its own `frame:rendered`.
@@ -2675,7 +2692,13 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                     .map_or_else(|| Ok(overlays), |p| p(&scene.doc, &scene.comp, spec.time))
                     .and_then(|overlays| {
                         let read = capture || picture_only;
-                        engine.frame(&scene, spec, layer.as_ref(), &overlays, read, trace)
+                        let superseded = &shared.superseded;
+                        let armed = superseded.load(std::sync::atomic::Ordering::Acquire);
+                        engine.set_interrupt(Some((superseded.clone(), armed)));
+                        let frame =
+                            engine.frame(&scene, spec, layer.as_ref(), &overlays, read, trace);
+                        engine.set_interrupt(None);
+                        frame
                     }),
                 // Given way: the newer picture is drawn next.
                 Ok(false) => Ok(None),
@@ -2882,6 +2905,17 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                                 } else {
                                     drawable_retry(r.refusals - 1)
                                 };
+                            // A still being read: drawn again when it lands
+                            // (`media_landed`), not by polling a stalled read.
+                            if matches!(
+                                e.downcast_ref::<pm_render::RenderError>(),
+                                Some(pm_render::RenderError::MediaPending)
+                            ) {
+                                r.stand_in = Some(landed);
+                                if spec.moment != policy::Moment::Playing {
+                                    r.not_before = now + 1.;
+                                }
+                            }
                             // Retried for good, but never silently: past a few
                             // seconds the viewer says what it waits for.
                             let since = *r.waiting_since.get_or_insert(now);
@@ -4726,6 +4760,7 @@ fn refusal_kind(error: &anyhow::Error) -> &'static str {
         Some(pm_render::RenderError::CompatPending(_)) => "raster-override",
         Some(pm_render::RenderError::WatchdogPending) => "watchdog",
         Some(pm_render::RenderError::ShaderFallbackPending(_)) => "shader-fallback",
+        Some(pm_render::RenderError::MediaPending) => "still",
         _ if error.is::<render::CompilerBusy>() => "shader-compiler",
         _ if error.is::<render::DiskFramePending>() => "disk-frame",
         _ if error.is::<render::DefinitionsPending>() => "definitions",

@@ -10,8 +10,8 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -61,8 +61,19 @@ struct Worker {
 struct Progress {
     /// The still being decoded, from its dequeue until its answer is sent.
     decoding: Option<StillKey>,
-    /// The still a frame is blocked on.
+    /// The still a frame waits for, or gave up waiting for: kept whatever
+    /// the hold, since a frame needs it.
     wanted: Option<StillKey>,
+}
+
+/// Whether a frame got the decode it waited for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Waited {
+    /// Nothing of this still was being decoded, or its answer arrived.
+    Done,
+    /// The decode is still running past the frame's bound: the frame shows
+    /// what it has and a later frame takes the answer.
+    Pending,
 }
 
 pub(crate) struct StillPrefetch {
@@ -73,6 +84,11 @@ pub(crate) struct StillPrefetch {
     /// Bytes of decoded stills, ready or still in the channel.
     held: Arc<AtomicUsize>,
     progress: Arc<Mutex<Progress>>,
+    /// The decode a frame gave up waiting for: later frames do not wait for
+    /// it again (each would lose its bound to the same stalled read).
+    abandoned: Option<StillKey>,
+    /// Bumped when a decode a frame gave up on has answered.
+    landed: Arc<AtomicU64>,
     limit: usize,
     ttl: Duration,
     /// Held by a test to keep the worker inside a decode.
@@ -98,6 +114,8 @@ impl StillPrefetch {
             ready: HashMap::new(),
             held: Arc::new(AtomicUsize::new(0)),
             progress: Default::default(),
+            abandoned: None,
+            landed: Default::default(),
             limit,
             ttl,
             #[cfg(test)]
@@ -129,6 +147,7 @@ impl StillPrefetch {
             let pool = pool.clone();
             let (held, limit) = (self.held.clone(), self.limit);
             let progress = self.progress.clone();
+            let landed = self.landed.clone();
             #[cfg(test)]
             let stall = self.stall.clone();
             let Ok(handle) = std::thread::Builder::new()
@@ -176,6 +195,10 @@ impl StillPrefetch {
                         if done.send((key, still)).is_err() {
                             break;
                         }
+                        // A frame gave up on it: the viewer draws again.
+                        if wanted {
+                            landed.fetch_add(1, Ordering::AcqRel);
+                        }
                     }
                 })
             else {
@@ -194,38 +217,93 @@ impl StillPrefetch {
         }
     }
 
-    /// Blocks while the worker is decoding `path` at `stamp` as `ask` reads
-    /// it: the frame that needs this still now gets that decode (and the
-    /// file's facts with it) instead of starting the same one beside it. The
-    /// worker runs at the waiting thread's class meanwhile. A still only
-    /// queued is not waited for.
-    pub(crate) fn wait_for_decoding(&mut self, path: &Path, stamp: (u64, u128), ask: StillAsk) {
-        let Some(worker) = &self.worker else { return };
+    /// Waits while the worker is decoding `path` at `stamp` as `ask` reads
+    /// it, so the frame that needs this still now gets that decode (and the
+    /// file's facts with it) instead of starting the same one beside it; the
+    /// worker runs at the waiting thread's class meanwhile. Never past
+    /// `until`, nor once `cancelled` says the frame is superseded: then the
+    /// decode is [`Waited::Pending`], and no later frame waits for it again
+    /// until it answers. A still only queued is not waited for.
+    pub(crate) fn wait_for_decoding(
+        &mut self,
+        path: &Path,
+        stamp: (u64, u128),
+        ask: StillAsk,
+        until: Instant,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Waited {
+        let Some(worker) = &self.worker else {
+            return Waited::Done;
+        };
+        let is = |k: &StillKey| k.0 == path && (k.1, k.2) == stamp && k.3 == ask;
         {
             let mut progress = self.progress.lock().unwrap();
-            if !progress
-                .decoding
-                .as_ref()
-                .is_some_and(|k| k.0 == path && (k.1, k.2) == stamp && k.3 == ask)
-            {
-                return;
+            let Some(decoding) = progress.decoding.clone().filter(is) else {
+                return Waited::Done;
+            };
+            if self.abandoned.as_ref() == Some(&decoding) {
+                return Waited::Pending;
             }
-            progress.wanted = progress.decoding.clone();
+            progress.wanted = Some(decoding);
         }
         let boost = qos::Boost::of(&worker.thread);
-        let now = Instant::now();
-        while let Ok((key, still)) = worker.answers.recv() {
-            let done = key.0 == path && (key.1, key.2) == stamp && key.3 == ask;
-            self.pending.remove(&key);
-            if let Some(still) = still {
-                self.ready.insert(key, (still, now));
+        loop {
+            let now = Instant::now();
+            if now >= until || cancelled() {
+                // The worker keeps the answer for a later frame.
+                self.abandoned = Some((path.to_path_buf(), stamp.0, stamp.1, ask));
+                return Waited::Pending;
             }
-            if done {
-                break;
+            // In slices, so a cancellation is seen while the read stalls.
+            match worker
+                .answers
+                .recv_timeout((until - now).min(Duration::from_millis(4)))
+            {
+                Ok((key, still)) => {
+                    let done = is(&key);
+                    self.pending.remove(&key);
+                    if self.abandoned.as_ref() == Some(&key) {
+                        // Its frame gave up on it; the wanted mark is this
+                        // frame's now.
+                        self.abandoned = None;
+                    }
+                    if let Some(still) = still {
+                        self.ready.insert(key, (still, now));
+                    }
+                    if done {
+                        break;
+                    }
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
             }
         }
         drop(boost);
         self.progress.lock().unwrap().wanted = None;
+        Waited::Done
+    }
+
+    /// Whether `path` at `stamp` is a decode a frame gave up waiting for and
+    /// that has not answered yet.
+    pub(crate) fn pending(&mut self, path: &Path, stamp: (u64, u128)) -> bool {
+        self.drain();
+        self.abandoned
+            .as_ref()
+            .is_some_and(|k| k.0 == path && (k.1, k.2) == stamp)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn stall(&self) -> Arc<Mutex<()>> {
+        self.stall.clone()
+    }
+    #[cfg(test)]
+    pub(crate) fn decoding(&self) -> bool {
+        self.progress.lock().unwrap().decoding.is_some()
+    }
+
+    /// Changes whenever a decode a frame gave up on answers.
+    pub(crate) fn landed(&self) -> u64 {
+        self.landed.load(Ordering::Acquire)
     }
 
     /// The still decoded for `path` at `stamp` and `ask`, if the worker has
@@ -262,6 +340,13 @@ impl StillPrefetch {
         if let Some(worker) = &self.worker {
             while let Ok((key, still)) = worker.answers.try_recv() {
                 self.pending.remove(&key);
+                if self.abandoned.as_ref() == Some(&key) {
+                    self.abandoned = None;
+                    let mut progress = self.progress.lock().unwrap();
+                    if progress.wanted.as_ref() == Some(&key) {
+                        progress.wanted = None;
+                    }
+                }
                 if let Some(still) = still {
                     self.ready.insert(key, (still, now));
                 }
@@ -544,7 +629,11 @@ mod tests {
             std::thread::sleep(Duration::from_millis(1));
         }
         // Queued behind the decode in progress: no wait, nothing to take.
-        prefetch.wait_for_decoding(&path, (stamp.0, stamp.1 + 2), ask);
+        let never = Instant::now() + Duration::from_secs(60);
+        assert_eq!(
+            prefetch.wait_for_decoding(&path, (stamp.0, stamp.1 + 2), ask, never, &|| false),
+            Waited::Done
+        );
         assert!(
             prefetch
                 .take(&path, (stamp.0, stamp.1 + 2), ask, None)
@@ -553,7 +642,10 @@ mod tests {
         assert!(prefetch.take(&path, stamp, ask, None).is_none());
         // The decode runs 100 ms after this; the frame waits for it.
         go.send(()).unwrap();
-        prefetch.wait_for_decoding(&path, stamp, ask);
+        assert_eq!(
+            prefetch.wait_for_decoding(&path, stamp, ask, never, &|| false),
+            Waited::Done
+        );
         assert!(
             prefetch.take(&path, stamp, ask, None).is_some(),
             "the decode in progress reached the frame"
@@ -583,5 +675,122 @@ mod tests {
                 .is_some()
         );
         assert_eq!(prefetch.held.load(Ordering::Acquire), one);
+    }
+
+    /// Holds the worker inside its next decode until the returned sender is
+    /// dropped or sent to: a read that does not return.
+    fn stall_worker(prefetch: &StillPrefetch) -> (Sender<()>, std::thread::JoinHandle<()>) {
+        let (stall, (locked, held), (go, release)) = (prefetch.stall.clone(), channel(), channel());
+        let holder = std::thread::spawn(move || {
+            let _guard = stall.lock().unwrap();
+            locked.send(()).unwrap();
+            let _ = release.recv();
+        });
+        held.recv().unwrap();
+        (go, holder)
+    }
+
+    fn decoding(prefetch: &StillPrefetch) {
+        let started = Instant::now();
+        while prefetch.progress.lock().unwrap().decoding.is_none() {
+            assert!(
+                started.elapsed() < Duration::from_secs(30),
+                "the worker starts"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// A decode that never returns holds a frame no longer than its bound:
+    /// the frame is told it is pending, later frames do not wait for it
+    /// again, and when it does answer the answer is kept for the next frame
+    /// (whatever the hold) and `landed` changes.
+    #[test]
+    fn a_stalled_decode_holds_a_frame_no_longer_than_its_bound() {
+        let (path, stamp) = fixture();
+        let pool = FramePool::new(0);
+        let mut prefetch = StillPrefetch::with_limits(1, READY_TTL);
+        let ask = StillAsk::default();
+        // One still held, so the next does not fit the hold.
+        prefetch.request(&path, (stamp.0, stamp.1 + 1), ask, &pool);
+        settle(&mut prefetch);
+        let (go, holder) = stall_worker(&prefetch);
+        prefetch.request(&path, stamp, ask, &pool);
+        decoding(&prefetch);
+        let landed = prefetch.landed();
+        let started = Instant::now();
+        let bound = started + Duration::from_millis(40);
+        assert_eq!(
+            prefetch.wait_for_decoding(&path, stamp, ask, bound, &|| false),
+            Waited::Pending
+        );
+        let waited = started.elapsed();
+        assert!(
+            waited < Duration::from_millis(1000),
+            "the frame waited {waited:?} for a decode that does not return"
+        );
+        assert!(prefetch.pending(&path, stamp));
+        // A later frame does not spend its own bound on the same read.
+        let started = Instant::now();
+        let far = started + Duration::from_secs(60);
+        assert_eq!(
+            prefetch.wait_for_decoding(&path, stamp, ask, far, &|| false),
+            Waited::Pending
+        );
+        assert!(started.elapsed() < Duration::from_millis(500));
+        assert!(prefetch.take(&path, stamp, ask, None).is_none());
+        // The read returns: the answer waits for the next frame.
+        drop(go);
+        holder.join().unwrap();
+        let started = Instant::now();
+        while prefetch.landed() == landed {
+            assert!(
+                started.elapsed() < Duration::from_secs(30),
+                "the decode lands"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(!prefetch.pending(&path, stamp));
+        assert!(
+            prefetch.take(&path, stamp, ask, None).is_some(),
+            "kept beside the held still for the frame that gave up on it"
+        );
+        assert!(prefetch.progress.lock().unwrap().wanted.is_none());
+    }
+
+    /// An exact frame may wait longer, but stops waiting as soon as it is
+    /// superseded (a seek, a new revision, the viewer closing).
+    #[test]
+    fn a_superseded_frame_stops_waiting_for_a_stalled_decode() {
+        let (path, stamp) = fixture();
+        let pool = FramePool::new(0);
+        let mut prefetch = StillPrefetch::default();
+        let ask = StillAsk::default();
+        let (go, holder) = stall_worker(&prefetch);
+        prefetch.request(&path, stamp, ask, &pool);
+        decoding(&prefetch);
+        let superseded = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = superseded.clone();
+        let seek = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(30));
+            flag.store(true, Ordering::Release);
+        });
+        let started = Instant::now();
+        let far = started + Duration::from_secs(60);
+        assert_eq!(
+            prefetch.wait_for_decoding(&path, stamp, ask, far, &|| superseded
+                .load(Ordering::Acquire)),
+            Waited::Pending
+        );
+        let waited = started.elapsed();
+        assert!(
+            waited < Duration::from_secs(5),
+            "a superseded frame waited {waited:?}"
+        );
+        seek.join().unwrap();
+        drop(go);
+        holder.join().unwrap();
+        settle(&mut prefetch);
+        assert!(prefetch.take(&path, stamp, ask, None).is_some());
     }
 }
