@@ -149,7 +149,7 @@ pub(crate) struct Settled {
 }
 
 /// The bytes the settling renderer holds between frames.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, Debug)]
 pub(crate) struct Held {
     pub target_pool: u64,
     pub images: u64,
@@ -157,12 +157,42 @@ pub(crate) struct Held {
     pub text: u64,
     pub vector: u64,
     pub pyramids: u64,
+    /// Its own decode service's frames and decoders.
+    pub frames: u64,
+    pub decoders: u64,
+    /// 3D meshes and maps resident for it.
+    pub geometry: u64,
+    /// The share of the engine's grant its kept caches are held to
+    /// ([`Settler::budget`]).
+    pub budget: u64,
+    /// The most it held at the end of a picture's drawing, before that
+    /// picture's originals and targets are let go: its peak working set as
+    /// the caches count it (the surface it draws into is the engine's).
+    pub peak: u64,
+}
+impl Held {
+    pub(crate) fn total(&self) -> u64 {
+        self.target_pool
+            + self.images
+            + self.converted
+            + self.text
+            + self.vector
+            + self.pyramids
+            + self.frames
+            + self.decoders
+            + self.geometry
+    }
 }
 
 enum Message {
     Draw(Box<Job>, f64),
     /// A document closed: nothing of it is kept.
     Forget,
+    /// The engine's grant moved: the kept caches are held to this many
+    /// bytes from now on.
+    Budget(u64),
+    /// Memory is wanted back: whatever is kept between pictures goes.
+    Release,
 }
 
 struct Shared {
@@ -171,6 +201,8 @@ struct Shared {
     busy: AtomicBool,
     /// The thread ended (a panic): nothing more is drawn here.
     dead: AtomicBool,
+    /// Memory is wanted back: the picture being drawn gives way.
+    abort: Arc<AtomicBool>,
     /// The picture sent and not answered yet: what fails if the thread
     /// ends before it answers.
     inflight: Mutex<Option<(crate::policy::CacheKey, Scene, Arc<ExportedSurface>, f64)>>,
@@ -227,6 +259,7 @@ impl Settler {
         gpu: &pm_gpu::Gpu,
         effects: pm_render::Effects,
         waker: Waker,
+        budget: u64,
     ) -> Result<Self> {
         let (jobs, inbox) = std::sync::mpsc::channel();
         let shared = Arc::new(Shared {
@@ -234,6 +267,7 @@ impl Settler {
             held: Mutex::default(),
             busy: AtomicBool::new(false),
             dead: AtomicBool::new(false),
+            abort: Arc::default(),
             inflight: Mutex::default(),
         });
         let (device, queue, worker) = (gpu.device.clone(), gpu.queue.clone(), shared.clone());
@@ -245,7 +279,7 @@ impl Settler {
                 // renderer, letting it go): the picture owed fails, and
                 // the thread is over.
                 if let Err(panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    run(device, queue, effects, inbox, worker, waker)
+                    run(device, queue, effects, inbox, worker, waker, budget)
                 })) {
                     let why = panic_message(&*panic);
                     eprintln!("a settled picture panicked: {why}");
@@ -288,24 +322,41 @@ impl Settler {
     pub(crate) fn forget(&self) {
         let _ = self.jobs.send(Message::Forget);
     }
+    /// Its kept caches are held to `bytes` of the engine's grant from its
+    /// next turn on.
+    pub(crate) fn budget(&self, bytes: u64) {
+        let _ = self.jobs.send(Message::Budget(bytes));
+    }
+    /// Memory is wanted back: the picture being drawn gives way at its
+    /// next slice, and what is kept between pictures goes.
+    pub(crate) fn release(&self) {
+        self.shared.abort.store(true, Ordering::Release);
+        let _ = self.jobs.send(Message::Release);
+    }
     pub(crate) fn held(&self) -> Held {
         *self.shared.held.lock().unwrap()
     }
 }
 
 /// What the renderer keeps of a frame's work between settled pictures:
-/// its programs and text, never the stills or targets of one frame.
-fn configure(renderer: &mut pm_render::Renderer) {
+/// its programs and text, never the stills or targets of one frame; its
+/// kept caches within `budget` bytes, its share of the engine's grant.
+fn configure(renderer: &mut pm_render::Renderer, budget: u64) {
+    let part = |percent: u64| budget * percent / 100;
     renderer.apply_media_lease(pm_media::decode::service::MediaLease {
-        frame_cache: 24 << 20,
-        decoders: 32 << 20,
+        frame_cache: part(25) as usize,
+        decoders: part(25) as usize,
     });
+    renderer.set_image_cache_budget(part(20));
+    renderer.set_converted_frame_budget(part(10));
+    renderer.set_target_pool_budget(part(10));
+    renderer.set_vector_cache_budget(part(5), 512);
+    renderer.trim(part(5));
     // Each settled picture is of another time: nothing to reuse between
     // them, and no kept draw to answer for when a frame gives way.
     renderer.set_draw_reuse(false);
     renderer.set_preview_media(false, false);
     renderer.set_isolate_layers(true);
-    renderer.set_vector_cache_budget(16 << 20, 512);
 }
 
 fn run(
@@ -315,6 +366,7 @@ fn run(
     inbox: std::sync::mpsc::Receiver<Message>,
     shared: Arc<Shared>,
     waker: Waker,
+    mut budget: u64,
 ) {
     // Below the worker's frames, which a person watches land; above jobs.
     // SAFETY: affects only the calling thread.
@@ -326,7 +378,7 @@ fn run(
     // with its first settled picture.
     renderer.swap_effects(&mut effects);
     drop(effects);
-    configure(&mut renderer);
+    configure(&mut renderer, budget);
     renderer.set_slices(Some(Slices::new(
         Duration::from_secs_f64(crate::policy::SETTLE_SLICE_SECONDS),
         Arc::new(|_| false),
@@ -344,7 +396,8 @@ fn run(
                         renderer.release_idle_media();
                         renderer.trim(0);
                     });
-                    *shared.held.lock().unwrap() = held(&renderer);
+                    let now = held(&renderer, budget, &shared);
+                    *shared.held.lock().unwrap() = now;
                 }
                 continue;
             }
@@ -354,13 +407,33 @@ fn run(
         match message {
             Message::Forget => {
                 objc2::rc::autoreleasepool(|_| renderer.release_project_memory());
-                configure(&mut renderer);
+                configure(&mut renderer, budget);
                 (document, fonts) = (None, None);
             }
+            Message::Budget(bytes) => {
+                budget = bytes;
+                configure(&mut renderer, budget);
+            }
+            Message::Release => {
+                objc2::rc::autoreleasepool(|_| {
+                    renderer.release_idle_targets();
+                    renderer.release_idle_media();
+                    renderer.trim(0);
+                });
+            }
             Message::Draw(job, sent) => {
+                // A release asked before this picture is not about it.
+                shared.abort.store(false, Ordering::Release);
                 let drawn = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     objc2::rc::autoreleasepool(|_| {
-                        draw(&mut renderer, &mut document, &mut fonts, *job, sent)
+                        draw(
+                            &mut renderer,
+                            &mut document,
+                            &mut fonts,
+                            *job,
+                            sent,
+                            &shared,
+                        )
                     })
                 }));
                 let settled = match drawn {
@@ -377,7 +450,8 @@ fn run(
                     }
                 };
                 // What it holds is known before its picture is taken.
-                *shared.held.lock().unwrap() = held(&renderer);
+                let now = held(&renderer, budget, &shared);
+                *shared.held.lock().unwrap() = now;
                 *shared.inflight.lock().unwrap() = None;
                 *shared.done.lock().unwrap() = Some(settled);
                 if let Some(wake) = &*waker.lock().unwrap() {
@@ -385,11 +459,15 @@ fn run(
                 }
             }
         }
-        *shared.held.lock().unwrap() = held(&renderer);
+        let now = held(&renderer, budget, &shared);
+        *shared.held.lock().unwrap() = now;
     }
 }
 
-fn held(renderer: &pm_render::Renderer) -> Held {
+fn held(renderer: &pm_render::Renderer, budget: u64, shared: &Shared) -> Held {
+    let media = renderer.media_usage();
+    let resident = renderer.scene3d_resident();
+    let peak = shared.held.lock().unwrap().peak;
     Held {
         target_pool: renderer.target_pool_bytes(),
         images: renderer.image_cache_bytes(),
@@ -397,6 +475,11 @@ fn held(renderer: &pm_render::Renderer) -> Held {
         text: renderer.text_cache_bytes(),
         vector: renderer.vector_cache_bytes(),
         pyramids: renderer.pyramid_bytes(),
+        frames: media.frame_cache as u64,
+        decoders: media.decoders as u64,
+        geometry: resident.mesh_bytes + resident.map_bytes,
+        budget,
+        peak,
     }
 }
 
@@ -409,6 +492,7 @@ fn draw(
     fonts: &mut Option<u64>,
     job: Job,
     sent: f64,
+    shared: &Shared,
 ) -> Settled {
     let mut timing = Timing {
         sent,
@@ -460,7 +544,11 @@ fn draw(
         let slices = renderer
             .slices_mut()
             .expect("set when the renderer was made");
-        slices.set_gate(job.gate.clone());
+        // Memory wanted back stops it as its viewer would.
+        let (gate, abort) = (job.gate.clone(), shared.abort.clone());
+        slices.set_gate(Arc::new(move |expected| {
+            abort.load(Ordering::Acquire) || gate(expected)
+        }));
         slices.reset_report();
         pm_render::media::note_reads();
         let rendered = renderer.render_into(
@@ -473,6 +561,13 @@ fn draw(
             None,
         );
         reads = pm_render::media::take_reads();
+        // Its working set at its fullest: every original and target of the
+        // picture still held.
+        let working = held(renderer, 0, shared).total();
+        {
+            let mut kept = shared.held.lock().unwrap();
+            kept.peak = kept.peak.max(working);
+        }
         let report = renderer.slices_mut().expect("set above").report();
         let host = |at: Instant| crate::trace::now() - at.elapsed().as_secs_f64();
         timing.planned = report.planned.map(host);

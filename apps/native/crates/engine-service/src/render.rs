@@ -417,6 +417,16 @@ struct CachedFrame {
     surface: Arc<ExportedSurface>,
     failures: Arc<[LayerFailure]>,
 }
+/// What a settled picture's renderer may keep of the cache remainder of the
+/// engine's grant (`cache`): an eighth, the worker's caches the rest.
+/// (Its working set while it draws one picture is that picture's: the
+/// originals and targets of one final frame, let go when it ends.)
+fn split_for_settling(cache: u64) -> (u64, u64) {
+    let settling = cache / 8;
+    (cache - settling, settling)
+}
+/// The grant assumed until the arbiter's first answer.
+const DEFAULT_GRANT: u64 = 512 << 20;
 /// A frame key's digest of an output tone ([`crate::policy::CacheKey::tone`]).
 fn tone_id(tone: Option<pm_render::OutputTone>) -> u64 {
     use std::hash::{Hash, Hasher};
@@ -511,6 +521,8 @@ pub struct Engine {
     memory_client: crate::memory::Registration,
     memory_request: Arc<std::sync::atomic::AtomicU64>,
     budgeted_surfaces: u64,
+    /// The settling renderer's part of the grant ([`split_for_settling`]).
+    settle_budget: u64,
     /// PM_SCRUB_EXTRA_MIB: the borrowed scrub allowance in force (bytes).
     budgeted_extra: u64,
 }
@@ -559,8 +571,8 @@ impl Engine {
             targets_created: self.renderer.target_pool_created(),
             image_bytes: self.renderer.image_cache_bytes() + settling.images,
             converted_frame_bytes: self.renderer.converted_frame_bytes() + settling.converted,
-            decoded_frame_bytes: media.frame_cache as u64,
-            decoder_bytes: media.decoders as u64,
+            decoded_frame_bytes: media.frame_cache as u64 + settling.frames,
+            decoder_bytes: media.decoders as u64 + settling.decoders,
             decoder_sessions: media.sessions,
             decoder_pool_free_bytes: media.pool.free_bytes as u64,
             disk_read_ahead_bytes: self.disk.as_ref().map_or(0, |disk| disk.ready_bytes()),
@@ -570,16 +582,24 @@ impl Engine {
                 .map(|s| u64::from(s.size.width) * u64::from(s.size.height) * 8)
                 .sum(),
             text_bytes: self.renderer.text_cache_bytes() + settling.text,
+            // (The settler's decode service and 3D residency are counted
+            // with the engine's below.)
             vector_bytes: self.renderer.vector_cache_bytes() + settling.vector,
             pyramid_bytes: self.renderer.pyramid_bytes() + settling.pyramids,
             geometry_bytes: self.renderer.scene3d_resident().mesh_bytes
-                + self.renderer.scene3d_resident().map_bytes,
+                + self.renderer.scene3d_resident().map_bytes
+                + settling.geometry,
             binding_bytes: self.renderer.binding_cache_bytes(),
             gpu_allocated_bytes: self.metal.current_allocated_size(),
             scrub_extra_bytes: self.budgeted_extra,
             // Counted by the service across engine rebuilds.
             project_releases: 0,
         }
+    }
+
+    /// What the settling renderer holds, and its peak and budget.
+    pub(crate) fn settler_held(&self) -> Option<crate::settle::Held> {
+        self.settler.as_ref().map(|settler| settler.held())
     }
 
     pub fn release_idle_memory(&mut self) {
@@ -695,6 +715,13 @@ impl Engine {
             } else {
                 share.saturating_sub(surfaces)
             };
+            // The settling renderer's kept caches have their part of the
+            // same grant ([`crate::settle`]); the worker's divide the rest.
+            let (cache, settling) = split_for_settling(cache);
+            self.settle_budget = settling;
+            if let Some(settler) = &self.settler {
+                settler.budget(settling);
+            }
             // PM_FIX_SHARES: the remainder after output frames favours
             // decoded frames (35 %) over stills (10 %); the parts still sum
             // to the grant.
@@ -721,6 +748,15 @@ impl Engine {
                 // about to be shown is not drawn a second time for a trim.
                 self.cache.clear();
                 self.pool.retain(|s| Arc::strong_count(s) > 1);
+            }
+            if request != u64::MAX || crate::memory::pressure() == crate::memory::Pressure::Critical
+            {
+                // The settled picture being drawn gives way (it is asked
+                // again once its viewer rests), and the settler lets go of
+                // what it keeps.
+                if let Some(settler) = &self.settler {
+                    settler.release();
+                }
             }
             if crate::memory::pressure() == crate::memory::Pressure::Critical {
                 self.release_idle_memory();
@@ -951,6 +987,7 @@ impl Engine {
             memory_client,
             memory_request,
             budgeted_surfaces: u64::MAX,
+            settle_budget: split_for_settling(DEFAULT_GRANT).1,
             budgeted_extra: 0,
         })
     }
@@ -1877,6 +1914,7 @@ impl Engine {
                 &self.gpu,
                 self.renderer.effects().sibling(),
                 self.waker.clone(),
+                self.settle_budget,
             )?);
         }
         if self.settler.as_ref().is_some_and(|settler| settler.busy()) {
@@ -1888,6 +1926,7 @@ impl Engine {
                 &self.gpu,
                 self.renderer.effects().sibling(),
                 self.waker.clone(),
+                self.settle_budget,
             )?);
         }
         let mut request = spec.request(scene)?;
@@ -2255,6 +2294,74 @@ mod lifetime_tests {
         assert!(engine.settled.is_none() && engine.cache.is_empty());
         assert!(engine.settle_now(&scene, spec, || false).unwrap());
         assert!(engine.settled.is_some());
+    }
+    /// The settling renderer's caches are held to its part of the engine's
+    /// grant and counted with the engine's (its own decode service too); a
+    /// trim request makes it let go of what it keeps between pictures.
+    #[test]
+    fn the_settling_renderer_is_held_to_its_part_of_the_grant() {
+        let mut engine = Engine::new(Gpu::new("settle-grant-test").unwrap()).unwrap();
+        let scene = Scene {
+            doc: Arc::new(pm_model::Document::new(
+                Some(pm_model::canonical::canonical_project(
+                    pm_model::json::parse(include_str!("../tests/fixtures/shapes.json")).unwrap(),
+                )),
+                1,
+            )),
+            comp: "Pshapes-primitives-root".into(),
+            media: Default::default(),
+            content: 1,
+        };
+        let spec = FrameSpec {
+            scale: 4.,
+            exact: false,
+            ..FrameSpec::exact(
+                Ticks::from_whole_seconds(1),
+                Output {
+                    width: 160,
+                    height: 90,
+                    display: 0,
+                    headroom: 1.,
+                    crop: None,
+                },
+            )
+        };
+        assert!(engine.settle_now(&scene, spec, || false).unwrap());
+        let held = |engine: &Engine| engine.settler_held().unwrap();
+        // The grant as governed now: an eighth of what the output surfaces
+        // leave goes to the settler, whose next turn takes it.
+        engine
+            .memory_request
+            .store(1, std::sync::atomic::Ordering::Release);
+        engine.govern_memory();
+        let share = engine.memory_client.grant();
+        let surfaces = engine.memory_usage().surface_bytes;
+        let expected = split_for_settling(share.saturating_sub(surfaces)).1;
+        assert_eq!(engine.settle_budget, expected);
+        let start = Instant::now();
+        while held(&engine).budget != expected {
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "{:?}",
+                held(&engine)
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(held(&engine).peak > 0, "its working set was measured");
+        // After the trim request it keeps nothing of the picture's work.
+        let start = Instant::now();
+        while held(&engine).target_pool + held(&engine).images + held(&engine).converted > 0 {
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "{:?}",
+                held(&engine)
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // And the engine's count includes what it keeps.
+        let usage = engine.memory_usage();
+        let h = held(&engine);
+        assert!(usage.text_bytes >= h.text && usage.decoder_bytes >= h.decoders);
     }
     /// A panic while a settled picture is drawn is caught: the picture
     /// fails with why (its viewer keeps the preview and says so), nothing

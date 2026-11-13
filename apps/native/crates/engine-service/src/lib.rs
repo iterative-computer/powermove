@@ -2333,12 +2333,16 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             #[cfg(test)]
             shared.settle_ends.lock().unwrap().push(outcome);
             if let Some(recorder) = &recorder {
+                let held = engine.settler_held().unwrap_or_default();
+                let mib = |bytes: u64| bytes as f64 / f64::from(1 << 20);
                 recorder.record(serde_json::json!({
                     "settled": outcome, "viewer_id": job.id, "taken": now,
                     "sent": timing.sent, "began": timing.began, "planned": timing.planned,
                     "first_submission": timing.first_submission, "ended": timing.ended,
                     "slices": timing.slices, "worst_slice_ms": timing.worst_slice_ms,
                     "worst_unit_ms": timing.worst_unit_ms, "held_ms": timing.held_ms,
+                    "settler_kept_mib": mib(held.total()), "settler_peak_mib": mib(held.peak),
+                    "settler_budget_mib": mib(held.budget),
                 }));
             }
             state.notify();
