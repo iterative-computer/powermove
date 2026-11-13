@@ -1,14 +1,18 @@
 import { HostClient, json, type Json } from "../../src";
 import {
   actions,
+  audioCodings,
   codecs,
+  colorTags,
   extensions,
   fieldDefaults,
   formats,
   kindOf,
   profiles,
   sizeError,
+  type AudioCoding,
   type Codec,
+  type ColorTag,
   type Format,
   type Kind,
   type Profile,
@@ -37,6 +41,16 @@ export interface Options {
   dynamicRange: "sdr" | "pq" | "hlg";
   /** Use Proxies (Draft); absent means originals. */
   useProxies?: boolean;
+  /** The label of an SDR ProRes or MP4. Absent from options saved before
+   * it existed: read as the QuickTime label. */
+  colorTag: ColorTag;
+  /** Start timecode of a QuickTime export; empty (or absent, in older
+   * options) means the composition's own time. The host checks it against
+   * the frame rate. */
+  timecode: string;
+  /** Sound coding of a QuickTime export. Absent from older options: read as
+   * 24-bit PCM. */
+  audioCoding: AudioCoding;
 }
 /** Presets saved before profile, codec and depth existed keep today's output. */
 const withDefaults = (o: Options): Options => ({ ...fieldDefaults, ...o });
@@ -108,7 +122,11 @@ function validOptions(x: unknown): x is Options {
     (x.useProxies === undefined || typeof x.useProxies === "boolean") &&
     (x.profile === undefined || profiles.some((p) => p.v === x.profile)) &&
     (x.codec === undefined || codecs.some((c) => c.v === x.codec)) &&
-    (x.depth === undefined || x.depth === 8 || x.depth === 16)
+    (x.depth === undefined || x.depth === 8 || x.depth === 16) &&
+    (x.colorTag === undefined || colorTags.some((c) => c.v === x.colorTag)) &&
+    (x.timecode === undefined || typeof x.timecode === "string") &&
+    (x.audioCoding === undefined ||
+      audioCodings.some((c) => c.v === x.audioCoding))
   );
 }
 export function snapshot(value: unknown): ExportSnapshot {

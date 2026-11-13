@@ -22,12 +22,35 @@ test("format support matches tagged contract and no web export is offered", () =
     "scale",
     "fps",
     "range",
+    "colorTag",
+    "timecode",
     "mblur",
     "audio",
+    "audioCoding",
     "alpha",
     "useProxies",
   ]);
-  expect(fields.mp4).toEqual(["codec", ...fields.webm]);
+  // MP4 carries the color tag; a timecode track and PCM are QuickTime's.
+  expect(fields.mp4).toEqual([
+    "codec",
+    "scale",
+    "fps",
+    "range",
+    "quality",
+    "colorTag",
+    "mblur",
+    "audio",
+    "useProxies",
+  ]);
+  expect(fields.webm).toEqual([
+    "scale",
+    "fps",
+    "range",
+    "quality",
+    "mblur",
+    "audio",
+    "useProxies",
+  ]);
   expect(fields.still).toEqual(["depth", "scale", "mblur", "alpha"]);
   expect(fields.json).toEqual([]);
   expect(rates[0].v).toBe(24000 / 1001);
@@ -439,4 +462,41 @@ test("ProRes 422 has no alpha; settings saved before profiles keep ProRes 4444",
     .args.options;
   expect(options.codec).toBe("hevc");
   expect(options.profile).toBe("422hq");
+});
+
+test("color tag, start timecode and audio format are options of the export, and old options keep today's file", async () => {
+  const f = fixture();
+  // Options saved before the fields existed read as today's output.
+  expect(f.model.options.colorTag).toBe("rec709QuickTime");
+  expect(f.model.options.timecode).toBe("");
+  expect(f.model.options.audioCoding).toBe("pcm24");
+  f.model.set("format", "prores");
+  f.model.set("profile", "422hq");
+  f.model.set("colorTag", "rec709");
+  f.model.set("timecode", "01:00:00:00");
+  f.model.set("audioCoding", "pcm16");
+  expect(() => f.model.set("colorTag", "p3" as "rec709")).toThrow();
+  expect(() => f.model.set("audioCoding", "aac" as "pcm16")).toThrow();
+  for (const field of ["colorTag", "timecode", "audioCoding"] as const)
+    expect(shows(f.model.options, field)).toBe(true);
+  // The planner (the host) checks the timecode against the frame rate.
+  await f.model.refreshPlan();
+  await f.model.start();
+  const sent = (command: string) =>
+    (
+      f.requests.find(
+        (r) =>
+          r.operation.type === "command" && r.operation.command === command,
+      )!.operation as unknown as { args: { options: Record<string, unknown> } }
+    ).args.options;
+  for (const command of ["export.plan", "export.begin"]) {
+    expect(sent(command).colorTag).toBe("rec709");
+    expect(sent(command).timecode).toBe("01:00:00:00");
+    expect(sent(command).audioCoding).toBe("pcm16");
+  }
+  // MP4 keeps the label and has no timecode track or PCM; WebM has none.
+  expect(shows({ format: "mp4" }, "colorTag")).toBe(true);
+  expect(shows({ format: "mp4" }, "timecode")).toBe(false);
+  expect(shows({ format: "mp4" }, "audioCoding")).toBe(false);
+  expect(shows({ format: "webm" }, "colorTag")).toBe(false);
 });

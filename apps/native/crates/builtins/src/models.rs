@@ -999,6 +999,9 @@ impl Backend {
                 "depth",
                 "dynamicRange",
                 "useProxies",
+                "colorTag",
+                "timecode",
+                "audioCoding",
                 "preset",
                 "presetName"
             ]))?;

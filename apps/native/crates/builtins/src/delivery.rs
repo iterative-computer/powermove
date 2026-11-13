@@ -484,6 +484,39 @@ mod tests {
         serde_json::from_value(json!({"format":"mp4","scale":1,"width":640,"height":360,"fps":29.97,"range":"all","quality":"high","mblur":false,"audio":true,"alpha":false,"captionsBurn":true,"captionsSidecar":"none"})).unwrap()
     }
     #[test]
+    fn the_planner_takes_color_tag_start_timecode_and_audio_format_from_the_sheet() {
+        use pm_protocol::priority::AudioCoding;
+        let asked = |extra: Value| {
+            let mut v = json!({"format":"prores","profile":"422hq","scale":1,"width":640,"height":360,"fps":29.97,"range":"all","quality":"high","mblur":false,"audio":true,"alpha":false,"captionsBurn":false,"captionsSidecar":"none"});
+            for (k, value) in extra.as_object().unwrap() {
+                v[k] = value.clone();
+            }
+            plan(&fixture(""), &super::options(&v).unwrap(), 0.)
+        };
+        let s = asked(json!({"colorTag":"rec709","timecode":"01:00:00;00","audioCoding":"pcm16"}))
+            .unwrap()
+            .settings
+            .unwrap();
+        assert_eq!(s.color, pm_protocol::color::OutputColor::Rec709Broadcast);
+        let timecode = s.delivery.timecode.unwrap();
+        assert_eq!(
+            (timecode.start.as_str(), timecode.drop_frame),
+            ("01:00:00;00", true)
+        );
+        // The fixture has no sound, so there is no sound coding to choose.
+        assert_eq!(s.delivery.audio_coding, None::<AudioCoding>);
+        // Without the fields: today's file.
+        let s = asked(json!({})).unwrap().settings.unwrap();
+        assert!(matches!(
+            s.color,
+            pm_protocol::color::OutputColor::Rec709QuickTime { .. }
+        ));
+        assert_eq!(s.delivery.timecode, None);
+        // A timecode the rate cannot count stops the plan with the sheet's words.
+        let error = asked(json!({"timecode":"01:00:00:31"})).err().unwrap();
+        assert!(error.contains("HH:MM:SS:FF"), "{error}");
+    }
+    #[test]
     fn hdr_delivery_follows_the_project_and_the_panel() {
         use pm_protocol::color::ColorMode;
         let mut o = options();
