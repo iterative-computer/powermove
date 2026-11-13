@@ -399,7 +399,7 @@ pub struct Engine {
     compat_document: Option<Arc<crate::compat::CompatStore>>,
     /// The peaks of the content on screen as its media were observed, and
     /// the output tone of its frames.
-    hdr: Option<((u64, u64, String, u64), Option<crate::color::HdrView>)>,
+    hdr: Option<(HdrOf, Option<crate::color::HdrView>)>,
     output_tone: Option<pm_render::OutputTone>,
     /// Where the viewer's analysis goes, while a Scopes panel is showing.
     pub scope_frames: Option<(
@@ -422,6 +422,9 @@ pub struct Engine {
     /// PM_SCRUB_EXTRA_MIB: the borrowed scrub allowance in force (bytes).
     budgeted_extra: u64,
 }
+/// What an HDR view is of: content, revision, composition, and the observed
+/// inputs its media were looked at under.
+type HdrOf = (u64, u64, String, u64);
 type Waker = Arc<std::sync::Mutex<Option<std::sync::mpsc::SyncSender<()>>>>;
 fn lose(lost: &AtomicBool, waker: &Waker) {
     lost.store(true, std::sync::atomic::Ordering::Release);
