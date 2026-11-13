@@ -28,6 +28,15 @@ pub trait Delegate: 'static {
     fn report(&self, message: String, cx: &mut App);
     /// Run a shell command by name, as its menu item or chord would.
     fn command(&self, name: &str, cx: &mut App);
+    /// A command with arguments (a menu row that names its target).
+    fn run(&self, name: &str, _args: Vec<serde_json::Value>, cx: &mut App) {
+        self.command(name, cx);
+    }
+    /// The layer menu's rows for the layer under the pointer
+    /// (`layer_commands::layer_menu`).
+    fn layer_menu_rows(&self, _layer: &str, _cx: &App) -> Vec<serde_json::Value> {
+        vec![]
+    }
     /// `choose` runs with the picked row, on the main thread, once tracking ends.
     fn menu(
         &self,
@@ -1495,15 +1504,17 @@ impl TimelineSurface {
                 serde_json::json!({"kind":"layer","layerId":id,"time":time}),
             ),
         ];
+        let rows = delegate.layer_menu_rows(&id, cx);
         self.delegate.clone().extension_menu(
             locations,
-            crate::layer_commands::layer_menu_rows(),
+            rows.clone(),
             window,
             cx,
             Box::new(move |index, cx| {
-                let rows = &crate::layer_commands::LAYER_MENU;
-                if let Some((command, _)) = index.and_then(|i| rows.get(i)) {
-                    delegate.command(command, cx);
+                if let Some((command, args)) =
+                    index.and_then(|i| crate::layer_commands::layer_menu_choice(&rows, i))
+                {
+                    delegate.run(&command, args, cx);
                 }
             }),
         );

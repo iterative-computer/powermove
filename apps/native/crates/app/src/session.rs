@@ -1184,6 +1184,11 @@ impl Controller {
         };
         let select = plan.select;
         let Some(session) = &self.session else { return };
+        let counted = plan
+            .count_keys
+            .zip(self.published.clone())
+            .map(|(ids, p)| (crate::layer_commands::key_count(&p, &ids), ids));
+        let project = session.project.clone();
         let pending = self
             .kernel
             .call(&session.project, Request::new(Caller::native(), call));
@@ -1194,6 +1199,13 @@ impl Controller {
                     if let Reply::Throw(e) = ack.reply {
                         v.message = e.to_string();
                         return;
+                    }
+                    // Simplify Keyframes says what it did, as the shipped app.
+                    if let Some((before, ids)) = counted
+                        && let Some(after) = v.kernel.published(&project)
+                    {
+                        let after = crate::layer_commands::key_count(&after, &ids);
+                        v.note(format!("{before} → {after} keyframes"), cx);
                     }
                     if let Some(ids) = select {
                         v.call(SelectionCall::Layers { ids, add: false }.into(), cx);
