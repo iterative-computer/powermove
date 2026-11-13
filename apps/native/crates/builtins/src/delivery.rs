@@ -863,6 +863,15 @@ pub fn observe_media(
     for (id, asset) in &catalog.assets {
         let availability = match originals.get(id) {
             None => Availability::Offline,
+            // A LUT is read when an effect draws it, and refused there in a
+            // sentence; here it is there or it isn't.
+            Some(path) if asset.kind == "lut" => {
+                if path.is_file() {
+                    Availability::Ready
+                } else {
+                    Availability::Offline
+                }
+            }
             Some(path) => {
                 if !matches!(asset.kind.as_str(), "image" | "video" | "audio") {
                     states.insert(id.clone(), RuntimeState::default());
@@ -912,6 +921,41 @@ mod probe_tests {
         std::fs::write(&file, b"replaced bytes").unwrap();
         observe_media("p", &snapshot, &originals, &BTreeMap::new(), &probes).unwrap();
         assert_eq!(probes.runs(), 2, "a changed file is decoded again");
+    }
+
+    /// A LUT asset (Apply LUT…, an agent's import) is ready when its file is
+    /// there and offline when it isn't, never left loading.
+    #[test]
+    fn a_lut_asset_is_ready_or_offline() {
+        use pm_panel_media::Availability;
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("Look.cube");
+        std::fs::write(&file, b"LUT_3D_SIZE 2\n").unwrap();
+        let project = pm_model::json::parse(
+            r##"{"id":"p","name":"Synthetic","compId":"c","w":64,"h":36,"fps":30,"dur":1,"bg":"#000000","assets":{"l":{"name":"Look.cube","kind":"lut","format":"cube"}},"comps":{},"layers":[]}"##,
+        )
+        .unwrap();
+        let snapshot = pm_kernel::DocumentStore::new_untitled(project).snapshot();
+        let originals = BTreeMap::from([("l".to_owned(), file.clone())]);
+        let availability = |originals: &BTreeMap<String, PathBuf>| {
+            use pm_panel_media::MediaRuntime;
+            let stamp = pm_panel_media::Catalog::new("p".into(), snapshot.clone())
+                .unwrap()
+                .stamp;
+            observe_media(
+                "p",
+                &snapshot,
+                originals,
+                &BTreeMap::new(),
+                &MediaProbes::default(),
+            )
+            .unwrap()
+            .state(&stamp, "l")
+            .availability
+        };
+        assert_eq!(availability(&originals), Availability::Ready);
+        std::fs::remove_file(&file).unwrap();
+        assert_eq!(availability(&originals), Availability::Offline);
     }
 }
 

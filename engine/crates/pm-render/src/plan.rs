@@ -1793,10 +1793,19 @@ fn native_content_quad<'d>(
             let fit = js::string(js::get(&d, "fit"));
             let uv = fit_uv(&fit, sw, sh, bw, bh);
             let mut interpret = crate::footage::interpretation(record);
+            let mut path = path;
             // Drawn from a proxy or optimized copy: the interpretation as
-            // the copy carries it.
-            if let Some(original) = b.assets.original(&asset_id).filter(|o| *o != path) {
-                interpret = interpret.and_then(|i| crate::footage::for_copy(i, &original));
+            // the copy carries it, or the original when it can't.
+            if let Some(original) = b.assets.original(&asset_id).filter(|o| *o != path)
+                && let Some(i) = interpret.take()
+            {
+                interpret = match crate::footage::for_copy(i, &original) {
+                    crate::footage::CopyReading::Copy(i) => i,
+                    crate::footage::CopyReading::Original(i) => {
+                        path = original;
+                        Some(i)
+                    }
+                };
             }
             let source = if ty == "video" {
                 // Inside motion-blur samples video keeps the center time's
