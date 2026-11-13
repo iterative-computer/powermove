@@ -1595,6 +1595,24 @@ fn archived(entry: &pm_kernel::state::ExtensionEntry) -> bool {
         == Some(true)
 }
 
+/// A time as the transport shows it (`00:00:02:15`: hours, minutes, seconds,
+/// frames at the composition's rate), and as it is spoken.
+pub(crate) fn timecode(time: f64, fps: f64) -> (String, String) {
+    let frames = (time * fps).round().max(0.) as u64;
+    let nominal = fps.round().max(1.) as u64;
+    let sec = frames / nominal;
+    (
+        format!(
+            "{:02}:{:02}:{:02}:{:02}",
+            sec / 3600,
+            sec / 60 % 60,
+            sec % 60,
+            frames % nominal
+        ),
+        format!("{sec} seconds, {} frames", frames % nominal),
+    )
+}
+
 #[cfg(test)]
 mod store_tests {
     use super::*;
@@ -1646,22 +1664,4 @@ mod store_tests {
             Some(json!(["unknown future shape"]))
         );
     }
-}
-
-/// A time as the transport shows it (`00:00:02:15`: hours, minutes, seconds,
-/// frames at the composition's rate), and as it is spoken.
-pub(crate) fn timecode(time: f64, fps: f64) -> (String, String) {
-    let frames = (time * fps).round().max(0.) as u64;
-    let nominal = fps.round().max(1.) as u64;
-    let sec = frames / nominal;
-    (
-        format!(
-            "{:02}:{:02}:{:02}:{:02}",
-            sec / 3600,
-            sec / 60 % 60,
-            sec % 60,
-            frames % nominal
-        ),
-        format!("{sec} seconds, {} frames", frames % nominal),
-    )
 }
