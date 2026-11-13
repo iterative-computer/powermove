@@ -32,6 +32,8 @@ pub(crate) enum Class {
 /// How long a slice is waited for before the frame goes on unsliced: a
 /// program that runs away is the watchdog's to judge, at the frame's end.
 const RUNAWAY: Duration = Duration::from_secs(2);
+/// The most units one slice holds.
+const AT_MOST: u32 = 256;
 /// While a slice runs, the watchdog looks at its frames this often.
 const WATCH_EVERY: Duration = Duration::from_millis(100);
 
@@ -62,8 +64,15 @@ pub struct Slices {
     budget: Duration,
     gate: Gate,
     /// Microseconds a unit of each class costs, as measured: raised at
-    /// once by a slower slice, lowered slowly by faster ones.
+    /// once by a slower slice, lowered slowly by faster ones. What a slice
+    /// is expected to take when it asks its gate.
     rates: [f64; 2],
+    /// How many units of each class a slice holds: one more after a slice
+    /// that took under half the budget, cut in proportion by one that took
+    /// more than it. (Units cost unalike, a heavy layer among light ones:
+    /// their mean says little about the next slice; what the last slices
+    /// took says more.)
+    limits: [u32; 2],
     /// The class and units recorded since the last submission.
     pending: Option<(Class, u32)>,
     runaway: bool,
@@ -80,6 +89,7 @@ impl Slices {
             budget,
             gate,
             rates: [unit, unit],
+            limits: [1, 1],
             pending: None,
             runaway: false,
             report: SliceReport::default(),
@@ -123,8 +133,21 @@ impl Slices {
             return false;
         }
         // A slice is of one class, so each class's cost is measured alone.
-        pending != class
-            || f64::from(units + 1) * self.rates[class as usize] >= self.budget.as_secs_f64() * 1e6
+        pending != class || units >= self.limits[class as usize]
+    }
+
+    /// A slice of `units` of `class` took `took`.
+    fn learn(&mut self, class: Class, units: u32, took: Duration) {
+        let measured = took.as_secs_f64() * 1e6 / f64::from(units);
+        let rate = &mut self.rates[class as usize];
+        *rate = measured.max(0.7 * *rate + 0.3 * measured);
+        let limit = &mut self.limits[class as usize];
+        if took > self.budget {
+            let fits = f64::from(units) * self.budget.as_secs_f64() / took.as_secs_f64();
+            *limit = (fits.floor() as u32).clamp(1, *limit);
+        } else if took * 2 < self.budget && units >= *limit {
+            *limit = (*limit + 1).min(AT_MOST);
+        }
     }
 
     /// A unit of `class` is recorded next.
@@ -191,9 +214,7 @@ impl Slices {
         if units == 1 {
             self.report.worst_unit = self.report.worst_unit.max(took);
         }
-        let measured = took.as_secs_f64() * 1e6 / f64::from(units);
-        let rate = &mut self.rates[class as usize];
-        *rate = measured.max(0.7 * *rate + 0.3 * measured);
+        self.learn(class, units, took);
     }
 }
 
@@ -246,21 +267,48 @@ mod tests {
         Slices::new(Duration::from_millis(budget_ms), Arc::new(|_| false))
     }
 
-    /// Units are batched while their measured cost fits the budget, and a
-    /// slice never mixes classes.
+    /// A slice holds one class of units, as many as the last slices showed
+    /// to fit: one more after a slice under half the budget, cut in
+    /// proportion after one over it.
     #[test]
-    fn a_slice_holds_what_fits_its_budget_of_one_class() {
+    fn a_slice_holds_what_the_last_ones_showed_to_fit() {
         let mut s = slices(8);
+        let ms = Duration::from_millis;
         assert!(!s.due(Class::Draw), "nothing recorded");
         s.note(Class::Draw);
-        assert!(s.due(Class::Draw), "unmeasured: a unit is a slice");
+        assert!(
+            s.due(Class::Draw),
+            "one unit a slice until slices prove cheap"
+        );
         assert!(s.due(Class::Effect), "another class is another slice");
-        // Measured cheap: 1 ms a unit, so a slice stays under 8 ms.
-        s.rates[Class::Draw as usize] = 1000.;
-        for _ in 1..7 {
-            assert!(!s.due(Class::Draw));
-            s.note(Class::Draw);
-        }
-        assert!(s.due(Class::Draw), "the eighth is the next slice's");
+        s.learn(Class::Draw, 1, ms(1));
+        s.learn(Class::Draw, 2, ms(2));
+        assert_eq!(
+            s.limits[Class::Draw as usize],
+            3,
+            "cheap slices grow by one"
+        );
+        s.note(Class::Draw);
+        assert!(!s.due(Class::Draw), "two of three");
+        s.note(Class::Draw);
+        assert!(s.due(Class::Draw), "the fourth is the next slice's");
+        s.limits[Class::Draw as usize] = 12;
+        s.learn(Class::Draw, 12, ms(32));
+        assert_eq!(
+            s.limits[Class::Draw as usize],
+            3,
+            "a slice four times over its budget holds a quarter next"
+        );
+        s.learn(Class::Draw, 3, ms(6));
+        assert_eq!(
+            s.limits[Class::Draw as usize],
+            3,
+            "within its budget: as it is"
+        );
+        assert_eq!(
+            s.limits[Class::Effect as usize],
+            1,
+            "each class by its own slices"
+        );
     }
 }
