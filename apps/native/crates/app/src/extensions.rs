@@ -771,22 +771,30 @@ impl Controller {
     ) {
         self.extensions.next_menu += 1;
         let token = self.extensions.next_menu;
-        let entries = rows
-            .iter()
-            .enumerate()
-            .map(|(i, row)| {
-                if row.is_null() {
-                    return MenuEntry::separator();
-                }
-                let mut entry = MenuEntry::item(
-                    row["label"].as_str().unwrap_or_default(),
-                    format!("{CHOICE}{token}:{i}"),
-                )
-                .checked(row["checked"] == true);
-                entry.enabled = row["disabled"] != true;
-                entry
-            })
-            .collect();
+        // Rows are numbered in preorder, submenu rows included, as the
+        // plain native menu numbers them (`v4_native::menu_item`).
+        fn entries(rows: &[Value], token: u64, next: &mut usize) -> Vec<MenuEntry> {
+            rows.iter()
+                .map(|row| {
+                    let index = *next;
+                    *next += 1;
+                    if row.is_null() {
+                        return MenuEntry::separator();
+                    }
+                    let label = row["label"].as_str().unwrap_or_default();
+                    let mut entry = match row["children"].as_array() {
+                        Some(children) if !children.is_empty() => {
+                            MenuEntry::submenu(label, entries(children, token, next))
+                        }
+                        _ => MenuEntry::item(label, format!("{CHOICE}{token}:{index}")),
+                    }
+                    .checked(row["checked"] == true);
+                    entry.enabled &= row["disabled"] != true;
+                    entry
+                })
+                .collect()
+        }
+        let entries = entries(rows, token, &mut 0);
         self.extensions.choice = Some((token, choose));
         if let Some(entries) = self.extension_menu(locations, entries, at, cx) {
             self.host.borrow().context_menu(&entries, at.0, at.1);
@@ -1894,6 +1902,45 @@ impl Controller {
 mod tests {
     use super::{external_link, menu_entries};
     use serde_json::json;
+
+    #[test]
+    fn discovery_loads_a_migrated_effect_extension() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("electron");
+        let native = pm_first_launch::beta_profile(temp.path());
+        let extension = source.join("extensions/synthetic-effect");
+        std::fs::create_dir_all(&extension).unwrap();
+        std::fs::write(
+            extension.join("manifest.json"),
+            json!({
+                "id":"synthetic-effect", "name":"Synthetic effect", "version":"1.0.0",
+                "apiVersion":1, "entry":"index.ts", "contributes":["effects"]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            extension.join("index.ts"),
+            "export function activate(api) {};",
+        )
+        .unwrap();
+        assert!(matches!(
+            pm_first_launch::run(
+                &pm_first_launch::Config {
+                    electron_profile: source,
+                    native_profile: native.clone()
+                },
+                |_| Ok(())
+            )
+            .unwrap(),
+            pm_first_launch::Outcome::Complete { .. }
+        ));
+        let found = pm_compat_runner::discovery::scan(&super::roots(&native));
+        let effect = found.iter().find(|f| f.id == "synthetic-effect").unwrap();
+        assert!(effect.manifest.is_ok(), "{:?}", effect.manifest);
+        assert_eq!(effect.directory, native.join("extensions/synthetic-effect"));
+        assert!(effect.store.is_none());
+    }
 
     #[test]
     fn extension_menus_keep_their_choice_tokens_and_only_web_links_open() {

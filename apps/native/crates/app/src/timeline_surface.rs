@@ -30,6 +30,15 @@ pub trait Delegate: 'static {
     fn report(&self, message: String, cx: &mut App);
     /// Run a shell command by name, as its menu item or chord would.
     fn command(&self, name: &str, cx: &mut App);
+    /// A command with arguments (a menu row that names its target).
+    fn run(&self, name: &str, _args: Vec<serde_json::Value>, cx: &mut App) {
+        self.command(name, cx);
+    }
+    /// The layer menu's rows for the layer under the pointer
+    /// (`layer_commands::layer_menu`).
+    fn layer_menu_rows(&self, _layer: &str, _cx: &App) -> Vec<serde_json::Value> {
+        vec![]
+    }
     /// `choose` runs with the picked row, on the main thread, once tracking ends.
     fn menu(
         &self,
@@ -128,6 +137,11 @@ enum Job {
     Persist(Viewed),
     Reveal {
         layer: String,
+        keys: Vec<String>,
+    },
+    ShowGraph {
+        layer: String,
+        channel: String,
         keys: Vec<String>,
     },
 }
@@ -899,6 +913,21 @@ impl TimelineSurface {
     /// The bottom bar's height: what the body keeps under the tracks.
     pub fn bar_height(&self) -> f64 {
         f32::from(self.body.size.height - self.bounds.size.height).max(0.) as f64
+    }
+    /// Properties' Show in Graph Editor: the graph view, on `channel`.
+    pub fn show_graph(
+        &mut self,
+        layer: String,
+        channel: String,
+        keys: Vec<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.queue.push_back(Job::ShowGraph {
+            layer,
+            channel,
+            keys,
+        });
+        self.pump(cx);
     }
     pub fn time_mapping(&self) -> (f64, f64, f64) {
         self.shown
@@ -1676,15 +1705,17 @@ impl TimelineSurface {
                 serde_json::json!({"kind":"layer","layerId":id,"time":time}),
             ),
         ];
+        let rows = delegate.layer_menu_rows(&id, cx);
         self.delegate.clone().extension_menu(
             locations,
-            crate::layer_commands::layer_menu_rows(),
+            rows.clone(),
             window,
             cx,
             Box::new(move |index, cx| {
-                let rows = &crate::layer_commands::LAYER_MENU;
-                if let Some((command, _)) = index.and_then(|i| rows.get(i)) {
-                    delegate.command(command, cx);
+                if let Some((command, args)) =
+                    index.and_then(|i| crate::layer_commands::layer_menu_choice(&rows, i))
+                {
+                    delegate.run(&command, args, cx);
                 }
             }),
         );
@@ -1963,6 +1994,19 @@ async fn run(client: &mut TimelineClient, job: Job) -> Result<Vec<HostEffect>, S
                 .map_err(|e| e.to_string())?;
             client.publish_view().await.map_err(text)?;
             Ok(vec![])
+        }
+        Job::ShowGraph {
+            layer,
+            channel,
+            keys,
+        } => {
+            let plan = client
+                .model
+                .show_graph(&layer, &channel, &keys)
+                .map_err(|e| e.to_string())?;
+            let effects = client.dispatch(plan).await.map_err(text)?;
+            client.publish_view().await.map_err(text)?;
+            Ok(effects)
         }
         Job::Persist(view) => {
             use pm_kernel::state::{StateOp, StateTransaction};

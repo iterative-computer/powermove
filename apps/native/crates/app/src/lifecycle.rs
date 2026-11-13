@@ -1161,7 +1161,7 @@ mod tests {
         assert!(k.published("test").is_none(), "the session is released");
         assert_eq!(std::fs::read(&file).unwrap(), saved, "the file is as saved");
         drop(
-            pm_kernel::locks::lock_project(&dir.path().join("locks"), &file)
+            pm_kernel::locks::lock_project(&pm_kernel::locks::user_lock_root(), &file)
                 .expect("its file lock is released"),
         );
         assert!(

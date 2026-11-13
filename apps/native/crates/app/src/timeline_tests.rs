@@ -21,6 +21,8 @@ pub(crate) struct Recorder {
     pub menus: RefCell<Vec<Vec<serde_json::Value>>>,
     pub choice: RefCell<Option<String>>,
     pub skims: RefCell<Vec<Option<f64>>>,
+    /// The kernel the layer menu reads its rows from.
+    pub published: RefCell<Option<pm_kernel::KernelHandle>>,
     pub skimming: std::cell::Cell<bool>,
 }
 pub(crate) struct Recording(pub Rc<Recorder>);
@@ -47,6 +49,15 @@ impl Delegate for Recording {
     fn command(&self, name: &str, _: &mut App) {
         self.0.commands.borrow_mut().push(name.to_owned());
     }
+    fn layer_menu_rows(&self, layer: &str, _: &App) -> Vec<serde_json::Value> {
+        match &*self.0.published.borrow() {
+            Some(kernel) => kernel
+                .published(crate::v4_view_tests::PROJECT)
+                .map(|p| crate::layer_commands::layer_menu(&p, layer, *self.0.time.borrow()))
+                .unwrap_or_default(),
+            None => vec![],
+        }
+    }
     fn menu(
         &self,
         items: Vec<serde_json::Value>,
@@ -54,12 +65,28 @@ impl Delegate for Recording {
         cx: &mut App,
         choose: Box<dyn FnOnce(Option<usize>, &mut App)>,
     ) {
+        // A row by its id or its label, numbered in preorder like the menu.
+        fn find(items: &[serde_json::Value], wanted: &str, next: &mut usize) -> Option<usize> {
+            for item in items {
+                let index = *next;
+                *next += 1;
+                if item["id"] == wanted || item["label"] == wanted {
+                    return Some(index);
+                }
+                if let Some(children) = item["children"].as_array()
+                    && let Some(found) = find(children, wanted, next)
+                {
+                    return Some(found);
+                }
+            }
+            None
+        }
         let index = self
             .0
             .choice
             .borrow()
             .as_ref()
-            .and_then(|id| items.iter().position(|i| i["id"] == id.as_str()));
+            .and_then(|wanted| find(&items, wanted, &mut 0));
         self.0.menus.borrow_mut().push(items);
         cx.defer(move |cx| choose(index, cx));
     }
@@ -79,6 +106,7 @@ pub(crate) fn stage_project(cx: &mut TestAppContext, project: String) -> Stage {
     let first = publication(&rig);
     let natives = Natives::default();
     let recorder = Rc::new(Recorder::default());
+    *recorder.published.borrow_mut() = Some(rig.kernel.clone());
     let delegate = Rc::new(Recording(recorder.clone()));
     let (kernel, outline) = (rig.kernel.clone(), natives.outline.clone());
     let surface = cx.new(|cx| {
