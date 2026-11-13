@@ -4,12 +4,15 @@
 //! its split command (`extensions/timeline/index.ts`: Cmd+Shift+D / Cmd+B),
 //! the layer-timing shortcuts of `extensions/keymap-default/keymap.ts`, the
 //! quick stagger (Cmd+Option drag), and the agent's video edits
-//! (`legacy/assistant/video-editing.ts`: split, trim, slip).
+//! (`legacy/assistant/video-editing.ts`: split, trim, slip), the inspector's
+//! Time buttons (`extensions/inspector/retiming.ts`: time remap, freeze
+//! frame, reverse), and the keyboard edits editors expect from Premiere,
+//! Final Cut and After Effects: ripple trim, roll, slide, lift and extract.
 //!
 //! Key times are layer-local, so moving a layer moves its animation with it.
 //! Group strips act on their members; caption cues stay put in composition
-//! time. There is no ripple edit in the old app (the parity inventory found
-//! none), so none is offered.
+//! time. The ripple, roll, slide and range edits keep what remains of a layer
+//! where it was in composition time (its media and its keys), as a cut does.
 
 use std::collections::HashSet;
 
@@ -70,6 +73,72 @@ pub enum TimingCommand {
     /// order) moves by `i * step`, at subframe precision (send the whole
     /// drag with `update_gesture_from_start`). Label "Stagger Layers".
     Stagger { layer_ids: Vec<String>, step: f64 },
+    /// Ripple trim to `time` (Premiere Q/W): each layer whose span holds
+    /// `time` loses the part before it (`In`) or after it (`Out`), and the
+    /// time removed closes up. What remains of a layer keeps its media and
+    /// keys; every later unlocked layer moves back by the removed time that
+    /// ends at or before its start; a layer that overlaps a removed part
+    /// stays. Groups stand for their members; locked layers are skipped.
+    /// Label "Ripple Trim".
+    RippleTrim {
+        layer_ids: Vec<String>,
+        edge: TimeEdge,
+        time: f64,
+    },
+    /// Roll the edit at a layer's `edge` to `time` (Premiere E, Final Cut
+    /// Shift-X): the layer's edge moves, and the layer that abuts it on the
+    /// same track and group takes the other side, so nothing after moves.
+    /// Without a neighbour it is a trim. Clamped so each side keeps a frame
+    /// and media keep their source start. Label "Roll Edit".
+    Roll {
+        layer_id: String,
+        edge: TimeEdge,
+        time: f64,
+    },
+    /// Slide by `delta` seconds (Premiere Option-comma/period): the layer
+    /// moves with its keys and media; the layer ending where it starts grows
+    /// or shrinks, the one starting where it ends gives or takes its head.
+    /// Clamped at the neighbours' limits; refuses when it cannot move.
+    /// Label "Slide Layer".
+    Slide { layer_id: String, delta: f64 },
+    /// Lift (`close: false`) or Extract (`close: true`) `start..end`
+    /// (After Effects Edit ▸ Lift/Extract Work Area): the layers' parts
+    /// inside the range go (a layer across the whole range is split, its
+    /// tail a fresh layer above it); Extract moves those layers' later
+    /// parts back by the range's length. Groups stand for their members;
+    /// locked layers are skipped. Label "Lift Work Area" / "Extract Work
+    /// Area".
+    RemoveRange {
+        layer_ids: Vec<String>,
+        start: f64,
+        end: f64,
+        close: bool,
+    },
+    /// Time remapping (`enableTimeRemap`): video and pre-comp layers get
+    /// `d.timeRemap` on and a `d.sourceTime` channel from their source time
+    /// at the layer's ends (`Remap`), the reverse (`Reverse`), or one hold
+    /// key of the source time at `time` (`Freeze`). Labels "Enable Time
+    /// Remapping", "Time-Reverse Layer", "Freeze Frame".
+    Retime {
+        layer_ids: Vec<String>,
+        mode: RetimeMode,
+        time: f64,
+    },
+}
+
+/// Which end of a layer an edit acts on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TimeEdge {
+    In,
+    Out,
+}
+
+/// The inspector's three Time buttons.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RetimeMode {
+    Remap,
+    Freeze,
+    Reverse,
 }
 
 impl TimingCommand {
@@ -82,6 +151,16 @@ impl TimingCommand {
             TimingCommand::Slip { .. } => "Slip Layer",
             TimingCommand::Split { .. } => "Split",
             TimingCommand::Stagger { .. } => "Stagger Layers",
+            TimingCommand::RippleTrim { .. } => "Ripple Trim",
+            TimingCommand::Roll { .. } => "Roll Edit",
+            TimingCommand::Slide { .. } => "Slide Layer",
+            TimingCommand::RemoveRange { close: false, .. } => "Lift Work Area",
+            TimingCommand::RemoveRange { close: true, .. } => "Extract Work Area",
+            TimingCommand::Retime { mode, .. } => match mode {
+                RetimeMode::Remap => "Enable Time Remapping",
+                RetimeMode::Freeze => "Freeze Frame",
+                RetimeMode::Reverse => "Time-Reverse Layer",
+            },
         }
         .to_owned()
     }
@@ -124,6 +203,28 @@ impl TimingCommand {
                     false,
                 )
             }
+            TimingCommand::RippleTrim {
+                layer_ids,
+                edge,
+                time,
+            } => ripple_trim(cx, layer_ids, *edge, *time),
+            TimingCommand::Roll {
+                layer_id,
+                edge,
+                time,
+            } => roll(cx, layer_id, *edge, *time),
+            TimingCommand::Slide { layer_id, delta } => slide(cx, layer_id, *delta),
+            TimingCommand::RemoveRange {
+                layer_ids,
+                start,
+                end,
+                close,
+            } => remove_range(cx, layer_ids, *start, *end, *close),
+            TimingCommand::Retime {
+                layer_ids,
+                mode,
+                time,
+            } => retime(cx, layer_ids, *mode, *time),
         }
     }
 }
@@ -392,23 +493,22 @@ fn crosses((from, dur): (f64, f64), t: f64) -> bool {
 
 const CUE_EPS: f64 = 1e-6;
 
-/// `splitLayerClone(PM, layer, tail, time)`: edits the head in place and
-/// returns the tail.
-fn split_pair(head: &mut Value, tail_id: &str, siblings: &[Value], t: f64) -> Value {
-    let source = head.clone();
-    let mut tail = layers::clone_layer(&source, tail_id, siblings);
-    let from = values::num(&source, "from").unwrap_or(0.0);
-    let end = from + values::num(&source, "dur").unwrap_or(0.0);
+/// `layer` (a copy of `source`) from `t` on: it starts at `t`, keeps its
+/// end, and shows what `source` showed there (its keys move back by the
+/// offset, `rebaseTailAnimation`; media continue, `startPatch`). `t` may lie
+/// before `source`'s start, which uncovers more of its head.
+fn cut_head(source: &Value, mut layer: Value, t: f64) -> Value {
+    let from = values::num(source, "from").unwrap_or(0.0);
+    let end = from + values::num(source, "dur").unwrap_or(0.0);
     let offset = t - from;
     {
-        let m = values::obj(&mut tail);
+        let m = values::obj(&mut layer);
         m.insert("from", Value::Number(t));
         m.insert("dur", Value::Number(end - t));
     }
-    // `rebaseTailAnimation`: keys move back by the offset.
     if offset.is_finite() && offset != 0.0 {
-        for (_, path) in channels::all(&tail) {
-            if let Some(keys) = channels::get_mut(&mut tail, &path)
+        for (_, path) in channels::all(&layer) {
+            if let Some(keys) = channels::get_mut(&mut layer, &path)
                 .and_then(|p| p.as_object_mut())
                 .and_then(|p| p.get_mut("kf"))
                 .and_then(Value::as_array_mut)
@@ -422,7 +522,16 @@ fn split_pair(head: &mut Value, tail_id: &str, siblings: &[Value], t: f64) -> Va
             }
         }
     }
-    start_patch(&mut tail, &source, t);
+    start_patch(&mut layer, source, t);
+    layer
+}
+
+/// `splitLayerClone(PM, layer, tail, time)`: edits the head in place and
+/// returns the tail.
+fn split_pair(head: &mut Value, tail_id: &str, siblings: &[Value], t: f64) -> Value {
+    let source = head.clone();
+    let mut tail = cut_head(&source, layers::clone_layer(&source, tail_id, siblings), t);
+    let from = values::num(&source, "from").unwrap_or(0.0);
     if values::text(&source, "type") == Some("captions")
         && let Some(cues) = cues_mut(head)
     {
@@ -641,4 +750,487 @@ fn split(
     }
     let next = layers::normalize_group_stack(layers);
     layers::write_layers(cx, comp.as_deref(), next)
+}
+
+/// Edits closer than this meet (abutting layers, a playhead on an edge).
+const EDGE_EPS: f64 = 1e-6;
+
+fn ends(layer: &Value) -> (f64, f64) {
+    let from = values::num(layer, "from").unwrap_or(0.0);
+    (from, from + values::num(layer, "dur").unwrap_or(0.0))
+}
+
+fn locked_here(layers: &[Value], layer: &Value) -> bool {
+    values::flag(layer, "lock")
+        || layers::ancestors(layers, layer)
+            .iter()
+            .any(|g| values::flag(g, "lock"))
+}
+
+/// The unlocked, non-group layers `ids` name (a group standing for its
+/// members), in stack order, and their composition. All must share one.
+fn leaves(cx: &Cx<'_>, ids: &[String]) -> Result<(Option<String>, Vec<Value>), CommandError> {
+    let Some(first) = ids.first() else {
+        return Ok((None, vec![]));
+    };
+    let comp = cx.find(first)?.comp_id;
+    for id in ids {
+        if cx.find(id)?.comp_id != comp {
+            return Err(CommandError::Invalid(
+                "Choose layers of one composition.".into(),
+            ));
+        }
+    }
+    let layers = cx.layers(comp.as_deref());
+    let named: HashSet<&str> = ids.iter().map(String::as_str).collect();
+    let wanted = layers::expand_groups(&layers, &named);
+    let picked = layers
+        .iter()
+        .filter(|l| {
+            values::text(l, "id").is_some_and(|id| wanted.iter().any(|w| w == id))
+                && values::text(l, "type") != Some("group")
+                && !locked_here(&layers, l)
+        })
+        .cloned()
+        .collect();
+    Ok((comp, picked))
+}
+
+/// The unlocked layer on `layer`'s track and group whose other edge meets
+/// `at`: the one ending there (`before`) or starting there.
+fn abutting(layers: &[Value], layer: &Value, at: f64, before: bool) -> Option<Value> {
+    let track = |l: &Value| values::num(l, "track").unwrap_or(0.0);
+    layers
+        .iter()
+        .find(|l| {
+            let (from, end) = ends(l);
+            values::text(l, "id") != values::text(layer, "id")
+                && values::text(l, "type") != Some("group")
+                && values::text(l, "group") == values::text(layer, "group")
+                && track(l) == track(layer)
+                && !locked_here(layers, l)
+                && ((if before { end } else { from }) - at).abs() < EDGE_EPS
+        })
+        .cloned()
+}
+
+fn put(cx: &mut Cx<'_>, layer: Value) -> Result<(), CommandError> {
+    let id = values::text(&layer, "id").unwrap_or_default().to_owned();
+    let loc = cx.find(&id)?;
+    cx.put_layer(&loc, layer)
+}
+
+fn with_dur(mut layer: Value, dur: f64) -> Value {
+    values::obj(&mut layer).insert("dur", Value::Number(dur));
+    layer
+}
+
+/// The earliest a layer's In may reach: its media's first frame.
+fn first_start(layer: &Value) -> f64 {
+    if is_timed(layer) {
+        earliest_start(layer)
+    } else {
+        f64::NEG_INFINITY
+    }
+}
+
+fn ripple_trim(
+    cx: &mut Cx<'_>,
+    ids: &[String],
+    edge: TimeEdge,
+    time: f64,
+) -> Result<(), CommandError> {
+    let time = values::finite(time, "time")?;
+    let (comp, targets) = leaves(cx, ids)?;
+    let frame = 1.0 / cx.fps(comp.as_deref());
+    let mut removed: Vec<(f64, f64)> = vec![];
+    for layer in targets {
+        let (from, end) = ends(&layer);
+        if time <= from + EDGE_EPS || time >= end - EDGE_EPS {
+            continue;
+        }
+        match edge {
+            TimeEdge::In => {
+                let t = time.min(end - frame);
+                removed.push((from, t));
+                put(cx, cut_head(&layer, layer.clone(), t))?;
+            }
+            TimeEdge::Out => {
+                let t = time.max(from + frame);
+                removed.push((t, end));
+                put(cx, with_dur(layer, t - from))?;
+            }
+        }
+    }
+    if removed.is_empty() {
+        return Err(CommandError::Invalid(
+            "Put the playhead inside a selected layer to ripple trim it.".into(),
+        ));
+    }
+    close_up(cx, comp.as_deref(), removed)
+}
+
+/// Every unlocked layer moves back by the removed time that ends at or
+/// before its start (overlapping removed spans count once).
+fn close_up(
+    cx: &mut Cx<'_>,
+    comp: Option<&str>,
+    mut removed: Vec<(f64, f64)>,
+) -> Result<(), CommandError> {
+    removed.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut spans: Vec<(f64, f64)> = vec![];
+    for (start, end) in removed {
+        match spans.last_mut() {
+            Some(last) if start <= last.1 + EDGE_EPS => last.1 = last.1.max(end),
+            _ => spans.push((start, end)),
+        }
+    }
+    let layers = cx.layers(comp);
+    for layer in &layers {
+        if values::text(layer, "type") == Some("group") || locked_here(&layers, layer) {
+            continue;
+        }
+        let (from, _) = ends(layer);
+        let shift: f64 = spans
+            .iter()
+            .filter(|(_, end)| from >= end - EDGE_EPS)
+            .map(|(start, end)| end - start)
+            .sum();
+        if shift > 0.0 {
+            let id = values::text(layer, "id").unwrap_or_default();
+            let mut path = cx.find(id)?.path();
+            path.push("from".into());
+            cx.set(path, Value::Number(from - shift))?;
+        }
+    }
+    Ok(())
+}
+
+fn editable(cx: &Cx<'_>, id: &str) -> Result<(Option<String>, Value, Vec<Value>), CommandError> {
+    let (loc, layer) = cx.layer(id)?;
+    cx.check_lock(&loc, id)?;
+    if values::text(&layer, "type") == Some("group") {
+        return Err(CommandError::Invalid(
+            "Choose a layer inside the group.".into(),
+        ));
+    }
+    let layers = cx.layers(loc.comp_id.as_deref());
+    Ok((loc.comp_id, layer, layers))
+}
+
+fn roll(cx: &mut Cx<'_>, id: &str, edge: TimeEdge, time: f64) -> Result<(), CommandError> {
+    let time = values::finite(time, "time")?;
+    let (comp, layer, layers) = editable(cx, id)?;
+    let frame = 1.0 / cx.fps(comp.as_deref());
+    let (from, end) = ends(&layer);
+    match edge {
+        TimeEdge::Out => {
+            let next = abutting(&layers, &layer, end, false);
+            let (mut lo, mut hi) = (from + frame, f64::INFINITY);
+            if let Some(next) = &next {
+                hi = ends(next).1 - frame;
+                lo = lo.max(first_start(next));
+            }
+            let t = time.clamp(lo, hi.max(lo));
+            put(cx, with_dur(layer, t - from))?;
+            if let Some(next) = next {
+                put(cx, cut_head(&next, next.clone(), t))?;
+            }
+        }
+        TimeEdge::In => {
+            let previous = abutting(&layers, &layer, from, true);
+            let (mut lo, hi) = (first_start(&layer), end - frame);
+            if let Some(previous) = &previous {
+                lo = lo.max(ends(previous).0 + frame);
+            }
+            let t = time.clamp(lo.min(hi), hi);
+            put(cx, cut_head(&layer, layer.clone(), t))?;
+            if let Some(previous) = previous {
+                let start = ends(&previous).0;
+                put(cx, with_dur(previous, t - start))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn slide(cx: &mut Cx<'_>, id: &str, delta: f64) -> Result<(), CommandError> {
+    let delta = values::finite(delta, "delta")?;
+    let (comp, layer, layers) = editable(cx, id)?;
+    let frame = 1.0 / cx.fps(comp.as_deref());
+    let (from, end) = ends(&layer);
+    let previous = abutting(&layers, &layer, from, true);
+    let next = abutting(&layers, &layer, end, false);
+    let (mut lo, mut hi) = (f64::NEG_INFINITY, f64::INFINITY);
+    if let Some(p) = &previous {
+        lo = lo.max(ends(p).0 + frame - from);
+    }
+    if let Some(n) = &next {
+        hi = hi.min(ends(n).1 - frame - end);
+        lo = lo.max(first_start(n) - end);
+    }
+    let delta = delta.clamp(lo.min(0.0), hi.max(0.0));
+    if delta.abs() < EDGE_EPS {
+        return Err(CommandError::Invalid(
+            "The layer cannot slide further.".into(),
+        ));
+    }
+    let mut moved = layer;
+    values::obj(&mut moved).insert("from", Value::Number(from + delta));
+    put(cx, moved)?;
+    if let Some(p) = previous {
+        let (start, _) = ends(&p);
+        put(cx, with_dur(p, from + delta - start))?;
+    }
+    if let Some(n) = next {
+        put(cx, cut_head(&n, n.clone(), end + delta))?;
+    }
+    Ok(())
+}
+
+/// A new cut at a layer's end: as split leaves the head.
+fn cut_tail(mut layer: Value, t: f64) -> Value {
+    let (from, _) = ends(&layer);
+    values::obj(&mut layer).insert("transitionOut", Value::Null);
+    if values::text(&layer, "type") == Some("audio") {
+        set_content(&mut layer, "fadeOut", Value::Number(0.0));
+    }
+    with_dur(layer, t - from)
+}
+
+fn remove_range(
+    cx: &mut Cx<'_>,
+    ids: &[String],
+    start: f64,
+    end: f64,
+    close: bool,
+) -> Result<(), CommandError> {
+    let (start, end) = (values::finite(start, "start")?, values::finite(end, "end")?);
+    if end - start < EDGE_EPS {
+        return Err(CommandError::Invalid("Set a work area first.".into()));
+    }
+    let (_, targets) = leaves(cx, ids)?;
+    // A layer across the whole range is split at its end first: its tail
+    // is a fresh layer, and the head then only crosses the start.
+    let mut chosen: Vec<String> = vec![];
+    for layer in &targets {
+        let id = values::text(layer, "id").unwrap_or_default().to_owned();
+        let (from, stop) = ends(layer);
+        if from < start - EDGE_EPS && stop > end + EDGE_EPS {
+            let tail = new_id("L");
+            split(
+                cx,
+                std::slice::from_ref(&id),
+                end,
+                std::slice::from_ref(&tail),
+            )?;
+            chosen.push(tail);
+        }
+        chosen.push(id);
+    }
+    let gap = end - start;
+    let mut gone: Vec<String> = vec![];
+    let mut changed = false;
+    for id in &chosen {
+        let (_, layer) = cx.layer(id)?;
+        let (from, stop) = ends(&layer);
+        if stop <= start + EDGE_EPS {
+            continue;
+        }
+        if from >= end - EDGE_EPS {
+            if close {
+                let mut moved = layer;
+                values::obj(&mut moved).insert("from", Value::Number(from - gap));
+                put(cx, moved)?;
+                changed = true;
+            }
+            continue;
+        }
+        changed = true;
+        if from >= start - EDGE_EPS && stop <= end + EDGE_EPS {
+            gone.push(id.clone());
+        } else if from < start {
+            put(cx, cut_tail(layer, start))?;
+        } else {
+            let mut tail = cut_head(&layer, layer.clone(), end);
+            values::obj(&mut tail).insert("transitionIn", Value::Null);
+            if values::text(&tail, "type") == Some("audio") {
+                set_content(&mut tail, "fadeIn", Value::Number(0.0));
+            }
+            if close {
+                values::obj(&mut tail).insert("from", Value::Number(start));
+            }
+            put(cx, tail)?;
+        }
+    }
+    if !changed {
+        return Err(CommandError::Invalid(
+            "No chosen layer is inside the work area.".into(),
+        ));
+    }
+    if !gone.is_empty() {
+        super::LayerCommand::Delete { layer_ids: gone }.plan(cx)?;
+    }
+    Ok(())
+}
+
+/// A linear key, as `setKeyOn(.., 'linear', fps)` makes one.
+fn linear_key(t: f64, v: f64, hold: bool) -> Value {
+    let mut key = Map::new();
+    key.insert("i", values::s(&new_id("k")));
+    key.insert("t", Value::Number(t));
+    key.insert("v", Value::Number(v));
+    key.insert(
+        "eo",
+        Value::Array(vec![Value::Number(0.0), Value::Number(0.0)]),
+    );
+    key.insert(
+        "ei",
+        Value::Array(vec![Value::Number(1.0), Value::Number(1.0)]),
+    );
+    if hold {
+        key.insert("hold", Value::Bool(true));
+    }
+    Value::Object(key)
+}
+
+fn retime(
+    cx: &mut Cx<'_>,
+    ids: &[String],
+    mode: RetimeMode,
+    time: f64,
+) -> Result<(), CommandError> {
+    let time = values::finite(time, "time")?;
+    for id in ids {
+        let (loc, layer) = cx.layer(id)?;
+        if !matches!(values::text(&layer, "type"), Some("video" | "precomp")) {
+            return Err(CommandError::Invalid(
+                "Time remapping needs a video or pre-comp layer.".into(),
+            ));
+        }
+        cx.check_lock(&loc, id)?;
+        let fps = cx.fps(loc.comp_id.as_deref());
+        let frame = 1.0 / fps;
+        let (from, end) = ends(&layer);
+        let dur = end - from;
+        let (start, last, now) = source_times(
+            cx,
+            loc.comp_id.as_deref(),
+            &layer,
+            [from, from + (dur - frame).max(0.0), time],
+        )?;
+        let keys = match mode {
+            RetimeMode::Freeze => vec![linear_key(((time - from) * fps).round() / fps, now, true)],
+            RetimeMode::Remap | RetimeMode::Reverse => {
+                let (a, b) = if mode == RetimeMode::Reverse {
+                    (last, start)
+                } else {
+                    (start, last)
+                };
+                vec![
+                    linear_key(0.0, a, false),
+                    linear_key((dur - frame).max(frame), b, false),
+                ]
+            }
+        };
+        let base = if mode == RetimeMode::Freeze {
+            now
+        } else {
+            start
+        };
+        let mut source_time = values::property(Value::Number(base));
+        values::obj(&mut source_time).insert("kf", Value::Array(keys));
+        for (key, value) in [
+            ("timeRemap", values::property(Value::Bool(true))),
+            ("sourceTime", source_time),
+        ] {
+            let mut path = loc.path();
+            path.extend(["d".into(), key.into()]);
+            cx.set(path, value)?;
+        }
+    }
+    Ok(())
+}
+
+/// `sourceTime(PM, layer, t)` at three times: the remapped channel when
+/// remapping is on, else elapsed time through the (possibly animated) speed
+/// plus the trim.
+fn source_times(
+    cx: &mut Cx<'_>,
+    comp: Option<&str>,
+    layer: &Value,
+    at: [f64; 3],
+) -> Result<(f64, f64, f64), CommandError> {
+    let from = values::num(layer, "from").unwrap_or(0.0);
+    let d = layer.get("d");
+    let channel = |key: &str| d.and_then(|d| d.get(key));
+    let remapped = channel("sourceTime").is_some_and(values::is_property);
+    let varying = channel("speed").is_some_and(|s| {
+        values::is_property(s)
+            && (s
+                .get("kf")
+                .and_then(Value::as_array)
+                .is_some_and(|k| !k.is_empty())
+                || s.get("expr")
+                    .and_then(Value::as_str)
+                    .is_some_and(|e| !e.is_empty()))
+    });
+    let fps = cx.fps(comp);
+    let node = pm_model::Node::from_value(layer.clone(), 0);
+    let times = cx.kernel(comp, |edit| {
+        edit.read_with(&node, |scope, layer| {
+            let d = layer.get("d");
+            let field = |key: &str| d.and_then(|d| d.get(key));
+            let mut one = |t: f64| -> pm_eval::JsResult<f64> {
+                if remapped
+                    && scope
+                        .evaluated(layer, field("timeRemap"), t, "c.timeRemap")?
+                        .truthy()
+                {
+                    let v = scope
+                        .evaluated(layer, field("sourceTime"), t, "c.sourceTime")?
+                        .to_number();
+                    return Ok(if v.is_nan() { 0.0 } else { v });
+                }
+                let trim = scope.evaluated(layer, field("trim"), t, "c.trim")?;
+                let trim = if trim.truthy() { trim.to_number() } else { 0.0 };
+                let local = t - from;
+                if !varying {
+                    let speed = scope.evaluated(layer, field("speed"), t, "c.speed")?;
+                    let speed =
+                        if matches!(speed, pm_eval::JsValue::Undefined | pm_eval::JsValue::Null) {
+                            1.0
+                        } else {
+                            speed.to_number()
+                        };
+                    return Ok(local * speed + trim);
+                }
+                // Integrate a varying rate at midpoints of fixed steps.
+                let step = 1.0 / (fps.max(30.0) * 2.0);
+                let end = local.max(0.0);
+                let full = (end / step).floor();
+                let mut sum = 0.0;
+                let mut i = 0.0;
+                while i < full {
+                    sum += scope
+                        .evaluated(layer, field("speed"), from + (i + 0.5) * step, "c.speed")?
+                        .to_number()
+                        * step;
+                    i += 1.0;
+                }
+                let rest = end - full * step;
+                let tail = scope
+                    .evaluated(
+                        layer,
+                        field("speed"),
+                        from + full * step + rest / 2.0,
+                        "c.speed",
+                    )?
+                    .to_number();
+                Ok(sum + tail * rest + trim)
+            };
+            Ok((one(at[0])?, one(at[1])?, one(at[2])?))
+        })
+    })?;
+    Ok(times)
 }
