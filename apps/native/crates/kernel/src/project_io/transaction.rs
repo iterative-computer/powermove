@@ -1263,6 +1263,11 @@ pub struct Leftover {
     pub owner: Option<Owner>,
     pub at: u64,
     pub size: u64,
+    /// Read now and found to hold exactly the bytes the save's record
+    /// names for it (then `role` says which version by those bytes). Only
+    /// such a file is a version to offer; any other is a file that could
+    /// not be identified.
+    pub proven: bool,
 }
 
 /// What [`settle`] found and did.
@@ -1385,6 +1390,21 @@ fn leftover(path: &Path, role: &'static str, why: Undecided, record: Option<&Rec
         owner: record.map(|r| r.owner.clone()),
         at: record.map_or(0, |r| r.at),
         size: fs::symlink_metadata(path).map_or(0, |m| m.len()),
+        proven: false,
+    }
+}
+
+/// [`leftover`] for one of `record`'s own files: proven by its bytes where
+/// they are what the record says, and then named by them.
+fn own_leftover(path: &Path, role: &'static str, why: Undecided, record: &Record) -> Leftover {
+    let (role, proven) = match proves(path, record) {
+        Holds::New => ("saving", true),
+        Holds::Old => ("previous", true),
+        _ => (role, false),
+    };
+    Leftover {
+        proven,
+        ..leftover(path, role, why, Some(record))
     }
 }
 
@@ -1713,7 +1733,7 @@ pub(crate) fn leftovers(destination: &Path) -> Vec<Leftover> {
         let why = held_by_another(record).unwrap_or(why);
         for (path, role) in [(&record.aside, "previous"), (&record.staged, "saving")] {
             if !record.retains(path) && matches!(lstat_file(path), Ok(Some(_))) {
-                found.push(leftover(path, role, why, Some(record)));
+                found.push(own_leftover(path, role, why, record));
             }
         }
     }
@@ -1728,12 +1748,10 @@ pub(crate) fn leftovers(destination: &Path) -> Vec<Leftover> {
             if found.iter().any(|l| l.path == path) {
                 continue;
             }
-            let role = match proves(&path, &record) {
-                Holds::Old => "previous",
-                Holds::New => "saving",
-                _ => continue,
-            };
-            found.push(leftover(&path, role, Undecided::Proven, Some(&record)));
+            let row = own_leftover(&path, "", Undecided::Proven, &record);
+            if row.proven {
+                found.push(row);
+            }
         }
     }
     found
@@ -1779,15 +1797,23 @@ fn proven_candidates(record: &Record) -> Vec<PathBuf> {
 /// be the project file: it takes the project's name, which must hold
 /// nothing, and the other files that record names get names the person
 /// finds. Nothing is removed. Call it while holding the project's lock.
+///
+/// `chosen` must be a version: read now, it holds exactly the bytes the
+/// record names (proven again right before it is placed). A file that does
+/// not is made the project only with `unproven`, which says the person was
+/// told it could not be identified and chose it all the same.
 pub(crate) fn use_leftover(
     destination: &Path,
     chosen: &Path,
+    unproven: bool,
     host: &Host,
 ) -> Result<Vec<LeftAside>, ProjectIoError> {
     let mut used = None;
     host.coordinated(destination, &mut |_| {
         if used.is_none() {
-            used = Some(probing(|| use_leftover_now(destination, chosen, host)));
+            used = Some(probing(|| {
+                use_leftover_now(destination, chosen, unproven, host)
+            }));
         }
     });
     used.unwrap_or_else(|| {
@@ -1800,6 +1826,7 @@ pub(crate) fn use_leftover(
 fn use_leftover_now(
     destination: &Path,
     chosen: &Path,
+    unproven: bool,
     host: &Host,
 ) -> Result<Vec<LeftAside>, ProjectIoError> {
     let hooks = host.hooks;
@@ -1821,6 +1848,22 @@ fn use_leftover_now(
             "This project is being saved right now by another copy of Powermove on this Mac."
                 .into(),
         ));
+    }
+    // What the chosen file must hold to be the version it is offered as.
+    let version = |record: &Record| match proves(chosen, record) {
+        Holds::New => Some(record.new.clone()),
+        Holds::Old => record.old.clone(),
+        _ => None,
+    };
+    let unidentified = || {
+        ProjectIoError::Invalid(
+            "That file does not hold what the save that left it recorded, so it is not a \
+             version Powermove can vouch for. Nothing was changed."
+                .into(),
+        )
+    };
+    if version(record).is_none() && !unproven {
+        return Err(unidentified());
     }
     let mut tx =
         Transaction::resume(record, destination, hooks).map_err(|e| io_err(&record.path, e))?;
@@ -1854,8 +1897,13 @@ fn use_leftover_now(
             }
         }
     }
+    // Proven again at the last moment: it is placed as the bytes read now.
+    let expected = version(record);
+    if expected.is_none() && !unproven {
+        return Err(unidentified());
+    }
     tx.step("chosen")?;
-    if tx.place(chosen, destination, None)? == Placed::Copied {
+    if tx.place(chosen, destination, expected.as_deref())? == Placed::Copied {
         // The name holds a verified copy: the file itself stays, for a
         // later save to read again and prune.
         tx.retain(chosen, None);

@@ -78,6 +78,9 @@ pub enum ShellCall {
     UseLeftover {
         path: PathBuf,
         leftover: PathBuf,
+        /// The file is not one `Leftovers` listed as `proven`, and the
+        /// person, told so, chose it all the same.
+        unproven: bool,
     },
     Save(SessionHandle),
     SaveAs {
@@ -394,6 +397,7 @@ fn leftover_row(left: &project_io::Leftover) -> Value {
         }),
     );
     m.insert("size", Value::from(left.size as f64));
+    m.insert("proven", Value::Bool(left.proven));
     if let Some(owner) = &left.owner {
         m.insert("computer", Value::from(owner.computer.as_str()));
         m.insert("user", Value::from(owner.user.as_str()));
@@ -622,11 +626,15 @@ impl Kernel {
                     .map(leftover_row)
                     .collect(),
             )),
-            ShellCall::UseLeftover { path, leftover } => {
+            ShellCall::UseLeftover {
+                path,
+                leftover,
+                unproven,
+            } => {
                 // Under the project's lock: no save of it is in its steps.
                 let _lock = self.lock_project(&path).map_err(failure)?;
-                let left =
-                    project_io::use_leftover(&path, &leftover, &self.host()).map_err(failure)?;
+                let left = project_io::use_leftover(&path, &leftover, unproven, &self.host())
+                    .map_err(failure)?;
                 Ok(ShellReply::Kept(left.iter().map(left_row).collect()))
             }
             ShellCall::DecideRecovery { ticket, decision } => {

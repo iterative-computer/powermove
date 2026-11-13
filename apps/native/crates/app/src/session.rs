@@ -1892,6 +1892,7 @@ impl Controller {
                         v.kernel.shell(ShellCall::UseLeftover {
                             path: file.clone(),
                             leftover: leftover.clone(),
+                            unproven: false,
                         })
                     }) else {
                         return;

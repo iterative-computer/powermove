@@ -2367,6 +2367,7 @@ fn a_save_in_progress_in_another_live_process_is_never_recovered() {
         .shell(ShellCall::UseLeftover {
             path: file.clone(),
             leftover: chosen.into(),
+            unproven: false,
         })
         .expect_err("its files are not for anyone to choose from");
     assert_eq!(tree(&dir.path("job")), before, "nothing was moved");
@@ -2442,6 +2443,7 @@ fn a_save_begun_on_another_computer_is_never_settled_unasked() {
         k.shell(ShellCall::UseLeftover {
             path: file.clone(),
             leftover: previous.into(),
+            unproven: false,
         })
         .unwrap();
         assert_eq!(fs::read(&file).unwrap(), original);
@@ -3704,6 +3706,7 @@ fn an_incomplete_file_at_the_name_never_traps_the_open_when_whole_versions_exist
         k.shell(ShellCall::UseLeftover {
             path: file.clone(),
             leftover: saving,
+            unproven: false,
         })
         .unwrap_or_else(|e| panic!("{case}: {e}"));
         assert_eq!(saved_name(&file).as_deref(), Some("One"), "{case}");
@@ -3717,6 +3720,80 @@ fn an_incomplete_file_at_the_name_never_traps_the_open_when_whole_versions_exist
         let (session, _) = open_file(&mut k, &file);
         let _ = session;
     }
+}
+/// The file under the project's name does not open, and of the two files
+/// the save's record names one is damaged too (an interrupted sync, another
+/// writer). Only a file read now and found to hold exactly what the record
+/// says is offered as a version, and only such a file can be made the
+/// project unasked for more: the damaged one is listed as not identified
+/// and is never installed in place of the whole version that is there.
+#[test]
+fn a_file_that_is_not_what_its_record_says_is_never_offered_or_installed_as_a_version() {
+    let dir = common::TempDir::new("unproven-offer");
+    fs::create_dir_all(dir.path("job")).unwrap();
+    let file = dir.path("job/cut.pmv");
+    fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+    let original = fs::read(&file).unwrap();
+    let native = dir.path("native");
+    assert!(killed(&native, &file, "no-exclusive", "mid-copy", "save"));
+    // The incomplete copy was changed (so it is not taken back), and the
+    // staged file is damaged.
+    land(&file, b"not a project");
+    let staged = private_file(&file, ".tmp");
+    write_through(&staged, b"damaged while it was synced");
+    let mut k = kernel(&native);
+    k.set_publish_hooks(child_disk("no-exclusive"));
+    k.shell(ShellCall::PrepareOpen {
+        id: "P".into(),
+        source: SessionSource::File(file.clone()),
+        electron_profile: None,
+    })
+    .expect_err("the file at the name is not a project");
+    let ShellReply::Leftovers(rows) = k.shell(ShellCall::Leftovers(file.clone())).unwrap() else {
+        panic!()
+    };
+    let text = |row: &Value, key: &str| row.get(key).and_then(Value::as_str).map(str::to_owned);
+    let proven: Vec<_> = rows
+        .iter()
+        .filter(|r| r.get("proven") == Some(&Value::Bool(true)))
+        .collect();
+    // The last saved version, under its private name and (recovery kept
+    // it beside the unreadable file) under a plain one.
+    assert!(!proven.is_empty(), "a whole version is offered: {rows:?}");
+    for row in &proven {
+        assert_eq!(text(row, "role").as_deref(), Some("previous"), "{rows:?}");
+        assert_eq!(fs::read(text(row, "path").unwrap()).unwrap(), original);
+    }
+    let previous = std::path::PathBuf::from(text(proven[0], "path").unwrap());
+    let damaged = rows
+        .iter()
+        .find(|r| text(r, "path").as_deref() == staged.to_str())
+        .unwrap_or_else(|| panic!("the damaged file is listed: {rows:?}"));
+    assert_eq!(damaged.get("proven"), Some(&Value::Bool(false)));
+    let before = tree(&dir.path("job"));
+    k.shell(ShellCall::UseLeftover {
+        path: file.clone(),
+        leftover: staged.clone(),
+        unproven: false,
+    })
+    .expect_err("a file that is not what its record says is not a version to open");
+    assert_eq!(tree(&dir.path("job")), before, "nothing was moved");
+    k.shell(ShellCall::UseLeftover {
+        path: file.clone(),
+        leftover: previous,
+        unproven: false,
+    })
+    .unwrap();
+    assert_eq!(fs::read(&file).unwrap(), original);
+    let kept: Vec<_> = visible_siblings(&file)
+        .iter()
+        .map(|p| fs::read(p).unwrap())
+        .collect();
+    assert!(kept.contains(&b"not a project".to_vec()), "{kept:?}");
+    assert!(
+        kept.contains(&b"damaged while it was synced".to_vec()),
+        "the damaged file is kept for the person too: {kept:?}"
+    );
 }
 /// A crash in the middle of writing a record line leaves a torn tail. What
 /// recovery appends after it must still be read: the record is cut back
@@ -3910,9 +3987,11 @@ fn files_that_do_not_match_their_record_are_left_for_the_person_to_choose() {
             .find(|r| text(r, "role").as_deref() == Some(choice))
             .and_then(|r| text(r, "path"))
             .unwrap();
+        // Told that neither could be identified, the person chooses one.
         k.shell(ShellCall::UseLeftover {
             path: file.clone(),
             leftover: chosen.into(),
+            unproven: true,
         })
         .unwrap();
         let (mine, other) = if choice == "previous" {
@@ -4714,6 +4793,7 @@ fn saves_on_real_volumes_replace_the_file_in_place() {
                 k.shell(ShellCall::UseLeftover {
                     path: crashed.clone(),
                     leftover: saving,
+                    unproven: false,
                 })
                 .unwrap_or_else(|e| panic!("{volume}: {e}"));
                 assert_eq!(saved_name(crashed).as_deref(), Some("One"), "{volume}");
