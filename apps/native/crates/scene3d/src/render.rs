@@ -5,10 +5,18 @@ use gltf::{ObjectKind, math, pose};
 pub use pm_geom3d::{Geometry, gltf};
 use std::{collections::HashMap, sync::Arc};
 
+#[derive(Clone, Debug, Default)]
+pub struct VertexAttributes {
+    pub colors: Arc<Vec<[f32; 4]>>,
+    pub secondary_uvs: Arc<Vec<[f32; 2]>>,
+}
 pub struct Part {
     pub geometry: Arc<Geometry>,
     pub world: [f64; 16],
     pub material: Option<gltf::Material>,
+    /// File material identity; final geometry variants can have other indices.
+    pub source_material: Option<usize>,
+    pub attributes: Arc<VertexAttributes>,
 }
 /// Resource lifetime owns decoded bytes and derived immutable geometry. Static
 /// parts share geometry across times, instances and renderer snapshot changes.
@@ -16,6 +24,7 @@ pub struct Resource {
     pub model: Model,
     pub key: String,
     meshes: std::sync::Mutex<HashMap<(usize, u64), Arc<Geometry>>>,
+    attributes: std::sync::Mutex<HashMap<usize, Arc<VertexAttributes>>>,
 }
 impl Resource {
     pub fn new(model: Model) -> Self {
@@ -23,6 +32,7 @@ impl Resource {
             model,
             key: String::new(),
             meshes: Default::default(),
+            attributes: Default::default(),
         }
     }
     pub fn load(name: &str, bytes: &[u8]) -> Result<Arc<Self>> {
@@ -76,13 +86,7 @@ impl Resource {
             .images
             .get(texture.image)
             .ok_or_else(|| Error("Missing model image".into()))?;
-        let image = image::load_from_memory(&image.bytes)
-            .map_err(|e| Error(format!("Model image: {e}")))?
-            .into_rgba8();
-        Ok(
-            image::imageops::resize(&image, 1024, 1024, image::imageops::FilterType::Triangle)
-                .into_raw(),
-        )
+        Ok((*texture_rgba(&image.bytes)?).clone())
     }
     pub fn parts(&self, time: f64) -> Result<Vec<Part>> {
         if !time.is_finite() {
@@ -111,6 +115,8 @@ impl Resource {
                     geometry,
                     world: math::IDENTITY,
                     material: None,
+                    source_material: None,
+                    attributes: Arc::default(),
                 }])
             }
             Model::Splats(_) => {
@@ -201,6 +207,49 @@ impl Resource {
                         cache.insert(key, geometry.clone());
                         geometry
                     };
+                    let attributes = {
+                        let mut cache = self
+                            .attributes
+                            .lock()
+                            .map_err(|_| Error("Model vertex cache poisoned".into()))?;
+                        if let Some(attributes) = cache.get(&d.geometry) {
+                            attributes.clone()
+                        } else {
+                            let mut attributes = VertexAttributes::default();
+                            if let Some(color) = &g.color {
+                                if ![3, 4].contains(&color.size)
+                                    || color.count() != g.vertex_count()
+                                {
+                                    return fail("Invalid imported vertex colors");
+                                }
+                                attributes.colors = Arc::new(
+                                    color
+                                        .data
+                                        .chunks_exact(color.size)
+                                        .map(|c| {
+                                            [
+                                                c[0],
+                                                c[1],
+                                                c[2],
+                                                if color.size == 4 { c[3] } else { 1. },
+                                            ]
+                                        })
+                                        .collect(),
+                                );
+                            }
+                            if let Some(uv) = &g.uv[1] {
+                                if uv.size != 2 || uv.count() != g.vertex_count() {
+                                    return fail("Invalid imported secondary UVs");
+                                }
+                                attributes.secondary_uvs = Arc::new(
+                                    uv.data.chunks_exact(2).map(|p| [p[0], p[1]]).collect(),
+                                );
+                            }
+                            let attributes = Arc::new(attributes);
+                            cache.insert(d.geometry, attributes.clone());
+                            attributes
+                        }
+                    };
                     let material = Some(m.materials[d.material].clone());
                     if let Some(instances) = &d.instances {
                         for instance in &instances.matrices {
@@ -208,6 +257,8 @@ impl Resource {
                                 geometry: geometry.clone(),
                                 world: math::multiply(&worlds[object], &instance.map(f64::from)),
                                 material: material.clone(),
+                                source_material: m.material_sources[d.material],
+                                attributes: attributes.clone(),
                             });
                         }
                     } else {
@@ -215,6 +266,8 @@ impl Resource {
                             geometry,
                             world: worlds[object],
                             material,
+                            source_material: m.material_sources[d.material],
+                            attributes,
                         });
                     }
                 }
@@ -242,4 +295,35 @@ pub fn geometry_key(g: &Geometry) -> String {
         h.update(value.to_le_bytes());
     }
     format!("{:x}", h.finalize())
+}
+
+/// The shared native map array uses raw RGBA8 1024² images. Key cached pixels
+/// by content, so relink/replacement under the same asset ID cannot go stale.
+pub fn texture_rgba(bytes: &[u8]) -> Result<Arc<Vec<u8>>> {
+    use sha2::{Digest, Sha256};
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<Vec<([u8; 32], Arc<Vec<u8>>)>>> =
+        std::sync::OnceLock::new();
+    let key: [u8; 32] = Sha256::digest(bytes).into();
+    let mut cache = CACHE
+        .get_or_init(Default::default)
+        .lock()
+        .map_err(|_| Error("Map image cache poisoned".into()))?;
+    if let Some(i) = cache.iter().position(|(k, _)| *k == key) {
+        let entry = cache.remove(i);
+        let pixels = entry.1.clone();
+        cache.push(entry);
+        return Ok(pixels);
+    }
+    let image = image::load_from_memory(bytes)
+        .map_err(|e| Error(format!("Material image: {e}")))?
+        .into_rgba8();
+    let pixels = Arc::new(
+        image::imageops::resize(&image, 1024, 1024, image::imageops::FilterType::Triangle)
+            .into_raw(),
+    );
+    cache.push((key, pixels.clone()));
+    if cache.len() > 16 {
+        cache.remove(0);
+    }
+    Ok(pixels)
 }

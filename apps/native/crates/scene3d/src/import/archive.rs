@@ -42,6 +42,7 @@ pub struct Receipt {
     primary: Blob,
     originals: Vec<Blob>,
     model: Arc<Model>,
+    bounds: crate::navigation::Bounds,
 }
 impl Receipt {
     pub fn primary(&self) -> &Blob {
@@ -49,6 +50,10 @@ impl Receipt {
     }
     pub fn originals(&self) -> &[Blob] {
         &self.originals
+    }
+    /// Initial normalized geometry, measured on the import/recovery worker.
+    pub fn bounds(&self) -> crate::navigation::Bounds {
+        self.bounds
     }
     pub fn model(&self) -> Arc<Model> {
         self.model.clone()
@@ -88,10 +93,16 @@ impl Archive {
             originals.push(self.put(&f.name, &f.mime, &f.bytes)?);
         }
         let primary = self.put(&prepared.name, &mime(&prepared.name), &prepared.bytes)?;
+        let model = Arc::new(model);
+        let mut geometry = crate::geometry::LoadedAssets::default();
+        geometry.insert_shared("admitted".into(), Value::Null, model.clone());
+        let bounds =
+            crate::geometry::AssetGeometry::bounds(&geometry, "admitted", &Value::Null, 0.)?;
         Ok(Receipt {
             primary,
             originals,
-            model: Arc::new(model),
+            model,
+            bounds,
         })
     }
     /// Recover only content-addressed objects inside this admitted archive.
@@ -153,10 +164,16 @@ impl Archive {
         }
         let bytes = std::fs::read(primary.path()).map_err(io)?;
         let model = super::load(primary.name(), &bytes)?;
+        let model = Arc::new(model);
+        let mut geometry = crate::geometry::LoadedAssets::default();
+        geometry.insert_shared("admitted".into(), Value::Null, model.clone());
+        let bounds =
+            crate::geometry::AssetGeometry::bounds(&geometry, "admitted", &Value::Null, 0.)?;
         Ok(Receipt {
             primary,
             originals,
-            model: Arc::new(model),
+            model,
+            bounds,
         })
     }
     fn put(&self, name: &str, mime: &str, bytes: &[u8]) -> Result<Blob> {

@@ -93,6 +93,75 @@ pub fn available_files() -> Vec<PathBuf> {
     Vec::new()
 }
 
+/// The font files CoreText resolves from at one moment, each with its
+/// length and modification time (nanoseconds): the fonts a render can
+/// resolve to, by stable identity. A render in another process draws with
+/// the same fonts when that process's inventory is this one
+/// ([`Inventory::adopt`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Inventory(pub Vec<(PathBuf, u64, u64)>);
+
+impl Inventory {
+    /// This process's fonts now ([`available_files`]).
+    pub fn current() -> Self {
+        Inventory(
+            available_files()
+                .into_iter()
+                .map(|path| {
+                    let meta = std::fs::metadata(&path).ok();
+                    let modified = meta
+                        .as_ref()
+                        .and_then(|m| m.modified().ok())
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX));
+                    (path, meta.map_or(0, |m| m.len()), modified)
+                })
+                .collect(),
+        )
+    }
+
+    /// Makes this process resolve from exactly these files: the ones it
+    /// lacks (fonts another process activated for itself) are registered
+    /// for this process only. Fails, saying what differs, when its fonts
+    /// still are not these.
+    pub fn adopt(&self) -> Result<(), String> {
+        let now = Self::current();
+        if now == *self {
+            return Ok(());
+        }
+        let have: std::collections::HashSet<&PathBuf> = now.0.iter().map(|f| &f.0).collect();
+        for (path, ..) in &self.0 {
+            if !have.contains(path) {
+                // Verified below, whatever CoreText answered.
+                let _ = register_for_process(path);
+            }
+        }
+        self.verify()
+    }
+
+    /// Whether this process's fonts are these now; if not, the first
+    /// difference.
+    pub fn verify(&self) -> Result<(), String> {
+        let now = Self::current();
+        if now == *self {
+            return Ok(());
+        }
+        let (ours, theirs): (std::collections::HashSet<_>, std::collections::HashSet<_>) =
+            (now.0.iter().collect(), self.0.iter().collect());
+        let name = |f: Option<&&(PathBuf, u64, u64)>| f.map(|f| f.0.display().to_string());
+        Err(
+            match (
+                name(theirs.difference(&ours).min()),
+                name(ours.difference(&theirs).min()),
+            ) {
+                (Some(missing), _) => format!("{missing} is not available as it was"),
+                (None, Some(extra)) => format!("{extra} was not available before"),
+                (None, None) => "the font list is in another order".to_owned(),
+            },
+        )
+    }
+}
+
 /// Makes the fonts of the file at `path` available to this process only
 /// (nothing is installed: no other process sees them and they are gone when
 /// it exits), as a font manager's activation is to one app. CoreText posts

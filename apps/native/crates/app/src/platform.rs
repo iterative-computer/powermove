@@ -112,10 +112,21 @@ pub fn lut_file(window: &NSWindow) -> async_channel::Receiver<Option<PathBuf>> {
             .map(|p| PathBuf::from(p.to_string()));
         let _ = tx.try_send(path);
     });
-    begin_panel(&panel, window, done);
+    begin_panel(&panel, &sheet_host(window), done);
     rx
 }
 
+/// The window a new sheet attaches to: the topmost sheet already shown on
+/// `window` (the Export sheet asking where to save), else `window` itself.
+/// A second sheet begun on a window that already has one is queued by AppKit
+/// until the first closes, so it would never appear.
+fn sheet_host(window: &NSWindow) -> Retained<NSWindow> {
+    let mut host = objc2::Message::retain(window);
+    while let Some(sheet) = host.attachedSheet() {
+        host = sheet;
+    }
+    host
+}
 pub fn paths(window: &NSWindow, save: bool) -> async_channel::Receiver<Option<PathBuf>> {
     paths_named(window, save, "Project.pmv")
 }
@@ -138,7 +149,7 @@ pub fn paths_named(
                 .map(|p| PathBuf::from(p.to_string()));
             let _ = tx.try_send(path);
         });
-        begin_panel(&panel, window, done);
+        begin_panel(&panel, &sheet_host(window), done);
     } else {
         let panel = NSOpenPanel::openPanel(mtm);
         panel.setCanChooseDirectories(false);
@@ -152,7 +163,7 @@ pub fn paths_named(
                 .map(|p| PathBuf::from(p.to_string()));
             let _ = tx.try_send(path);
         });
-        begin_panel(&panel, window, done);
+        begin_panel(&panel, &sheet_host(window), done);
     }
     rx
 }
@@ -350,7 +361,7 @@ pub fn choose_paths(
         };
         let _ = tx.try_send(paths);
     });
-    begin_panel(&panel, window, done);
+    begin_panel(&panel, &sheet_host(window), done);
     rx
 }
 
@@ -646,7 +657,7 @@ pub fn export_destination(
             .map(|(parent, name)| parent.join(name));
         let _ = tx.try_send(path);
     });
-    begin_panel(&panel, window, done);
+    begin_panel(&panel, &sheet_host(window), done);
     rx
 }
 
@@ -804,5 +815,17 @@ mod media_tests {
             );
         }
         assert!(media_document(&root.join("gone.png")).is_err());
+    }
+}
+
+/// Bounces the Dock icon once when Powermove isn't the active app (a long
+/// export finishing in the background); nothing when it is.
+pub fn request_attention() {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let app = NSApplication::sharedApplication(mtm);
+    if !app.isActive() {
+        app.requestUserAttention(NSRequestUserAttentionType::InformationalRequest);
     }
 }

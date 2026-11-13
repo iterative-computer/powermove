@@ -43,6 +43,20 @@ thread_local! {
     static MENU_DELEGATES:RefCell<Vec<Retained<MenuDelegate>>>=const{RefCell::new(Vec::new())};
     /// The context menu being tracked, so a test driver can cancel it.
     static OPEN_MENU:RefCell<Option<Retained<NSMenu>>>=const{RefCell::new(None)};
+    /// View ▸ 3D items with their (group, value), for checkmarks.
+    static VIEW3D_ITEMS:RefCell<Vec<(String,String,Retained<NSMenuItem>)>>=const{RefCell::new(Vec::new())};
+}
+/// Checkmarks for View ▸ 3D (3d-studio.md §2: the same names and checkmarks
+/// as the viewer bar): `on(group, value)` says whether a row is current.
+pub fn check_view3d(on: &dyn Fn(&str, &str) -> bool) {
+    VIEW3D_ITEMS.with(|items| {
+        for (group, value, item) in &*items.borrow() {
+            let state = if on(group, value) { 1 } else { 0 };
+            if item.state() != state {
+                item.setState(state);
+            }
+        }
+    });
 }
 /// A context-menu row. An empty label is a separator.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -1867,6 +1881,11 @@ pub struct Host {
     backdrop: Retained<NSVisualEffectView>,
     viewer: Retained<NSView>,
     pub viewer_rect: Rc<Cell<Option<crate::layout::Rect>>>,
+    /// Studio 3D views: 1, 2 or 4 panes. With more than one, `viewer_rect`
+    /// is the first pane and `viewer_tiles` holds every pane (the host
+    /// places the others' views), in content coordinates, top-left origin.
+    pub viewer_split: Cell<u8>,
+    pub viewer_tiles: Rc<std::cell::RefCell<Vec<crate::layout::Rect>>>,
     pub splitter_focus: bool,
     pub keyboard_control_focus: Cell<bool>,
     pub canvas_focus: Cell<bool>,
@@ -2062,6 +2081,8 @@ impl Host {
             backdrop,
             viewer,
             viewer_rect: Rc::new(Cell::new(None)),
+            viewer_split: Cell::new(1),
+            viewer_tiles: Rc::default(),
             splitter_focus: false,
             keyboard_control_focus: Cell::new(false),
             canvas_focus: Cell::new(false),
@@ -5239,6 +5260,10 @@ pub fn install_menus() {
     }
     let tools_start = commands.len();
     commands.extend(menu::tools().into_iter().map(|i| (i.command, i.args)));
+    let new3d_start = commands.len();
+    commands.extend(menu::new3d().into_iter().map(|i| (i.command, i.args)));
+    let view3d_start = commands.len();
+    commands.extend(menu::view3d().into_iter().map(|i| (i.command, i.args)));
     let target = Target::new(mtm, commands, None);
     // Dynamic rows look the target up through MENU_TARGET.
     MENU_TARGET.with(|t| *t.borrow_mut() = Some(target.clone()));
@@ -5324,6 +5349,40 @@ pub fn install_menus() {
                     delegate(&tools, MenuKind::DisplayOnly);
                     item.setSubmenu(Some(&tools));
                 }
+                "new3d" => {
+                    let sub = NSMenu::new(mtm);
+                    for (i, t) in menu::new3d().iter().enumerate() {
+                        if t.label.is_empty() {
+                            sub.addItem(&NSMenuItem::separatorItem(mtm));
+                        } else {
+                            sub.addItem(&row(&t.label, &t.chord, new3d_start + i));
+                        }
+                    }
+                    delegate(&sub, MenuKind::DisplayOnly);
+                    item.setSubmenu(Some(&sub));
+                }
+                "view3d" => {
+                    let sub = NSMenu::new(mtm);
+                    VIEW3D_ITEMS.with(|v| v.borrow_mut().clear());
+                    for (i, t) in menu::view3d().iter().enumerate() {
+                        if t.label.is_empty() {
+                            sub.addItem(&NSMenuItem::separatorItem(mtm));
+                        } else {
+                            let item = row(&t.label, &t.chord, view3d_start + i);
+                            let arg = |k: usize| {
+                                t.args
+                                    .get(k)
+                                    .and_then(|a| a.as_str())
+                                    .unwrap_or("")
+                                    .to_owned()
+                            };
+                            VIEW3D_ITEMS.with(|v| v.borrow_mut().push((arg(0), arg(1), item.clone())));
+                            sub.addItem(&item);
+                        }
+                    }
+                    delegate(&sub, MenuKind::DisplayOnly);
+                    item.setSubmenu(Some(&sub));
+                }
                 "panels" => {
                     let dynamic = NSMenu::new(mtm);
                     delegate(&dynamic, MenuKind::Panels);
@@ -5344,7 +5403,16 @@ pub fn install_menus() {
                 }
                 _ => {}
             }
-            if menu::SUBMENUS.contains(&spec.command.as_str()) {
+            if matches!(spec.command.as_str(), "tools" | "new3d" | "view3d") {
+                // In an auto-enabling menu an item with no action is disabled;
+                // its submenu's own action keeps the parent enabled.
+                if let Some(sub) = item.submenu() {
+                    unsafe {
+                        item.setTarget(Some(&sub));
+                        item.setAction(Some(sel!(submenuAction:)));
+                    }
+                }
+            } else if menu::SUBMENUS.contains(&spec.command.as_str()) {
                 unsafe { item.setAction(None) };
             }
             submenu.addItem(&item);

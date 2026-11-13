@@ -41,6 +41,11 @@ export interface Options {
   dynamicRange: "sdr" | "pq" | "hlg";
   /** Use Proxies (Draft); absent means originals. */
   useProxies?: boolean;
+  /** This export's 3D quality; absent or `composition` uses the saved preset. */
+  studioQuality?: StudioQuality;
+  /** Render 3D at 75% of the output size and scale up: faster, slightly
+   * softer. Never automatic; absent means full size. */
+  studioReducedSize?: boolean;
   /** The label of an SDR ProRes or MP4. Absent from options saved before
    * it existed: read as the QuickTime label. */
   colorTag: ColorTag;
@@ -52,6 +57,12 @@ export interface Options {
    * 24-bit PCM. */
   audioCoding: AudioCoding;
 }
+export type StudioQuality =
+  | "composition"
+  | "draft"
+  | "preview"
+  | "production"
+  | "final";
 /** Presets saved before profile, codec and depth existed keep today's output. */
 const withDefaults = (o: Options): Options => ({ ...fieldDefaults, ...o });
 export type Run =
@@ -93,6 +104,18 @@ export interface ExportSnapshot {
     hasWorkArea: boolean;
     /** The project keeps HDR light, so HDR delivery is on offer. */
     hdr?: boolean;
+    /** The composition has 3D layers; `saved` names its own quality preset. */
+    studio?: {
+      saved: string;
+      /** The resolved preset of this export (draft, preview, production, final, custom). */
+      preset?: string;
+      /** The render time for the Render Time row ("12–60 min", "measuring…"). */
+      estimate?: string;
+      /** Where `estimate` comes from: the viewer's measurement or a static guess. */
+      state?: "measured" | "measuring" | "guess";
+      /** "guided" when this build has no Open Image Denoise (the engine's own filter cleans the frames). */
+      denoiser?: "oidn" | "guided";
+    };
     /** Host planner uses engine tick/rate/range semantics, including still timecode. */
     summary: string;
     note?: string;
@@ -123,6 +146,12 @@ function validOptions(x: unknown): x is Options {
       (v) => typeof v === "boolean",
     ) &&
     (x.useProxies === undefined || typeof x.useProxies === "boolean") &&
+    (x.studioReducedSize === undefined ||
+      typeof x.studioReducedSize === "boolean") &&
+    (x.studioQuality === undefined ||
+      ["composition", "draft", "preview", "production", "final"].includes(
+        x.studioQuality as string,
+      )) &&
     (x.profile === undefined || profiles.some((p) => p.v === x.profile)) &&
     (x.codec === undefined || codecs.some((c) => c.v === x.codec)) &&
     (x.depth === undefined || x.depth === 8 || x.depth === 16) &&

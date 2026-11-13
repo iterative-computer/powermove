@@ -165,7 +165,8 @@ impl Controller {
             _ => {}
         }
         let Some(v) = &self.viewer else { return false };
-        match v.command(command) {
+        // Measured through the frame it presents.
+        match v.command_at(command, Self::event_time()) {
             Ok(()) => true,
             Err(e) => {
                 self.message = e.to_string();

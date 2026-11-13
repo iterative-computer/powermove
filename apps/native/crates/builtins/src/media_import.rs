@@ -278,6 +278,9 @@ pub struct ImportRequest {
     pub staged: Option<tempfile::TempDir>,
     /// What the status bar says once it lands, instead of the summary.
     pub note: Option<String>,
+    /// Layer ▸ Add 3D Layer ▸ Import 3D Model…: each imported model becomes
+    /// a 3D layer once its asset lands.
+    pub add_3d: bool,
     /// Import Folder: chosen folders stay folders in the Project panel.
     pub keep_folders: bool,
 }
@@ -382,6 +385,7 @@ fn model_mime(path: &Path) -> Option<&'static str> {
         "glb" => Some("model/gltf-binary"),
         "gltf" => Some("model/gltf+json"),
         "obj" => Some("model/obj"),
+        "fbx" => Some("model/fbx"),
         _ => None,
     }
 }

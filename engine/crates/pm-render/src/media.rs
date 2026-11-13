@@ -1987,6 +1987,15 @@ impl MediaCache {
         self.bytes
     }
 
+    /// Drops the stills read whole (not at a view's size). A viewer's
+    /// settled paused frame reads them as an export does and keeps none of
+    /// them after it: held, large originals cost gigabytes.
+    pub fn release_whole_images(&mut self) {
+        self.images.retain(|key, _| key.edge.is_some());
+        self.image_seen.retain(|key, _| key.edge.is_some());
+        self.recount();
+    }
+
     pub fn trim_images(&mut self, budget: u64) {
         self.image_budget = budget;
         self.image_seen

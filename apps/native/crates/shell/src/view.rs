@@ -721,6 +721,9 @@ impl Editor {
             "shellFocusNext" | "shellFocusPrevious" | "shellPanelNext" | "shellPanelPrevious"
         ) {
             let reverse = cmd.name.ends_with("Previous");
+            // The shell took the key before the window saw it: still a
+            // keyboard move, so focus rings show (checklist §6).
+            window.note_keyboard_input();
             if cmd.name.starts_with("shellPanel") {
                 let current = self
                     .panel_order
@@ -1372,6 +1375,8 @@ impl Editor {
         if let Some(h) = &self.host {
             let h = h.borrow();
             h.viewer_rect.set(None);
+            // Home covers the viewer: its extra 3D views have no place.
+            h.viewer_tiles.borrow_mut().clear();
             h.canvas_focus.set(false);
             h.keyboard_control_focus.set(true);
             h.publish_menu_state(&self.menu_state(cx));
@@ -1507,6 +1512,21 @@ impl Render for Editor {
                 w: (p.rect.w - m.border * 2.).max(0.),
                 h: (p.rect.h - m.header - m.border).max(0.),
             });
+        // Studio 3D views split the viewer's body into panes; the first is
+        // the main viewer, the host draws the others (3d-studio.md §2).
+        let viewer = match (&self.host, viewer) {
+            (Some(h), Some(r)) if h.borrow().viewer_split.get() > 1 => {
+                let tiles = crate::layout::view_tiles(r, h.borrow().viewer_split.get(), m.border * 2.);
+                let first = tiles[0];
+                *h.borrow().viewer_tiles.borrow_mut() = tiles;
+                Some(first)
+            }
+            (Some(h), _) => {
+                h.borrow().viewer_tiles.borrow_mut().clear();
+                viewer
+            }
+            _ => viewer,
+        };
         if let Some(h) = &self.host {
             let h = h.borrow();
             h.viewer_rect.set(viewer);
@@ -2563,6 +2583,8 @@ mod keyboard_tests {
                 let mut stops = vec![first.clone()];
                 for _ in 0..100 {
                     v.command(command("shellFocusNext"), w, cx);
+                    // The shell handled the key: rings still show (focus-visible).
+                    assert!(w.last_input_was_keyboard(), "Tab is keyboard input");
                     let focused = w.focused(cx).expect("Tab must have a focused element");
                     if focused == first {
                         break;
