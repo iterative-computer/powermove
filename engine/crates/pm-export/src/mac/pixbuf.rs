@@ -14,7 +14,7 @@ use objc2_foundation::{NSDictionary, NSNumber, NSString};
 use super::cf::{self, Dict};
 use crate::Error;
 use crate::convert::{EncoderInput, Plane, PlaneData, plane_layout};
-use crate::settings::{AlphaOutput, ColorTags, InputFormat};
+use crate::settings::{AlphaOutput, ChromaLocation, ColorTags, InputFormat};
 
 /// A retained CVPixelBuffer.
 pub struct PixelBuffer(pub CFRetained<CVPixelBuffer>);
@@ -300,13 +300,23 @@ impl PixelBuffer {
         unsafe { CVBufferSetAttachment(&self.0, key, value, CVAttachmentMode::ShouldPropagate) };
     }
 
-    /// Sets the color and alpha attachments the encoder sees.
-    pub fn tag(&self, tags: ColorTags, alpha: AlphaOutput) {
+    /// Sets the color and alpha attachments the encoder sees. `rows_subsampled`:
+    /// the buffer is 4:2:0, so where its chroma sits between rows is stated
+    /// when it is not the codecs' default.
+    pub fn tag(&self, tags: ColorTags, alpha: AlphaOutput, rows_subsampled: bool) {
         let (primaries, transfer, matrix) = color_constants(tags);
         unsafe {
             self.attach(kCVImageBufferColorPrimariesKey, primaries.as_ref());
             self.attach(kCVImageBufferTransferFunctionKey, transfer.as_ref());
             self.attach(kCVImageBufferYCbCrMatrixKey, matrix.as_ref());
+            if rows_subsampled && tags.chroma_location() == ChromaLocation::TopLeft {
+                for field in [
+                    kCVImageBufferChromaLocationTopFieldKey,
+                    kCVImageBufferChromaLocationBottomFieldKey,
+                ] {
+                    self.attach(field, kCVImageBufferChromaLocation_TopLeft.as_ref());
+                }
+            }
             if let Some(hdr) = tags.hdr_metadata() {
                 self.attach(
                     kCVImageBufferMasteringDisplayColorVolumeKey,

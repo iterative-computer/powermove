@@ -18,8 +18,11 @@
 //!   C = 128 + 224·C; RGB full range 0..2ⁿ − 1;
 //! * chroma ([`Chroma`]): rendered frames are decimated band-limited by the
 //!   tent kernel, `[1, 2, 1] / 4` across on the co-sited (even) column for
-//!   4:2:2 and 4:2:0 siting type 0, and `[1, 3, 3, 1] / 8` on rows 2y − 1 to
-//!   2y + 2 for 4:2:0 (clamped), on Y′CbCr; a frame of untouched footage takes
+//!   4:2:2 and 4:2:0, and between rows for 4:2:0 where the output's chroma
+//!   sits (`ColorTags::chroma_location`): `[1, 3, 3, 1] / 8` on rows 2y − 1
+//!   to 2y + 2 for Rec.709 (siting type 0), `[1, 2, 1] / 4` on rows 2y − 1
+//!   to 2y + 1 for BT.2100 (top-left, type 2), clamped, on Y′CbCr; a frame
+//!   of untouched footage takes
 //!   the exact inverse of the renderer's upsampling instead (point decimation
 //!   across, `pm_color::chroma::VERTICAL_420` down), so a 4:2:x source keeps
 //!   its chroma (section 2 invariant (1));
@@ -32,7 +35,7 @@
 
 use crate::Error;
 use crate::dither::dither_offset;
-use crate::settings::{AlphaOutput, ColorTags, InputFormat, WorkingEncoding};
+use crate::settings::{AlphaOutput, ChromaLocation, ColorTags, InputFormat, WorkingEncoding};
 
 pub const KR: f64 = 0.2126;
 pub const KB: f64 = 0.0722;
@@ -314,9 +317,10 @@ fn pixel(frame: &WorkingFrame, x: usize, y: usize) -> [f32; 4] {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Chroma {
     /// Band-limited, for every rendered frame: the tent kernel sited where
-    /// the output's chroma sits (`pm_color::chroma::TENT_COSITED` across,
-    /// `TENT_CENTERED` between rows). Thin coloured detail keeps its colour
-    /// at either pixel parity, and no tap is negative.
+    /// the output's chroma sits (`pm_color::chroma::TENT_COSITED` across;
+    /// between rows `TENT_CENTERED`, or `TENT_COSITED` for a top-left
+    /// output). Thin coloured detail keeps its colour at either pixel
+    /// parity, and no tap is negative.
     #[default]
     Filtered,
     /// The exact inverse of the renderer's upsampling (point decimation at
@@ -330,12 +334,16 @@ pub enum Chroma {
 type Taps = &'static [(i64, f64)];
 
 impl Chroma {
-    /// Taps across (columns from `2x`) and down (rows from `2y`, 4:2:0).
-    fn taps(self) -> (Taps, Taps) {
+    /// Taps across (columns from `2x`) and down (rows from `2y`, 4:2:0)
+    /// for an output whose chroma sits at `location`.
+    fn taps(self, location: ChromaLocation) -> (Taps, Taps) {
         use pm_color::chroma::{TENT_CENTERED, TENT_COSITED, VERTICAL_420};
-        match self {
-            Chroma::Filtered => (&TENT_COSITED, &TENT_CENTERED),
-            Chroma::Footage => (&[(0, 1.0)], &VERTICAL_420),
+        match (self, location) {
+            (Chroma::Filtered, ChromaLocation::Left) => (&TENT_COSITED, &TENT_CENTERED),
+            (Chroma::Filtered, ChromaLocation::TopLeft) => (&TENT_COSITED, &TENT_COSITED),
+            // The inverse of the renderer's upsampling of a source centred
+            // between rows (the only footage the exporter passes through).
+            (Chroma::Footage, _) => (&[(0, 1.0)], &VERTICAL_420),
         }
     }
 }
@@ -471,7 +479,7 @@ pub fn convert_tagged(
         }
     }
     let params = &ConvertParams { tags, ..*params };
-    let (across, down) = chroma.taps();
+    let (across, down) = chroma.taps(tags.chroma_location());
     let (w, h) = working_dimensions(frame)?;
     let horizontal = !matches!(
         format,
@@ -535,9 +543,9 @@ pub fn convert_tagged(
             (rgb_to_ycbcr(c), a)
         }
     };
-    // (Cb, Cr) of one chroma row: siting type 0 for 4:2:0 (co-sited on the
-    // even column, centred between rows 2y and 2y + 1), co-sited for 4:2:2;
-    // taps clamped to the frame.
+    // (Cb, Cr) of one chroma row: co-sited on the even column; for 4:2:0
+    // centred between rows 2y and 2y + 1 or on row 2y, as the output's
+    // chroma sits; taps clamped to the frame.
     let chroma_row = |cy: usize, subsampled_rows: bool| -> Vec<[f64; 2]> {
         let (taps, base): (&[(i64, f64)], i64) = if subsampled_rows {
             (down, 2 * cy as i64)

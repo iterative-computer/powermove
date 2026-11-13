@@ -496,6 +496,11 @@ fn video_options(cmd: &mut Command, s: &ExportSpec) {
         "-color_range",
         "tv",
     ]);
+    // 4:2:0 chroma that is not at the codecs' default place says where it is.
+    let rows_subsampled = !matches!(s.input_format(), InputFormat::Y416 | InputFormat::V216);
+    if rows_subsampled && s.tags.chroma_location() == ChromaLocation::TopLeft {
+        cmd.args(["-chroma_sample_location", "topleft"]);
+    }
 }
 fn mux_options(cmd: &mut Command, s: &ExportSpec) -> Result<(), Error> {
     if s.container.is_quicktime_family() {
@@ -765,6 +770,17 @@ fn probe_and_verify(
             .track(b"vide")
             .ok_or_else(|| Error::Verify("no MOV video track".into()))?;
         movie_timescale = movie.movie_timescale;
+        if let Some(visual) = &track.visual {
+            let (stream, full_range) = verify::stream_problems(
+                visual,
+                spec.tags.cicp(),
+                spec.tags.chroma_location().sample_loc_type(),
+            );
+            problems.extend(stream);
+            if full_range {
+                problems.push("the stream is flagged full range".into());
+            }
+        }
         media_timescale = track.media_timescale;
         duration = track.stts_duration();
         if movie_timescale != timing.timescale as u32

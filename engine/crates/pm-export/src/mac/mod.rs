@@ -136,7 +136,14 @@ impl Sink for VideoToolboxSink {
         }
         let buffer = self.pool.buffer()?;
         buffer.write(input)?;
-        buffer.tag(self.spec.tags, self.spec.alpha);
+        buffer.tag(
+            self.spec.tags,
+            self.spec.alpha,
+            input
+                .planes
+                .get(1)
+                .is_some_and(|c| c.rows < input.planes[0].rows),
+        );
         self.encoder.encode(&buffer, index)?;
         let samples = self.encoder.take()?;
         let samples = self.described(samples)?;

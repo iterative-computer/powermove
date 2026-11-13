@@ -373,6 +373,36 @@ impl ColorTags {
     pub fn is_image(self) -> bool {
         matches!(self, ColorTags::SrgbImage | ColorTags::Rec709Image)
     }
+
+    /// Where a 4:2:0 output's chroma sits: co-sited with the top-left luma
+    /// sample for BT.2100 (PQ and HLG), centred between rows for Rec.709.
+    pub fn chroma_location(self) -> ChromaLocation {
+        if self.is_hdr() {
+            ChromaLocation::TopLeft
+        } else {
+            ChromaLocation::Left
+        }
+    }
+}
+
+/// Where the chroma samples of a 4:2:0 output sit on the luma grid. Both
+/// are co-sited with the even luma column.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ChromaLocation {
+    /// Centred between luma rows `2y` and `2y + 1` (the codecs' default).
+    Left,
+    /// On luma row `2y`.
+    TopLeft,
+}
+
+impl ChromaLocation {
+    /// `chroma_sample_loc_type` (H.264 and HEVC VUI).
+    pub fn sample_loc_type(self) -> u32 {
+        match self {
+            ChromaLocation::Left => 0,
+            ChromaLocation::TopLeft => 2,
+        }
+    }
 }
 
 /// How alpha leaves the export.

@@ -102,6 +102,8 @@ pub struct Expected {
     pub codec: Codec,
     pub container: Container,
     pub cicp: (u16, u16, u16),
+    /// `chroma_sample_loc_type` of a 4:2:0 stream's chroma.
+    pub chroma_location: u32,
     pub hdr: Option<crate::settings::HdrMetadata>,
     pub alpha: AlphaOutput,
     pub frames: u64,
@@ -122,6 +124,7 @@ impl Expected {
             codec: spec.codec,
             container: spec.container,
             cicp: spec.tags.cicp(),
+            chroma_location: spec.tags.chroma_location().sample_loc_type(),
             hdr: spec.tags.hdr_metadata(),
             alpha: spec.alpha,
             frames: spec.frames,
@@ -314,6 +317,45 @@ pub(crate) fn check_pixel_blocks(
     pixels
 }
 
+/// What a track's own parameter sets (H.264 or HEVC SPS VUI) say against
+/// what the export asked for: a player may read them and not the container.
+/// Returns the problems, and whether the stream says full range.
+pub(crate) fn stream_problems(
+    visual: &crate::mp4box::Visual,
+    cicp: (u16, u16, u16),
+    chroma_location: u32,
+) -> (Vec<String>, bool) {
+    let stream = match (&visual.sps, &visual.hevc) {
+        (Some(sps), _) => Some(crate::mp4box::Vui {
+            full_range: sps.full_range,
+            colour_description: sps.colour_description,
+            chroma_location: sps.chroma_location,
+        }),
+        (None, Some(hevc)) => hevc.vui,
+        (None, None) => None,
+    };
+    let mut problems = Vec::new();
+    let Some(vui) = stream else {
+        return (problems, false);
+    };
+    if let Some((p, t, m)) = vui.colour_description
+        && (p as u16, t as u16, m as u16) != cicp
+    {
+        problems.push(format!(
+            "stream VUI colour {p}-{t}-{m}, expected {}-{}-{}",
+            cicp.0, cicp.1, cicp.2
+        ));
+    }
+    // A stream that leaves the location out means type 0.
+    let said = vui.chroma_location.unwrap_or((0, 0));
+    if said != (chroma_location, chroma_location) {
+        problems.push(format!(
+            "stream chroma location {said:?}, expected type {chroma_location}"
+        ));
+    }
+    (problems, vui.full_range.unwrap_or(false))
+}
+
 fn chroma_name(idc: u32) -> &'static str {
     match idc {
         0 => "4:0:0",
@@ -486,17 +528,10 @@ pub fn check(
         .as_ref()
         .and_then(|c| c.full_range)
         .unwrap_or(false);
-    if let Some(sps) = &visual.sps {
-        if let Some((p, t, m)) = sps.colour_description
-            && (p as u16, t as u16, m as u16) != expected.cicp
-        {
-            fail(format!(
-                "H.264 VUI colour {p}-{t}-{m}, expected {}-{}-{}",
-                expected.cicp.0, expected.cicp.1, expected.cicp.2
-            ));
-        }
-        full_range |= sps.full_range.unwrap_or(false);
-    }
+    let (stream, stream_full_range) =
+        stream_problems(&visual, expected.cicp, expected.chroma_location);
+    stream.into_iter().for_each(&mut fail);
+    full_range |= stream_full_range;
     if full_range {
         fail("video is flagged full range; exports are limited range".into());
     }
