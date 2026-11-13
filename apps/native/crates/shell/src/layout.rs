@@ -986,6 +986,7 @@ pub fn empty_state(
             "Notes you add to this project appear here.",
             None,
         ),
+        "color" => ("No Selection", "Select a layer to grade it.", None),
         "scopes" => ("No Picture", "Open a composition to see its scopes.", None),
         "mixer" => ("No Audio", "No audio in this composition.", None),
         "captions" => ("No Captions", "Open a project to see its captions.", None),
@@ -1038,6 +1039,7 @@ fn builtin_title(id: &str) -> &str {
         "shader" => "Shader",
         "perf" => "Performance",
         "notes" => "Notes",
+        "color" => "Color",
         "scopes" => "Scopes",
         "mixer" => "Mixer",
         "captions" => "Captions",
@@ -1056,7 +1058,7 @@ pub fn stacks(id: &str) -> bool {
     id != VIEWER
 }
 /// Every built-in panel, in Window ▸ Panels order.
-pub const PANELS: [&str; 15] = [
+pub const PANELS: [&str; 16] = [
     "assets",
     "layer-effects",
     "viewer",
@@ -1068,6 +1070,7 @@ pub const PANELS: [&str; 15] = [
     "shader",
     "perf",
     "notes",
+    "color",
     "scopes",
     "mixer",
     "captions",
