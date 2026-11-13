@@ -83,9 +83,17 @@ const sectionActions: Record<SectionAction, string> = {
 };
 const sectionSymbols: Partial<Record<SectionAction, string>> = {
   "refresh-fonts": "arrow.clockwise",
-  "time-remap": "timer",
-  "freeze-frame": "pause",
-  reverse: "backward",
+  // Time's three share the heading row: short words, no glyph, so they fit
+  // beside "Time" in a narrow panel (their labels keep the full names).
+  "time-remap": "",
+  "freeze-frame": "",
+  reverse: "",
+};
+/** What a heading action shows when its full name would not fit. */
+const sectionShort: Partial<Record<SectionAction, string>> = {
+  "time-remap": "Remap",
+  "freeze-frame": "Freeze",
+  reverse: "Reverse",
 };
 export const alignmentButtons: {
   id: Alignment;
@@ -654,7 +662,7 @@ export function InspectorPanel({
       }
       label={sectionActions[action]}
       symbol={sectionSymbols[action] ?? "plus"}
-      children={sectionActions[action]}
+      children={sectionShort[action] ?? sectionActions[action]}
       style={{
         gap: token("metrics.border"),
         paddingLeft: token("metrics.gap"),
