@@ -156,8 +156,25 @@ export function createLoader(options: LoaderOptions) {
   const generations = new Map<string, number>();
   let queue: Promise<unknown> = Promise.resolve();
   let booting: Promise<void> | null = null;
-  /** The running pass's extensions not yet activated or failed, in order. */
+  /** Extensions being loaded, in order: a pass's not yet activated or
+   * failed, and any being reloaded or activated on its own. */
   const loading = new Set<string>();
+  /** Load work asked for and not finished (queued or running). While there
+   * is any, what an extension registers may still arrive. */
+  let work = 0;
+  /** Every entry that can activate an extension runs through here: it counts
+   * as loading from the moment it is asked for, before anything it replaces
+   * is disposed, until it has finished or failed. */
+  function load<T>(ids: string[], task: () => Promise<T>): Promise<T> {
+    work += 1;
+    for (const id of ids) loading.add(id);
+    options.progress?.();
+    return task().finally(() => {
+      work -= 1;
+      for (const id of ids) loading.delete(id);
+      options.progress?.();
+    });
+  }
   /** A new generation is a new module instance, like the reference's cache bust. */
   async function importGraph(record: Data): Promise<Data> {
     const graph = record.graph;
@@ -283,7 +300,8 @@ export function createLoader(options: LoaderOptions) {
     const desired = new Set(plan.order);
     const moved = new Set(changed);
     const panels = kernel.panels.batchChanges();
-    for (const id of plan.order) if (!active.has(id)) loading.add(id);
+    const planned = plan.order.filter((id) => !active.has(id) || moved.has(id));
+    for (const id of planned) loading.add(id);
     options.progress?.();
     try {
       for (const { id, health: value } of plan.skipped) health(id, value);
@@ -304,7 +322,7 @@ export function createLoader(options: LoaderOptions) {
         }
       }
     } finally {
-      loading.clear();
+      for (const id of planned) loading.delete(id);
       panels.dispose();
     }
   }
@@ -333,37 +351,46 @@ export function createLoader(options: LoaderOptions) {
     /** No bundled v1–3 extensions: the rewritten built-ins are v4 realms. */
     builtinsReady: Promise.resolve(),
     boot(list: Data[]): Promise<void> {
-      return (booting ??= enqueue(async () => {
-        await reconcile(list);
-        kernel.events.emit("extensions:ready", {});
-      }));
+      return (booting ??= load([], () =>
+        enqueue(async () => {
+          await reconcile(list);
+          kernel.events.emit("extensions:ready", {});
+        }),
+      ));
     },
     update(list: Data[], ids: string[], reason: string): Promise<void> {
-      return enqueue(async () => {
-        await reconcile(list, ids);
-        kernel.events.emit("extensions:changed", { ids: [...ids], reason });
-      });
+      return load([], () =>
+        enqueue(async () => {
+          await reconcile(list, ids);
+          kernel.events.emit("extensions:changed", { ids: [...ids], reason });
+        }),
+      );
     },
-    activate,
+    activate: (record: Data): Promise<boolean> =>
+      load([record.id], () => activate(record)),
     deactivate,
     reload(id: string): Promise<void> {
-      return enqueue(async () => {
-        const panels = kernel.panels.batchChanges();
-        try {
-          await deactivate(id);
-          failed.delete(id);
-          const record = records.get(id);
-          if (
-            !record ||
-            record.enabled === false ||
-            BLOCKED.has(record.health?.state)
-          )
-            return;
-          await activate(record);
-        } finally {
-          panels.dispose();
-        }
-      });
+      return load([id], () =>
+        enqueue(async () => {
+          const panels = kernel.panels.batchChanges();
+          try {
+            await deactivate(id);
+            failed.delete(id);
+            const record = records.get(id);
+            if (
+              !record ||
+              record.enabled === false ||
+              BLOCKED.has(record.health?.state)
+            )
+              return;
+            // A pass that ran meanwhile cleared its own names, not this one.
+            loading.add(id);
+            await activate(record);
+          } finally {
+            panels.dispose();
+          }
+        }),
+      );
     },
     disable(id: string): Promise<void> {
       return enqueue(async () => {
@@ -376,8 +403,11 @@ export function createLoader(options: LoaderOptions) {
     reportRuntimeError,
     records: () => [...records.values()],
     activeIds: () => [...active.keys()],
-    /** Extensions the running load pass has yet to activate (or fail). */
+    /** Extensions still loading: a pass's, a reload's, an activation's. */
     loading: () => [...loading],
+    /** No load work is queued or running: every extension has registered
+     * what its activation registers, or has failed. */
+    settled: () => work === 0,
     whenIdle: () => queue.then(() => undefined),
     async dispose(): Promise<void> {
       for (const id of [...active.keys()].reverse()) await deactivate(id);

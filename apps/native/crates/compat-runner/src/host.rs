@@ -2925,6 +2925,82 @@ mod tests {
         let settled = fixture.host.publication();
         assert!(settled.loading.is_empty() && settled.revision > partial.revision);
     }
+    /// An extension reloading through the public API (`api.extensions.reload`,
+    /// `PM.Kernel.loader.reload`) is loading: from the reload being asked for
+    /// until it has registered again (or failed), no publication calls the
+    /// effects it owns settled-and-absent, so no frame draws them bypassed
+    /// and nothing says "not installed".
+    #[test]
+    fn a_public_reload_counts_as_loading_for_the_effects_it_owns() {
+        let root = tempfile::tempdir().unwrap();
+        let extensions = root.path().join("extensions");
+        // Its first activation registers at once; a later one takes a while,
+        // as a reload that fetches or compiles does.
+        extension(
+            &extensions,
+            "a-effect",
+            &[(
+                "index.ts",
+                "export default async function(api){
+                   const round=(api.storage.get('round')||0)+1;
+                   api.storage.set('round',round);
+                   if(round>1) await new Promise(r=>setTimeout(r,1500));
+                   api.effects.register({id:'a-effect.tint',label:'Tint '+round,group:'Stylize',params:[],frag:'o = src(v_uv);'});
+                 }",
+            )],
+        );
+        extension(
+            &extensions,
+            "b-driver",
+            &[(
+                "index.ts",
+                "export default function(api){
+                   api.commands.register({id:'b-driver.reload',label:'Reload',run(){api.extensions.reload('a-effect')}});
+                   api.commands.register({id:'b-driver.raw',label:'Raw',run(){api.host.pm.Kernel.loader.reload('a-effect')}});
+                 }",
+            )],
+        );
+        let fixture = Fixture::start(root);
+        let label = |now: &Publication| {
+            now.contributions.as_ref().and_then(|c| {
+                c["effects"]
+                    .as_array()?
+                    .iter()
+                    .find(|e| e["id"] == "a-effect.tint")?["label"]
+                    .as_str()
+                    .map(str::to_owned)
+            })
+        };
+        fixture.until("the first load settles", |host| {
+            let now = host.publication();
+            now.settled && label(&now).as_deref() == Some("Tint 1")
+        });
+        for (command, round) in [("b-driver.reload", "Tint 2"), ("b-driver.raw", "Tint 3")] {
+            fixture.host.run_command(command, json!([]));
+            let deadline = Instant::now() + Duration::from_secs(20);
+            let mut named = false;
+            loop {
+                let now = fixture.host.publication();
+                let label = label(&now);
+                if now.settled && label.as_deref() == Some(round) {
+                    break;
+                }
+                if label.as_deref() != Some(round) {
+                    // The old registration, or none: only ever while loading
+                    // once the reload has been published.
+                    named |= now.loading.iter().any(|(id, _)| id == "a-effect");
+                    assert!(
+                        !now.settled || !named && label.is_some(),
+                        "settled without the reloading effect ({command}): {label:?}"
+                    );
+                }
+                assert!(Instant::now() < deadline, "{round} never registered");
+                thread::sleep(Duration::from_millis(2));
+            }
+            assert!(named, "the reloading extension was named as loading");
+            assert!(fixture.host.publication().loading.is_empty());
+        }
+    }
     /// A Store helper's activation is part of the load: until it has
     /// registered its effect (at boot, or when it is installed later) the
     /// contributions are not settled.
