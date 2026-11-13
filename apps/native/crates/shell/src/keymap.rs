@@ -97,8 +97,7 @@ pub fn normalize(text: &str) -> Option<String> {
     let mut mods = [false; 4];
     let mut rest = text;
     // Glyph modifiers lead (⌃⌥⇧⌘ in any order).
-    loop {
-        let Some(c) = rest.chars().next() else { break };
+    while let Some(c) = rest.chars().next() {
         let at = match c {
             '⌘' => 0,
             '⌃' => 1,
