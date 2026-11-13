@@ -192,6 +192,13 @@ fn export_resolver_never_silently_uses_proxies() {
         Some("original.mov")
     );
     assert_eq!(c.export_paths(true).paths["a"].to_str(), Some("proxy.mov"));
+    // A draft's proxy is named with its original, so Interpret Footage is
+    // carried to it as the proxy's maker left it; a file drawn as itself
+    // (an original, or a proxy whose original is gone) names none.
+    assert!(c.export_paths(false).originals.is_empty());
+    let draft = c.export_paths(true).originals;
+    assert_eq!(draft.len(), 1);
+    assert_eq!(draft["a"].to_str(), Some("original.mov"));
 }
 #[test]
 fn headless_pixels_equal_export_reference_and_overlays_share_pass() {

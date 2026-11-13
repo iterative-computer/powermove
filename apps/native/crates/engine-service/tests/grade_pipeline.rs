@@ -1,16 +1,22 @@
 //! One graded composition read five ways: the paused viewer, the playing
-//! viewer, the frame the disk render cache stores, what the scopes count,
-//! and the exported files (ProRes 4444 and a 16-bit PNG, decoded by FFmpeg).
-//! Every reading is compared with the 16-bit PNG, as display-encoded Rec.709.
+//! viewer, playback from the disk render cache (the stored frame, and the
+//! picture a playing frame presents from it), what the scopes count, and the
+//! exported files (ProRes 4444 and a 16-bit PNG, decoded by FFmpeg). Every
+//! reading is compared with the 16-bit PNG, as display-encoded Rec.709.
 //!
 //! The grade is an adjustment layer with a LUT, a gamma curve and a lift and
-//! gain, over a gradient and flat patches.
+//! gain, over a gradient, flat patches and a moving clip whose range flag is
+//! wrong and is corrected in Interpret Footage (full-range codes in a file
+//! that says limited). Every reading is taken three frames in, so each path
+//! also has to choose the same frame of the clip.
 //!
 //! Stated tolerances, of full scale, with what a debug build measured on
 //! 2026-11-12 (Apple silicon, Metal):
 //! - the playing viewer against the paused one: identical (measured 0);
 //! - the cached frame against the PNG: one 16-bit code (measured 7.6e-6,
 //!   half a code: the cache holds the export's own values);
+//! - the picture a playing frame presents from the cache, against the paused
+//!   viewer: identical (measured 0), and playback shows cached frames;
 //! - the paused viewer (a half-float surface in linear Display P3, brought
 //!   back to encoded Rec.709) against the PNG: 0.0005 (measured 0.00023,
 //!   mean 0.00005);
@@ -20,8 +26,9 @@
 //!   same scope of the PNG (measured 1 in 575 at worst, the waveform).
 use pm_engine_service::{jobs::*, *};
 use pm_protocol::{
+    clock::{SeekMode, TransportCommand as C},
     color::{OutputColor, Precision, QuickTimeTag},
-    common::{FrameRate, SessionId, Size, TICKS_PER_SECOND, TickRange, Ticks},
+    common::{FrameRate, PlaybackRate, SessionId, Size, TICKS_PER_SECOND, TickRange, Ticks},
     priority::{AlphaOutput, ExportFormat, ExportSettings, JobSpec, JobState, ProResProfile},
 };
 use serde_json::{Value, json};
@@ -32,6 +39,71 @@ use std::{
 
 const W: u32 = 192;
 const H: u32 = 108;
+/// Where every reading is taken: three frames in.
+const AT: i64 = TICKS_PER_SECOND / 10;
+/// The clip's frame there, and its size.
+const CLIP_FRAME: usize = 3;
+const CLIP: (u32, u32) = (64, 48);
+
+/// The luma codes of the clip's four grey bands at frame `n`: the whole of
+/// 0..255, as a full-range camera or screen recorder writes.
+fn clip_luma(n: usize) -> [u8; 4] {
+    [16 + n as u8, 128 - 4 * n as u8, 235, 255 - n as u8]
+}
+
+fn ffmpeg_bin() -> PathBuf {
+    PathBuf::from(std::env::var_os("PM_FFMPEG_DIR").expect("source engine/env.sh before this test"))
+        .join("bin/ffmpeg")
+}
+
+/// A clip whose range flag is wrong: 8-bit Y′CbCr with full-range codes, in
+/// a file that says limited. Lossless, so the file holds these codes.
+fn mistagged_clip(dir: &Path) -> PathBuf {
+    let (w, h) = (CLIP.0 as usize, CLIP.1 as usize);
+    let mut raw = Vec::new();
+    for n in 0..12 {
+        let bands = clip_luma(n);
+        for _ in 0..h {
+            for x in 0..w {
+                raw.push(bands[x / 16]);
+            }
+        }
+        raw.extend(std::iter::repeat_n(128u8, w * h / 2));
+    }
+    let input = dir.join("codes.yuv");
+    std::fs::write(&input, raw).unwrap();
+    let output = dir.join("Clip.mkv");
+    let status = std::process::Command::new(ffmpeg_bin())
+        .args(["-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "yuv420p"])
+        .args(["-s", "64x48", "-r", "30", "-i"])
+        .arg(&input)
+        .args(["-c:v", "ffv1", "-color_range", "tv"])
+        .arg(&output)
+        .status()
+        .unwrap();
+    assert!(status.success(), "ffmpeg wrote the clip");
+    output
+}
+
+fn clip_asset(interpret: Option<Value>) -> Value {
+    let mut asset = json!({"id": "clip", "name": "Clip.mkv", "kind": "video", "format": "mkv",
+        "w": CLIP.0, "h": CLIP.1, "dur": 0.4, "fps": 30, "persisted": true});
+    if let Some(interpret) = interpret {
+        asset["interpret"] = interpret;
+    }
+    asset
+}
+
+fn clip_layer(w: u32, h: u32, x: f64, y: f64) -> Value {
+    layer(
+        "footage",
+        "video",
+        json!({"asset": "clip", "fit": "stretch", "w": w, "h": h, "trim": 0, "speed": 1}),
+        x,
+        y,
+        100.,
+    )
+}
 
 fn channel(v: Value) -> Value {
     json!({"v": v, "kf": [], "expr": null})
@@ -118,24 +190,26 @@ fn project() -> pm_model::Value {
             {"id": "b", "color": "#2F6FD0", "position": 40},
             {"id": "c", "color": "#E8A46A", "position": 75},
             {"id": "d", "color": "#FAFAF2", "position": 100}]},
+        "requiresEngine": "native",
         "layers": [
             grade,
+            clip_layer(CLIP.0, CLIP.1, 150., 30.),
             solid("skin", "#C68E6E", 40, 30, 30., 20., 100.),
             solid("red", "#E0261C", 30, 30, 90., 30., 100.),
             solid("green", "#1FB34A", 36, 24, 150., 70., 100.),
             solid("veil", "#FFFFFF", 80, 20, 100., 90., 60.),
         ],
-        "assets": {"look": {"id": "look", "name": "Look.cube", "kind": "lut", "format": "cube"}},
+        "assets": {
+            "look": {"id": "look", "name": "Look.cube", "kind": "lut", "format": "cube"},
+            "clip": clip_asset(Some(json!({"range": "full"}))),
+        },
         "comps": {}
     });
     pm_model::json::parse(&value.to_string()).unwrap()
 }
 
 fn ffmpeg(args: &[&str], input: &Path, output: &Path) -> Vec<u8> {
-    let dir = PathBuf::from(
-        std::env::var_os("PM_FFMPEG_DIR").expect("source engine/env.sh before this test"),
-    );
-    let status = std::process::Command::new(dir.join("bin/ffmpeg"))
+    let status = std::process::Command::new(ffmpeg_bin())
         .args(["-v", "error", "-y", "-i"])
         .arg(input)
         .args(args)
@@ -154,19 +228,33 @@ fn export(
     color: OutputColor,
     alpha: AlphaOutput,
 ) {
-    let end = if format.is_image() {
-        1
-    } else {
-        TICKS_PER_SECOND / 10
-    };
+    export_sized(snapshot, media, destination, format, color, alpha, (W, H));
+}
+
+/// Exports from [`AT`]: one frame of a still, a tenth of a second of video.
+fn export_sized(
+    snapshot: &Snapshot,
+    media: &MediaCatalog,
+    destination: &Path,
+    format: ExportFormat,
+    color: OutputColor,
+    alpha: AlphaOutput,
+    (width, height): (u32, u32),
+) {
+    let end = AT
+        + if format.is_image() {
+            1
+        } else {
+            TICKS_PER_SECOND / 10
+        };
     let settings = ExportSettings {
         format,
         alpha,
         quality: pm_protocol::priority::QualityTier::High,
-        size: Size::new(W, H),
+        size: Size::new(width, height),
         frame_rate: FrameRate::new(30, 1),
         range: TickRange {
-            start: Ticks::ZERO,
+            start: Ticks::new(AT).unwrap(),
             end: Ticks::new(end).unwrap(),
         },
         audio: false,
@@ -258,7 +346,11 @@ fn a_graded_frame_is_the_same_in_the_viewer_the_cache_the_scopes_and_the_export(
     let snapshot = pm_kernel::document::DocumentStore::new_untitled(project()).snapshot();
     let mut media = MediaCatalog::default();
     media.originals.insert("look".into(), cube);
+    media
+        .originals
+        .insert("clip".into(), mistagged_clip(dir.path()));
     let exe = Path::new(env!("CARGO_BIN_EXE_pm-engine-service"));
+    let at = Ticks::new(AT).unwrap();
 
     // The exported files.
     let png = dir.path().join("still.png");
@@ -366,12 +458,20 @@ fn a_graded_frame_is_the_same_in_the_viewer_the_cache_the_scopes_and_the_export(
         })
         .unwrap();
     viewer.quality(Quality::Full).unwrap();
+    viewer
+        .command(C::Seek {
+            time: at,
+            mode: SeekMode::Exact,
+        })
+        .unwrap();
+    wait(&viewer, "the playhead three frames in", |f| f.time == at);
+    // The scopes count the frames drawn from here on: all at the playhead.
     let (taps, counted) = async_channel::bounded(1);
     let config = pm_render::scopes::ScopeConfig::PANEL;
     viewer.scopes(Some((config, taps))).unwrap();
     viewer.capture_next().unwrap();
     let paused = wait(&viewer, "a paused frame", |f| {
-        f.moment == Moment::Paused && f.pixels.is_some() && f.scale >= 1.
+        f.time == at && f.moment == Moment::Paused && f.pixels.is_some() && f.scale >= 1.
     });
     let paused = encoded_rec709(&paused.pixels.unwrap());
     let (worst, mean) = difference(&paused, &exported);
@@ -449,7 +549,7 @@ fn a_graded_frame_is_the_same_in_the_viewer_the_cache_the_scopes_and_the_export(
             FrameSpec {
                 moment: Moment::Playing,
                 exact: false,
-                ..FrameSpec::exact(Ticks::ZERO, output)
+                ..FrameSpec::exact(at, output)
             },
             &Default::default(),
         )
@@ -461,10 +561,10 @@ fn a_graded_frame_is_the_same_in_the_viewer_the_cache_the_scopes_and_the_export(
         "the playing viewer against the paused one: worst {worst:e}, mean {mean:e}"
     );
 
-    // The frame the disk render cache stores for playback.
+    // The frames the disk render cache stores for playback: the first second.
     let start = Instant::now();
     while disk
-        .start_fill(0., 0.05, exe, jobs::Activity::default(), |_| {})
+        .start_fill(0., 1., exe, jobs::Activity::default(), |_| {})
         .is_err()
     {
         assert!(start.elapsed() < Duration::from_secs(30), "scene not read");
@@ -479,23 +579,85 @@ fn a_graded_frame_is_the_same_in_the_viewer_the_cache_the_scopes_and_the_export(
         std::thread::sleep(Duration::from_millis(20));
     }
     assert_eq!(disk.bars().error, None);
-    let mut stored = vec![];
-    let mut folders = vec![frames];
-    while let Some(folder) = folders.pop() {
-        for entry in std::fs::read_dir(folder).unwrap().flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                folders.push(path);
-            } else if let Ok(data) = std::fs::read(&path)
-                && data.len() > 48
-                && let Some(frame) = frame_codec::decode(&data[48..], W, H)
-            {
-                stored.push(frame);
-            }
+
+    // Playback shows them. The viewer, played through the rendered second:
+    // a playing frame there is a cached one. (This is the first play, so no
+    // frame of it is in the viewer's own memory.)
+    let played = (0..3).any(|_| {
+        viewer
+            .command(C::Seek {
+                time: Ticks::ZERO,
+                mode: SeekMode::Exact,
+            })
+            .unwrap();
+        wait(&viewer, "back at the start", |f| f.time == Ticks::ZERO);
+        viewer
+            .command(C::Play {
+                rate: PlaybackRate::NORMAL,
+            })
+            .unwrap();
+        let start = Instant::now();
+        let mut cached = false;
+        while !cached && start.elapsed() < Duration::from_secs(2) {
+            let status = viewer.status();
+            assert!(status.error.is_none(), "{:?}", status.error);
+            cached = status.frame.is_some_and(|f| {
+                f.moment == Moment::Playing
+                    && f.cache_hit
+                    && f.time.get() > 0
+                    && f.time.get() < TICKS_PER_SECOND
+            });
+            std::thread::sleep(Duration::from_millis(1));
         }
-    }
-    assert!(!stored.is_empty(), "a rendered frame is on disk");
-    let cached: Vec<[f64; 3]> = stored[0]
+        viewer.command(C::Pause).unwrap();
+        cached
+    });
+    assert!(played, "playback through a rendered range shows cached frames");
+
+    // The picture a playing frame presents from the cache: the viewer's own
+    // scene, through the engine's frame path with the cache it reads, until
+    // the read has landed.
+    let rendered = disk.observed_scene().expect("the composition is observed");
+    let mut reader = Headless::new().unwrap();
+    reader.read_rendered_frames(disk.clone());
+    let start = Instant::now();
+    let presented = loop {
+        let (pixels, from_disk) = reader
+            .frame_spec_read(
+                &rendered,
+                FrameSpec {
+                    moment: Moment::Playing,
+                    exact: false,
+                    ..FrameSpec::exact(at, output)
+                },
+                &Default::default(),
+            )
+            .unwrap();
+        if from_disk {
+            break encoded_rec709(&pixels);
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(20),
+            "the playing frame was drawn, not read from the cache"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    let (worst, mean) = difference(&presented, &paused);
+    assert!(
+        worst < 1e-4,
+        "cached playback against the paused viewer: worst {worst:e}, mean {mean:e}"
+    );
+    let (worst, mean) = difference(&presented, &exported);
+    assert!(
+        worst < 0.0005,
+        "cached playback against the 16-bit PNG: worst {worst:.5}, mean {mean:.6}"
+    );
+
+    // The stored frame itself, read through the cache's own reader.
+    let stored = disk
+        .stored_frame(&rendered, at)
+        .expect("the frame three frames in is on disk");
+    let cached: Vec<[f64; 3]> = stored
         .chunks_exact(8)
         .map(|p| {
             let value = |c: usize| f64::from(half::f16::from_le_bytes([p[c * 2], p[c * 2 + 1]]));
@@ -503,10 +665,137 @@ fn a_graded_frame_is_the_same_in_the_viewer_the_cache_the_scopes_and_the_export(
             [value(0), value(1), value(2)]
         })
         .collect();
+    assert_eq!(cached.len(), (W * H) as usize);
     let (worst, mean) = difference(&cached, &exported);
     assert!(
         worst < 1. / 65535.,
         "the cached frame against the 16-bit PNG: worst {worst:.6}, mean {mean:.7}"
     );
     viewer.retire();
+}
+
+/// Interpret Footage › Range reaches the viewer and the export alike. The
+/// clip's file says limited and holds full-range codes: as the file says it
+/// is read as limited everywhere, and with Range set to Full every code is
+/// read as code / 255, in the paused viewer and in the exported 16-bit PNG.
+#[test]
+fn a_corrected_range_is_read_the_same_in_the_viewer_and_the_export() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut media = MediaCatalog::default();
+    media
+        .originals
+        .insert("clip".into(), mistagged_clip(dir.path()));
+    let service = EngineService::start(pm_gpu::Gpu::new("range-pipeline").unwrap()).unwrap();
+    let at = Ticks::new(AT).unwrap();
+    let (w, h) = CLIP;
+    for (case, (interpret, full)) in [
+        (None, false),
+        (Some(json!({"range": "full"})), true),
+        (Some(json!({"range": "limited"})), false),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let value = json!({
+            "id": "P", "name": "P", "compId": "root", "compName": "P", "w": w, "h": h,
+            "fps": 30, "dur": 3, "bg": "#000000", "work": [0, 3], "requiresEngine": "native",
+            "layers": [clip_layer(w, h, f64::from(w) / 2., f64::from(h) / 2.)],
+            "assets": {"clip": clip_asset(interpret.clone())},
+            "comps": {}
+        });
+        let snapshot = pm_kernel::document::DocumentStore::new_untitled(
+            pm_model::json::parse(&value.to_string()).unwrap(),
+        )
+        .snapshot();
+        let expected: Vec<f64> = clip_luma(CLIP_FRAME)
+            .into_iter()
+            .map(|code| {
+                let code = f64::from(code);
+                if full { code / 255. } else { (code - 16.) / 219. }
+            })
+            .collect();
+        // The middle of each band, away from its edges.
+        let bands = |pixels: &[[f64; 3]]| -> Vec<[f64; 3]> {
+            (0..4)
+                .map(|band| pixels[(h as usize / 2) * w as usize + band * 16 + 8])
+                .collect()
+        };
+        let check = |what: &str, got: Vec<[f64; 3]>, tolerance: f64| {
+            for (band, expected) in expected.iter().enumerate() {
+                // What a file can hold: the PNG stores 0..1.
+                let expected = expected.clamp(0., 1.);
+                for value in got[band] {
+                    assert!(
+                        (value.clamp(0., 1.) - expected).abs() < tolerance,
+                        "{what}, {interpret:?}, band {band}: {value}, expected {expected}"
+                    );
+                }
+            }
+        };
+
+        let png = dir.path().join(format!("range-{case}.png"));
+        export_sized(
+            &snapshot,
+            &media,
+            &png,
+            ExportFormat::PngStill { sixteen_bit: true },
+            OutputColor::SrgbImage,
+            AlphaOutput::None,
+            CLIP,
+        );
+        let raw = ffmpeg(
+            &["-f", "rawvideo", "-pix_fmt", "rgba64le"],
+            &png,
+            &dir.path().join("range.raw"),
+        );
+        let code = |bytes: &[u8]| f64::from(u16::from_le_bytes([bytes[0], bytes[1]])) / 65535.;
+        let exported: Vec<[f64; 3]> = raw
+            .chunks_exact(8)
+            .map(|p| [code(p), code(&p[2..]), code(&p[4..])])
+            .collect();
+        // The export renders in half float: half a stored code below 1.
+        check("the exported PNG", bands(&exported), 2.5e-4);
+
+        let viewer = service
+            .viewer(ViewerConfig {
+                composition: snapshot.open_comp().unwrap(),
+                snapshot: snapshot.clone(),
+                media: media.clone(),
+                output: Output {
+                    width: w,
+                    height: h,
+                    display: 0,
+                    headroom: 1.,
+                    crop: None,
+                },
+                layer: None,
+                rate: pm_time::Rate::FPS_30,
+                end: Some(3 * TICKS_PER_SECOND),
+                audio: false,
+            })
+            .unwrap();
+        viewer.quality(Quality::Full).unwrap();
+        viewer
+            .command(C::Seek {
+                time: at,
+                mode: SeekMode::Exact,
+            })
+            .unwrap();
+        wait(&viewer, "the playhead three frames in", |f| f.time == at);
+        viewer.capture_next().unwrap();
+        let paused = wait(&viewer, "a paused frame", |f| {
+            f.time == at && f.moment == Moment::Paused && f.pixels.is_some() && f.scale >= 1.
+        });
+        let paused = encoded_rec709(&paused.pixels.unwrap());
+        check("the paused viewer", bands(&paused), 0.0005);
+        // The limited reading puts the brightest band above white; the
+        // viewer's surface keeps that and an SDR file stops at white.
+        let shown: Vec<[f64; 3]> = paused.iter().map(|p| p.map(|v| v.clamp(0., 1.))).collect();
+        let (worst, mean) = difference(&shown, &exported);
+        assert!(
+            worst < 0.0005,
+            "{interpret:?}: the viewer against the PNG: worst {worst:.5}, mean {mean:.6}"
+        );
+        viewer.retire();
+    }
 }
