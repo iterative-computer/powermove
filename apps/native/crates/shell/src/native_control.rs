@@ -107,7 +107,15 @@ fn readable(v: f64) -> String {
 }
 struct TargetState {
     sender: async_channel::Sender<Value>,
+    /// The rows the pop-up's menu shows now: what an action's index means.
     options: std::cell::RefCell<Vec<Value>>,
+    /// The pop-up's menu is open.
+    tracking: std::cell::Cell<bool>,
+    /// Rows (and the selected value) that came while the menu was open and
+    /// differ in more than their titles: shown once the menu has closed and
+    /// its action has gone out.
+    pending: std::cell::RefCell<Option<(Vec<Value>, Value)>>,
+    popup: std::cell::RefCell<Option<Retained<NSPopUpButton>>>,
     kind: Kind,
     /// The window's content view: where the keyboard goes back to.
     content: Retained<NSView>,
@@ -123,7 +131,7 @@ define_class!(
         #[unsafe(method(act:))]
         fn act(&self,sender:&AnyObject){
             let value=match self.ivars().kind{
-                Kind::Popup=>{let index:isize=unsafe{msg_send![sender,indexOfSelectedItem]};self.ivars().options.borrow().get(index as usize).map(|o|o.get("v").unwrap_or(o).clone()).unwrap_or(Value::Null)},
+                Kind::Popup=>{let index:isize=unsafe{msg_send![sender,indexOfSelectedItem]};self.ivars().options.borrow().get(index as usize).map(|o|row_value(o).clone()).unwrap_or(Value::Null)},
                 Kind::Checkbox|Kind::Radio|Kind::Switch=>{let state:isize=unsafe{msg_send![sender,state]};json!(state!=0)},
                 Kind::Segmented=>{let index:isize=unsafe{msg_send![sender,selectedSegment]};json!(index)},
                 Kind::Slider=>{let position:f64=unsafe{msg_send![sender,doubleValue]};json!(Range::of(&self.ivars().options.borrow()).value(position))},
@@ -131,6 +139,27 @@ define_class!(
                 Kind::Search=>{let text:Retained<NSString>=unsafe{msg_send![sender,stringValue]};let text=text.to_string();if let Some(field)=sender.downcast_ref::<NSView>(){search_hint(field,text.is_empty());}json!(text)},
             };
             let _=self.ivars().sender.try_send(value);
+        }
+        #[unsafe(method(menuBegan:))]
+        fn menu_began(&self,_:&AnyObject){self.ivars().tracking.set(true);}
+        /// The action of the row that was chosen goes out after this, so
+        /// the rows it indexes stay until the next turn of the run loop.
+        #[unsafe(method(menuEnded:))]
+        fn menu_ended(&self,_:&AnyObject){
+            self.ivars().tracking.set(false);
+            if self.ivars().pending.borrow().is_some(){
+                unsafe{let _:()=msg_send![self,performSelector:sel!(showPending),withObject:std::ptr::null::<AnyObject>(),afterDelay:0.0f64];}
+            }
+        }
+        #[unsafe(method(showPending))]
+        fn show_pending(&self){
+            let popup=self.ivars().popup.borrow().clone();
+            if self.ivars().tracking.get(){return;}
+            if let (Some(popup),Some((options,value)))=(popup,self.ivars().pending.take()){
+                replace_rows(&popup,&options);
+                if let Some(index)=options.iter().position(|o|row_value(o)==&value){popup.selectItemAtIndex(index as isize);}
+                *self.ivars().options.borrow_mut()=options;
+            }
         }
         /// A search field's editor: Return, Escape and Down give the
         /// keyboard back to the window's content and tell the view.
@@ -182,10 +211,7 @@ impl Control {
     fn value(&self, value: &Value, options: &[Value]) {
         match self {
             Self::Popup(v) => {
-                if let Some(index) = options
-                    .iter()
-                    .position(|o| o.get("v").unwrap_or(o) == value)
-                {
+                if let Some(index) = options.iter().position(|o| row_value(o) == value) {
                     v.selectItemAtIndex(index as isize);
                 } else if options.iter().any(|o| o.get("checked").is_some()) {
                     // A settings pull-down has no single value: no row is
@@ -241,7 +267,6 @@ pub struct NativeControl {
     control: Control,
     slot: Rc<NativeControlSlot>,
     _target: Retained<Target>,
-    options: Vec<Value>,
     width: f32,
     height: f32,
     inline: bool,
@@ -266,11 +291,6 @@ impl NativeControl {
     }
 }
 
-/// What a glass capsule keeps clear around the control it holds, along and
-/// across.
-const GLASS_PAD: (f32, f32) = (4., 3.);
-/// Before and after a glass search field's magnifier.
-const GLASS_LEAD: f64 = 6.;
 pub struct ControlSpec<'a> {
     pub kind: Kind,
     pub label: &'a str,
@@ -293,14 +313,10 @@ pub struct ControlSpec<'a> {
     /// (`⌘F`): the field is then the view's one prominent search, drawn large
     /// with the shortcut at its trailing end while it is empty.
     pub symbol: Option<&'a str>,
-    /// The system's liquid glass (macOS 26 and later; the plain control
-    /// before). A push button takes the system's glass bezel at the large
-    /// size: a surface's one raised action. A search field or a segmented
-    /// control stands, with no bezel of its own, in a glass capsule.
+    /// A push button with the system's liquid glass bezel at the large size
+    /// (macOS 26 and later; the plain bezel before): a surface's one raised
+    /// action.
     pub glass: bool,
-    /// A glass push button that shows its symbol alone; `label` is then its
-    /// tooltip and accessibility label.
-    pub symbol_only: bool,
 }
 
 impl NativeControl {
@@ -324,7 +340,6 @@ impl NativeControl {
             tint,
             symbol,
             glass,
-            symbol_only,
         } = spec;
         let glass = glass && objc2::runtime::AnyClass::get(c"NSGlassEffectView").is_some();
         use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -342,6 +357,9 @@ impl NativeControl {
                 super(Target::alloc(mtm).set_ivars(TargetState {
                     sender: tx,
                     options: std::cell::RefCell::new(options.clone()),
+                    tracking: std::cell::Cell::new(false),
+                    pending: std::cell::RefCell::new(None),
+                    popup: std::cell::RefCell::new(None),
                     kind,
                     content: gpui.clone(),
                 })),
@@ -360,6 +378,7 @@ impl NativeControl {
                     v.setTarget(Some(&target));
                     v.setAction(Some(sel!(act:)));
                 }
+                watch_menu(&target, &v);
                 v.setFont(Some(&NSFont::systemFontOfSize(t.typography.body as f64)));
                 if inline {
                     v.setBordered(false);
@@ -478,12 +497,7 @@ impl NativeControl {
                         )
                     }) {
                         v.setImage(Some(&image));
-                        v.setImagePosition(if symbol_only {
-                            v.setToolTip(Some(&NSString::from_str(label)));
-                            NSCellImagePosition::ImageOnly
-                        } else {
-                            NSCellImagePosition::ImageLeading
-                        });
+                        v.setImagePosition(NSCellImagePosition::ImageLeading);
                     }
                     if let Some(rgb) = tint {
                         let channel = |shift: u32| ((rgb >> shift) & 255) as f64 / 255.;
@@ -572,92 +586,6 @@ impl NativeControl {
         let height = t.metrics.control.max(intrinsic.height as f32);
         let native =
             unsafe { Retained::retain(control.view() as *const NSView as *mut NSView).unwrap() };
-        // A field or a segmented control on glass: the control, with no
-        // bezel of its own, is the content of a glass capsule, and the
-        // capsule is what the view places.
-        let capsule = (glass && matches!(kind, Kind::Search | Kind::Segmented)).then(|| {
-            let height = (height + GLASS_PAD.1 * 2.) as f64;
-            let pad = GLASS_PAD.0 as f64;
-            let size = NSSize::new(width as f64 + 2. * pad, height);
-            let capsule = NSGlassEffectView::initWithFrame(
-                NSGlassEffectView::alloc(mtm),
-                NSRect::new(NSPoint::ZERO, size),
-            );
-            capsule.setCornerRadius(height / 2.);
-            let content =
-                NSView::initWithFrame(NSView::alloc(mtm), NSRect::new(NSPoint::ZERO, size));
-            if let Control::Search(field) = &control {
-                // With no bezel the field is as high as its text, which
-                // then stands in the middle of the capsule.
-                field.setBezeled(false);
-                field.setDrawsBackground(false);
-                // A field with no bezel lays its text over its own search
-                // button while it is edited: the magnifier is the capsule's
-                // instead, and the field starts after it.
-                if let Some(cell) = field
-                    .cell()
-                    .and_then(|c| c.downcast::<NSSearchFieldCell>().ok())
-                {
-                    cell.setSearchButtonCell(None);
-                }
-                field.sizeToFit();
-            }
-            let own = native.frame().size;
-            if matches!(control, Control::Search(_)) {
-                let glyph = t.metrics.symbol_toolbar as f64 + 1.;
-                let lead = pad + GLASS_LEAD;
-                if let Some(image) = NSImage::imageWithSystemSymbolName_accessibilityDescription(
-                    &NSString::from_str("magnifyingglass"),
-                    None,
-                ) {
-                    let config = NSImageSymbolConfiguration::configurationWithPointSize_weight(
-                        glyph,
-                        unsafe { NSFontWeightRegular },
-                    );
-                    let image = image.imageWithSymbolConfiguration(&config).unwrap_or(image);
-                    let mark = NSImageView::imageViewWithImage(&image, mtm);
-                    mark.setContentTintColor(Some(&NSColor::secondaryLabelColor()));
-                    let side = glyph + 4.;
-                    mark.setFrame(NSRect::new(
-                        NSPoint::new(lead, ((height - side) / 2.).round()),
-                        NSSize::new(side, side),
-                    ));
-                    mark.setAutoresizingMask(
-                        NSAutoresizingMaskOptions::ViewMinYMargin
-                            | NSAutoresizingMaskOptions::ViewMaxYMargin,
-                    );
-                    content.addSubview(&mark);
-                }
-                let from = lead + glyph + 4. + GLASS_LEAD;
-                native.setFrame(NSRect::new(
-                    NSPoint::new(from, ((height - own.height) / 2.).round()),
-                    NSSize::new(size.width - from - pad, own.height),
-                ));
-                native.setAutoresizingMask(
-                    NSAutoresizingMaskOptions::ViewWidthSizable
-                        | NSAutoresizingMaskOptions::ViewMinYMargin
-                        | NSAutoresizingMaskOptions::ViewMaxYMargin,
-                );
-            } else {
-                native.setFrameOrigin(NSPoint::new(
-                    ((size.width - own.width) / 2.).round(),
-                    ((height - own.height) / 2.).round(),
-                ));
-                native.setAutoresizingMask(
-                    NSAutoresizingMaskOptions::ViewMinXMargin
-                        | NSAutoresizingMaskOptions::ViewMaxXMargin
-                        | NSAutoresizingMaskOptions::ViewMinYMargin
-                        | NSAutoresizingMaskOptions::ViewMaxYMargin,
-                );
-            }
-            content.addSubview(&native);
-            capsule.setContentView(Some(&content));
-            Retained::into_super(capsule)
-        });
-        let (native, width, height) = match capsule {
-            Some(capsule) => (capsule, width + 2. * GLASS_PAD.0, height + 2. * GLASS_PAD.1),
-            None => (native, width, height),
-        };
         let slot = Rc::new(NativeControlSlot::new(&gpui, native));
         cx.spawn(async move |this, cx| {
             while let Ok(value) = rx.recv().await {
@@ -671,7 +599,6 @@ impl NativeControl {
             control,
             slot,
             _target: target,
-            options,
             width,
             height,
             inline,
@@ -765,7 +692,7 @@ impl NativeControl {
                 true
             }
             Control::Slider(v) if matches!(key, "left" | "right" | "up" | "down") => {
-                let range = Range::of(&self.options);
+                let range = Range::of(&self._target.ivars().options.borrow());
                 let now = range.value(v.doubleValue());
                 let next = range.nudge(now, matches!(key, "right" | "up"));
                 if next != now {
@@ -819,22 +746,19 @@ impl NativeControl {
         cx: &mut Context<Self>,
     ) {
         // A pop-up's rows follow the tree (the viewer's zoom row names the
-        // current zoom), so a changed list replaces the menu's items.
-        if let Control::Popup(v) = &self.control
-            && options != self.options.as_slice()
-        {
-            v.removeAllItems();
-            add_items(v, options);
-            options.clone_into(&mut self.options);
-            options.clone_into(&mut self._target.ivars().options.borrow_mut());
+        // current zoom).
+        if let Control::Popup(v) = &self.control {
+            set_rows(&self._target, v, options, value);
         }
-        if let Control::Slider(_) = &self.control
-            && options != self.options.as_slice()
-        {
-            options.clone_into(&mut self.options);
-            options.clone_into(&mut self._target.ivars().options.borrow_mut());
+        // A slider's one option is its range.
+        if let Control::Slider(_) = &self.control {
+            let mut range = self._target.ivars().options.borrow_mut();
+            if range.as_slice() != options {
+                options.clone_into(&mut range);
+            }
         }
-        self.control.value(value, &self.options);
+        let shown = self._target.ivars().options.borrow().clone();
+        self.control.value(value, &shown);
         self.control.enabled(!disabled);
         if self.inline {
             // The title names the current value, so the width follows it.
@@ -931,28 +855,49 @@ fn segment_face(title: &str, glyph: Option<Retained<NSImage>>, font: &NSFont) ->
     face.setAccessibilityDescription(Some(&NSString::from_str(title)));
     face
 }
+/// The value a row stands for (a plain string row is its own value).
+fn row_value(option: &Value) -> &Value {
+    option.get("v").unwrap_or(option)
+}
+fn row_title(option: &Value) -> Retained<NSString> {
+    NSString::from_str(
+        option
+            .get("label")
+            .and_then(Value::as_str)
+            .or_else(|| option.as_str())
+            .unwrap_or(""),
+    )
+}
+/// One menu item a row, in order. (`addItemWithTitle:` would drop an
+/// earlier row of the same title, and an action's index would then name
+/// another row.)
 fn add_items(popup: &NSPopUpButton, options: &[Value]) {
-    for (i, option) in options.iter().enumerate() {
-        popup.addItemWithTitle(&NSString::from_str(
-            option
-                .get("label")
-                .and_then(Value::as_str)
-                .or_else(|| option.as_str())
-                .unwrap_or(""),
-        ));
-        // A row's second line (a quality's promise, a sky's look): the menu
-        // item's own subtitle, under its title, as in System Settings.
-        if let Some(detail) = option.get("detail").and_then(Value::as_str)
-            && let Some(item) = popup.itemAtIndex(i as isize)
-        {
-            let responds: bool =
-                unsafe { msg_send![&*item, respondsToSelector: sel!(setSubtitle:)] };
-            if responds {
-                let _: () = unsafe { msg_send![&*item, setSubtitle: &*NSString::from_str(detail)] };
-            }
-        }
+    let Some(menu) = popup.menu() else { return };
+    let mtm = MainThreadMarker::new().expect("main thread");
+    for option in options {
+        let item = unsafe {
+            NSMenuItem::initWithTitle_action_keyEquivalent(
+                NSMenuItem::alloc(mtm),
+                &row_title(option),
+                None,
+                &NSString::from_str(""),
+            )
+        };
+        subtitle(&item, option);
+        menu.addItem(&item);
     }
     checks(popup, options);
+}
+/// A row's second line (a quality's promise, a sky's look): the menu item's
+/// own subtitle, under its title, as in System Settings.
+fn subtitle(item: &NSMenuItem, option: &Value) {
+    let Some(detail) = option.get("detail").and_then(Value::as_str) else {
+        return;
+    };
+    let responds: bool = unsafe { msg_send![item, respondsToSelector: sel!(setSubtitle:)] };
+    if responds {
+        let _: () = unsafe { msg_send![item, setSubtitle: &*NSString::from_str(detail)] };
+    }
 }
 /// Rows marked `checked` show a checkmark: a pull-down that reports several
 /// settings at once (the viewer's collapsed 3D menu).
@@ -967,6 +912,112 @@ fn checks(popup: &NSPopUpButton, options: &[Value]) {
             } else {
                 NSControlStateValueOff
             });
+        }
+    }
+}
+fn replace_rows(popup: &NSPopUpButton, options: &[Value]) {
+    popup.removeAllItems();
+    add_items(popup, options);
+}
+/// Brings a pop-up's rows to `next`. Rows that stand for the same values in
+/// the same order keep their menu items and take the new titles, open menu
+/// or not (the item under the pointer stays the item under the pointer).
+/// Any other change replaces the items, and waits for an open menu to close
+/// and send its action first: the action names a row by its index.
+fn set_rows(target: &Target, popup: &NSPopUpButton, next: &[Value], value: &Value) {
+    let state = target.ivars();
+    let shown = state.options.borrow().clone();
+    let same_rows = shown.len() == next.len()
+        && shown
+            .iter()
+            .zip(next)
+            .all(|(a, b)| row_value(a) == row_value(b));
+    if same_rows {
+        state.pending.take();
+        if shown.as_slice() != next {
+            for (index, option) in next.iter().enumerate() {
+                let title = row_title(option);
+                if let Some(item) = popup.itemAtIndex(index as isize) {
+                    if item.title() != title {
+                        item.setTitle(&title);
+                    }
+                    subtitle(&item, option);
+                }
+            }
+            *state.options.borrow_mut() = next.to_vec();
+        }
+    } else if state.tracking.get() {
+        *state.pending.borrow_mut() = Some((next.to_vec(), value.clone()));
+    } else {
+        state.pending.take();
+        replace_rows(popup, next);
+        *state.options.borrow_mut() = next.to_vec();
+    }
+}
+/// Tells `target` when the pop-up's menu opens and closes.
+fn watch_menu(target: &Target, popup: &NSPopUpButton) {
+    *target.ivars().popup.borrow_mut() = Some(unsafe {
+        Retained::retain(popup as *const NSPopUpButton as *mut NSPopUpButton).unwrap()
+    });
+    let Some(menu) = popup.menu() else { return };
+    let center = objc2_foundation::NSNotificationCenter::defaultCenter();
+    unsafe {
+        for (selector, name) in [
+            (sel!(menuBegan:), NSMenuDidBeginTrackingNotification),
+            (sel!(menuEnded:), NSMenuDidEndTrackingNotification),
+        ] {
+            center.addObserver_selector_name_object(target, selector, Some(name), Some(&menu));
+        }
+    }
+}
+/// A pop-up and its rows without a window, for tests of how rows follow a
+/// publication while its menu is open.
+#[doc(hidden)]
+pub struct PopupRows {
+    pub popup: Retained<NSPopUpButton>,
+    target: Retained<Target>,
+    pub chosen: async_channel::Receiver<Value>,
+}
+impl PopupRows {
+    pub fn new(options: &[Value]) -> Self {
+        let mtm = MainThreadMarker::new().expect("main thread");
+        let (sender, chosen) = async_channel::unbounded();
+        let content = NSView::initWithFrame(NSView::alloc(mtm), NSRect::ZERO);
+        let target: Retained<Target> = unsafe {
+            msg_send![
+                super(Target::alloc(mtm).set_ivars(TargetState {
+                    sender,
+                    options: std::cell::RefCell::new(options.to_vec()),
+                    tracking: std::cell::Cell::new(false),
+                    pending: std::cell::RefCell::new(None),
+                    popup: std::cell::RefCell::new(None),
+                    kind: Kind::Popup,
+                    content,
+                })),
+                init
+            ]
+        };
+        let popup =
+            NSPopUpButton::initWithFrame_pullsDown(NSPopUpButton::alloc(mtm), NSRect::ZERO, false);
+        add_items(&popup, options);
+        unsafe {
+            popup.setTarget(Some(&target));
+            popup.setAction(Some(sel!(act:)));
+        }
+        watch_menu(&target, &popup);
+        Self {
+            popup,
+            target,
+            chosen,
+        }
+    }
+    pub fn update(&self, options: &[Value], value: &Value) {
+        set_rows(&self.target, &self.popup, options, value);
+    }
+    /// The value the pop-up's action sends for the selected row.
+    pub fn act(&self) {
+        unsafe {
+            let _: () = msg_send![&*self.target, act: &*self.popup];
         }
     }
 }

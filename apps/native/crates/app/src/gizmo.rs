@@ -226,6 +226,9 @@ struct Drag {
     click: Option<Press>,
     /// What a move snaps to, once read off the main thread.
     snaps: Option<Arc<Vec<[f64; 2]>>>,
+    /// An Option-drag of the body: each moved layer and the copy that takes
+    /// the move in its place.
+    copies: Option<Vec<(String, String)>>,
 }
 #[derive(Clone, Copy)]
 struct Press {
@@ -243,6 +246,8 @@ enum Job {
     Transact(&'static str, Vec<Command>, Option<String>),
     /// Select one layer, or nothing (not an edit).
     Select(Option<String>),
+    /// Select these layers (the copies an Option-drag made).
+    SelectLayers(Vec<String>),
 }
 pub struct GizmoSurface {
     studio: studio3d::State,
@@ -791,6 +796,7 @@ impl GizmoSurface {
             time,
             click,
             snaps: None,
+            copies: None,
         };
         let deep = event.modifiers.platform || event.modifiers.control;
         let press = Press {
@@ -1006,6 +1012,7 @@ impl GizmoSurface {
                         time: press.time,
                         click: None,
                         snaps: None,
+                        copies: None,
                     });
                 }
             });
@@ -1107,7 +1114,19 @@ impl GizmoSurface {
                 })
                 .detach();
             }
+            // Option on a body drag: copies take the move (decided as the
+            // drag starts), and the layers themselves stay.
+            if drag.hit == Hit::Body && event.modifiers.alt {
+                drag.copies = Some(
+                    drag.poses
+                        .iter()
+                        .filter(|p| p.root && !p.locked)
+                        .map(|p| (p.id.clone(), pm_kernel::new_id("L")))
+                        .collect(),
+                );
+            }
             self.queue.push_back(Job::Begin(match drag.hit {
+                Hit::Body if drag.copies.is_some() => "Duplicate",
                 Hit::Body => "Move",
                 Hit::Handle(_) if drag.poses.iter().any(|p| p.shape.is_some()) => "Resize Shape",
                 Hit::Handle(_) => "Scale",
@@ -1140,7 +1159,10 @@ impl GizmoSurface {
             offset = result.0;
             guides = result.1;
         }
-        let commands = commands(drag, origin, at, mods, offset);
+        let mut commands = commands(drag, origin, at, mods, offset);
+        if let Some(copies) = &drag.copies {
+            commands = on_copies(commands, copies);
+        }
         // The alignment feedback marks catching something new, not each
         // step that stays caught.
         let caught = |g: &[snap::Guide]| g.iter().map(|(_, to)| *to).collect::<Vec<_>>();
@@ -1191,6 +1213,10 @@ impl GizmoSurface {
         };
         if drag.active {
             self.queue.push_back(Job::Finish(commit));
+            if let (true, Some(copies)) = (commit, drag.copies) {
+                let ids = copies.into_iter().map(|(_, copy)| copy).collect();
+                self.queue.push_back(Job::SelectLayers(ids));
+            }
             self.pump(cx);
         } else if let Some(press) = drag.click.filter(|_| commit) {
             self.pick(press, cx);
@@ -1324,8 +1350,12 @@ impl GizmoSurface {
                 .background_executor()
                 .spawn(async move {
                     let call: Call = match (job, gesture) {
-                        (Job::Select(id), _) => {
-                            let ids = id.into_iter().collect();
+                        (job @ (Job::Select(_) | Job::SelectLayers(_)), _) => {
+                            let ids = match job {
+                                Job::Select(id) => id.into_iter().collect(),
+                                Job::SelectLayers(ids) => ids,
+                                _ => vec![],
+                            };
                             let select = SelectionCall::Layers { ids, add: false };
                             return kernel
                                 .call(&project, Request::new(Caller::native(), select))
@@ -1697,6 +1727,24 @@ fn inside(corners: &[[f64; 2]; 4], p: [f64; 2]) -> bool {
         }
     }
     true
+}
+/// A body move's writes, made on copies of the moved layers: the layers are
+/// duplicated first (each step starts again from the gesture's beginning),
+/// then each write goes to its layer's copy.
+fn on_copies(moves: Vec<Command>, copies: &[(String, String)]) -> Vec<Command> {
+    let (layer_ids, new_ids): (Vec<String>, Vec<String>) = copies.iter().cloned().unzip();
+    let mut out: Vec<Command> =
+        vec![pm_kernel::LayerCommand::Duplicate { layer_ids, new_ids }.into()];
+    out.extend(moves.into_iter().map(|command| match command {
+        Command::Property(PropertyCommand::Set(mut set)) => {
+            if let Some((_, copy)) = copies.iter().find(|(source, _)| *source == set.layer_id) {
+                set.layer_id = copy.clone();
+            }
+            PropertyCommand::Set(set).into()
+        }
+        other => other,
+    }));
+    out
 }
 fn set(id: &str, channel: &str, value: f64, time: f64) -> Command {
     // A viewer edit is the artist's hand: it overrides earlier hand edits and

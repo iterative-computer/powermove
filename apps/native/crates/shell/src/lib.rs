@@ -40,7 +40,7 @@ pub use macos::{
 };
 #[cfg(target_os = "macos")]
 pub use native::{
-    Command, FlowchartRow, Host, MenuEntry, SHAPES, accent_color, agent_menu_windows, check_view3d,
+    ADD, Command, FlowchartRow, Host, MenuEntry, SHAPES, accent_color, agent_menu_windows, check_view3d,
     document_subtitle, native_color, popover_frame, request_close, resize_from_top, send_menu_command,
     sidebar_frame, system_accent, viewer_window, window_backdrop, zoom_limit,
 };

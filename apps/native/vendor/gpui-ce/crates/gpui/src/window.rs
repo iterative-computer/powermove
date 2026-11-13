@@ -3391,6 +3391,7 @@ impl Window {
             self.refresh();
         }
         self.needs_present.set(true);
+        self.platform_window.painted();
 
         #[cfg(feature = "profiler")]
         {

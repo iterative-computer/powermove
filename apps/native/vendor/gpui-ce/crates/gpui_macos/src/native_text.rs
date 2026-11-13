@@ -97,7 +97,9 @@ struct State {
     original: RefCell<String>,
     events: RefCell<Vec<TextEvent>>,
     wake: RefCell<Option<Rc<dyn Fn()>>>,
-    geometry: Cell<Option<(NSRect, NSRect)>>,
+    /// What a paint staged, with that paint's number: placed by the present
+    /// that follows that paint, and by no later one.
+    geometry: Cell<Option<(u64, NSRect, NSRect)>>,
     staged: Cell<Option<(NSRect, NSRect)>>,
     /// Canvas: the system insertion point, in its own pointer-transparent host.
     caret: Option<(Retained<NSView>, Retained<NSTextInsertionIndicator>)>,
@@ -615,12 +617,12 @@ impl NativeTextSlot {
     }
     /// Top-left point bounds and inherited rectangular content clip, in GPUI coordinates.
     pub fn stage(&self, bounds: NSRect, clip: NSRect) {
-        self.state.geometry.set(Some((bounds, clip)));
+        self.state.stage(Some((bounds, clip)));
         self.state.staged.set(Some((bounds, clip)));
     }
     /// A cached GPUI view reuses its paint, so its slot keeps the last geometry.
     pub fn keep(&self) {
-        self.state.geometry.set(self.state.staged.get());
+        self.state.stage(self.state.staged.get());
     }
     pub fn begin_editing(&self) {
         if !self.state.editing.replace(true) {
@@ -816,24 +818,51 @@ impl Drop for NativeTextSlot {
         });
     }
 }
+impl State {
+    fn stage(&self, geometry: Option<(NSRect, NSRect)>) {
+        let paint = crate::composition::open_paint(Retained::as_ptr(&self.gpui) as usize);
+        self.geometry
+            .set(geometry.map(|(bounds, clip)| (paint, bounds, clip)));
+    }
+}
 /// Applies staged text-slot geometry. Returns `Moved` when any slot's frame,
 /// clip or visibility changed this frame (P-120 transactional present).
 pub(crate) fn present(key: usize) -> crate::composition::SlotChange {
+    place(key, true).into()
+}
+/// Whether [`present`] would move a slot. Nothing is touched.
+pub(crate) fn pending(key: usize) -> bool {
+    place(key, false)
+}
+/// Places what the last complete paint staged (`apply`), or only says
+/// whether doing so would move anything.
+fn place(key: usize, apply: bool) -> bool {
     let mut moved = false;
+    let last = crate::composition::last_paint(key);
     let slots = SLOTS.with(|slots| slots.borrow().get(&key).cloned().unwrap_or_default());
     for state in slots.into_iter().filter_map(|s| s.upgrade()) {
         // A canvas editor is invisible and must stay first responder, so a
         // frame that did not repaint its host keeps the last placement.
-        let geometry = state.geometry.take().or_else(|| {
-            (state.kind == TextKind::Canvas)
-                .then(|| state.staged.get())
-                .flatten()
-        });
+        let geometry = state
+            .geometry
+            .get()
+            .filter(|(paint, ..)| Some(*paint) == last)
+            .map(|(_, bounds, clip)| (bounds, clip))
+            .or_else(|| {
+                (state.kind == TextKind::Canvas)
+                    .then(|| state.staged.get())
+                    .flatten()
+            });
+        if apply {
+            state.geometry.set(None);
+        }
         let Some((bounds, clip)) = geometry else {
             if !state.wrapper.isHidden() {
-                state.wrapper.setHidden(true);
                 moved = true;
-                crate::composition_accessibility::changed(key);
+                if apply {
+                    state.wrapper.setHidden(true);
+                    crate::composition_accessibility::changed(key);
+                }
             }
             continue;
         };
@@ -848,8 +877,10 @@ pub(crate) fn present(key: usize) -> crate::composition::SlotChange {
             visible.size,
         );
         if state.wrapper.frame() != frame {
-            state.wrapper.setFrame(frame);
             moved = true;
+            if apply {
+                state.wrapper.setFrame(frame);
+            }
         }
         let local = NSRect::new(
             NSPoint::new(
@@ -860,28 +891,34 @@ pub(crate) fn present(key: usize) -> crate::composition::SlotChange {
         );
         if let Some(scroll) = &state.scroll {
             if scroll.frame() != local {
-                scroll.setFrame(local);
                 moved = true;
+                if apply {
+                    scroll.setFrame(local);
+                }
             }
             let size = scroll.contentSize();
             let view = state.editor.view();
-            if view.frame().size.width != size.width {
+            if apply && view.frame().size.width != size.width {
                 view.setFrameSize(NSSize::new(
                     size.width,
                     view.frame().size.height.max(size.height),
                 ));
             }
         } else if state.editor.view().frame() != local {
-            state.editor.view().setFrame(local);
             moved = true;
+            if apply {
+                state.editor.view().setFrame(local);
+            }
         }
         let hidden = visible.size.width <= 0.
             || visible.size.height <= 0.
             || (state.kind.dense() && !state.editing.get());
         if state.wrapper.isHidden() != hidden {
-            state.wrapper.setHidden(hidden);
             moved = true;
-            crate::composition_accessibility::changed(key);
+            if apply {
+                state.wrapper.setHidden(hidden);
+                crate::composition_accessibility::changed(key);
+            }
         }
         if let Some((host, indicator)) = &state.caret {
             let content_h = state
@@ -899,26 +936,34 @@ pub(crate) fn present(key: usize) -> crate::composition::SlotChange {
                     );
                     let visible = shown.size.width > 0. && shown.size.height > 0.;
                     if host.frame() != frame {
-                        host.setFrame(frame);
-                        indicator.setFrame(NSRect::new(NSPoint::new(0., 0.), rect.size));
                         moved = true;
+                        if apply {
+                            host.setFrame(frame);
+                            indicator.setFrame(NSRect::new(NSPoint::new(0., 0.), rect.size));
+                        }
                     }
                     if host.isHidden() == visible {
-                        host.setHidden(!visible);
                         moved = true;
+                        if apply {
+                            host.setHidden(!visible);
+                        }
                     }
-                    indicator.setDisplayMode(NSTextInsertionIndicatorDisplayMode::Automatic);
+                    if apply {
+                        indicator.setDisplayMode(NSTextInsertionIndicatorDisplayMode::Automatic);
+                    }
                 }
                 None => {
                     if !host.isHidden() {
-                        indicator.setDisplayMode(NSTextInsertionIndicatorDisplayMode::Hidden);
-                        host.setHidden(true);
                         moved = true;
+                        if apply {
+                            indicator.setDisplayMode(NSTextInsertionIndicatorDisplayMode::Hidden);
+                            host.setHidden(true);
+                        }
                     }
                 }
             }
         }
-        if state.focus_pending.replace(false) {
+        if apply && state.focus_pending.replace(false) {
             if let Some(w) = state.gpui.window() {
                 if let Editor::Multiline(v) = &state.editor {
                     w.makeFirstResponder(Some(v));
@@ -934,7 +979,7 @@ pub(crate) fn present(key: usize) -> crate::composition::SlotChange {
             }
         }
     }
-    moved.into()
+    moved
 }
 pub(crate) fn accessibility(key: usize) -> Vec<crate::composition::AccessibilityItem> {
     SLOTS.with(|slots| {

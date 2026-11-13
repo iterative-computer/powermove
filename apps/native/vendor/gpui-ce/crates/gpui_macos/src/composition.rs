@@ -46,6 +46,8 @@ impl From<bool> for SlotChange {
 
 struct Hooks {
     present: Rc<dyn Fn() -> SlotChange>,
+    /// Whether `present` would move a slot now, without moving it.
+    pending: Option<Rc<dyn Fn() -> bool>>,
     accepts: Rc<dyn Fn(NSPoint) -> bool>,
     accessibility: Vec<AccessibilityItem>,
     /// The first publication places every slot, so it is always transactional.
@@ -114,12 +116,108 @@ fn insert_hooks(
             key,
             Hooks {
                 present,
+                pending: None,
                 accepts,
                 accessibility: Vec::new(),
                 fresh: true,
             },
         );
     });
+}
+/// Lets the window ask a registered host whether its next `present` would
+/// move a slot, before anything is moved: a frame that would is held back
+/// whole until a drawable it can be shown with is in hand. A host that gives
+/// none is found out only after it has moved its views; that one frame then
+/// waits on the layer for its drawable (see `MacWindow::draw`).
+pub fn set_pending(view: &NSView, pending: Rc<dyn Fn() -> bool>) {
+    let key = view as *const NSView as usize;
+    HOSTS.with(|h| {
+        if let Some(host) = h.borrow_mut().get_mut(&key) {
+            host.pending = Some(pending);
+        }
+    });
+}
+thread_local! {
+    /// Paints completed per GPUI view. A slot is staged for the paint that is
+    /// open (this count); a present places what the last complete paint
+    /// staged and nothing an earlier one left behind.
+    static PAINTS: RefCell<HashMap<usize, u64>> = RefCell::new(HashMap::new());
+}
+/// The paint a slot staged now belongs to.
+pub(crate) fn open_paint(view: usize) -> u64 {
+    PAINTS.with(|p| p.borrow().get(&view).copied().unwrap_or(0))
+}
+/// The paint whose staging the next present places.
+pub(crate) fn last_paint(view: usize) -> Option<u64> {
+    open_paint(view).checked_sub(1)
+}
+/// A paint of `view` ended.
+pub(crate) fn painted(view: usize) {
+    PAINTS.with(|p| *p.borrow_mut().entry(view).or_default() += 1);
+}
+pub(crate) fn forget_paints(view: usize) {
+    PAINTS.with(|p| p.borrow_mut().remove(&view));
+}
+/// Whether presenting now would move a hosted view. Nothing is touched.
+pub(crate) fn pending(view: usize, painted: bool) -> bool {
+    let hook = HOSTS.with(|h| h.borrow().get(&view).map(|h| (h.pending.clone(), h.fresh)));
+    if let Some((pending, fresh)) = hook
+        && (fresh || pending.is_some_and(|pending| pending()))
+    {
+        return true;
+    }
+    painted && (crate::native_text::pending(view) || crate::native_control::pending(view))
+}
+
+/// Where a window's frames get their drawables (P-120).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pace {
+    /// A `CAMetalDisplayLink` lends one per update, shown at the link's time.
+    Link,
+    /// Taken from the layer off the main thread and presented with the slot
+    /// transaction: the only way hosted views and the scene they were laid
+    /// out with reach the screen together.
+    Direct,
+}
+pub use gpui_apple::metal_renderer::LinkDrawable;
+/// What one draw does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Step {
+    /// Present into the link's drawable; the main thread waits for nothing.
+    Link,
+    /// Leave the scene and the hosted views as they are; draw again on the
+    /// next update.
+    Defer,
+    /// As `Defer`, and take drawables from the layer from now on.
+    EnterDirect,
+    /// Place hosted views and present with their transaction, into the
+    /// drawable in hand.
+    Direct,
+}
+/// The decision of one draw, made before any hosted view is touched, so the
+/// main thread never waits for a drawable and a scene is never drawn into a
+/// drawable of another size. `pending`: presenting would move a hosted view.
+/// `in_hand`: a drawable of the layer's size has arrived from the layer.
+pub fn step(pace: Pace, link: LinkDrawable, pending: bool, in_hand: bool) -> Step {
+    match (pace, link) {
+        (Pace::Direct, _) if in_hand => Step::Direct,
+        (Pace::Direct, _) => Step::Defer,
+        (Pace::Link, LinkDrawable::Wait) => Step::Defer,
+        (Pace::Link, LinkDrawable::Stale) => Step::EnterDirect,
+        (Pace::Link, LinkDrawable::Ready) if pending => Step::EnterDirect,
+        (Pace::Link, LinkDrawable::Ready) => Step::Link,
+    }
+}
+/// How long a window keeps taking drawables from the layer after the last
+/// frame that moved a hosted view: a scroll or a drag is one stay, not a
+/// link made and thrown away for every frame of it.
+pub const DIRECT_LINGER: std::time::Duration = std::time::Duration::from_millis(500);
+/// Whether a direct window goes back to the link: nothing has moved for
+/// [`DIRECT_LINGER`], no frame is waiting to be drawn and no drawable is on
+/// its way from the layer (the layer must not be asked for one while a link
+/// owns it).
+pub fn leaves_direct(since_moved: std::time::Duration, frame_waiting: bool, idle: bool) -> bool {
+    since_moved >= DIRECT_LINGER && !frame_waiting && idle
 }
 pub(crate) fn accepts(view: usize, point: NSPoint) -> bool {
     let accepts = HOSTS.with(|h| h.borrow().get(&view).map(|h| h.accepts.clone()));
@@ -172,7 +270,10 @@ pub(crate) fn accessibility(view: usize) -> Option<Vec<AccessibilityItem>> {
 /// Opens the explicit CATransaction for this frame's slot publication and runs the
 /// host. When geometry moved, GPUI's drawable must be presented with the
 /// transaction ([`Transaction::moved`]); otherwise it presents asynchronously.
-pub(crate) fn present(view: usize) -> Option<Transaction> {
+/// `painted` is false for a scene shown again with no paint since the last
+/// one: text and control slots, placed from what a paint staged, are left
+/// as they are.
+pub(crate) fn present(view: usize, painted: bool) -> Option<Transaction> {
     let hook = HOSTS.with(|h| {
         h.borrow_mut()
             .get_mut(&view)
@@ -192,8 +293,13 @@ pub(crate) fn present(view: usize) -> Option<Transaction> {
         let change = gpui_util::measure("native composition", || present());
         transaction.change = change.or(fresh.into());
     }
-    let text = crate::native_text::present(view);
-    transaction.change = transaction.change.or(text).or(crate::native_control::present(view));
+    if painted {
+        let text = crate::native_text::present(view);
+        transaction.change = transaction
+            .change
+            .or(text)
+            .or(crate::native_control::present(view));
+    }
     Some(transaction)
 }
 /// A frame drawn within this long after the previous one is "continuous".
@@ -290,7 +396,7 @@ pub mod probe {
     }
     /// `continuous`: the previous frame was within [`super::CONTINUOUS_FRAME`].
     pub fn frame_after(key: usize, forced: bool, continuous: bool) -> Option<bool> {
-        let transaction = present(key);
+        let transaction = present(key, true);
         transaction.as_ref()?;
         Some(presents_with_transaction(
             forced,
@@ -301,7 +407,7 @@ pub mod probe {
     }
     /// Compositor-paced frames can use async even during continuous animation.
     pub fn paced_frame(key: usize, forced: bool) -> Option<bool> {
-        let transaction = present(key);
+        let transaction = present(key, true);
         transaction.as_ref()?;
         Some(presents_with_transaction(
             forced,
@@ -312,6 +418,22 @@ pub mod probe {
     }
     pub fn has_frame_budget(now: f64, deadline: f64, budget: f64) -> bool {
         super::has_frame_budget(now, deadline, budget)
+    }
+    /// A paint of `view` ended, as `MacWindow::painted` reports it.
+    pub fn painted(view: &NSView) {
+        super::painted(view as *const NSView as usize);
+    }
+    /// Whether presenting `view` now would move a hosted view.
+    pub fn pending(view: &NSView) -> bool {
+        super::pending(view as *const NSView as usize, true)
+    }
+    /// Places what the last paint of `view` staged, as a presented frame
+    /// does; true when a hosted view moved.
+    pub fn place(view: &NSView) -> bool {
+        present(view as *const NSView as usize, true).is_some_and(|t| t.moved())
+    }
+    pub fn forget(view: &NSView) {
+        super::forget_paints(view as *const NSView as usize);
     }
     pub fn unregistered_frame(forced: bool) -> bool {
         presents_with_transaction(forced, None, true, false)

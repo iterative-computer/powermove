@@ -131,6 +131,7 @@ pub(super) struct Start {
     pub(super) viewport: Option<(f32, f32, f32)>,
     pub(super) text: Option<CanvasText>,
     pub(super) rasters: Option<RasterHooks>,
+    pub(super) vars: Option<crate::VarsSource>,
     pub(super) kernel: KernelHandle,
     pub(super) shared: Arc<Shared>,
     /// Set when the window's extensions stop.
@@ -365,7 +366,15 @@ impl Run {
             realm.eval(format!("__compat.viewport({width},{height},{scale})"))?;
         }
         host.set_code(&self.start.records);
-        realm.eval(format!("__compat.boot({})", self.start.records))?;
+        // The same values the window's realm activated with, chosen the same way.
+        let token = host.stage_vars(super::staged_vars(
+            self.start.vars.as_ref(),
+            &self.start.records,
+        ));
+        realm.eval(format!(
+            "__compatHost.boot({},\"{token}\")",
+            self.start.records
+        ))?;
         self.start
             .shared
             .exports

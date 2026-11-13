@@ -10,6 +10,15 @@ pub struct ResourceSnapshot {
     /// this generation so a frame or export job never sees a later registration.
     #[serde(default)]
     pub definitions: Vec<pm_protocol::definitions::DefinitionSnapshot>,
+    /// Extensions are still loading: an effect `definitions` lacks may yet be
+    /// registered. A frame that would bypass it is not drawn, cached or
+    /// exported until a settled snapshot arrives.
+    #[serde(default)]
+    pub pending: bool,
+    /// While `pending`: the extensions still loading, as (id, name), so a
+    /// frame that waits for one says which.
+    #[serde(default)]
+    pub loading: Vec<(String, String)>,
 }
 impl ResourceSnapshot {
     pub fn validate(&self) -> anyhow::Result<()> {
@@ -31,8 +40,56 @@ impl ResourceSnapshot {
     }
     /// The same pins, whichever viewer holds them: switching between viewers
     /// on one engine must not reinstall definitions or drop cached frames.
+    /// Which extensions are still loading names a wait; it pins nothing.
     pub fn same_pins(a: &std::sync::Arc<Self>, b: &std::sync::Arc<Self>) -> bool {
-        std::sync::Arc::ptr_eq(a, b) || (a.generation == b.generation && a == b)
+        std::sync::Arc::ptr_eq(a, b)
+            || (a.pending == b.pending
+                && a.definitions == b.definitions
+                && a.extension_generations == b.extension_generations
+                && a.project_fonts == b.project_fonts)
+    }
+}
+/// One window's resources as they change, for every viewer of that window
+/// (the editor's, a popped-out one). A viewer attached here draws the latest
+/// snapshot and every one published after it: none keeps the snapshot it
+/// happened to start with, so a viewer opened while extensions load does not
+/// wait for them forever, and none draws an effect's old code after a reload.
+#[derive(Clone, Default)]
+pub struct ResourceFeed(std::sync::Arc<std::sync::Mutex<Feed>>);
+#[derive(Default)]
+struct Feed {
+    current: std::sync::Arc<ResourceSnapshot>,
+    viewers: Vec<crate::Viewer>,
+}
+impl ResourceFeed {
+    /// A feed whose viewers draw `snapshot` until another is published.
+    pub fn new(snapshot: std::sync::Arc<ResourceSnapshot>) -> Self {
+        Self(std::sync::Arc::new(std::sync::Mutex::new(Feed {
+            current: snapshot,
+            viewers: vec![],
+        })))
+    }
+    /// The viewer draws this feed's resources from now on.
+    pub fn attach(&self, viewer: &crate::Viewer) -> anyhow::Result<()> {
+        let mut feed = self.0.lock().unwrap();
+        feed.viewers.retain(crate::Viewer::live);
+        viewer.resources(feed.current.clone())?;
+        feed.viewers.push(viewer.clone());
+        Ok(())
+    }
+    /// Every attached viewer draws `snapshot` from now on; the first refusal
+    /// is returned once all have been told.
+    pub fn publish(&self, snapshot: std::sync::Arc<ResourceSnapshot>) -> anyhow::Result<()> {
+        snapshot.validate()?;
+        let mut feed = self.0.lock().unwrap();
+        feed.current = snapshot;
+        feed.viewers.retain(crate::Viewer::live);
+        let mut refused = Ok(());
+        for viewer in &feed.viewers {
+            let told = viewer.resources(feed.current.clone());
+            refused = refused.and(told);
+        }
+        refused
     }
 }
 #[cfg(test)]

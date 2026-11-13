@@ -265,6 +265,43 @@ impl TimelineModel {
         self.rebuild_rows();
         Ok(())
     }
+    /// Properties' Show in Graph Editor (v1's `showGraphEditor`): the layer
+    /// opens and shows `keys` too, the graph view comes up, and it plots the
+    /// track `channel` belongs to (Position and Scale are one track).
+    pub fn show_graph(
+        &mut self,
+        layer: &str,
+        channel: &str,
+        keys: &[String],
+    ) -> Result<crate::Plan, ModelError> {
+        self.reveal_paths(layer, keys)?;
+        let track = self
+            .rows()
+            .iter()
+            .find_map(|row| match &row.id {
+                crate::RowId::Property {
+                    layer_id,
+                    channel: track,
+                } if layer_id == layer
+                    && self
+                        .track_channels(layer, track)
+                        .iter()
+                        .any(|c| c.path == channel) =>
+                {
+                    Some(track.clone())
+                }
+                _ => None,
+            })
+            .ok_or_else(|| ModelError::UnknownId(channel.into()))?;
+        if self.graph_display == crate::GraphDisplay::DopeSheet {
+            self.graph_display = crate::GraphDisplay::Graph;
+        }
+        self.graph_focus = Some((layer.into(), track));
+        Ok(crate::Plan {
+            calls: vec![pm_kernel::SelectionCall::Channel(Some(channel.into())).into()],
+            ..Default::default()
+        })
+    }
 }
 fn same_paths(a: &[String], b: &[String]) -> bool {
     let a: HashSet<_> = a.iter().collect();

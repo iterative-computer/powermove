@@ -9,6 +9,42 @@ for (const [key, value] of [
   ["devicePixelRatio", 2],
 ])
   globalThis[key] = value;
+{
+  // The values people entered for extensions' declared `vars`. They live in
+  // this block's scope only: the host stages them for a load it asks for and
+  // hands that load a single-use token; nothing an extension can call or read
+  // (the engine bridge, the loader, `__compat`) selects an extension or a key.
+  const held = Object.create(null);
+  const { engine } = runtime;
+  const { freeze, keys } = Object;
+  const take = (token) => {
+    const staged = engine("extension.vars", { token });
+    for (const id of keys(staged)) held[id] = freeze(staged[id]);
+  };
+  // The host's entries for a load: an extension cannot replace them to see a
+  // token before it is spent.
+  Object.defineProperty(globalThis, "__compatHost", {
+    value: freeze({
+      boot(records, token) {
+        take(token);
+        __compat.boot(records);
+      },
+      update(records, ids, reason, token) {
+        take(token);
+        __compat.update(records, ids, reason);
+      },
+    }),
+  });
+  // The loader's read of them, taken once by `create` before any extension
+  // runs; then no global leads here.
+  let reader = (id) => held[id] ?? {};
+  globalThis.__compatVars = () => {
+    const once = reader;
+    reader = null;
+    delete globalThis.__compatVars;
+    return once;
+  };
+}
 globalThis.__compat = {
   /** The editor window's viewport changed (points and backing scale). */
   viewport(width, height, scale) {
@@ -24,6 +60,7 @@ globalThis.__compat = {
   },
   create(initial) {
     const call = (operation, input = {}) => runtime.engine(operation, input);
+    const varsOf = __compatVars();
     initial ??= call("kernel.publication");
     const unavailable = (operation, input) => call(operation, input);
     this.errors = [];
@@ -146,6 +183,8 @@ globalThis.__compat = {
         kind: reply.kind,
         size: file.size,
       };
+    // `PM.MediaStore.get`: the asset's file, held on disk like a picked one.
+    this.mediaFile = (asset) => ask({ kind: "mediaFile", asset });
     this.assets = {
       get: (id) => this.realm.PM.proj.assets?.[id],
       import: async (file, options = {}) => {
@@ -684,6 +723,163 @@ globalThis.__compat = {
     };
     this.realm.PM.toggle = () =>
       this.realm.PM.playing ? this.realm.PM.pause() : this.realm.PM.play();
+    // v1's model members that extensions reach raw (`api.host.pm`), as main.
+    // Inside an edit (`PM.Edit.mutate`, an open history entry) the insert is
+    // part of it; called on its own it is one edit, so Undo takes the layer
+    // out again (a bare write to the project is no history step).
+    this.realm.PM.addLayer = (layer, at) => {
+      const PM = this.realm.PM;
+      const insert = () => {
+        PM.proj.layers.splice(at == null ? 0 : at, 0, layer);
+        PM.ProjectIndex?.invalidate();
+      };
+      if (PM.hist.busy()) insert();
+      else {
+        const done = PM.Edit.mutate("Add Layer", insert);
+        if (!done.ok) throw new Error(done.message ?? "The layer could not be added");
+      }
+      PM.bus.emit("layers");
+      return layer;
+    };
+    // Called here, a member the realm does not have says which one it is
+    // (composition editing, file import and save, takes, scripting are the
+    // editor's own work in main).
+    const missing = (member) => () => {
+      throw new Error(`${member} is not available in this version of Powermove`);
+    };
+    {
+      // More of v1's model that an extension can call raw. Pure model work
+      // answers as main did; the rest of the roster says which member it is.
+      const PM = this.realm.PM;
+      const kernel = this.realm.kernel;
+      // One step of the history on its own, part of the edit inside one.
+      const edited = (label, change) => {
+        if (PM.hist.busy()) return change();
+        const done = PM.Edit.mutate(label, change);
+        if (!done.ok) throw new Error(done.message ?? `${label} could not be done`);
+      };
+      // Render scope: nested compositions render natively, so always the project.
+      PM.scope = [];
+      PM.compOf = (layer) => {
+        if (!layer || layer.type !== "precomp" || !layer.d || !layer.d.comp) return null;
+        const comp = PM.proj.comps && PM.proj.comps[layer.d.comp];
+        return comp && Array.isArray(comp.layers) ? comp : null;
+      };
+      PM.removeLayers = (ids) => {
+        ids = PM.expandGroups([].concat(ids));
+        edited("Delete Layers", () => {
+          PM.proj.layers = PM.proj.layers.filter((l) => !ids.includes(l.id));
+          PM.proj.layers.forEach((l) => {
+            if (ids.includes(l.parent)) l.parent = null;
+          });
+          PM.ProjectIndex?.invalidate();
+        });
+        PM.sel.layers = PM.sel.layers.filter((id) => !ids.includes(id));
+        PM.bus.emit("layers");
+      };
+      // The effects and transitions extensions registered here, by type.
+      // Built-in ones are drawn natively and have no definition in this realm.
+      const view = (registry) =>
+        new Proxy(
+          {},
+          {
+            get: (_, type) => (typeof type === "string" ? registry.get(type) : undefined),
+            has: (_, type) => typeof type === "string" && registry.has(type),
+            ownKeys: () => registry.ids(),
+            getOwnPropertyDescriptor: (_, type) =>
+              typeof type === "string" && registry.has(type)
+                ? { value: registry.get(type), enumerable: true, configurable: true }
+                : undefined,
+          },
+        );
+      PM.FX = view(kernel.effects);
+      PM.TRANSITIONS = view(kernel.transitions);
+      PM.effectDef = (effect) => kernel.effects.get(typeof effect === "string" ? effect : effect?.type);
+      PM.transitionDef = (type) => kernel.transitions.get(type);
+      const undefinedHere = (member, type) =>
+        new Error(
+          `${member}: no definition of "${type}" is available to extensions in this version of Powermove`,
+        );
+      PM.mkEffect = (type) => {
+        const definition = PM.effectDef(type);
+        if (!definition) throw undefinedHere("PM.mkEffect", type);
+        const effect = { id: PM.uid("f"), type, on: true, p: {} };
+        for (const param of definition.params ?? []) effect.p[param.k] = PM.P(param.def);
+        return effect;
+      };
+      PM.mkTransition = (type) => {
+        const definition = PM.transitionDef(type);
+        if (!definition) throw undefinedHere("PM.mkTransition", type);
+        const transition = { type, dur: 0.5, p: {} };
+        for (const param of definition.params ?? []) transition.p[param.k] = PM.P(param.def);
+        return transition;
+      };
+      // `// @param default min max` annotations as inspector-ready uniforms.
+      PM.parseUniforms = (code) => {
+        const out = [];
+        const re =
+          /uniform\s+(float|vec2|vec3|vec4|int|bool)\s+(\w+)\s*;\s*(?:\/\/\s*@param\s*([^\n]*))?/g;
+        let m;
+        while ((m = re.exec(code))) {
+          const [, type, name, ann] = m;
+          if (/^i(Resolution|Time|GlobalTime|Progress|Frame|Mouse)$/.test(name)) continue;
+          const a = (ann || "").trim().split(/\s+/).filter(Boolean);
+          const d = {
+            name,
+            type,
+            label: name.replace(/^u/, "").replace(/([a-z])([A-Z])/g, "$1 $2"),
+          };
+          if (type === "vec3" && a[0] && a[0].startsWith("#")) {
+            d.control = "color";
+            d.def = a[0];
+          } else if (type === "bool") {
+            d.control = "toggle";
+            d.def = a[0] === "true";
+          } else {
+            d.control = "num";
+            d.def = a[0] !== undefined ? parseFloat(a[0]) : 0;
+            d.min = a[1] !== undefined ? parseFloat(a[1]) : d.def < 0 ? d.def * 2 : 0;
+            d.max = a[2] !== undefined ? parseFloat(a[2]) : Math.max(1, Math.abs(d.def) * 2);
+            if (isNaN(d.def)) d.def = 0;
+          }
+          out.push(d);
+        }
+        return out;
+      };
+      // The editor's own work in main: each says which member it is.
+      for (const member of [
+        "precompose",
+        "assetKind",
+        "resolveAssetKind",
+        "importFiles",
+        "pickFiles",
+        "saveProject",
+      ])
+        PM[member] = missing(`PM.${member}`);
+      for (const namespace of ["Comps", "takes", "Script"])
+        PM[namespace] = new Proxy(
+          {},
+          {
+            get: (_, member) =>
+              typeof member === "string" ? missing(`PM.${namespace}.${member}`) : undefined,
+          },
+        );
+    }
+    // v1's media store, read side: an asset's bytes as a Blob (the file behind
+    // it on disk, read when asked), or null when it has none. The native app
+    // keeps media itself, so writing to it throws by name.
+    const storeOnly = (member) => missing(`PM.MediaStore.${member}`);
+    this.realm.PM.MediaStore = {
+      get: async (asset) => {
+        const id = typeof asset === "string" ? asset : asset?.id;
+        if (!id) return null;
+        const file = await this.mediaFile(String(id));
+        return file?.token ? runtime.hostFile(file) : null;
+      },
+      put: storeOnly("put"),
+      getForSave: storeOnly("getForSave"),
+      remove: storeOnly("remove"),
+    };
     // Built-in services v1 registered for extensions: `tool` (the shell's tool)
     // and `viewer` (its navigation and its stage, a page element over the
     // native viewer that the shell keeps on it).
@@ -1060,6 +1256,12 @@ globalThis.__compat = {
       report: (id, health) => call("extension.health", { id, health }),
       toast: (text, options) => call("ui.toast", { text, options }),
       activating: (id) => call("extension.activating", { id }),
+      // Which extensions are still loading is part of the contributions.
+      progress: () => this.contributionsChanged?.(),
+      // v1's loader: each activation reads the values entered for the keys
+      // its manifest declares (apiVersion 2+); a key without one is absent.
+      // The host chose them from the manifests it read (`__compatHost`).
+      vars: (record) => varsOf(record.id),
       document: this.dom?.document,
     });
     this.realm.PM.Kernel.loader = this.loader;
@@ -1073,6 +1275,7 @@ globalThis.__compat = {
         this.publishContributions();
       });
     };
+    this.contributionsChanged = changed;
     for (const registry of [
       kernel.commands,
       kernel.panels,
@@ -1116,6 +1319,10 @@ globalThis.__compat = {
       this.realm.PM.Fonts.setSystemFamilies(runtime.engine("fonts.families", {}));
       void this.projectFonts();
     });
+    // The loader counts every load it is asked for (this pass, an update, a
+    // reload, a lone activation) and says when one starts or ends: until none
+    // runs, a definition the project uses may still be registered, so nothing
+    // may treat it as not installed.
     this.loader
       .boot(this.trusted(records))
       .catch((error) => this.reportFailure(error))
@@ -1129,7 +1336,13 @@ globalThis.__compat = {
     this.loader
       .update(this.trusted(records), ids, reason)
       .catch((error) => this.reportFailure(error))
-      .finally(() => this.publishContributions());
+      .finally(() => {
+        this.publishContributions();
+        runtime.engine("extensions.ready", {});
+      });
+    // Published now, not a microtask later: the host must not see the old
+    // contributions as settled once it has asked for the update.
+    this.publishContributions();
   },
   reportFailure(error) {
     runtime.engine("ui.toast", {
@@ -1261,6 +1474,10 @@ globalThis.__compat = {
       theme: kernel.theme.activeId,
       nativeTheme: this.nativeTheme(),
       definitions: this.definitions(),
+      settled: this.loader?.settled() ?? true,
+      // The extensions still to activate, named for the person while
+      // frames that may need them wait.
+      loading: this.stillLoading(),
     };
   },
   /** The active theme as native token patches (translator in this realm). */
@@ -1279,6 +1496,11 @@ globalThis.__compat = {
     return PowermoveCompat.definitionSnapshots(this.realm.kernel, (id, error) =>
       this.errors.push({ id, name: error?.name, message: error?.message }),
     );
+  },
+  stillLoading() {
+    const ids = this.loader?.loading?.() ?? [];
+    const records = new Map((this.loader?.records() ?? []).map((r) => [r.id, r]));
+    return ids.map((id) => ({ id, name: records.get(id)?.manifest?.name ?? id }));
   },
   publishContributions() {
     runtime.engine("contributions.publish", { value: this.contributions() });

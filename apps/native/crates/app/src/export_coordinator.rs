@@ -111,6 +111,11 @@ impl AgentExport {
     pub fn cancelled(&self) -> bool {
         self.cancel.load(Ordering::Acquire)
     }
+    /// The row's task, as Background Tasks ▸ Cancel names it (`cancel_export`).
+    #[cfg(test)]
+    pub fn id(&self) -> pm_promedia::tasks::TaskId {
+        self.ticket.id
+    }
     /// Settles the row: completed, failed with its reason, or cancelled.
     pub fn finish(self, result: Result<(), String>) {
         cancellers().lock().unwrap().remove(&self.ticket.id.0);
@@ -219,6 +224,43 @@ impl Controller {
                 });
                 return;
             };
+            // A delivery started while the window's extensions load waits for
+            // them: an effect still loading is never refused as not installed.
+            // The status line says who it waits for; Cancel still cancels.
+            let mut resources = resources;
+            let mut shown = String::new();
+            if resources.pending {
+                // The destination is chosen: the panel shows the export as
+                // preparing, the phase whose Cancel it sends (while it chose
+                // the destination its Cancel was off, and a wait left in
+                // that phase could not be cancelled from the panel).
+                observe(&runtime, json!({"phase":"preparing"})).await;
+            }
+            while resources.pending && !job.cancel.load(Ordering::Acquire) {
+                let text = crate::extensions::starts_once_loaded("Export", &resources);
+                let _ = this.update(cx, |v, cx| {
+                    if (shown.is_empty() || v.message == shown) && v.message != text {
+                        v.message = text.clone();
+                        cx.notify();
+                    }
+                });
+                shown = text;
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(50))
+                    .await;
+                match this.update(cx, |v, _| v.extensions.resources.clone()) {
+                    Ok(now) => resources = now,
+                    Err(_) => return,
+                }
+            }
+            if !shown.is_empty() {
+                let _ = this.update(cx, |v, cx| {
+                    if v.message == shown {
+                        v.message.clear();
+                        cx.notify();
+                    }
+                });
+            }
             let frozen = Frozen {
                 publication: p,
                 options: typed,

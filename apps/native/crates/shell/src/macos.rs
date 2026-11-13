@@ -310,6 +310,66 @@ fn open_editor_window(
 /// Development builds only: `--open a,b` (`PM_NATIVE_REVIEW_OPEN`) runs those
 /// commands in the first editor window once it has settled, so design review
 /// captures reach Settings, sheets and the palette without the menu bar or focus.
+/// Development builds: `pointer:x:y`, `click:x:y`, `dblclick:x:y` and
+/// `drag:x:y:x:y` (window points) as GPUI input, so a review can hover,
+/// click and drag without the real pointer. False for any other name.
+pub(crate) fn review_pointer(name: &str, window: &mut Window, cx: &mut App) -> bool {
+    let mut parts = name.split(':');
+    let kind = parts.next().unwrap_or_default();
+    if !matches!(kind, "pointer" | "click" | "dblclick" | "drag") {
+        return false;
+    }
+    let at: Vec<f32> = parts.filter_map(|v| v.parse().ok()).collect();
+    if at.len() != if kind == "drag" { 4 } else { 2 } {
+        return false;
+    }
+    let position = gpui::point(gpui::px(at[0]), gpui::px(at[1]));
+    let modifiers = gpui::Modifiers::default();
+    let moved = |position, held: bool| {
+        gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
+            position,
+            pressed_button: held.then_some(gpui::MouseButton::Left),
+            modifiers,
+        })
+    };
+    let down = |position, click_count| {
+        gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
+            button: gpui::MouseButton::Left,
+            position,
+            modifiers,
+            click_count,
+            first_mouse: false,
+        })
+    };
+    let up = |position, click_count| {
+        gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
+            button: gpui::MouseButton::Left,
+            position,
+            modifiers,
+            click_count,
+        })
+    };
+    window.dispatch_event(moved(position, false), cx);
+    match kind {
+        "drag" => {
+            let to = gpui::point(gpui::px(at[2]), gpui::px(at[3]));
+            window.dispatch_event(down(position, 1), cx);
+            for step in 1..=8 {
+                let along = position + (to - position) * (step as f32 / 8.);
+                window.dispatch_event(moved(along, true), cx);
+            }
+            window.dispatch_event(up(to, 1), cx);
+        }
+        "click" | "dblclick" => {
+            for click_count in 1..=if kind == "click" { 1 } else { 2 } {
+                window.dispatch_event(down(position, click_count), cx);
+                window.dispatch_event(up(position, click_count), cx);
+            }
+        }
+        _ => {}
+    }
+    true
+}
 fn review_open(editor: WeakEntity<view::Editor>, handle: AnyWindowHandle, cx: &mut App) {
     static ONCE: std::sync::Once = std::sync::Once::new();
     let Some(names) = std::env::var("PM_NATIVE_REVIEW_OPEN")
@@ -327,53 +387,13 @@ fn review_open(editor: WeakEntity<view::Editor>, handle: AnyWindowHandle, cx: &m
                     .timer(std::time::Duration::from_secs(wait))
                     .await;
                 wait = 3;
-                // `pointer:x:y`, `click:x:y` and `dblclick:x:y` (window points) go into the
-                // window as GPUI input, so a review can hover and click
-                // without the real pointer.
-                if let Some((kind, at)) = name.split_once(':')
-                    && matches!(kind, "pointer" | "click" | "dblclick")
-                    && let Some((x, y)) = at.split_once(':')
-                    && let (Ok(x), Ok(y)) = (x.parse::<f32>(), y.parse::<f32>())
+                // Synthetic pointer input goes into the window as GPUI
+                // events (`review_pointer`).
+                if handle
+                    .update(cx, |_, window, cx| review_pointer(name, window, cx))
+                    .unwrap_or(false)
                 {
                     wait = 1;
-                    let _ = handle.update(cx, |_, window, cx| {
-                        let position = gpui::point(gpui::px(x), gpui::px(y));
-                        let modifiers = gpui::Modifiers::default();
-                        window.dispatch_event(
-                            gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
-                                position,
-                                pressed_button: None,
-                                modifiers,
-                            }),
-                            cx,
-                        );
-                        let clicks = match kind {
-                            "click" => 1,
-                            "dblclick" => 2,
-                            _ => 0,
-                        };
-                        for click_count in 1..=clicks {
-                            window.dispatch_event(
-                                gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
-                                    button: gpui::MouseButton::Left,
-                                    position,
-                                    modifiers,
-                                    click_count,
-                                    first_mouse: false,
-                                }),
-                                cx,
-                            );
-                            window.dispatch_event(
-                                gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
-                                    button: gpui::MouseButton::Left,
-                                    position,
-                                    modifiers,
-                                    click_count,
-                                }),
-                                cx,
-                            );
-                        }
-                    });
                     continue;
                 }
                 let cmd = native::Command {

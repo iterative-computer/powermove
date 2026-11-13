@@ -102,6 +102,25 @@ impl V4Adapter {
         }
         Ok(entry)
     }
+    /// Every property a row action on `handle` reaches: its own channels,
+    /// on each selected layer that has them and can be edited.
+    pub fn targets(
+        &self,
+        model: &Inspector,
+        handle: &str,
+    ) -> Result<Vec<crate::PropertyId>, InspectorError> {
+        let mut targets = Vec::new();
+        for binding in &self.entry(model, handle)?.bindings {
+            for target in model.binding_targets(binding)? {
+                if let Some(id) = target.property_id()
+                    && !targets.contains(&id)
+                {
+                    targets.push(id);
+                }
+            }
+        }
+        Ok(targets)
+    }
     pub fn read(
         &self,
         model: &mut Inspector,

@@ -47,6 +47,50 @@ impl Controller {
                     view.update(cx, |v, cx| v.review_send(semantic, event, cx));
                 }
             }
+            // Development builds: a panel's scroller swept for some seconds
+            // (`reviewScroll:<panel>:<seconds>`).
+            #[cfg(debug_assertions)]
+            command if command.starts_with("reviewScroll:") => {
+                let mut parts = command.splitn(3, ':').skip(1);
+                if let (Some(panel), Some(Ok(seconds))) =
+                    (parts.next(), parts.next().map(str::parse::<f32>))
+                    && let Some(view) = self.builtins.views.get(panel).cloned()
+                {
+                    view.update(cx, |v, cx| v.review_scroll(seconds, cx));
+                }
+            }
+            // Development builds: a panel's own command with its intent, as
+            // its controls send it, for actions that sit behind a context
+            // menu (`reviewIntent:<panel>:<command>:<the JSON intent in hex>`).
+            #[cfg(debug_assertions)]
+            command if command.starts_with("reviewIntent:") => {
+                let mut parts = command.splitn(4, ':').skip(1);
+                let intent = |hex: &str| -> Option<serde_json::Value> {
+                    let bytes: Option<Vec<u8>> = (0..hex.len())
+                        .step_by(2)
+                        .map(|i| u8::from_str_radix(hex.get(i..i + 2)?, 16).ok())
+                        .collect();
+                    serde_json::from_slice(&bytes?).ok()
+                };
+                if let (Some(panel), Some(name), Some(hex)) =
+                    (parts.next(), parts.next(), parts.next())
+                    && let Some(runtime) = self.builtins.runtime.clone()
+                    && let Some(intent) = intent(hex)
+                    && let Ok(ticket) = runtime.panel_command(panel, name, &intent)
+                {
+                    cx.spawn(async move |this, cx| {
+                        let _ = ticket.await;
+                        let _ = this.update(cx, |v, cx| v.drain_builtins(cx));
+                    })
+                    .detach();
+                }
+            }
+            // Development builds: hold a modifier for the pointer input
+            // an on-screen review sends (`reviewModifiers:alt`).
+            #[cfg(debug_assertions)]
+            command if command.starts_with("reviewModifiers:") => {
+                crate::panel_bridge::hold_review_modifier(&command["reviewModifiers:".len()..]);
+            }
             // Development builds: the control kit in every state, on Home.
             #[cfg(debug_assertions)]
             "reviewKit" => {

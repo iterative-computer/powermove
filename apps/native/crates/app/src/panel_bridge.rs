@@ -1304,9 +1304,41 @@ enum Step {
 }
 /// Real input through the window's own event path (hit testing, focus,
 /// gestures), paced like a person's pointer and keyboard.
+/// Development builds: a modifier held for the pointer events of
+/// `computer_use_panel`, set by the review link `reviewModifiers:<name>`
+/// (`alt`, `shift`, `cmd`, `ctrl`; anything else lets go), so an on-screen
+/// review can do a modified drag without the keyboard.
+#[cfg(debug_assertions)]
+pub static REVIEW_MODIFIERS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+#[cfg(debug_assertions)]
+pub fn hold_review_modifier(name: &str) {
+    let bits = match name {
+        "alt" => 1,
+        "shift" => 2,
+        "cmd" => 4,
+        "ctrl" => 8,
+        _ => 0,
+    };
+    REVIEW_MODIFIERS.store(bits, std::sync::atomic::Ordering::Relaxed);
+}
+fn pointer_modifiers() -> Modifiers {
+    #[cfg(debug_assertions)]
+    {
+        let bits = REVIEW_MODIFIERS.load(std::sync::atomic::Ordering::Relaxed);
+        Modifiers {
+            alt: bits & 1 != 0,
+            shift: bits & 2 != 0,
+            platform: bits & 4 != 0,
+            control: bits & 8 != 0,
+            ..Modifiers::default()
+        }
+    }
+    #[cfg(not(debug_assertions))]
+    Modifiers::default()
+}
 fn input_steps(args: &Value, points: &[Point<Pixels>]) -> Vec<Step> {
     let first = points[0];
-    let modifiers = Modifiers::default();
+    let modifiers = pointer_modifiers();
     let mut steps = vec![Step::Event(PlatformInput::MouseMove(MouseMoveEvent {
         position: first,
         pressed_button: None,

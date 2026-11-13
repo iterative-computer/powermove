@@ -99,6 +99,17 @@ child web view, at most eight per document, closed on drop. Store pages open no
 child windows. Unexpected WebContent termination is reported as
 `ProcessTerminated`; crash policy is the app's.
 
+## Headless effect definitions
+
+MCP hosts and captures of projects without an editor window start the same
+`ExtensionHost` used by windows. It scans only the native profile's extension
+roots, applies the saved enable state, activates trusted code in V8 and admits
+Store extensions through their isolated helpers. It needs no WebKit page.
+Worker jobs wait for activation and pin the resulting definition snapshot for
+the entire capture or export; an open window's snapshot takes precedence.
+A timed-out startup fails the job rather than pinning partially initialized
+registrations.
+
 ## Background work
 
 `begin_background_job(park)`/`end_background_job` are nestable. They save and

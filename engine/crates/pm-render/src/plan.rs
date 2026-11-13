@@ -654,7 +654,7 @@ pub(crate) fn comp_pass<'d>(
         background(scope.comp)
     };
     let view = b.level_view(scope, width, height, scale);
-    // The effect pixel contract: an effect or transition without an owner
+    // The built-in pixel contract: an effect or transition without an owner
     // binding reads its pixel sizes (`u_texel`, `u_res`, `v_px`,
     // `texelFetch`) on the grid it is drawn on. At another density than the
     // composition's (a resized export, a viewer zoom or playback scale) a
@@ -662,7 +662,8 @@ pub(crate) fn comp_pass<'d>(
     // final output; in a viewer frame, one whose shader addresses physical
     // texels) is drawn whole at the composition's size and density, then
     // resampled to its output, so an export's look never depends on its size.
-    // A window onto the composition (an origin) keeps its own density.
+    // Electron extension effects use the output raster directly and do not
+    // request this replay. A window onto the composition keeps its density.
     if view.is_none()
         && ((scale.0 - 1.0).abs() > 1e-9 || (scale.1 - 1.0).abs() > 1e-9)
         && let Some(host) = b.effects

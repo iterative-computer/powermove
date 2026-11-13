@@ -8,7 +8,9 @@ use pm_kernel::{Caller, KernelHandle, Published, QueryMirror, SelectionCall};
 use pm_panel_timeline::{
     Context as MenuContext, DragKind, DragSample, GraphDisplay, HostEffect, MarqueeSession,
     Modifiers as Mods, Plan, PropertyFacts, RowId, Scrub, TimelineClient, TimelineMode,
-    TimelineModel, frame,
+    TimelineModel,
+    footer::Part,
+    frame,
     graph_render::{self, Graph},
     render::{Edge, Frame, Interpolation, Label, Media, ModelPresenter, Op, Rect, Scene, Viewport},
 };
@@ -28,6 +30,15 @@ pub trait Delegate: 'static {
     fn report(&self, message: String, cx: &mut App);
     /// Run a shell command by name, as its menu item or chord would.
     fn command(&self, name: &str, cx: &mut App);
+    /// A command with arguments (a menu row that names its target).
+    fn run(&self, name: &str, _args: Vec<serde_json::Value>, cx: &mut App) {
+        self.command(name, cx);
+    }
+    /// The layer menu's rows for the layer under the pointer
+    /// (`layer_commands::layer_menu`).
+    fn layer_menu_rows(&self, _layer: &str, _cx: &App) -> Vec<serde_json::Value> {
+        vec![]
+    }
     /// `choose` runs with the picked row, on the main thread, once tracking ends.
     fn menu(
         &self,
@@ -76,6 +87,8 @@ pub type Choose = Box<dyn FnOnce(Option<usize>, &mut App)>;
 #[derive(Clone, Debug)]
 enum Spec {
     Layers,
+    /// Option-drag: copies follow the pointer, the originals stay.
+    Duplicate,
     Trim(Edge),
     Offset,
     Ripple(Edge),
@@ -128,6 +141,11 @@ enum Job {
         layer: String,
         keys: Vec<String>,
     },
+    ShowGraph {
+        layer: String,
+        channel: String,
+        keys: Vec<String>,
+    },
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Viewed {
@@ -174,6 +192,15 @@ enum Gesture {
         at: Point<Pixels>,
     },
     Column,
+    /// The bottom bar: the zoom slider held; the navigator's thumb or the
+    /// row thumb held this far from its start.
+    Zoom,
+    Navigate {
+        grab: f64,
+    },
+    Rows {
+        grab: f64,
+    },
 }
 pub struct TimelineSurface {
     kernel: KernelHandle,
@@ -198,6 +225,11 @@ pub struct TimelineSurface {
     /// draws hovered, with the trim grip inside the nearer edge.
     hover_clip: Option<(String, f64)>,
     bounds: Bounds<Pixels>,
+    /// The panel's whole body: `bounds` (the ruler and the rows) and the
+    /// bottom bar under them.
+    body: Bounds<Pixels>,
+    /// The part of the bottom bar or the row thumb under the pointer or held.
+    lit: Option<Part>,
     view: Viewed,
     /// The native playhead's time mapping: pixels per second, first second and
     /// time column of the frame last prepared.
@@ -230,6 +262,8 @@ pub struct TimelineSurface {
     activation: Option<Subscription>,
 }
 const WHEEL_ZOOM: f64 = 0.01;
+/// The fewest letters of a clip's name worth showing before its ellipsis.
+const NAME_LEAST: usize = 3;
 const PPS: (f64, f64) = (4., 4000.);
 impl TimelineSurface {
     pub fn new(
@@ -268,6 +302,8 @@ impl TimelineSurface {
             graph: None,
             frame: None,
             bounds: Bounds::default(),
+            body: Bounds::default(),
+            lit: None,
             view,
             shown: (view.pps, view.scroll_time, view.layer_column),
             fitted: false,
@@ -410,6 +446,17 @@ impl TimelineSurface {
         shift: bool,
         cx: &mut Context<Self>,
     ) {
+        // The time scale is this surface's own view, not the model's: the
+        // keys zoom as the bottom bar's ends do.
+        use pm_panel_timeline::footer::ZOOM_STEP;
+        match id {
+            // The playhead is the caller's: this runs inside the editor's own
+            // command, where asking it for the time is not allowed.
+            "timeline.zoomIn" => return self.zoom_about(self.view.pps * ZOOM_STEP, time, cx),
+            "timeline.zoomOut" => return self.zoom_about(self.view.pps / ZOOM_STEP, time, cx),
+            "timeline.fit" => return self.fit_time(cx),
+            _ => {}
+        }
         self.queue.push_back(Job::Command {
             id: id.into(),
             time,
@@ -417,6 +464,13 @@ impl TimelineSurface {
             shift,
         });
         self.pump(cx);
+    }
+    /// Menu checkmarks: the timeline shows tracks, and clips snap in them.
+    pub fn toggles(&self) -> (bool, bool) {
+        (
+            self.model.mode == TimelineMode::Tracks,
+            !self.model.track_snap_disabled,
+        )
     }
     /// The keyframe clipboard payload, or nothing with no keys selected.
     pub fn copied_keys(&self) -> Vec<pm_panel_timeline::ClipboardTrack> {
@@ -461,6 +515,159 @@ impl TimelineSurface {
             .max(self.model.index.minimum_time());
         self.fitted = true;
         self.changed_while_hot(cx);
+    }
+    /// The ruler and the rows: the body less the bottom bar, which a body
+    /// too short for both gives up.
+    fn above_bar(body: Bounds<Pixels>, t: &Tokens) -> Bounds<Pixels> {
+        let bar = px(t.metrics.ruler);
+        if body.size.height < bar * 4. {
+            return body;
+        }
+        Bounds::new(body.origin, size(body.size.width, body.size.height - bar))
+    }
+    /// The bottom bar's layout for the view as it stands.
+    fn bar(&self) -> Option<pm_panel_timeline::footer::Layout> {
+        let scene = self.scene.as_ref()?;
+        let (top, height) = (
+            f32::from(self.bounds.size.height) as f64,
+            f32::from(self.body.size.height - self.bounds.size.height) as f64,
+        );
+        (height > 0.).then_some(pm_panel_timeline::footer::Layout {
+            width: f32::from(self.bounds.size.width) as f64,
+            top,
+            height,
+            layer_column: self.view.layer_column,
+            pps: self.view.pps,
+            pps_range: PPS,
+            scroll_time: self.view.scroll_time,
+            time: (self.model.index.minimum_time(), scene.duration),
+            rows_top: self.tokens.metrics.ruler as f64,
+            scroll_y: self.view.scroll_y,
+            // Under a graph the rows do not scroll.
+            content_height: if self.graph_region().is_some() {
+                0.
+            } else {
+                scene.content_height()
+            },
+        })
+    }
+    fn bar_ops(&self) -> Vec<Op> {
+        let (Some(bar), Some(scene)) = (self.bar(), self.scene.as_ref()) else {
+            return vec![];
+        };
+        let length = crate::captions_panel::timecode(scene.duration, scene.fps);
+        bar.ops(self.lit, &length, &self.tokens)
+    }
+    /// Lights the part of the bar under an idle pointer; true over the bar
+    /// or the row thumb, where the tracks' hover and skimmer stand down.
+    fn over_bar(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) -> bool {
+        let (x, y) = self.local(position);
+        let inside = self.body.contains(&position);
+        let part = self
+            .bar()
+            .filter(|_| inside)
+            .and_then(|bar| bar.hit(x, y, &self.tokens));
+        let over = part.is_some() || (inside && y >= f32::from(self.bounds.size.height) as f64);
+        if over && self.cursor != CursorStyle::Arrow {
+            self.cursor = CursorStyle::Arrow;
+            cx.notify();
+        }
+        if self.lit != part {
+            self.lit = part;
+            cx.notify();
+        }
+        over
+    }
+    /// Zooms to `pps` about the playhead when it is on screen, else about
+    /// the middle of the tracks.
+    fn zoom_to(&mut self, pps: f64, cx: &mut Context<Self>) {
+        let time = self.delegate.time(cx);
+        self.zoom_about(pps, time, cx);
+    }
+    /// [`Self::zoom_to`] with the playhead at `time`.
+    fn zoom_about(&mut self, pps: f64, time: f64, cx: &mut Context<Self>) {
+        let width = f32::from(self.bounds.size.width) as f64;
+        let column = self.view.layer_column;
+        let playhead = column + (time - self.view.scroll_time) * self.view.pps;
+        let about = if playhead >= column && playhead <= width {
+            playhead
+        } else {
+            (column + width) / 2.
+        };
+        self.zoom_at(about, pps / self.view.pps, cx);
+    }
+    fn press_bar(
+        &mut self,
+        part: Part,
+        bar: pm_panel_timeline::footer::Layout,
+        x: f64,
+        y: f64,
+        clicks: usize,
+        cx: &mut Context<Self>,
+    ) {
+        use pm_panel_timeline::footer::ZOOM_STEP;
+        let t = &self.tokens;
+        self.lit = Some(part);
+        match part {
+            Part::ZoomOut => self.zoom_to(self.view.pps / ZOOM_STEP, cx),
+            Part::ZoomIn => self.zoom_to(self.view.pps * ZOOM_STEP, cx),
+            // Twice on the slider fits the composition (the first press has
+            // brought the knob under the pointer); once on the track sets
+            // the zoom there and holds the knob.
+            Part::Zoom | Part::ZoomTrack if clicks == 2 => self.fit_time(cx),
+            Part::Zoom => self.gesture = Gesture::Zoom,
+            Part::ZoomTrack => {
+                self.gesture = Gesture::Zoom;
+                self.drag_bar(Part::Zoom, x, y, 0., cx);
+            }
+            Part::Time | Part::TimeTrack => {
+                let (from, length) = bar.time_thumb(t).unwrap_or_default();
+                let grab = if part == Part::Time {
+                    x - from
+                } else {
+                    length / 2.
+                };
+                self.gesture = Gesture::Navigate { grab };
+                self.drag_bar(Part::Time, x, y, grab, cx);
+            }
+            Part::Rows | Part::RowsTrack => {
+                let (from, length) = bar.rows_thumb().unwrap_or_default();
+                let grab = if part == Part::Rows {
+                    y - from
+                } else {
+                    length / 2.
+                };
+                self.gesture = Gesture::Rows { grab };
+                self.drag_bar(Part::Rows, x, y, grab, cx);
+            }
+        }
+        cx.notify();
+    }
+    fn drag_bar(&mut self, part: Part, x: f64, y: f64, grab: f64, cx: &mut Context<Self>) {
+        let Some(bar) = self.bar() else {
+            return;
+        };
+        match part {
+            Part::Zoom => {
+                if let Some(pps) = bar.zoom_at(x, &self.tokens) {
+                    self.zoom_to(pps, cx);
+                }
+            }
+            Part::Time => {
+                if let Some(time) = bar.scroll_time_at(x - grab, &self.tokens) {
+                    self.view.scroll_time = time.max(self.model.index.minimum_time());
+                    self.fitted = true;
+                    self.changed_while_hot(cx);
+                }
+            }
+            _ => {
+                if let Some(scroll) = bar.scroll_y_at(y - grab) {
+                    self.view.scroll_y = scroll;
+                    self.clamp_scroll();
+                    self.changed_while_hot(cx);
+                }
+            }
+        }
     }
     /// Wheel and pinch move the view locally on every event; each write
     /// publishes to every panel, so it waits until the gesture rests.
@@ -749,6 +956,25 @@ impl TimelineSurface {
         self.queue.push_back(Job::Reveal { layer, keys });
         self.pump(cx);
     }
+    /// The bottom bar's height: what the body keeps under the tracks.
+    pub fn bar_height(&self) -> f64 {
+        f32::from(self.body.size.height - self.bounds.size.height).max(0.) as f64
+    }
+    /// Properties' Show in Graph Editor: the graph view, on `channel`.
+    pub fn show_graph(
+        &mut self,
+        layer: String,
+        channel: String,
+        keys: Vec<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.queue.push_back(Job::ShowGraph {
+            layer,
+            channel,
+            keys,
+        });
+        self.pump(cx);
+    }
     pub fn time_mapping(&self) -> (f64, f64, f64) {
         self.shown
     }
@@ -847,6 +1073,17 @@ impl TimelineSurface {
         }
     }
     fn on_down(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
+        let (x, y) = self.local(event.position);
+        if let Some(bar) = self.bar()
+            && let Some(part) = bar.hit(x, y, &self.tokens)
+        {
+            self.set_skimmer(None, cx);
+            self.press_bar(part, bar, x, y, event.click_count, cx);
+            return;
+        }
+        if y >= f32::from(self.bounds.size.height) as f64 {
+            return;
+        }
         // Final Cut: a click moves the playhead to the skimmer; the gesture
         // (selection, a drag) goes on from there, without a skimmer.
         if let Some(at) = self.skimmer {
@@ -996,14 +1233,17 @@ impl TimelineSurface {
                 }
                 None if mods.command() && mods.alt => Spec::Offset,
                 None if tracks && mods.control => Spec::Slip,
-                None if tracks && mods.alt => Spec::Slide,
+                None if tracks && mods.alt && mods.shift => Spec::Slide,
+                // Option-drag duplicates, as in Premiere, Final Cut and
+                // Resolve (Slide took Option alone before; it has Shift now).
+                None if mods.alt => Spec::Duplicate,
                 None => Spec::Layers,
             };
             let selected = self.model.selection.contains(&layer);
             // Pro-edit modifiers choose the tool; they must not toggle selection.
             let picking = if matches!(
                 spec,
-                Spec::Ripple(_) | Spec::Roll(_) | Spec::Slip | Spec::Slide
+                Spec::Ripple(_) | Spec::Roll(_) | Spec::Slip | Spec::Slide | Spec::Duplicate
             ) {
                 Mods::default()
             } else {
@@ -1148,6 +1388,17 @@ impl TimelineSurface {
         self.tokens.metrics.keyframe as f64 / self.view.pps
     }
     fn on_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) -> bool {
+        let held = match self.gesture {
+            Gesture::Zoom => Some((Part::Zoom, 0.)),
+            Gesture::Navigate { grab } => Some((Part::Time, grab)),
+            Gesture::Rows { grab } => Some((Part::Rows, grab)),
+            _ => None,
+        };
+        if let Some((part, grab)) = held {
+            let (x, y) = self.local(event.position);
+            self.drag_bar(part, x, y, grab, cx);
+            return true;
+        }
         match &mut self.gesture {
             Gesture::Idle => return false,
             Gesture::Pressed(press) => {
@@ -1340,7 +1591,14 @@ impl TimelineSurface {
                     }));
                 }
             }
-            Gesture::Column | Gesture::Pan { .. } => self.changed(true, cx),
+            Gesture::Column
+            | Gesture::Pan { .. }
+            | Gesture::Zoom
+            | Gesture::Navigate { .. }
+            | Gesture::Rows { .. } => {
+                self.lit = None;
+                self.changed(true, cx)
+            }
             Gesture::Scrub(_) => {}
         }
         cx.notify();
@@ -1496,15 +1754,17 @@ impl TimelineSurface {
                 serde_json::json!({"kind":"layer","layerId":id,"time":time}),
             ),
         ];
+        let rows = delegate.layer_menu_rows(&id, cx);
         self.delegate.clone().extension_menu(
             locations,
-            crate::layer_commands::layer_menu_rows(),
+            rows.clone(),
             window,
             cx,
             Box::new(move |index, cx| {
-                let rows = &crate::layer_commands::LAYER_MENU;
-                if let Some((command, _)) = index.and_then(|i| rows.get(i)) {
-                    delegate.command(command, cx);
+                if let Some((command, args)) =
+                    index.and_then(|i| crate::layer_commands::layer_menu_choice(&rows, i))
+                {
+                    delegate.run(&command, args, cx);
                 }
             }),
         );
@@ -1718,8 +1978,19 @@ async fn run(client: &mut TimelineClient, job: Job) -> Result<Vec<HostEffect>, S
             Ok(vec![])
         }
         Job::Finish(commit) => {
-            if client.active_drag().is_some() {
+            if let Some(drag) = client.active_drag() {
+                let copies = drag.copies().map(<[String]>::to_vec);
                 client.finish_drag(commit).await.map_err(text)?;
+                // An Option-drag leaves its copies selected.
+                if let (true, Some(ids)) = (commit, copies) {
+                    client
+                        .dispatch(Plan {
+                            calls: vec![SelectionCall::Layers { ids, add: false }.into()],
+                            ..Default::default()
+                        })
+                        .await
+                        .map_err(text)?;
+                }
             }
             Ok(vec![])
         }
@@ -1783,6 +2054,19 @@ async fn run(client: &mut TimelineClient, job: Job) -> Result<Vec<HostEffect>, S
                 .map_err(|e| e.to_string())?;
             client.publish_view().await.map_err(text)?;
             Ok(vec![])
+        }
+        Job::ShowGraph {
+            layer,
+            channel,
+            keys,
+        } => {
+            let plan = client
+                .model
+                .show_graph(&layer, &channel, &keys)
+                .map_err(|e| e.to_string())?;
+            let effects = client.dispatch(plan).await.map_err(text)?;
+            client.publish_view().await.map_err(text)?;
+            Ok(effects)
         }
         Job::Persist(view) => {
             use pm_kernel::state::{StateOp, StateTransaction};
@@ -1854,6 +2138,28 @@ fn drag_kind(model: &TimelineModel, spec: Spec, time: f64) -> Result<DragKind, S
     };
     Ok(match spec {
         Spec::Layers => DragKind::Layers { ids },
+        Spec::Duplicate => {
+            // A selected group brings its members: only the tops are copied.
+            let inside = |id: &str| {
+                let mut at = model.index.layer(id).and_then(|l| l.group.clone());
+                for _ in 0..256 {
+                    let Some(group) = at else { return false };
+                    if ids.contains(&group) {
+                        return true;
+                    }
+                    at = model.index.layer(&group).and_then(|l| l.group.clone());
+                }
+                false
+            };
+            let tops: Vec<String> = ids.iter().filter(|id| !inside(id)).cloned().collect();
+            if tops.is_empty() {
+                return Err("Select a layer first".into());
+            }
+            DragKind::DuplicateLayers {
+                new_ids: tops.iter().map(|_| pm_kernel::new_id("L")).collect(),
+                ids: tops,
+            }
+        }
         Spec::Trim(Edge::In) => DragKind::TrimIn { ids },
         Spec::Trim(Edge::Out) => DragKind::TrimOut { ids },
         Spec::Offset => DragKind::QuickOffsetLayers { ids },
@@ -2162,7 +2468,10 @@ impl Render for TimelineSurface {
                 canvas(
                     move |bounds, _, cx| {
                         let frame = weak
-                            .update(cx, |s, cx| s.prepared(bounds, cx))
+                            .update(cx, |s, cx| {
+                                s.body = bounds;
+                                s.prepared(Self::above_bar(bounds, &s.tokens), cx)
+                            })
                             .ok()
                             .flatten();
                         *prepared.borrow_mut() = frame.clone().map(|f| (bounds.origin, f));
@@ -2200,7 +2509,11 @@ impl Render for TimelineSurface {
                             }
                             if let Some(started) = started {
                                 let ms = started.elapsed().as_secs_f64() * 1000.;
-                                if ms >= 4. {
+                                if ms < 4. {
+                                    // Every paint is counted: none may run
+                                    // on a playback tick.
+                                    crate::diag::line(serde_json::json!({"span":"timeline.paint","ms":ms,"ops":frame.ops.len()}));
+                                } else {
                                     let keys = frame.ops.iter().filter(|o| o.shape.starts_with("diamond") || o.shape == "keyframe.hold").count();
                                     crate::diag::line(serde_json::json!({"span":"timeline.paint","ms":ms,"ops":frame.ops.len(),"keys":keys,"h":f32::from(bounds.size.height),
                                         "visible":frame.ops.iter().filter(|o| o.bounds.y < f64::from(f32::from(bounds.size.height)) && o.bounds.y + o.bounds.height > 0. && o.bounds.x < f64::from(f32::from(bounds.size.width)) && o.bounds.x + o.bounds.width > 0.).count()}));
@@ -2233,6 +2546,18 @@ impl Render for TimelineSurface {
                         for op in graph.iter().flatten() {
                             paint(op, bounds.origin, &tokens, window, cx);
                         }
+                        // The bottom bar and the row thumb, over the tracks.
+                        let started = crate::diag::enabled().then(std::time::Instant::now);
+                        let bar = this
+                            .upgrade()
+                            .map(|s| s.read(cx).bar_ops())
+                            .unwrap_or_default();
+                        for op in &bar {
+                            paint(op, bounds.origin, &tokens, window, cx);
+                        }
+                        if let Some(started) = started {
+                            crate::diag::line(serde_json::json!({"span":"timeline.bar","ms":started.elapsed().as_secs_f64() * 1000.,"ops":bar.len()}));
+                        }
                         if let Some(area) = marquee {
                             window.paint_quad(
                                 PaintQuad::new(area)
@@ -2246,7 +2571,10 @@ impl Render for TimelineSurface {
                                 let _ = moved.update(cx, |s, cx| {
                                     if s.on_move(e, cx) {
                                         cx.stop_propagation();
-                                    } else if s.bounds.contains(&e.position) {
+                                        return;
+                                    }
+                                    let over = s.over_bar(e.position, cx);
+                                    if s.bounds.contains(&e.position) && !over {
                                         s.hover(e.position, cx);
                                     } else {
                                         s.set_skimmer(None, cx);
@@ -2353,36 +2681,50 @@ impl Cull {
             || b.y + b.height <= -MARGIN
     }
 }
-/// A strip's rim: a ring inside its edge, then the same ring again over the
-/// top edge and its corners only, so the light is brightest there.
+/// A strip's rim, each part as (colour, alpha). In one colour (the dark
+/// canvas's light): a ring inside the edge, then the same ring again over
+/// the top edge and its corners, so the light is brightest there. In two
+/// (the light canvas's deeper rim under a light top edge): the top's ring
+/// over the top edge and its corners, the side's below them.
 fn strip_rim(
     area: Bounds<Pixels>,
     radius: Pixels,
     width: Pixels,
     smoothing: f32,
-    side: Rgba,
-    top: Rgba,
+    side: (u32, f32),
+    top: (u32, f32),
     window: &mut Window,
 ) {
-    let ring = |color: Rgba| {
+    let ring = |(rgb, alpha): (u32, f32)| {
         PaintQuad::new(area)
-            .border_color(color)
+            .border_color(rgba(
+                (rgb << 8) | (alpha.clamp(0., 1.) * 255.).round() as u32,
+            ))
             .border_widths(width)
             .corner_radii(radius)
             .corner_smoothing(smoothing)
     };
-    window.paint_quad(ring(side));
     let band = Bounds::new(area.origin, size(area.size.width, radius + width));
-    window.with_content_mask(
-        Some(ContentMask {
-            bounds: band,
-            fade_out: Default::default(),
-        }),
-        |window| window.paint_quad(ring(top)),
-    );
+    let masked = |bounds, quad: PaintQuad, window: &mut Window| {
+        window.with_content_mask(
+            Some(ContentMask {
+                bounds,
+                fade_out: Default::default(),
+            }),
+            |window| window.paint_quad(quad),
+        )
+    };
+    if side.0 == top.0 {
+        window.paint_quad(ring(side));
+        masked(band, ring((top.0, top.1 - side.1)), window);
+    } else {
+        let below = Bounds::from_corners(point(area.origin.x, band.bottom()), area.bottom_right());
+        masked(below, ring(side), window);
+        masked(band, ring(top), window);
+    }
 }
-/// The strip under the pointer: its rim brightens toward white (nothing else
-/// changes) and the trim grip stands inside the nearer edge.
+/// The strip under the pointer: its rim in the hover state (lighter on the
+/// dark canvas, deeper on the light one; nothing else changes) and the trim grip stands inside the nearer edge.
 fn strip_hover(op: &Op, pointer_x: f64, origin: Point<Pixels>, t: &Tokens, window: &mut Window) {
     let b = op.bounds;
     let area = Bounds::new(
@@ -2390,15 +2732,14 @@ fn strip_hover(op: &Op, pointer_x: f64, origin: Point<Pixels>, t: &Tokens, windo
         size(px(b.width as f32), px(b.height as f32)),
     );
     let hover = t.strip(op.color, pm_design::StripState::Hover);
-    let tint = |(rgb, a): (u32, f32)| rgba((rgb << 8) | (a.clamp(0., 1.) * 255.).round() as u32);
     let radius = px(op.radius as f32).min(area.size.height / 2.);
     strip_rim(
         area,
         radius,
         px(t.metrics.border),
         t.radius.smoothing,
-        tint(hover.rim),
-        tint((hover.rim_top.0, hover.rim_top.1 - hover.rim.1)),
+        hover.rim,
+        hover.rim_top,
         window,
     );
     let grip = t.trim_grip();
@@ -2536,11 +2877,8 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
                 (radius - inset).max(px(0.)),
                 rim,
                 smoothing,
-                tint(hex("rim"), number("rimAlpha")),
-                tint(
-                    hex("rimTop"),
-                    (number("rimTopAlpha") - number("rimAlpha")).max(0.),
-                ),
+                (hex("rim"), number("rimAlpha") as f32),
+                (hex("rimTop"), number("rimTopAlpha") as f32),
                 window,
             );
         }
@@ -2755,6 +3093,12 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
                     else {
                         return;
                     };
+                    // A strip too short for three letters of its name shows
+                    // its colour alone: one letter and an ellipsis names
+                    // nothing.
+                    if fitted.chars().count() < NAME_LEAST + 1 {
+                        return;
+                    }
                     line = shape(fitted, window);
                 }
             }
@@ -2764,6 +3108,8 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
             let x = if op.detail["align"] == "center" {
                 let x = b.x + (b.width - f32::from(line.width) as f64) / 2.;
                 x.max(op.detail["minX"].as_f64().unwrap_or(f64::MIN))
+            } else if op.detail["align"] == "right" {
+                b.x + b.width - f32::from(line.width) as f64
             } else {
                 b.x
             };

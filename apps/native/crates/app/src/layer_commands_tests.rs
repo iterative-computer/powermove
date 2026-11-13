@@ -366,6 +366,7 @@ fn every_seeded_effect_adds_through_the_kernel_and_draws_in_the_viewer_path() {
         run(
             &kernel,
             Plan {
+                count_keys: None,
                 label: "Add Effect".into(),
                 commands: vec![
                     pm_kernel::EffectCommand::Add(Box::new(

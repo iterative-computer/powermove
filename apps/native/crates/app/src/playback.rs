@@ -243,10 +243,11 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                 }
                 v.tick_builtins(cx);
                 let scale=v.host.borrow().window.backingScaleFactor();
-                if let Some(clock)=status.clock { v.sync_popout(&clock); v.sync_studio_pane_clock(&clock); }
+                if let Some(clock)=status.clock { v.watch_run(&clock); v.sync_popout(&clock); v.sync_studio_pane_clock(&clock); }
                 v.sync_studio_panes(cx);
                 if let Some(clock)=status.clock {
-                    let playing=clock.state==pm_protocol::clock::TransportState::Playing;
+                    // Shuttling is a run too: the live timecode shows at every speed.
+                    let playing=clock.state!=pm_protocol::clock::TransportState::Stopped;
                     let fraction=(clock.media_time.get()as f64/pm_protocol::common::TICKS_PER_SECOND as f64/v.duration).clamp(0.,1.);
                     let _=layers.update(MainThreadMarker::new().unwrap(),&clock,clock.host_time,v.rate,fraction,std::array::from_fn(|i|status.levels.as_ref().and_then(|l|l.master.peak.get(i)).copied().unwrap_or(0.) as f64));
                     let host=v.host.borrow();
@@ -262,6 +263,8 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                         if let Some(p)=&playhead { p.style(&host.tokens, scale); }
                         let geometry=v.builtins.timeline_place;
                         let (pps,scroll_time,column)=v.builtins.timeline.as_ref().map_or((100.,0.,0.),|t|t.read(cx).time_mapping());
+                        // The playhead ends where the tracks do, above the bottom bar.
+                        let bar=v.builtins.timeline.as_ref().map_or(0.,|t|t.read(cx).bar_height()) as f32;
                         let seconds=clock.media_time.get()as f64/pm_protocol::common::TICKS_PER_SECOND as f64;
                         let offset=column+(seconds-scroll_time)*pps;
                         // A clear ground: the panel hides its paused readout while playing
@@ -278,9 +281,10 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                             let slot=&measured.as_ref().unwrap().1;
                             let top=r.y+(metrics.header-slot.h)/2.;
                             let _:()=msg_send![&*layers.timecode,setFrame:NSRect::new(NSPoint::new((r.x+metrics.inset+metrics.hit+metrics.gap) as f64,height-(top+slot.h) as f64),NSSize::new(slot.w as f64,slot.h as f64))];
-                            let tall=(r.h-y-metrics.inset).max(0.) as f64;
+                            let foot=bar.max(metrics.inset);
+                            let tall=(r.h-y-foot).max(0.) as f64;
                             if let Some(p)=&mut playhead {
-                                p.place(r.x as f64+offset,height-(r.y+r.h-metrics.inset)as f64,metrics.playhead as f64,tall,metrics.ruler as f64,playing,&host.tokens);
+                                p.place(r.x as f64+offset,height-(r.y+r.h-foot)as f64,metrics.playhead as f64,tall,metrics.ruler as f64,playing,&host.tokens);
                             }
                         }
                         let _:()=msg_send![objc2::class!(CATransaction),commit];

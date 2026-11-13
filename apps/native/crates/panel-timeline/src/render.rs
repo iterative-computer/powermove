@@ -1000,32 +1000,54 @@ impl Scene {
     fn ruler(&self, v: Viewport, t: &Tokens, ops: &mut Vec<Op>) {
         let (m, c) = (t.metrics, &t.colors);
         let h = m.ruler as f64;
-        ops.push(Op::new(
+        // The ruler and the band over the layer column are one piece: its
+        // foot is one hairline across the panel.
+        let (edge, edge_alpha) = t.line();
+        let mut border = Op::new(
             "ruler-border",
             "rect",
-            Rect::new(
-                v.layer_column,
-                h - m.border as f64,
-                v.width - v.layer_column,
-                m.border as f64,
-            ),
-            c.separator,
-        ));
+            Rect::new(0., h - m.border as f64, v.width, m.border as f64),
+            edge,
+        );
+        border.opacity = edge_alpha as f64;
+        ops.push(border);
+        // The work area is the lit stretch of the ruler between two bars, in
+        // the ink, not the accent: the playhead is the ruler's one bright
+        // mark. The tracks outside it are veiled.
         if self.work_area != (0., self.duration) {
             if let Some(r) = span(v.x(self.work_area.0), v.x(self.work_area.1), 0., h, v) {
-                ops.push(Op::new("work-area", "rect", r, c.accent_wash));
+                let mut o = Op::new("work-area", "rect", r, c.text);
+                o.opacity = WORK_AREA_WASH;
+                ops.push(o);
             }
             for (edge, time) in [("in", self.work_area.0), ("out", self.work_area.1)] {
                 let x = v.x(time);
                 if x >= v.layer_column && x <= v.width {
+                    // What the pointer takes hold of is wider than the bar.
                     let mut o = Op::new(
                         format!("work-{edge}"),
                         "work-area-handle",
                         Rect::new(x - 3., 0., 6., h),
-                        c.accent,
+                        c.text,
                     );
-                    o.radius = m.inner_radius as f64;
+                    o.opacity = 0.;
                     o.detail = json!({"outerEdge":edge});
+                    ops.push(o);
+                    let mut o = Op::new(
+                        format!("work-bar:{edge}"),
+                        "rect",
+                        // The foot of the ruler, clear of a label that
+                        // stands at the same second.
+                        Rect::new(
+                            x - WORK_AREA_BAR / 2.,
+                            h / 2.,
+                            WORK_AREA_BAR,
+                            h / 2. - m.border as f64,
+                        ),
+                        c.text,
+                    );
+                    o.opacity = WORK_AREA_EDGE;
+                    o.radius = WORK_AREA_BAR / 2.;
                     ops.push(o);
                 }
             }
@@ -1039,6 +1061,26 @@ impl Scene {
         };
         let (label_step, frames) = self.label_step(v);
         let right = v.scroll_time + (v.width - v.layer_column) / v.pps;
+        // Between two labels, smaller and fainter dots count the scale off.
+        let minor = minor_step(label_step, v.pps, self.fps, frames);
+        if let Some(minor) = minor {
+            let every = (label_step / minor).round().max(1.) as u64;
+            let mut i = (v.scroll_time / minor).ceil().max(0.) as u64;
+            while i as f64 * minor <= right && ops.len() < 10_000 {
+                if !i.is_multiple_of(every) {
+                    let x = v.x(i as f64 * minor);
+                    let mut o = Op::new(
+                        format!("minor:{i}"),
+                        "circle",
+                        Rect::new(x - 1., h - 6.5, 2., 2.),
+                        major.0,
+                    );
+                    o.opacity = major.1 * MINOR_DOT;
+                    ops.push(o);
+                }
+                i += 1;
+            }
+        }
         let mut i = (v.scroll_time / label_step).ceil().max(0.) as u64;
         while i as f64 * label_step <= right && ops.len() < 10_000 {
             let time = i as f64 * label_step;
@@ -1150,6 +1192,40 @@ impl Scene {
             }
         }
     }
+}
+/// The work area in the ruler: the wash between its two bars, the bars'
+/// ink and their width.
+const WORK_AREA_WASH: f64 = 0.09;
+const WORK_AREA_EDGE: f64 = 0.6;
+const WORK_AREA_BAR: f64 = 2.;
+/// A minor dot's ink against a label's dot, and the least room between two.
+const MINOR_DOT: f64 = 0.55;
+const MINOR_ROOM: f64 = 7.;
+/// Seconds between the ruler's minor dots: the finest whole division of the
+/// label step that leaves `MINOR_ROOM` between dots; none when even halves
+/// would crowd.
+fn minor_step(label_step: f64, pps: f64, fps: f64, frames: bool) -> Option<f64> {
+    if frames {
+        let frame = 1. / fps;
+        return (label_step > frame * 1.5 && frame * pps >= MINOR_ROOM).then_some(frame);
+    }
+    let divisions: &[f64] = match label_step as u64 {
+        1 => &[10., 5., 2.],
+        5 => &[5.],
+        10 => &[10., 5., 2.],
+        15 => &[3.],
+        30 => &[6., 3., 2.],
+        60 => &[6., 4., 2.],
+        120 => &[4., 2.],
+        300 => &[5.],
+        600 => &[10., 5., 2.],
+        1800 => &[6., 3., 2.],
+        _ => &[6., 4., 2.],
+    };
+    divisions
+        .iter()
+        .map(|n| label_step / n)
+        .find(|step| step * pps >= MINOR_ROOM)
 }
 /// A waveform is a soft shape in the strip's own hue, not a solid one.
 const WAVEFORM_OPACITY: f64 = 0.72;

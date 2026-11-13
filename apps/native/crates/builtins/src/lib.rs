@@ -8,6 +8,7 @@ mod chrome;
 pub use agent_host::AgentCarry;
 pub use models::APPLICATION_AGENT_STORE;
 pub use pm_panel_inspector::EffectClipboard;
+pub use properties::STARTING_EXPRESSION;
 pub use settings::{RESOLUTIONS, set_notification_status};
 
 /// Panel state is locked both on the V8 owner thread (every panel and
@@ -1328,6 +1329,20 @@ impl Builtins {
     pub fn timeline_action(&self, intent: Value) -> Result<Ticket<Evaluation>> {
         self.realm_of("timeline")?
             .eval(format!("__pmBuiltin.command('panel.timeline',{})", intent))
+    }
+
+    /// A panel's own command with `intent`, exactly as its controls send it.
+    pub fn panel_command(
+        &self,
+        panel: &str,
+        command: &str,
+        intent: &Value,
+    ) -> Result<Ticket<Evaluation>> {
+        self.realm_of(panel)?.eval(format!(
+            "__pmBuiltin.command({},{})",
+            json!(command),
+            intent
+        ))
     }
 
     /// Inspect exact library source and CAS revision on the panel worker.
