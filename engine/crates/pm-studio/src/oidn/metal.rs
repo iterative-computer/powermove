@@ -47,12 +47,12 @@ impl Drop for Owned {
 }
 pub(super) struct Metal {
     device: Device,
-    filters: [Filter; 3],
+    filters: Vec<Filter>,
     buffers: [Owned; 6],
 }
 impl Drop for Metal {
     fn drop(&mut self) {
-        for f in self.filters {
+        for &f in &self.filters {
             if !f.is_null() {
                 unsafe { oidnReleaseFilter(f) };
             }
@@ -73,7 +73,7 @@ impl Metal {
         }
         let mut this = Self {
             device,
-            filters: [std::ptr::null_mut(); 3],
+            filters: Vec::new(),
             buffers: Default::default(),
         };
         unsafe { oidnCommitDevice(device) };
@@ -81,14 +81,33 @@ impl Metal {
         if unsafe { oidnGetDeviceInt(device, name("type").as_ptr()) } != 5 {
             return Err("Open Image Denoise did not select Metal".into());
         }
-        for i in 0..3 {
-            this.filters[i] = unsafe { oidnNewFilter(device, name("RT").as_ptr()) };
-            this.check()?;
-            if this.filters[i].is_null() {
-                return Err("Open Image Denoise Metal filter unavailable".into());
-            }
+        for _ in 0..3 {
+            this.add_filter()?;
         }
         Ok(this)
+    }
+    fn add_filter(&mut self) -> Result<(), String> {
+        let filter = unsafe { oidnNewFilter(self.device, name("RT").as_ptr()) };
+        self.filters.push(filter);
+        self.check()?;
+        if filter.is_null() {
+            return Err("Open Image Denoise Metal filter unavailable".into());
+        }
+        Ok(())
+    }
+    fn beauty_filter(&mut self, layer: usize) -> Result<usize, String> {
+        // A cropped color layer and the full-size catcher must not keep
+        // rebuilding one another's neural graph. Keep one filter per layer;
+        // OIDN already reuses a committed graph when its shape is unchanged.
+        let index = if layer == 0 {
+            0
+        } else {
+            layer.checked_add(2).ok_or("too many denoise layers")?
+        };
+        while self.filters.len() <= index {
+            self.add_filter()?;
+        }
+        Ok(index)
     }
     fn check(&self) -> Result<(), String> {
         let mut message = std::ptr::null();
@@ -266,12 +285,6 @@ impl Metal {
                 times.upload_ms += t.elapsed().as_secs_f64() * 1000.;
             }
         }
-        unsafe {
-            oidnSetFilterBool(self.filters[0], name("hdr").as_ptr(), true);
-            oidnSetFilterBool(self.filters[0], name("cleanAux").as_ptr(), true);
-            oidnSetFilterInt(self.filters[0], name("quality").as_ptr(), quality);
-            oidnSetFilterFloat(self.filters[0], name("inputScale").as_ptr(), f32::NAN);
-        }
         // Defer publication until every layer succeeds: CPU fallback sees the
         // original inputs, never a partially or twice-denoised color layer.
         let mut pending = Vec::new();
@@ -284,17 +297,24 @@ impl Metal {
             } else {
                 (0, 0, w, h)
             };
+            let filter = self.beauty_filter(index)?;
+            unsafe {
+                oidnSetFilterBool(self.filters[filter], name("hdr").as_ptr(), true);
+                oidnSetFilterBool(self.filters[filter], name("cleanAux").as_ptr(), true);
+                oidnSetFilterInt(self.filters[filter], name("quality").as_ptr(), quality);
+                oidnSetFilterFloat(self.filters[filter], name("inputScale").as_ptr(), f32::NAN);
+            }
             let offset = y * w + x;
             let t = std::time::Instant::now();
             self.upload(0, &color[..pixels * stride])?;
             times.upload_ms += t.elapsed().as_secs_f64() * 1000.;
             self.ensure(5, rw * rh * 3)?;
-            self.bind(0, "color", 0, (rw, rh), offset * stride, stride, w);
-            self.bind(0, "albedo", 3, (rw, rh), offset * 3, 3, w);
-            self.bind(0, "normal", 4, (rw, rh), offset * 3, 3, w);
-            self.bind(0, "output", 5, (rw, rh), 0, 3, rw);
+            self.bind(filter, "color", 0, (rw, rh), offset * stride, stride, w);
+            self.bind(filter, "albedo", 3, (rw, rh), offset * 3, 3, w);
+            self.bind(filter, "normal", 4, (rw, rh), offset * 3, 3, w);
+            self.bind(filter, "output", 5, (rw, rh), 0, 3, rw);
             let t = std::time::Instant::now();
-            self.execute(0, cancel)?;
+            self.execute(filter, cancel)?;
             times.beauty_ms += t.elapsed().as_secs_f64() * 1000.;
             times.beauty_pixels += (rw * rh) as u64;
             let t = std::time::Instant::now();

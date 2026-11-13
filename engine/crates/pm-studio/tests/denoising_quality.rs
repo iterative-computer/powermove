@@ -322,11 +322,14 @@ fn adaptive_polished_and_catcher_pixels_keep_enough_observations() {
     floor.objects=vec![Object{mesh:mesh::sphere(v3(1000.,0.,0.),1.,12,24),material:0}];
     floor.shadow_catcher=true;floor.backdrop=Vec3::splat(0.9);
     floor.camera=Camera::lens(v3(0.,6.,8.),Vec3::ZERO,50.,0.);
+    // HDRI-only light cannot launch this renderer's caustic photon pass.
+    // Add a real emitter so the enabled-map case exercises that transport.
+    floor.lights.push(pm_studio::scene::Softbox::aimed(Vec3::ZERO,-30.,45.,6.,3.,3.,Vec3::splat(4.)));
     let mut r=Renderer::new(64,48).unwrap();
     for hardware in [false,true] {
         r.hardware_rt=hardware;r.caustics_enabled=false;
         r.sampling_policy=pm_studio::sampling::SamplingPolicy::PRODUCTION;
-        for (scene,object,minimum) in [(&mirror,1,32.),(&floor,0,24.)] {
+        for (scene,object,minimum) in [(&mirror,1,32.),(&floor,0,16.)] {
             r.set_scene(scene,&scene.prepare());
             r.set_adaptive_sampling_with_floor(AdaptiveSampling{enabled:true,min_samples:8,relative_error:0.12,absolute_error:0.001},true);
             r.trace(128,8,true,64);
@@ -335,18 +338,29 @@ fn adaptive_polished_and_catcher_pixels_keep_enough_observations() {
             assert!(visible.len()>100 && visible.iter().all(|&n|n>=minimum),"undersampled reflection/catcher: {visible:?}");
             assert!(visible.iter().any(|&n|n<128.),"quiet regions must still converge");
         }
+        r.caustics_enabled = true;
+        r.set_scene(&floor, &floor.prepare());
+        r.set_precomputed_caustics(true);
+        r.set_adaptive_sampling_with_floor(AdaptiveSampling{enabled:true,min_samples:8,relative_error:0.12,absolute_error:0.001},true);
+        r.trace(128, 8, true, 64);
+        let catcher = r.sample_counts();
+        assert!(catcher.iter().all(|&n|n>=24.),"caustic catcher stopped too early");
+        assert!(catcher.iter().any(|&n|n<128.),"caustic catcher did not exercise adaptive stopping");
         // A real diffuse mesh behind glass also receives caustics. It must not
         // stop on an apparently quiet first batch merely because it is not
         // represented by the analytic shadow catcher.
-        let receiver = glass_detail();
+        let mut receiver = glass_detail();
+        receiver.lights = floor.lights.clone();
         r.caustics_enabled = true;
         r.set_scene(&receiver, &receiver.prepare());
         r.set_precomputed_caustics(true);
+        r.set_adaptive_sampling_with_floor(AdaptiveSampling{enabled:true,min_samples:8,relative_error:0.12,absolute_error:0.001},true);
         r.trace(128, 8, true, 64);
         let counts = r.sample_counts();
         let ids = r.first_hit_ids();
         let matte: Vec<_> = counts.iter().zip(ids).filter_map(|(&n,id)|(id==2).then_some(n)).collect();
         assert!(matte.len()>100 && matte.iter().all(|&n|n>=24.),"undersampled mesh caustic receiver: {matte:?}");
+        assert!(matte.iter().any(|&n|n<128.),"mesh receiver did not exercise adaptive stopping");
     }
 }
 
