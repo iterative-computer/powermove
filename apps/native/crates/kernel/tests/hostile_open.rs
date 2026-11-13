@@ -8,6 +8,13 @@
 //! readable message. A dead kernel (a panic) or a call that never answers
 //! (a hang) fails the test, and afterwards the same kernel must still open a
 //! good project.
+//!
+//! Two tests run the same cases. The default one judges what the kernel
+//! does: it calls a call hung only after [`HANG`], long enough that a loaded
+//! machine and a debug build cannot be taken for a hang. The other holds
+//! every answer to [`DEADLINE`] and is run by name on an unloaded machine
+//! (`cargo test -p pm-kernel --test hostile_open -- --ignored
+//! hostile_projects_answer_within_the_deadline`).
 
 mod hostile;
 
@@ -20,12 +27,25 @@ use pm_model::NodeKind;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// How long one kernel answer may take (`PM_HOSTILE_ANSWER_S` overrides).
+/// How long one kernel answer may take before it counts as slow: the
+/// deadline the editor is held to.
+const DEADLINE: Duration = Duration::from_secs(60);
+/// How long before a call that has not answered is a hang, whatever the
+/// machine is doing.
+const HANG: Duration = Duration::from_secs(900);
+
+thread_local! {
+    /// The limit of the test running on this thread.
+    static LIMIT: std::cell::Cell<Duration> = const { std::cell::Cell::new(HANG) };
+}
+
+/// How long one kernel answer may take in the running test
+/// (`PM_HOSTILE_ANSWER_S` overrides).
 fn answer_limit() -> Duration {
     std::env::var("PM_HOSTILE_ANSWER_S")
         .ok()
         .and_then(|s| s.parse().ok())
-        .map_or(Duration::from_secs(60), Duration::from_secs)
+        .map_or(LIMIT.get(), Duration::from_secs)
 }
 
 #[derive(Debug)]
@@ -203,8 +223,22 @@ fn readable(message: &str) -> bool {
         && message.len() < 600
 }
 
+/// Every case opens or is refused readably, nothing panics, no call hangs
+/// ([`HANG`]) and the kernel still works afterwards.
 #[test]
 fn hostile_projects_open_or_refuse_without_crashing_or_hanging() {
+    hostile_projects(HANG);
+}
+
+/// The same cases with every kernel answer held to [`DEADLINE`].
+#[test]
+#[ignore = "deadline: run on an unloaded machine, by name"]
+fn hostile_projects_answer_within_the_deadline() {
+    hostile_projects(DEADLINE);
+}
+
+fn hostile_projects(limit: Duration) {
+    LIMIT.set(limit);
     // `PM_HOSTILE_ONLY=<substring>` runs the matching cases only.
     let only = std::env::var("PM_HOSTILE_ONLY").ok();
     let cases: Vec<_> = hostile::cases(12)

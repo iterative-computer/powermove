@@ -454,8 +454,21 @@ impl DecodeImporter {
         encoder: &mut wgpu::CommandEncoder,
         imp: &ImportedFrame,
     ) -> Result<Normalized> {
+        self.normalize_as(queue, encoder, imp, imp.format.range)
+    }
+
+    /// [`Self::normalize`] with the frame's Y′CbCr codes read as `range`
+    /// (`PixelFormat::norm_as`): the reading in use, which Interpret Footage
+    /// can set against the file's own flag.
+    pub fn normalize_as(
+        &self,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        imp: &ImportedFrame,
+        range: pm_protocol::color::Range,
+    ) -> Result<Normalized> {
         let f = &imp.format;
-        let n = f.norm();
+        let n = f.norm_as(range);
         let unorm_max = |pf: PlaneFormat| match pf {
             PlaneFormat::R8 | PlaneFormat::Rg8 | PlaneFormat::Rgba8 => 255.0,
             PlaneFormat::R16 | PlaneFormat::Rg16 | PlaneFormat::Rgba16 => 65535.0,

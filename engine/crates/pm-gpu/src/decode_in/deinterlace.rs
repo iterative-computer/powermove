@@ -21,7 +21,14 @@ pub struct CodeSpace {
 
 impl CodeSpace {
     pub fn of(f: &PixelFormat) -> CodeSpace {
-        let n = f.norm();
+        Self::read_as(f, f.range)
+    }
+
+    /// The code space of frames normalized as `range`
+    /// (`DecodeImporter::normalize_as`), so the filter runs on the codes
+    /// the file holds.
+    pub fn read_as(f: &PixelFormat, range: pm_protocol::color::Range) -> CodeSpace {
+        let n = f.norm_as(range);
         // MSB-aligned formats filter n-bit codes (c = v / 64 for x420).
         let unit = if f.alignment == SampleAlignment::MsbIn16 {
             (1u32 << (16 - f.bits)) as f64

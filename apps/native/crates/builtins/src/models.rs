@@ -342,14 +342,6 @@ impl Backend {
         let frames = (time * fps).round().max(0.) as u64;
         let nominal = fps.round().max(1.) as u64;
         let sec = frames / nominal;
-        frame["graphEmpty"] = json!(
-            !client
-                .model
-                .index
-                .layers
-                .iter()
-                .any(|l| l.channels.iter().any(|c| !c.keys.is_empty()))
-        );
         frame["playing"] = json!(playing);
         frame["timecode"] = json!(format!(
             "{:02}:{:02}:{:02}:{:02}",

@@ -29,7 +29,7 @@ use foreign_types::ForeignTypeRef;
 use futures::channel::oneshot;
 use gpui_util::ResultExt;
 use objc2::{
-    MainThreadMarker, class, msg_send,
+    MainThreadMarker, Message, class, msg_send,
     rc::Retained,
     runtime::{AnyClass, AnyObject as Objc2Object, AnyProtocol, Bool, ClassBuilder, Sel},
     sel,
@@ -1499,6 +1499,7 @@ impl MacWindow {
             let app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
             let main_window: ObjcId = msg_send![app, mainWindow];
             let mut sheet_parent = None;
+            let mut held_sheet = false;
             // Powermove P-SHEET/P-CHILD: the window that asked, if it named one.
             let requested: ObjcId = match requested_parent {
                 Some(rwh::RawWindowHandle::AppKit(handle)) => {
@@ -1561,8 +1562,19 @@ impl MacWindow {
                                 active_sheet
                             }
                         };
-                        let _: () =
-                            msg_send![parent, beginSheet: native_window, completionHandler: NIL];
+                        // A development lane holds it while the app is
+                        // inactive (child_window::sheet); otherwise it begins now.
+                        let on = Retained::retain(parent as *mut objc2_app_kit::NSWindow)
+                            .expect("the sheet's parent");
+                        let sheet = Retained::retain(native_window as *mut objc2_app_kit::NSWindow)
+                            .expect("the sheet window");
+                        let (asked_on, asked) = (on.clone(), sheet.clone());
+                        held_sheet = !crate::child_window::sheet(
+                            &asked_on,
+                            &asked,
+                            move || on.beginSheet_completionHandler(&sheet, None),
+                            || {},
+                        );
                         sheet_parent = Some(parent);
                     }
                 }
@@ -1622,7 +1634,8 @@ impl MacWindow {
                 }
             }
 
-            if show {
+            // A sheet waiting for the app to become active shows when it begins.
+            if show && !held_sheet {
                 present(native_window, focus);
             }
 
@@ -1729,6 +1742,13 @@ impl Drop for MacWindow {
         let sheet_parent = this.sheet_parent.take();
         // A child window queued to show on activation never shows once closed.
         unsafe { crate::child_window::forget(&*(window as *const objc2_app_kit::NSWindow)) };
+        // Nor does a sheet that waited for it, and sheets waiting to go on
+        // it are cancelled.
+        unsafe {
+            let window = &*(window as *const objc2_app_kit::NSWindow);
+            crate::child_window::forget_sheet(window);
+            crate::child_window::forget_sheets_on(window);
+        }
         this.frame_source.take();
         if let Some(link) = this.ca_display_link.take() {
             unsafe {
@@ -2010,7 +2030,15 @@ impl PlatformWindow for MacWindow {
                     let sheet_window: &Objc2NSWindow =
                         unsafe { &*(native_window as *const Objc2NSWindow) };
 
-                    alert.beginSheetModalForWindow_completionHandler(sheet_window, Some(&block));
+                    let on = sheet_window.retain();
+                    let shown = alert.clone();
+                    // A dropped prompt drops `block` and its sender: cancelled.
+                    crate::child_window::sheet(
+                        sheet_window,
+                        &alert.window(),
+                        move || shown.beginSheetModalForWindow_completionHandler(&on, Some(&block)),
+                        || {},
+                    );
                 }
             })
             .detach();

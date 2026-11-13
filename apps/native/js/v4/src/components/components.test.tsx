@@ -231,11 +231,12 @@ test("row association, shared token column, unit colour and authored numeric des
     fontVariantNumeric: "tabular-nums",
     textAlign: "left",
   });
+  // The host sizes a row's columns: the value slot pins no width.
   expect(
     [...root.host.nodes.values()].find(
       (n) => n.props["data-pm-slot"] === "value",
     )!.props.style,
-  ).toMatchObject({ width: UI.token("metrics.value_column") });
+  ).toBeUndefined();
   expect(n.props.labelledBy).toBeDefined();
   root.dispose();
 });

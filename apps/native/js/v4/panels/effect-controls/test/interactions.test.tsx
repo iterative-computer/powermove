@@ -32,7 +32,8 @@ test("§4 header selection, disclosure, checkbox, reset/remove, and outside cont
     });
     const chevron = find(
       root,
-      (p) => (p.attr as any)?.symbol === "chevron.right",
+      // An expanded heading's disclosure points down.
+      (p) => (p.attr as any)?.symbol === "chevron.down",
     );
     await event(root, chevron.id, "click", {}, [header().id]);
     await settle();

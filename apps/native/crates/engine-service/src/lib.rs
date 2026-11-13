@@ -172,8 +172,10 @@ fn viewer_media(
     Arc<pm_export::render::MediaPaths>,
 ) {
     let paths = |m: &MediaCatalog| {
+        let paths = m.viewer_paths(mode);
         Arc::new(pm_export::render::MediaPaths {
-            paths: m.viewer_paths(mode),
+            originals: m.copied(&paths),
+            paths,
             resolving: m.resolving.clone(),
         })
     };
@@ -210,9 +212,23 @@ impl MediaCatalog {
             paths.extend(self.proxies.clone());
         }
         pm_export::render::MediaPaths {
+            originals: self.copied(&paths),
             paths,
             ..Default::default()
         }
+    }
+    /// The originals of the assets `paths` draws from a proxy or optimized
+    /// copy: Interpret Footage describes the original, and the renderer
+    /// carries it to the copy (`pm_render::footage::for_copy`).
+    fn copied(
+        &self,
+        paths: &BTreeMap<String, std::path::PathBuf>,
+    ) -> BTreeMap<String, std::path::PathBuf> {
+        self.originals
+            .iter()
+            .filter(|(id, original)| paths.get(*id).is_some_and(|path| path != *original))
+            .map(|(id, original)| (id.clone(), original.clone()))
+            .collect()
     }
     /// The file the viewer reads for each asset in `mode`.
     pub fn viewer_paths(&self, mode: MediaMode) -> BTreeMap<String, std::path::PathBuf> {
@@ -3113,17 +3129,35 @@ impl Headless {
         spec: FrameSpec,
         overlays: &OverlayGeometry,
     ) -> Result<Vec<[f64; 3]>> {
+        Ok(self.frame_spec_read(scene, spec, overlays)?.0)
+    }
+    /// Reads rendered frames from `disk` where a viewer's engine would: a
+    /// playing, dragged or paused frame that is on disk is presented from
+    /// it instead of drawn.
+    pub fn read_rendered_frames(&mut self, disk: render_cache::DiskFrames) {
+        self.engine.disk = Some(disk);
+    }
+    /// [`Self::frame_spec_settled`], and whether the picture was a rendered
+    /// frame read from disk ([`Self::read_rendered_frames`]).
+    pub fn frame_spec_read(
+        &mut self,
+        scene: &Scene,
+        spec: FrameSpec,
+        overlays: &OverlayGeometry,
+    ) -> Result<(Vec<[f64; 3]>, bool)> {
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
         loop {
+            let trace = Arc::new(Mutex::new(trace::Trace::default()));
             match self
                 .engine
-                .frame(scene, spec, None, overlays, true, Arc::default())
+                .frame(scene, spec, None, overlays, true, trace.clone())
             {
                 Ok(s) => {
                     let s = s.ok_or_else(|| anyhow::anyhow!("no offscreen target"))?;
                     s.commit();
                     s.complete()?;
-                    return Ok(s.pixels());
+                    let from_disk = trace.lock().unwrap().disk == 2;
+                    return Ok((s.pixels(), from_disk));
                 }
                 Err(e) if render::transient(&e) && std::time::Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_secs_f64(RETRY_SECONDS));

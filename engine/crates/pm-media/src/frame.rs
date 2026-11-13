@@ -131,6 +131,14 @@ impl PixelFormat {
     /// The section 13 constants for this format, from contract 4's
     /// reference (`pm_protocol::color::normalization`).
     pub fn norm(&self) -> Norm {
+        self.norm_as(self.range)
+    }
+
+    /// [`Self::norm`] with the Y′CbCr codes read as `range`: Interpret
+    /// Footage's correction of a file whose range flag is wrong. The format
+    /// itself (the decoder's fact, shared by every reader of the frame) is
+    /// not changed. RGB and float layouts have no range to read.
+    pub fn norm_as(&self, range: Range) -> Norm {
         if self.is_float() {
             return Norm {
                 y_off: 0.0,
@@ -150,7 +158,7 @@ impl PixelFormat {
                     chroma_scale: m,
                 }
             }
-            _ => normalization(self.bits, self.alignment, self.range),
+            _ => normalization(self.bits, self.alignment, range),
         };
         Norm {
             y_off: n.luma_offset,

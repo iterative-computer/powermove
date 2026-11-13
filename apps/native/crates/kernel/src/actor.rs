@@ -334,6 +334,8 @@ struct Shared {
     subscribers: Mutex<Vec<mpsc::Sender<KernelEvent>>>,
     realms: Mutex<HashMap<Writer, mpsc::Sender<RealmEnvelope>>>,
     journal_sync: Mutex<Option<crate::journal::JournalSync>>,
+    /// The actor's own mailbox, for a worker to hand back what it did.
+    back: Mutex<Option<mpsc::Sender<Msg>>>,
 }
 
 type Reply<T> = Box<dyn FnOnce(T) + Send>;
@@ -368,6 +370,9 @@ enum Msg {
         path: Option<std::path::PathBuf>,
         replace: bool,
         document: Option<u64>,
+        /// The save's disk work, when a worker has done it
+        /// ([`crate::session::SaveJob`]); `None` inside: the worker failed.
+        prelude: Option<Option<Box<crate::session::SavePrelude>>>,
         reply: Reply<Result<crate::session::SessionSave, KernelFailure>>,
     },
     FinishSave {
@@ -380,6 +385,14 @@ enum Msg {
     },
     Shell {
         call: crate::session::ShellCall,
+        reply: Reply<Result<crate::session::ShellReply, KernelFailure>>,
+    },
+    /// A file open whose disk work a worker has done
+    /// ([`crate::session::OpenJob`]); `prelude` is `None` if it failed.
+    Opened {
+        call: crate::session::ShellCall,
+        path: std::path::PathBuf,
+        prelude: Option<Box<crate::session::OpenPrelude>>,
         reply: Reply<Result<crate::session::ShellReply, KernelFailure>>,
     },
     Call {
@@ -437,6 +450,7 @@ impl KernelActor {
         let (tx, rx) = mpsc::channel::<Msg>();
         let shared = Arc::new(Shared::default());
         *shared.state.lock().expect("state") = Arc::new(crate::state::StateSnapshot::seeded());
+        *shared.back.lock().expect("back") = Some(tx.clone());
         let thread = {
             let shared = shared.clone();
             let wake = tx.clone();
@@ -617,6 +631,7 @@ impl KernelHandle {
             path,
             replace,
             document,
+            prelude: None,
             reply: Box::new(move |v| r.resolve(v)),
         });
         p
@@ -955,7 +970,7 @@ fn scope(msg: &Msg) -> Scope {
         | Msg::Close { project, .. } => Scope::Project(project.clone()),
         Msg::PrepareSave { session, .. } => Scope::Project(session.project.clone()),
         Msg::FinishSave { completion, .. } => Scope::Project(completion.project().to_owned()),
-        Msg::Shell { call, .. } => shell_scope(call),
+        Msg::Shell { call, .. } | Msg::Opened { call, .. } => shell_scope(call),
         Msg::State { .. }
         | Msg::ProClock { .. }
         | Msg::Profile { .. }
@@ -1141,6 +1156,71 @@ fn contain(
     );
 }
 
+/// Runs `work` on a worker thread and posts `done(result)` back to the
+/// actor (`None` if `work` panicked): the actor never waits on it.
+fn off_actor<T: Send + 'static>(
+    name: &str,
+    back: mpsc::Sender<Msg>,
+    work: impl FnOnce() -> T + Send + 'static,
+    done: impl FnOnce(Option<Box<T>>) -> Msg + Send + 'static,
+) {
+    let run = move || {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)).ok();
+        let _ = back.send(done(result.map(Box::new)));
+    };
+    // A thread that cannot be started leaves the caller unanswered (its
+    // reply closes), as any call the kernel could not serve.
+    let _ = thread::Builder::new().name(name.into()).spawn(run);
+}
+
+/// One shell call, with what it publishes and emits.
+fn shell_step(
+    kernel: &mut Kernel,
+    shared: &Arc<Shared>,
+    call: crate::session::ShellCall,
+    reply: Reply<Result<crate::session::ShellReply, KernelFailure>>,
+) {
+    let before: Vec<_> = kernel.projects().map(str::to_owned).collect();
+    let result = kernel.shell(call);
+    let ids: Vec<_> = kernel.projects().map(str::to_owned).collect();
+    shared
+        .published
+        .lock()
+        .expect("published")
+        .retain(|id, _| ids.contains(id));
+    *shared.state.lock().expect("state") = Arc::new(kernel.state().clone());
+    for id in &ids {
+        publish(kernel, shared, id);
+    }
+    reply(result);
+    for id in &ids {
+        if !before.contains(id) {
+            emit(
+                shared,
+                KernelEvent::Opened {
+                    project: id.clone(),
+                },
+            );
+        } else if let Some(p) = kernel.project(id) {
+            emit(
+                shared,
+                KernelEvent::Published {
+                    project: id.clone(),
+                    revision: p.store().revision(),
+                },
+            );
+        }
+    }
+    for id in before {
+        if !ids.contains(&id) {
+            emit(shared, KernelEvent::Closed { project: id });
+        }
+    }
+    for message in kernel.take_log() {
+        emit(shared, KernelEvent::Log { message });
+    }
+}
+
 fn step(kernel: &mut Kernel, shared: &Arc<Shared>, turns: &mut Turns, msg: Msg) {
     let Turns {
         deferred,
@@ -1243,9 +1323,40 @@ fn step(kernel: &mut Kernel, shared: &Arc<Shared>, turns: &mut Turns, msg: Msg) 
             path,
             replace,
             document,
+            prelude,
             reply,
         } => {
             let id = session.project.clone();
+            // The disk work a save in place does first (settling what an
+            // earlier save left, proving a renamed file) runs on a worker;
+            // this message comes back with what it did, and every other
+            // project is answered meanwhile.
+            match prelude {
+                None => match kernel.save_job(&session, path.as_deref()) {
+                    Ok(Some(job)) => {
+                        let back = shared.back.lock().expect("back").clone();
+                        if let Some(back) = back {
+                            kernel.preparing.push(id);
+                            let again = move |prelude| Msg::PrepareSave {
+                                session,
+                                path,
+                                replace,
+                                document,
+                                prelude: Some(prelude),
+                                reply,
+                            };
+                            off_actor("pm-kernel-save", back, move || job.run(), again);
+                            return;
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => return reply(Err(e)),
+                },
+                Some(done) => {
+                    kernel.preparing.retain(|p| *p != id);
+                    kernel.save_prelude = done;
+                }
+            }
             let result = if document.is_some_and(|expected| {
                 kernel
                     .project(&id)
@@ -1308,45 +1419,40 @@ fn step(kernel: &mut Kernel, shared: &Arc<Shared>, turns: &mut Turns, msg: Msg) 
             }
         }
         Msg::Shell { call, reply } => {
-            let before: Vec<_> = kernel.projects().map(str::to_owned).collect();
-            let result = kernel.shell(call);
-            let ids: Vec<_> = kernel.projects().map(str::to_owned).collect();
-            shared
-                .published
-                .lock()
-                .expect("published")
-                .retain(|id, _| ids.contains(id));
-            *shared.state.lock().expect("state") = Arc::new(kernel.state().clone());
-            for id in &ids {
-                publish(kernel, shared, id);
-            }
-            reply(result);
-            for id in &ids {
-                if !before.contains(id) {
-                    emit(
-                        shared,
-                        KernelEvent::Opened {
-                            project: id.clone(),
-                        },
-                    );
-                } else if let Some(p) = kernel.project(id) {
-                    emit(
-                        shared,
-                        KernelEvent::Published {
-                            project: id.clone(),
-                            revision: p.store().revision(),
-                        },
-                    );
+            // The disk work of opening a project file (its lock, what a
+            // cut-short save left, the file itself read whole) runs on a
+            // worker; the open comes back as `Opened` with what it did, and
+            // every other project is answered meanwhile.
+            match kernel.open_job(&call) {
+                Ok(Some(job)) => {
+                    let back = shared.back.lock().expect("back").clone();
+                    if let Some(back) = back {
+                        let path = job.path().to_owned();
+                        kernel.opening.push(path.clone());
+                        let opened = move |prelude: Option<Box<_>>| Msg::Opened {
+                            call,
+                            path,
+                            prelude,
+                            reply,
+                        };
+                        off_actor("pm-kernel-open", back, move || job.run(), opened);
+                        return;
+                    }
                 }
+                Ok(None) => {}
+                Err(e) => return reply(Err(e)),
             }
-            for id in before {
-                if !ids.contains(&id) {
-                    emit(shared, KernelEvent::Closed { project: id });
-                }
-            }
-            for message in kernel.take_log() {
-                emit(shared, KernelEvent::Log { message });
-            }
+            shell_step(kernel, shared, call, reply)
+        }
+        Msg::Opened {
+            call,
+            path,
+            prelude,
+            reply,
+        } => {
+            kernel.opening.retain(|p| *p != path);
+            kernel.open_prelude = prelude;
+            shell_step(kernel, shared, call, reply)
         }
         Msg::Call {
             project,

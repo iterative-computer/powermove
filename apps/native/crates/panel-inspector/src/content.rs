@@ -3,7 +3,7 @@
 use crate::view::{array, number, object, text};
 use crate::{Binding, Inspector, InspectorError, PropertyId};
 use pm_kernel::commands::properties::{KeyMode, SetProperty};
-use pm_kernel::{Caller, ContentCommand, PropertyCommand, Request};
+use pm_kernel::{Caller, ContentCommand, PropertyCommand, Request, TimingCommand};
 use pm_model::{Map, Value};
 use std::collections::HashSet;
 
@@ -35,12 +35,7 @@ pub struct AxisState {
     pub value: Value,
     pub saved: bool,
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RemapMode {
-    Remap,
-    Freeze,
-    Reverse,
-}
+pub use pm_kernel::commands::timing::RetimeMode as RemapMode;
 
 pub fn nearest_face(faces: &[FontFace], weight: f64, italic: bool) -> Option<&FontFace> {
     let same_slope = faces.iter().any(|f| f.italic == italic);
@@ -336,6 +331,8 @@ impl Inspector {
             time,
         )
     }
+    /// The Time buttons (`retiming.ts`): one kernel step, as the menu and
+    /// the agent run it.
     pub fn remap(
         &mut self,
         caller: Caller,
@@ -347,156 +344,16 @@ impl Inspector {
         if !["video", "precomp"].contains(&text(&source, "type")) || !time.is_finite() {
             return Err(InspectorError::InvalidInput);
         }
-        let from = number(&source, "from", 0.0);
-        let duration = number(&source, "dur", 0.0);
-        let frame = 1.0 / self.fps();
-        let start = self.source_time(layer, from)?;
-        let end = self.source_time(layer, from + (duration - frame).max(0.0))?;
-        let current = self.source_time(layer, time)?;
-        let mut keys = Vec::new();
-        let key = |t: f64, v: f64, hold: bool| {
-            object([
-                ("i", pm_kernel::new_id("k").into()),
-                ("t", t.into()),
-                ("v", v.into()),
-                ("eo", Value::Array(vec![0.0.into(), 0.0.into()])),
-                ("ei", Value::Array(vec![1.0.into(), 1.0.into()])),
-                ("hold", hold.into()),
-            ])
-        };
-        if mode == RemapMode::Freeze {
-            keys.push(key(
-                ((time - from) * self.fps()).round() / self.fps(),
-                current,
-                true,
-            ));
-        } else {
-            keys.push(key(
-                0.0,
-                if mode == RemapMode::Reverse {
-                    end
-                } else {
-                    start
-                },
-                false,
-            ));
-            keys.push(key(
-                (duration - frame).max(frame),
-                if mode == RemapMode::Reverse {
-                    start
-                } else {
-                    end
-                },
-                false,
-            ));
-        }
-        let mut patch = Map::new();
-        patch.insert(
-            "timeRemap",
-            object([
-                ("v", true.into()),
-                ("kf", Value::Array(vec![])),
-                ("expr", Value::Null),
-            ]),
-        );
-        patch.insert(
-            "sourceTime",
-            object([
-                (
-                    "v",
-                    if mode == RemapMode::Freeze {
-                        current
-                    } else {
-                        start
-                    }
-                    .into(),
-                ),
-                ("kf", Value::Array(keys)),
-                ("expr", Value::Null),
-            ]),
-        );
         self.transaction(
             caller,
             vec![
-                ContentCommand::Set {
-                    layer_id: layer.into(),
-                    patch,
+                TimingCommand::Retime {
+                    layer_ids: vec![layer.into()],
+                    mode,
                     time,
                 }
                 .into(),
             ],
         )
-    }
-    fn source_time(&mut self, layer: &str, time: f64) -> Result<f64, InspectorError> {
-        let source = self.layer(layer)?;
-        let content = source.get("d").ok_or(InspectorError::InvalidInput)?;
-        let local = time - number(&source, "from", 0.0);
-        let remap = if let Some(value) = content.get("timeRemap") {
-            if value.get("kf").is_some() {
-                self.evaluate(&PropertyId::new(layer, "c.timeRemap"), time)?
-                    .as_bool()
-                    .unwrap_or(false)
-            } else {
-                value.as_bool().unwrap_or(false)
-            }
-        } else {
-            false
-        };
-        if remap
-            && content
-                .get("sourceTime")
-                .is_some_and(|p| p.get("kf").is_some())
-        {
-            return self
-                .evaluate(&PropertyId::new(layer, "c.sourceTime"), time)?
-                .as_f64()
-                .ok_or(InspectorError::InvalidInput);
-        }
-        let trim = if content.get("trim").is_some() {
-            self.evaluate(&PropertyId::new(layer, "c.trim"), time)?
-                .as_f64()
-                .unwrap_or(0.0)
-        } else {
-            0.0
-        };
-        let speed = content.get("speed");
-        let animated = speed.is_some_and(|p| {
-            !array(p.get("kf")).is_empty()
-                || p.get("expr")
-                    .and_then(Value::as_str)
-                    .is_some_and(|e| !e.is_empty())
-        });
-        if !animated {
-            return Ok(local
-                * speed
-                    .and_then(|v| v.as_f64().or_else(|| v.get("v").and_then(Value::as_f64)))
-                    .unwrap_or(1.0)
-                + trim);
-        }
-        let step = 1.0 / (self.fps().max(30.0) * 2.0);
-        let end = local.max(0.0);
-        let full = (end / step).floor() as usize;
-        let mut sum = 0.0;
-        for index in 0..full {
-            sum += self
-                .evaluate(
-                    &PropertyId::new(layer, "c.speed"),
-                    number(&source, "from", 0.0) + (index as f64 + 0.5) * step,
-                )?
-                .as_f64()
-                .ok_or(InspectorError::InvalidInput)?
-                * step;
-        }
-        let remainder = end - full as f64 * step;
-        Ok(sum
-            + self
-                .evaluate(
-                    &PropertyId::new(layer, "c.speed"),
-                    number(&source, "from", 0.0) + full as f64 * step + remainder / 2.0,
-                )?
-                .as_f64()
-                .ok_or(InspectorError::InvalidInput)?
-                * remainder
-            + trim)
     }
 }
