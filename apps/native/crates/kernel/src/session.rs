@@ -47,6 +47,37 @@ pub enum ShellCall {
     /// place that the person has not been told about yet (see
     /// `Kernel::unoffered_copies`). Replies `Copies`.
     CopiesOf(SessionHandle),
+    /// Files kept beside this session's project file that the person has
+    /// not seen a notice about yet: a version that arrived during a save,
+    /// what a save that was cut short left, a retained version found
+    /// changed. They are read from the saves' own records beside the file
+    /// (written before each file was kept, so a crash loses none), and only
+    /// from records that know the file now open. Replies `Kept`; nothing is
+    /// forgotten until `KeptSeen`.
+    KeptBeside(SessionHandle),
+    /// The person was shown the notices about the kept files `paths` (and,
+    /// with `restored`, that the last saved version was put back; with
+    /// `other`, the notices that are not about a kept file): they are not
+    /// reported again.
+    KeptSeen {
+        session: SessionHandle,
+        paths: Vec<PathBuf>,
+        restored: bool,
+        other: bool,
+    },
+    /// The files a save of the project file at this path left when it was
+    /// cut short and recovery would not choose between (their bytes are
+    /// not what the save's record says, or more than one save was cut
+    /// short). Moves nothing. Replies `Leftovers`.
+    Leftovers(PathBuf),
+    /// The person chose `leftover` (a path `Leftovers` listed) to be the
+    /// project file at `path`, whose name holds nothing: it takes that name
+    /// (never over a file that landed there since), and the other files
+    /// that save left get names the person finds. Replies `Kept` with them.
+    UseLeftover {
+        path: PathBuf,
+        leftover: PathBuf,
+    },
     Save(SessionHandle),
     SaveAs {
         session: SessionHandle,
@@ -276,6 +307,27 @@ pub enum ShellReply {
     Recent(Vec<Value>),
     /// Library rows (`id`, `name`, `at`) of copies of a file.
     Copies(Vec<Value>),
+    /// Rows (`why`, and `path` unless `why` is `restored`) of files kept
+    /// beside a project file. `why`: `arrived` (another version, taken from
+    /// the path by a save that stands), `restored` (a save was cut short and
+    /// the last saved version is back under the project's name), `other`
+    /// (the file such a save had moved aside, where the path holds a file),
+    /// `unfinished` (the finished file of the save that was cut short),
+    /// `undecided` (a file such a save left that recovery would not move),
+    /// `unconfirmed` (the copy kept on this machine of the last save to a
+    /// volume that could not prove it durable, when the file read is not
+    /// that save).
+    Kept(Vec<Value>),
+    /// Rows of files a cut-short save left that the person has to choose
+    /// between: `path`, `role` (`previous`: the file that was under the
+    /// project's name; `saving`: the file the save had finished; `record`:
+    /// a save's record that cannot be read), `why` (`unknown`, `several`,
+    /// `unreadable`; `active`: the save is going on right now in another
+    /// copy of the app on this Mac, and nothing can be chosen; `elsewhere`:
+    /// it was begun on another computer on a shared volume, which may have
+    /// crashed or may still be at it), `size`, and who was saving and when
+    /// (`computer`, `user`, `at` in milliseconds) where the record says.
+    Leftovers(Vec<Value>),
     Changed(bool),
 }
 pub(crate) enum Destination {
@@ -289,6 +341,68 @@ pub(crate) struct Session {
     pub meta: Value,
     pub rejected_history: Option<Value>,
     pub pending_save: Option<PendingSave>,
+    /// A save whose file was installed but whose folder did not sync after
+    /// it ([`crate::ProjectIoError::Finalize`]): adopted by the next save in
+    /// place once the folder syncs, so that save expects the file that is
+    /// there.
+    pub unfinalized: Option<Box<crate::SaveReceipt>>,
+}
+/// The session metadata member that lists files kept beside the project
+/// file which the person has not been told about.
+const KEPT_BESIDE: &str = "keptBeside";
+fn kept_row(why: &str, path: Option<&std::path::Path>) -> Value {
+    let mut m = Map::new();
+    m.insert("why", Value::from(why));
+    if let Some(path) = path {
+        m.insert("path", Value::from(path.to_string_lossy().into_owned()));
+    }
+    Value::Object(m)
+}
+fn left_row(left: &project_io::LeftAside) -> Value {
+    use project_io::LeftAside::*;
+    match left {
+        Restored => kept_row("restored", None),
+        Kept(path) => kept_row("other", Some(path)),
+        Unfinished(path) => kept_row("unfinished", Some(path)),
+    }
+}
+fn leftover_row(left: &project_io::Leftover) -> Value {
+    let mut m = Map::new();
+    m.insert(
+        "path",
+        Value::from(left.path.to_string_lossy().into_owned()),
+    );
+    m.insert("role", Value::from(left.role));
+    m.insert(
+        "why",
+        Value::from(match left.why {
+            project_io::Undecided::Unknown => "unknown",
+            project_io::Undecided::Several => "several",
+            project_io::Undecided::Unreadable => "unreadable",
+            project_io::Undecided::Active => "active",
+            project_io::Undecided::Elsewhere => "elsewhere",
+            project_io::Undecided::Proven => "proven",
+        }),
+    );
+    m.insert("size", Value::from(left.size as f64));
+    if let Some(owner) = &left.owner {
+        m.insert("computer", Value::from(owner.computer.as_str()));
+        m.insert("user", Value::from(owner.user.as_str()));
+        m.insert("at", Value::from(left.at as f64));
+    }
+    Value::Object(m)
+}
+fn push_kept(meta: &mut Map, rows: impl IntoIterator<Item = Value>) {
+    let mut rows = rows.into_iter().peekable();
+    if rows.peek().is_none() {
+        return;
+    }
+    let mut kept = match meta.remove(KEPT_BESIDE) {
+        Some(Value::Array(kept)) => kept,
+        _ => Vec::new(),
+    };
+    kept.extend(rows);
+    meta.insert(KEPT_BESIDE, Value::Array(kept));
 }
 fn failure(e: impl std::fmt::Display) -> KernelFailure {
     KernelFailure::Storage(e.to_string())
@@ -425,6 +539,77 @@ impl Kernel {
                 self.check_session(&handle)?;
                 Ok(ShellReply::Copies(self.unoffered_copies(&handle.project)))
             }
+            ShellCall::KeptBeside(handle) => {
+                self.check_session(&handle)?;
+                let mut rows = Vec::new();
+                if let Some(Destination::File(path)) =
+                    self.sessions.get(&handle.project).map(|s| &s.destination)
+                {
+                    let path = path.clone();
+                    let hash = self
+                        .project(&handle.project)
+                        .and_then(|p| p.store().file().version.clone())
+                        .map(|v| v.hash.clone());
+                    let (told, strangers) = project_io::kept_notices(&path, hash.as_deref());
+                    rows.extend(
+                        told.iter()
+                            .map(|(why, kept)| kept_row(why, kept.as_deref())),
+                    );
+                    // A notice about another project that was under this
+                    // name is not this project's: left, and logged.
+                    for record in strangers {
+                        self.log(format!(
+                            "A save's record beside {} tells of files kept for a project that                              is no longer under that name; it was left as it is: {}",
+                            path.display(),
+                            record.display()
+                        ));
+                    }
+                }
+                if let Some(Value::Array(more)) = self
+                    .state
+                    .ui
+                    .get(&handle.project)
+                    .and_then(|ui| ui.session.get(KEPT_BESIDE))
+                {
+                    rows.extend(more.iter().cloned());
+                }
+                Ok(ShellReply::Kept(rows))
+            }
+            ShellCall::KeptSeen {
+                session,
+                paths,
+                restored,
+                other,
+            } => {
+                self.check_session(&session)?;
+                if let Some(Destination::File(path)) =
+                    self.sessions.get(&session.project).map(|s| &s.destination)
+                {
+                    project_io::kept_seen(path, &paths, restored);
+                }
+                if other
+                    && std::sync::Arc::make_mut(&mut self.state.ui)
+                        .get_mut(&session.project)
+                        .and_then(|ui| ui.session.as_object_mut()?.remove(KEPT_BESIDE))
+                        .is_some()
+                {
+                    self.save_session_meta(&session.project)?;
+                }
+                Ok(ShellReply::Kept(Vec::new()))
+            }
+            ShellCall::Leftovers(path) => Ok(ShellReply::Leftovers(
+                project_io::leftovers(&path, &self.host())
+                    .iter()
+                    .map(leftover_row)
+                    .collect(),
+            )),
+            ShellCall::UseLeftover { path, leftover } => {
+                // Under the project's lock: no save of it is in its steps.
+                let _lock = self.lock_project(&path).map_err(failure)?;
+                let left =
+                    project_io::use_leftover(&path, &leftover, &self.host()).map_err(failure)?;
+                Ok(ShellReply::Kept(left.iter().map(left_row).collect()))
+            }
             ShellCall::DecideRecovery { ticket, decision } => {
                 let mut pending = self
                     .pending_recovery
@@ -553,19 +738,32 @@ impl Kernel {
                     None
                 } else {
                     let saved = self.save_session(&handle, None)?;
-                    let ShellReply::Saved { recovery_copy, .. } = saved else {
+                    let ShellReply::Saved {
+                        recovery_copy,
+                        displaced,
+                        ..
+                    } = saved
+                    else {
                         unreachable!()
                     };
+                    // Nobody sees this save's reply: the save's record keeps
+                    // what it kept, and the next open says it.
+                    let _ = displaced;
                     recovery_copy
                 };
+                crate::fault_injection::hit(crate::fault_injection::Stage::InClose);
                 self.flush_project(&handle.project)?;
                 self.durability_barrier()?;
                 let journals = self.project_dir(&handle.project);
+                // A volume that could not prove the save durable may still
+                // lose it: the journal stays (and its local copy, see `local_copy`).
+                let proven = !self.unproven.contains(&handle.project);
                 self.remove_closed_project(&handle.project);
                 // Saved where it belongs and durable: the journal holds nothing
                 // more. Left behind, every quit reopened the project to compact
                 // it, and a later open asked to recover work that was saved.
                 if recovery_copy.is_none()
+                    && proven
                     && let Some(dir) = journals
                 {
                     for session in crate::journal::sessions(&dir) {
@@ -748,6 +946,7 @@ impl Kernel {
     ) -> Result<SessionSave, KernelFailure> {
         self.ensure_idle(&session)?;
         if path.is_none() {
+            self.adopt_unfinalized(&session.project)?;
             self.follow_file(&session.project);
         }
         let mut lock = None;
@@ -822,8 +1021,28 @@ impl Kernel {
             .pending_save
             .take()
             .unwrap();
-        let receipt = result.map_err(failure)?;
-        let displaced = receipt.displaced.clone();
+        let receipt = match result {
+            Ok(receipt) => receipt,
+            Err(crate::ProjectIoError::Finalize {
+                message,
+                receipt: Some(mut receipt),
+            }) => {
+                // Kept as a ticket, not as a save still running.
+                receipt.ticket = std::sync::Arc::new(());
+                self.sessions.get_mut(&session.project).unwrap().unfinalized = Some(receipt);
+                return Err(failure(crate::ProjectIoError::Finalize {
+                    message,
+                    receipt: None,
+                }));
+            }
+            Err(e) => {
+                self.adopt_put_back(&session.project, &e);
+                return Err(failure(e));
+            }
+        };
+        self.sessions.get_mut(&session.project).unwrap().unfinalized = None;
+        let displaced = self.note_changed(&session.project, &receipt);
+        self.note_unproven(&session.project, receipt.unproven);
         // Written from the snapshot frozen before the error; the slot and the
         // journal base keep their state (recovery offers a copy if they differ).
         self.refuse_faulted(&session.project)?;
@@ -923,9 +1142,17 @@ impl Kernel {
         let mut projects = 0;
         let mut recovery_copies = Vec::new();
         for handle in handles {
-            if let ShellReply::Saved { recovery_copy, .. } = self.shell(ShellCall::Save(handle))? {
+            if let ShellReply::Saved {
+                recovery_copy,
+                displaced,
+                ..
+            } = self.shell(ShellCall::Save(handle.clone()))?
+            {
                 projects += 1;
                 recovery_copies.extend(recovery_copy);
+                // A quit has no window to say it in: the save's record keeps
+                // what it kept, and the next open says it.
+                let _ = displaced;
             }
         }
         let Some(root) = &self.config_journal_root() else {
@@ -1108,7 +1335,13 @@ impl Kernel {
             SessionSource::Library { profile, project }
                 if project == id && self.owns_library(&profile) =>
             {
-                match self.file_entry(&project).filter(|p| p.is_file()) {
+                // A file a save was cut short on is still that file: its last
+                // saved version waits beside its path, and the file route
+                // puts it back.
+                match self
+                    .file_entry(&project)
+                    .filter(|p| p.is_file() || project_io::pending(p))
+                {
                     Some(path) => SessionSource::File(path),
                     None => SessionSource::Library { profile, project },
                 }
@@ -1290,12 +1523,26 @@ impl Kernel {
                     }
                 }
                 decision = locks::open_decision(&path, electron_profile.as_deref());
+                let mut left_aside = project_io::Settled::default();
                 if decision == OpenDecision::Writable {
                     match self.lock_project(&path) {
                         Ok(l) => {
                             lock = Some(l);
                             // Staging files a save cut short by Quit Now left.
                             crate::project_io::remove_abandoned_temps(&path);
+                            // What a save that was cut short left is settled
+                            // from its record: the version it moved aside
+                            // and never got to replace is the file again.
+                            left_aside = project_io::settle(&path, &self.host());
+                            self.log_unrecorded(&left_aside);
+                            if let Some(e) = &left_aside.unsynced {
+                                return Err(failure(format!(
+                                    "The last save of this project did not finish. Its files \
+                                     were put back in order, but the folder could not be \
+                                     synced to make that last ({e}). Nothing was removed. \
+                                     Try opening it again."
+                                )));
+                            }
                         }
                         Err(e) => {
                             decision = OpenDecision::AsCopy(
@@ -1317,6 +1564,57 @@ impl Kernel {
                     && let Some(copy) = self.copy_of(&path)
                 {
                     return self.reopen_copy(id, copy, decision, mode);
+                }
+                // Its name holds nothing and its last saved version waits
+                // beside it, but the lock is not ours: another computer is
+                // between the two renames of a save, or its owner ended there
+                // moments ago (a share's lock is believed for 30 seconds).
+                // Nothing is moved without the lock.
+                if decision != OpenDecision::Writable
+                    && !path.is_file()
+                    && project_io::pending(&path)
+                {
+                    return Err(failure(
+                        "This project was being saved a moment ago, here or on another computer, \
+                         and that save did not finish. Its last saved version is safe next to \
+                         it. Try opening it again in a minute.",
+                    ));
+                }
+                // The name holds nothing, and which of the files the save
+                // left is the project could not be told from its record:
+                // nothing was moved, and the person chooses
+                // (`ShellCall::Leftovers`, `ShellCall::UseLeftover`).
+                if !left_aside.undecided.is_empty() && !path.is_file() {
+                    let names: Vec<_> = left_aside
+                        .undecided
+                        .iter()
+                        .filter_map(|l| Some(l.path.file_name()?.to_string_lossy().into_owned()))
+                        .collect();
+                    // Somebody else's save: who, and since when.
+                    let held = left_aside.undecided.iter().find_map(|l| {
+                        let owner = l.owner.as_ref()?;
+                        let since = project_io::local_time(l.at / 1000);
+                        match l.why {
+                            project_io::Undecided::Active => Some(format!(
+                                "This project is being saved right now by another copy of                                  Powermove on this Mac (user {}, since {since}). Nothing was                                  moved. Open it again when that save has finished.",
+                                owner.user
+                            )),
+                            project_io::Undecided::Elsewhere => Some(format!(
+                                "A save of this project from the computer “{}” (user {}),                                  begun {since}, has not finished: that computer may still be                                  saving, or it stopped part way. Nothing was moved or removed.                                  Its files are next to where the project was: {}",
+                                owner.computer,
+                                owner.user,
+                                names.join(", ")
+                            )),
+                            _ => None,
+                        }
+                    });
+                    if let Some(held) = held {
+                        return Err(failure(held));
+                    }
+                    return Err(failure(format!(
+                        "The last save of this project did not finish, and which of the files                          it left is the project cannot be told. Nothing was moved or removed.                          They are next to where the project was: {}",
+                        names.join(", ")
+                    )));
                 }
                 let mut opened =
                     project_io::open_project(&path, OpenOptions::default()).map_err(failure)?;
@@ -1341,6 +1639,31 @@ impl Kernel {
                         Some(Left::Maybe { entry, name }) => maybe_left = Some((entry, name)),
                         None => {}
                     }
+                }
+                // The last save here went to a volume that could not prove
+                // it durable, and a copy of it was kept on this machine. The
+                // file read back with that version confirms it; any other
+                // file means that save may not have arrived, and the person
+                // is told where the copy is.
+                if decision == OpenDecision::Writable
+                    && let Some(version) = &opened.file.version
+                    && let Some(copy) = self.unconfirmed_copy(&id, &version.hash)
+                    && let Value::Object(m) = &mut meta
+                {
+                    push_kept(m, [kept_row("unconfirmed", Some(&copy))]);
+                }
+                // What a save that was cut short left and recovery did not
+                // move is said once the project is open, with what its
+                // records tell (`ShellCall::KeptBeside`).
+                if let Value::Object(m) = &mut meta {
+                    push_kept(
+                        m,
+                        left_aside
+                            .undecided
+                            .iter()
+                            .filter(|l| l.why != project_io::Undecided::Active)
+                            .map(|l| kept_row("undecided", Some(&l.path))),
+                    );
                 }
                 // The workspace the person left this file with (its entry keeps
                 // it, as v1 kept it in the project's state) wins while the file
@@ -1712,6 +2035,7 @@ impl Kernel {
                 meta,
                 rejected_history,
                 pending_save: None,
+                unfinalized: None,
             },
         );
         // A new/copy project gets a rollback-readable slot immediately.
@@ -1863,10 +2187,23 @@ impl Kernel {
                 self.mark_save_point(id, &plan.document, plan.revision)?;
             }
             let p = self.project_mut(id).unwrap();
+            let mut changed = Vec::new();
+            let mut untrashed = Vec::new();
+            let mut unproven = None;
             let result = plan.and_then(|plan| plan.run()).and_then(|receipt| {
                 displaced = receipt.displaced.clone();
+                changed = receipt.changed.clone();
+                untrashed = receipt.untrashed.clone();
+                unproven = Some(receipt.unproven);
                 p.store_mut().finish_save(receipt)
             });
+            if let Some(unproven) = unproven {
+                self.note_unproven(id, unproven);
+            }
+            self.log_untrashed(&untrashed);
+            // A retained version found changed is another version to tell
+            // about: named by the reply where nothing else is.
+            displaced = displaced.or_else(|| changed.into_iter().next());
             if result.is_ok() {
                 self.save_published(id);
             }
@@ -1894,6 +2231,7 @@ impl Kernel {
         if matches!(self.sessions[id].destination, Destination::File(_)) && self.library.is_some() {
             self.save_library_slot(id, id, false)?;
         }
+        crate::fault_injection::hit(crate::fault_injection::Stage::InSave);
         self.rebase_journal(id)?;
         Ok(ShellReply::Saved {
             session: handle.clone(),
@@ -2303,15 +2641,156 @@ impl Kernel {
         }
         maybe
     }
+    /// What a save needs from this kernel besides the files.
+    pub(crate) fn host(&self) -> project_io::Host<'_> {
+        project_io::Host {
+            hooks: &self.publish_hooks,
+            coordinator: self.write_coordinator(),
+            profile: self.profile_dir(),
+            backups: None,
+            backup: None,
+            unconfirmed: None,
+        }
+    }
+    /// Private files beside a project that no save's record names are never
+    /// touched: they go to the host's Error Log.
+    fn log_unrecorded(&mut self, settled: &project_io::Settled) {
+        for path in &settled.unrecorded {
+            self.log(format!(
+                "A file a save left beside a project is not named by any save's record and                  was left as it is: {}",
+                path.display()
+            ));
+        }
+    }
+    /// A save that failed put the version it had moved aside back under
+    /// the project's name as a copy ([`ProjectIoError::PutBack`]): the same
+    /// bytes in another file. The session carries on with that file, so
+    /// its next save is an ordinary one, if the file there holds exactly
+    /// the version the session read.
+    fn adopt_put_back(&mut self, id: &str, error: &crate::ProjectIoError) {
+        if !matches!(error, crate::ProjectIoError::PutBack(_)) {
+            return;
+        }
+        let Some(Destination::File(path)) = self.sessions.get(id).map(|s| &s.destination) else {
+            return;
+        };
+        let Some(version) = self
+            .project(id)
+            .and_then(|p| p.store().file().version.clone())
+        else {
+            return;
+        };
+        if let Ok(Some(now)) = project_io::FileVersion::read(path)
+            && now.hash == version.hash
+        {
+            self.project_mut(id).unwrap().store_mut().file_moved(now);
+        }
+    }
+    /// Whether session `id`'s last save is on a volume that could not prove
+    /// it durable.
+    fn note_unproven(&mut self, id: &str, unproven: bool) {
+        if unproven {
+            self.unproven.insert(id.to_owned());
+        } else {
+            self.unproven.remove(id);
+        }
+    }
+    /// The copy this machine keeps of `id`'s last save to a volume that
+    /// could not prove it durable, when the file just read (`hash`) is not
+    /// that save: it may not have arrived.
+    fn unconfirmed_copy(&self, id: &str, hash: &str) -> Option<PathBuf> {
+        let local = self.unconfirmed_dir(id)?;
+        // Read back with that version: no proof it is durable on the
+        // server (it can come from a cache), so the copy stays, until a
+        // later save's copy takes its place or a save is proven durable.
+        if local.join(format!("{hash}.pmv")).is_file() {
+            return None;
+        }
+        std::fs::read_dir(&local)
+            .ok()?
+            .flatten()
+            .map(|e| e.path())
+            .find(|p| p.extension().is_some_and(|e| e == "pmv"))
+    }
+    /// The other version a save kept beside the project that its reply
+    /// names: the one found at the path, else the first of the versions an
+    /// earlier save had retained and this one found changed. Every one of
+    /// them is in a save's record until the person has seen it
+    /// (`ShellCall::KeptBeside`).
+    fn note_changed(&mut self, _id: &str, receipt: &crate::SaveReceipt) -> Option<PathBuf> {
+        self.log_untrashed(&receipt.untrashed);
+        receipt
+            .displaced
+            .clone()
+            .or_else(|| receipt.changed.first().cloned())
+    }
+    /// The last save in place installed its file but its folder did not
+    /// sync. Before the next save in place: the folder is synced again (a
+    /// failure fails this save too, and the ticket stays), and if the name
+    /// still holds exactly that save's file it is adopted, as the save it
+    /// is; edits made since stay unsaved and are what this save writes. A
+    /// file changed since is not adopted: this save then finds it changed.
+    fn adopt_unfinalized(&mut self, id: &str) -> Result<(), KernelFailure> {
+        let Some(receipt) = self.sessions.get_mut(id).and_then(|s| s.unfinalized.take()) else {
+            return Ok(());
+        };
+        let dir = receipt
+            .path
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .to_owned();
+        if let Err(e) = project_io::folder_sync_now(&dir, &self.publish_hooks) {
+            self.sessions.get_mut(id).unwrap().unfinalized = Some(receipt);
+            return Err(failure(crate::ProjectIoError::Finalize {
+                message: e.to_string(),
+                receipt: None,
+            }));
+        }
+        if !receipt.version.is_unchanged().unwrap_or(false) {
+            return Ok(());
+        }
+        self.note_changed(id, &receipt);
+        self.note_unproven(id, receipt.unproven);
+        self.project_mut(id)
+            .unwrap()
+            .store_mut()
+            .finish_save(*receipt)
+            .map_err(failure)?;
+        self.save_published(id);
+        Ok(())
+    }
+    /// Earlier versions found changed when a save was to remove them, that
+    /// could not be kept beside the project: the Error Log says where they
+    /// are (the Trash, or where they were).
+    fn log_untrashed(&mut self, untrashed: &[PathBuf]) {
+        for path in untrashed {
+            self.log(format!(
+                "An earlier version of a project was changed after it was saved and could not \
+                 be kept next to the project; it is here: {}",
+                path.display()
+            ));
+        }
+    }
     /// The file session `id` saves to was renamed or moved while open: carry
     /// on at the place the system says it is now (the same inode, its bytes
     /// proven unchanged, never a Trash), under a lock taken there. A file
     /// with no name any more is left to the save to report (Save As still
     /// works from the descriptor the session holds).
     fn follow_file(&mut self, id: &str) {
-        let Some(Destination::File(_)) = self.sessions.get(id).map(|s| &s.destination) else {
+        let Some(Destination::File(path)) = self.sessions.get(id).map(|s| &s.destination) else {
             return;
         };
+        // A save that could not put the file back under its name left it
+        // aside: it is put back now, not followed to its private name.
+        let path = path.clone();
+        let left = project_io::settle(&path, &self.host());
+        if let Some(e) = &left.unsynced {
+            self.log(format!(
+                "Recovery beside {} could not sync its folder: {e}",
+                path.display()
+            ));
+        }
+        self.log_unrecorded(&left);
         let Some(version) = self
             .project(id)
             .and_then(|p| p.store().file().version.clone())

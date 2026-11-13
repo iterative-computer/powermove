@@ -487,6 +487,16 @@ pub(crate) fn check_expression(source: &str) -> Result<(), CommandError> {
         .map_err(|e| CommandError::Invalid(e.to_string()))
 }
 
+/// What an expression editor says about `source` before it is applied:
+/// `None` when [`PropertyCommand::SetExpression`] would accept it.
+pub fn expression_diagnostic(source: &str) -> Option<String> {
+    match check_expression(source) {
+        Err(CommandError::Invalid(message)) => Some(message),
+        Err(other) => Some(other.to_string()),
+        Ok(()) => None,
+    }
+}
+
 /// `setExpression(command)`.
 fn set_expression(
     cx: &mut Cx<'_>,

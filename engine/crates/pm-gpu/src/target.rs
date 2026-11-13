@@ -171,6 +171,7 @@ impl TargetPool {
         let mut i = 0;
         while i < self.free.len() {
             if self.frame.wrapping_sub(self.free[i].2) > Self::MAX_IDLE_FRAMES {
+                pm_perf::bump(pm_perf::Counter::TargetPoolEvictions);
                 let (_, target, _) = self.free.swap_remove(i);
                 self.free_bytes -= target.bytes();
                 self.live_bytes -= target.bytes();
@@ -250,6 +251,7 @@ impl TargetPool {
                 .max_by_key(|(_, (_, _, at))| self.frame.wrapping_sub(*at))
                 .map(|(i, _)| i)
                 .unwrap();
+            pm_perf::bump(pm_perf::Counter::TargetPoolEvictions);
             let (_, target, _) = self.free.swap_remove(oldest);
             self.free_bytes -= target.bytes();
             self.live_bytes -= target.bytes();
@@ -274,6 +276,7 @@ impl TargetPool {
             let Some((_, t, _)) = self.free.pop() else {
                 break;
             };
+            pm_perf::bump(pm_perf::Counter::TargetPoolEvictions);
             self.live_bytes = self.live_bytes.saturating_sub(t.bytes());
             self.free_bytes -= t.bytes();
             drop(t);

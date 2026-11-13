@@ -96,6 +96,7 @@ impl SourceRaster {
         let m = self.world();
         let b = self.bounds;
         crate::effects::plan::Owner {
+            valid: true,
             uv: [
                 (1. / (m[0] * b.width)) as f32,
                 0.,
@@ -195,6 +196,11 @@ pub trait EffectPasses: Send + Sync {
     ) -> Option<Arc<dyn EffectPasses>> {
         None
     }
+    /// Remove one refused input consumer, retaining the other effects.
+    fn without_effect(&self, _instance: &str) -> Option<Arc<dyn EffectPasses>> {
+        None
+    }
+
     /// Identifies the chain and every input that changes its pixels (for
     /// plan equality and render cache keys).
     fn key(&self) -> Vec<u8>;
@@ -296,6 +302,28 @@ pub trait EffectHost: Send + Sync {
         } else {
             self.prepare(scope, layer, frame)
         }
+    }
+
+    /// Geometry for owner-reading effects uses the same fonts as the layer.
+    fn prepare_measured<'d>(
+        &self,
+        scope: &mut Scope<'_, 'd>,
+        layer: &'d Node,
+        frame: EffectFrame,
+        prefix: Option<usize>,
+        _measure: Option<&mut dyn pm_eval::text_geom::TextMeasure>,
+    ) -> JsResult<Result<Option<PreparedEffects>, Feature>> {
+        self.prepare_prefix(scope, layer, frame, prefix)
+    }
+
+    /// Drain plan diagnostics into the current draw (including draw reuse).
+    fn take_bypassed(&self) -> Vec<crate::LayerFailure> {
+        Vec::new()
+    }
+
+    /// Viewer looks may bypass a refused effect while keeping its layer.
+    fn bypasses_refusals(&self) -> bool {
+        false
     }
 
     /// Whether `layer` has an effect or transition at `time` that must read

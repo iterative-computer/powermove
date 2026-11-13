@@ -103,23 +103,26 @@ outer shadows under the whole element, so translucent surfaces (`Panel`,
 Real system material through AppKit, for what the system itself makes glass:
 
 - Toolbar and title bar controls: the window's `NSToolbar` in the regular
-  unified style, at the system's own height and spacing. Its items are Home,
-  the project tabs (the window's tab group drawn by `Host::sync_tabs`; AppKit's
-  own tab bar row stays hidden), the tools, Agent and Export. Docks are shown
+  unified style, at the system's own height and spacing. Its items are the
+  project strip (Home and the window's tab group drawn by `Host::sync_tabs`;
+  AppKit's own tab bar row stays hidden), the tools, Agent and Export. Docks are shown
   and hidden from the menus and by their tabs, not from the toolbar.
-- The project strip (Home and the open projects, in the toolbar's leading
-  glass) is one control drawn in cells. Every cell stands 4 pt inside the
-  glass on all four sides, so a pill's corner is the glass's corner less the
-  inset. Tabs share one width: the widest while there is room, then narrower
-  together down to a readable least; past that the strip shows the run that
-  holds the selected tab and a pull-down lists every project. A title stands
-  in the middle of its tab and is cut in the middle, keeping the start and
-  the end of a name. The leading slot holds the close button (under the
-  pointer) or the edited dot and is always kept, so the title never moves.
-  The selected cell is a raised neutral pill; the one under the pointer a
-  wash of the same shape; hairlines part resting tabs and vanish beside
-  either. The pull-down and New Project are round targets after the last
-  rule, each in a cell that shows the strip's wash under the pointer. A tab is carried along the strip to reorder it.
+- The project strip (Home, the open projects, New Project) is not glass: it
+  is an unbordered toolbar item of quiet cells straight on the bar, 4 pt
+  apart, each the control height with an 8 pt corner. A tab is as wide as
+  its title asks (14 pt inside each end, at most 180); short of room the
+  long titles narrow together, cut in the middle so the start and the end
+  of a name stay; past the narrowest the strip shows the run that holds the
+  selected tab and a quiet pull-down lists every project. One neutral ink
+  fills the showing project's cell (8 %) and the cell under the pointer;
+  nothing else has a fill, an edge or a shadow. The showing title is the
+  primary ink, the others muted, all in one size and weight. An edited
+  project carries a 6 pt dot before its title. Under the pointer the close
+  button slides in from the trailing end while the title's end fades out
+  under it (a mask), so the title never moves. Home is a glyph cell before
+  the first tab, New Project one after the last. A tab is carried along the
+  strip to reorder it and changes places with a neighbour once its leading
+  edge passes that tab's middle.
 - Sidebars: `Host::sync_sidebar` puts an `NSGlassEffectView` (clear style, a
   heavy tint of the window colour) in a column under the GPUI view, which
   leaves that column unpainted. The glass runs on under the content sheet's
@@ -162,7 +165,8 @@ snaps anything that moves and turns fades into a 0.15 s cross-fade.
 Real controls first. Wherever AppKit has the control and the system draws it
 (liquid glass on macOS 26 and later), host the real one:
 `pm_shell::native_control::NativeControl` with a `ControlSpec` of kind `Push`
-(optionally tinted, the view's one accent action), `Popup`, `Segmented`,
+(optionally tinted, the view's one accent action; with `glass`, the system's
+glass button at the large size, a surface's one raised action), `Popup`, `Segmented`,
 `Switch`, `Checkbox`, `Radio`, `Slider` or `Search` (the system search
 field, with no focus ring: Return, Escape and Down hand the keyboard back to
 the window's content and reach the view as keys; ⌘F on Home calls `focus`).
@@ -217,6 +221,8 @@ share their parts, in AppKit (`native::Popup`) and drawn (`Kit::menu`):
 - Corners are concentric: the palette is 16 with rows 6 inside it (row corner
   10), a menu is 12 with rows 4 inside (row corner 8).
 - It opens on the enter spring and closes on the exit fade.
+- A list longer than the palette fades out at the bottom edge, so a row is
+  never cut there, and scrolls a fade's length past its last row.
 
 Every drawn control: arrow cursor, hover wash, pressed fill, neutral
 keyboard-only focus ring (`Tokens::focus_ring`), one symbol size per context
@@ -240,9 +246,18 @@ controls are for forms: Settings, sheets, panel option rows).
 - First row, 48 high: the title in the Headline role (17, semibold); the
   search in the middle of the sheet, a soft pill 32 high with no edge (a
   magnifier, the bare native text field, the shortcut in the faint ink while
-  it is empty), at most 360 wide; at the trailing edge Open… and New Project
-  as icons alone, 32 square, no fill at rest, their names and shortcuts in
-  the tooltips. ⌘F puts the keyboard in the search; typing filters.
+  it is empty), at most 360 wide; at the trailing edge Open… as an icon
+  alone (32 square, no fill at rest, its name and shortcut in the tooltip)
+  and New Project, the header's one raised action: the system's glass
+  button (a plus and its name), the same glass as the toolbar's Export.
+  ⌘F puts the keyboard in the search; typing filters; Escape clears the
+  search and leaves the field in one step
+  (`TextField::set_escape_cancels`).
+- An open choice, kept in code until it is made (`PM_NATIVE_HOME_GLASS`):
+  `glyph` shows New Project as its plus alone; `all` also stands the search
+  field and the view switch in glass capsules (`ControlSpec.glass` on a
+  search field or a segmented control). The default is the label, with the
+  rest of the header drawn.
 - Second row, 28 high: the count in the muted ink; the sort as a text action
   (an icon and the current order) that opens our menu; then the grid/list
   switch, the header's one raised element (a small pill, two 30 × 24 cells,
@@ -251,8 +266,11 @@ controls are for forms: Settings, sheets, panel option rows).
   concentric (page 16, frame 20, continuous), in one shape for every card.
   The poster fills the page when it has the page's shape and stands whole on
   the viewer's ground otherwise; a project with no poster yet is an empty
-  page that says its size. Under the pointer the frame deepens a step;
-  selected, it carries a ring of ink inside its edge. The name and one line
+  page that says its size. Under the pointer the frame deepens a step and
+  a round "more" button stands at the page's top trailing corner, on a
+  scrim so it reads over any poster: it opens our menu with the row's
+  actions (a right-click keeps the system's menu). Selected, the frame
+  carries a ring of ink inside its edge. The name and one line
   of facts stand under the card on the page's edge, with a small dot when
   the project is open (the accent for this window's).
 - Cards are 240 wide when four or more fit, and one to three wider ones on
