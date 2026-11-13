@@ -1616,40 +1616,36 @@ impl Controller {
         })
         .detach();
     }
-    /// Files kept beside this project's file that nobody was told about: a
-    /// version that arrived during a save no window showed the end of (at
-    /// quit), or what a save that was cut short left. Said once, in a sheet
-    /// with a way to them, and in the Error Log.
-    /// The person has been shown the notice about the kept files `paths`
-    /// (and, with `restored`, that the last saved version was put back;
-    /// with `other`, the notices that are not about a kept file): the
-    /// kernel stops reporting them. Called only once the sheet was answered.
+    /// The person has been shown, and has answered, the notice about the
+    /// kept files `paths` (and, with `restored`, the ones about no file):
+    /// the kernel stops reporting exactly those. `session` is the one the
+    /// notice was about, captured before the sheet went up: never whatever
+    /// the window shows by the time the sheet is answered.
     fn kept_seen(
-        &mut self,
+        &self,
+        session: SessionHandle,
         paths: Vec<PathBuf>,
         restored: bool,
         other: bool,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(session) = self.session.clone() else {
-            return;
-        };
-        let seen = self.kernel.shell(ShellCall::KeptSeen {
+    ) -> pm_kernel::Pending<Result<ShellReply, KernelFailure>> {
+        self.kernel.shell(ShellCall::KeptSeen {
             session,
             paths,
             restored,
             other,
-        });
-        cx.spawn(async move |_, _| {
-            let _ = seen.await;
         })
-        .detach();
     }
+    /// Files kept beside this project's file that nobody was told about: a
+    /// version that arrived during a save no window showed the end of (at
+    /// quit), or what a save that was cut short left. Said in a sheet with
+    /// a way to them, and in the Error Log. Only a sheet the person
+    /// answered counts as seen, and only for the rows it told; what it had
+    /// no room for is told in the next one.
     fn tell_kept_beside(&mut self, cx: &mut Context<Self>) {
         let Some(session) = self.session.clone() else {
             return;
         };
-        let asked = self.kernel.shell(ShellCall::KeptBeside(session));
+        let asked = self.kernel.shell(ShellCall::KeptBeside(session.clone()));
         cx.spawn(async move |this, cx| {
             let Some(Ok(ShellReply::Kept(rows))) = asked.await else {
                 return;
@@ -1661,39 +1657,57 @@ impl Controller {
                     Some((text("why")?.to_owned(), text("path").map(PathBuf::from)))
                 })
                 .collect();
-            let Ok(Some((answer, reveal))) = this.update(cx, |v, _| {
+            let Ok(Some((answer, reveal, told))) = this.update(cx, |v, _| {
+                // The window shows another project by now: not its notice.
+                if v.session.as_ref() != Some(&session) {
+                    return None;
+                }
                 let file = v.path.as_deref().map(file_name).unwrap_or_default();
                 let named: Vec<_> = rows
                     .iter()
                     .map(|(why, path)| (why.clone(), path.as_deref().map(file_name)))
                     .collect();
                 let alert = crate::surfaces::documents::kept_beside(&file, &named)?;
+                let told: Vec<_> = crate::surfaces::documents::kept_beside_told(&named)
+                    .into_iter()
+                    .map(|at| rows[at].clone())
+                    .collect();
                 v.errors.borrow_mut().push(
                     "Project",
                     &format!("{} {}", alert.message, alert.informative),
                 );
-                let reveal = rows
+                // A file that went to the Trash is not where it was.
+                let reveal = told
                     .iter()
-                    .find_map(|(_, path)| path.clone())
+                    .find_map(|(why, path)| path.clone().filter(|_| why != "trashed"))
                     .or(v.path.clone());
-                Some((alert.sheet(&v.host.borrow().window), reveal))
+                Some((alert.sheet(&v.host.borrow().window), reveal, told))
             }) else {
                 return;
             };
-            let answered = answer.recv().await.ok().flatten();
-            // Shown and answered: only now is it not to be told again.
-            let _ = this.update(cx, |v, cx| {
+            // A sheet that went away unanswered (its window closed) was not
+            // seen: the next open tells it again.
+            let Some(answered) = answer.recv().await.ok().flatten() else {
+                return;
+            };
+            let Ok(seen) = this.update(cx, |v, _| {
                 v.kept_seen(
-                    rows.iter().filter_map(|(_, path)| path.clone()).collect(),
-                    rows.iter().any(|(why, _)| why == "restored"),
+                    session,
+                    told.iter().filter_map(|(_, path)| path.clone()).collect(),
+                    told.iter().any(|(_, path)| path.is_none()),
                     true,
-                    cx,
                 )
-            });
-            if answered == Some(crate::surfaces::documents::Action::ShowInFinder)
+            }) else {
+                return;
+            };
+            let _ = seen.await;
+            if answered == crate::surfaces::documents::Action::ShowInFinder
                 && let Some(path) = reveal
             {
                 platform::reveal(&path);
+            }
+            if told.len() < rows.len() {
+                let _ = this.update(cx, |v, cx| v.tell_kept_beside(cx));
             }
         })
         .detach();
@@ -1844,19 +1858,37 @@ impl Controller {
                     .and_then(pm_model::Value::as_str)
                     .map(str::to_owned)
             };
-            // Never a save that is going on right now; the newest work first.
-            let offered = ["saving", "previous"].iter().find_map(|role| {
-                rows.iter().find(|r| {
-                    text(r, "role").as_deref() == Some(role)
+            // Only a file read and found to be a whole version is offered
+            // as one, and never one of a save that is going on right now.
+            // Of those: the newest save's, and of one save the version it
+            // was writing before the one it replaced.
+            let at = |row: &pm_model::Value| {
+                row.get("at")
+                    .and_then(pm_model::Value::as_f64)
+                    .unwrap_or(0.0)
+            };
+            let offered = rows
+                .iter()
+                .filter(|r| {
+                    r.get("proven") == Some(&pm_model::Value::Bool(true))
                         && text(r, "why").as_deref() != Some("active")
                 })
-            });
+                .max_by(|a, b| {
+                    at(a).total_cmp(&at(b)).then_with(|| {
+                        let saving =
+                            |r: &pm_model::Value| text(r, "role").as_deref() == Some("saving");
+                        saving(a).cmp(&saving(b))
+                    })
+                });
             let Some(row) = offered else {
                 let _ = this.update(cx, |v, cx| v.report_open_error(&name, path, &error, cx));
                 return;
             };
             let leftover = PathBuf::from(text(row, "path").unwrap_or_default());
             let saving = text(row, "role").as_deref() == Some("saving");
+            // Another computer's save: it may still be going on there.
+            let computer =
+                text(row, "computer").filter(|_| text(row, "why").as_deref() == Some("elsewhere"));
             let at = row
                 .get("at")
                 .and_then(pm_model::Value::as_f64)
@@ -1875,6 +1907,7 @@ impl Controller {
                         saving,
                         at: &at,
                         bytes,
+                        computer: computer.as_deref(),
                     },
                 );
                 v.errors.borrow_mut().push(
@@ -2203,13 +2236,42 @@ impl Controller {
             .unwrap_or("Untitled")
             .to_owned()
     }
-    /// The save went through, and a version that arrived meanwhile was kept
-    /// beside the file: a sheet that names it, a way to it, an Error Log row.
+    /// The save went through and kept a file beside the project. Why is in
+    /// the save's record: a version that arrived during this save gets the
+    /// sheet that says so; anything else (an earlier version found changed
+    /// when it was to go) is told as what it is.
     fn other_version_kept(&mut self, kept: PathBuf, cx: &mut Context<Self>) {
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        let name = self.project_name();
+        self.message = format!("“{name}” was saved. Another version of its file was kept.");
+        let asked = self.kernel.shell(ShellCall::KeptBeside(session.clone()));
+        cx.spawn(async move |this, cx| {
+            let arrived = match asked.await {
+                Some(Ok(ShellReply::Kept(rows))) => rows.iter().any(|row| {
+                    let text = |key: &str| row.get(key).and_then(pm_model::Value::as_str);
+                    text("why") == Some("arrived")
+                        && text("path").map(PathBuf::from) == Some(kept.clone())
+                }),
+                _ => false,
+            };
+            let _ = this.update(cx, |v, cx| {
+                if arrived {
+                    v.tell_arrived(kept, session, cx)
+                } else {
+                    v.tell_kept_beside(cx)
+                }
+            });
+        })
+        .detach();
+    }
+    /// A version that arrived while this save ran was kept beside the
+    /// file: a sheet that names it, a way to it, an Error Log row.
+    fn tell_arrived(&mut self, kept: PathBuf, session: SessionHandle, cx: &mut Context<Self>) {
         use crate::surfaces::documents::{Action, other_version_kept};
         let name = self.project_name();
         let file = self.path.as_deref().map(file_name).unwrap_or_default();
-        self.message = format!("“{name}” was saved. Another version of its file was kept.");
         self.errors.borrow_mut().push(
             "Save",
             &format!(
@@ -2220,12 +2282,17 @@ impl Controller {
         let answer =
             other_version_kept(&name, &file, &file_name(&kept)).sheet(&self.host.borrow().window);
         cx.spawn(async move |this, cx| {
-            let answered = answer.recv().await.ok().flatten();
-            // Shown and answered: the notice about this file was seen.
-            let _ = this.update(cx, |v, cx| {
-                v.kept_seen(vec![kept.clone()], false, false, cx)
-            });
-            if answered == Some(Action::ShowInFinder) {
+            // Shown and answered: only then was the notice about this file
+            // seen, by the session it was about.
+            let Some(answered) = answer.recv().await.ok().flatten() else {
+                return;
+            };
+            if let Ok(seen) = this.update(cx, |v, _| {
+                v.kept_seen(session, vec![kept.clone()], false, false)
+            }) {
+                let _ = seen.await;
+            }
+            if answered == Action::ShowInFinder {
                 platform::reveal(&kept);
             }
         })
@@ -2256,15 +2323,19 @@ impl Controller {
         };
         let kept = pm_kernel::project_io::kept_beside(detail);
         let answer = alert.sheet(&self.host.borrow().window);
+        let session = self.session.clone();
         cx.spawn(async move |this, cx| {
             let answered = answer.recv().await.ok().flatten();
-            // The save's own kept file was shown. Whatever else that save
-            // kept (another version it found on the way) is told next.
-            if let Some(kept) = kept {
-                let _ = this.update(cx, |v, cx| {
-                    v.kept_seen(vec![kept], false, false, cx);
-                    v.tell_kept_beside(cx);
-                });
+            // The save's own kept file was shown and the sheet answered:
+            // seen. Whatever else that save kept (another version it found
+            // on the way) is told next.
+            if let (Some(kept), Some(session), Some(_)) = (kept, session, &answered) {
+                if let Ok(seen) =
+                    this.update(cx, |v, _| v.kept_seen(session, vec![kept], false, false))
+                {
+                    let _ = seen.await;
+                }
+                let _ = this.update(cx, |v, cx| v.tell_kept_beside(cx));
             }
             match answered {
                 Some(Action::SaveAs) => {

@@ -979,7 +979,7 @@ impl Transaction {
         let mut kept = Kept::default();
         let gone = self.record.with_extension(GONE);
         for file in left {
-            match self.keep_file(file.clone(), "other version") {
+            match self.keep_as(file.clone(), "other version", "changed") {
                 Ok((beside, placed)) => {
                     kept.beside.push(beside);
                     if placed == Placed::Copied {
@@ -1039,6 +1039,17 @@ impl Transaction {
             _ if self.live => "arrived",
             _ => "other",
         };
+        self.keep_as(held, label, why)
+    }
+
+    /// [`Self::keep_file`] with the reason the person is told: `changed`
+    /// for a version that was to be removed and was found written into.
+    fn keep_as(
+        &mut self,
+        held: PathBuf,
+        label: &str,
+        why: &str,
+    ) -> Result<(PathBuf, Placed), PathBuf> {
         let kept = self.name_beside(held, label, why)?;
         // It has its name: the person is to be told, and the record keeps
         // that until they were.
@@ -1554,8 +1565,8 @@ pub(super) fn carry_notices(destination: &Path, current: &Transaction, old: &str
 
 /// What the records beside `destination` have to tell the person and have
 /// not been seen: (why, where) of each file a save or a recovery kept
-/// beside the project (`arrived`, `other`, `unfinished`, `trashed`,
-/// `hidden`), and `restored`.
+/// beside the project (`arrived`, `other`, `unfinished`, `changed`,
+/// `trashed`, `hidden`), and `restored`.
 ///
 /// A record that knows the file now under the project's name (`hash`; see
 /// [`Record::knows`]) tells it as it happened. One that does not (another

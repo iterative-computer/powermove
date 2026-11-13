@@ -193,26 +193,65 @@ pub fn saved_beside(name: &str, file: &str, kept: &str) -> Alert<Action> {
         ],
     )
 }
+/// The kinds of kept file [`kept_beside`] has a sentence for.
+const KEPT_KINDS: [&str; 9] = [
+    "arrived",
+    "other",
+    "changed",
+    "unfinished",
+    "undecided",
+    "unconfirmed",
+    "earlier",
+    "hidden",
+    "trashed",
+];
+
+/// Which of `rows` [`kept_beside`] tells: the first file of each kind (it
+/// has one sentence for each) and every row about no file. The caller marks
+/// exactly these seen once the person has answered, and asks again for the
+/// rest.
+pub fn kept_beside_told(rows: &[(String, Option<String>)]) -> Vec<usize> {
+    let mut told: Vec<usize> = KEPT_KINDS
+        .iter()
+        .filter_map(|kind| {
+            rows.iter()
+                .position(|(why, name)| why == kind && name.is_some())
+        })
+        .collect();
+    told.extend(
+        rows.iter()
+            .enumerate()
+            .filter(|(_, (why, name))| name.is_none() && (why == "restored" || why == "earlier"))
+            .map(|(at, _)| at),
+    );
+    told.sort_unstable();
+    told
+}
+
 /// Files found beside a project's file that the person was never told
 /// about, said once when the project opens. `rows` are the kernel's
 /// (`ShellReply::Kept`): why each file is there and its name. `None` when
 /// there is nothing to say.
 pub fn kept_beside(file: &str, rows: &[(String, Option<String>)]) -> Option<Alert<Action>> {
+    let told = kept_beside_told(rows);
+    if told.is_empty() {
+        return None;
+    }
     let named = |why: &str| {
-        rows.iter()
+        told.iter()
+            .map(|at| &rows[*at])
             .find(|(w, name)| w == why && name.is_some())
             .and_then(|(_, name)| name.clone())
     };
     let restored = rows.iter().any(|(why, _)| why == "restored");
     let (arrived, other, unfinished) = (named("arrived"), named("other"), named("unfinished"));
     let (undecided, unconfirmed) = (named("undecided"), named("unconfirmed"));
-    if !restored
-        && [&arrived, &other, &unfinished, &undecided, &unconfirmed]
-            .iter()
-            .all(|kept| kept.is_none())
-    {
-        return None;
-    }
+    let (earlier, hidden, trashed) = (named("earlier"), named("hidden"), named("trashed"));
+    let changed = named("changed");
+    // An earlier save's own account of having put a version back.
+    let earlier_restored = rows
+        .iter()
+        .any(|(why, name)| why == "earlier" && name.is_none());
     let mut said = Vec::new();
     if restored {
         said.push("The last saved version is back in place and is the one open now.".to_owned());
@@ -242,15 +281,41 @@ pub fn kept_beside(file: &str, rows: &[(String, Option<String>)]) -> Option<Aler
             "The last time “{file}” was saved, its drive could not confirm that the save arrived, and the file there now is not that version. The version you saved is kept on this Mac."
         ));
     }
+    if let Some(kept) = &changed {
+        said.push(format!(
+            "An earlier version of “{file}” was changed by another app after Powermove had replaced it, so it was not removed. It is next to “{file}” as “{kept}”. Look at it before you remove it."
+        ));
+    }
+    if let Some(kept) = &earlier {
+        said.push(format!(
+            "An earlier save kept a file next to “{file}” as “{kept}”. “{file}” has been changed by another app since then, so Powermove can’t tell which version that file goes with. Look at it before you remove it."
+        ));
+    } else if earlier_restored {
+        said.push(format!(
+            "An earlier save of “{file}” was interrupted and its last saved version was put back. “{file}” has been changed by another app since then."
+        ));
+    }
+    if let Some(kept) = &hidden {
+        said.push(format!(
+            "A file from an earlier save of “{file}” was changed by another app and couldn’t be given a visible name. It is still in the project’s folder as the hidden file “{kept}”."
+        ));
+    }
+    if trashed.is_some() {
+        said.push(format!(
+            "A file from an earlier save of “{file}” was changed by another app and couldn’t be kept next to the project. It was moved to the Trash."
+        ));
+    }
     said.push("Nothing was lost.".to_owned());
-    let kept_another = arrived.is_some() || other.is_some();
+    let kept_another = arrived.is_some() || other.is_some() || changed.is_some();
     let message = if restored || (arrived.is_none() && unfinished.is_some()) || undecided.is_some()
     {
         format!("Powermove was interrupted while saving “{file}”.")
     } else if unconfirmed.is_some() && !kept_another {
         format!("The last save of “{file}” may not have arrived.")
-    } else {
+    } else if kept_another {
         format!("Another version of “{file}” was kept.")
+    } else {
+        format!("An earlier save of “{file}” left a file behind.")
     };
     Some(Alert::new(
         message,
@@ -284,6 +349,9 @@ pub struct OfferedVersion<'a> {
     pub saving: bool,
     pub at: &'a str,
     pub bytes: u64,
+    /// The save that left it was begun on this other computer, which may
+    /// still be saving.
+    pub computer: Option<&'a str>,
 }
 
 /// The file `file` did not open, and a whole version of it exists beside
@@ -294,18 +362,24 @@ pub fn version_offer(name: &str, file: &str, version: &OfferedVersion) -> Alert<
     } else {
         "the last saved version"
     };
+    let which_one = if version.saving {
+        "The version being saved"
+    } else {
+        "The last saved version"
+    };
+    let (at, size) = (version.at, size_text(version.bytes));
+    let informative = match version.computer {
+        Some(computer) => format!(
+            "A save of “{file}” from the computer “{computer}” has not finished. If that computer is still saving, wait for it and open the project again. Otherwise, {} from {at}, {size}, is next to where the project was. Open This One makes it “{file}”; a file under that name now is kept next to it, so nothing is lost.",
+            which_one.to_lowercase()
+        ),
+        None => format!(
+            "The file “{file}” is incomplete or was changed after a save was interrupted. {which_one} from {at}, {size}, is next to it. Open This One puts it in place of “{file}”; the file there now is kept next to it, so nothing is lost."
+        ),
+    };
     Alert::new(
         format!("“{name}” couldn’t be opened, but {which} is intact."),
-        format!(
-            "The file “{file}” is incomplete or was changed after a save was interrupted. {} from {}, {}, is next to it. Open This One puts it in place of “{file}”; the file there now is kept next to it, so nothing is lost.",
-            if version.saving {
-                "The version being saved"
-            } else {
-                "The last saved version"
-            },
-            version.at,
-            size_text(version.bytes)
-        ),
+        informative,
         vec![
             Button::new("Open This One", Action::OpenThisOne).default(),
             Button::new("Show in Finder", Action::ShowInFinder),
@@ -368,6 +442,7 @@ mod write_failure_tests {
                 saving: true,
                 at: "2026-11-12 14.03.22",
                 bytes: 285_283_213,
+                computer: None,
             },
         );
         assert_eq!(
@@ -454,6 +529,119 @@ mod write_failure_tests {
         assert!(alert.message.contains("interrupted while saving"));
         assert!(alert.informative.contains("It was not moved"));
         assert!(alert.informative.contains("“.cut.pmv.0f8f.aside”"));
+    }
+
+    /// A kept file whose project was changed by another app since, a file
+    /// that could not be given a visible name and one that went to the
+    /// Trash are each said in plain words, with no path and no word of the
+    /// app's own workings.
+    #[test]
+    fn files_an_earlier_save_left_are_said_without_claiming_whose_they_are() {
+        let row = |why: &str, name: Option<&str>| (why.to_owned(), name.map(str::to_owned));
+        let alert = kept_beside(
+            "cut.pmv",
+            &[row(
+                "earlier",
+                Some("cut (other version 2026-11-12 14.03.22).pmv"),
+            )],
+        )
+        .unwrap();
+        assert_eq!(
+            alert.message,
+            "An earlier save of “cut.pmv” left a file behind."
+        );
+        assert!(
+            alert
+                .informative
+                .contains("as “cut (other version 2026-11-12 14.03.22).pmv”")
+        );
+        assert!(alert.informative.contains("changed by another app since"));
+        let alert = kept_beside(
+            "cut.pmv",
+            &[
+                row("hidden", Some(".cut.pmv.0f8f.gone")),
+                row("trashed", Some(".cut.pmv.0f8f.aside")),
+            ],
+        )
+        .unwrap();
+        assert!(
+            alert
+                .informative
+                .contains("the hidden file “.cut.pmv.0f8f.gone”")
+        );
+        assert!(alert.informative.contains("moved to the Trash"));
+        assert!(
+            !alert.informative.contains(".cut.pmv.0f8f.aside"),
+            "a file in the Trash is not named by where it was"
+        );
+        assert!(!alert.informative.contains('/'), "names, never paths");
+        assert!(alert.informative.ends_with("Nothing was lost."));
+    }
+
+    /// A version that was to be removed and had been written into is said
+    /// as that, not as a save that was interrupted.
+    #[test]
+    fn an_earlier_version_found_changed_is_said_as_changed() {
+        let alert = kept_beside(
+            "cut.pmv",
+            &[(
+                "changed".to_owned(),
+                Some("cut (other version 2026-11-12 14.03.22).pmv".to_owned()),
+            )],
+        )
+        .unwrap();
+        assert_eq!(alert.message, "Another version of “cut.pmv” was kept.");
+        assert!(alert.informative.contains("was changed by another app"));
+        assert!(!alert.informative.contains("interrupted"));
+        assert!(alert.informative.ends_with("Nothing was lost."));
+    }
+
+    /// One sheet tells the first file of each kind; the rows it tells are
+    /// the only ones the caller may mark seen.
+    #[test]
+    fn the_rows_a_sheet_tells_are_exactly_the_ones_it_names() {
+        let row = |why: &str, name: Option<&str>| (why.to_owned(), name.map(str::to_owned));
+        let rows = [
+            row("arrived", Some("cut (other version 1).pmv")),
+            row("arrived", Some("cut (other version 2).pmv")),
+            row("restored", None),
+            row("unknown kind", Some("x")),
+        ];
+        assert_eq!(kept_beside_told(&rows), [0, 2]);
+        let alert = kept_beside("cut.pmv", &rows).unwrap();
+        assert!(alert.informative.contains("cut (other version 1).pmv"));
+        assert!(!alert.informative.contains("cut (other version 2).pmv"));
+        assert!(kept_beside_told(&[row("unknown kind", Some("x"))]).is_empty());
+    }
+
+    /// A save another computer began is offered with that said: it may
+    /// still be saving.
+    #[test]
+    fn a_version_another_computer_left_is_offered_with_that_said() {
+        let alert = version_offer(
+            "cut",
+            "cut.pmv",
+            &OfferedVersion {
+                saving: false,
+                at: "2026-11-12 14.03.22",
+                bytes: 285_283_213,
+                computer: Some("studio-mac-2"),
+            },
+        );
+        assert_eq!(
+            alert.message,
+            "“cut” couldn’t be opened, but the last saved version is intact."
+        );
+        assert!(alert.informative.contains("the computer “studio-mac-2”"));
+        assert!(
+            alert
+                .informative
+                .contains("If that computer is still saving")
+        );
+        assert_eq!(
+            alert.labels(),
+            ["Open This One", "Show in Finder", "Cancel"]
+        );
     }
 
     #[test]
