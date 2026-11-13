@@ -52,18 +52,14 @@ export function ColorPanel({ controller: c, command }: ColorProps) {
         row && <Control key={row.id} row={row} locked={p.locked} model={c} />,
     );
   const add = (definition: string, label: string) => (
-    <UI.PushButton
+    <SectionAction
       id={`${PANEL_ID}:add:${definition}`}
       label={label}
+      short="Add"
+      symbol="plus"
       disabled={!editable}
-      onClick={(e) => {
-        stop(e);
-        send({ type: "add", definition });
-      }}
-      style={{ height: t("metrics.control"), marginTop: t("metrics.inset") }}
-    >
-      {label}
-    </UI.PushButton>
+      onActivate={() => send({ type: "add", definition })}
+    />
   );
   return (
     <div
@@ -105,6 +101,7 @@ export function ColorPanel({ controller: c, command }: ColorProps) {
               tool={wheels}
               send={send}
               editable={editable}
+              action={wheels ? undefined : add(WHEELS, "Add Color Wheels")}
             >
               {wheels
                 ? WHEEL_SECTIONS.map((s) => (
@@ -113,9 +110,14 @@ export function ColorPanel({ controller: c, command }: ColorProps) {
                       {rows(s.keys.map((k) => parameter(wheels, k)))}
                     </div>
                   ))
-                : add(WHEELS, "Add Color Wheels")}
+                : null}
             </Section>
-            <Section title="Curves" send={send} editable={editable}>
+            <Section
+              title="Curves"
+              send={send}
+              editable={editable}
+              action={add(CURVES, "Add Curve")}
+            >
               {curves.map((g) => (
                 <Tool
                   key={g.header.id}
@@ -126,9 +128,21 @@ export function ColorPanel({ controller: c, command }: ColorProps) {
                   {rows(curveRows(g))}
                 </Tool>
               ))}
-              {add(CURVES, "Add Curve")}
             </Section>
-            <Section title="LUT" send={send} editable={editable}>
+            <Section
+              title="LUT"
+              send={send}
+              editable={editable}
+              action={
+                <SectionAction
+                  id={`${PANEL_ID}:load-lut`}
+                  label="Load LUT…"
+                  symbol="folder"
+                  disabled={!editable}
+                  onActivate={() => command(LOAD_LUT)}
+                />
+              }
+            >
               {luts.map((g) => (
                 <Tool
                   key={g.header.id}
@@ -139,21 +153,6 @@ export function ColorPanel({ controller: c, command }: ColorProps) {
                   {rows(g.parameters)}
                 </Tool>
               ))}
-              <UI.PushButton
-                id={`${PANEL_ID}:load-lut`}
-                label="Load LUT…"
-                disabled={!editable}
-                onClick={(e) => {
-                  stop(e);
-                  command(LOAD_LUT);
-                }}
-                style={{
-                  height: t("metrics.control"),
-                  marginTop: t("metrics.inset"),
-                }}
-              >
-                Load LUT…
-              </UI.PushButton>
             </Section>
             {others.length > 0 && (
               <Section title="More" send={send} editable={editable}>
@@ -187,10 +186,13 @@ function Heading({ title, detail }: { title: string; detail: string }) {
         alignItems: "center",
         gap: t("metrics.gap"),
         height: t("metrics.row"),
+        minHeight: t("metrics.row"),
         paddingLeft: t("metrics.inset"),
         paddingRight: t("metrics.inset"),
         color: t("colors.text"),
-        fontSize: t("typography.title"),
+        // As Properties names its layer: the label rank, the kind after the
+        // name in the muted ink (design language, Properties).
+        fontSize: t("typography.label"),
         fontWeight: t("typography.semibold_weight"),
       }}
     >
@@ -224,8 +226,8 @@ function Subheading({ title }: { title: string }) {
       style={{
         paddingLeft: t("metrics.inset"),
         paddingTop: t("metrics.gap"),
-        color: t("colors.muted"),
-        fontSize: t("typography.caption"),
+        color: t("colors.secondary"),
+        fontSize: t("typography.label"),
         fontWeight: t("typography.semibold_weight"),
       }}
     >
@@ -240,12 +242,15 @@ function Section({
   tool,
   send,
   editable,
+  action,
   children,
 }: {
   title: string;
   tool?: GradeEffect;
   send: (intent: Intent) => void;
   editable: boolean;
+  /** The section's own action, at the trailing edge of its heading. */
+  action?: any;
   children: any;
 }) {
   return (
@@ -254,7 +259,13 @@ function Section({
       label={title}
       style={{ paddingBottom: t("metrics.inset") }}
     >
-      <ToolHeader title={title} tool={tool} send={send} editable={editable} />
+      <ToolHeader
+        title={title}
+        tool={tool}
+        send={send}
+        editable={editable}
+        action={action}
+      />
       {children}
     </div>
   );
@@ -296,12 +307,14 @@ function ToolHeader({
   send,
   editable,
   removable,
+  action,
 }: {
   title: string;
   tool?: GradeEffect;
   send: (intent: Intent) => void;
   editable: boolean;
   removable?: boolean;
+  action?: any;
 }) {
   const id = tool?.header.id;
   return (
@@ -317,7 +330,9 @@ function ToolHeader({
         paddingLeft: t("metrics.inset"),
         paddingRight: t("metrics.inset"),
         color: t("colors.text"),
-        fontSize: t("typography.body"),
+        // Section and tool headings: the label rank (design language,
+        // Properties).
+        fontSize: t("typography.label"),
         fontWeight: t("typography.semibold_weight"),
       }}
     >
@@ -337,6 +352,7 @@ function ToolHeader({
         />
       )}
       <text style={{ flexGrow: 1 }}>{title}</text>
+      {action}
       {id && (
         <UI.ToolbarItem
           id={`${PANEL_ID}:reset:${id}`}
@@ -364,6 +380,50 @@ function ToolHeader({
         />
       )}
     </div>
+  );
+}
+
+/** A section's own action: a quiet text action at the trailing edge of its
+ * heading (design language, Properties). */
+function SectionAction({
+  id,
+  label,
+  short,
+  symbol,
+  disabled,
+  onActivate,
+}: {
+  id: string;
+  label: string;
+  short?: string;
+  symbol: string;
+  disabled: boolean;
+  onActivate: () => void;
+}) {
+  return (
+    <UI.ToolbarItem
+      id={id}
+      label={label}
+      title={label}
+      disabled={disabled}
+      attr={{ symbol }}
+      onKeyDown={stop}
+      onClick={(e) => {
+        stop(e);
+        if (!disabled) onActivate();
+      }}
+      style={{
+        gap: t("metrics.border"),
+        paddingLeft: t("metrics.gap"),
+        paddingRight: t("metrics.gap"),
+        color: t("colors.muted"),
+        fontSize: t("typography.label"),
+        fontWeight: t("typography.regular_weight"),
+        symbolSize: t("metrics.symbol_inline"),
+      }}
+    >
+      {short ?? label}
+    </UI.ToolbarItem>
   );
 }
 
@@ -468,7 +528,7 @@ function Control({
               minWidth: t("metrics.hit"),
               minHeight: t("metrics.hit"),
               color: t(p.animated ? "colors.accent" : "colors.muted"),
-              symbolSize: t("metrics.keyframe"),
+              symbolSize: t("metrics.symbol_inline"),
             }}
           />
         }
