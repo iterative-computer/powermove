@@ -1457,6 +1457,9 @@ pub struct Progress {
     pub preview: Option<Arc<PreviewFrame>>,
     /// The mixed sound's levels so far (exports with sound).
     pub mix: Option<crate::verify::MixLevels>,
+    /// Once every frame is encoded, the frames of the written file checked
+    /// so far (of `frames`): the check is its own phase.
+    pub checked: Option<u64>,
 }
 
 impl Progress {
@@ -1652,6 +1655,7 @@ where
                     frames,
                     preview,
                     mix: mixer.is_some().then_some(levels),
+                    checked: None,
                 });
                 progress_ns += started.map_or(0, |t| t.elapsed().as_nanos());
             }
@@ -1665,12 +1669,46 @@ where
                 );
             }
             encoder_gate.sync_worker_qos();
-            pipeline
-                .finish_with_cancel(cancel)
-                .map_err(|error| match error {
-                    crate::Error::Cancelled => JobError::Cancelled,
-                    error => JobError::Export(error),
-                })
+            // The file is written and checked on its own thread while this
+            // one tells how far the check is.
+            let checked = Arc::new(std::sync::atomic::AtomicU64::new(0));
+            pipeline.count_checked(checked.clone());
+            let mix = mixer.is_some().then_some(levels);
+            std::thread::scope(|finishing| {
+                let finished = finishing.spawn(|| pipeline.finish_with_cancel(cancel));
+                let mut told = None;
+                while !finished.is_finished() {
+                    let now = checked.load(Ordering::Acquire);
+                    if told != Some(now) {
+                        told = Some(now);
+                        progress(Progress {
+                            frames_done: frames,
+                            frames,
+                            preview: None,
+                            mix,
+                            checked: Some(now),
+                        });
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                let now = checked.load(Ordering::Acquire);
+                if told != Some(now) && now > 0 {
+                    progress(Progress {
+                        frames_done: frames,
+                        frames,
+                        preview: None,
+                        mix,
+                        checked: Some(now),
+                    });
+                }
+                finished
+                    .join()
+                    .unwrap_or_else(|_| Err(crate::Error::Verify("the file check panicked".into())))
+            })
+            .map_err(|error| match error {
+                crate::Error::Cancelled => JobError::Cancelled,
+                error => JobError::Export(error),
+            })
         });
         let mut render_error = None;
         let _qos_refresh = crate::par::install_qos_refresh(gate.worker_qos_refresh());

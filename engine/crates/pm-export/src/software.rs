@@ -157,6 +157,8 @@ pub struct SoftwareSink {
     next: u64,
     audio_frames: u64,
     evidence: Evidence,
+    /// Frames of the written file checked so far.
+    checked: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl SoftwareSink {
@@ -243,6 +245,7 @@ impl SoftwareSink {
             next: 0,
             audio_frames: 0,
             evidence: Evidence::default(),
+            checked: Default::default(),
         })
     }
 
@@ -321,6 +324,7 @@ impl SoftwareSink {
             self.audio_frames,
             &self.evidence,
             cancel,
+            &self.checked,
             &self.scratch.0,
         )?;
         if cancel.load(Ordering::Acquire) {
@@ -377,6 +381,10 @@ impl Sink for SoftwareSink {
         self.audio_frames += (samples.len() / usize::from(spec.channels)) as u64;
         Ok(())
     }
+    fn count_checked(&mut self, checked: std::sync::Arc<std::sync::atomic::AtomicU64>) {
+        self.checked = checked;
+    }
+
     fn finish(self) -> Result<Delivered, Error> {
         self.complete(&AtomicBool::new(false))
     }
@@ -683,6 +691,7 @@ fn probe_and_verify(
     audio_frames: u64,
     evidence: &Evidence,
     cancel: &AtomicBool,
+    checked: &std::sync::atomic::AtomicU64,
     scratch: &Path,
 ) -> Result<VerifyReport, Error> {
     let mut cmd = Command::new(&tools.ffprobe);
@@ -945,6 +954,7 @@ fn probe_and_verify(
     let mut decoded = verify::Decoded::default();
     decode_frames(cmd, frame_bytes, cancel, &mut |index, bytes| {
         decoded.add(index, spec.frames, unpack(bytes, spec));
+        checked.fetch_add(1, Ordering::AcqRel);
     })?;
     let mut picture = verify::PictureReport::default();
     verify::check_frames(

@@ -30,6 +30,9 @@ pub trait Sink {
     fn idle(&mut self) -> Result<(), Error> {
         Ok(())
     }
+    /// Counts the frames of the written file checked while it finishes, in
+    /// `checked` (sinks that check their file frame by frame).
+    fn count_checked(&mut self, _checked: std::sync::Arc<std::sync::atomic::AtomicU64>) {}
     fn finish(self) -> Result<Self::Output, Error>;
     /// A job may be cancelled while a sink is finishing a long encoder or mux step.
     fn finish_with_cancel(self, _cancel: &AtomicBool) -> Result<Self::Output, Error>
@@ -43,6 +46,7 @@ pub trait Sink {
 enum Message {
     Video(u64, EncoderInput),
     Audio(Vec<f32>),
+    Checked(std::sync::Arc<std::sync::atomic::AtomicU64>),
 }
 
 /// Runs a sink on its own thread, one frame behind: the next frame converts
@@ -66,6 +70,7 @@ impl<S: Sink + Send + 'static> Overlapped<S> {
                     match message {
                         Message::Video(index, input) => sink.video_owned(index, input)?,
                         Message::Audio(samples) => sink.audio(&samples)?,
+                        Message::Checked(checked) => sink.count_checked(checked),
                     }
                 }
                 Ok(sink)
@@ -120,6 +125,10 @@ impl<S: Sink + Send + 'static> Sink for Overlapped<S> {
 
     fn audio(&mut self, interleaved: &[f32]) -> Result<(), Error> {
         self.send(Message::Audio(interleaved.to_vec()))
+    }
+
+    fn count_checked(&mut self, checked: std::sync::Arc<std::sync::atomic::AtomicU64>) {
+        let _ = self.send(Message::Checked(checked));
     }
 
     fn finish(mut self) -> Result<S::Output, Error> {
@@ -257,6 +266,11 @@ impl<S: Sink> Pipeline<S> {
             )));
         }
         self.sink.finish()
+    }
+
+    /// Counts the frames of the written file checked while it finishes.
+    pub fn count_checked(&mut self, checked: std::sync::Arc<std::sync::atomic::AtomicU64>) {
+        self.sink.count_checked(checked);
     }
 
     /// Finishes a job while allowing its sink to interrupt blocking encoder work.

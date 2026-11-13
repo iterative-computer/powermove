@@ -237,8 +237,11 @@ fn generated_projects_export_and_verify_in_every_phase_2_format() {
             settings(format, alpha, dur),
             destination.clone(),
         );
-        let seen = Mutex::new(vec![]);
-        let mut progress = |p: Progress| seen.lock().unwrap().push(p.frames_done);
+        let (seen, checks) = (Mutex::new(vec![]), Mutex::new(vec![]));
+        let mut progress = |p: Progress| match p.checked {
+            None => seen.lock().unwrap().push(p.frames_done),
+            Some(checked) => checks.lock().unwrap().push(checked),
+        };
         let delivered = run_export(
             &mut renderer,
             &job,
@@ -260,6 +263,14 @@ fn generated_projects_export_and_verify_in_every_phase_2_format() {
         assert_eq!(audio.samples, 96_000, "{name}");
         assert!(r.max_pixel_error_cv() <= verify::pixel_tolerance(job_codec(format)));
         assert_eq!(*seen.lock().unwrap(), (1..=60).collect::<Vec<u64>>());
+        // The file check is its own phase, after every frame is encoded,
+        // counting up to every frame of the file.
+        let checks = checks.lock().unwrap();
+        assert!(
+            checks.windows(2).all(|w| w[0] <= w[1]),
+            "{name}: {checks:?}"
+        );
+        assert_eq!(checks.last(), Some(&60), "{name}: {checks:?}");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -788,6 +799,24 @@ fn a_cancelled_export_leaves_nothing_behind() {
         std::fs::read_dir(&dir).unwrap().count(),
         0,
         "no destination, temporary, or work file"
+    );
+    // Cancelled while the written file is being checked.
+    let cancel = AtomicBool::new(false);
+    let mut progress = |p: Progress| {
+        if p.checked.is_some() {
+            cancel.store(true, Ordering::Relaxed);
+        }
+    };
+    let result = run_export(&mut renderer, &j, &Unrestricted, &cancel, &mut progress);
+    assert!(
+        matches!(result, Err(JobError::Cancelled)),
+        "{:?}",
+        result.err()
+    );
+    assert_eq!(
+        std::fs::read_dir(&dir).unwrap().count(),
+        0,
+        "no destination, temporary, or work file after a cancelled check"
     );
     std::fs::remove_dir_all(dir).unwrap();
 }

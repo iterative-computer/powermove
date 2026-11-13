@@ -799,3 +799,96 @@ fn measure_the_check_per_frame() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// What the check adds to a long UHD ProRes export: the export's own time
+/// (render input, encode, write, check), and the check alone with one
+/// reader and with the readers an export uses.
+#[test]
+#[ignore = "measurement: run with --ignored --nocapture"]
+fn measure_the_check_on_a_long_uhd_export() {
+    use std::sync::atomic::AtomicU64;
+    let dir = scratch("long");
+    const N: u64 = 120;
+    let (w, h) = (3840u32, 2160u32);
+    let format = formats()
+        .into_iter()
+        .find(|f| f.name == "ProRes 422 HQ")
+        .unwrap();
+    let path = dir.join("long.mov");
+    let mut spec = spec(format, path.clone());
+    (spec.width, spec.height, spec.frames) = (w, h, N);
+    let mut job = pm_export::export(spec.clone()).unwrap();
+    let mut evidence = Evidence::default();
+    let mut encoding = 0.0;
+    for n in 0..N {
+        let rgba: Vec<f32> = (0..h)
+            .flat_map(|y| (0..w).map(move |x| (x, y)))
+            .flat_map(|(x, y)| {
+                let v = 0.25 + 0.4 * x as f32 / w as f32 + 0.08 * hash(x, y, n);
+                [v, v * 0.9, 0.8 - v * 0.5, 1.0]
+            })
+            .collect();
+        let frame = WorkingFrame {
+            width: w,
+            height: h,
+            rgba: &rgba,
+        };
+        let started = std::time::Instant::now();
+        job.push_frame(&frame).unwrap();
+        encoding += started.elapsed().as_secs_f64();
+        // The evidence of the encoder input, as the sink takes it.
+        let input = pm_export::convert::convert(
+            &frame,
+            spec.input_format(),
+            &pm_export::convert::ConvertParams {
+                working: spec.working,
+                alpha: spec.alpha,
+                tags: spec.tags,
+                dither: false,
+                frame: n as u32,
+            },
+        )
+        .unwrap();
+        evidence.add(n, N, &input);
+    }
+    let started = std::time::Instant::now();
+    let delivered = job.finish().unwrap();
+    let finishing = started.elapsed().as_secs_f64();
+    let timing = spec.timing().unwrap();
+    let mut check = |readers: u64| {
+        let started = std::time::Instant::now();
+        let checked = AtomicU64::new(0);
+        pm_export::mac::reader::decode_frames_with(
+            &delivered.path,
+            timing,
+            spec.input_format(),
+            N,
+            readers,
+            &|_, buffer| buffer.signature(spec.input_format()).map(|_| ()),
+            &checked,
+        )
+        .unwrap();
+        assert_eq!(checked.into_inner(), N);
+        started.elapsed().as_secs_f64()
+    };
+    let (one, four) = (check(1), check(4));
+    let (frames_held, problems) =
+        pm_export::mac::examine_file(&delivered.path, &spec, evidence, 0, None).unwrap();
+    assert!(problems.is_empty(), "{problems:?}");
+    assert_eq!(frames_held.picture.frames_checked, N);
+    eprintln!(
+        "MEASURE {w}x{h} ProRes 422 HQ, {N} frames: frames handed to the export {encoding:.1} s, its finish (flush, write, every frame checked with four readers) {finishing:.1} s; the check's decode alone: one reader {one:.1} s ({:.1} ms a frame), four readers {four:.1} s ({:.1} ms a frame); load {}",
+        one * 1e3 / N as f64,
+        four * 1e3 / N as f64,
+        std::fs::read_to_string("/proc/loadavg").unwrap_or_else(|_| String::from_utf8_lossy(
+            &std::process::Command::new("sysctl")
+                .args(["-n", "vm.loadavg"])
+                .output()
+                .unwrap()
+                .stdout
+        )
+        .trim()
+        .to_string()),
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

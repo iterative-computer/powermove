@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { HostClient, json } from "../../src";
 import { fixture, initial } from "./fixtures";
-import { ExportModel, progress, snapshot } from "./model";
+import { ExportModel, isProgress, progress, snapshot } from "./model";
 import {
   fields,
   formats,
@@ -303,10 +303,24 @@ test("progress uses actual frames and measured ETA thresholds", () => {
       .eta,
   ).toBe("About 89 s left");
 });
+test("checking the written file is its own phase, with its own progress", () => {
+  expect(
+    progress({ phase: "checking", frame: 75, total: 300, elapsed: 30 }),
+  ).toEqual({
+    leading: "Checking the file · frame 75 of 300",
+    value: 0.25,
+    ax: "Checking the file, 25 percent, frame 75 of 300",
+  });
+  expect(
+    isProgress({ phase: "checking", frame: 0, total: 300, elapsed: 1 }),
+  ).toBe(true);
+});
 test("malformed model facts fail visibly, without normalizing or mutating their source", () => {
   for (const mutate of [
     (s: any) =>
       (s.run = { phase: "rendering", frame: 301, total: 300, elapsed: 1 }),
+    (s: any) =>
+      (s.run = { phase: "checking", frame: 301, total: 300, elapsed: 1 }),
     (s: any) => (s.options.format = "web"),
     (s: any) => (s.bindings = {}),
     (s: any) => (s.sequence = -1),
@@ -464,10 +478,12 @@ test("ProRes 422 has no alpha; settings saved before profiles keep ProRes 4444",
   await f.model.refreshPlan();
   await f.model.start();
   const begin = f.requests.find(
-    (r) => r.operation.type === "command" && r.operation.command === "export.begin",
+    (r) =>
+      r.operation.type === "command" && r.operation.command === "export.begin",
   )!;
-  const options = (begin.operation as { args: { options: Record<string, unknown> } })
-    .args.options;
+  const options = (
+    begin.operation as { args: { options: Record<string, unknown> } }
+  ).args.options;
   expect(options.codec).toBe("hevc");
   expect(options.profile).toBe("422hq");
 });

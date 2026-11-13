@@ -72,6 +72,9 @@ export type Run =
       extra?: string;
       preview?: string;
     }
+  /** Every frame is encoded; the written file is checked against what was
+   * rendered, frame by frame, before it is kept. */
+  | { phase: "checking"; frame: number; total: number; elapsed: number }
   | { phase: "done"; path: string }
   /** `offline`: refused because clips are offline; Export Without Them applies. */
   | { phase: "failed"; message: string; offline?: boolean }
@@ -204,13 +207,14 @@ export function snapshot(value: unknown): ExportSnapshot {
       "choosingDestination",
       "preparing",
       "rendering",
+      "checking",
       "finishing",
       "cancelling",
       "done",
       "failed",
       "cancelled",
     ].includes(r.phase as string) ||
-    (r.phase === "rendering" &&
+    ((r.phase === "rendering" || r.phase === "checking") &&
       (!Number.isSafeInteger(r.frame) ||
         !Number.isSafeInteger(r.total) ||
         (r.total as number) <= 0 ||
@@ -228,9 +232,14 @@ export function snapshot(value: unknown): ExportSnapshot {
   return structuredClone(value) as unknown as ExportSnapshot;
 }
 export const isProgress = (run: Run) =>
-  ["preparing", "rendering", "finishing", "cancelling", "failed"].includes(
-    run.phase,
-  );
+  [
+    "preparing",
+    "rendering",
+    "checking",
+    "finishing",
+    "cancelling",
+    "failed",
+  ].includes(run.phase);
 export function progress(run: Run): {
   leading: string;
   eta?: string;
@@ -251,6 +260,14 @@ export function progress(run: Run): {
         eta,
         value: run.frame / run.total,
         ax: `${pct} percent, frame ${run.frame} of ${run.total}`,
+      };
+    }
+    case "checking": {
+      const pct = Math.round((run.frame / run.total) * 100);
+      return {
+        leading: `Checking the file · frame ${run.frame} of ${run.total}`,
+        value: run.frame / run.total,
+        ax: `Checking the file, ${pct} percent, frame ${run.frame} of ${run.total}`,
       };
     }
     case "finishing":
@@ -584,7 +601,9 @@ export class ExportModel {
       return;
     }
     if (
-      ["preparing", "rendering", "finishing"].includes(this.current.run.phase)
+      ["preparing", "rendering", "checking", "finishing"].includes(
+        this.current.run.phase,
+      )
     ) {
       this.current.run = { phase: "cancelling" };
       this.changed();

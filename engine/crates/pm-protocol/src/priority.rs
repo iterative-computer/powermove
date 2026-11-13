@@ -196,6 +196,11 @@ impl Validate for JobStatus {
             format!("progress {} outside 0..1", self.progress)
         })?;
         ensure(
+            self.checking.is_none_or(|c| (0.0..=1.0).contains(&c)),
+            C,
+            || format!("checking {:?} outside 0..1", self.checking),
+        )?;
+        ensure(
             self.path.is_none() || self.state == JobState::Done,
             C,
             || "only a finished job has a path".into(),
@@ -310,6 +315,11 @@ pub struct JobStatus {
     /// ([`DeliveryOptions::preview`]).
     #[serde(default)]
     pub preview: Option<JobPreview>,
+    /// Once every frame is encoded, how much of the written file has been
+    /// checked against what was rendered (0 to 1): the check is its own
+    /// phase, with its own progress.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checking: Option<f64>,
 }
 
 /// A preview of an export's latest encoded frame: a JPEG at most
@@ -1277,6 +1287,7 @@ mod tests {
             path: path.map(str::to_owned),
             error: None,
             preview: None,
+            checking: None,
         };
         let wait = AgentExportMode::Wait;
         assert_eq!(

@@ -89,16 +89,77 @@ export). Cancel, failure, or drop removes the temporary file and AVAssetWriter's
 ### Verification
 
 After `finishWriting` and before the move, `mp4box.rs` reads the container and
-`mac/reader.rs` decodes the first, middle and last frames through AVFoundation to the
-encoder-input format. Checked: sample entry (codec), profile (ProRes flavor, H.264
-`profile_idc` 100), pixel format (4:2:2, 4:4:4, 4:4:4:4, 4:2:0), depth, `colr` and
-the H.264 VUI colour description, range (`nclx` flag, VUI flag), frame count, every
-frame duration, movie and media timescales, duration, audio codec, rate, channels and
-presented samples (edit list for AAC priming), alpha (QuickTime depth 32), timecode
-(start frame, drop-frame flag, frames per second, reel, track reference), and 16×16
-block means of Y′CbCrA at nine places per sampled frame against the encoder input
-(tolerance 4 CV at the codec depth for ProRes, 6 CV for H.264). Any mismatch fails the
-export and nothing is moved into place.
+`mac/reader.rs` decodes every frame through AVFoundation to the encoder-input format,
+four readers at once over their own runs of frames (`software.rs` streams them from
+FFmpeg; WebM decodes its first, middle and last frame). The check is its own phase of
+the export, after every frame is encoded: the job reports `Progress::checked`, the
+engine job `JobStatus::checking`, and the sheet shows "Checking the file · frame k of
+N" with Cancel. On a UHD ProRes 422 HQ export of 120 frames (debug test build, load
+average 141) the frames took 6.8 s to hand over and the finish, check included, 0.9 s;
+the check's decode alone is 4.1 ms a frame with one reader, 3.1 ms with four.
+
+The file is moved into place only when the check passes. Otherwise it is removed and
+the person is told one sentence naming the first thing found ("The exported file
+failed its check and was removed: frame 3 shows the picture of frame 2."). Nothing is
+retried; Try Again is the person's.
+
+#### The file check: a failed export is only for what is certain
+
+An export fails only on evidence that cannot be legitimate codec loss at any data rate
+the export admits. Anything that is a matter of degree is judged against what the same
+encode does elsewhere, or reported to the person as a note with the file kept
+(`VerifyReport::notes`). A threshold that refuses a correct export is wrong.
+
+Fails the export:
+
+- Container and stream facts: sample entry (codec), profile, pixel format, depth,
+  `colr` and the H.264/HEVC VUI colour description, range, frame count, every frame's
+  time and duration, movie and media timescales, duration, audio codec, rate, channels,
+  presented samples and length, alpha (QuickTime depth 32), timecode (start frame,
+  drop-frame flag, rate, reel, track reference).
+- A frame that is not the frame it should be. Every frame keeps an 8 × 8 grid of the
+  means of Y′, Cb, Cr and alpha (`evidence.rs`); a cell is the mean of 1,024 samples of
+  an eighth of the frame each way, which every codec keeps at every rate. A frame three
+  times nearer a neighbour's reference than its own, while its own distance is three
+  times the export's typical one, shows that neighbour's picture (stale, repeated,
+  swapped); a frame eight times the typical distance, or one cell eight times the
+  typical largest cell, is not its picture.
+- A channel lost across a frame: the frame keeps under a quarter of the picture its
+  luma, colour or alpha grid carries, and little of any other.
+- A level, range or matrix mistake: a shift of most of the picture (the median cell)
+  that every frame shares beyond `level_tolerance`, or a gain of every frame's grid 5 %
+  or more from one (a video/full range mistake is 14 %). Quantisation of the DC moves
+  every frame of a slate, a flat, dark or starved picture by whole steps, so the
+  allowance is twice the largest such shift measured at any rate from 0.1 Mb/s
+  (`tests/hard_delivery.rs`): H.264 10 codes (measured 5, at 0.1 Mb/s), HEVC 2, HEVC
+  Main10 10 of 10 bits, ProRes 2 of 10 bits (measured 0.48: Proxy, magenta slate),
+  4444 8 of 12 bits. A smaller shift in H.264 or HEVC Main10 is not certain and is
+  delivered.
+- Where each block is coded from its own samples (ProRes; a long-GOP codec's first
+  frame), a 16-pixel block of a sampled 48 × 48 region that went flat, or holds a
+  picture its reference does not explain, while its neighbours of the same kind kept
+  theirs; and in every codec, a picture displaced as a whole (most sampled regions
+  nearer the reference moved a pixel).
+
+Noted with the file kept: one damaged-looking block of a long-GOP predicted frame (at a
+low rate a skipped or intra-predicted block shows a picture that is not the frame's
+own), texture lost, contrast, correlation of fine detail, per-patch colour error.
+
+`tests/hard_delivery.rs` holds the rule's other side: 167 correct exports at the hard
+places (0.1 to 4 Mb/s H.264 and HEVC in HD and UHD with grain and small text, long-GOP
+cuts and a flash frame, primary and secondary slates in every ProRes flavour, very dark
+and flat frames, one-frame exports, soft alpha, 12-bit ramps, PQ and HLG, heavy noise)
+must all be delivered. Their margins: identity ratio at least 0.88 (refused under 1/3),
+least channel kept 0.66 (under 0.25), gain within 0.008 (beyond 0.05), largest frame
+2.8 times the typical distance (8 times). `tests/picture_check.rs` holds the certain
+failures in real files: a level shift (ProRes), a range mistake, a picture moved a
+pixel, a stale frame and a swapped pair (also colour-only and alpha-only), a frame
+without its colour, alpha in other places, a foreign block, and in ProRes a flattened
+or garbage block.
+
+What the check cannot tell: a stale or swapped frame whose neighbours look alike at the
+grid's scale, damage smaller than a grid cell away from the sampled regions, one wrong
+block of a long-GOP predicted frame, and a shift within quantisation.
 
 ### Measured (M4 Max, macOS 27, release build)
 

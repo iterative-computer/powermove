@@ -15,7 +15,8 @@ use crate::mp4box::Movie;
 use crate::pipeline::Sink;
 use crate::settings::{ExportSpec, Overwrite};
 use crate::verify::{self, Evidence, Expected};
-use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// The production sink: VideoToolbox → AVAssetWriter → verify → move into place.
 pub struct VideoToolboxSink {
@@ -29,6 +30,8 @@ pub struct VideoToolboxSink {
     evidence: Evidence,
     /// Alpha exports: samples re-described with depth 32 (see `alpha`).
     alpha: Option<alpha::AlphaDescriptions>,
+    /// Frames of the written file checked so far.
+    checked: Arc<AtomicU64>,
 }
 
 impl VideoToolboxSink {
@@ -67,6 +70,7 @@ impl VideoToolboxSink {
             alpha: (spec.alpha != crate::settings::AlphaOutput::None
                 && matches!(spec.codec, crate::settings::Codec::ProRes(_)))
             .then(alpha::AlphaDescriptions::default),
+            checked: Arc::default(),
         })
     }
 
@@ -86,7 +90,7 @@ impl VideoToolboxSink {
     }
 
     fn finish_inner(mut self, cancel: Option<&AtomicBool>) -> Result<Delivered, Error> {
-        if cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed)) {
+        if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
             return Err(Error::Cancelled);
         }
         let samples = self.encoder.complete()?;
@@ -101,13 +105,18 @@ impl VideoToolboxSink {
         {
             crate::mp4box::add_channel_layout(&temp, audio.channels)?;
         }
-        let mut report = verify_file(
+        let (report, problems) = examine(
             &temp,
             &self.spec,
             std::mem::take(&mut self.evidence),
             audio_frames,
             cancel,
+            &self.checked,
         )?;
+        if !problems.is_empty() {
+            return Err(Error::Verify(problems.join("; ")));
+        }
+        let mut report = report;
         report.hardware_encoder = self.encoder.hardware;
         report.bytes = std::fs::metadata(&temp).map(|m| m.len()).unwrap_or(0);
         let path = self.output.commit()?;
@@ -125,7 +134,14 @@ pub fn verify_file(
     audio_frames: u64,
     cancel: Option<&AtomicBool>,
 ) -> Result<verify::VerifyReport, Error> {
-    let (report, problems) = examine_file(path, spec, evidence, audio_frames, cancel)?;
+    let (report, problems) = examine(
+        path,
+        spec,
+        evidence,
+        audio_frames,
+        cancel,
+        &AtomicU64::new(0),
+    )?;
     if problems.is_empty() {
         Ok(report)
     } else {
@@ -141,18 +157,54 @@ pub fn examine_file(
     audio_frames: u64,
     cancel: Option<&AtomicBool>,
 ) -> Result<(verify::VerifyReport, Vec<String>), Error> {
+    examine(
+        path,
+        spec,
+        evidence,
+        audio_frames,
+        cancel,
+        &AtomicU64::new(0),
+    )
+}
+
+/// [`examine_file`], counting the frames checked in `checked`.
+fn examine(
+    path: &std::path::Path,
+    spec: &ExportSpec,
+    evidence: Evidence,
+    audio_frames: u64,
+    cancel: Option<&AtomicBool>,
+    checked: &AtomicU64,
+) -> Result<(verify::VerifyReport, Vec<String>), Error> {
     let timing = spec.timing()?;
     let movie = Movie::read(path)?;
-    let mut decoded = verify::Decoded::default();
+    let decoded = std::sync::Mutex::new(verify::Decoded::default());
     let format = spec.input_format();
-    reader::decode_frames(path, timing, format, spec.frames, &mut |index, frame| {
-        if cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed)) {
-            return Err(Error::Cancelled);
-        }
-        // Only the sampled frames are copied out of the decoder's buffer.
-        let signature = frame.signature(format)?;
-        decoded.add_with(index, spec.frames, signature, || frame.read(format))
-    })?;
+    let sampled = verify::sampled_frames(spec.frames);
+    reader::decode_frames(
+        path,
+        timing,
+        format,
+        spec.frames,
+        &|index, frame| {
+            if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+                return Err(Error::Cancelled);
+            }
+            // Only the sampled frames are copied out of the decoder's buffer.
+            let signature = frame.signature(format)?;
+            let whole = if sampled.contains(&index) {
+                Some(frame.read(format)?)
+            } else {
+                None
+            };
+            let mut decoded = decoded.lock().unwrap();
+            decoded.frames.push((index, signature));
+            decoded.sampled.extend(whole.map(|f| (index, f)));
+            Ok(())
+        },
+        checked,
+    )?;
+    let mut decoded = decoded.into_inner().unwrap();
     decoded.complete = true;
     let expected = Expected::new(spec, timing, audio_frames, evidence);
     verify::examine(&expected, &movie, &decoded)
@@ -192,6 +244,10 @@ impl Sink for VideoToolboxSink {
         self.writer().push_video(samples)
     }
 
+    fn count_checked(&mut self, checked: Arc<AtomicU64>) {
+        self.checked = checked;
+    }
+
     fn finish(self) -> Result<Delivered, Error> {
         self.finish_inner(None)
     }
@@ -200,3 +256,4 @@ impl Sink for VideoToolboxSink {
         self.finish_inner(Some(cancel))
     }
 }
+
