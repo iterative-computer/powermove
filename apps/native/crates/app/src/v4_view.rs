@@ -892,6 +892,17 @@ impl SurfaceView {
     pub fn has_header(&self) -> bool {
         self.prepared.header.is_some()
     }
+    /// Development builds: every scroll region of the view moved down by
+    /// `by` points (`review/scroll`).
+    #[cfg(debug_assertions)]
+    pub fn review_scroll(&mut self, by: f32, cx: &mut Context<Self>) {
+        for scroll in self.scrolls.values() {
+            let offset = scroll.offset();
+            let most = scroll.max_offset().y;
+            scroll.set_offset(point(offset.x, (offset.y - px(by)).clamp(-most, px(0.))));
+        }
+        cx.notify();
+    }
     pub fn scroll_semantic(&mut self, semantic: &str, cx: &mut Context<Self>) {
         if let Some(id) = self.prepared.semantics.get(semantic)
             && let Some(node) = self.prepared.node(*id)
