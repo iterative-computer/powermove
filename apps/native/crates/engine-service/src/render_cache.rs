@@ -702,6 +702,12 @@ impl DiskFrames {
         });
     }
 
+    /// Rises whenever an observation finds a media file's stamp changed:
+    /// a viewer's cached pictures of the earlier files are retired.
+    pub(crate) fn media_generation(&self) -> u64 {
+        self.inner.state.lock().unwrap().media_generation
+    }
+
     /// Storage › Renders: the folder and the Render Files Limit (`None`: no
     /// render cache). The same folder again finds its frames again (Clear…
     /// may have removed some). Disk work: call off the main thread.
@@ -1591,12 +1597,6 @@ impl DiskFrames {
         self.reindex(true).unwrap();
         time
     }
-    /// Rises whenever an observation finds a media file's stamp changed:
-    /// a viewer's cached pictures of the earlier files are retired.
-    pub(crate) fn media_generation(&self) -> u64 {
-        self.inner.state.lock().unwrap().media_generation
-    }
-
     /// Media stamps are looked at again at the next observation.
     pub(crate) fn test_recheck_media(&self) {
         self.inner.state.lock().unwrap().media_checked = None;

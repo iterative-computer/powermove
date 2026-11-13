@@ -804,6 +804,9 @@ impl Inner {
     /// or the BLAKE3 of a linked file (hashed once per file state). Call on
     /// a worker: it may read the whole file.
     fn content_of(&self, path: &Path, stop: &AtomicBool) -> std::io::Result<String> {
+        if let Some(content) = self.sequence_content(path, stop)? {
+            return Ok(content);
+        }
         if path.parent() == Some(self.objects.as_path())
             && let Some(name) = path.file_name()
         {
@@ -828,6 +831,61 @@ impl Inner {
         state.index.stamps.retain(|(s, _)| s.path != source.path);
         state.index.stamps.push((source, content.clone()));
         Ok(content)
+    }
+
+    /// A sequence read in place is its frames: `seq:` and the aggregate of
+    /// their bytes and rate (`pm_proxy::sequence_identity`, the key of its
+    /// proxies), read again whenever a frame's stamp changes. A frame
+    /// rendered again is another content, with no rendition yet. A missing
+    /// frame fails, naming it: no rendition stands in for the sequence.
+    fn sequence_content(&self, path: &Path, stop: &AtomicBool) -> std::io::Result<Option<String>> {
+        let Ok(Some(sequence)) = pm_media::image::sequence::Manifest::read(path) else {
+            return Ok(None);
+        };
+        let mut stamps = blake3::Hasher::new();
+        for number in sequence.first..=sequence.last {
+            let file = sequence.file(number);
+            let Some(frame) = Source::of(&file) else {
+                let name = file.file_name().unwrap_or_default().to_string_lossy();
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("frame {number} of the image sequence is missing: {name}"),
+                ));
+            };
+            stamps.update(&frame.len.to_le_bytes());
+            stamps.update(&frame.modified.to_le_bytes());
+        }
+        let digest = stamps.finalize();
+        let stamp = Source {
+            path: path.to_path_buf(),
+            len: sequence.frames(),
+            modified: u128::from_le_bytes(digest.as_bytes()[..16].try_into().unwrap()),
+        };
+        if let Some((_, content)) = self
+            .state
+            .lock()
+            .unwrap()
+            .index
+            .stamps
+            .iter()
+            .find(|(s, _)| *s == stamp)
+        {
+            return Ok(Some(content.clone()));
+        }
+        let identity = pm_proxy::sequence_identity(path, stop)
+            .map_err(|e| match e {
+                pm_proxy::ProxyError::Io(e) => e,
+                pm_proxy::ProxyError::Cancelled => {
+                    std::io::Error::new(std::io::ErrorKind::Interrupted, "stopped")
+                }
+                e => std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()),
+            })?
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "not a sequence"))?;
+        let content = format!("seq:{identity}");
+        let mut state = self.state.lock().unwrap();
+        state.index.stamps.retain(|(s, _)| s.path != stamp.path);
+        state.index.stamps.push((stamp, content.clone()));
+        Ok(Some(content))
     }
 
     /// Notes `asset`'s content for `project` and its original's path.
@@ -1127,7 +1185,10 @@ impl Inner {
         let content = self
             .content_of(&source, &self.stop)
             .map_err(|e| failure(TaskFailureCode::SourceOffline, e.to_string()))?;
-        let hash = match content.strip_prefix("b3:") {
+        let hash = match content
+            .strip_prefix("b3:")
+            .or_else(|| content.strip_prefix("seq:"))
+        {
             Some(hash) => hash.to_owned(),
             None => hash_file(&source, &self.stop)
                 .map_err(|e| failure(TaskFailureCode::SourceOffline, e.to_string()))?,
@@ -1366,8 +1427,38 @@ impl ProMedia {
             let mut changed = inner.refresh_present();
             let stop = AtomicBool::new(false);
             let mut previews = Vec::new();
+            let mut renew: Vec<(Rendition, Original)> = Vec::new();
             for (asset, path) in &originals {
-                if let Ok(content) = inner.content_of(path, &stop) {
+                let content = inner.content_of(path, &stop);
+                if content.is_err()
+                    && matches!(pm_media::image::sequence::Manifest::read(path), Ok(Some(_)))
+                {
+                    // A sequence with a frame missing now: its earlier
+                    // content's renditions are not its picture.
+                    changed |= inner.state.lock().unwrap().known.remove(path).is_some();
+                }
+                if let Ok(content) = content {
+                    // Its file (or a sequence's frame) rendered again: the
+                    // proxy and optimized media made of the earlier bytes
+                    // are made again of these.
+                    {
+                        let state = inner.state.lock().unwrap();
+                        let earlier = state
+                            .index
+                            .assets
+                            .get(&project)
+                            .and_then(|a| a.get(asset))
+                            .filter(|earlier| **earlier != content)
+                            .and_then(|earlier| state.index.contents.get(earlier));
+                        for (kind, title) in [
+                            (Rendition::Proxy, "Update proxy"),
+                            (Rendition::Optimized, "Update optimized media"),
+                        ] {
+                            if earlier.and_then(|r| r.get(kind)).is_some_and(|f| !f.attached) {
+                                renew.push((kind, (asset.clone(), title.into(), path.clone())));
+                            }
+                        }
+                    }
                     changed |= inner.note(&project, asset, path, &content);
                     let unchecked = !inner
                         .state
@@ -1415,6 +1506,16 @@ impl ProMedia {
                     ..inner.preferences()
                 };
                 let _ = inner.create(&project, Rendition::Proxy, &prefs, previews);
+            }
+            for kind in [Rendition::Proxy, Rendition::Optimized] {
+                let again: Vec<Original> = renew
+                    .iter()
+                    .filter(|(k, _)| *k == kind)
+                    .map(|(_, original)| original.clone())
+                    .collect();
+                if !again.is_empty() {
+                    let _ = inner.create(&project, kind, &inner.preferences(), again);
+                }
             }
         });
     }
@@ -2298,7 +2399,7 @@ mod tests {
     fn clip(dir: &Path, name: &str, args: &[&str]) -> PathBuf {
         let (ffmpeg, _) = ffmpeg().expect("FFmpeg");
         let out = dir.join(name);
-        let status = std::process::Command::new(ffmpeg)
+        let status = std::process::Command::new(&ffmpeg)
             .args(["-hide_banner", "-loglevel", "error", "-y"])
             .args(args)
             .arg(&out)
@@ -2321,8 +2422,9 @@ mod tests {
         pm_proxy::set_test_disk_reserve(Some(1 << 30));
         let (dir, media) = service();
         let frames = dir.path().join("renders");
+        let frames_dir = frames.clone();
         std::fs::create_dir(&frames).unwrap();
-        let made = std::process::Command::new(ffmpeg)
+        let made = std::process::Command::new(&ffmpeg)
             .args([
                 "-v",
                 "error",
@@ -2356,40 +2458,88 @@ mod tests {
         // Retained as the media cache keeps an asset's original.
         let original = media.inner.objects.join("retained.png");
         std::fs::write(&original, sequence.to_bytes()).unwrap();
-        identify(&media, "p", &[("a", &original)]);
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-        let tasks = loop {
-            let tasks = media.inner.tasks.lock().unwrap().snapshot(WINDOW);
-            if !tasks.is_empty() && tasks.iter().all(|t| t.state.terminal()) {
-                break tasks;
-            }
+        // Waits for every queued task, then answers the catalog the viewer
+        // reads.
+        let finish = || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            let tasks = loop {
+                let tasks = media.inner.tasks.lock().unwrap().snapshot(WINDOW);
+                if !tasks.is_empty() && tasks.iter().all(|t| t.state.terminal()) {
+                    break tasks;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the HD preview never finished: {:?}, large {:?}",
+                    tasks
+                        .iter()
+                        .map(|t| (&t.title, t.state, t.completed, t.total))
+                        .collect::<Vec<_>>(),
+                    media.inner.state.lock().unwrap().preview_large
+                );
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            };
             assert!(
-                std::time::Instant::now() < deadline,
-                "the HD preview never finished: {:?}, large {:?}",
+                tasks.iter().all(|t| t.state == TaskState::Completed),
+                "{:?}",
                 tasks
                     .iter()
-                    .map(|t| (&t.title, t.state, t.completed, t.total))
-                    .collect::<Vec<_>>(),
-                media.inner.state.lock().unwrap().preview_large
+                    .map(|t| (&t.title, t.state, t.diagnostic_for_log()))
+                    .collect::<Vec<_>>()
             );
-            std::thread::sleep(std::time::Duration::from_millis(200));
+            settle(&media);
+            let mut catalog = MediaCatalog::default();
+            catalog.originals.insert("a".into(), original.clone());
+            media.decorate("p", &mut catalog, &["a".into()]);
+            catalog
         };
-        assert!(
-            tasks.iter().all(|t| t.state == TaskState::Completed),
-            "{:?}",
-            tasks
-                .iter()
-                .map(|t| (&t.title, t.state, t.diagnostic_for_log()))
-                .collect::<Vec<_>>()
-        );
-        settle(&media);
-        let mut catalog = MediaCatalog::default();
-        catalog.originals.insert("a".into(), original);
-        media.decorate("p", &mut catalog, &["a".into()]);
+        identify(&media, "p", &[("a", &original)]);
+        let catalog = finish();
         assert!(catalog.automatic_proxies.contains("a"));
         let proxy = pm_media::probe::probe(&catalog.proxies["a"]).unwrap();
         let video = proxy.probe.video.unwrap();
         assert_eq!((video.frames, video.height), (4, 1080));
+        let first = catalog.proxies["a"].clone();
+
+        // A 3D app renders frame 2 again (a flat grey): the old preview is
+        // not the sequence any more. The viewer stops using it and a new
+        // one is made that shows the new frame.
+        let rendered = std::process::Command::new(&ffmpeg)
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
+            .arg("color=c=0x808080:size=2048x1152")
+            .args(["-frames:v", "1", "-pix_fmt", "rgb48be"])
+            .arg(frames_dir.join("shot.0002.png"))
+            .status()
+            .unwrap();
+        assert!(rendered.success());
+        identify(&media, "p", &[("a", &original)]);
+        let catalog = finish();
+        let second = catalog.proxies.get("a").cloned();
+        assert!(
+            second.as_ref().is_some_and(|p| *p != first),
+            "the preview of the earlier frames is used: {second:?}"
+        );
+        let grey = std::process::Command::new(&ffmpeg)
+            .args(["-v", "error", "-i"])
+            .arg(second.unwrap())
+            .args(["-vf", "select=eq(n\\,1)", "-frames:v", "1"])
+            .args(["-f", "rawvideo", "-pix_fmt", "gray", "-"])
+            .output()
+            .unwrap();
+        let spread = grey.stdout.iter().map(|&v| i32::from(v)).fold((255, 0), |(lo, hi), v| {
+            (lo.min(v), hi.max(v))
+        });
+        assert!(
+            spread.0 > 110 && spread.1 < 150,
+            "frame 2 of the new preview is not the grey file: {spread:?}"
+        );
+
+        // A frame deleted: no preview stands in for the sequence.
+        std::fs::remove_file(frames_dir.join("shot.0003.png")).unwrap();
+        identify(&media, "p", &[("a", &original)]);
+        let mut catalog = MediaCatalog::default();
+        catalog.originals.insert("a".into(), original.clone());
+        media.decorate("p", &mut catalog, &["a".into()]);
+        assert_eq!(catalog.proxies.get("a"), None);
     }
 
     #[test]
