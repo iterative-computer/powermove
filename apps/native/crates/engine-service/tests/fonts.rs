@@ -139,10 +139,31 @@ fn exported(
     to: &Path,
     fonts: impl FnOnce(&mut pm_text::system_fonts::Inventory),
 ) -> Result<Vec<u8>, String> {
+    use pm_protocol::priority::JobState;
+    let mut request = export_request(to);
+    fonts(request.fonts.as_mut().expect("an export names its fonts"));
+    let exe = Path::new(env!("CARGO_BIN_EXE_pm-engine-service"));
+    let status = jobs::ExportHandle::start(exe, request)
+        .unwrap()
+        .wait()
+        .unwrap();
+    if status.state != JobState::Done {
+        return Err(status.error.map(|e| e.message).unwrap_or_default());
+    }
+    let mut frames: Vec<_> = std::fs::read_dir(to)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    frames.sort();
+    Ok(std::fs::read(&frames[0]).unwrap())
+}
+
+/// The app's request for the composition's first frame as a PNG in `to`.
+fn export_request(to: &Path) -> jobs::ExportRequest {
     use pm_protocol::{
         color::{OutputColor, Precision},
         common::{FrameRate, SessionId, Size, TickRange, Ticks},
-        priority::{AlphaOutput, ExportFormat, ExportSettings, JobSpec, JobState, QualityTier},
+        priority::{AlphaOutput, ExportFormat, ExportSettings, JobSpec, QualityTier},
     };
     let s = snapshot();
     let settings = ExportSettings {
@@ -164,7 +185,7 @@ fn exported(
         draft_from_proxies: false,
         delivery: Default::default(),
     };
-    let mut request = jobs::ExportRequest::new(
+    jobs::ExportRequest::new(
         "font-export".into(),
         &s,
         JobSpec::Export {
@@ -175,22 +196,25 @@ fn exported(
         MediaCatalog::default(),
         to.to_owned(),
     )
-    .unwrap();
-    fonts(request.fonts.as_mut().expect("an export names its fonts"));
-    let exe = Path::new(env!("CARGO_BIN_EXE_pm-engine-service"));
-    let status = jobs::ExportHandle::start(exe, request)
+    .unwrap()
+}
+
+/// The font file written again with the bytes it has, its modification
+/// time put back: nothing a list of names, lengths and times shows, and no
+/// registration changes. Another version of the file all the same (what a
+/// font tool saving in place does, whatever it writes).
+fn rewritten_in_place(font: &Path) {
+    let bytes = std::fs::read(font).unwrap();
+    let modified = std::fs::metadata(font).unwrap().modified().unwrap();
+    // The status-change time has the file system's resolution.
+    std::thread::sleep(Duration::from_millis(20));
+    std::fs::write(font, bytes).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(font)
         .unwrap()
-        .wait()
+        .set_modified(modified)
         .unwrap();
-    if status.state != JobState::Done {
-        return Err(status.error.map(|e| e.message).unwrap_or_default());
-    }
-    let mut frames: Vec<_> = std::fs::read_dir(to)
-        .unwrap()
-        .map(|e| e.unwrap().path())
-        .collect();
-    frames.sort();
-    Ok(std::fs::read(&frames[0]).unwrap())
 }
 
 /// Text that fell back because its family was absent is rendered and cached;
@@ -281,11 +305,33 @@ fn a_font_installed_while_a_project_is_open_retires_its_rendered_frames(
     );
     assert_eq!(
         exported(&dir.path().join("unmatched"), |fonts| {
-            fonts.0.push((dir.path().join("gone.ttf"), 1, 1));
+            fonts.0.push((
+                dir.path().join("gone.ttf"),
+                pm_text::file_version::FileVersion {
+                    len: 1,
+                    ..Default::default()
+                },
+            ));
         }),
         Err(jobs::FONTS_CHANGED.to_owned())
     );
     assert!(!dir.path().join("unmatched").exists());
+    // Asked for a list without the font: every file the job reads is one
+    // it was asked for (its fence holds), yet it resolves the family to a
+    // fallback face where the app resolves it to the font. Its faces are
+    // compared with the app's: it fails rather than export another face.
+    assert_eq!(
+        exported(&dir.path().join("unlisted"), |fonts| {
+            fonts
+                .0
+                .retain(|(path, _)| path.file_name() != font.file_name());
+        }),
+        Err(jobs::FACES_DIFFER.to_owned())
+    );
+    assert!(
+        std::fs::read_dir(dir.path().join("unlisted")).map_or(true, |mut d| d.next().is_none()),
+        "nothing exported"
+    );
 
     // The font is active for this process alone, and a range is rendered
     // now: the fill child draws with the app's fonts, so the frame on disk
@@ -322,9 +368,12 @@ fn a_font_installed_while_a_project_is_open_retires_its_rendered_frames(
         "the rendered frame is not the picture drawn with the activated font"
     );
 
-    // A fill waiting for its turn when the font goes away draws, when its
-    // turn comes, with the fonts its frames' keys were taken from: when the
-    // font is back, those frames are that state's pictures.
+    // A fill waiting for its turn when the font goes away from the app
+    // would draw, when its turn comes, with the fonts its frames' keys
+    // were taken from; but the app can no longer say whether the faces it
+    // resolved are the ones the app resolves with those fonts, so it keeps
+    // nothing. When the font is back, the frame is drawn, and it is the
+    // picture of its time.
     let (_, drawn) = settled(&viewer, &scope, frame(61));
     let waiting = jobs::Activity::default();
     waiting.set(true);
@@ -334,7 +383,10 @@ fn a_font_installed_while_a_project_is_open_retires_its_rendered_frames(
         picture(&viewer) == fallback
     });
     waiting.set(false);
-    filled();
+    eventually("the fill ends", || {
+        !disk.bars().running && disk.bars().error.is_some()
+    });
+    assert_eq!(disk.bars().error.as_deref(), Some(jobs::FONTS_CHANGED));
     pm_text::system_fonts::register_for_process(&font).unwrap();
     eventually("the viewer draws with the font again", || {
         picture(&viewer) == installed
@@ -342,12 +394,114 @@ fn a_font_installed_while_a_project_is_open_retires_its_rendered_frames(
     settled(&viewer, &scope, frame(30));
     settled(&viewer, &scope, frame(60));
     let (report, cached) = settled(&viewer, &scope, frame(61));
-    assert_eq!(report.scale, 1., "rendered while the font was away");
+    assert_eq!(report.scale, 2., "nothing kept from the fill: drawn");
     assert!(
         cached == drawn,
-        "a frame rendered while the font was away is not its key's picture"
+        "the frame drawn again is its time's picture"
     );
     viewer.scopes(None).unwrap();
+
+    // What holds a job to its fonts (`system_fonts::Fence`): asking it
+    // lists nothing (a frame's check costs one look per font file read,
+    // not one per installed font), and a font removed and installed again
+    // in between does not pass, though the list is as it was.
+    use pm_text::system_fonts;
+    let asked = system_fonts::Inventory::current();
+    let fence = system_fonts::Fence::new(&asked);
+    let listed = system_fonts::listings();
+    for _ in 0..100 {
+        fence.hold().unwrap();
+    }
+    assert_eq!(
+        system_fonts::listings(),
+        listed,
+        "holding a job to its fonts lists every installed font"
+    );
+    let changes = system_fonts::epoch();
+    system_fonts::unregister_for_process(&font).unwrap();
+    system_fonts::register_for_process(&font).unwrap();
+    eventually("both changes are heard", || {
+        system_fonts::epoch() >= changes + 2
+    });
+    assert_eq!(asked.verify(), Ok(()), "the list is as it was");
+    assert!(
+        fence.hold().is_err(),
+        "a font removed and installed again while a job rendered goes unseen"
+    );
+    eventually("the viewer draws with the font again", || {
+        picture(&viewer) == installed
+    });
+
+    // A font file read that the job was not asked to draw with (a font
+    // activated for this process alone, or after the list was taken) does
+    // not pass: the process resolved to a font the asking one never
+    // listed. With every file read listed (the system's own sealed fonts
+    // are read unlisted), the fence holds.
+    assert!(
+        system_fonts::files_read()
+            .iter()
+            .any(|(path, _)| path == &font),
+        "the app drew with the font"
+    );
+    let listed = system_fonts::Inventory::current();
+    system_fonts::Fence::new(&listed).hold().unwrap();
+    let unlisted = system_fonts::Inventory(
+        listed
+            .0
+            .iter()
+            .filter(|(path, _)| path != &font)
+            .cloned()
+            .collect(),
+    );
+    assert!(unlisted.0.len() < listed.0.len(), "the font is listed");
+    let refused = system_fonts::Fence::new(&unlisted).hold().unwrap_err();
+    assert!(
+        refused.contains("not among the fonts asked for"),
+        "a font file nobody asked for was read: {refused}"
+    );
+
+    // An export waiting for its turn when a font file it draws with is
+    // rewritten in place: it fails rather than deliver frames drawn with
+    // other fonts than the ones it was asked for, and leaves no file.
+    let read_as = |font: &Path| {
+        system_fonts::files_read()
+            .into_iter()
+            .find(|(path, _)| path == font)
+            .map(|(_, version)| version)
+    };
+    let before = read_as(&font).expect("the app drew with the font");
+    let waiting = jobs::Activity::default();
+    waiting.set(true);
+    let to = dir.path().join("rewritten");
+    let export =
+        jobs::ExportHandle::start_scheduled(exe, export_request(&to), waiting.clone()).unwrap();
+    eventually("the export waits for its turn", || {
+        export.gpu_requests() > 0
+    });
+    rewritten_in_place(&font);
+    waiting.set(false);
+    let status = export.wait().unwrap();
+    assert_eq!(
+        (
+            status.state,
+            status.error.map(|e| e.message).unwrap_or_default()
+        ),
+        (
+            pm_protocol::priority::JobState::Failed,
+            jobs::FONTS_CHANGED.to_owned()
+        ),
+        "an export delivered frames drawn after its font file was rewritten"
+    );
+    assert!(
+        !to.exists() || std::fs::read_dir(&to).unwrap().next().is_none(),
+        "the failed export left a file"
+    );
+    // And the app itself reads the rewritten file again (it would go on
+    // drawing the bytes it had: nothing announces a rewrite in place).
+    eventually("the app reads the rewritten font again", || {
+        picture(&viewer);
+        read_as(&font).is_some_and(|version| version != before)
+    });
 
     pm_text::system_fonts::unregister_for_process(&font).unwrap();
     eventually("the first state's frames are this state's again", rendered);

@@ -95,18 +95,30 @@ pub struct CacheKey {
     pub scale: u64,
     /// The resampler the frame was drawn with.
     pub sampling: pm_render::sampling::Sampling,
+    /// The final picture (`FrameSpec::final_picture`), not its preview at
+    /// the same size.
+    pub finished: bool,
     pub studio_preview: crate::studio::Preview,
     /// `ViewCamera::key` of the pane's camera.
     pub studio_view: u64,
     /// What the frame read besides its document, as observed when it was
     /// drawn: its media files' stamps and the override wrappers answering.
     pub inputs: u64,
+    /// The view's output tone it was drawn for (a digest of it).
+    pub tone: u64,
+    /// The font registry generation it was drawn with.
+    pub fonts: Option<u64>,
+    /// The resources (contributed definitions) generation it was drawn with.
+    pub resources: u64,
 }
 impl CacheKey {
     pub fn same_content(self, other: Self) -> bool {
         self.content == other.content
             && self.revision == other.revision
             && self.inputs == other.inputs
+            && self.tone == other.tone
+            && self.fonts == other.fonts
+            && self.resources == other.resources
             && self.width == other.width
             && self.height == other.height
             && self.crop == other.crop
@@ -133,6 +145,20 @@ const UNDER: f64 = 0.2;
 /// A dragged playhead waits this long without moving before its frame is
 /// drawn again exact (After Effects' adaptive resolution).
 pub const SCRUB_SETTLE_SECONDS: f64 = 0.1;
+/// How long a paused picture has been on screen, its viewer asking for
+/// nothing newer, before its settled picture is asked for
+/// (`FrameSpec::final_picture`, drawn by `crate::settle`): a click through
+/// the timeline or a held arrow key never starts one.
+pub const SETTLE_IDLE_SECONDS: f64 = 0.3;
+/// The GPU time a slice of a settled picture is sized to: how many units
+/// (layers, effect passes) share a slice. Not a bound: a single unit takes
+/// what it takes (see `pm_render::slices`).
+pub const SETTLE_SLICE_SECONDS: f64 = 0.006;
+/// The longest a slice waits for the worker's pictures (a viewer being
+/// drawn, a playing viewer's next frame) at one slice point: past it the
+/// slice goes, so another viewer playing or being dragged never keeps a
+/// paused one from settling (it may then delay one of the playing frames).
+pub const SETTLE_HOLD_SECONDS: f64 = 0.05;
 
 /// Auto's adaptive resolution, which applies only while the playhead is
 /// dragged (After Effects' Adaptive Resolution): a full-resolution still that
