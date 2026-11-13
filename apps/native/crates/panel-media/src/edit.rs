@@ -58,6 +58,14 @@ pub struct NewFolder {
     pub parent: Option<String>,
 }
 
+/// Where an import's assets go: a Project folder (`None`: the root) and the
+/// folders the import makes inside it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Destination {
+    pub folder: Option<String>,
+    pub new_folders: Vec<NewFolder>,
+}
+
 /// A reviewable one-step edit, bound to a document lifetime and revision. Uses
 /// kernel Restore's atomic identity guard (Transact currently has only a revision
 /// guard). It refuses during another open edit instead of racing project reopen.

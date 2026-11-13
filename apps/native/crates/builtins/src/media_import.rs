@@ -586,6 +586,10 @@ impl Builtins {
             }
         }
         folders.retain(|folder| used.contains(&folder.id));
+        let into = pm_panel_media::Destination {
+            folder: request.folder.clone(),
+            new_folders: folders,
+        };
         let names: Vec<String> = items
             .iter()
             .filter_map(|item| Some(item.metadata.get("name")?.as_str()?.to_owned()))
@@ -614,8 +618,7 @@ impl Builtins {
                 .admit_media(
                     &stamp,
                     items.clone(),
-                    request.folder.clone(),
-                    &folders,
+                    &into,
                     request.replace.clone(),
                     place,
                     Caller::native(),

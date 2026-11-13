@@ -1314,8 +1314,7 @@ impl Builtins {
         &self,
         owner: &pm_panel_media::Stamp,
         items: Vec<RetainedAsset>,
-        folder: Option<String>,
-        folders: &[pm_panel_media::NewFolder],
+        into: &pm_panel_media::Destination,
         replace: Option<String>,
         place: Vec<pm_kernel::Command>,
         caller: pm_kernel::Caller,
@@ -1356,7 +1355,13 @@ impl Builtins {
             });
         }
         let mut edit = catalog
-            .prepare_import(owner, stored, folder, replace, folders)
+            .prepare_import(
+                owner,
+                stored,
+                into.folder.clone(),
+                replace,
+                &into.new_folders,
+            )
             .map_err(|error| match error {
                 pm_panel_media::Error::MissingItem => "That folder is no longer in the project",
                 _ => "The import no longer matches the project",
