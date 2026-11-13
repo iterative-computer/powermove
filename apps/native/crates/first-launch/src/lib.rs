@@ -5,6 +5,7 @@ mod checkpoint;
 mod closure;
 mod delta;
 mod disk;
+mod extension_import;
 pub mod recovery;
 pub mod report;
 pub mod secrets;
@@ -188,6 +189,12 @@ pub struct State {
     /// Newest merged delta checkpoint, the three-way base of the next one.
     #[serde(default)]
     pub delta_base: Option<String>,
+    #[serde(default)]
+    pub extensions_imported: bool,
+    #[serde(default)]
+    pub extension_receipts: std::collections::BTreeMap<String, extension_import::Receipt>,
+    #[serde(default)]
+    pub extension_provenance: std::collections::BTreeMap<String, serde_json::Value>,
     /// Both versions kept. The original's bytes stay in its delta checkpoint.
     #[serde(default)]
     pub conflicts: BTreeSet<delta::Conflict>,
@@ -359,6 +366,8 @@ fn validate_native_paths(native: &Path) -> Result<()> {
         "first-launch-checkpoint",
         "first-launch-deltas",
         "extensions-shared",
+        "extensions",
+        "extensions-provenance.json",
         "extensions-overlay",
     ] {
         let p = native.join(path);
@@ -432,6 +441,9 @@ fn run_inner(
             imported_secrets: BTreeSet::new(),
             receipts: Default::default(),
             delta_base: None,
+            extensions_imported: false,
+            extension_receipts: Default::default(),
+            extension_provenance: Default::default(),
             conflicts: BTreeSet::new(),
             source_stamp: None,
             latest_pass: None,
@@ -570,7 +582,9 @@ fn run_inner(
     drop(writer);
     if !state.completed.contains(&Step::Extensions) {
         hook(Event::Started(Step::Extensions))?;
+        extension_import::import(&cp, &root, &native, &mut state)?;
         extensions(&native, Vec::new())?;
+        state.extensions_imported = true;
         finish(&native, &mut state, Step::Extensions, &mut hook)?;
     }
     if state.secrets != SecretStep::Complete || retry_current_secrets {
@@ -804,7 +818,10 @@ fn bootstrap(
         })?;
     }
     for (relative, entry) in &cp.files {
-        if relative.starts_with("store") || state.imported_files.contains(relative) {
+        if relative.starts_with("store")
+            || relative == Path::new("extensions-provenance.json")
+            || state.imported_files.contains(relative)
+        {
             continue;
         }
         let target = native.join(checkpoint::file_target(relative)?);
@@ -1009,20 +1026,15 @@ fn extensions(native: &Path, mut ops: Vec<StateOp>) -> Result<()> {
         matches!(result, ShellReply::Library(OpenDecision::Writable)),
         "native library not writable"
     );
-    let shared = native.join("extensions-shared");
-    // Removed from the original app: unregistered. The overlay and its checkpoint stay.
-    let gone = kernel
-        .state()
-        .extensions
-        .values()
-        .filter(|e| e.installed && !shared.join(&e.id).join("manifest.json").is_file())
-        .map(|e| {
-            let mut entry = e.clone();
-            entry.installed = false;
-            StateOp::Extension(entry)
-        })
-        .collect::<Vec<_>>();
-    ops.extend(gone);
+    // Apply merged settings before deriving entries: otherwise registering an
+    // already-known extension writes its old toggle over the imported toggle.
+    if !ops.is_empty() {
+        kernel.state_transaction(StateTransaction {
+            expected_revision: None,
+            ops: std::mem::take(&mut ops),
+        })?;
+    }
+    let shared = native.join("extensions");
     if shared.is_dir() {
         for e in fs::read_dir(&shared)? {
             let e = e?;

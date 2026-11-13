@@ -1904,6 +1904,45 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn discovery_loads_a_migrated_effect_extension() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("electron");
+        let native = pm_first_launch::beta_profile(temp.path());
+        let extension = source.join("extensions/synthetic-effect");
+        std::fs::create_dir_all(&extension).unwrap();
+        std::fs::write(
+            extension.join("manifest.json"),
+            json!({
+                "id":"synthetic-effect", "name":"Synthetic effect", "version":"1.0.0",
+                "apiVersion":1, "entry":"index.ts", "contributes":["effects"]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            extension.join("index.ts"),
+            "export function activate(api) {};",
+        )
+        .unwrap();
+        assert!(matches!(
+            pm_first_launch::run(
+                &pm_first_launch::Config {
+                    electron_profile: source,
+                    native_profile: native.clone()
+                },
+                |_| Ok(())
+            )
+            .unwrap(),
+            pm_first_launch::Outcome::Complete { .. }
+        ));
+        let found = pm_compat_runner::discovery::scan(&super::roots(&native));
+        let effect = found.iter().find(|f| f.id == "synthetic-effect").unwrap();
+        assert!(effect.manifest.is_ok(), "{:?}", effect.manifest);
+        assert_eq!(effect.directory, native.join("extensions/synthetic-effect"));
+        assert!(effect.store.is_none());
+    }
+
+    #[test]
     fn extension_menus_keep_their_choice_tokens_and_only_web_links_open() {
         let items = menu_entries(
             &[

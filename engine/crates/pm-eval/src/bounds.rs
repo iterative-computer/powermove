@@ -405,6 +405,18 @@ impl<'d> Scope<'_, 'd> {
         measure: &mut dyn TextMeasure,
         host: &mut dyn LayerHost,
     ) -> JsResult<Option<Bounds>> {
+        self.bounds_with_measure(layer, time, &mut Some(measure), host)
+    }
+
+    /// `GL.bounds` when the caller may not have a font service. Geometry
+    /// without text needs no measure; text fails explicitly without one.
+    pub fn bounds_with_measure(
+        &mut self,
+        layer: &'d Node,
+        time: f64,
+        measure: &mut Option<&mut dyn TextMeasure>,
+        host: &mut dyn LayerHost,
+    ) -> JsResult<Option<Bounds>> {
         let bounds = self.native_bounds(layer, time, measure, host)?;
         if Role3d::of(layer).is_some() {
             return Ok(bounds);
@@ -432,7 +444,7 @@ impl<'d> Scope<'_, 'd> {
         &mut self,
         layer: &'d Node,
         time: f64,
-        measure: &mut dyn TextMeasure,
+        measure: &mut Option<&mut dyn TextMeasure>,
         host: &mut dyn LayerHost,
     ) -> JsResult<Option<Bounds>> {
         match Role3d::of(layer) {
@@ -441,7 +453,7 @@ impl<'d> Scope<'_, 'd> {
             None => {}
         }
         if is_type(layer, "group") {
-            return self.group_bounds(layer, time, measure, host);
+            return self.group_bounds_with_measure(layer, time, measure, host);
         }
         if is_type(layer, "extension") && self.backgroundless_scene(layer, time, host)? {
             return self.scene_bounds3d(layer, time, host);
@@ -449,11 +461,11 @@ impl<'d> Scope<'_, 'd> {
         let ty = node::to_js_string(node::member(Some(layer), "type"));
         let ty = ty.as_str().unwrap_or("");
         if ty == "captions" {
-            let b = self.caption_bounds(layer, time, measure)?;
+            let b = self.caption_bounds(layer, time, require_measure(measure)?)?;
             return Ok(Some(Bounds::sized(b.x0, b.y0, b.x1, b.y1, 0.0, 0.0)));
         }
         if ty == "text" {
-            let r = self.text_raster(layer, time, measure)?;
+            let r = self.text_raster(layer, time, require_measure(measure)?)?;
             let s = r.selection;
             return Ok(Some(Bounds {
                 x0: s.x0,
@@ -559,6 +571,16 @@ impl<'d> Scope<'_, 'd> {
         measure: &mut dyn TextMeasure,
         host: &mut dyn LayerHost,
     ) -> JsResult<Option<Bounds>> {
+        self.group_bounds_with_measure(group, time, &mut Some(measure), host)
+    }
+
+    fn group_bounds_with_measure(
+        &mut self,
+        group: &'d Node,
+        time: f64,
+        measure: &mut Option<&mut dyn TextMeasure>,
+        host: &mut dyn LayerHost,
+    ) -> JsResult<Option<Bounds>> {
         if self.is_model_group(group)? {
             return self.model_group_bounds3d(group, time, host);
         }
@@ -579,7 +601,7 @@ impl<'d> Scope<'_, 'd> {
             if !inside || !self.active(child, time)? {
                 continue;
             }
-            let bounds = self.bounds(child, time, measure, host)?;
+            let bounds = self.bounds_with_measure(child, time, measure, host)?;
             let world = self.world_matrix(child, time)?;
             let local = mul(&inv, &world);
             if let Some(b) = bounds {
@@ -714,4 +736,16 @@ pub struct PickOptions<'a> {
     /// The editor's Local View set: object layers outside it are skipped.
     /// `None` outside Local View.
     pub local_view: Option<&'a [JsValue]>,
+}
+
+fn require_measure<'a>(
+    measure: &'a mut Option<&mut dyn TextMeasure>,
+) -> JsResult<&'a mut dyn TextMeasure> {
+    match measure {
+        Some(measure) => Ok(&mut **measure),
+        None => Err(JsThrow {
+            kind: HOST_ONLY,
+            message: "effect owner text measurement is unavailable".into(),
+        }),
+    }
 }

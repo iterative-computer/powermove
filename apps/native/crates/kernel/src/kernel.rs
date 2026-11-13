@@ -37,10 +37,20 @@ pub struct KernelConfig {
     /// Previous versions (`<root>/<project id>/`). Every production host sets
     /// this: a save without it deletes the file it replaces.
     pub backup_root: Option<PathBuf>,
-    /// Where local project locks live (`locks::lock_project`). `None`: a
-    /// `locks` folder beside the journals, or the user's temporary folder
-    /// when there are no journals either.
+    /// Where local project locks live (`locks::lock_project`). `None`: the
+    /// user's lock folder ([`crate::locks::user_lock_root`]), which every
+    /// build and profile of the app shares, so two of them never write one
+    /// project file. Set only to isolate a test.
     pub lock_root: Option<PathBuf>,
+    /// The system's file coordination, asked for a coordinated write around
+    /// every save's publication and every recovery move
+    /// ([`crate::project_io::WriteCoordinator`]). `None`: saves are not
+    /// coordinated (tests, hosts without one).
+    pub write_coordinator: Option<crate::project_io::SharedWriteCoordinator>,
+    /// The person's Trash: where versions of a project a save no longer
+    /// needs go, instead of being deleted (`project_io::TrashHook`).
+    /// `None`: they stay where they are and the Error Log lists them.
+    pub trash: Option<crate::project_io::TrashHook>,
     /// Optional allocator collection on the actor after two seconds idle.
     /// Snapshots allocated here may be freed later by UI/render owners;
     /// thread-local allocators need their allocating thread to collect.
@@ -130,7 +140,11 @@ pub struct Kernel {
     history_max_bytes: usize,
     history_max_entries: usize,
     pub(crate) trimmed_projects: Vec<String>,
-    publish_hooks: crate::project_io::PublishHooks,
+    pub(crate) publish_hooks: crate::project_io::PublishHooks,
+    /// Open projects whose last save is on a volume that could not prove it
+    /// durable: their journals are kept at close.
+    pub(crate) unproven: std::collections::HashSet<String>,
+    log: Vec<String>,
     durability: Option<Durability>,
     slots: BTreeMap<String, Slot>,
     pub(crate) compacting: bool,
@@ -146,13 +160,19 @@ impl Kernel {
             .journal_root
             .as_ref()
             .map(|_| Durability::new(config.journal.clone()));
+        let trash = config.trash.clone();
         Kernel {
             config,
             history_order: Vec::new(),
             history_max_bytes: crate::history::DEFAULT_MAX_BYTES,
             history_max_entries: crate::history::MAX_ENTRIES,
             trimmed_projects: Vec::new(),
-            publish_hooks: Default::default(),
+            publish_hooks: crate::project_io::PublishHooks {
+                trash,
+                ..Default::default()
+            },
+            unproven: Default::default(),
+            log: Vec::new(),
             durability,
             slots: BTreeMap::new(),
             library: None,
@@ -411,6 +431,7 @@ impl Kernel {
     /// Remove only after the caller's flush/compaction barrier succeeded.
     pub(crate) fn remove_closed_project(&mut self, id: &str) -> bool {
         self.sessions.remove(id);
+        self.unproven.remove(id);
         std::sync::Arc::make_mut(&mut self.state.ui).remove(id);
         self.history_order.retain(|p| p != id);
         self.slots.remove(id).is_some()
@@ -428,12 +449,40 @@ impl Kernel {
         crate::SaveOptions {
             backups,
             hooks: self.publish_hooks.clone(),
+            profile: self.profile_dir().map(Into::into),
+            coordinator: self.config.write_coordinator.clone(),
+            unconfirmed: self.unconfirmed_dir(project),
             ..Default::default()
         }
     }
+    pub(crate) fn write_coordinator(&self) -> Option<&crate::project_io::SharedWriteCoordinator> {
+        self.config.write_coordinator.as_ref()
+    }
+    /// Where a copy of `project`'s last save is kept on this machine while
+    /// its volume cannot prove that save durable.
+    pub(crate) fn unconfirmed_dir(&self, project: &str) -> Option<PathBuf> {
+        Some(self.profile_dir()?.join("unconfirmed").join(project))
+    }
+    /// The profile folder this kernel keeps its journals in.
+    pub(crate) fn profile_dir(&self) -> Option<&std::path::Path> {
+        self.config.journal_root.as_ref()?.parent()
+    }
+    /// A line for the host's Error Log ([`crate::KernelEvent::Log`]).
+    pub(crate) fn log(&mut self, message: String) {
+        if !self.log.contains(&message) {
+            self.log.push(message);
+        }
+    }
+    /// The lines logged since the last call.
+    pub fn take_log(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.log)
+    }
     /// Test hooks for every file save this kernel starts from now on.
     #[doc(hidden)]
-    pub fn set_publish_hooks(&mut self, hooks: crate::project_io::PublishHooks) {
+    pub fn set_publish_hooks(&mut self, mut hooks: crate::project_io::PublishHooks) {
+        if hooks.trash.is_none() {
+            hooks.trash = self.config.trash.clone();
+        }
         self.publish_hooks = hooks;
     }
     /// Exclusive use of the project file `path` ([`crate::locks::lock_project`]).
@@ -448,11 +497,7 @@ impl Kernel {
         self.config
             .lock_root
             .clone()
-            .or_else(|| {
-                let journals = self.config.journal_root.as_ref()?;
-                Some(journals.parent()?.join("locks"))
-            })
-            .unwrap_or_else(|| std::env::temp_dir().join("com.powermove.locks"))
+            .unwrap_or_else(crate::locks::user_lock_root)
     }
     pub(crate) fn config_journal_root(&self) -> Option<PathBuf> {
         self.config.journal_root.clone()
@@ -514,6 +559,13 @@ impl Kernel {
         }
     }
 
+    /// Tests: the shared budget, not applied until the next call that
+    /// maintains it (so a test chooses which call trims).
+    #[cfg(any(test, feature = "fault-injection"))]
+    pub(crate) fn set_history_budget_later(&mut self, max_entries: usize) {
+        self.history_max_entries = max_entries;
+    }
+
     fn maintain_history(&mut self, active: &str) {
         self.history_order
             .retain(|p| p != active && self.slots.contains_key(p));
@@ -531,6 +583,7 @@ impl Kernel {
                 if !slot.project.store_mut().trim_history_one() {
                     break;
                 }
+                crate::fault_injection::hit(crate::fault_injection::Stage::InHistoryTrim);
                 let after = slot.project.store().history().stats();
                 entries -= before.entries - after.entries;
                 bytes -= before.bytes - after.bytes;
