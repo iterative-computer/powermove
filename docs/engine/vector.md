@@ -208,6 +208,8 @@ Compatibility level 1 shapes and editable paths retain the Canvas source
 raster: quarter-step density, transparent padding, ceil-rounded dimensions,
 and the original anchor. Coverage is painted on that local grid and the
 compositor samples its retained ink crop through the layer transform.
+The crop retains the transparent texels read by bilinear filtering, so
+subpixel rules preserve the original canvas footprint and remain visible.
 This also applies to 3D planes: the plane projects the same local source
 with bilinear sampling. Enabling 3D without perspective does not change
 its raster grid or edge coverage.

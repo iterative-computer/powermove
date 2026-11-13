@@ -322,9 +322,18 @@ pub(crate) fn legacy_raster<'d>(
     {
         return Ok(None);
     }
-    let Some(rect) = scene.pixel_bounds(PixelRect::new(0, 0, width as u32, height as u32)) else {
+    let Some(ink) = scene.pixel_bounds(PixelRect::new(0, 0, width as u32, height as u32)) else {
         return Ok(None);
     };
+    // The compositor samples the canvas with LINEAR filtering. Retain one
+    // transparent texel around its ink so the cropped quad has the same
+    // filter footprint as the original canvas. A tight one-row ink crop
+    // can otherwise become a subpixel quad that covers no pixel centers.
+    let x0 = (ink.x - 1).max(0);
+    let y0 = (ink.y - 1).max(0);
+    let x1 = (ink.x as u32 + ink.width + 1).min(width as u32);
+    let y1 = (ink.y as u32 + ink.height + 1).min(height as u32);
+    let rect = PixelRect::new(x0, y0, x1 - x0 as u32, y1 - y0 as u32);
     let (sx, sy) = (w / width, h / height);
     Ok(Some(LegacyRaster {
         source: VectorSource::Scene { scene, rect },

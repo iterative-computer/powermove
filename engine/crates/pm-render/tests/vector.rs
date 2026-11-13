@@ -829,3 +829,34 @@ fn a_legacy_shape_keeps_its_canvas_when_3d_is_enabled() {
         );
     }
 }
+
+/// Cropping a canvas to its ink must retain the transparent texels that
+/// bilinear filtering reads. Otherwise a subpixel-height rule's cropped
+/// quad can miss every output pixel center and disappear.
+#[test]
+fn a_legacy_subpixel_rule_retains_its_canvas_filter_border() {
+    let mut renderer = Renderer::headless().unwrap();
+    let l = placed(
+        "rule",
+        "shape",
+        json!({ "shape": "rect", "w": 100, "h": 1, "radius": 0,
+            "color": "#FFFFFF", "stroke": 0 }),
+        1,
+        0.0,
+        200.0 / 3.0,
+    );
+    let alpha = render_alpha(&mut renderer, vec![l]);
+    // The quarter-step density is .75. A 9-unit padded canvas becomes
+    // seven texels high, with .75 coverage in row 3. Projected at 2/3,
+    // the two adjacent pixel centers read that row with weight 5/12.
+    let expected = 0.75 * (5.0 / 12.0);
+    for y in [127, 128] {
+        let a = alpha[(y * W + 128) as usize];
+        assert!(
+            (a - expected).abs() < 0.004,
+            "rule row {y}: {a} instead of {expected}"
+        );
+    }
+    assert_eq!(alpha[(126 * W + 128) as usize], 0.0);
+    assert_eq!(alpha[(129 * W + 128) as usize], 0.0);
+}
