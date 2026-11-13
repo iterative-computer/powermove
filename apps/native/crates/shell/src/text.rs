@@ -356,7 +356,7 @@ impl Render for TextField {
                 // A step deeper under the pointer: the well takes input.
                 .when(!editing, |d| {
                     let over = crate::kit::ink(t.colors.text, t.translucency.selected);
-                    d.hover(move |s| s.bg(over))
+                    d.hover_style(move |s| s.bg(over))
                 })
                 .when(editing, |d| d.shadow(vec![ring]))
             })
