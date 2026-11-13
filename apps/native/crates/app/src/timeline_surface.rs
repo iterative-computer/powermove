@@ -446,8 +446,10 @@ impl TimelineSurface {
         // keys zoom as the bottom bar's ends do.
         use pm_panel_timeline::footer::ZOOM_STEP;
         match id {
-            "timeline.zoomIn" => return self.zoom_to(self.view.pps * ZOOM_STEP, cx),
-            "timeline.zoomOut" => return self.zoom_to(self.view.pps / ZOOM_STEP, cx),
+            // The playhead is the caller's: this runs inside the editor's own
+            // command, where asking it for the time is not allowed.
+            "timeline.zoomIn" => return self.zoom_about(self.view.pps * ZOOM_STEP, time, cx),
+            "timeline.zoomOut" => return self.zoom_about(self.view.pps / ZOOM_STEP, time, cx),
             "timeline.fit" => return self.fit_time(cx),
             _ => {}
         }
@@ -575,9 +577,14 @@ impl TimelineSurface {
     /// Zooms to `pps` about the playhead when it is on screen, else about
     /// the middle of the tracks.
     fn zoom_to(&mut self, pps: f64, cx: &mut Context<Self>) {
+        let time = self.delegate.time(cx);
+        self.zoom_about(pps, time, cx);
+    }
+    /// [`Self::zoom_to`] with the playhead at `time`.
+    fn zoom_about(&mut self, pps: f64, time: f64, cx: &mut Context<Self>) {
         let width = f32::from(self.bounds.size.width) as f64;
         let column = self.view.layer_column;
-        let playhead = column + (self.delegate.time(cx) - self.view.scroll_time) * self.view.pps;
+        let playhead = column + (time - self.view.scroll_time) * self.view.pps;
         let about = if playhead >= column && playhead <= width {
             playhead
         } else {
