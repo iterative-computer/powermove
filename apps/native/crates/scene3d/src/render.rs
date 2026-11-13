@@ -48,6 +48,8 @@ pub struct Resource {
     pub key: String,
     meshes: std::sync::Mutex<HashMap<(usize, u64), Arc<Geometry>>>,
     attributes: std::sync::Mutex<HashMap<usize, Arc<VertexAttributes>>>,
+    /// The triangle picker (its BVH builds once per resource).
+    picker: std::sync::OnceLock<Option<Arc<gltf::pick::Picker>>>,
 }
 impl Resource {
     pub fn new(model: Model) -> Self {
@@ -56,7 +58,18 @@ impl Resource {
             key: String::new(),
             meshes: Default::default(),
             attributes: Default::default(),
+            picker: Default::default(),
         }
+    }
+    /// A glTF model's triangle picker, built on first use; `None` for
+    /// formats without material slots (OBJ, splats).
+    pub fn picker(&self) -> Option<Arc<gltf::pick::Picker>> {
+        self.picker
+            .get_or_init(|| match &self.model {
+                Model::Gltf(m) => Some(Arc::new(gltf::pick::Picker::new(Arc::new((**m).clone())))),
+                _ => None,
+            })
+            .clone()
     }
     pub fn load(name: &str, bytes: &[u8]) -> Result<Arc<Self>> {
         use sha2::{Digest, Sha256};

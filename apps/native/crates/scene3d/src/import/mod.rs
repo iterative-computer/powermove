@@ -167,6 +167,22 @@ pub fn triangle_glb(positions: &[[f32; 3]], indices: &[u32]) -> Vec<u8> {
     w.finish(json!({"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],"nodes":[{"mesh":0}],"meshes":[{"primitives":[{"attributes":{"POSITION":p},"indices":i}]}]}).as_object().unwrap().clone())
 }
 
+/// Flat quads facing +z, one primitive and named material each, in order
+/// (material index = position): a minimal multi-part model.
+pub fn quads_glb(parts: &[(&str, [[f32; 3]; 4])]) -> Vec<u8> {
+    let mut w = GlbWriter::default();
+    let quad = w.indices(&[0, 1, 2, 0, 2, 3]);
+    let primitives: Vec<_> = parts
+        .iter()
+        .enumerate()
+        .map(|(i, (_, corners))| {
+            let p = w.floats(corners, true);
+            json!({"attributes":{"POSITION":p},"indices":quad,"material":i})
+        })
+        .collect();
+    let materials: Vec<_> = parts.iter().map(|(name, _)| json!({"name":name})).collect();
+    w.finish(json!({"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],"nodes":[{"mesh":0}],"materials":materials,"meshes":[{"primitives":primitives}]}).as_object().unwrap().clone())
+}
 /// The material slots a model's parts can override, by their source index
 /// (glTF material index; FBX converts to glTF): `(index, name)` in index
 /// order, named "Material N" when the file leaves the name empty. OBJ parts

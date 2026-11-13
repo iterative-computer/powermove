@@ -5096,6 +5096,7 @@ dependencies = [
  "libc",
  "pm-kernel",
  "pm-model",
+ "pm-panel-studio3d",
  "pm-scene3d",
  "regex",
  "serde",

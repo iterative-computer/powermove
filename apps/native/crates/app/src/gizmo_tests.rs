@@ -6,8 +6,8 @@ use crate::v4_view_tests::{
     PROJECT, Rig, bounds, publication, rig, rig_project, settle, tokens, window,
 };
 use gpui::{
-    App, AppContext, Bounds, Entity, Modifiers, MouseButton, Pixels, Point, TestAppContext,
-    VisualTestContext, point, px,
+    App, AppContext, Bounds, Entity, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, Pixels,
+    Point, TestAppContext, VisualTestContext, point, px,
 };
 use gpui_macos::native_text::TextEvent;
 use pm_engine_service::OverlayLine;
@@ -31,6 +31,11 @@ struct Recorder {
     stamps: RefCell<Vec<f64>>,
     /// The composition size the viewer reports, when not 640 by 360.
     size: Cell<Option<[f64; 2]>>,
+    /// Compositions a double-clicked precomp asked to open.
+    opened: RefCell<Vec<String>>,
+    /// Model geometry a part pick loads, and the parts it focused.
+    assets: RefCell<Option<Arc<dyn pm_scene3d::geometry::AssetGeometry>>>,
+    parts: RefCell<Vec<(String, Option<u64>)>>,
 }
 /// The canvas editor without AppKit: typing is an event, as from NSTextView.
 #[derive(Default)]
@@ -132,6 +137,15 @@ impl Host for Recording {
     }
     fn command(&self, name: &str, _: &mut App) {
         self.0.commands.borrow_mut().push(name.into());
+    }
+    fn open_composition(&self, comp: String, _: &mut App) {
+        self.0.opened.borrow_mut().push(comp);
+    }
+    fn scene3d_assets(&self, _: &App) -> Option<Arc<dyn pm_scene3d::geometry::AssetGeometry>> {
+        self.0.assets.borrow().clone()
+    }
+    fn focus_part(&self, layer: &str, slot: Option<u64>, _: &mut App) {
+        self.0.parts.borrow_mut().push((layer.into(), slot));
     }
     fn input(&self, at: f64, _: &mut App) {
         self.0.stamps.borrow_mut().push(at);
@@ -1663,4 +1677,255 @@ fn the_middle_button_and_space_pan_whatever_the_tool(cx: &mut TestAppContext) {
         .vcx
         .update(|window, cx| surface.update(cx, |g, cx| g.release_space(window, cx)));
     assert!(!panned, "no drag: the release plays");
+}
+// Viewer selection parity with the shipped viewer (viewer.ts onDown, dblclick).
+fn select(s: &Stage, ids: &[&str]) {
+    s.rig
+        .kernel
+        .call(
+            PROJECT,
+            Request::new(
+                Caller::native(),
+                SelectionCall::Layers {
+                    ids: ids.iter().map(|id| id.to_string()).collect(),
+                    add: false,
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+}
+fn selected(s: &Stage) -> Vec<String> {
+    s.rig
+        .kernel
+        .published(PROJECT)
+        .unwrap()
+        .selection
+        .layers()
+        .to_vec()
+}
+/// Down and up in place, then the surface's picks and queue settle.
+fn click(s: &mut Stage, cx: &mut TestAppContext, comp: [f64; 2], m: Modifiers, count: usize) {
+    let at = s.point_of(comp);
+    s.vcx.simulate_event(MouseDownEvent {
+        button: MouseButton::Left,
+        position: at,
+        modifiers: m,
+        click_count: count,
+        first_mouse: false,
+    });
+    s.vcx.simulate_event(MouseUpEvent {
+        button: MouseButton::Left,
+        position: at,
+        modifiers: m,
+        click_count: count,
+    });
+    let surface = s.surface.clone();
+    settle(cx, move |cx| surface.read_with(cx, |s, _| s.idle()));
+}
+fn grouped() -> String {
+    pair()
+        .replace(
+            r#""id":"l1","type":"shape""#,
+            r#""id":"l1","group":"g","type":"shape""#,
+        )
+        .replace(
+            r#""layers":[{"#,
+            r#""layers":[{"id":"g","type":"group","name":"Group","from":0,"dur":2,"on":true,"p":{"position.x":{"v":0,"kf":[]},"position.y":{"v":0,"kf":[]},"scale.x":{"v":100,"kf":[]},"scale.y":{"v":100,"kf":[]},"rotation":{"v":0,"kf":[]},"opacity":{"v":100,"kf":[]}},"d":{},"fx":[]},{"#,
+        )
+}
+/// A click on one layer of a multiple selection keeps the selection: it was
+/// a move that never moved (viewer.ts `startMove(... click)`).
+#[gpui::test]
+fn a_click_on_a_member_of_a_multiple_selection_keeps_it(cx: &mut TestAppContext) {
+    let mut s = stage_on(cx, &pair());
+    select(&s, &["l0", "l1"]);
+    s.refresh(cx);
+    click(&mut s, cx, [460., 160.], Modifiers::none(), 1);
+    assert_eq!(selected(&s), ["l0", "l1"]);
+    // ⇧ on a member still takes it out.
+    click(&mut s, cx, [460., 160.], Modifiers::shift(), 1);
+    let kernel = s.rig.kernel.clone();
+    settle(cx, move |_| {
+        kernel.published(PROJECT).unwrap().selection.layers() == ["l0".to_string()]
+    });
+}
+/// The gap inside a multiple selection's common box belongs to the
+/// selection: a drag there moves every layer, a click there clears.
+#[gpui::test]
+fn the_gap_in_a_multiple_selection_moves_it_and_a_click_there_clears(cx: &mut TestAppContext) {
+    let mut s = stage_on(cx, &pair());
+    select(&s, &["l0", "l1"]);
+    s.refresh(cx);
+    let at = s.point_of([380., 200.]);
+    s.drag(cx, at, point(px(0.), px(20.)), Modifiers::none());
+    let p = s.rig.kernel.published(PROJECT).unwrap();
+    let mut mirror = pm_kernel::QueryMirror::new(&p);
+    let mut y = |id: &str| {
+        mirror
+            .queries()
+            .evaluate(None, id, "position.y", 0.5)
+            .unwrap()
+            .as_f64()
+            .unwrap()
+    };
+    assert_eq!((y("l0"), y("l1")), (170., 170.));
+    assert_eq!(selected(&s), ["l0", "l1"]);
+    click(&mut s, cx, [380., 200.], Modifiers::none(), 1);
+    let kernel = s.rig.kernel.clone();
+    settle(cx, move |_| {
+        kernel.published(PROJECT).unwrap().selection.layers().is_empty()
+    });
+}
+/// A click selects the outermost group; a double-click descends one level
+/// to the member under the pointer (viewer.ts drillTarget).
+#[gpui::test]
+fn a_double_click_descends_into_the_group_under_the_pointer(cx: &mut TestAppContext) {
+    let mut s = stage_on(cx, &grouped());
+    select(&s, &[]);
+    click(&mut s, cx, [460., 160.], Modifiers::none(), 1);
+    let kernel = s.rig.kernel.clone();
+    settle(cx, move |_| {
+        kernel.published(PROJECT).unwrap().selection.layers() == ["g".to_string()]
+    });
+    click(&mut s, cx, [460., 160.], Modifiers::none(), 2);
+    let kernel = s.rig.kernel.clone();
+    settle(cx, move |_| {
+        kernel.published(PROJECT).unwrap().selection.layers() == ["l1".to_string()]
+    });
+    // Nothing deeper: another double-click leaves the member selected.
+    click(&mut s, cx, [460., 160.], Modifiers::none(), 2);
+    assert_eq!(selected(&s), ["l1"]);
+    assert!(s.recorder.opened.borrow().is_empty());
+}
+/// A double-click on a precomp opens its composition (viewer.ts dblclick).
+#[gpui::test]
+fn a_double_click_on_a_precomp_opens_its_composition(cx: &mut TestAppContext) {
+    let precomp = pair()
+        .replace(
+            r#""id":"l1","type":"shape""#,
+            r#""id":"l1","type":"precomp""#,
+        )
+        .replace(r#""d":{"w":100,"h":100},"fx":[]}]}"#, r#""d":{"comp":"c2","w":100,"h":100},"fx":[]}]}"#)
+        .replace(
+            r#""comps":{}"#,
+            r##""comps":{"c2":{"id":"c2","name":"Inner","w":100,"h":100,"fps":30,"dur":2,"bg":"#000000","layers":[]}}"##,
+        );
+    assert!(precomp.contains(r#""comp":"c2""#));
+    let mut s = stage_on(cx, &precomp);
+    click(&mut s, cx, [460., 160.], Modifiers::none(), 1);
+    click(&mut s, cx, [460., 160.], Modifiers::none(), 2);
+    let recorder = s.recorder.clone();
+    settle(cx, move |_| *recorder.opened.borrow() == ["c2".to_string()]);
+}
+/// Hovering outlines what a click would select: the outermost group, the
+/// leaf with ⌘, nothing over a layer already selected (viewer.ts hover).
+#[gpui::test]
+fn hovering_outlines_what_a_click_would_select(cx: &mut TestAppContext) {
+    let mut s = stage_on(cx, &grouped());
+    let hover = |s: &mut Stage, cx: &mut TestAppContext, comp: [f64; 2], m: Modifiers| {
+        let at = s.point_of(comp);
+        s.vcx.simulate_mouse_move(at, None, m);
+        let surface = s.surface.clone();
+        settle(cx, move |cx| surface.read_with(cx, |s, _| s.idle()));
+        s.surface.read_with(&s.vcx, |g, _| g.hovered())
+    };
+    // l0 is selected by the stage.
+    assert_eq!(hover(&mut s, cx, [460., 160.], Modifiers::none()), Some("g".into()));
+    assert_eq!(hover(&mut s, cx, [460., 160.], Modifiers::command()), Some("l1".into()));
+    assert_eq!(hover(&mut s, cx, [210., 160.], Modifiers::none()), None);
+    assert_eq!(hover(&mut s, cx, [600., 340.], Modifiers::none()), None);
+    // The outline is drawn: four more lines than the selection alone.
+    let before = s.recorder.lines.borrow().len();
+    hover(&mut s, cx, [460., 160.], Modifiers::none());
+    assert_eq!(s.recorder.lines.borrow().len(), before + 4);
+    // A press takes it away.
+    let at = s.point_of([460., 160.]);
+    s.vcx.simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
+    assert_eq!(s.surface.read_with(&s.vcx, |g, _| g.hovered()), None);
+    s.vcx.simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+}
+/// A double-click on an imported model picks the part under the pointer:
+/// the model alone is selected and Properties is asked to reveal that
+/// part's material slot (viewer.ts dblclick → scene3d.pickPart).
+#[gpui::test]
+fn a_double_click_on_an_imported_model_focuses_the_part_under_the_pointer(
+    cx: &mut TestAppContext,
+) {
+    let mut s = stage(cx);
+    let dir = std::env::temp_dir().join(pm_kernel::new_id("pm-part-pick"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("camera.glb");
+    // The body covers the middle of the frame; the lens sits to its right.
+    std::fs::write(
+        &path,
+        pm_scene3d::import::quads_glb(&[
+            ("Body", [[-2., -1., 0.], [0.3, -1., 0.], [0.3, 1., 0.], [-2., 1., 0.]]),
+            ("Lens", [[0.6, -1., 0.], [2., -1., 0.], [2., 1., 0.], [0.6, 1., 0.]]),
+        ]),
+    )
+    .unwrap();
+    *s.recorder.assets.borrow_mut() = Some(Arc::new(pm_scene3d::geometry::FileAssets::new(
+        [("asset".to_string(), path)].into(),
+    )));
+    let transact = |s: &Stage, command: pm_kernel::Command| {
+        let call = Call::Transact {
+            label: None,
+            expected_revision: None,
+            body: pm_kernel::WriteBody::Commands(vec![command]),
+        };
+        let ack = s
+            .rig
+            .kernel
+            .call(PROJECT, Request::new(Caller::native(), call))
+            .wait()
+            .unwrap()
+            .unwrap();
+        assert!(!matches!(ack.reply, pm_kernel::Reply::Throw(_)), "{:?}", ack.reply);
+    };
+    transact(
+        &s,
+        pm_kernel::MediaCommand::AddAsset {
+            asset_id: "asset".into(),
+            asset: pm_scene3d::to_model(
+                &serde_json::json!({"id":"asset","kind":"model","name":"camera.glb","format":"glb"}),
+            ),
+        }
+        .into(),
+    );
+    transact(
+        &s,
+        pm_kernel::Scene3dCommand::Apply {
+            comp: None,
+            args: pm_scene3d::to_model(&serde_json::json!({"operation":"add_object","id":"model",
+                "object":{"source":{"assetId":"asset"},"useSourceMaterials":true}})),
+            selection: vec![],
+            time: 0.,
+            autokey: false,
+        }
+        .into(),
+    );
+    s.refresh(cx);
+    let surface = s.surface.clone();
+    settle(cx, move |cx| surface.read_with(cx, |g, _| g.studio_active()));
+    // The first click selects the model, the second picks its part.
+    click(&mut s, cx, [320., 180.], Modifiers::none(), 1);
+    click(&mut s, cx, [320., 180.], Modifiers::none(), 2);
+    let recorder = s.recorder.clone();
+    settle(cx, move |_| !recorder.parts.borrow().is_empty());
+    assert_eq!(*s.recorder.parts.borrow(), [("model".to_string(), Some(0))]);
+    let kernel = s.rig.kernel.clone();
+    settle(cx, move |_| {
+        kernel.published(PROJECT).unwrap().selection.layers() == ["model".to_string()]
+    });
+    // Further right along the middle, the lens answers with its own slot.
+    for x in (330..640).step_by(10) {
+        click(&mut s, cx, [x as f64, 180.], Modifiers::none(), 2);
+        if s.recorder.parts.borrow().last().is_some_and(|p| p.1 == Some(1)) {
+            break;
+        }
+    }
+    assert_eq!(s.recorder.parts.borrow().last(), Some(&("model".to_string(), Some(1))));
+    let _ = std::fs::remove_dir_all(dir);
 }

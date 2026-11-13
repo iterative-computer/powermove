@@ -743,10 +743,13 @@ impl GizmoSurface {
                 .collect(),
             ..(*scene).clone()
         };
-        if let Some(hit) = lights.pick(&eye.ray(at)) {
+        if let Some(hit) = lights.pick(&eye.ray(at)).filter(|h| !locked(&scene, &h.id)) {
             self.studio_select(hit.id, shift, cx);
             return true;
         }
+        // A double-click on an imported model picks the part under the
+        // pointer (viewer.ts dblclick → scene3d.pickPart).
+        let part = event.click_count == 2 && !shift;
         let uv = [
             (at[0] / frame.size[0]) as f32,
             (at[1] / frame.size[1]) as f32,
@@ -754,20 +757,39 @@ impl GizmoSurface {
         if let Some(rx) = self.host.pick_surface(uv, cx) {
             cx.spawn(async move |this, cx| {
                 let reply = rx.recv().await;
-                let _ = this.update(cx, |s, cx| match reply {
-                    Ok(Ok(reply)) => match reply.hit {
-                        Some(hit) => s.studio_select(hit.layer, shift, cx),
-                        None if !shift => {
+                let _ = this.update(cx, |s, cx| {
+                    let hit = match reply {
+                        Ok(Ok(reply)) => Ok(reply.hit.map(|h| h.layer)),
+                        // A stale frame: the box pick answers instead.
+                        _ => Err(s.studio.scene.clone().and_then(|sc| sc.pick(&eye.ray(at)))),
+                    };
+                    // A locked layer isn't picked (the click goes through it).
+                    let scene = s.studio.scene.clone();
+                    let unlocked =
+                        |id: String| (!scene.as_ref().is_some_and(|sc| locked(sc, &id))).then_some(id);
+                    match hit {
+                        Ok(Some(layer)) => match unlocked(layer) {
+                            Some(layer) if part => s.studio_part(layer, eye, at, cx),
+                            Some(layer) => s.studio_select(layer, shift, cx),
+                            None if !shift => {
+                                s.queue.push_back(Job::Select(None));
+                                s.pump(cx);
+                            }
+                            None => {}
+                        },
+                        Ok(None) if !shift => {
                             s.queue.push_back(Job::Select(None));
                             s.pump(cx);
                         }
-                        None => {}
-                    },
-                    // A stale frame: the box pick answers instead.
-                    _ => {
-                        let hit = s.studio.scene.clone().and_then(|sc| sc.pick(&eye.ray(at)));
-                        if let Some(hit) = hit {
-                            s.studio_select(hit.id, shift, cx);
+                        Ok(None) => {}
+                        Err(hit) => {
+                            if let Some(id) = hit.and_then(|h| unlocked(h.id)) {
+                                if part {
+                                    s.studio_part(id, eye, at, cx);
+                                } else {
+                                    s.studio_select(id, shift, cx);
+                                }
+                            }
                         }
                     }
                 });
@@ -775,11 +797,48 @@ impl GizmoSurface {
             .detach();
             return true;
         }
-        let Some(hit) = scene.pick(&eye.ray(at)) else {
+        let Some(hit) = scene.pick(&eye.ray(at)).filter(|h| !locked(&scene, &h.id)) else {
             return false;
         };
-        self.studio_select(hit.id, shift, cx);
+        if part {
+            self.studio_part(hit.id, eye, at, cx);
+        } else {
+            self.studio_select(hit.id, shift, cx);
+        }
         true
+    }
+    /// Double-click on a 3D layer: an imported model's part under the
+    /// pointer becomes the focus of Properties (its material slot opens and
+    /// is marked), with the model the only selected layer. Anything else, or
+    /// a miss on the model's triangles, is an ordinary click.
+    fn studio_part(&mut self, id: String, eye: Eye, at: [f64; 2], cx: &mut Context<Self>) {
+        let (kernel, project) = (self.kernel.clone(), self.project.clone());
+        let assets = self.host.scene3d_assets(cx);
+        let time = self.host.time(cx);
+        let ray = eye.ray(at);
+        let layer = id.clone();
+        cx.spawn(async move |this, cx| {
+            let picked = cx
+                .background_executor()
+                .spawn(async move {
+                    let p = kernel.published(&project)?;
+                    let assets = assets?;
+                    pm_panel_studio3d::viewport::pick_part(&p.snapshot, time, &layer, &ray, &*assets)
+                        .ok()
+                        .flatten()
+                })
+                .await;
+            let _ = this.update(cx, |s, cx| match picked {
+                Some(hit) => {
+                    if s.studio.selected != [id.clone()] {
+                        s.studio_select(id.clone(), false, cx);
+                    }
+                    s.host.focus_part(&id, Some(hit.slot as u64), cx);
+                }
+                None => s.studio_select(id, false, cx),
+            });
+        })
+        .detach();
     }
     /// Select a layer the pointer found; ⇧ adds or removes it.
     fn studio_select(&mut self, id: String, shift: bool, cx: &mut Context<Self>) {
@@ -1259,4 +1318,8 @@ impl GizmoSurface {
             },
         })
     }
+}
+/// A 3D item the viewer must not pick: locked, or not in the scene.
+fn locked(scene: &Scene, id: &str) -> bool {
+    scene.items.iter().any(|i| i.id == id && i.locked)
 }

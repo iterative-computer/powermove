@@ -16,8 +16,31 @@ pub struct EvaluatedGeometry {
     pub bounds: Value,
     pub parent_inverse: Value,
 }
+/// The imported-model part a ray meets first: its material slot (the
+/// original glTF material index Properties' part sections and edit_3d's
+/// `materialIndex` use), the world point and the distance along the ray.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PartHit {
+    pub slot: usize,
+    pub point: Vec3,
+    pub distance: f64,
+}
 pub trait AssetGeometry: Send + Sync {
     fn bounds(&self, id: &str, record: &Value, time: f64) -> Result<Bounds>;
+    /// The part of the model asset `id`, placed by the layer matrix `world`
+    /// at model time `time`, that the world ray `origin` + t·`direction`
+    /// meets first. `None`: a miss, or a format without slots.
+    fn part_at(
+        &self,
+        id: &str,
+        _record: &Value,
+        _world: [f64; 16],
+        _time: f64,
+        _origin: Vec3,
+        _direction: Vec3,
+    ) -> Result<Option<PartHit>> {
+        fail(format!("3D model geometry is not loaded: {id}"))
+    }
     /// The glTF source uses metres. Its fit is inverted when a command opts
     /// into original size/origin; the renderer's normalized resource is kept.
     fn source_fit(&self, _id: &str, _record: &Value) -> Result<gltf::Fit> {
@@ -103,6 +126,72 @@ impl AssetGeometry for LoadedAssets {
         }
         source_fit(model)
     }
+    fn part_at(
+        &self,
+        id: &str,
+        record: &Value,
+        world: [f64; 16],
+        time: f64,
+        origin: Vec3,
+        direction: Vec3,
+    ) -> Result<Option<PartHit>> {
+        let (loaded, model) = self
+            .models
+            .get(id)
+            .ok_or_else(|| Error(format!("3D model geometry is not loaded: {id}")))?;
+        if loaded != record {
+            return fail("3D model source changed; reload geometry");
+        }
+        let crate::import::Model::Gltf(m) = &**model else {
+            return Ok(None);
+        };
+        let picker = gltf::pick::Picker::new(std::sync::Arc::new((**m).clone()));
+        part_hit(&picker, world, time, origin, direction)
+    }
+}
+/// The first part a world ray meets on a posed, placed glTF model.
+pub fn part_hit(
+    picker: &gltf::pick::Picker,
+    world: [f64; 16],
+    time: f64,
+    origin: Vec3,
+    direction: Vec3,
+) -> Result<Option<PartHit>> {
+    if !time.is_finite()
+        || !world.iter().chain(&origin).chain(&direction).all(|v| v.is_finite())
+        || length(direction) < 1e-12
+    {
+        return fail("Invalid part pick");
+    }
+    let posed = picker.pose(&world, time);
+    let ray = gltf::pick::Ray {
+        origin,
+        direction: normalize(direction),
+    };
+    let model = &picker.model;
+    let Some(hit) = picker.pick(
+        &posed,
+        &ray,
+        0.,
+        f64::INFINITY,
+        &|_| gltf::pick::Side::Double,
+        &|_| false,
+    ) else {
+        return Ok(None);
+    };
+    let gltf::ObjectKind::Drawable(d) = &model.objects[hit.object].kind else {
+        return Ok(None);
+    };
+    Ok(model
+        .material_sources
+        .get(d.material)
+        .copied()
+        .flatten()
+        .map(|slot| PartHit {
+            slot,
+            point: hit.point,
+            distance: hit.distance,
+        }))
 }
 /// Snapshot-approved originals, resolved by the same media host as exports.
 /// Decode with Studio's shared Resource loader, independent of editor views.
@@ -163,6 +252,20 @@ impl AssetGeometry for FileAssets {
     }
     fn source_fit(&self, id: &str, record: &Value) -> Result<gltf::Fit> {
         source_fit(&self.resource(id, record)?.model)
+    }
+    fn part_at(
+        &self,
+        id: &str,
+        record: &Value,
+        world: [f64; 16],
+        time: f64,
+        origin: Vec3,
+        direction: Vec3,
+    ) -> Result<Option<PartHit>> {
+        match self.resource(id, record)?.picker() {
+            Some(picker) => part_hit(&picker, world, time, origin, direction),
+            None => Ok(None),
+        }
     }
 }
 fn source_fit(model: &crate::import::Model) -> Result<gltf::Fit> {
@@ -446,4 +549,73 @@ pub fn required_ids(comp: &Value, args: &Value, selection: &[String]) -> Result<
 }
 pub fn bounds_json(b: Bounds) -> Value {
     json!([b.min[0], b.min[1], b.min[2], b.max[0], b.max[1], b.max[2]])
+}
+#[cfg(test)]
+mod part_tests {
+    use super::*;
+    /// Two quads side by side facing +z, with their own materials: a body on
+    /// the left (material 0) and a lens on the right (material 1).
+    fn two_parts() -> Vec<u8> {
+        crate::import::quads_glb(&[
+            ("Body", [[-2., -1., 0.], [-0.5, -1., 0.], [-0.5, 1., 0.], [-2., 1., 0.]]),
+            ("Lens", [[0.5, -1., 0.], [2., -1., 0.], [2., 1., 0.], [0.5, 1., 0.]]),
+        ])
+    }
+    fn assets() -> (LoadedAssets, Value, gltf::Fit) {
+        let resource = crate::render::Resource::load("Camera.glb", &two_parts()).unwrap();
+        let crate::import::Model::Gltf(m) = &resource.model else {
+            panic!("glTF")
+        };
+        let fit = m.fit;
+        let record = json!({"kind":"model","name":"Camera.glb"});
+        let mut assets = LoadedAssets::default();
+        assets.insert("a".into(), record.clone(), crate::import::Model::Gltf(m.clone()));
+        (assets, record, fit)
+    }
+    #[test]
+    fn a_ray_names_the_material_slot_of_the_part_it_meets_first() {
+        let (assets, record, fit) = assets();
+        // The renderer's placement: the fit's centre and radius normalize it.
+        let x = |source: f64| (source - fit.center[0]) / fit.radius;
+        let world = math::IDENTITY;
+        let pick = |at: f64| {
+            assets
+                .part_at("a", &record, world, 0., [x(at), 0., 5.], [0., 0., -1.])
+                .unwrap()
+        };
+        let body = pick(-1.).expect("hits the body");
+        assert_eq!(body.slot, 0);
+        assert!((body.distance - 5.).abs() < 1e-6, "{body:?}");
+        assert_eq!(pick(1.2).expect("hits the lens").slot, 1);
+        // The gap between the parts, and beyond them, is no part.
+        assert_eq!(pick(0.), None);
+        assert_eq!(pick(5.), None);
+        // Seen from behind (double-sided) it is still the lens.
+        let back = assets
+            .part_at("a", &record, world, 0., [x(1.2), 0., -5.], [0., 0., 1.])
+            .unwrap();
+        assert_eq!(back.map(|h| h.slot), Some(1));
+    }
+    #[test]
+    fn the_layer_matrix_places_the_model_it_picks() {
+        let (assets, record, fit) = assets();
+        let x = |source: f64| (source - fit.center[0]) / fit.radius;
+        // Moved 10 units along x: the old place is empty, the new one hits.
+        let mut world = math::IDENTITY;
+        world[12] = 10.;
+        let at = |dx: f64| {
+            assets
+                .part_at("a", &record, world, 0., [x(1.2) + dx, 0., 5.], [0., 0., -1.])
+                .unwrap()
+                .map(|h| h.slot)
+        };
+        assert_eq!(at(0.), None);
+        assert_eq!(at(10.), Some(1));
+        // A changed source asks for a reload rather than answering stale.
+        assert!(
+            assets
+                .part_at("a", &json!({"kind":"model"}), world, 0., [0.; 3], [0., 0., -1.])
+                .is_err()
+        );
+    }
 }

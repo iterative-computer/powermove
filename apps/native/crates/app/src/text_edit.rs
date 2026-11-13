@@ -1394,28 +1394,9 @@ impl GizmoSurface {
         })
         .detach();
     }
-    /// A double-click with the Select tool on unlocked text edits it.
-    pub(super) fn text_double_click(
-        &mut self,
-        at: [f64; 2],
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let time = self.host.time(cx);
-        let (kernel, project) = (self.kernel.clone(), self.project.clone());
-        let handle = window.window_handle();
-        cx.spawn(async move |this, cx| {
-            let hit = cx
-                .background_executor()
-                .spawn(async move { text_under(&kernel, &project, at, time) })
-                .await;
-            if let Some(id) = hit {
-                let _ = handle.update(cx, |_, window, cx| {
-                    let _ = this.update(cx, |s, cx| s.edit_text(id, Entry::All, window, cx));
-                });
-            }
-        })
-        .detach();
+    /// A double-click's text edit: the layer's text, all of it selected.
+    pub(super) fn edit_text_all(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.edit_text(id, Entry::All, window, cx);
     }
     /// Return with one text layer selected edits it (Edit ▸ Edit Text).
     pub fn edit_selected_text(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
