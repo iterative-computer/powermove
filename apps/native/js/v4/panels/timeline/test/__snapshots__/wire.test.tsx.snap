@@ -2775,6 +2775,35 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "props": {
                                     "aria-pressed": false,
                                     "data-pm-component": "toolbar-item",
+                                    "id": "timeline:shy:layer:headline",
+                                    "label": "Toggle Shy",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "face.dashed",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Shy",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
                                     "id": "timeline:solo:layer:headline",
                                     "label": "Toggle Solo",
                                     "metadata": {
@@ -3836,6 +3865,35 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "props": {
                                     "aria-pressed": false,
                                     "data-pm-component": "toolbar-item",
+                                    "id": "timeline:shy:layer:headline",
+                                    "label": "Toggle Shy",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "face.dashed",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Shy",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
                                     "id": "timeline:solo:layer:headline",
                                     "label": "Toggle Solo",
                                     "metadata": {
@@ -4890,6 +4948,35 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "tabIndex": -1,
                                     "title": "Parent: None · Drag to a layer",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:shy:layer:headline",
+                                    "label": "Toggle Shy",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "face.dashed",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Shy",
                                   },
                                   "type": "button",
                                 },
@@ -8166,6 +8253,35 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "tabIndex": -1,
                                     "title": "Parent: None · Drag to a layer",
+                                  },
+                                  "type": "button",
+                                },
+                                {
+                                  "props": {
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "id": "timeline:shy:layer:headline",
+                                    "label": "Toggle Shy",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "face.dashed",
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.secondary",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
+                                      },
+                                    },
+                                    "tabIndex": -1,
+                                    "title": "Toggle Shy",
                                   },
                                   "type": "button",
                                 },
