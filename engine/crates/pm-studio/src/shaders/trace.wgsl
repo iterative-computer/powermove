@@ -1453,6 +1453,13 @@ fn surface(ro: vec3f, rd: vec3f, h: Hit) -> Surface {
   }
   if (m.layers.w > 0.0) { n = droplets(n, uv, m.layers.w);coat_normal=droplets(coat_normal,uv,m.layers.w); }
   if(imported.physical3.w<0.5){coat_normal=n;}
+  // Interpolated or mapped normals may face behind this ray on an otherwise
+  // visible polygon (notably coarse terrain ridges). Such a shading frame
+  // makes every reflective BSDF return zero. Fall back to the real face normal
+  // only for that invalid frame; retain authored smooth/bump normals elsewhere.
+  let facing = select(-1.,1.,dot(ng,-rd)>=0.);
+  if(dot(n,-rd)*facing<=0.){n=ng;}
+  if(dot(coat_normal,-rd)*facing<=0.){coat_normal=ng;}
   m.spec.x = max(m.spec.x, 0.002);
   let volume=select(vec4f(1.,1.,1.,0.),imported.volume,imported.physical3.w>0.5 && imported.physical.x>0.);
   if(imported.physical3.w<0.5){imported.specular_color.w=m.spec.x;}

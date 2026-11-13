@@ -356,3 +356,30 @@ fn a_far_clipped_catcher_miss_never_shades_an_invalid_surface_at_the_horizon() {
         assert!(minimum>=220,"far-clipped empty backdrop turned dark: hardware={hardware} far={far} min={minimum}");
     }}
 }
+
+#[test]
+fn a_front_facing_polygon_never_goes_black_when_its_smooth_normal_faces_away() {
+    // A low camera sees a terrain ridge's front polygon while its averaged
+    // vertex normal can point behind the view. Rejecting that BSDF creates
+    // black triangles along the hilltop, even under a uniform white sky.
+    let mut scene=glass_detail();
+    let mut ridge=Mesh::default();
+    ridge.positions=vec![v3(-4.,-2.,8./3.),v3(4.,-2.,8./3.),v3(4.,2.,-8./3.),v3(-4.,2.,-8./3.)];
+    ridge.uvs=vec![[0.,0.],[1.,0.],[1.,1.],[0.,1.]];
+    ridge.indices=vec![[0,1,2],[0,2,3]];
+    scene.materials=vec![Material::dielectric(Vec3::splat(0.7),1.)];
+    scene.camera=Camera::lens(v3(0.,0.,5.),Vec3::ZERO,50.,0.);
+    let mut renderer=Renderer::new(48,48).unwrap();
+    for hardware in [false,true] {
+        renderer.hardware_rt=hardware;
+        for normal in [v3(0.,0.8,0.6),v3(0.,0.95,-0.3).normalize()] {
+            ridge.normals=vec![normal;4];
+            scene.objects=vec![Object{mesh:ridge.clone(),material:0}];
+            renderer.set_scene(&scene,&scene.prepare());renderer.caustics_enabled=false;
+            renderer.trace(32,8,true,0);let pixels=renderer.finish(0).0;
+            let center=&pixels[(24*48+24)*4..(24*48+24)*4+4];
+            eprintln!("RIDGE_NORMAL hardware={hardware} normal={normal:?} center={center:?}");
+            assert!(center[..3].iter().all(|&v|v>120),"a visible front polygon lost all environment light: {center:?}");
+        }
+    }
+}
