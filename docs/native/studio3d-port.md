@@ -3042,3 +3042,83 @@ passes both its behavior regression and the full three-product image check.
 The default-quality assertion is updated from the old 32–256 / 3% policy to
 the approved 8–128 / 12% policy, including the Production sampling contract;
 that is a test correction, not an image-threshold or runtime-policy change.
+
+
+### Final native handoff — 13 November
+
+The runtime handoff retains the band, invalid-normal, Live-fog, portable
+macOS-14 Metal OIDN/CPU fallback and finite-matte receiver fixes. Command,
+recovery, headless geometry, import-scale and floor-safe highlight changes
+from `feat/na-studio3d-cmdfix` are merged. The experimental cone, enlarged
+photon maps and catcher-query caches are absent. R3/R4 were not started;
+their unfinished prototypes remain outside Git.
+
+The implicit Production policy assertion now passes independently: 8–128
+samples, relative convergence 0.12, eight total bounces and the Production
+per-kind/edge policy. This changes no runtime policy. Integration's test
+already expected those numeric values; its earlier pass was not independent
+evidence of stale preset defaults. Its real design/build-script cache issues
+still warrant owned-source freshness and mounted runtime-policy checks.
+
+Full-HD Metal Production acceptance, using unchanged independent MC4096
+references and full-size 1920×1080 output:
+
+| Object ROI | RMS <0.02 | Noise <0.006 | Bias p95 <0.012 | Two-seed flicker <0.006 | Result |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Chrome | 0.005142 | 0.002518 | 0.003456 | 0.002411 | PASS |
+| Glass | **0.020706** | 0.004130 | 0.004929 | 0.004015 | **FAIL: RMS** |
+| Teapot, corrected mesh | 0.002670 | 0.001269 | 0.003663 | 0.001626 | PASS |
+
+Glass whole-image RMS is 0.009991; the object ROI still fails. Under the
+owner's completion decision this is included as a documented known failure,
+with no threshold or reference change. Teapot's corrected-mesh full-HD
+reference completed using the identical independent MC4096 method; its
+Production results are shown above. The mixed chrome-set full-HD reference and current eleven-scene Cycles rerun also
+remain unfinished. Small Production/Final teapot, glass and chrome checks
+pass. The analytic chrome-set floor remains a known failure: Production
+noise 0.006068, bias 0.013539 and flicker 0.006768; Final noise 0.008522,
+bias 0.012100 and flicker 0.006049. All original assertions remain active.
+
+No full-HD Metal glass measurement was made at `a197bcef7`. Its broad run
+ignored the expensive full-HD test. The older R1 RMS 0.011945 is an earlier
+CPU/build result, not a matched a197 Metal control. `69e71b812` is test-only;
+`73d2cb69e` restores only finite matte receiver observations to 24. It changes
+neither the glass surface's 128-observation safeguard nor the 128 ceiling,
+12% convergence setting, edge/bounce policy, analytic catcher, photon proposal,
+map size, OIDN or references. It could influence the denoiser's surrounding
+pixels, but causation is unmeasured. Cutting back to a197 reintroduces the
+known small-image glass bias failure without proving a full-HD improvement.
+
+Current export evidence remains the matched, contended R2 release real-30
+measurements above: Product Metal 3.064 s/frame misses 3 s; Hero 1.979 is
+below 3 s but lacks final quiet-window recertification. Chrome's retained R1
+real-30 CPU result is 11.043 s/frame, above 8 s; the latest restored native
+trace-only probe is 9.233 s/frame. None is presented as a new final-source
+30-frame Chrome export. Draft/Refine budgets were not re-certified. For the
+fixed dense-foliage environment benchmark, the provisional baseline budget
+is 75 s/frame, set from its first 72.524 s/frame real-30 measurement; a current
+source remeasurement remains required. Final has no time limit.
+
+The latest observed estimate gate passes on CPU Product (+14.95%) and misses
+on Metal Product (+32.06%). Per-export physical/RSS peaks are recorded for
+Product and Hero; Chrome/environment editing/export peaks and the two-fixed-
+project flat-memory gate remain unmeasured. No on-screen session was opened
+because `USER_ACTIVE` remained present. Historical 120-Hz composition results
+were 78.1725 presented fps, largest gap 49.9995 ms, zero >=100-ms gaps, and
+input p95 40.8202 ms over 133 native frame-step inputs at a 1464×824 viewer;
+these are not final-source or full-navigation recertification.
+
+The core broad run recorded 230 passes, three failures and three ignored
+tests across five binaries. Follow-ups correct the stale policy assertion
+and the small glass bias, with separate passing checks. The remaining known
+small-image failure is the mixed-set floor. This does not claim a completely
+green image acceptance suite. Full regression, full-HD glass diagnosis,
+current real-content/complex-scene timing, estimate accuracy, motion blur and
+memory acceptance remain follow-up work. Fog/subsurface/sheen/sky Cycles
+matching and full USDZ import remain the approved v1.1 deferrals.
+
+
+The full-HD test completed with its glass ROI failure; it was not cancelled.
+Runtime/code handoff was pushed before the integration cut. The final results
+and documentation update were completed after the documentation cutoff and
+are documentation-only; they are not a request to change the frozen package.
