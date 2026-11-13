@@ -236,17 +236,39 @@ fn translation(m: &[f64; 16]) -> Vec3 {
     )
     .map_or([0.; 3], |b| b.min)
 }
+/// Whether a composition node has a 3D object, light or camera layer
+/// (`schema::role`, read from the nodes).
+fn has_roles(comp: &pm_model::Node) -> bool {
+    let Some(pm_model::NodeKind::Array(layers)) = comp.get("layers").map(pm_model::Node::kind)
+    else {
+        return false;
+    };
+    layers.iter().any(|layer| {
+        layer
+            .get("d")
+            .and_then(|d| d.get("definition"))
+            .is_some_and(|definition| match definition.kind() {
+                pm_model::NodeKind::String(s) => {
+                    let s = s.to_string_lossy();
+                    [schema::OBJECT, schema::LIGHT, schema::CAMERA].contains(&s.as_str())
+                }
+                _ => false,
+            })
+    })
+}
 /// Read on a worker from one publication at `time`.
 pub fn scene(p: &Published, time: f64) -> Result<Scene> {
     let comp_id = p.snapshot.open_comp();
     let root = p.snapshot.root().ok_or_else(|| invalid("No project"))?;
     let comp = pm_kernel::model::comp_node(root, comp_id.as_deref())
         .ok_or_else(|| invalid("No composition"))?;
-    let comp = from_model(&comp.to_value())?;
-    let layers = comp["layers"].as_array().cloned().unwrap_or_default();
-    if !layers.iter().any(|l| schema::role(l).is_some()) {
+    // Asked for every revision of every project: a composition with no 3D
+    // layer answers from its nodes, before anything is converted.
+    if !has_roles(comp) {
         return Err(invalid("No 3D layers"));
     }
+    let comp = from_model(&comp.to_value())?;
+    let layers = comp["layers"].as_array().cloned().unwrap_or_default();
     let r = pm_kernel::commands::scene3d::resolve_scene(&p.snapshot, comp_id.as_deref(), time)
         .map_err(|e| invalid(e.to_string()))?;
     let records = from_model(
@@ -394,6 +416,29 @@ pub fn framed(scene: &Scene, from: Pose, selection: &[String]) -> Option<Pose> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_composition_without_3d_layers_answers_from_its_nodes() {
+        let has = |layers: serde_json::Value| {
+            let parsed =
+                pm_model::json::parse(&serde_json::json!({"id":"c","layers":layers}).to_string())
+                    .unwrap();
+            has_roles(pm_model::Document::new(Some(parsed), 1).root().unwrap())
+        };
+        assert!(!has(serde_json::json!([])));
+        assert!(!has(serde_json::json!([
+            {"id":"a","type":"solid","d":{"w":10,"h":10}},
+            {"id":"b","type":"extension","d":{"definition":"some.other.layer"}}
+        ])));
+        for definition in [schema::OBJECT, schema::LIGHT, schema::CAMERA] {
+            let layers = serde_json::json!([
+                {"id":"a","type":"solid","d":{}},
+                {"id":"b","type":"extension","d":{"definition":definition}}
+            ]);
+            assert!(has(layers.clone()), "{definition}");
+            // The same answer `schema::role` gives on the converted value.
+            assert!(layers.as_array().unwrap().iter().any(|l| schema::role(l).is_some()));
+        }
+    }
     #[test]
     fn imported_outline_uses_retained_geometry_before_loading_the_mesh() {
         let record = serde_json::json!({"kind":"model", "native3dBounds":{
