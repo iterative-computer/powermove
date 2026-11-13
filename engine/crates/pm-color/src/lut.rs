@@ -43,6 +43,20 @@ pub struct GpuLut {
     pub cube_range: [f32; 2],
 }
 
+/// The bit depth of a `.3dl` table whose largest value is `largest`, by
+/// OpenColorIO's rule: a table may overshoot its white by up to twice, so
+/// up to 511 is 8 bits, 2047 is 10, 8191 is 12 and anything above is 16
+/// (14-bit tables are not made). Below 128 it is not whole code values.
+fn likely_depth(largest: f64) -> Option<u32> {
+    match largest {
+        v if v < 128. => None,
+        v if v <= 511. => Some(8),
+        v if v <= 2047. => Some(10),
+        v if v <= 8191. => Some(12),
+        _ => Some(16),
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct CubeLut {
     pub title: Option<String>,
@@ -239,14 +253,16 @@ impl CubeLut {
         }
     }
 
-    /// Reads an Autodesk `.3dl` cube: an input mesh line, then one row of
-    /// whole numbers per grid point, blue fastest. `Mesh in out` gives the
-    /// grid (2^in + 1 points) and the output depth; without it the grid is
-    /// the mesh line's length and the output depth is the smallest of 8, 10,
-    /// 12, 14 and 16 bits that holds the table's largest value. The mesh must
-    /// be evenly spaced: the table is looked up over 0..1.
+    /// Reads an Autodesk `.3dl` cube as OpenColorIO does: one row of whole
+    /// numbers per grid point, blue fastest, after an input line of more
+    /// than three numbers. The cube's depth is `Mesh in out`'s output depth
+    /// when the file has that line, and otherwise comes from the table's
+    /// largest value ([`likely_depth`]). The input line is a 1D table applied
+    /// before the cube, over 0..1, at its own depth from its own largest
+    /// value; one within two codes of evenly spaced changes nothing and is
+    /// dropped.
     pub fn parse_3dl(text: &str) -> Result<Self, LutError> {
-        let mut mesh: Option<Vec<f64>> = None;
+        let mut input: Option<Vec<f64>> = None;
         let mut declared: Option<(u32, u32)> = None;
         let mut rows = Vec::new();
         for (line_index, raw) in text.trim_start_matches('\u{feff}').lines().enumerate() {
@@ -270,32 +286,30 @@ impl CubeLut {
             }
             let values = fields
                 .iter()
-                .map(|s| s.parse::<f64>().ok().filter(|n| n.is_finite()))
+                .map(|s| s.parse::<f64>().ok().filter(|n| n.is_finite() && *n >= 0.))
                 .collect::<Option<Vec<f64>>>()
-                .ok_or_else(|| fail("has a value that isn’t a number."))?;
+                .ok_or_else(|| fail("has a value that isn’t a number of zero or more."))?;
             match values.len() {
                 3 => rows.push([values[0], values[1], values[2]]),
-                2.. if mesh.is_none() && rows.is_empty() => mesh = Some(values),
+                4.. if input.is_none() => input = Some(values),
+                4.. => return Err(fail("is a second input line; a .3dl has one.")),
                 _ => return Err(fail("isn’t a row of three numbers.")),
             }
-            if rows.len() > 129 * 129 * 129 {
+            if rows.len() > 129 * 129 * 129 + 1 {
                 return Err(fail("is a row past the largest table of 129 points."));
             }
         }
-        // A three-point table's mesh line reads as a row.
-        let three = declared.is_some_and(|(input, _)| input == 1) && !rows.is_empty();
-        if mesh.is_none() && (three || rows.len() == 28) {
-            mesh = Some(rows.remove(0).to_vec());
+        // A three-point table's input line reads as a row.
+        if input.is_none() && rows.len() == 28 {
+            input = Some(rows.remove(0).to_vec());
         }
-        let size = match (&mesh, declared) {
-            (Some(mesh), _) => mesh.len(),
-            (None, Some((input, _))) => (1 << input) + 1,
-            (None, None) => (rows.len() as f64).cbrt().round() as usize,
+        let size = match declared {
+            Some((input, _)) => (1 << input) + 1,
+            None => (rows.len() as f64).cbrt().round() as usize,
         };
-        if !(2..=129).contains(&size) || declared.is_some_and(|(input, _)| size != (1 << input) + 1)
-        {
+        if !(2..=129).contains(&size) {
             return Err(LutError(
-                "The file’s mesh doesn’t give a table of 2 to 129 points.".into(),
+                "The file doesn’t give a table of 2 to 129 points.".into(),
             ));
         }
         if rows.len() != size * size * size {
@@ -305,25 +319,18 @@ impl CubeLut {
                 size * size * size
             )));
         }
-        if let Some(mesh) = &mesh {
-            let top = mesh[size - 1];
-            let even = |(i, v): (usize, &f64)| (v - top * i as f64 / (size - 1) as f64).abs() <= 1.;
-            if top <= 0. || !mesh.iter().enumerate().all(even) {
-                return Err(LutError(
-                    "The file’s input mesh isn’t evenly spaced, which isn’t supported.".into(),
-                ));
-            }
-        }
-        let largest = rows.iter().flatten().fold(0f64, |a, b| a.max(*b));
-        let bits = declared.map_or_else(
-            || {
-                [8, 10, 12, 14, 16]
-                    .into_iter()
-                    .find(|bits| largest <= f64::from((1u32 << bits) - 1))
-                    .unwrap_or(16)
-            },
-            |(_, output)| output,
-        );
+        let largest = |values: &mut dyn Iterator<Item = f64>| values.fold(0f64, f64::max);
+        let depth = |largest: f64, what: &str| {
+            likely_depth(largest).ok_or_else(|| {
+                LutError(format!(
+                    "The {what}’s largest value is {largest}, too low for a .3dl: its values are whole code values of 8 bits or more."
+                ))
+            })
+        };
+        let bits = match declared {
+            Some((_, output)) => output,
+            None => depth(largest(&mut rows.iter().flatten().copied()), "table")?,
+        };
         let scale = f64::from((1u32 << bits) - 1);
         let mut cube = vec![[0.; 3]; rows.len()];
         for r in 0..size {
@@ -334,10 +341,19 @@ impl CubeLut {
                 }
             }
         }
+        let mut shaper = Vec::new();
+        if let Some(input) = input {
+            let top = f64::from((1u32 << depth(largest(&mut input.iter().copied()), "input line")?) - 1);
+            let step = top / (input.len() - 1) as f64;
+            let even = |(i, v): (usize, &f64)| (i as f64 * step - v).abs() < 2.;
+            if !input.iter().enumerate().all(even) {
+                shaper = input.iter().map(|v| [v / top; 3]).collect();
+            }
+        }
         Ok(Self {
             title: None,
             domain: [[0.; 3], [1.; 3]],
-            shaper: Vec::new(),
+            shaper,
             size,
             cube,
             cube_range: [0., 1.],
@@ -534,6 +550,20 @@ mod tests {
         }
     }
 
+    /// A `.3dl` whose cube is `axis` on each channel (blue fastest), after
+    /// `head` lines.
+    fn three_dl(head: &str, axis: &[u32]) -> String {
+        let mut text = String::from(head);
+        for r in axis {
+            for g in axis {
+                for b in axis {
+                    text += &format!("{r} {g} {b}\n");
+                }
+            }
+        }
+        text
+    }
+
     #[test]
     fn a_3dl_cube_is_read_blue_fastest_at_its_output_depth() {
         // Red is the slowest axis; each channel has its own slope.
@@ -552,25 +582,135 @@ mod tests {
         for c in 0..3 {
             assert!((out[c] - expected[c]).abs() < 1e-12, "{out:?}");
         }
-        // Without a Mesh line the depth is the smallest that holds the table.
+        // Without a Mesh line the depth comes from the table's largest value.
         let bare = text.replace("Mesh 1 12\n", "");
         assert_eq!(CubeLut::parse_3dl(&bare).unwrap(), lut);
         for (bad, sentence) in [
             (
-                text.replace("0 512 1023", "0 100 1023"),
-                "The file’s input mesh isn’t evenly spaced, which isn’t supported.",
-            ),
-            (
                 text.replace("Mesh 1 12", "Mesh 2 12"),
-                "The file’s mesh doesn’t give a table of 2 to 129 points.",
+                "The table has 27 rows; its size needs 125.",
             ),
             (
                 format!("{text}0 0 0\n"),
-                "The table has 28 rows; its size needs 27.",
+                "The table has 29 rows; its size needs 27.",
+            ),
+            (
+                text.replace("0 512 1023\n", "0 256 512 768 1023\n0 256 512 768 1023\n"),
+                "Line 5 is a second input line; a .3dl has one.",
+            ),
+            (
+                text.replace("0 512 1023\n", "0 -5 1023\n"),
+                "Line 4 has a value that isn’t a number of zero or more.",
             ),
         ] {
             assert_eq!(CubeLut::parse_3dl(&bad).unwrap_err().to_string(), sentence);
         }
+    }
+
+    /// OpenColorIO's rule (`GetLikelyLutBitDepth`): the largest value picks
+    /// the depth with room for a table that overshoots its white, so a
+    /// superwhite does not push the whole table down a depth.
+    #[test]
+    fn a_3dl_depth_follows_the_largest_value_with_room_for_overshoot() {
+        for (largest, white) in [
+            (128, 255.),
+            (255, 255.),
+            (511, 255.),
+            (512, 1023.),
+            (1023, 1023.),
+            (1100, 1023.),
+            (2047, 1023.),
+            (2048, 4095.),
+            (4095, 4095.),
+            (4500, 4095.),
+            (8191, 4095.),
+            // 14-bit tables are not made: above 8191 is 16 bits.
+            (8192, 65535.),
+            (10000, 65535.),
+            (16383, 65535.),
+            (32767, 65535.),
+            (32768, 65535.),
+            (65535, 65535.),
+            (70000, 65535.),
+        ] {
+            let lut = CubeLut::parse_3dl(&three_dl("", &[0, largest])).unwrap();
+            let out = lut.apply([1., 0., 1.]).unwrap();
+            let expected = f64::from(largest) / white;
+            assert!(
+                (out[0] - expected).abs() < 1e-12 && out[1] == 0.,
+                "largest {largest}: {out:?}, expected {expected}"
+            );
+        }
+        // A 10-bit table with a superwhite: its white stays 1.
+        let mut text = three_dl("0 341 682 1023\n", &[0, 341, 682, 1023]);
+        text = text.replacen("1023 1023 1023\n", "1100 1100 1100\n", 1);
+        assert!(text.contains("1100 1100 1100") && text.contains("1023 1023 682"));
+        let lut = CubeLut::parse_3dl(&text).unwrap();
+        let white = lut.apply([1., 1., 1.]).unwrap();
+        let below = lut.apply([1., 1., 2. / 3.]).unwrap();
+        assert!((white[0] - 1100. / 1023.).abs() < 1e-12, "{white:?}");
+        assert!(
+            (below[0] - 1.).abs() < 1e-12 && (below[2] - 682. / 1023.).abs() < 1e-12,
+            "{below:?}"
+        );
+        // An explicit output depth is the file's own statement.
+        let declared = CubeLut::parse_3dl(&three_dl("Mesh 1 12\n", &[0, 512, 1023])).unwrap();
+        assert!((declared.apply([1.; 3]).unwrap()[0] - 1023. / 4095.).abs() < 1e-12);
+        // Values that are not code values are not a .3dl.
+        assert_eq!(
+            CubeLut::parse_3dl(&three_dl("", &[0, 1])).unwrap_err().to_string(),
+            "The table’s largest value is 1, too low for a .3dl: its values are whole code values of 8 bits or more."
+        );
+    }
+
+    /// The input line is a 1D table before the cube, at its own depth.
+    #[test]
+    fn a_3dl_input_line_is_applied_before_the_cube() {
+        let axis = [0, 1024, 2048, 3071, 4095];
+        let cube = |x: f64| {
+            // The cube alone: linear between its five grid values.
+            let at = x.clamp(0., 1.) * 4.;
+            let lo = (at as usize).min(3);
+            let t = at - lo as f64;
+            (f64::from(axis[lo]) * (1. - t) + f64::from(axis[lo + 1]) * t) / 4095.
+        };
+        let shaped = CubeLut::parse_3dl(&three_dl("Mesh 2 12\n0 250 500 750 1000\n", &axis))
+            .unwrap();
+        let even = CubeLut::parse_3dl(&three_dl("Mesh 2 12\n0 256 512 767 1023\n", &axis))
+            .unwrap();
+        // 1000 is a 10-bit line: 0.5 reaches the cube at 500/1023.
+        for (x, through) in [(0.5, 500. / 1023.), (1., 1000. / 1023.), (0.125, 125. / 1023.)] {
+            let out = shaped.apply([x; 3]).unwrap();
+            assert!(
+                (out[0] - cube(through)).abs() < 1e-12,
+                "{x}: {out:?}, expected {}",
+                cube(through)
+            );
+            let plain = even.apply([x; 3]).unwrap();
+            assert!((plain[0] - cube(x)).abs() < 1e-12, "{x}: {plain:?}");
+        }
+        // An evenly spaced line (within two codes) changes nothing: no stage.
+        let gpu = even.gpu().unwrap();
+        assert_eq!((gpu.cube_size, gpu.shaper_size), (5, 0));
+        let gpu = shaped.gpu().unwrap();
+        assert_eq!((gpu.cube_size, gpu.shaper_size), (5, 5));
+        // The line's depth is its own: a 12-bit line before a 10-bit cube,
+        // and a line longer than the cube's edge.
+        let mixed = CubeLut::parse_3dl(&three_dl(
+            "0 300 600 900 1200 1500 2000 2500 3000 3500 4095\n",
+            &[0, 512, 1023],
+        ))
+        .unwrap();
+        let out = mixed.apply([0.25; 3]).unwrap();
+        let through: f64 = 750. / 4095.;
+        let expected = (through * 2. * 512.) / 1023.;
+        assert!((out[0] - expected).abs() < 1e-12, "{out:?} {expected}");
+        assert_eq!(
+            CubeLut::parse_3dl(&three_dl("0 10 20 30 40\n", &axis))
+                .unwrap_err()
+                .to_string(),
+            "The input line’s largest value is 40, too low for a .3dl: its values are whole code values of 8 bits or more."
+        );
     }
 
     #[test]
