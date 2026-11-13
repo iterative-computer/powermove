@@ -2899,3 +2899,49 @@ Production/Final scenes and the two-seed checks. The chrome-set floor measures
 noise 0.005907, bias p95 0.009778 and flicker 0.005517 with the unchanged
 limits. This is correctness evidence; new real-export speed and full-HD
 acceptance are still pending.
+
+
+### November 13 matched release measurements and regression diagnosis
+
+The matched 30-frame exports below used the same release executable, full
+1920×1080 output, unchanged image targets, the real native export worker and
+encoder, and one controlled OIDN backend at a time. Background GPU activity
+was present in the monitor captures. These are engineering measurements,
+**not quiet-window certification**; the small differences must not be read as
+isolated GPU-denoiser speedups.
+
+| Scene / device | Real export s/frame | Trace ms/frame | Denoise ms/frame | Peak physical footprint GB | Peak RSS GB |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Product / CPU | 3.1231 | 2137.7 | 829.6 | 3.0612 | 2.3093 |
+| Product / Metal | 3.0642 | 2377.5 | 514.7 | 3.6820 | 0.5563 |
+| Hero / CPU | 2.2541 | 1248.0 | 844.7 | 3.2449 | 2.3423 |
+| Hero / Metal | 1.9785 | 1336.2 | 466.3 | 3.9990 | 0.6318 |
+
+Footprint and RSS overlap and must not be added. These peaks cover exporting;
+editing peaks and a flat trend across the two fixed projects remain pending.
+The observed Product CPU estimate was 2.7168 s/frame versus 3.1231 actual
+(+14.95%, inside the point-estimate gate). Metal estimated 2.3204 versus
+3.0642 actual (+32.06%, outside the +30% gate). The fitted adaptive constant
+has not been changed to conceal that miss. The owner explicitly retained GPU
+OIDN despite the smaller end-to-end gain; the measured denoise reduction is
+315 ms on Product and 378 ms on Hero.
+
+Chrome's floor-grain repair exposed a separate transport regression before
+its new real-30 timing could be certified. Four-frame controls on the same
+saved scene and CPU denoiser measured warm trace 10.2807 s at R1, 25.0211 s
+with the floor repair, and 25.0739 s at the current release. Removing only the
+new photon cone returned it to 10.018–10.092 s; removing the matte observation
+guard or the shading-normal fallback did not. The cone filled 524,284 of
+524,288 photon slots (99.9992%), versus 15.70% without it. Missing-cell queries
+then consumed the twelve-probe limit instead of 1.20 probes on average.
+This is a real photon-map-capacity regression, not evidence against the
+normal or backdrop-band fixes. A bounded lazy allocation repair is under
+validation; until it passes the unchanged image/flicker gates and restores
+trace to at most 11.3088 s, the floor speed fix is not accepted.
+
+The environment's earlier Production real-30 measurement was 72.5237
+s/frame, including 70.899 s tracing (97.8%). This is an outlier against the
+product/caustic budgets: dense foliage, long volume/visibility paths and an
+average near 144 samples dominate rather than OIDN. A current-source real
+export and an environment-specific gate are still pending; a single newer
+40.259 s frame is not a 30-frame acceptance measurement.

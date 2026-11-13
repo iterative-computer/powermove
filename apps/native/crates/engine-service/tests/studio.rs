@@ -3479,18 +3479,32 @@ fn viewer_export_estimates_measure_the_shot_and_publish_four_presets_without_edi
     };
     assert_eq!(estimate.presets.iter().map(|p|p.preset.as_str()).collect::<Vec<_>>(), ["draft","preview","production","final"]);
     assert_eq!((estimate.width, estimate.height, estimate.frames), (1920,1080,12));
-    assert_eq!((estimate.calibration_width, estimate.calibration_height), (320,180));
+    assert_eq!((estimate.calibration_width, estimate.calibration_height), (480,270));
     assert!(estimate.extrapolated);
     for p in &estimate.presets {
         assert!(p.frame_ms.min > 0. && p.frame_ms.max >= p.frame_ms.min, "{p:?}");
-        assert_eq!(p.total_ms.max, p.frame_ms.max * 12.);
-        assert_eq!((p.calibration.cold_samples, p.calibration.warm_samples), (8,16));
-        // Draft denoises on the GPU; every other preset runs the denoiser,
-        // when this build has it (the guided filter otherwise).
-        if p.preset == "draft" || !studio::OIDN {
+        assert!((p.total_ms.max-p.frame_ms.max*12.).abs() <= p.total_ms.max.max(1.)*1e-9);
+        let policy=pm_scene3d::quality::preset(&p.preset).unwrap();
+        assert_eq!(p.min_samples,policy["minSamples"].as_u64().unwrap() as u32);
+        assert_eq!(p.max_samples,policy["maxSamples"].as_u64().unwrap() as u32);
+        // Calibration now follows each real preset until convergence or its
+        // ceiling, yielding in four-sample chunks; it no longer forces 8/16.
+        for done in [p.calibration.cold_samples,p.calibration.warm_samples] {
+            assert!(done>0 && done<=p.max_samples && done%4==0,"{p:?}");
+            if done<p.max_samples {assert_eq!(done%32,0,"early stop must use a convergence check");}
+        }
+        assert!(p.calibration.average_samples>=f64::from(p.min_samples));
+        assert!(p.calibration.average_samples<=f64::from(p.max_samples));
+        assert!((0. ..=1.).contains(&p.calibration.cap_fraction));
+        if p.preset=="draft" {
+            assert_eq!(p.calibration.denoise_backend,"none");
+            assert_eq!(p.calibration.oidn_ms,0.);assert_eq!(p.oidn_ms,0.);
+        } else if !studio::OIDN {
+            // OIDN-free builds retain the guided-filter fallback without
+            // charging an OIDN calibration or per-frame denoise cost.
             assert_eq!((p.calibration.oidn_ms, p.oidn_ms), (0., 0.), "{p:?}");
-        } else {
-            assert!(p.calibration.oidn_ms > 0. && p.oidn_ms > 0., "{p:?}");
+        } else if matches!(p.calibration.denoise_backend.as_str(),"cpu"|"metal") {
+            assert!(p.calibration.oidn_ms>0. && p.oidn_ms>0.);
         }
     }
     assert!(matches!(viewer.status().export_estimate, ExportEstimateState::Ready { .. }));
