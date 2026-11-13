@@ -76,6 +76,10 @@ pub const STATIC_KEYS: [&str; 42] = [
     "cloudAccount",
 ];
 
+/// Keys only the native app writes (v1.2.0 leaves them alone): the person's
+/// keymap (Settings › Shortcuts).
+pub const NATIVE_KEYS: [&str; 1] = ["keymap"];
+
 /// `DYNAMIC_PREFIXES` at v1.2.0.
 pub const DYNAMIC_PREFIXES: [&str; 10] = [
     "project",
@@ -113,7 +117,7 @@ fn valid_id(id: &str) -> bool {
 
 /// `parseStoreKey`.
 pub fn parse_key(key: &str) -> Option<StoreKey> {
-    if STATIC_KEYS.contains(&key) {
+    if STATIC_KEYS.contains(&key) || NATIVE_KEYS.contains(&key) {
         return Some(StoreKey::Static(key.to_owned()));
     }
     let (prefix, id) = key.split_once('.')?;
