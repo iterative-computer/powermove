@@ -191,6 +191,8 @@ pub struct Controller {
     /// state revision and keymap value this window's keys follow, and the
     /// page as last built (`stamp` changes with it).
     pub(crate) shortcut_recording: Option<String>,
+    /// First run's Bring My Workspace waits for the project being created.
+    pub(crate) workspace_after_open: bool,
     pub(crate) keymap_revision: Option<u64>,
     pub(crate) keymap_seen: Option<pm_model::Value>,
     pub(crate) shortcuts_page: serde_json::Value,
@@ -334,38 +336,10 @@ impl pm_shell::integration::Integration for Bridge {
         self.0.update(cx, |v, cx| v.command(cmd, w, cx))
     }
     fn checked(&self, cx: &App) -> std::collections::BTreeSet<String> {
-        let v = self.0.read(cx);
-        let mut on = std::collections::BTreeSet::new();
-        if v.playback.looping {
-            on.insert("toggleLoop".to_owned());
-        }
-        if let Some(timeline) = &v.builtins.timeline {
-            if timeline.read(cx).hides_shy() {
-                on.insert("timeline.toggleShy".to_owned());
-            }
-            let (tracks, snapping) = timeline.read(cx).toggles();
-            if tracks {
-                on.insert("timeline.toggleMode".to_owned());
-            }
-            if snapping {
-                on.insert("timeline.toggleSnapping".to_owned());
-            }
-            on.insert(timeline.read(cx).edit_tool().command());
-            if timeline.read(cx).graph_merged() {
-                on.insert("graph.merge".to_owned());
-            }
-        }
-        on
+        self.0.read(cx).checked_commands(cx)
     }
     fn disabled(&self, cx: &App) -> std::collections::BTreeSet<String> {
-        let v = self.0.read(cx);
-        let mut off = v.disabled.clone();
-        // While a project arrives its commands stay available: they wait for
-        // it (`Controller::command`) instead of being refused.
-        if v.opening || v.settling.is_some() {
-            off.retain(|name| !crate::layer_commands::waits_for_project(name));
-        }
-        off
+        self.0.read(cx).unavailable_commands()
     }
     fn panel(
         &self,
@@ -501,6 +475,61 @@ fn composition_size(w: f64, h: f64) -> [f64; 2] {
 /// again before its first frame.
 fn left_at(clock: Option<f64>, asked: Option<f64>) -> f64 {
     clock.or(asked).unwrap_or(0.)
+}
+impl Controller {
+    /// Toggles that are on: menu checkmarks, and `list_commands` for agents.
+    pub(crate) fn checked_commands(&self, cx: &App) -> std::collections::BTreeSet<String> {
+        let v = self;
+        let mut on = std::collections::BTreeSet::new();
+        if v.playback.looping {
+            on.insert("toggleLoop".to_owned());
+        }
+        // The viewer's overlays and the channel it shows.
+        for (shown, command) in [
+            (v.safe_areas, "viewer.safeAreas"),
+            (v.guides, "viewer.guides"),
+            (v.rulers, "viewer.rulers"),
+            (v.grid, "viewer.grid"),
+        ] {
+            if shown {
+                on.insert(command.to_owned());
+            }
+        }
+        if let Some((_, _, command)) = crate::viewer2::CHANNELS
+            .iter()
+            .find(|(m, _, _)| *m == v.channels)
+        {
+            on.insert((*command).to_owned());
+        }
+        if let Some(timeline) = &v.builtins.timeline {
+            if timeline.read(cx).hides_shy() {
+                on.insert("timeline.toggleShy".to_owned());
+            }
+            let (tracks, snapping) = timeline.read(cx).toggles();
+            if tracks {
+                on.insert("timeline.toggleMode".to_owned());
+            }
+            if snapping {
+                on.insert("timeline.toggleSnapping".to_owned());
+            }
+            on.insert(timeline.read(cx).edit_tool().command());
+            if timeline.read(cx).graph_merged() {
+                on.insert("graph.merge".to_owned());
+            }
+        }
+        on
+    }
+    /// Commands that cannot run now: dimmed menu rows, refused agent runs.
+    pub(crate) fn unavailable_commands(&self) -> std::collections::BTreeSet<String> {
+        let v = self;
+        let mut off = v.disabled.clone();
+        // While a project arrives its commands stay available: they wait for
+        // it (`Controller::command`) instead of being refused.
+        if v.opening || v.settling.is_some() {
+            off.retain(|name| !crate::layer_commands::waits_for_project(name));
+        }
+        off
+    }
 }
 impl Controller {
     /// A passing status note (v1's status toast): shown in the status line,
@@ -756,6 +785,7 @@ impl Controller {
             imports: Default::default(),
             importing: None,
             shortcut_recording: None,
+            workspace_after_open: false,
             keymap_revision: None,
             keymap_seen: None,
             shortcuts_page: serde_json::Value::Null,
@@ -3059,6 +3089,63 @@ impl Controller {
                 }
             }
             // Settings, at the open project's own page.
+            // The agent's transport, work area and the edits whose menu rows
+            // ask with a sheet (run_command; list_commands describes them).
+            "transport.play" | "transport.pause" => {
+                if self.running() != (cmd.name == "transport.play") {
+                    let play = ShellCommand {
+                        name: "play".into(),
+                        args: vec![],
+                        token: None,
+                    };
+                    return self.command(&play, window, cx);
+                }
+            }
+            "transport.seek" => {
+                let Some(seconds) = cmd.args.first().and_then(|v| v.as_f64()) else {
+                    return false;
+                };
+                if self.running() {
+                    self.end_run();
+                }
+                self.seek(seconds);
+            }
+            "transport.loop" => {
+                let on = cmd.args.first().and_then(|v| v.as_bool()) != Some(false);
+                if self.playback.looping != on {
+                    self.toggle_loop(cx);
+                }
+            }
+            "workArea.set" | "precompose.selection" | "composition.new" => {
+                let Some(published) = self.published.clone() else {
+                    return false;
+                };
+                let Some(plan) =
+                    crate::agent_commands::plan(&cmd.name, &cmd.args, &published, self.time())
+                else {
+                    return false;
+                };
+                self.run_layer_plan(plan, cx);
+            }
+            // First run's Bring My Workspace (v1's onboarding handoff): it
+            // needs a project, so with none open a blank one comes first.
+            "firstRunWorkspace" => {
+                if self.session.is_some() {
+                    self.bring_workspace(window, cx);
+                } else if let Some(library) = self.library(cx) {
+                    self.workspace_after_open = true;
+                    library.update(cx, |v, cx| {
+                        let _ = v.controller.refresh();
+                        let _ = v.controller.begin_new(
+                            String::new(),
+                            None,
+                            &crate::project_library::default_format(),
+                        );
+                        let _ = v.controller.create();
+                        v.pump(cx);
+                    });
+                }
+            }
             // Edit ▸ Keyboard Shortcuts… (After Effects' place for it).
             "keyboardShortcuts" => {
                 self.builtins.settings_page = Some("shortcuts".into());

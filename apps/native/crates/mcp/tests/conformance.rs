@@ -141,6 +141,8 @@ fn captured_installed_stdio_pairs_replay_with_owner_3d_contract() {
                         .find(|t| t["name"] == replacement["name"])
                         .unwrap() = replacement.clone();
                 }
+                // The native window tools follow the pinned catalog.
+                tools.extend(catalog::native_tools().iter().cloned());
                 expected["result"]["tools"] = Value::Array(tools);
                 expected
             } else {
@@ -690,7 +692,7 @@ fn loopback_authentication_catalog_and_descriptor_lifetime() {
     reader.read_line(&mut line).unwrap();
     assert_eq!(
         serde_json::from_str::<Value>(&line).unwrap()["result"],
-        json!(catalog::tools())
+        json!(catalog::served_tools())
     );
     drop(reader);
     drop(stream);
@@ -733,7 +735,7 @@ fn binary_proxy_edits_and_disconnect_rolls_back() {
         rpc("initialize", json!({}));
         assert_eq!(
             rpc("tools/list", json!({}))["tools"],
-            json!(catalog::tools())
+            json!(catalog::served_tools())
         );
         value(rpc(
             "tools/call",

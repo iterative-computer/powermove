@@ -40,6 +40,7 @@ mod interpret_sheet;
 mod keyframe_sheets;
 mod poster;
 
+mod agent_commands;
 mod agent_speech;
 mod captions_generate;
 mod captions_panel;

@@ -19,6 +19,8 @@ const PANEL_TOOLS: &[&str] = &[
     "computer_use_panel",
     "set_panel_layout",
     "get_workspace_state",
+    "list_commands",
+    "run_command",
 ];
 /// The shell's live docks and workspace replace the saved ones; panels the
 /// window registered natively join the kernel's registrations.
@@ -109,7 +111,7 @@ impl McpSession {
         }
     }
     pub fn tools(&self) -> Value {
-        json!(catalog::tools())
+        json!(catalog::served_tools())
     }
     pub fn set_agent_run(&mut self, token: &str) {
         self.agent_token = Some(token.to_owned());
@@ -321,7 +323,12 @@ impl McpSession {
                 .clone()
                 .ok_or_else(|| Error::unavailable(catalog::backing(name)))?;
             let project = session.project.clone();
-            let acting = ["interact_panel", "computer_use_panel"].contains(&name);
+            let acting = ["interact_panel", "computer_use_panel", "run_command"].contains(&name);
+            if name == "run_command" && project.is_none() {
+                return Err(Error::invalid(
+                    "This tool requires project access and an attached project.",
+                ));
+            }
             if acting && let Some(id) = project.as_deref() {
                 let revision = host.revision(id)?;
                 if session.transaction.is_none() {
@@ -995,7 +1002,7 @@ impl McpSession {
             )?;
             std::fs::write(
                 root.join("api/mcp-tools.json"),
-                json!(catalog::tools()).to_string(),
+                json!(catalog::served_tools()).to_string(),
             )?;
             result["workspace"] = json!(root);
             result["stagingDirectory"] = json!(root.join("extensions"));
