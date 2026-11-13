@@ -707,3 +707,39 @@ fn a_layer_in_a_locked_group_offers_unlock_group() {
         Some("Unlock Group")
     );
 }
+
+/// The layer commands with no shipped chord are menu-bar rows that send
+/// their own command (the Layer menu lists keymap bindings only), and
+/// choosing each one changes the project.
+#[test]
+fn chordless_layer_commands_run_from_the_menu_bar() {
+    let desk = Desk::new(menu_project());
+    // `install_menus` sends a chosen row's command and arguments as listed.
+    let rows: Vec<(&str, pm_shell::menu::Item)> = pm_shell::menu::menus()
+        .into_iter()
+        .flat_map(|(title, items)| items.into_iter().map(move |item| (title, item)))
+        .collect();
+    for (command, select) in [
+        ("toggleVisibility", "a"),
+        ("toggleSolo", "a"),
+        ("fitToComposition", "a"),
+        ("simplifyKeyframes", "keyed"),
+        ("separateAudio", "v"),
+    ] {
+        let (menu, item) = rows
+            .iter()
+            .find(|(_, item)| item.command == command)
+            .unwrap_or_else(|| panic!("{command} has no menu row"));
+        assert!(
+            !pm_shell::menu::DISPLAY_ONLY.contains(menu),
+            "{command} sits in {menu}, which lists keymap bindings only"
+        );
+        assert!(item.role.is_none() && item.chord.is_empty(), "{command}");
+        desk.select(&[select]);
+        let before = desk.document();
+        desk.run(&item.command, &item.args, 1.);
+        assert_ne!(desk.document(), before, "{command} changed nothing");
+        desk.undo();
+        assert_eq!(desk.document(), before, "{command} is one Undo step");
+    }
+}

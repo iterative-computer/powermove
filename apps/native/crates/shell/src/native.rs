@@ -5097,8 +5097,12 @@ pub fn install_menus() {
     let mut index = 0;
     for (title, items) in menus {
         let submenu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str(title));
+        // These menus dim a row whose command cannot run now (`validateMenuItem`).
         submenu.setAutoenablesItems(
-            title == "Edit" || menu::DISPLAY_ONLY.contains(&title) || title == "View",
+            title == "Edit"
+                || title == "Composition"
+                || menu::DISPLAY_ONLY.contains(&title)
+                || title == "View",
         );
         if menu::DISPLAY_ONLY.contains(&title) {
             delegate(&submenu, MenuKind::DisplayOnly);
