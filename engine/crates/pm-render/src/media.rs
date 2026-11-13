@@ -1296,12 +1296,14 @@ impl MediaCache {
             |e: pm_media::MediaError| MediaFailure::Failed(format!("{}: {e}", path.display()));
         let none = Interpretation::default();
         let interp = interpret.unwrap_or(&none);
-        probe_interpreted_image(path, interp).map_err(issue)?;
-        let facts = still_facts(path).map_err(issue)?;
         let ask = stills::StillAsk {
             edge,
             interpreted: interpret.is_some(),
         };
+        // Before the probe: its first read of a file is a decode too.
+        self.stills.wait_for_decoding(path, (len, modified), ask);
+        probe_interpreted_image(path, interp).map_err(issue)?;
+        let facts = still_facts(path).map_err(issue)?;
         let preview = edge.filter(|_| facts.previewed(ask.interpreted));
         // Decoded ahead by the worker as this frame reads it, or here.
         let mut still = match self.stills.take(path, (len, modified), ask, preview) {

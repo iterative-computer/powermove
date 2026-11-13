@@ -3,14 +3,16 @@
 //!
 //! The worker runs the same [`pm_media::image::read`] the frame would (and
 //! warms the per-stamp facts its probe reads); the frame takes the result
-//! when the file's stamp still matches and decodes itself otherwise. Only the decode moves: conversion and upload stay on
-//! the frame, so the pixels are the ones a cold read gives.
+//! when the file's stamp still matches and decodes itself otherwise; a frame
+//! that meets a still the worker is decoding at that moment waits for it
+//! instead of decoding it a second time. Only the decode moves: conversion
+//! and upload stay on the frame, so the pixels are the ones a cold read gives.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -35,7 +37,9 @@ pub(crate) struct StillAsk {
 const MAX_READY: usize = 8;
 /// The decoded bytes held at most, counted from the moment the worker
 /// decodes a still, so stills on their way to the frame count too (a UHD
-/// 16-bit RGBA still is 66 MB).
+/// 16-bit RGBA still is 66 MB). One still is held whatever its size, and so
+/// is the one a frame is waiting for: dropping either made the frame decode
+/// the same file again on the render thread.
 const MAX_READY_BYTES: usize = 24 << 20;
 /// A decoded still no frame took, or asked for again, within this long is
 /// dropped: the playhead went elsewhere.
@@ -49,7 +53,16 @@ type Decoded = (StillImage, Option<u32>);
 struct Worker {
     ask: Sender<StillKey>,
     answers: Receiver<(StillKey, Option<Decoded>)>,
-    _thread: JoinHandle<()>,
+    thread: JoinHandle<()>,
+}
+
+/// What the worker is doing, shared with the frame.
+#[derive(Default)]
+struct Progress {
+    /// The still being decoded, from its dequeue until its answer is sent.
+    decoding: Option<StillKey>,
+    /// The still a frame is blocked on.
+    wanted: Option<StillKey>,
 }
 
 pub(crate) struct StillPrefetch {
@@ -59,8 +72,12 @@ pub(crate) struct StillPrefetch {
     ready: HashMap<StillKey, (Decoded, Instant)>,
     /// Bytes of decoded stills, ready or still in the channel.
     held: Arc<AtomicUsize>,
+    progress: Arc<Mutex<Progress>>,
     limit: usize,
     ttl: Duration,
+    /// Held by a test to keep the worker inside a decode.
+    #[cfg(test)]
+    stall: Arc<Mutex<()>>,
 }
 
 impl Default for StillPrefetch {
@@ -80,8 +97,11 @@ impl StillPrefetch {
             pending: HashSet::new(),
             ready: HashMap::new(),
             held: Arc::new(AtomicUsize::new(0)),
+            progress: Default::default(),
             limit,
             ttl,
+            #[cfg(test)]
+            stall: Default::default(),
         }
     }
 
@@ -108,10 +128,16 @@ impl StillPrefetch {
             let (done, answers) = channel();
             let pool = pool.clone();
             let (held, limit) = (self.held.clone(), self.limit);
+            let progress = self.progress.clone();
+            #[cfg(test)]
+            let stall = self.stall.clone();
             let Ok(handle) = std::thread::Builder::new()
                 .name("pm-still-prefetch".into())
                 .spawn(move || {
                     for key in asks {
+                        progress.lock().unwrap().decoding = Some(key.clone());
+                        #[cfg(test)]
+                        drop(stall.lock().unwrap());
                         // The frame's probe reads the file's facts first,
                         // once per stamp (a whole decode): warm that cache
                         // here too. They also say whether the frame reads a
@@ -131,15 +157,22 @@ impl StillPrefetch {
                             }
                             None => pm_media::image::read(&key.0, &pool).map(|s| (s, None)),
                         };
-                        // Only a still that fits beside the held ones is
-                        // kept; the frame decodes the others itself.
+                        // Kept: a still that fits beside the held ones,
+                        // the only one held, and the one a frame waits for.
+                        // The frame decodes the others itself. The answer
+                        // is sent before the frame can see the decode as
+                        // over, so it never starts one for a still on its
+                        // way.
+                        let mut progress = progress.lock().unwrap();
+                        let wanted = progress.wanted.as_ref() == Some(&key);
                         let still = decoded.ok().filter(|(still, _)| {
                             let size = bytes(still);
                             held.fetch_update(Ordering::AcqRel, Ordering::Acquire, |h| {
-                                (h + size <= limit).then_some(h + size)
+                                (wanted || h == 0 || h + size <= limit).then_some(h + size)
                             })
                             .is_ok()
                         });
+                        progress.decoding = None;
                         if done.send((key, still)).is_err() {
                             break;
                         }
@@ -151,7 +184,7 @@ impl StillPrefetch {
             self.worker = Some(Worker {
                 ask,
                 answers,
-                _thread: handle,
+                thread: handle,
             });
         }
         if let Some(worker) = &self.worker
@@ -159,6 +192,40 @@ impl StillPrefetch {
         {
             self.pending.insert(key);
         }
+    }
+
+    /// Blocks while the worker is decoding `path` at `stamp` as `ask` reads
+    /// it: the frame that needs this still now gets that decode (and the
+    /// file's facts with it) instead of starting the same one beside it. The
+    /// worker runs at the waiting thread's class meanwhile. A still only
+    /// queued is not waited for.
+    pub(crate) fn wait_for_decoding(&mut self, path: &Path, stamp: (u64, u128), ask: StillAsk) {
+        let Some(worker) = &self.worker else { return };
+        {
+            let mut progress = self.progress.lock().unwrap();
+            if !progress
+                .decoding
+                .as_ref()
+                .is_some_and(|k| k.0 == path && (k.1, k.2) == stamp && k.3 == ask)
+            {
+                return;
+            }
+            progress.wanted = progress.decoding.clone();
+        }
+        let boost = qos::Boost::of(&worker.thread);
+        let now = Instant::now();
+        while let Ok((key, still)) = worker.answers.recv() {
+            let done = key.0 == path && (key.1, key.2) == stamp && key.3 == ask;
+            self.pending.remove(&key);
+            if let Some(still) = still {
+                self.ready.insert(key, (still, now));
+            }
+            if done {
+                break;
+            }
+        }
+        drop(boost);
+        self.progress.lock().unwrap().wanted = None;
     }
 
     /// The still decoded for `path` at `stamp` and `ask`, if the worker has
@@ -208,6 +275,56 @@ impl StillPrefetch {
             }
             keep
         });
+    }
+}
+
+/// The worker lent the class of the thread that waits for it: a render
+/// thread at user-interactive would otherwise wait for a decode the
+/// scheduler holds back at the default class.
+#[cfg(target_os = "macos")]
+mod qos {
+    use std::ffi::c_void;
+    use std::os::unix::thread::JoinHandleExt;
+
+    unsafe extern "C" {
+        fn qos_class_self() -> u32;
+        fn pthread_override_qos_class_start_np(
+            thread: std::os::unix::thread::RawPthread,
+            qos: u32,
+            relative: i32,
+        ) -> *mut c_void;
+        fn pthread_override_qos_class_end_np(token: *mut c_void) -> i32;
+    }
+
+    pub(super) struct Boost(*mut c_void);
+
+    impl Boost {
+        pub(super) fn of(thread: &std::thread::JoinHandle<()>) -> Self {
+            // SAFETY: the handle keeps the thread's identifier valid; the
+            // override ends when this value drops.
+            Self(unsafe {
+                pthread_override_qos_class_start_np(thread.as_pthread_t(), qos_class_self(), 0)
+            })
+        }
+    }
+
+    impl Drop for Boost {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                // SAFETY: the token came from the matching start call.
+                unsafe { pthread_override_qos_class_end_np(self.0) };
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+mod qos {
+    pub(super) struct Boost;
+    impl Boost {
+        pub(super) fn of(_: &std::thread::JoinHandle<()>) -> Self {
+            Self
+        }
     }
 }
 
@@ -377,6 +494,69 @@ mod tests {
         );
         assert_eq!(prefetch.ready.len(), 0);
         assert_eq!(prefetch.held.load(Ordering::Acquire), 0);
+    }
+
+    /// A still larger than the whole hold is handed to its frame all the
+    /// same (dropped, the frame decoded the file a second time); a second
+    /// one beside it is not kept.
+    #[test]
+    fn one_still_is_held_whatever_its_size() {
+        let (path, stamp) = fixture();
+        let pool = FramePool::new(0);
+        let mut prefetch = StillPrefetch::with_limits(1, READY_TTL);
+        prefetch.request(&path, stamp, StillAsk::default(), &pool);
+        prefetch.request(&path, (stamp.0, stamp.1 + 1), StillAsk::default(), &pool);
+        settle(&mut prefetch);
+        assert_eq!(prefetch.ready.len(), 1, "one over the limit, not two");
+        assert!(
+            prefetch
+                .take(&path, stamp, StillAsk::default(), None)
+                .is_some()
+        );
+        assert_eq!(prefetch.held.load(Ordering::Acquire), 0);
+    }
+
+    /// A frame that needs the still the worker is decoding at that moment
+    /// waits for that decode and takes its result, even when it does not fit
+    /// beside the stills already held; one only queued is not waited for.
+    #[test]
+    fn a_frame_waits_for_the_decode_in_progress() {
+        let (path, stamp) = fixture();
+        let pool = FramePool::new(0);
+        let mut prefetch = StillPrefetch::with_limits(1, READY_TTL);
+        let ask = StillAsk::default();
+        // One still held, so the next does not fit.
+        prefetch.request(&path, (stamp.0, stamp.1 + 1), ask, &pool);
+        settle(&mut prefetch);
+        assert_eq!(prefetch.ready.len(), 1);
+        let stall = prefetch.stall.clone();
+        let guard = stall.lock().unwrap();
+        prefetch.request(&path, stamp, ask, &pool);
+        prefetch.request(&path, (stamp.0, stamp.1 + 2), ask, &pool);
+        while prefetch.progress.lock().unwrap().decoding.is_none() {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        // Queued behind the decode in progress: no wait, nothing to take.
+        prefetch.wait_for_decoding(&path, (stamp.0, stamp.1 + 2), ask);
+        assert!(
+            prefetch
+                .take(&path, (stamp.0, stamp.1 + 2), ask, None)
+                .is_none()
+        );
+        assert!(prefetch.take(&path, stamp, ask, None).is_none());
+        let release = std::thread::spawn(move || {
+            let _guard = guard;
+            std::thread::sleep(Duration::from_millis(100));
+        });
+        // `guard` moved to a thread that lets the decode run in 100 ms.
+        prefetch.wait_for_decoding(&path, stamp, ask);
+        assert!(
+            prefetch.take(&path, stamp, ask, None).is_some(),
+            "the decode in progress reached the frame"
+        );
+        release.join().unwrap();
+        settle(&mut prefetch);
+        assert!(prefetch.progress.lock().unwrap().wanted.is_none());
     }
 
     /// The byte bound counts a still from its decode: one that does not fit
