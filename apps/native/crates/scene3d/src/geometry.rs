@@ -22,6 +22,8 @@ pub struct EvaluatedGeometry {
 #[derive(Clone, Debug, PartialEq)]
 pub struct PartHit {
     pub slot: usize,
+    /// The slot's name as Properties titles it (`import::material_slots`).
+    pub name: String,
     pub point: Vec3,
     pub distance: f64,
 }
@@ -193,6 +195,12 @@ pub fn part_hit(
         .flatten()
         .map(|slot| PartHit {
             slot,
+            name: model
+                .materials
+                .get(d.material)
+                .map(|m| m.name.trim().to_owned())
+                .filter(|n| !n.is_empty())
+                .unwrap_or_else(|| format!("Material {}", slot + 1)),
             point: hit.point,
             distance: hit.distance,
         }))
@@ -603,7 +611,7 @@ mod part_tests {
                 .unwrap()
         };
         let body = pick(-1.).expect("hits the body");
-        assert_eq!(body.slot, 0);
+        assert_eq!((body.slot, body.name.as_str()), (0, "Body"));
         assert!((body.distance - 5.).abs() < 1e-6, "{body:?}");
         assert_eq!(pick(1.2).expect("hits the lens").slot, 1);
         // The gap between the parts, and beyond them, is no part.

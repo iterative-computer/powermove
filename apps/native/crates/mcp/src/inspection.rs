@@ -174,7 +174,7 @@ pub fn scene(host: &Automation, id: &str, args: &Value) -> Result<Value> {
                     .flatten()
                     .find(|s| s["index"] == hit.slot)
                     .and_then(|s| s["name"].as_str())
-                    .map_or_else(|| format!("Material {}", hit.slot + 1), str::to_owned);
+                    .map_or_else(|| hit.name.clone(), str::to_owned);
                 json!({"layerId":layer,"materialIndex":hit.slot,"slotName":name,"point":hit.point,"distance":hit.distance})
             }
             None => Value::Null,
