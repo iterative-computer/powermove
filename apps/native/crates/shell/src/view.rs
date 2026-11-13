@@ -1724,9 +1724,14 @@ impl Render for Editor {
             integration.open_panels(&self.layout.open_panels(), cx);
         }
         let mut native_bodies = vec![];
+        // Every panel on screen (the active tab of each placed group), native
+        // body or GPUI: a panel left off this list loses its native playhead
+        // and timecode layers.
+        let mut on_screen: Vec<String> = vec![];
         for p in ordered {
             let group = &self.layout.docks[p.dock].groups[p.group];
             let id = group.active().to_string();
+            on_screen.push(id.clone());
             let is_viewer = id == "viewer";
             let body_native = self
                 .integration
@@ -2143,7 +2148,7 @@ impl Render for Editor {
             root = root.child(panel);
         }
         if let Some(integration) = &self.integration {
-            let shown: Vec<&str> = native_bodies.iter().map(|(id, _)| id.as_str()).collect();
+            let shown: Vec<&str> = on_screen.iter().map(String::as_str).collect();
             integration.shown_panels(&shown, cx);
         }
         if let Some(h) = &self.host {
