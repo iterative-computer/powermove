@@ -178,6 +178,46 @@ pub struct PixelCheck {
     pub spread_cv: f64,
 }
 
+/// How loud the mixed sound got: its largest sample, and how much of it was
+/// over full scale. An integer PCM or AAC track cannot hold a sample over
+/// full scale and clips it; the person exporting is told how much.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MixLevels {
+    /// The largest absolute sample of the mix (1.0 is full scale).
+    pub peak: f32,
+    /// Samples, counted in every channel, above full scale.
+    pub overs: u64,
+}
+
+impl MixLevels {
+    /// Takes in a block of the mix.
+    pub fn add(&mut self, samples: &[f32]) {
+        for s in samples {
+            let level = s.abs();
+            self.peak = self.peak.max(level);
+            self.overs += u64::from(level > 1.0);
+        }
+    }
+
+    /// The peak in decibels relative to full scale (`None` for silence).
+    pub fn peak_db(&self) -> Option<f64> {
+        (self.peak > 0.0).then(|| 20.0 * f64::from(self.peak).log10())
+    }
+
+    /// One line for the person, when part of the sound is over full scale:
+    /// "Audio clipped: 1,204 samples over full scale, peak +2.1 dB."
+    pub fn warning(&self) -> Option<String> {
+        (self.overs > 0).then(|| {
+            format!(
+                "Audio clipped: {} sample{} over full scale, peak +{:.1} dB.",
+                self.overs,
+                if self.overs == 1 { "" } else { "s" },
+                self.peak_db().unwrap_or(0.0)
+            )
+        })
+    }
+}
+
 /// What the probe found.
 #[derive(Clone, Debug, PartialEq)]
 pub struct VerifyReport {
@@ -200,6 +240,8 @@ pub struct VerifyReport {
     pub hardware_encoder: Option<bool>,
     /// Bytes delivered (every file of a PNG sequence).
     pub bytes: u64,
+    /// The mixed sound's levels, for an export job with sound.
+    pub mix: Option<MixLevels>,
 }
 
 impl VerifyReport {
@@ -751,6 +793,7 @@ pub fn check(
         pixels,
         hardware_encoder: None,
         bytes: 0,
+        mix: None,
     })
 }
 

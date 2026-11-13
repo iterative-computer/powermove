@@ -444,3 +444,98 @@ fn the_encoder_places_sound_at_its_sample_at_every_rate() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Sound over full scale is counted and reported: an integer PCM or AAC
+/// track clips it, and the person exporting is told how much.
+#[test]
+fn sound_over_full_scale_is_counted_and_reported() {
+    let dir = scratch("overs");
+    let rate = 48_000u32;
+    let dur = 1.0;
+    // A 440 Hz tone at 0.8 of full scale.
+    let tone: Vec<f32> = (0..rate)
+        .map(|i| (0.8 * (std::f64::consts::TAU * 440.0 * f64::from(i) / 48_000.0).sin()) as f32)
+        .collect();
+    let clip = dir.join("tone.wav");
+    write_wav(&clip, rate, &tone);
+    for (gain, loud) in [(1.0, false), (2.0, true)] {
+        let mut layer = audio("sound", "tone", 0.0, dur);
+        layer["d"]["gain"] = json!(gain);
+        let mut doc = project(64, 36, dur, solid_fill("#14161C"), vec![layer]);
+        doc["fps"] = json!(25);
+        asset(&mut doc, "tone", "audio", "wav", 0, 0, dur);
+        let mut media = MediaPaths::default();
+        media.insert("tone", clip.clone());
+        let destination = dir.join(format!("gain-{gain}.mov"));
+        let job = ExportJob {
+            document: Arc::new(load(&doc)),
+            composition: "Ptest-root".into(),
+            settings: ExportSettings {
+                format: ExportFormat::ProRes {
+                    profile: WireProRes::Hq,
+                },
+                alpha: WireAlpha::None,
+                quality: QualityTier::Draft,
+                size: Size::new(64, 36),
+                frame_rate: FrameRate::new(25, 1),
+                range: TickRange {
+                    start: Ticks::ZERO,
+                    end: Ticks::new(TICKS_PER_SECOND).unwrap(),
+                },
+                audio: true,
+                audio_index_playhead: None,
+                motion_blur: false,
+                color: OutputColor::Rec709QuickTime {
+                    candidate: QuickTimeTag::Cicp1_13_1,
+                },
+                precision: Precision::Float16,
+                dither: false,
+                draft_from_proxies: false,
+                delivery: Default::default(),
+            },
+            media: Arc::new(media),
+            destination: destination.clone(),
+            overwrite: Overwrite::Fail,
+            mode: None,
+            seed: 1,
+        };
+        let mut renderer = Renderer::headless().unwrap();
+        let mut last = None;
+        let delivered = run_export(
+            &mut renderer,
+            &job,
+            &Unrestricted,
+            &AtomicBool::new(false),
+            &mut |p| last = p.mix,
+        )
+        .unwrap();
+        let mix = delivered.report.mix.expect("the mix's levels");
+        let decoded = ffmpeg_decode(&destination);
+        let ceiling = decoded.iter().fold(0f32, |m, v| m.max(v.abs()));
+        eprintln!(
+            "MEASURE tone at 0.8 with gain {gain}: mix peak {:.3} ({:+.1} dB), {} samples over full scale; the file's own peak {ceiling:.3}; said to the person: {:?}",
+            mix.peak,
+            mix.peak_db().unwrap(),
+            mix.overs,
+            mix.warning()
+        );
+        assert_eq!(last, Some(mix), "the last progress carries the whole mix");
+        assert!(
+            (f64::from(mix.peak) - 0.8 * gain).abs() < 0.01,
+            "{}",
+            mix.peak
+        );
+        assert_eq!(mix.overs > 0, loud);
+        assert_eq!(mix.warning().is_some(), loud);
+        // The 24-bit track cannot hold what is over: it is clipped there.
+        assert!(ceiling <= 1.0 && (ceiling > 0.99) == loud, "{ceiling}");
+        if loud {
+            let said = mix.warning().unwrap();
+            assert!(
+                said.starts_with("Audio clipped: ") && said.ends_with("peak +4.1 dB."),
+                "{said}"
+            );
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

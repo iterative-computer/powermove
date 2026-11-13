@@ -386,6 +386,7 @@ impl Sink for PngSink {
             pixels,
             hardware_encoder: None,
             bytes,
+            mix: None,
         };
         if cancel.load(std::sync::atomic::Ordering::Acquire) {
             return Err(Error::Cancelled);

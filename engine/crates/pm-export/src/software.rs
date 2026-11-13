@@ -943,6 +943,7 @@ fn probe_and_verify(
         pixels,
         hardware_encoder: Some(false),
         bytes: fs::metadata(path).map_err(io)?.len(),
+        mix: None,
     })
 }
 

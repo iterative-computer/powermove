@@ -1182,6 +1182,7 @@ pub fn verify_webm(
         pixels,
         hardware_encoder: Some(false),
         bytes: 0,
+        mix: None,
     })
 }
 

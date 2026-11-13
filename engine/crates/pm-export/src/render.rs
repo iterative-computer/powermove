@@ -1441,6 +1441,8 @@ pub struct Progress {
     /// A preview of the frame just encoded (plans that ask for previews, at
     /// most every [`PREVIEW_EVERY`], and the last frame).
     pub preview: Option<Arc<PreviewFrame>>,
+    /// The mixed sound's levels so far (exports with sound).
+    pub mix: Option<crate::verify::MixLevels>,
 }
 
 impl Progress {
@@ -1553,6 +1555,7 @@ where
             let _qos_refresh = crate::par::install_qos_refresh(encoder_gate.worker_qos_refresh());
             encoder_gate.sync_worker_qos();
             let mut last_preview: Option<Instant> = None;
+            let mut levels = crate::verify::MixLevels::default();
             let profiling = std::env::var("PM_EXPORT_PROFILE").as_deref() == Ok("1");
             let (mut video_ns, mut preview_ns, mut audio_ns, mut progress_ns) = (0, 0, 0, 0);
             for expected in 0..frames {
@@ -1617,6 +1620,7 @@ where
                         return Err(JobError::Audio(format!("{voice}: {why}")));
                     }
                     if !block.is_empty() {
+                        levels.add(&block);
                         pipeline.push_audio(&block)?;
                     }
                 }
@@ -1626,6 +1630,7 @@ where
                     frames_done: n + 1,
                     frames,
                     preview,
+                    mix: mixer.is_some().then_some(levels),
                 });
                 progress_ns += started.map_or(0, |t| t.elapsed().as_nanos());
             }
@@ -2002,7 +2007,14 @@ pub fn run_export(
 ) -> Result<crate::Delivered, JobError> {
     let plan = plan_export(job)?;
     let sink = sink_for(&plan)?;
-    run_export_into(renderer, job, plan, sink, gate, cancel, progress)
+    // The mix's levels arrive with the progress; the last is the whole mix.
+    let mut mix = None;
+    let mut delivered = run_export_into(renderer, job, plan, sink, gate, cancel, &mut |p| {
+        mix = p.mix;
+        progress(p)
+    })?;
+    delivered.report.mix = mix;
+    Ok(delivered)
 }
 
 // ---------------------------------------------------------------------------
