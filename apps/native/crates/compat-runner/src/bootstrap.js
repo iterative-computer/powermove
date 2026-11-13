@@ -724,10 +724,20 @@ globalThis.__compat = {
     this.realm.PM.toggle = () =>
       this.realm.PM.playing ? this.realm.PM.pause() : this.realm.PM.play();
     // v1's model members that extensions reach raw (`api.host.pm`), as main.
+    // Inside an edit (`PM.Edit.mutate`, an open history entry) the insert is
+    // part of it; called on its own it is one edit, so Undo takes the layer
+    // out again (a bare write to the project is no history step).
     this.realm.PM.addLayer = (layer, at) => {
       const PM = this.realm.PM;
-      PM.proj.layers.splice(at == null ? 0 : at, 0, layer);
-      PM.ProjectIndex?.invalidate();
+      const insert = () => {
+        PM.proj.layers.splice(at == null ? 0 : at, 0, layer);
+        PM.ProjectIndex?.invalidate();
+      };
+      if (PM.hist.busy()) insert();
+      else {
+        const done = PM.Edit.mutate("Add Layer", insert);
+        if (!done.ok) throw new Error(done.message ?? "The layer could not be added");
+      }
       PM.bus.emit("layers");
       return layer;
     };

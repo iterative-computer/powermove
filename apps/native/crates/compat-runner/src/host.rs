@@ -4694,6 +4694,63 @@ mod tests {
     /// The raw members a real extension used to cut a layer out of a clip:
     /// `PM.MediaStore.get` reads the asset's file (the app answers with it, held
     /// on disk) and `PM.addLayer` inserts a layer as main did, inside an edit.
+    /// Raw `PM.addLayer` called on its own (a command, a panel callback: no
+    /// edit open) is one step of the project's history: Undo takes the layer
+    /// out and Redo puts it back. Called inside an edit it belongs to that
+    /// edit, with the edit's other changes.
+    #[test]
+    fn raw_add_layer_outside_an_edit_is_one_undoable_step() {
+        let root = tempfile::tempdir().unwrap();
+        extension(
+            &root.path().join("extensions"),
+            "raw-pm",
+            &[(
+                "index.ts",
+                "export default function(api){const PM=api.host.pm;
+                   const layer=(id)=>({...PM.proj.layers[0]??{},id,name:id});
+                   api.commands.register({id:'raw-pm.alone',label:'Alone',run(){PM.addLayer(layer('alone'),0)}});
+                   api.commands.register({id:'raw-pm.both',label:'Both',run(){
+                     PM.Edit.mutate('Both',()=>{PM.proj.name='Both';PM.addLayer(layer('in-edit'),0)})}});
+                 }",
+            )],
+        );
+        let fixture = Fixture::start(root);
+        fixture.until("activation", |host| host.publication().settled && host.is_ready());
+        let first = |fixture: &Fixture| {
+            let published = fixture.kernel.published("window").unwrap();
+            published.snapshot.layers(None).first().map(|l| l.id.clone())
+        };
+        let history = |call: HistoryCall| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let ack = fixture
+                    .kernel
+                    .call_blocking("window", Request::new(pm_kernel::Caller::native(), call.clone()))
+                    .unwrap();
+                if matches!(ack.reply, Reply::Bool(true)) {
+                    return;
+                }
+                assert!(Instant::now() < deadline, "{call:?} stayed refused");
+                thread::sleep(Duration::from_millis(5));
+            }
+        };
+        let before = first(&fixture);
+        let name = fixture.name();
+        fixture.host.run_command("raw-pm.alone", json!([]));
+        fixture.until("the layer is added", |_| first(&fixture).as_deref() == Some("alone"));
+        history(HistoryCall::Undo);
+        assert_eq!(first(&fixture), before, "Undo takes the layer out");
+        history(HistoryCall::Redo);
+        assert_eq!(first(&fixture).as_deref(), Some("alone"), "Redo puts it back");
+        // Inside an edit: one entry with the edit's other change.
+        fixture.host.run_command("raw-pm.both", json!([]));
+        fixture.until("the edit lands", |_| {
+            first(&fixture).as_deref() == Some("in-edit") && fixture.name() == "Both"
+        });
+        history(HistoryCall::Undo);
+        assert_eq!(first(&fixture).as_deref(), Some("alone"));
+        assert_eq!(fixture.name(), name, "one Undo for the whole edit");
+    }
     #[test]
     fn media_store_reads_an_assets_file_and_add_layer_inserts_a_layer() {
         let root = tempfile::tempdir().unwrap();
