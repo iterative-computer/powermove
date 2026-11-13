@@ -2491,6 +2491,212 @@ fn coordinated_kernel(path: &Path, grants: bool) -> (Kernel, std::sync::Arc<Coor
     .unwrap();
     (k, coordinator)
 }
+/// A coordinator under which the coordinated write of one file waits (a
+/// share that stalls, a program that does not answer) until it is released.
+struct Stalled {
+    file: std::path::PathBuf,
+    armed: std::sync::atomic::AtomicBool,
+    waiting: std::sync::atomic::AtomicBool,
+    release: std::sync::atomic::AtomicBool,
+}
+impl pm_kernel::project_io::WriteCoordinator for Stalled {
+    fn coordinate(&self, path: &Path, work: &mut dyn FnMut(bool)) {
+        use std::sync::atomic::Ordering::SeqCst;
+        if path == self.file && self.armed.load(SeqCst) {
+            self.waiting.store(true, SeqCst);
+            while !self.release.load(SeqCst) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+        work(true)
+    }
+}
+/// A kernel on its own thread, as the app runs it, with a library at
+/// `profile` and a coordinator that can stall the writes of `file`.
+fn stalling_actor(profile: &Path, file: &Path) -> (KernelActor, std::sync::Arc<Stalled>) {
+    let stalled = std::sync::Arc::new(Stalled {
+        file: file.to_owned(),
+        armed: false.into(),
+        waiting: false.into(),
+        release: false.into(),
+    });
+    let actor = KernelActor::spawn(KernelConfig {
+        journal_root: Some(profile.join("journals")),
+        trash: Some(common::trash(&profile.join("Trash"))),
+        write_coordinator: Some(pm_kernel::project_io::SharedWriteCoordinator(
+            stalled.clone(),
+        )),
+        ..Default::default()
+    });
+    actor
+        .handle()
+        .shell(ShellCall::AttachLibrary {
+            profile: profile.into(),
+            format: DiskFormat::V1_2,
+            electron_profile: None,
+        })
+        .wait()
+        .unwrap()
+        .unwrap();
+    (actor, stalled)
+}
+fn open_on(k: &KernelHandle, id: &str, file: &Path) -> SessionHandle {
+    match k
+        .shell(ShellCall::Open {
+            id: id.into(),
+            source: SessionSource::File(file.into()),
+            electron_profile: None,
+        })
+        .wait()
+    {
+        Some(Ok(ShellReply::Opened { session, .. })) => session,
+        other => panic!("{other:?}"),
+    }
+}
+fn rename_on(k: &KernelHandle, id: &str, name: &str) -> Pending<Result<Ack, KernelFailure>> {
+    use pm_kernel::commands::comps::{CompCommand, CompPatch};
+    k.call(
+        id,
+        Request::new(
+            Caller::native(),
+            Call::Transact {
+                label: Some("Rename".into()),
+                body: WriteBody::Commands(vec![
+                    CompCommand::Set {
+                        patch: Box::new(CompPatch {
+                            name: Some(name.into()),
+                            ..Default::default()
+                        }),
+                    }
+                    .into(),
+                ]),
+                expected_revision: None,
+            },
+        ),
+    )
+}
+/// Whether `pending` is answered within `limit`.
+fn answered<T>(pending: &Pending<T>, limit: Duration) -> Option<T> {
+    let deadline = std::time::Instant::now() + limit;
+    loop {
+        if let Some(value) = pending.try_take() {
+            return Some(value);
+        }
+        if std::time::Instant::now() > deadline {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+/// Opening a project whose last save was cut short recovers it: files are
+/// read whole, hashed and moved, on whatever disk the project is on. While
+/// that waits (a large project, a share that stalls) the kernel goes on
+/// answering every other project: recovery runs on a worker, and the
+/// kernel only adopts its result.
+#[test]
+fn a_recovery_waiting_on_its_disk_does_not_hold_up_the_other_projects() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let dir = common::TempDir::new("stalled-recovery");
+    fs::create_dir_all(dir.path("job")).unwrap();
+    let (file, other) = (dir.path("job/cut.pmv"), dir.path("job/other.pmv"));
+    fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+    fs::copy(common::ts_fixture("fresh.pmv"), &other).unwrap();
+    let original = fs::read(&file).unwrap();
+    let native = dir.path("native");
+    assert!(killed(&native, &file, "no-exchange", "between", "save"));
+    let (actor, stalled) = stalling_actor(&native, &file);
+    let k = actor.handle();
+    open_on(&k, "Q", &other);
+    stalled.armed.store(true, SeqCst);
+    let opening = k.shell(ShellCall::Open {
+        id: "P".into(),
+        source: SessionSource::File(file.clone()),
+        electron_profile: None,
+    });
+    let reached = (0..2000).any(|_| {
+        std::thread::sleep(Duration::from_millis(5));
+        stalled.waiting.load(SeqCst)
+    });
+    // The other project is worked on while the recovery waits.
+    let edit = rename_on(&k, "Q", "Still answered");
+    let edited = answered(&edit, Duration::from_secs(5));
+    stalled.release.store(true, SeqCst);
+    let opened = opening.wait();
+    assert!(reached, "the recovery reached its coordinated write");
+    assert!(
+        matches!(edited, Some(Ok(_))),
+        "the other project's edit was answered while the recovery waited"
+    );
+    assert!(
+        matches!(opened, Some(Ok(ShellReply::Opened { .. }))),
+        "{opened:?}"
+    );
+    assert_eq!(
+        fs::read(&file).unwrap(),
+        original,
+        "and the project is recovered"
+    );
+    actor.shutdown();
+}
+/// The same for a save: before it writes, a save settles what an earlier
+/// save of the file left (here another copy of the app, with a lock folder
+/// of its own, was killed in the middle of saving it). That runs on a
+/// worker too; the kernel answers the other projects meanwhile, and the
+/// save then goes through.
+#[test]
+fn a_save_that_must_first_recover_does_not_hold_up_the_other_projects() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let dir = common::TempDir::new("stalled-save");
+    fs::create_dir_all(dir.path("job")).unwrap();
+    let (file, other) = (dir.path("job/cut.pmv"), dir.path("job/other.pmv"));
+    fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+    fs::copy(common::ts_fixture("fresh.pmv"), &other).unwrap();
+    let native = dir.path("native");
+    let (actor, stalled) = stalling_actor(&native, &file);
+    let k = actor.handle();
+    let session = open_on(&k, "P", &file);
+    open_on(&k, "Q", &other);
+    let killed = Process::new(std::env::current_exe().unwrap())
+        .args(["--exact", "save_child_process"])
+        .env("PM_KERNEL_TEST_SAVE_PROFILE", dir.path("their-profile"))
+        .env("PM_KERNEL_TEST_SAVE_LOCKS", dir.path("their-locks"))
+        .env("PM_KERNEL_TEST_SAVE_FILE", &file)
+        .env("PM_KERNEL_TEST_SAVE_DISK", "no-exchange")
+        .env("PM_KERNEL_TEST_SAVE_KILL", "between")
+        .stdout(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(killed.status.code(), Some(0));
+    rename_on(&k, "P", "Mine").wait().unwrap().unwrap();
+    stalled.armed.store(true, SeqCst);
+    let preparing = k.prepare_save(session, None);
+    let reached = (0..2000).any(|_| {
+        std::thread::sleep(Duration::from_millis(5));
+        stalled.waiting.load(SeqCst)
+    });
+    let edit = rename_on(&k, "Q", "Still answered");
+    let edited = answered(&edit, Duration::from_secs(5));
+    stalled.release.store(true, SeqCst);
+    let prepared = preparing.wait();
+    assert!(reached, "the save's recovery reached its coordinated write");
+    assert!(
+        matches!(edited, Some(Ok(_))),
+        "the other project's edit was answered while the save's recovery waited"
+    );
+    let save = prepared.unwrap().unwrap_or_else(|e| panic!("{e}"));
+    k.finish_save(save.run())
+        .wait()
+        .unwrap()
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(saved_name(&file).as_deref(), Some("Mine"));
+    assert!(
+        visible_siblings(&file)
+            .iter()
+            .any(|p| saved_name(p).as_deref() == Some("One")),
+        "the save that was cut short is kept beside"
+    );
+    actor.shutdown();
+}
 /// A save's publication runs inside a coordinated write of the project
 /// file (other programs that take part in file coordination wait for it,
 /// and are asked to write their own changes first), and so do the moves a

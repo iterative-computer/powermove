@@ -152,6 +152,14 @@ pub struct Kernel {
     pub(crate) library: Option<crate::persistence::LibraryWriter>,
     pub(crate) sessions: BTreeMap<String, crate::session::Session>,
     pub(crate) state: crate::state::StateSnapshot,
+    /// Disk work a worker did for the call the actor runs next
+    /// ([`crate::session::OpenPrelude`], [`crate::session::SavePrelude`]).
+    pub(crate) open_prelude: Option<Box<crate::session::OpenPrelude>>,
+    pub(crate) save_prelude: Option<Box<crate::session::SavePrelude>>,
+    /// Project files a worker is reading for an open, and sessions a worker
+    /// is settling for a save: one at a time each.
+    pub(crate) opening: Vec<PathBuf>,
+    pub(crate) preparing: Vec<String>,
 }
 
 impl Kernel {
@@ -180,6 +188,10 @@ impl Kernel {
             pending_recovery: BTreeMap::new(),
             sessions: BTreeMap::new(),
             state: crate::state::StateSnapshot::seeded(),
+            open_prelude: None,
+            save_prelude: None,
+            opening: Vec::new(),
+            preparing: Vec::new(),
         }
     }
 
