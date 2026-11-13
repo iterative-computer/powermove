@@ -79,3 +79,13 @@ recovery inputs changed before accepting a choice.
 a recovery encountered while opening a launch-file argument before MCP
 connects. Existing `open_project` calls need no new arguments when there
 is no interrupted work.
+
+## Glass highlights above the studio floor
+
+With the studio floor enabled, `light_highlight` keeps the reflected ray and
+shortens the light's distance when necessary to fit the softbox above Y = 0.
+An automatic softbox size follows that adjusted distance. An explicit size
+is preserved. If no above-floor placement exists for that point and size,
+the command fails without adding a light, explaining that a higher surface
+point or smaller softbox is needed. Scenes without a studio floor retain
+the unrestricted reflection placement.
