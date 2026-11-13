@@ -483,6 +483,7 @@ impl Kernel {
         if hooks.trash.is_none() {
             hooks.trash = self.config.trash.clone();
         }
+        hooks.strays = self.publish_hooks.strays.clone();
         self.publish_hooks = hooks;
     }
     /// Exclusive use of the project file `path` ([`crate::locks::lock_project`]).

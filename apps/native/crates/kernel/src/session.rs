@@ -474,6 +474,11 @@ fn saved_state(source: &OpenSource) -> Option<(crate::History, Value)> {
 
 impl Kernel {
     pub fn shell(&mut self, call: ShellCall) -> Result<ShellReply, KernelFailure> {
+        let reply = self.shell_call(call);
+        self.tell_strays();
+        reply
+    }
+    fn shell_call(&mut self, call: ShellCall) -> Result<ShellReply, KernelFailure> {
         match call {
             ShellCall::AttachLibrary {
                 profile,
@@ -944,6 +949,16 @@ impl Kernel {
         path: Option<PathBuf>,
         replace: bool,
     ) -> Result<SessionSave, KernelFailure> {
+        let prepared = self.prepare_save_of(session, path, replace);
+        self.tell_strays();
+        prepared
+    }
+    fn prepare_save_of(
+        &mut self,
+        session: SessionHandle,
+        path: Option<PathBuf>,
+        replace: bool,
+    ) -> Result<SessionSave, KernelFailure> {
         self.ensure_idle(&session)?;
         if path.is_none() {
             self.adopt_unfinalized(&session.project)?;
@@ -998,6 +1013,14 @@ impl Kernel {
         })
     }
     pub fn finish_session_save(
+        &mut self,
+        completion: SessionSaveCompletion,
+    ) -> Result<ShellReply, KernelFailure> {
+        let finished = self.finish_save_of(completion);
+        self.tell_strays();
+        finished
+    }
+    fn finish_save_of(
         &mut self,
         completion: SessionSaveCompletion,
     ) -> Result<ShellReply, KernelFailure> {
@@ -2188,19 +2211,16 @@ impl Kernel {
             }
             let p = self.project_mut(id).unwrap();
             let mut changed = Vec::new();
-            let mut untrashed = Vec::new();
             let mut unproven = None;
             let result = plan.and_then(|plan| plan.run()).and_then(|receipt| {
                 displaced = receipt.displaced.clone();
                 changed = receipt.changed.clone();
-                untrashed = receipt.untrashed.clone();
                 unproven = Some(receipt.unproven);
                 p.store_mut().finish_save(receipt)
             });
             if let Some(unproven) = unproven {
                 self.note_unproven(id, unproven);
             }
-            self.log_untrashed(&untrashed);
             // A retained version found changed is another version to tell
             // about: named by the reply where nothing else is.
             displaced = displaced.or_else(|| changed.into_iter().next());
@@ -2718,7 +2738,6 @@ impl Kernel {
     /// them is in a save's record until the person has seen it
     /// (`ShellCall::KeptBeside`).
     fn note_changed(&mut self, _id: &str, receipt: &crate::SaveReceipt) -> Option<PathBuf> {
-        self.log_untrashed(&receipt.untrashed);
         receipt
             .displaced
             .clone()
@@ -2759,16 +2778,46 @@ impl Kernel {
         self.save_published(id);
         Ok(())
     }
-    /// Earlier versions found changed when a save was to remove them, that
-    /// could not be kept beside the project: the Error Log says where they
-    /// are (the Trash, or where they were).
-    fn log_untrashed(&mut self, untrashed: &[PathBuf]) {
-        for path in untrashed {
+    /// Files a save or a recovery found changed when they were to go and
+    /// could not keep beside their project ([`project_io::Stray`]): the
+    /// Error Log says where each is (the Trash, or hidden where it was).
+    /// The save's record tells the person until they have seen it; one
+    /// whose record could not be written is told by the open session's own
+    /// rows instead.
+    fn tell_strays(&mut self) {
+        let strays = match self.publish_hooks.strays.lock() {
+            Ok(mut strays) => std::mem::take(&mut *strays),
+            Err(_) => return,
+        };
+        for stray in strays {
             self.log(format!(
-                "An earlier version of a project was changed after it was saved and could not \
-                 be kept next to the project; it is here: {}",
-                path.display()
+                "A file from an earlier save of {} was changed after it was saved and could \
+                 not be kept next to the project; it is {}: {}",
+                stray.project.display(),
+                if stray.trashed {
+                    "in the Trash"
+                } else {
+                    "still hidden in the project's folder"
+                },
+                stray.path.display()
             ));
+            if stray.recorded {
+                continue;
+            }
+            let Some(id) = self.sessions.iter().find_map(|(id, s)| {
+                matches!(&s.destination, Destination::File(p) if *p == stray.project)
+                    .then(|| id.clone())
+            }) else {
+                continue;
+            };
+            let why = if stray.trashed { "trashed" } else { "hidden" };
+            if let Some(Value::Object(meta)) = std::sync::Arc::make_mut(&mut self.state.ui)
+                .get_mut(&id)
+                .map(|ui| &mut ui.session)
+            {
+                push_kept(meta, [kept_row(why, Some(&stray.path))]);
+                let _ = self.save_session_meta(&id);
+            }
         }
     }
     /// The file session `id` saves to was renamed or moved while open: carry

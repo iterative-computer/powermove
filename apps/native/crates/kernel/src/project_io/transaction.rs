@@ -28,9 +28,9 @@ use std::path::{Path, PathBuf};
 use pm_model::json::{Map, Value, parse, to_canonical_string};
 
 use super::durable::{
-    FileVersion, Folder, Host, Placed, PublishHooks, begins, copy_of, dispose, dispose_captured,
-    folder_sync, holds_hash, is_backup_name, is_uuid_v4, keep_beside, lstat_file, place_new,
-    probing, rename_private, sync_file, trash_or_leave, withdraw,
+    FileVersion, Folder, Host, Placed, PublishHooks, Stray, begins, copy_of, dispose,
+    dispose_captured, folder_sync, holds_hash, is_backup_name, is_uuid_v4, keep_beside, lstat_file,
+    place_new, probing, rename_private, sync_file, trash_or_leave, withdraw,
 };
 use crate::error::{ProjectIoError, io_err};
 
@@ -320,8 +320,9 @@ fn known_step(step: &Value, destination: &Path, staged: &Path, aside: &Path) -> 
         Some("kept") => kept("to"),
         Some("retained") => own("name"),
         Some("dispose") => own("name") && text("hash").is_some(),
+        Some("left") => own("name") && matches!(text("where"), Some("trash" | "hidden")),
         Some("settled") => step.get("holds").is_none() || text("holds").is_some(),
-        Some("seen") => step.get("to").is_none() || kept("to"),
+        Some("seen") => step.get("to").is_none() || kept("to") || own("to"),
         _ => false,
     }
 }
@@ -471,15 +472,29 @@ impl Record {
                 }
             } else if is(step, "restored") {
                 push("restored".into(), None);
+            } else if is(step, "left") {
+                // Could not be kept beside the project: in the Trash, or
+                // still under its private name.
+                if let (Some(name), Some(place)) = (text(step, "name"), text(step, "where")) {
+                    let why = if place == "trash" {
+                        "trashed"
+                    } else {
+                        "hidden"
+                    };
+                    push(why.into(), Some(dir.join(name)));
+                }
             } else if is(step, "keep") {
                 let (Some(from), Some(to), Some(why)) =
                     (text(step, "from"), text(step, "to"), text(step, "why"))
                 else {
                     continue;
                 };
-                let last = !self.steps[at + 1..]
-                    .iter()
-                    .any(|later| is(later, "keep") && text(later, "from").as_ref() == Some(&from));
+                // The last word about that file: no later attempt to keep
+                // it, and it was not given up on (`left`).
+                let last = !self.steps[at + 1..].iter().any(|later| {
+                    (is(later, "keep") && text(later, "from").as_ref() == Some(&from))
+                        || (is(later, "left") && text(later, "name").as_ref() == Some(&from))
+                });
                 if last
                     && matches!(lstat_file(&dir.join(&from)), Ok(None))
                     && matches!(lstat_file(&dir.join(&to)), Ok(Some(_)))
@@ -856,8 +871,35 @@ impl Transaction {
                 }
                 Err(file) => {
                     let now = trash_or_leave(file.clone(), &self.hooks);
-                    if now == file {
+                    let trashed = now != file;
+                    if !trashed {
                         self.strand();
+                    }
+                    // The record tells the person until they have seen it;
+                    // where even that cannot be written, the host does.
+                    let mut members = Map::new();
+                    members.insert(
+                        "name",
+                        Value::from(
+                            file.file_name()
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                                .into_owned(),
+                        ),
+                    );
+                    members.insert(
+                        "where",
+                        Value::from(if trashed { "trash" } else { "hidden" }),
+                    );
+                    let recorded = self.step_with("left", members).is_ok();
+                    self.tells |= recorded;
+                    if let Ok(mut strays) = self.hooks.strays.lock() {
+                        strays.push(Stray {
+                            project: self.destination.clone(),
+                            path: now.clone(),
+                            trashed,
+                            recorded,
+                        });
                     }
                     kept.elsewhere.push(now);
                 }
@@ -1400,15 +1442,15 @@ pub(crate) fn kept_seen(destination: &Path, paths: &[PathBuf], restored: bool) {
 /// removed in the same call as that read ([`dispose`]). One that changed
 /// since (something wrote into it after it was replaced) holds work nobody
 /// read: it is kept beside the project as "other version" (recorded in the
-/// record that names it) and returned in the first list; where it cannot be
-/// kept there it goes to the Trash (or stays) and is returned in the second. `current` is the
-/// record of the save that runs the pass.
+/// record that names it) and returned; where it cannot be
+/// kept there it goes to the Trash (or stays) and is reported as a
+/// [`Stray`]. `current` is the record of the save that runs the pass.
 pub(super) fn prune_retained(
     destination: &Path,
     current: &Transaction,
     hooks: &PublishHooks,
-) -> (Vec<PathBuf>, Vec<PathBuf>) {
-    let (mut changed, mut untrashed) = (Vec::new(), Vec::new());
+) -> Vec<PathBuf> {
+    let mut changed = Vec::new();
     let (records, _) = records_of(destination);
     for record in records {
         if record.path == current.record || !record.only_retains() || record.retained.is_empty() {
@@ -1424,9 +1466,7 @@ pub(super) fn prune_retained(
             // Read again as it goes, and removed only if unchanged. One
             // that something wrote into since it was retained holds work
             // nobody read: kept beside the project and told.
-            let kept = tx.dispose(path, hash, None);
-            changed.extend(kept.beside);
-            untrashed.extend(kept.elsewhere);
+            changed.extend(tx.dispose(path, hash, None).beside);
         }
         // The record goes with its last file, unless it has something to
         // tell that was not seen yet (a file just kept is one).
@@ -1437,7 +1477,7 @@ pub(super) fn prune_retained(
             let _ = fs::remove_file(&record.path);
         }
     }
-    (changed, untrashed)
+    changed
 }
 
 /// A copy that was cut short: the record says a file was about to be placed

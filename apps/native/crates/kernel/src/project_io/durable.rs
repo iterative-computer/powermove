@@ -738,6 +738,24 @@ impl std::fmt::Debug for TrashHook {
     }
 }
 
+/// A file found changed when it was to go that could not be kept beside its
+/// project: where it is now, for the person to be told.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Stray {
+    /// The project file it was a version of.
+    pub project: PathBuf,
+    /// Where it is: in the Trash (`trashed`), or still under the private
+    /// name it had beside the project.
+    pub path: PathBuf,
+    pub trashed: bool,
+    /// The save's record tells the person (it could be written).
+    pub recorded: bool,
+}
+
+/// Where saves and recoveries report their [`Stray`]s; the kernel collects
+/// them once the call that ran the save or the recovery returns.
+pub type Strays = Arc<std::sync::Mutex<Vec<Stray>>>;
+
 /// What a test makes a folder's syncs answer.
 #[doc(hidden)]
 pub type FolderSyncHook = Arc<dyn Fn() -> (Option<i32>, Option<i32>) + Send + Sync>;
@@ -806,6 +824,9 @@ pub struct PublishHooks {
     /// no longer needs it (the kernel's host sets it; `None`: such files
     /// stay where they are).
     pub trash: Option<TrashHook>,
+    /// Not a test hook: where files that could not be kept beside their
+    /// project are reported ([`Stray`]).
+    pub strays: Strays,
 }
 impl std::fmt::Debug for PublishHooks {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1754,10 +1775,6 @@ pub(crate) struct Published {
     /// The published file, held open since it was confirmed under the
     /// name and confirmed again after the save's last step.
     pub installed: Option<Installed>,
-    /// Earlier versions found changed when they were to go, that could not
-    /// be kept beside the project: where they are now (the Trash, or where
-    /// they were), for the person.
-    pub untrashed: Vec<PathBuf>,
     /// The file is installed but the folder did not sync after it: why.
     /// Nothing else was done (the replaced version stays named by the
     /// record); the save is reported failed, and adopted by the next save
@@ -2241,7 +2258,7 @@ fn publish_now(
     }
     // The save stands. Versions earlier saves retained are read again and
     // go; one that changed since is kept beside the project instead.
-    (published.changed, published.untrashed) = transaction::prune_retained(destination, &tx, hooks);
+    published.changed = transaction::prune_retained(destination, &tx, hooks);
     if let Some(policy) = host.backups {
         let just_written = published.backup.as_deref().or(host.backup);
         for changed in retain(policy, just_written, hooks).unwrap_or_default() {

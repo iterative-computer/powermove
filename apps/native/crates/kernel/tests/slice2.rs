@@ -1527,6 +1527,73 @@ fn a_disposal_cut_short_is_finished_by_the_next_open() {
         assert_eq!(private_leftovers(&file), [""; 0], "{changed}");
     }
 }
+/// Recovery finds a file changed when it is to go and cannot keep it beside
+/// the project (every name it could be given is taken, as when the folder
+/// or its disk refuses): it goes to the Trash, or stays hidden where it
+/// is. Either way the person is told, by the save's record, until they have
+/// seen it, and the Error Log says where the file is.
+#[test]
+fn a_changed_file_that_cannot_be_kept_beside_the_project_is_still_told() {
+    for trash in [true, false] {
+        let dir = common::TempDir::new("stray");
+        fs::create_dir_all(dir.path("job")).unwrap();
+        let file = dir.path("job/cut.pmv");
+        fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+        let native = dir.path("native");
+        assert!(killed(&native, &file, "no-exclusive", "installed", "save"));
+        let record = private_file(&file, ".save");
+        fs::copy(&file, record.with_extension("tmp")).unwrap();
+        let mut k = kernel(&native);
+        let (hook, written) = work_before_disposal();
+        let (no_trash, _) = counted_trash();
+        k.set_publish_hooks(pm_kernel::project_io::PublishHooks {
+            before_disposal: Some(hook),
+            before_install: Some(std::sync::Arc::new(|to: &Path| {
+                if to.to_string_lossy().contains("(other version") {
+                    land(to, b"in the way");
+                }
+            })),
+            trash: (!trash).then_some(no_trash),
+            ..child_disk("no-exclusive")
+        });
+        let (session, _) = open_file(&mut k, &file);
+        let work = written.lock().unwrap()[0].clone();
+        let told = kept_beside(&mut k, &session);
+        let why = if trash { "trashed" } else { "hidden" };
+        assert!(told.iter().any(|(w, _)| w == why), "{why}: {told:?}");
+        if trash {
+            assert!(common::trashed(&native.join("Trash")).contains(&work));
+        } else {
+            assert!(
+                told.iter().any(|(_, path)| path
+                    .as_ref()
+                    .is_some_and(|p| fs::read(p).is_ok_and(|b| b == work))),
+                "the notice says where the hidden file is: {told:?}"
+            );
+        }
+        let log = k.take_log();
+        assert!(
+            log.iter().any(|l| l.contains("could not be kept")),
+            "{why}: {log:?}"
+        );
+        // Not seen yet: the next launch tells it again.
+        k.shell(ShellCall::Close(session)).unwrap();
+        drop(k);
+        let mut k = kernel(&native);
+        k.set_publish_hooks(child_disk("no-exclusive"));
+        let (session, _) = open_file(&mut k, &file);
+        let told = kept_beside(&mut k, &session);
+        assert!(
+            told.iter().any(|(w, path)| w == why
+                || path
+                    .as_ref()
+                    .is_some_and(|p| fs::read(p).is_ok_and(|b| b == work))),
+            "{why}: told again: {told:?}"
+        );
+        seen(&mut k, &session, &told);
+        assert_eq!(kept_beside(&mut k, &session), [], "{why}: seen");
+    }
+}
 /// Every private file beside `file` (staged, moved aside, retained): what
 /// each holds.
 fn private_versions(file: &Path) -> Vec<Vec<u8>> {
