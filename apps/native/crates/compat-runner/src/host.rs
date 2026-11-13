@@ -2051,6 +2051,10 @@ impl Owner {
         self.publish_entries();
     }
     fn start_realm(&mut self, clock: Option<(f64, bool)>) -> Result<()> {
+        #[cfg(test)]
+        if tests::FAIL_START.lock().unwrap().as_deref() == Some(self.config.cache.as_path()) {
+            return Err(Error::Host("no realm for this test".into()));
+        }
         if std::mem::take(&mut self.retired) {
             self.writer.generation += 1;
             forward_mailbox(&self.config.kernel, self.writer, self.inbox.clone());
@@ -2300,6 +2304,9 @@ impl Owner {
         let transport = live.host.transport();
         let clock = (transport.time(), transport.playing());
         self.retire_realm();
+        // What the retired realm contributed went with it: nothing of it is
+        // settled until the realm that replaces it has loaded.
+        self.publish_without_realm(false);
         // Repeated failures nobody can name stop the realm; a Stop that turns
         // its culprit off is not a loop.
         if culprit.is_none() {
@@ -2325,15 +2332,12 @@ impl Owner {
             });
         }
         if self.restarts > MAX_RESTARTS {
-            // Helpers stay; what the realm contributed went with it.
-            let mut value = json!({});
-            merge_store(&mut value, &self.shared.store.lock().unwrap());
+            self.publish_without_realm(true);
             self.shared.update(|p| {
-                p.contributions = Some(Arc::new(value));
                 p.toasts.push(
                     "Extensions stopped after repeated failures. Reopen the project to retry."
                         .into(),
-                );
+                )
             });
             self.publish_records();
             return;
@@ -2345,11 +2349,26 @@ impl Owner {
                 self.replay_window();
                 self.load(&records, "boot", "");
             }
-            Err(error) => self.shared.update(|p| {
-                p.toasts
-                    .push(format!("Extensions could not start: {error}"))
-            }),
+            // No realm will finish this load: it has failed, by name, and
+            // nothing waits for it (held frames, exports, stills).
+            Err(error) => {
+                self.publish_without_realm(true);
+                self.shared.update(|p| {
+                    p.toasts
+                        .push(format!("Extensions could not start: {error}"))
+                });
+                self.publish_records();
+            }
         }
+    }
+    /// The contributions with no trusted realm behind them: the helpers'
+    /// stay. `settled` is false while a realm that will load is starting.
+    fn publish_without_realm(&self, settled: bool) {
+        let mut value = json!({"settled": settled, "commands": [], "panels": [], "effects": [],
+            "transitions": [], "layers": [], "definitions": []});
+        merge_store(&mut value, &self.shared.store.lock().unwrap());
+        self.shared
+            .update(|p| p.contributions = Some(Arc::new(value)));
     }
 }
 
@@ -2358,6 +2377,8 @@ mod tests {
     use super::*;
     use pm_kernel::{HistoryCall, KernelActor, KernelConfig, OpenSource, Reply, Request};
     use std::{fs, path::Path, time::Instant};
+    /// The host whose compiled-extension cache is here cannot start a realm.
+    pub(super) static FAIL_START: Mutex<Option<std::path::PathBuf>> = Mutex::new(None);
     fn extension(root: &Path, id: &str, files: &[(&str, &str)]) {
         let directory = root.join(id);
         fs::create_dir_all(&directory).unwrap();
@@ -3726,6 +3747,67 @@ mod tests {
             "build-error" | "activation-error"
         ));
         assert!(command(&fixture, "synthetic-good.run"));
+    }
+    /// Stop on a hung activation rebuilds the realm; when the new realm
+    /// cannot start, nothing is left loading: the publication settles
+    /// without the realm's definitions and says why, instead of keeping the
+    /// hung load's "still loading" forever (frames held, exports waiting).
+    #[test]
+    fn a_restart_that_cannot_start_settles_with_the_failure_named() {
+        let root = tempfile::tempdir().unwrap();
+        let extensions = root.path().join("extensions");
+        extension(
+            &extensions,
+            "a-effect",
+            &[(
+                "index.ts",
+                "export default function(api){api.effects.register({id:'a-effect.tint',label:'Tint',group:'Stylize',params:[],frag:'o = src(v_uv);'})}",
+            )],
+        );
+        extension(
+            &extensions,
+            "z-hangs",
+            &[("index.ts", "export default function(){for(;;);}")],
+        );
+        let cache = root.path().join("cache");
+        let fixture = Fixture::start(root);
+        let asked = fixture.answer_unresponsive(Some("z-hangs"));
+        let hung = fixture.host.publication();
+        assert!(!hung.settled, "the hung load is still loading");
+        *FAIL_START.lock().unwrap() = Some(cache);
+        fixture.host.answer_unresponsive(asked, true);
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut toasts = vec![];
+        let settled = loop {
+            toasts.extend(fixture.host.take_toasts());
+            let now = fixture.host.publication();
+            if now.settled {
+                break now;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the failed restart never settled: {now:?}, toasts {toasts:?}"
+            );
+            thread::sleep(Duration::from_millis(5));
+        };
+        *FAIL_START.lock().unwrap() = None;
+        assert!(settled.loading.is_empty());
+        let definitions = settled
+            .contributions
+            .as_ref()
+            .map(|c| c["definitions"].clone());
+        assert!(
+            definitions.is_none_or(|d| d.as_array().is_none_or(Vec::is_empty)),
+            "the retired realm's definitions went with it"
+        );
+        thread::sleep(Duration::from_millis(50));
+        toasts.extend(fixture.host.take_toasts());
+        assert!(
+            toasts
+                .iter()
+                .any(|t| t.starts_with("Extensions could not start: ")),
+            "{toasts:?}"
+        );
     }
     #[test]
     fn a_hung_activation_is_stopped_and_the_realm_comes_back_without_it() {
