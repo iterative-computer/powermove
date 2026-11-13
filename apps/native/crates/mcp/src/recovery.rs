@@ -10,19 +10,33 @@ pub(crate) struct PendingOpens(BTreeMap<String, Value>);
 impl PendingOpens {
     pub fn required(&mut self, project: &str, ticket: String, recovery: RecoveryResult) -> Value {
         self.0.retain(|_, v| v["projectId"] != project);
-        let (kind, truncated, reason) = match recovery {
-            RecoveryResult::Recovered { truncated } => ("recoverable", truncated, None),
-            RecoveryResult::OfferCopy { truncated, .. } => ("copy", truncated, None),
-            RecoveryResult::Unrecoverable { reason } => ("unrecoverable", false, Some(reason)),
-            RecoveryResult::None => ("none", false, None),
+        let (kind, truncated, reason, source_name) = match recovery {
+            RecoveryResult::Recovered { truncated } => ("recoverable", truncated, None, None),
+            RecoveryResult::OfferCopy { truncated, .. } => ("copy", truncated, None, None),
+            RecoveryResult::Unrecoverable { reason } => {
+                ("unrecoverable", false, Some(reason), None)
+            }
+            RecoveryResult::FromOtherFile { name, truncated } => (
+                "from_other_file",
+                truncated,
+                Some("Declining leaves the unsaved changes with their original file.".into()),
+                Some(name),
+            ),
+            RecoveryResult::None => ("none", false, None, None),
         };
-        let choices = if kind == "unrecoverable" {
-            json!(["open_saved_version"])
-        } else {
-            json!(["recover", "open_as_copy", "discard"])
+        let choices = match kind {
+            "unrecoverable" => json!(["open_saved_version"]),
+            // Match the native Recover / Leave Them prompt. This work may
+            // belong to a different file, so neither a copy nor destruction
+            // is offered; the kernel leaves its journal untouched on decline.
+            "from_other_file" => json!(["recover", "discard"]),
+            _ => json!(["recover", "open_as_copy", "discard"]),
         };
-        let value = json!({"projectId":project,"recoveryRequired":true,"ticket":ticket,
+        let mut value = json!({"projectId":project,"recoveryRequired":true,"ticket":ticket,
             "recovery":{"kind":kind,"truncated":truncated,"reason":reason,"choices":choices}});
+        if let Some(name) = source_name {
+            value["recovery"]["sourceName"] = json!(name);
+        }
         self.0.insert(ticket, value.clone());
         value
     }
@@ -62,5 +76,41 @@ impl PendingOpens {
         };
         self.0.remove(ticket);
         Ok((ticket.into(), decision))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn another_files_recovery_keeps_its_name_and_offers_only_recover_or_leave() {
+        let mut pending = PendingOpens::default();
+        let offer = pending.required(
+            "restored",
+            "ticket".into(),
+            RecoveryResult::FromOtherFile {
+                name: "original.pmv".into(),
+                truncated: true,
+            },
+        );
+        assert_eq!(offer["recovery"]["kind"], "from_other_file");
+        assert_eq!(offer["recovery"]["sourceName"], "original.pmv");
+        assert_eq!(offer["recovery"]["truncated"], true);
+        assert_eq!(offer["recovery"]["choices"], json!(["recover", "discard"]));
+        for decision in ["open_as_copy", "open_saved_version"] {
+            assert!(
+                pending
+                    .take("restored", &json!({"ticket":"ticket","decision":decision}))
+                    .is_err()
+            );
+        }
+        assert_eq!(
+            pending
+                .take("restored", &json!({"ticket":"ticket","decision":"discard"}))
+                .unwrap(),
+            ("ticket".into(), RecoveryDecision::Discard),
+        );
+        assert_eq!(pending.list(), json!([]));
     }
 }

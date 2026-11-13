@@ -199,6 +199,71 @@ fn app_launch_file_recovery_is_listed_and_accepts_a_command_choice() {
     assert_eq!(std::fs::read(path).unwrap(), original, "EOF must not overwrite unsaved working files");
 }
 #[test]
+fn app_recovery_from_another_file_requires_a_choice_and_keeps_declined_work() {
+    fn tree(root: &std::path::Path) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+        fn read(root: &std::path::Path, at: &std::path::Path, files: &mut std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>) {
+            for entry in std::fs::read_dir(at).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    read(root, &path, files);
+                } else {
+                    files.insert(path.strip_prefix(root).unwrap().into(), std::fs::read(path).unwrap());
+                }
+            }
+        }
+        let mut files = Default::default();
+        read(root, root, &mut files);
+        files
+    }
+
+    for decision in ["recover", "discard"] {
+        let root = tempfile::tempdir().unwrap();
+        let profile = root.path().join("profile");
+        let original = root.path().join("original.json");
+        let restored = root.path().join("restored.json");
+        let saved = serde_json::to_vec(&json!({"id":"P","name":"Synthetic restored file","compId":"C","compName":"Main","w":64,"h":36,"fps":30,"dur":2,"layers":[],"assets":{},"comps":{}})).unwrap();
+        std::fs::write(&original, &saved).unwrap();
+        std::fs::write(&restored, &saved).unwrap();
+        let mut first = Client::new(&profile, Some(&original));
+        first.rpc("initialize", json!({}));
+        let source_id = first.tool("list_projects", json!({}))["currentProjectId"]
+            .as_str().unwrap().to_owned();
+        first.tool("start_session", json!({"prompt":"Synthetic work from another file"}));
+        first.tool("apply_commands", json!({"commands":[{"type":"add_layer","id":"synthetic","layerType":"solid","name":"Synthetic"}]}));
+        first.tool("finish_session", json!({"commit":true}));
+        first.child.kill().unwrap();
+        first.child.wait().unwrap();
+        std::fs::remove_file(&original).unwrap();
+        let journal = profile.join("journals").join(source_id);
+        let kept = tree(&journal);
+        assert!(!kept.is_empty());
+
+        let mut second = Client::new(&profile, Some(&restored));
+        second.rpc("initialize", json!({}));
+        let offer = second.tool("list_projects", json!({}))["pendingRecoveries"][0].clone();
+        assert_eq!(offer["recovery"]["kind"], "from_other_file");
+        assert_eq!(offer["recovery"]["sourceName"], "original.json");
+        assert_eq!(offer["recovery"]["choices"], json!(["recover", "discard"]));
+        let invalid = second.rpc("tools/call", json!({"name":"open_project","arguments":{
+            "projectId":offer["projectId"],"recovery":{"ticket":offer["ticket"],"decision":"open_as_copy"}
+        }}));
+        assert_eq!(invalid["isError"], true, "another file's work cannot be copied unasked");
+        second.tool("open_project", json!({"projectId":offer["projectId"],"recovery":{
+            "ticket":offer["ticket"],"decision":decision
+        }}));
+        second.tool("start_session", json!({"prompt":"Inspect explicit recovery choice"}));
+        assert_eq!(second.tool("get_project_state", json!({"indexOnly":true}))["layerCount"], u64::from(decision == "recover"));
+        second.tool("finish_session", json!({"commit":true}));
+        if decision == "discard" {
+            assert_eq!(tree(&journal), kept, "declining keeps the other file's journal byte for byte");
+        }
+        drop(second.input.take());
+        assert!(second.child.wait().unwrap().success());
+        assert_eq!(std::fs::read(restored).unwrap(), saved, "EOF never overwrites the named file");
+    }
+}
+
+#[test]
 fn app_stdio_conformance_on_a_corpus_copy_commit_and_rollback() {
     let root = tempfile::tempdir().unwrap();
     let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..");
