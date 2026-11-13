@@ -162,16 +162,14 @@ fn export(
     .unwrap_or_else(|e| panic!("{}: {e}", destination.display()));
 }
 
+/// The ideal ramp's code for a value 0..1.
+type Ideal = Box<dyn Fn(f64) -> f64>;
+
 /// Every frame's luma plane as coded (Y′CbCr) or its green (RGB), decoded
 /// by FFmpeg, in codes of the output's depth, with the ideal ramp's codes.
 /// A lossy file's later frames are predicted from earlier ones: whether
 /// dither survives is a question about all of them.
-fn decoded(
-    path: &Path,
-    rows: u32,
-    ycbcr: bool,
-    ten_bit: bool,
-) -> (Vec<Vec<f64>>, Box<dyn Fn(f64) -> f64>) {
+fn decoded(path: &Path, rows: u32, ycbcr: bool, ten_bit: bool) -> (Vec<Vec<f64>>, Ideal) {
     // Planar 4:2:0 output: its first plane is the coded Y′, copied.
     let pix = match (ycbcr, ten_bit) {
         (true, false) => "yuv420p",
@@ -209,7 +207,7 @@ fn decoded(
             _ => b.chunks_exact(3).map(|p| f64::from(p[1])).collect(),
         })
         .collect();
-    let ideal: Box<dyn Fn(f64) -> f64> = match (ycbcr, ten_bit) {
+    let ideal: Ideal = match (ycbcr, ten_bit) {
         (true, false) => Box::new(|v| v * 219.0 + 16.0),
         (true, true) => Box::new(|v| v * 876.0 + 64.0),
         (false, _) => Box::new(|v| v * 255.0),
