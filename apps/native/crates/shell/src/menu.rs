@@ -186,9 +186,17 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
                 k("Split Text by Character", "splitTextCharacters", ""),
                 k("Split Text by Line", "splitTextLines", ""),
                 sep(),
+                // Layer commands the shipped keymap has no chord for stand
+                // here: the Layer menu lists registry bindings only.
+                k("Hide/Show Selected Layers", "toggleVisibility", ""),
+                k("Solo Selected Layers", "toggleSolo", ""),
+                k("Fit to Composition", "fitToComposition", ""),
+                k("Separate Audio", "separateAudio", ""),
+                sep(),
                 k("Edit Keyframe Value…", "keyframeValue", ""),
                 k("Keyframe Velocity…", "keyframeVelocity", ""),
                 k("Scale Keyframes…", "scaleKeyframes", ""),
+                k("Simplify Keyframes", "simplifyKeyframes", ""),
             ],
         ),
         (
@@ -197,6 +205,7 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
                 r("New Solid", "newSolid"),
                 r("New Shape", "newShape"),
                 r("New Adjustment Layer", "newAdjustment"),
+                r("New Null Object", "newNull"),
                 sep(),
                 r("Group", "groupLayers"),
                 r("Ungroup", "ungroupLayers"),

@@ -1192,6 +1192,11 @@ impl Controller {
         };
         let select = plan.select;
         let Some(session) = &self.session else { return };
+        let counted = plan
+            .count_keys
+            .zip(self.published.clone())
+            .map(|(ids, p)| (crate::layer_commands::key_count(&p, &ids), ids));
+        let project = session.project.clone();
         let pending = self
             .kernel
             .call(&session.project, Request::new(Caller::native(), call));
@@ -1202,6 +1207,13 @@ impl Controller {
                     if let Reply::Throw(e) = ack.reply {
                         v.message = e.to_string();
                         return;
+                    }
+                    // Simplify Keyframes says what it did, as the shipped app.
+                    if let Some((before, ids)) = counted
+                        && let Some(after) = v.kernel.published(&project)
+                    {
+                        let after = crate::layer_commands::key_count(&after, &ids);
+                        v.note(format!("{before} → {after} keyframes"), cx);
                     }
                     if let Some(ids) = select {
                         v.call(SelectionCall::Layers { ids, add: false }.into(), cx);
@@ -2269,7 +2281,7 @@ impl Controller {
     }
     /// An edit the kernel refused or could not answer: plain words in the
     /// status bar, the kernel's account in the Error Log.
-    fn edit_failed(&mut self, error: Option<KernelFailure>) {
+    pub(crate) fn edit_failed(&mut self, error: Option<KernelFailure>) {
         self.message = "That change couldn’t be made.".into();
         let detail =
             error.map_or_else(|| "the project didn’t answer".to_owned(), |e| e.to_string());
@@ -2460,6 +2472,36 @@ impl Controller {
                 if let Some(cancel) = &self.importing {
                     cancel.store(true, std::sync::atomic::Ordering::Release);
                 }
+            }
+            // A Properties row's Show in Graph Editor: the Timeline comes
+            // forward with its graph on that property.
+            "timeline.showGraph" => {
+                let text = |i: usize| cmd.args.get(i).and_then(|v| v.as_str()).map(str::to_owned);
+                let (Some(layer), Some(channel), Some(timeline)) =
+                    (text(0), text(1), self.builtins.timeline.clone())
+                else {
+                    return false;
+                };
+                let keys = cmd
+                    .args
+                    .get(2)
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(str::to_owned))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                self.host
+                    .borrow()
+                    .send_command("panel:show:timeline", vec![]);
+                timeline.update(cx, |t, cx| t.show_graph(layer, channel, keys, cx));
+            }
+            "properties.expression" => {
+                let Some(input) = cmd.args.first() else {
+                    return false;
+                };
+                self.expression_sheet(input, cx);
             }
             "import" => self.pick_media(None, true, cx),
             "importFolder" => self.pick_media_folder(None, cx),

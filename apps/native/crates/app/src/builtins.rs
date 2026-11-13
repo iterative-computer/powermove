@@ -1386,9 +1386,23 @@ impl crate::timeline_surface::Delegate for ControllerDelegate {
         });
     }
     fn command(&self, name: &str, cx: &mut App) {
+        crate::timeline_surface::Delegate::run(self, name, vec![], cx);
+    }
+    fn run(&self, name: &str, args: Vec<Value>, cx: &mut App) {
         if let Some(controller) = self.0.upgrade() {
-            controller.read(cx).host.borrow().send_command(name, vec![]);
+            controller.read(cx).host.borrow().send_command(name, args);
         }
+    }
+    fn layer_menu_rows(&self, layer: &str, cx: &App) -> Vec<Value> {
+        let Some(controller) = self.0.upgrade() else {
+            return vec![];
+        };
+        let controller = controller.read(cx);
+        controller
+            .published
+            .as_ref()
+            .map(|p| crate::layer_commands::layer_menu(p, layer, controller.time()))
+            .unwrap_or_default()
     }
     fn menu(
         &self,
@@ -1540,7 +1554,7 @@ impl crate::gizmo::Host for ControllerDelegate {
         let at = window.mouse_position();
         let at = (f32::from(at.x), f32::from(at.y));
         // Over nothing: the canvas's own menu (New, as the shipped app; Text
-        // and Null have no native command yet) and what extensions add to it.
+        // is a tool here, not a command) and what extensions add to it.
         let Some(id) = layer else {
             controller.update(cx, |v, cx| {
                 let entries = vec![pm_shell::MenuEntry::submenu(
@@ -1549,6 +1563,7 @@ impl crate::gizmo::Host for ControllerDelegate {
                         pm_shell::MenuEntry::item("Solid", "newSolid"),
                         pm_shell::MenuEntry::item("Shape Layer", "newShape"),
                         pm_shell::MenuEntry::item("Adjustment Layer", "newAdjustment"),
+                        pm_shell::MenuEntry::item("Null Object", "newNull"),
                         pm_shell::MenuEntry::separator(),
                         pm_shell::MenuEntry::item("Composition…", "newComposition"),
                     ],
@@ -1560,25 +1575,29 @@ impl crate::gizmo::Host for ControllerDelegate {
             });
             return;
         };
+        // The press selects the layer before the menu opens, but that
+        // write may not have published yet: the rows are for this layer.
+        let rows = controller
+            .read(cx)
+            .published
+            .as_ref()
+            .map(|p| crate::layer_commands::layer_menu(p, &id, time))
+            .unwrap_or_default();
+        let chosen = rows.clone();
         let choose: crate::timeline_surface::Choose = Box::new(move |index, cx| {
-            let rows = &crate::layer_commands::LAYER_MENU;
-            if let (Some((command, _)), Some(controller)) =
-                (index.and_then(|i| rows.get(i)), host.upgrade())
-            {
+            if let (Some((command, args)), Some(controller)) = (
+                index.and_then(|i| crate::layer_commands::layer_menu_choice(&chosen, i)),
+                host.upgrade(),
+            ) {
                 controller
                     .read(cx)
                     .host
                     .borrow()
-                    .send_command(command, vec![]);
+                    .send_command(&command, args);
             }
         });
         if !controller.read(cx).extensions_listen() {
-            crate::v4_native::menu(
-                window,
-                &crate::layer_commands::layer_menu_rows(),
-                cx,
-                choose,
-            );
+            crate::v4_native::menu(window, &rows, cx, choose);
             return;
         }
         // The layer's menu with what extensions add for it, as the shipped
@@ -1598,13 +1617,7 @@ impl crate::gizmo::Host for ControllerDelegate {
             ),
         ];
         controller.update(cx, |v, cx| {
-            v.extension_rows_menu(
-                locations,
-                &crate::layer_commands::layer_menu_rows(),
-                at,
-                choose,
-                cx,
-            )
+            v.extension_rows_menu(locations, &rows, at, choose, cx)
         });
     }
     fn navigate(&self, change: crate::gizmo::Navigate, cx: &mut App) {

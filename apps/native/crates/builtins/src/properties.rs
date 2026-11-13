@@ -20,8 +20,45 @@ pub struct Properties {
     selection: Vec<String>,
     document: Option<u64>,
     sequence: u64,
+    /// Commands a row action asks the app to run (a sheet, another panel's
+    /// view); the backend sends them on.
+    pub(crate) commands: Vec<(String, Vec<Value>)>,
+    /// Each listed row's label, for what a row action shows about it.
+    labels: BTreeMap<String, String>,
 }
+/// What Add Expression… starts from, as the shipped editor did.
+pub const STARTING_EXPRESSION: &str = "value + wiggle(2, 20)";
 impl Properties {
+    /// A row's expression field, when one of its channels has an expression:
+    /// the source, what the parser says about it, and a lease that writes
+    /// every channel of the row.
+    fn expression(
+        &mut self,
+        model: &Inspector,
+        row: &str,
+        bindings: Vec<Binding>,
+        source: Option<String>,
+    ) -> Result<Option<Value>, String> {
+        let Some(source) = source else {
+            return Ok(None);
+        };
+        let key = format!("expr.{row}");
+        let handle = match self.handles.get(&key) {
+            Some(handle) => handle.clone(),
+            None => {
+                let handle = self
+                    .adapter
+                    .register(model, bindings)
+                    .map_err(|e| e.to_string())?;
+                self.handles.insert(key.clone(), handle.clone());
+                handle
+            }
+        };
+        let error = pm_kernel::commands::properties::expression_diagnostic(&source);
+        Ok(Some(
+            json!({"binding":{"handle":handle,"channels":[key]},"source":source,"error":error}),
+        ))
+    }
     fn lease(&mut self, model: &Inspector, id: &str, binding: Binding) -> Result<Value, String> {
         let handle = if let Some(handle) = self.handles.get(id) {
             handle.clone()
@@ -271,7 +308,17 @@ impl Properties {
                         "static"
                     })
                 };
-                let row = json!({"id":id,"label":label,"locked":!model.editable(&layer),"animation":animation,"control":control});
+                let mut row = json!({"id":id,"label":label,"locked":!model.editable(&layer),"animation":animation,"control":control});
+                if field.animatable
+                    && let Some(expression) = self.expression(
+                        model,
+                        id,
+                        vec![field.binding.clone()],
+                        state.expression.clone(),
+                    )?
+                {
+                    row["expression"] = expression;
+                }
                 if id.starts_with("layer.") {
                     layer_rows.push(row);
                 } else {
@@ -319,6 +366,7 @@ impl Properties {
                 ] {
                     let mut axes = vec![];
                     let mut animation = "static";
+                    let (mut bound, mut expression) = (vec![], None);
                     for (index, path) in paths.iter().enumerate() {
                         let binding = Binding::Property(PropertyId::new(&layer, *path));
                         let state = match model.binding_state(&binding, time) {
@@ -335,6 +383,8 @@ impl Properties {
                         } else if state.animated {
                             animation = "animated";
                         }
+                        bound.push(binding.clone());
+                        expression = expression.or_else(|| state.expression.clone());
                         let mut axis = json!({"binding":self.lease(model,path,binding)?,"value":value,"unit":unit,"step":step,"precision":2,"mixed":state.mixed,"animation": if state.key_at_playhead { "key-at-playhead" } else if state.animated { "animated" } else { "static" }});
                         if paths.len() > 1 {
                             axis["axis"] = json!(if index == 0 { "X" } else { "Y" });
@@ -356,6 +406,9 @@ impl Properties {
                                     .and_then(pm_model::Value::as_bool)
                                     .unwrap_or(true)
                             );
+                        }
+                        if let Some(expression) = self.expression(model, id, bound, expression)? {
+                            row["expression"] = expression;
                         }
                         rows.push(row);
                     }
@@ -410,6 +463,23 @@ impl Properties {
                 json!({"id":"composition","title":"Composition","collapsed":false,"rows":rows}),
             );
         }
+        self.labels = sections
+            .iter()
+            .flat_map(|section| {
+                let masks = section["masks"].as_array().into_iter().flatten();
+                section["rows"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .chain(masks.flat_map(|m| m["rows"].as_array().into_iter().flatten()))
+            })
+            .filter_map(|row| {
+                Some((
+                    row["id"].as_str()?.to_owned(),
+                    row["label"].as_str()?.to_owned(),
+                ))
+            })
+            .collect();
         Ok(json!({"target":target,"sections":sections,"playing":playing,"time":time}))
     }
     /// A 3D control that isn't a channel (a pop-up or checkbox): its lease
@@ -1097,6 +1167,28 @@ impl Properties {
                 },
             ));
         }
+        if self
+            .handles
+            .iter()
+            .any(|(path, h)| h == handle && path.starts_with("expr."))
+        {
+            // The field holds the whole source; cleared, the expression goes.
+            let source = value.as_str().ok_or("Expected text")?.trim().to_owned();
+            return match self
+                .adapter
+                .action(
+                    model,
+                    caller,
+                    handle,
+                    V4Action::Expression((!source.is_empty()).then_some(source)),
+                    time,
+                )
+                .map_err(|e| e.to_string())?
+            {
+                V4Plan::Request(request) => Ok(*request),
+                V4Plan::Service(_) => Err("Expected an edit".into()),
+            };
+        }
         if let Some(control) = self
             .handles
             .iter()
@@ -1285,6 +1377,45 @@ impl Properties {
         } else {
             handle
         };
+        if intent["type"] == "row-action" && intent["action"] == "edit-expression" {
+            // The sheet is the app's: it gets what it edits and where it
+            // applies (every channel of the row, on each selected layer).
+            let targets = self.adapter.targets(model, handle);
+            let source = self
+                .adapter
+                .read(model, handle, time)
+                .map(|states| states.into_iter().find_map(|s| s.expression));
+            if matches!(row, "position" | "scale" | "anchor") {
+                self.adapter.dispose(handle);
+            }
+            let targets = targets.map_err(|e| e.to_string())?;
+            if targets.is_empty() {
+                return Err("Locked layers can’t be edited.".into());
+            }
+            let layer = model.primary().ok_or("No selected layer")?.to_owned();
+            let name = model
+                .layer(&layer)
+                .ok()
+                .and_then(|l| {
+                    l.get("name")
+                        .and_then(pm_model::Value::as_str)
+                        .map(str::to_owned)
+                })
+                .unwrap_or_default();
+            let label = self.labels.get(row).map_or(row, String::as_str);
+            self.commands.push((
+                "properties.expression".into(),
+                vec![json!({
+                    "document": model.document_id(),
+                    "layer": name,
+                    "layers": model.selected_layers().len(),
+                    "property": label,
+                    "source": source.map_err(|e| e.to_string())?,
+                    "targets": targets.iter().map(|id| json!([id.layer, id.path])).collect::<Vec<_>>(),
+                })],
+            ));
+            return Ok(None);
+        }
         let action = if intent["type"] == "key" {
             if intent["removeAnimation"] == true {
                 V4Action::RemoveAnimation
@@ -1299,7 +1430,7 @@ impl Properties {
                 Some("remove-expression") => V4Action::Expression(None),
                 Some("link") => V4Action::LinkScale,
                 Some("show-graph") => V4Action::ShowGraph,
-                _ => return Err("Property action requires native service".into()),
+                _ => return Err("Unknown property action".into()),
             }
         };
         let result = self.adapter.action(model, caller, handle, action, time);
@@ -1308,7 +1439,29 @@ impl Properties {
         }
         match result.map_err(|e| e.to_string())? {
             V4Plan::Request(request) => Ok(Some(*request)),
-            V4Plan::Service(_) => Err("Graph service unavailable".into()),
+            V4Plan::Service(intents) => {
+                // Show in Graph Editor: the Timeline's graph, on this property.
+                use pm_panel_inspector::ServiceIntent;
+                let mut shown = None;
+                let mut keys = vec![];
+                for intent in intents {
+                    match intent {
+                        ServiceIntent::OpenGraph(id) | ServiceIntent::FocusGraph(id) => {
+                            shown = Some(id)
+                        }
+                        ServiceIntent::Reveal(ids) => {
+                            keys = ids.into_iter().map(|id| id.path).collect()
+                        }
+                        _ => {}
+                    }
+                }
+                let id = shown.ok_or("No property to show")?;
+                self.commands.push((
+                    "timeline.showGraph".into(),
+                    vec![json!(id.layer), json!(id.path), json!(keys)],
+                ));
+                Ok(None)
+            }
         }
     }
 }
