@@ -2898,33 +2898,68 @@ mod frame_cache_tests {
             std::thread::sleep(Duration::from_millis(5));
         }
     }
-    /// A playing frame draws a reduced still with the final resampler, as the
-    /// paused frame of the same time and density does: footage and
-    /// precomps don't sharpen when playback stops. (On a drawable half the
-    /// composition's size: the paused frame at the drawable's density is
-    /// the picture shown at once, a preview as the playing frame is. At the
-    /// composition's own size a paused frame is the final picture, drawn
-    /// from the original still.)
+    /// Stopping playback never changes the picture at the moment it stops:
+    /// a playing frame draws a reduced still with the final resampler and
+    /// from the same source as the paused frame shown at once, at the
+    /// composition's own drawable size and at half of it (footage and
+    /// precomps don't sharpen when playback stops). What the paused viewer
+    /// then settles on, once it has rested, is another picture by design:
+    /// the final one, drawn from the original still at the composition's
+    /// size, the picture a capture reads (and an export delivers).
     #[test]
     fn playing_and_paused_frames_resample_alike() {
         let dir = tempfile::tempdir().unwrap();
         let scene = scene(&stripes(dir.path()));
-        let output = Output {
-            width: 64,
-            height: 36,
-            display: 0,
-            headroom: 1.,
-            crop: None,
-        };
-        let spec = |moment| FrameSpec {
-            moment,
-            exact: false,
-            ..FrameSpec::exact(Ticks::ZERO, output)
-        };
-        let mut engine = Engine::new(Gpu::new("playing-resampler").unwrap()).unwrap();
-        let paused = drawn(&mut engine, &scene, spec(Moment::Paused));
-        let playing = drawn(&mut engine, &scene, spec(Moment::Playing));
-        assert_eq!(playing, paused);
+        for (width, height) in [(128, 72), (64, 36)] {
+            let output = Output {
+                width,
+                height,
+                display: 0,
+                headroom: 1.,
+                crop: None,
+            };
+            let spec = |moment| FrameSpec {
+                moment,
+                exact: false,
+                ..FrameSpec::exact(Ticks::ZERO, output)
+            };
+            let mut engine = Engine::new(Gpu::new("playing-resampler").unwrap()).unwrap();
+            let paused = drawn(&mut engine, &scene, spec(Moment::Paused));
+            let playing = drawn(&mut engine, &scene, spec(Moment::Playing));
+            assert_eq!(
+                playing, paused,
+                "{width}×{height}: the picture changes when playback stops"
+            );
+            // Drawn as the worker draws it: above the drawable's size, in
+            // bands into the frame cache first.
+            let settled = FrameSpec {
+                scale: FrameSpec::paused_full_scale(&scene, &output),
+                settled: true,
+                ..spec(Moment::Paused)
+            };
+            assert!(spec(Moment::Paused).settles(&scene) && settled.final_picture(&scene));
+            if settled.scale > 1. {
+                let mut costs = crate::jobs::Costs::default();
+                assert!(
+                    engine
+                        .refine(&scene, settled, &mut costs, &|| false)
+                        .unwrap()
+                );
+            }
+            let settled_picture = drawn(&mut engine, &scene, settled);
+            let capture = drawn(
+                &mut engine,
+                &scene,
+                FrameSpec {
+                    exact: true,
+                    ..settled
+                },
+            );
+            assert_eq!(
+                settled_picture, capture,
+                "{width}×{height}: the settled picture is not the one a capture reads"
+            );
+        }
     }
     /// A rendered frame uploaded ahead of its turn is of one cache state.
     /// When a media file its composition draws from changes on disk, the
