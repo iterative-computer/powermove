@@ -10,6 +10,48 @@ use std::time::Duration;
 /// How long a Render Selection asked during loading waits, once extensions
 /// have settled, for the viewer to draw the settled composition.
 const SETTLED_FRAME_WAIT: Duration = Duration::from_secs(10);
+/// What a waiting Render Selection was asked for.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Asked {
+    doc_id: u64,
+    composition: String,
+    range: (f64, f64),
+}
+/// One look at a waiting Render Selection.
+#[derive(Debug, PartialEq)]
+enum Wait {
+    /// Still waiting, with the status line that says for what.
+    Keep(String),
+    /// The window shows another project or composition now (or the wait was
+    /// cancelled): it never starts.
+    Drop,
+    Start,
+}
+/// `now`: what a Render Selection would be asked for at this moment (`None`
+/// once the wait was cancelled or nothing is open). `settled_for`: how long
+/// the window's extensions have been loaded.
+fn wait_step(
+    asked: &Asked,
+    now: Option<&Asked>,
+    resources: &pm_engine_service::resources::ResourceSnapshot,
+    observed: bool,
+    settled_for: Option<Duration>,
+) -> Wait {
+    let same =
+        now.is_some_and(|now| now.doc_id == asked.doc_id && now.composition == asked.composition);
+    if !same {
+        return Wait::Drop;
+    }
+    match settled_for {
+        None => Wait::Keep(crate::extensions::starts_once_loaded(
+            "Render Selection",
+            resources,
+        )),
+        // Past the wait it starts and says what is in the way, if anything.
+        Some(settled) if observed || settled >= SETTLED_FRAME_WAIT => Wait::Start,
+        Some(_) => Wait::Keep("Reading the composition to render".to_owned()),
+    }
+}
 
 /// The engine's render cache, for the timeline's render bar.
 static DISK: OnceLock<pm_engine_service::render_cache::DiskFrames> = OnceLock::new();
@@ -117,63 +159,102 @@ impl Controller {
         (to > from).then_some((from, to))
     }
 
+    /// The project, composition and range a Render Selection is asked for now.
+    fn render_ask(&self) -> Option<Asked> {
+        let range = self.render_range()?;
+        let p = self.published.as_ref()?;
+        Some(Asked {
+            doc_id: p.snapshot.doc_id,
+            composition: p.snapshot.render_comp(),
+            range,
+        })
+    }
+    /// The viewer has drawn a settled frame of what `asked` names, as the
+    /// window's project and extensions are now.
+    fn render_observed(&self, asked: &Asked) -> bool {
+        self.published.as_ref().is_some_and(|p| {
+            self.engine.render_cache().observed(
+                asked.doc_id,
+                p.snapshot.revision,
+                &asked.composition,
+                &self.extensions.resources.definitions,
+            )
+        })
+    }
     /// Asked while this window's extensions load, a Render Selection waits
     /// for them (its frames would otherwise be drawn without effects still
     /// loading, or find nothing to render), then for the viewer's settled
-    /// frame, then starts.
+    /// frame of that composition, then starts. It is bound to the project,
+    /// composition and range it was asked for: when the window shows
+    /// another composition or project meanwhile it is dropped, never
+    /// started on what is open then. Asking again replaces it.
     pub(crate) fn render_selection(&mut self, cx: &mut Context<Self>) {
-        if !self.extensions.resources.pending && !self.engine.render_cache().reading() {
-            return self.start_render_selection(cx);
+        let Some(asked) = self.render_ask() else {
+            self.message = "Nothing to render".into();
+            cx.notify();
+            return;
+        };
+        if !self.extensions.resources.pending && self.render_observed(&asked) {
+            return self.start_render_selection(asked, cx);
         }
-        let disk = self.engine.render_cache();
+        self.render_wait += 1;
+        let wait = self.render_wait;
         cx.spawn(async move |this, cx| {
             let mut shown = String::new();
             let mut settled_at = None;
             loop {
-                let Ok((pending, text)) = this.update(cx, |v, cx| {
+                let Ok(step) = this.update(cx, |v, cx| {
                     let resources = &v.extensions.resources;
-                    let text = if resources.pending {
-                        crate::extensions::starts_once_loaded("Render Selection", resources)
-                    } else {
-                        "Reading the composition to render".to_owned()
-                    };
+                    let since = (!resources.pending)
+                        .then(|| *settled_at.get_or_insert_with(std::time::Instant::now));
+                    let step = wait_step(
+                        &asked,
+                        (v.render_wait == wait)
+                            .then(|| v.render_ask())
+                            .flatten()
+                            .as_ref(),
+                        resources,
+                        v.render_observed(&asked),
+                        since.map(|since| since.elapsed()),
+                    );
                     // Only our own line is replaced; anything said since stays.
-                    if (shown.is_empty() || v.message == shown) && v.message != text {
-                        v.message = text.clone();
-                        cx.notify();
+                    let ours = shown.is_empty() || v.message == shown;
+                    match &step {
+                        Wait::Keep(text) if ours && v.message != *text => {
+                            v.message = text.clone();
+                            cx.notify();
+                        }
+                        Wait::Drop | Wait::Start if v.message == shown => {
+                            v.message.clear();
+                            cx.notify();
+                        }
+                        _ => {}
                     }
-                    (resources.pending, text)
+                    if step == Wait::Start {
+                        v.start_render_selection(asked.clone(), cx);
+                    }
+                    step
                 }) else {
                     return;
                 };
-                shown = text;
-                if !pending {
-                    let since = *settled_at.get_or_insert_with(std::time::Instant::now);
-                    if !disk.reading() || since.elapsed() >= SETTLED_FRAME_WAIT {
-                        break;
-                    }
+                match step {
+                    Wait::Keep(text) => shown = text,
+                    Wait::Drop | Wait::Start => return,
                 }
                 cx.background_executor()
                     .timer(Duration::from_millis(100))
                     .await;
             }
-            let _ = this.update(cx, |v, cx| {
-                if v.message == shown {
-                    v.message.clear();
-                }
-                v.start_render_selection(cx);
-            });
         })
         .detach();
     }
-
-    fn start_render_selection(&mut self, cx: &mut Context<Self>) {
-        let Some((from, to)) = self.render_range() else {
-            self.message = "Nothing to render".into();
-            cx.notify();
-            return;
-        };
-        let Some(p) = self.published.clone() else {
+    fn start_render_selection(&mut self, asked: Asked, cx: &mut Context<Self>) {
+        let (from, to) = asked.range;
+        let Some(p) = self
+            .published
+            .clone()
+            .filter(|p| p.snapshot.doc_id == asked.doc_id)
+        else {
             return;
         };
         let disk = self.engine.render_cache();
@@ -192,7 +273,8 @@ impl Controller {
             let exe = std::env::current_exe().map_err(|e| e.to_string())?;
             // Its overrides answer from the window's publication, whatever is
             // edited meanwhile.
-            let queued = fill.start_fill(from, to, &exe, activity, |session| {
+            let (doc_id, comp) = (asked.doc_id, asked.composition.as_str());
+            let queued = fill.start_fill_of(doc_id, comp, from, to, &exe, activity, |session| {
                 if let Some(overrides) = overrides {
                     overrides.pin(session, &p, false);
                 }
@@ -385,6 +467,80 @@ fn follow(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A Render Selection asked while extensions load is of the project and
+    /// composition it was asked for: it waits for the extensions, then for
+    /// the viewer's settled frame of that composition, and is dropped (never
+    /// started on something else) once the window shows another composition
+    /// or project, or nothing.
+    #[test]
+    fn a_waiting_render_selection_is_bound_to_its_project_and_composition() {
+        use pm_engine_service::resources::ResourceSnapshot;
+        let asked = Asked {
+            doc_id: 7,
+            composition: "main".into(),
+            range: (1., 4.),
+        };
+        let loading = ResourceSnapshot {
+            pending: true,
+            loading: vec![("glow".into(), "Glow".into())],
+            ..Default::default()
+        };
+        let loaded = ResourceSnapshot::default();
+        let second = Duration::from_secs(1);
+        // Still what was asked for (the selection may have moved: the range
+        // asked for is the one rendered).
+        let same = Asked {
+            range: (0., 9.),
+            ..asked.clone()
+        };
+        assert_eq!(
+            wait_step(&asked, Some(&same), &loading, false, None),
+            Wait::Keep("Render Selection starts once Glow has loaded".into())
+        );
+        assert_eq!(
+            wait_step(&asked, Some(&same), &loaded, false, Some(second)),
+            Wait::Keep("Reading the composition to render".into())
+        );
+        assert_eq!(
+            wait_step(&asked, Some(&same), &loaded, true, Some(second)),
+            Wait::Start
+        );
+        // An observation left by another project is not this one's: without
+        // its own the wait goes on, to its bound.
+        assert_eq!(
+            wait_step(
+                &asked,
+                Some(&same),
+                &loaded,
+                false,
+                Some(SETTLED_FRAME_WAIT)
+            ),
+            Wait::Start
+        );
+        // Another composition, another project, nothing open, or replaced.
+        let other_comp = Asked {
+            composition: "precomp".into(),
+            ..asked.clone()
+        };
+        let other_project = Asked {
+            doc_id: 8,
+            ..asked.clone()
+        };
+        for now in [Some(&other_comp), Some(&other_project), None] {
+            for (resources, observed, settled) in [
+                (&loading, false, None),
+                (&loaded, true, Some(second)),
+                (&loaded, false, Some(SETTLED_FRAME_WAIT)),
+            ] {
+                assert_eq!(
+                    wait_step(&asked, now, resources, observed, settled),
+                    Wait::Drop,
+                    "{now:?}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn a_selected_clip_renders_only_inside_the_composition() {

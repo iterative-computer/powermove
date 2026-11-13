@@ -104,6 +104,9 @@ pub struct Controller {
     pub guides: bool,
     pub skimming: crate::skimming::Skimming,
     pub popout: Option<crate::viewer2::Popout>,
+    /// The Render Selection waiting to start, by count: asking again
+    /// replaces the one that waits.
+    pub(crate) render_wait: u64,
     /// This window's extension resources as they change: every viewer of the
     /// window (the editor's, the popout's) is attached and follows them.
     pub resource_feed: pm_engine_service::resources::ResourceFeed,
@@ -660,6 +663,7 @@ impl Controller {
             guides: false,
             skimming: Default::default(),
             popout: None,
+            render_wait: 0,
             resource_feed,
             main_output: Default::default(),
             selected: None,
