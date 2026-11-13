@@ -1482,6 +1482,8 @@ struct Flight {
     played: Option<(i64, [u8; 32])>,
     /// Override layers this frame drew from an earlier answer.
     late_layers: usize,
+    /// Read back only for the trace's picture hash, not asked as a capture.
+    picture_only: bool,
 }
 /// A jump of more frames than this (2 s at 24 fps) between played frames
 /// is a seek, not a stall; a short seek taken for one only renders more.
@@ -1950,10 +1952,8 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             if let Some(v) = state.views.get_mut(&f.id) {
                 let t = f.submission.trace.lock().unwrap();
                 // A playing frame read back for the trace alone: not a capture.
-                let traced_picture = trace_pictures
-                    && f.spec.moment == Moment::Playing
-                    && f.submission.readback.is_some();
-                let captured = f.submission.readback.is_some() && !traced_picture;
+                let traced_picture = f.picture_only && f.submission.readback.is_some();
+                let captured = f.submission.readback.is_some() && !f.picture_only;
                 if let Some(recorder) = &recorder {
                     let mut row = serde_json::json!({"display":t.display,"worker":t.worker_start,"completed":t.completed,"commit":t.commit,
                         "input":f.input,"audio_host":f.audio_host,"time":f.spec.time.get(),"scale":f.spec.scale,"moment":format!("{:?}",f.spec.moment),"disk":t.disk,"disk_wait_ms":t.disk_wait_ms,"enter_ms":t.enter_ms,"disk_upload_ms":t.disk_upload_ms,"cache_hit":t.cache_hit,
@@ -2669,11 +2669,12 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 }
                 _ => Ok(true),
             };
+            let picture_only = trace_pictures && spec.moment == Moment::Playing && !capture;
             let result = match refined {
                 Ok(true) => provider
                     .map_or_else(|| Ok(overlays), |p| p(&scene.doc, &scene.comp, spec.time))
                     .and_then(|overlays| {
-                        let read = capture || (trace_pictures && spec.moment == Moment::Playing);
+                        let read = capture || picture_only;
                         engine.frame(&scene, spec, layer.as_ref(), &overlays, read, trace)
                     }),
                 // Given way: the newer picture is drawn next.
@@ -2814,6 +2815,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                             pipeline,
                             played,
                             late_layers,
+                            picture_only,
                         });
                     }
                     Ok(None) => {
