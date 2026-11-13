@@ -64,7 +64,8 @@ impl Options3d {
     pub fn for_request(&self, request: &crate::RenderRequest) -> Options3d {
         Options3d {
             studio: self.studio,
-            studio_final: request.export || request.output_kind == crate::OutputKind::Final,
+            studio_final: request.export
+                || (request.output_kind == crate::OutputKind::Final && !request.viewer),
             view: request
                 .view
                 .as_ref()

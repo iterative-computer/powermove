@@ -207,6 +207,9 @@ impl FrameSpec {
         if self.final_picture(scene) {
             request.output_kind = pm_render::OutputKind::Final;
         }
+        // 3D stays at the viewer's own tier (Fast or Quality Preview; a
+        // capture asks for Final itself): a paused frame is not a delivery.
+        request.viewer = true;
         #[cfg(test)]
         SAMPLED
             .lock()
