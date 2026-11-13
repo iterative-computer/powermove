@@ -2912,10 +2912,7 @@ mod definitions_pending_tests {
             "Deep Glow and Blur Kit are loading (deep-glow.effect, blur-kit.radial)"
         );
         // An effect registered under its extension's own id.
-        assert_eq!(
-            line(&["blur-kit"], &both),
-            "Blur Kit is loading (blur-kit)"
-        );
+        assert_eq!(line(&["blur-kit"], &both), "Blur Kit is loading (blur-kit)");
         // An id that names no loading extension: everyone still loading.
         assert_eq!(
             line(&["glow"], &[("a", "A"), ("b", "B"), ("c", "C")]),
