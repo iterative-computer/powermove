@@ -1813,6 +1813,10 @@ impl MediaCache {
                 .map_err(|e| MediaFailure::Failed(e.to_string()))
         };
         let imported = import(&frame)?;
+        // Interpret Footage's Range reads the codes; the frame's own range
+        // (the decoder's fact, shared with other readers) stays as it is.
+        // The reading is part of this frame's key (`reading_key`).
+        let range = interp.range.unwrap_or(frame.format.range);
         let mut held = vec![];
         // The importer's normalizations to hand back once recorded.
         let mut recycled = vec![];
@@ -1822,7 +1826,7 @@ impl MediaCache {
                 let next = import(&f.next)?;
                 let norm = |i: &pm_gpu::decode_in::ImportedFrame, e: &mut wgpu::CommandEncoder| {
                     importer
-                        .normalize(queue, e, i)
+                        .normalize_as(queue, e, i, range)
                         .map_err(|e| MediaFailure::Failed(e.to_string()))
                 };
                 let (np, nc, nn) = (
@@ -1844,14 +1848,14 @@ impl MediaCache {
                         &nc,
                         &nn,
                         pass,
-                        &CodeSpace::of(&frame.format),
+                        &CodeSpace::read_as(&frame.format, range),
                     )
                     .map_err(|e| MediaFailure::Failed(e.to_string()))?;
                 recycled.extend([np, nc, nn]);
                 out
             }
             None => importer
-                .normalize(queue, encoder, &imported)
+                .normalize_as(queue, encoder, &imported, range)
                 .map_err(|e| MediaFailure::Failed(e.to_string()))?,
         };
         let converted = convert_format_scaled(

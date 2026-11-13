@@ -597,6 +597,95 @@ fn interpret_overrides_change_the_reading() {
     assert!(straight.chunks_exact(4).any(|p| p[3] < 0.5));
 }
 
+/// A clip whose range flag is wrong, as full-range cameras and screen
+/// recorders write them: 8-bit Y′CbCr holding codes over the whole 0..255,
+/// in a file that says limited. Four grey bands; `luma(frame)` gives their
+/// codes. Stored lossless (FFV1), so the file holds exactly these codes.
+fn mistagged_clip(dir: &Path, frames: usize, luma: impl Fn(usize) -> [u8; 4]) -> PathBuf {
+    let (w, h) = (64usize, 48usize);
+    let mut raw = Vec::new();
+    for n in 0..frames {
+        let bands = luma(n);
+        for _ in 0..h {
+            for x in 0..w {
+                raw.push(bands[x / 16]);
+            }
+        }
+        raw.extend(std::iter::repeat_n(128u8, w * h / 2));
+    }
+    let input = dir.join("codes.yuv");
+    std::fs::write(&input, raw).unwrap();
+    let output = dir.join("mistagged.mkv");
+    let ffmpeg = PathBuf::from(
+        std::env::var_os("PM_FFMPEG_DIR").expect("source engine/env.sh before this test"),
+    )
+    .join("bin/ffmpeg");
+    let status = std::process::Command::new(ffmpeg)
+        .args(["-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "yuv420p"])
+        .args(["-s", "64x48", "-r", "25", "-i"])
+        .arg(&input)
+        .args(["-c:v", "ffv1", "-color_range", "tv"])
+        .arg(&output)
+        .status()
+        .unwrap();
+    assert!(status.success(), "ffmpeg wrote the clip");
+    output
+}
+
+/// Interpret Footage › Range reaches the numbers: the codes are read as the
+/// chosen range, on the ordinary path and through deinterlacing, and the
+/// file's own flag is used when nothing is chosen.
+#[test]
+fn a_range_override_reads_the_codes_the_file_holds() {
+    let dir = tempfile::tempdir().unwrap();
+    let luma = |n: usize| [16 + n as u8, 128 - 4 * n as u8, 235, 255 - n as u8];
+    let moving = mistagged_clip(dir.path(), 8, luma);
+    let (w, h) = (64u32, 48u32);
+    let mut r = Renderer::headless().unwrap();
+    let frame = |r: &mut Renderer, path: &Path, interpret: Option<Value>, t: f64| {
+        let (doc, res) = document(path, (w, h), 25.0, interpret);
+        let pixels = render(r, &doc, (w, h), t, &res);
+        let at = |band: usize| {
+            let o = ((h as usize / 2) * w as usize + band * 16 + 8) * 4;
+            [pixels[o], pixels[o + 1], pixels[o + 2]].map(f64::from)
+        };
+        [at(0), at(1), at(2), at(3)]
+    };
+    let check = |what: &str, got: [[f64; 3]; 4], n: usize, read: &dyn Fn(f64) -> f64| {
+        for (band, code) in luma(n).into_iter().enumerate() {
+            let expected = read(f64::from(code));
+            for value in got[band] {
+                assert!(
+                    (value - expected).abs() < 2e-5,
+                    "{what}, frame {n}, code {code}: {value}, expected {expected}"
+                );
+            }
+        }
+    };
+    let limited = |code: f64| (code - 16.) / 219.;
+    let full = |code: f64| code / 255.;
+    for n in [0, 3] {
+        let t = n as f64 / 25. + 0.01;
+        check("as the file says", frame(&mut r, &moving, None, t), n, &limited);
+        let chosen = frame(&mut r, &moving, Some(json!({ "range": "limited" })), t);
+        check("limited chosen", chosen, n, &limited);
+        let chosen = frame(&mut r, &moving, Some(json!({ "range": "full" })), t);
+        check("full chosen", chosen, n, &full);
+        // Back to Automatic after the override: the earlier frame is not kept.
+        check("automatic again", frame(&mut r, &moving, None, t), n, &limited);
+    }
+    // Through deinterlacing (a held picture, so every field shows it).
+    let held = mistagged_clip(dir.path(), 8, |_| luma(2));
+    for (interpret, read) in [
+        (json!({ "fieldOrder": "topFirst" }), &limited as &dyn Fn(f64) -> f64),
+        (json!({ "fieldOrder": "topFirst", "range": "full" }), &full),
+        (json!({ "fieldOrder": "bottomFirst", "range": "full" }), &full),
+    ] {
+        let got = frame(&mut r, &held, Some(interpret.clone()), 0.13);
+        check(&interpret.to_string(), got, 2, read);
+    }
+}
+
 #[test]
 fn a_conformed_rate_shows_frame_n_at_n_over_rate() {
     let Some(path) = formats("video/vfr.mp4") else {
