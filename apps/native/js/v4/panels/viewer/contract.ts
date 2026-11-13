@@ -25,28 +25,6 @@ export interface ViewerModel {
     views?: "1" | "2" | "4";
     /** The viewer is narrower than the 3D group: show one pull-down. */
     compact?: boolean;
-    /** The Light tool's panel (3d-studio.md §6), while Light is the tool. */
-    light?: {
-      settings: { aim: string; add: boolean; kind: string };
-      hint?: string;
-      name?: string;
-      kind?: string;
-      locked?: boolean;
-      rows: {
-        id: string;
-        label: string;
-        value: number;
-        min: number;
-        max: number;
-        log: boolean;
-        tooltip: string;
-        unit?: string;
-      }[];
-      /** Imported models a light can aim at. */
-      models?: { v: string; label: string }[];
-    };
-    lightKind?: string;
-    lightAim?: "reflect" | "direct" | "orbit";
     /** Quality's refinement (3d-studio.md §3 status capsule). */
     refine?: {
       samplesDone: number;
@@ -74,7 +52,8 @@ export interface ViewerHostFacts {
   };
   interaction: "idle" | "hover" | "focus" | "media-drop" | "effect-drop";
   /** The composition's transport, the same state the timeline header shows.
-   * While playing, `timecode` stands still: a native layer draws the time. */
+   * While playing, `timecode` stands still: a native layer draws the time.
+   * Null while a timeline in the workspace shows play and the time. */
   transport?: {
     time: number;
     timecode: string;
@@ -82,7 +61,7 @@ export interface ViewerHostFacts {
     duration: string;
     playing: boolean;
     looping: boolean;
-  };
+  } | null;
   /** The channel view, as the command that shows it (display only). */
   channels?: string;
 }

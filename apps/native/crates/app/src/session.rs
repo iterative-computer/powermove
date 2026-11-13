@@ -109,6 +109,10 @@ pub struct Controller {
     pub part_focus: Option<(String, u64, u64)>,
     /// View ▸ Show Rulers and Show Grid.
     pub rulers: bool,
+    /// Whether the workspace shows a timeline. While it does, its header owns
+    /// play and the timecode, and the viewer shows neither (`None` until the
+    /// first layout reports it).
+    pub timeline_shown: Option<bool>,
     pub grid: bool,
     pub skimming: crate::skimming::Skimming,
     pub shuttle: crate::shuttle::Shuttle,
@@ -398,8 +402,18 @@ impl pm_shell::integration::Integration for Bridge {
         });
     }
     fn shown_panels(&self, shown: &[&str], cx: &mut App) {
-        self.0.update(cx, |v, _| {
+        self.0.update(cx, |v, cx| {
             v.hide_extension_panels(shown);
+            // The viewer's transport and timecode follow the timeline's
+            // presence: one set of play controls on screen, never two.
+            let timeline = shown.contains(&"timeline");
+            if v.timeline_shown.replace(timeline) != Some(timeline) {
+                // Republished after this layout pass, not inside it.
+                cx.spawn(async move |this, cx| {
+                    let _ = this.update(cx, |v, cx| v.update_builtins(cx));
+                })
+                .detach();
+            }
             // A panel not on screen (another one maximised, a workspace
             // without it) leaves no native playhead or timecode behind.
             let mut gone = false;
@@ -737,6 +751,7 @@ impl Controller {
             channels: Default::default(),
             part_focus: None,
             rulers: false,
+            timeline_shown: None,
             grid: false,
             skimming: Default::default(),
             shuttle: Default::default(),

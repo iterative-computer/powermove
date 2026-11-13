@@ -438,7 +438,6 @@ impl Backend {
                 Some((vm.stamp.clone(), viewport, effective, projection.clone()));
             projection
         };
-        // The Light tool's panel (3d-studio.md §6) rides on the 3D state.
         let mut model = model;
         // Refine progress for the status capsule (3d-studio.md §3).
         if model["studio"].is_object() {
@@ -452,36 +451,24 @@ impl Backend {
                 model["studio"]["pending"] = json!(true);
             }
         }
-        if model["studio"]["tool"] == "light" {
-            let ui = |k: &str| {
-                p.ui_state
-                    .viewer
-                    .get(k)
-                    .and_then(pm_model::Value::as_str)
-                    .map(str::to_owned)
-            };
-            let kind = ui("studioLightKind").unwrap_or_else(|| "area".into());
-            let add = ui("studioLightAdd").as_deref() == Some("on");
-            let time = self.native.facts["time"].as_f64().unwrap_or(0.);
-            if let Ok(light) = pm_panel_studio3d::properties::light_panel(&p, time, &kind, add) {
-                model["studio"]["light"] = light;
-                model["studio"]["lightKind"] = json!(kind);
-                model["studio"]["lightAim"] =
-                    json!(ui("studioLightAim").unwrap_or_else(|| "reflect".into()));
-            }
-        }
         // The bar's transport: the same time, run and loop the timeline's
         // header shows (one state); while playing the time is a native layer.
         let time = self.time().clamp(0., vm.transport.duration);
         let (now, spoken) = timecode(time, vm.transport.fps);
-        let transport = json!({
+        // With a timeline in the workspace, its header owns play and the
+        // timecode; the viewer shows neither (one set of controls on screen).
+        let transport = if self.native.facts["timelineShown"] == true {
+            Value::Null
+        } else {
+            json!({
             "time": time,
             "timecode": now,
             "spokenTime": spoken,
             "duration": timecode(vm.transport.duration, vm.transport.fps).0,
             "playing": self.native.facts["playing"].as_bool().unwrap_or(false),
             "looping": self.native.facts["looping"].as_bool().unwrap_or(false),
-        });
+            })
+        };
         // The channel view's command (`viewer.showRGB`, `viewer.showRed`…).
         let channels = self.native.facts["channels"]
             .as_str()

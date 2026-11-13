@@ -162,6 +162,14 @@ pub fn new3d() -> Vec<Item> {
         ("Sun", "sun"),
         ("Camera", "camera"),
         ("", ""),
+        // Light presets, placed for the selected model and the shot (the
+        // same `light_preset` operation agents use).
+        ("Rim Strip Left", "preset:rim_left"),
+        ("Rim Strip Right", "preset:rim_right"),
+        ("Top Softbox", "preset:top"),
+        ("Edge Highlight Card", "preset:edge_card"),
+        ("Strip Light", "preset:strip"),
+        ("", ""),
         ("Sky", "sky"),
         ("Fog Volume", "fog"),
         ("Terrain", "terrain"),

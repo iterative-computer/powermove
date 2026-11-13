@@ -1980,8 +1980,8 @@ impl Controller {
                 (self.dimensions[0] * zoom) as f32,
                 (self.dimensions[1] * zoom) as f32,
             );
-            let x = s.x + (s.w - w) / 2. + self.view.pan[0] as f32;
-            let y = s.y + (s.h - h) / 2. + self.view.pan[1] as f32;
+            let x = s.x + (s.w - w) / 2. + self.view.shown_pan()[0] as f32;
+            let y = s.y + (s.h - h) / 2. + self.view.shown_pan()[1] as f32;
             ([s.x, s.y, s.w, s.h], [x, y, w, h])
         });
         let key = placed.map(|(a, b)| {

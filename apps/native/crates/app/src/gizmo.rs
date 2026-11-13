@@ -56,6 +56,9 @@ pub struct ViewPlacement {
     pub scale: Cell<f64>,
     /// The viewer body the composition fits in, points.
     pub stage: [f64; 2],
+    /// Looking through a 3D composition's Free View: the image covers the
+    /// whole viewer body, centred, whatever the zoom and pan (3d-studio.md §4).
+    pub fill: Cell<bool>,
     local: bool,
 }
 impl Default for ViewPlacement {
@@ -65,6 +68,7 @@ impl Default for ViewPlacement {
             pan: [0., 0.],
             scale: Cell::new(1.),
             stage: [640., 360.],
+            fill: Cell::new(false),
             local: false,
         }
     }
@@ -95,6 +99,10 @@ impl ViewPlacement {
     }
     pub fn written(&mut self) {
         self.local = false;
+    }
+    /// The pan as shown: none while the editor view fills the body.
+    pub fn shown_pan(&self) -> [f64; 2] {
+        if self.fill.get() { [0., 0.] } else { self.pan }
     }
 }
 /// The zoom and pan after a change: zooming keeps the point under the pointer.
@@ -980,8 +988,14 @@ impl GizmoSurface {
             self.finish_text(false, cx);
             tool = Tool::Select;
         }
-        if (tool == Tool::Select || event.modifiers.alt && self.studio.active())
-            && self.studio_down(event, at, frame, cx)
+        // In a 3D composition the window's Hand and Zoom tools move the
+        // editor view (orbit, ⇧ pan; dolly), as they navigate a 2D one.
+        let view_tool = (self.studio.active() && matches!(tool, Tool::Hand | Tool::Zoom))
+            .then_some(tool == Tool::Zoom);
+        if (tool == Tool::Select
+            || view_tool.is_some()
+            || event.modifiers.alt && self.studio.active())
+            && self.studio_down(event, at, frame, view_tool, cx)
         {
             return;
         }
@@ -2493,7 +2507,7 @@ impl Render for GizmoSurface {
                 cx.listener(|s, event: &MouseDownEvent, _, cx| {
                     if let Some(frame) = s.host.frame(s.bounds, cx) {
                         let at = s.to_comp(event.position, frame);
-                        s.studio_down(event, at, frame, cx);
+                        s.studio_down(event, at, frame, None, cx);
                     }
                 }),
             )
@@ -2511,6 +2525,9 @@ impl Render for GizmoSurface {
                 s.on_wheel(event, window.line_height(), cx);
             }))
             .on_pinch(cx.listener(|s, event: &PinchEvent, _, cx| {
+                if s.studio_pinch(event.delta as f64, cx) {
+                    return;
+                }
                 let (factor, at) = (1. + event.delta as f64, event.position);
                 s.host.navigate(Navigate::Zoom { factor, at }, cx);
                 s.draw(cx);
@@ -2607,7 +2624,9 @@ fn extruded_item(
         bounds: pm_scene3d::navigation::Bounds { min: lo, max: hi },
         pivot: to_scene(position[0], position[1], position[2]),
         target: None,
+        aim: None,
         light: None,
+        shape: [0.; 3],
         position,
         rotation,
         scale,

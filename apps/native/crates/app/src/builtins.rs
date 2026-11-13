@@ -429,7 +429,7 @@ impl Controller {
             .filter(|q| *q > 0.)
             .unwrap_or(1.);
         json!({"time":self.time(),"playing":playing,"looping":self.playback.looping,
-            "channels":crate::viewer2::CHANNELS.iter().find(|(m, _, _)| *m == self.channels).map_or("viewer.showRGB", |(_, _, c)| c),"effectiveQuality":effective,"layerFailures":failures,"studioRefineProgress":status.as_ref().and_then(|s|s.refine_progress),"studioExportEstimate":status.as_ref().map(|s|&s.export_estimate),"studioDenoiser":if pm_engine_service::studio::OIDN{"oidn"}else{"guided"},"focusPart":self.part_focus.as_ref().map(|(layer,slot,seq)|json!({"layer":layer,"slot":slot,"seq":seq})),"stage":self.view.stage,"light":self.host.borrow().tokens.scheme==pm_design::Scheme::Light,
+            "channels":crate::viewer2::CHANNELS.iter().find(|(m, _, _)| *m == self.channels).map_or("viewer.showRGB", |(_, _, c)| c),"effectiveQuality":effective,"layerFailures":failures,"studioRefineProgress":status.as_ref().and_then(|s|s.refine_progress),"studioExportEstimate":status.as_ref().map(|s|&s.export_estimate),"studioDenoiser":if pm_engine_service::studio::OIDN{"oidn"}else{"guided"},"focusPart":self.part_focus.as_ref().map(|(layer,slot,seq)|json!({"layer":layer,"slot":slot,"seq":seq})),"stage":self.view.stage,"timelineShown":self.timeline_shown,"light":self.host.borrow().tokens.scheme==pm_design::Scheme::Light,
             "mediaSettings":self.media_settings_fact(),"skimming":self.skimming.on,"shortcuts":self.shortcuts_page,"cloud":crate::cloud::fact(cx),"provider":crate::providers::fact(cx),"agentClients":crate::agent_clients::fact(cx),
             // The Agent panel is a popover while its own window is open, a docked panel otherwise.
             "agentPopover":self.builtins.opening_windows.contains("agent")
@@ -724,17 +724,30 @@ impl Controller {
                     0.
                 };
             let fit = crate::panels::fit_scale(body_w, body_h, self.dimensions, inset);
-            let scale = self.view.zoom.unwrap_or(fit).min(self.zoom_limit());
+            // Free View fills the whole viewer body; the shot keeps its fit.
+            let free = self
+                .builtins
+                .gizmos
+                .as_ref()
+                .is_some_and(|g| g.read(cx).studio_free());
+            self.view.fill.set(free);
+            let scale = if free {
+                crate::panels::cover_scale(body_w, body_h, self.dimensions)
+            } else {
+                self.view.zoom.unwrap_or(fit).min(self.zoom_limit())
+            };
             if self.view.scale.replace(scale) != scale
                 && let Some(gizmos) = &self.builtins.gizmos
             {
                 gizmos.update(cx, |g, cx| g.redraw(cx));
             }
-            self.host
-                .borrow_mut()
-                .viewer_transform(self.dimensions, Some(scale), self.view.pan);
+            self.host.borrow_mut().viewer_transform(
+                self.dimensions,
+                Some(scale),
+                self.view.shown_pan(),
+            );
             // A cropped canvas has its edges outside the pane: no outline.
-            let cropped = self.host.borrow().viewer_crop.get().is_some();
+            let cropped = free || self.host.borrow().viewer_crop.get().is_some();
             self.builtins.frame_outline.show(
                 &self.host.borrow(),
                 !cropped && crate::panels::needs_frame_outline(self.background, t.colors.viewer),
@@ -1690,8 +1703,8 @@ impl crate::gizmo::Host for ControllerDelegate {
         let (w, h) = (v.dimensions[0] * scale, v.dimensions[1] * scale);
         Some(crate::gizmo::ViewFrame {
             origin: point(
-                px(slot.x + (slot.w - w as f32) / 2. + v.view.pan[0] as f32),
-                px(slot.y + (slot.h - h as f32) / 2. + v.view.pan[1] as f32),
+                px(slot.x + (slot.w - w as f32) / 2. + v.view.shown_pan()[0] as f32),
+                px(slot.y + (slot.h - h as f32) / 2. + v.view.shown_pan()[1] as f32),
             ),
             scale,
             size: v.dimensions,

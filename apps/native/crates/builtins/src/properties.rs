@@ -614,6 +614,21 @@ impl Properties {
                 1.,
             ));
         }
+        // A light aims at its target (the renderer ignores its rotation): the
+        // target sits under its position, and is what the ◆ in the viewer drags.
+        if role == Role::Light {
+            groups.push((
+                "target",
+                "Target",
+                vec![
+                    ("light.targetX", "X"),
+                    ("light.targetY", "Y"),
+                    ("light.targetZ", "Z"),
+                ],
+                "",
+                0.1,
+            ));
+        }
         if role == Role::Object {
             groups.push((
                 "scale",
@@ -655,6 +670,15 @@ impl Properties {
                     (value * 10.).round() / 10.
                 };
                 axes.push(json!({"binding":self.lease(model,path,binding)?,"value":shown,"unit":unit,"step":step,"precision":2,"mixed":state.mixed,"animation":a,"axis":axis}));
+            }
+            // A light's rotation does nothing it can show: only kept in view
+            // while a value or keyframe is there to clear.
+            if role == Role::Light
+                && id == "rotation3d"
+                && animation == "static"
+                && axes.iter().all(|a| a["value"].as_f64() == Some(0.))
+            {
+                continue;
             }
             if !axes.is_empty() {
                 // Three axes fill the value column; no room for a link button.
@@ -1434,6 +1458,56 @@ impl Properties {
                 }
             }
             Role::Light => {
+                // What the Light tool's panel used to hold lives here with the
+                // rest of the light (3d-studio.md §8): colour temperature, its
+                // distance from what it lights, and Aim At.
+                if let Ok(panel) = pm_panel_studio3d::properties::light_panel(
+                    model.published(),
+                    time,
+                    "area",
+                    false,
+                ) {
+                    let rows = panel["rows"].as_array().cloned().unwrap_or_default();
+                    let find = |id: &str| rows.iter().find(|r| r["id"] == id).cloned();
+                    if let Some(r) = find("temperature") {
+                        let lease = self.control_lease("3d.light.adjust.temperature");
+                        push(
+                            &mut groups,
+                            "Light",
+                            row(
+                                "3d.light.adjust.temperature",
+                                "Temperature",
+                                json!({"kind":"number","axes":[{"binding":lease,"value":r["value"],"unit":"K","step":100.,"precision":0,"min":1800,"max":12000}]}),
+                            ),
+                        );
+                    }
+                    if let Some(r) = find("distance") {
+                        let lease = self.control_lease("3d.light.adjust.distance");
+                        push(
+                            &mut groups,
+                            "Light",
+                            row(
+                                "3d.light.adjust.distance",
+                                "Distance",
+                                json!({"kind":"number","axes":[{"binding":lease,"value":r["value"],"unit":"","step":0.1,"precision":2,"min":0.1,"max":200}]}),
+                            ),
+                        );
+                    }
+                    let models = panel["models"].as_array().cloned().unwrap_or_default();
+                    if !models.is_empty() && data["light"]["type"] != "point" {
+                        push(
+                            &mut groups,
+                            "Light",
+                            choice(
+                                self,
+                                "3d.light.adjust.aimAt",
+                                "Aim At",
+                                Value::Null,
+                                json!(models),
+                            ),
+                        );
+                    }
+                }
                 let on = data["light"]["castShadow"] != false;
                 push(
                     &mut groups,

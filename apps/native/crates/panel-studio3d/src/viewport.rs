@@ -25,9 +25,15 @@ pub struct Item {
     pub bounds: Bounds,
     /// Where handles sit: the layer's world origin.
     pub pivot: Vec3,
-    /// The light's aim point, for lights.
+    /// The light's aim point, for lights (world space).
     pub target: Option<Vec3>,
+    /// The light's target channels (`light.targetX/Y/Z`), which an aim drag
+    /// edits by the same world delta it moves the point.
+    pub aim: Option<Vec3>,
     pub light: Option<String>,
+    /// A light's emitter: softbox width and height, and a spotlight's spread
+    /// (degrees). Zeros for everything else.
+    pub shape: Vec3,
     /// Evaluated channels at the time: position (scene units), rotation
     /// x/y/z (degrees) and scale x/y/z (percent).
     pub position: Vec3,
@@ -455,7 +461,9 @@ pub fn scene(p: &Published, time: f64) -> Result<Scene> {
                     bounds,
                     pivot: translation(world),
                     target: None,
+                    aim: None,
                     light: None,
+                    shape: [0.; 3],
                 });
             }
             Role::Light => {
@@ -479,7 +487,16 @@ pub fn scene(p: &Published, time: f64) -> Result<Scene> {
                     },
                     pivot,
                     target: r.targets.get(&id).copied(),
+                    aim: Some(channels(
+                        &id,
+                        ["light.targetX", "light.targetY", "light.targetZ"],
+                        0.,
+                    )),
                     light: data["light"]["type"].as_str().map(str::to_owned),
+                    shape: {
+                        let w = channels(&id, ["light.width", "light.height", "light.angle"], 0.);
+                        [w[0], w[1], w[2]]
+                    },
                 });
             }
             Role::Camera => {}
@@ -586,7 +603,9 @@ mod tests {
             bounds: b(z),
             pivot: [0., 0., z],
             target: None,
+            aim: None,
             light: None,
+            shape: [0.; 3],
             position: [0., 0., z],
             rotation: [0.; 3],
             scale: [100.; 3],

@@ -287,7 +287,8 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                         let _:()=msg_send![&*viewer_time,setContentsScale:scale];
                         let _:()=msg_send![&*viewer_time,setFontSize:host.tokens.typography.timecode as f64];
                         let _:()=msg_send![&*viewer_time,setForegroundColor:&*cg!(colors.text)];
-                        let _:()=msg_send![&*viewer_time,setHidden:viewer_bar.is_none()||!playing];
+                        // With a timeline on screen its head shows the time: the viewer shows none.
+                        let _:()=msg_send![&*viewer_time,setHidden:viewer_bar.is_none()||!playing||geometry.is_some()||v.timeline_shown==Some(true)];
                         let _:()=msg_send![&*layers.playhead,setHidden:geometry.is_none_or(|(r,_)|offset<column||offset>r.w as f64)];
                         // Measured once per timecode size, never per tick.
                         if measured.as_ref().is_none_or(|(size,_)|*size!=host.tokens.typography.timecode) {
