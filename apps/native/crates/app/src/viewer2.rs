@@ -14,7 +14,7 @@ use objc2_app_kit::{
     NSBackingStoreType, NSMenu, NSMenuDelegate, NSMenuItem, NSView, NSWindow, NSWindowStyleMask,
 };
 use objc2_foundation::{NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
-use pm_engine_service::{MediaMode, OverlayGeometry, OverlayLine, color::Mastering};
+use pm_engine_service::{Channels, MediaMode, OverlayGeometry, OverlayLine, color::Mastering};
 use std::{cell::RefCell, rc::Rc};
 
 /// The viewer's output transform. SDR keeps the default extended-linear P3
@@ -151,6 +151,11 @@ pub fn engine_quality(chosen: pm_panel_viewerchrome::state::Quality) -> pm_engin
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
     Output(OutputMode),
+    /// View › Channels: what the viewer shows of the picture.
+    Channels(Channels),
+    Rulers,
+    Grid,
+    ClearGuides,
     SafeAreas,
     Guides,
     Popout,
@@ -159,6 +164,8 @@ pub enum Action {
     ApplyLut,
     /// An index of [`crate::colour::CAMERA_LOGS`], or the file's own reading.
     Interpret(Option<usize>),
+    /// The Interpret Footage sheet: every member of the clip's colour reading.
+    InterpretFootage,
     CleanAperture,
     RenderSelection,
     KeepRendered,
@@ -166,6 +173,20 @@ pub enum Action {
     Skimming,
     AudioSkimming,
 }
+/// View › Channels, in the order of the menu, with their palette commands
+/// and After Effects' keys (⌥1 to ⌥4; the overlay ⌥5).
+pub const CHANNELS: [(Channels, &str, &str); 6] = [
+    (Channels::Rgb, "RGB", "viewer.showRGB"),
+    (Channels::Red, "Red", "viewer.showRed"),
+    (Channels::Green, "Green", "viewer.showGreen"),
+    (Channels::Blue, "Blue", "viewer.showBlue"),
+    (Channels::Alpha, "Alpha", "viewer.showAlpha"),
+    (
+        Channels::AlphaOverlay,
+        "Alpha Overlay",
+        "viewer.showAlphaOverlay",
+    ),
+];
 /// View › Viewer Media, in the order of the menu.
 const MEDIA_MODES: [(MediaMode, &str); 4] = [
     (MediaMode::Automatic, "Automatic"),
@@ -174,7 +195,7 @@ const MEDIA_MODES: [(MediaMode, &str); 4] = [
     (MediaMode::ProxyOnly, "Proxy Only"),
 ];
 impl Action {
-    const ALL: [Action; 26] = [
+    const ALL: [Action; 36] = [
         Action::Output(OutputMode::Sdr),
         Action::Output(OutputMode::Pq),
         Action::Output(OutputMode::Hlg),
@@ -201,6 +222,16 @@ impl Action {
         Action::DeleteRendered,
         Action::Skimming,
         Action::AudioSkimming,
+        Action::InterpretFootage,
+        Action::Channels(Channels::Rgb),
+        Action::Channels(Channels::Red),
+        Action::Channels(Channels::Green),
+        Action::Channels(Channels::Blue),
+        Action::Channels(Channels::Alpha),
+        Action::Channels(Channels::AlphaOverlay),
+        Action::Rulers,
+        Action::Grid,
+        Action::ClearGuides,
     ];
     fn tag(self) -> isize {
         Self::ALL.iter().position(|a| *a == self).unwrap() as isize
@@ -322,8 +353,28 @@ pub fn install(entity: &gpui::Entity<Controller>, cx: &mut App) {
             unsafe { parent.setAction(None) };
             parent.setSubmenu(Some(&media));
             view.addItem(&parent);
+            let channels =
+                NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("Channels"));
+            for (mode, label, _) in CHANNELS {
+                let item = menu_item(mtm, label, Action::Channels(mode), &target, "");
+                channels.addItem(&item);
+                items.push((Action::Channels(mode), item));
+            }
+            let parent = menu_item(
+                mtm,
+                "Channels",
+                Action::Channels(Channels::Rgb),
+                &target,
+                "",
+            );
+            unsafe { parent.setAction(None) };
+            parent.setSubmenu(Some(&channels));
+            view.addItem(&parent);
             for (label, action) in [
                 ("Toggle Proxies", Action::ToggleProxies),
+                ("Show Rulers", Action::Rulers),
+                ("Show Grid", Action::Grid),
+                ("Clear Guides", Action::ClearGuides),
                 ("Show Safe Areas", Action::SafeAreas),
                 ("Show Guides", Action::Guides),
                 ("Popout Viewer", Action::Popout),
@@ -367,6 +418,13 @@ pub fn install(entity: &gpui::Entity<Controller>, cx: &mut App) {
             skim_delegate = Some(display_only);
             view.addItem(&NSMenuItem::separatorItem(mtm));
             view.addItem(&menu_item(mtm, "Apply LUT…", Action::ApplyLut, &target, ""));
+            view.addItem(&menu_item(
+                mtm,
+                "Interpret Footage…",
+                Action::InterpretFootage,
+                &target,
+                "",
+            ));
             let interpret = NSMenu::initWithTitle(
                 NSMenu::alloc(mtm),
                 &NSString::from_str("Interpret Selection As"),
@@ -472,19 +530,32 @@ fn focused(cx: &mut App) -> Option<gpui::Entity<Controller>> {
         .cloned()
 }
 /// Checkmarks follow the focused controller's state.
-pub fn update_checks(output: OutputMode, media: MediaMode, safe: bool, guides: bool, popout: bool) {
+pub fn update_checks(
+    output: OutputMode,
+    media: MediaMode,
+    channels: Channels,
+    [rulers, grid]: [bool; 2],
+    safe: bool,
+    guides: bool,
+    popout: bool,
+) {
     MENU.with(|m| {
         if let Some(m) = &*m.borrow() {
             for (action, item) in &m.items {
                 let on = match action {
                     Action::Output(mode) => *mode == output,
                     Action::Media(mode) => *mode == media,
+                    Action::Channels(mode) => *mode == channels,
+                    Action::Rulers => rulers,
+                    Action::Grid => grid,
+                    Action::ClearGuides => false,
                     Action::ToggleProxies => false,
                     Action::SafeAreas => safe,
                     Action::Guides => guides,
                     Action::Popout => popout,
                     Action::ApplyLut
                     | Action::Interpret(_)
+                    | Action::InterpretFootage
                     | Action::CleanAperture
                     | Action::RenderSelection
                     | Action::KeepRendered
@@ -963,8 +1034,14 @@ pub fn review_action(title: &str) -> Option<Action> {
 
 /// The viewer action a palette or keyboard command names.
 pub fn command_action(command: &str) -> Option<Action> {
+    if let Some((mode, _, _)) = CHANNELS.iter().find(|(_, _, c)| *c == command) {
+        return Some(Action::Channels(*mode));
+    }
     Some(match command {
         "viewer.safeAreas" => Action::SafeAreas,
+        "viewer.rulers" => Action::Rulers,
+        "viewer.grid" => Action::Grid,
+        "viewer.clearGuides" => Action::ClearGuides,
         "viewer.guides" => Action::Guides,
         "viewer.popout" => Action::Popout,
         "viewer.toggleProxies" => Action::ToggleProxies,
@@ -980,8 +1057,37 @@ impl Controller {
     pub fn viewer_action(&mut self, action: Action, cx: &mut Context<Self>) {
         match action {
             Action::Output(mode) => self.set_output_mode(mode, cx),
+            // Asking for the channel already shown goes back to the picture.
+            Action::Channels(mode) => {
+                self.channels = if self.channels == mode {
+                    Channels::Rgb
+                } else {
+                    mode
+                };
+                self.apply_viewer_options();
+                self.update_builtins(cx);
+                cx.notify();
+            }
             Action::Skimming => self.toggle_skimming(cx),
             Action::AudioSkimming => self.toggle_audio_skimming(cx),
+            Action::Rulers | Action::Grid => {
+                match action {
+                    Action::Rulers => self.rulers = !self.rulers,
+                    _ => self.grid = !self.grid,
+                }
+                let (rulers, grid) = (self.rulers, self.grid);
+                if let Some(g) = self.builtins.gizmos.clone() {
+                    g.update(cx, |g, cx| g.set_rulers(rulers, grid, cx));
+                }
+                // The composition fits inside the rulers at the next layout.
+                self.apply_viewer_options();
+                cx.notify();
+            }
+            Action::ClearGuides => {
+                if let Some(g) = self.builtins.gizmos.clone() {
+                    g.update(cx, |g, cx| g.clear_guides(cx));
+                }
+            }
             Action::SafeAreas => self.set_overlays(!self.safe_areas, self.guides, cx),
             Action::Guides => self.set_overlays(self.safe_areas, !self.guides, cx),
             Action::Popout => self.toggle_popout(cx),
@@ -999,6 +1105,7 @@ impl Controller {
                 let log = log.map(|index| crate::colour::CAMERA_LOGS[index]);
                 self.interpret_selection(log, cx);
             }
+            Action::InterpretFootage => self.interpret_footage_sheet(cx),
             Action::CleanAperture => self.crop_selection(cx),
             Action::RenderSelection => self.render_selection(cx),
             Action::KeepRendered => self.keep_rendered(cx),
@@ -1048,6 +1155,7 @@ impl Controller {
                 .into_iter()
                 .chain(self.gizmo_lines.iter().copied()),
         )
+        .with_channels(self.channels)
     }
     /// Re-applies output mode, media, Preview Resolution and overlays to
     /// every viewer of this editor (after any viewer is created or an option
@@ -1060,7 +1168,8 @@ impl Controller {
             (self.viewer.as_ref(), self.overlay()),
             (
                 popout.as_ref(),
-                OverlayGeometry::lossy(overlay_lines(self.safe_areas, self.guides)),
+                OverlayGeometry::lossy(overlay_lines(self.safe_areas, self.guides))
+                    .with_channels(self.channels),
             ),
         ];
         for (viewer, geometry) in geometries {
@@ -1077,6 +1186,8 @@ impl Controller {
         update_checks(
             self.output_mode,
             self.media_mode,
+            self.channels,
+            [self.rulers, self.grid],
             self.safe_areas,
             self.guides,
             self.popout.is_some(),

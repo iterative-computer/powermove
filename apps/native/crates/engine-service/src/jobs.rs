@@ -27,6 +27,11 @@ pub struct ExportRequest {
     pub document: String,
     pub originals: std::collections::BTreeMap<String, PathBuf>,
     pub proxies: std::collections::BTreeMap<String, PathBuf>,
+    /// A render cache fill draws what the viewer draws (`originals` holds
+    /// the viewer's files): the original of each one that is a proxy or
+    /// optimized copy.
+    #[serde(default)]
+    pub copies_of: std::collections::BTreeMap<String, PathBuf>,
     pub destination: PathBuf,
     #[serde(default)]
     pub saving_app_version: Option<String>,
@@ -463,6 +468,7 @@ impl ExportRequest {
             document: pm_model::json::to_canonical_string(&document),
             originals: media.originals,
             proxies: media.proxies,
+            copies_of: Default::default(),
             destination,
             saving_app_version: snapshot.document.saving_app_version().map(str::to_owned),
             resources: Default::default(),
@@ -498,6 +504,7 @@ fn status(
             )
         }),
         preview: None,
+        checking: None,
     }
 }
 /// An export refused because clips it draws are offline (audio it would
@@ -954,7 +961,8 @@ pub fn run_child() -> Result<()> {
             proxies: request.proxies,
             ..Default::default()
         };
-        let media = catalog.export_paths(settings.draft_from_proxies);
+        let mut media = catalog.export_paths(settings.draft_from_proxies);
+        media.originals.extend(request.copies_of);
         let mut doc = pm_model::Document::new(
             Some(pm_model::json::parse(&request.document)?),
             request.revision,
@@ -1092,13 +1100,12 @@ pub fn run_child() -> Result<()> {
             &gate,
             &cancel,
             &mut |p| {
-                let _ = emit(status(
-                    &request.job,
-                    JobState::Running,
-                    p.fraction(),
-                    None,
-                    None,
-                ));
+                let _ = emit(JobStatus {
+                    checking: p
+                        .checked
+                        .map(|c| (c as f64 / p.frames.max(1) as f64).min(1.0)),
+                    ..status(&request.job, JobState::Running, p.fraction(), None, None)
+                });
             },
         )?;
         Ok(delivered.path)

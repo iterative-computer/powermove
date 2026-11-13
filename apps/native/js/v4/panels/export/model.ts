@@ -1,14 +1,18 @@
 import { HostClient, json, type Json } from "../../src";
 import {
   actions,
+  audioCodings,
   codecs,
+  colorTags,
   extensions,
   fieldDefaults,
   formats,
   kindOf,
   profiles,
   sizeError,
+  type AudioCoding,
   type Codec,
+  type ColorTag,
   type Format,
   type Kind,
   type Profile,
@@ -42,6 +46,16 @@ export interface Options {
   /** Render 3D at 75% of the output size and scale up: faster, slightly
    * softer. Never automatic; absent means full size. */
   studioReducedSize?: boolean;
+  /** The label of an SDR ProRes or MP4. Absent from options saved before
+   * it existed: read as the QuickTime label. */
+  colorTag: ColorTag;
+  /** Start timecode of a QuickTime export; empty (or absent, in older
+   * options) means the composition's own time. The host checks it against
+   * the frame rate. */
+  timecode: string;
+  /** Sound coding of a QuickTime export. Absent from older options: read as
+   * 24-bit PCM. */
+  audioCoding: AudioCoding;
 }
 export type StudioQuality =
   | "composition"
@@ -69,6 +83,9 @@ export type Run =
       extra?: string;
       preview?: string;
     }
+  /** Every frame is encoded; the written file is checked against what was
+   * rendered, frame by frame, before it is kept. */
+  | { phase: "checking"; frame: number; total: number; elapsed: number }
   | { phase: "done"; path: string }
   /** `offline`: refused because clips are offline; Export Without Them applies. */
   | { phase: "failed"; message: string; offline?: boolean }
@@ -137,7 +154,11 @@ function validOptions(x: unknown): x is Options {
       )) &&
     (x.profile === undefined || profiles.some((p) => p.v === x.profile)) &&
     (x.codec === undefined || codecs.some((c) => c.v === x.codec)) &&
-    (x.depth === undefined || x.depth === 8 || x.depth === 16)
+    (x.depth === undefined || x.depth === 8 || x.depth === 16) &&
+    (x.colorTag === undefined || colorTags.some((c) => c.v === x.colorTag)) &&
+    (x.timecode === undefined || typeof x.timecode === "string") &&
+    (x.audioCoding === undefined ||
+      audioCodings.some((c) => c.v === x.audioCoding))
   );
 }
 export function snapshot(value: unknown): ExportSnapshot {
@@ -215,13 +236,14 @@ export function snapshot(value: unknown): ExportSnapshot {
       "choosingDestination",
       "preparing",
       "rendering",
+      "checking",
       "finishing",
       "cancelling",
       "done",
       "failed",
       "cancelled",
     ].includes(r.phase as string) ||
-    (r.phase === "rendering" &&
+    ((r.phase === "rendering" || r.phase === "checking") &&
       (!Number.isSafeInteger(r.frame) ||
         !Number.isSafeInteger(r.total) ||
         (r.total as number) <= 0 ||
@@ -239,9 +261,14 @@ export function snapshot(value: unknown): ExportSnapshot {
   return structuredClone(value) as unknown as ExportSnapshot;
 }
 export const isProgress = (run: Run) =>
-  ["preparing", "rendering", "finishing", "cancelling", "failed"].includes(
-    run.phase,
-  );
+  [
+    "preparing",
+    "rendering",
+    "checking",
+    "finishing",
+    "cancelling",
+    "failed",
+  ].includes(run.phase);
 export function progress(run: Run): {
   leading: string;
   eta?: string;
@@ -262,6 +289,14 @@ export function progress(run: Run): {
         eta,
         value: run.frame / run.total,
         ax: `${pct} percent, frame ${run.frame} of ${run.total}`,
+      };
+    }
+    case "checking": {
+      const pct = Math.round((run.frame / run.total) * 100);
+      return {
+        leading: `Checking the file · frame ${run.frame} of ${run.total}`,
+        value: run.frame / run.total,
+        ax: `Checking the file, ${pct} percent, frame ${run.frame} of ${run.total}`,
       };
     }
     case "finishing":
@@ -595,7 +630,9 @@ export class ExportModel {
       return;
     }
     if (
-      ["preparing", "rendering", "finishing"].includes(this.current.run.phase)
+      ["preparing", "rendering", "checking", "finishing"].includes(
+        this.current.run.phase,
+      )
     ) {
       this.current.run = { phase: "cancelling" };
       this.changed();

@@ -667,6 +667,12 @@ async fn execute_inner(
             .map_err(|e| format!("{e:?}"))?;
         let run = if job.cancel.load(Ordering::Acquire) {
             json!({"phase":"cancelling"})
+        } else if status.state == JobState::Running
+            && let Some(checked) = status.checking
+        {
+            // Every frame is encoded: the written file is being checked.
+            let checked = (checked * planned.frames as f64).round() as u64;
+            json!({"phase":"checking","frame":checked,"total":planned.frames,"elapsed":started.elapsed().as_secs_f64()})
         } else if status.state == JobState::Running {
             let elapsed = started.elapsed().as_secs_f64();
             let mut run = json!({"phase":"rendering","frame":frame,"total":planned.frames,"elapsed":elapsed});

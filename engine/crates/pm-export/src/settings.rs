@@ -282,6 +282,9 @@ impl InputFormat {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ColorTags {
     /// CICP 1-1-1, limited: Rec.709 primaries, BT.709 transfer, BT.709 matrix.
+    /// "Rec.709": the same codes as 1-13-1 (Standard reads both transfers as
+    /// the display encoding), labelled as broadcast and colour-managed
+    /// timelines expect.
     Rec709Broadcast,
     /// CICP 1-13-1, limited: Rec.709 primaries, sRGB transfer, BT.709 matrix.
     /// "Rec.709 (QuickTime and Safari)": matches the viewer in QuickTime and Safari (S2).
@@ -350,11 +353,6 @@ impl ColorTags {
         }
     }
 
-    /// CICP transfer 1 uses the BT.709 OETF. Transfer 13 is sRGB E.
-    pub fn bt709_transfer(self) -> bool {
-        matches!(self, Self::Rec709Broadcast | Self::Rec709Image)
-    }
-
     /// (colour primaries, transfer characteristics, matrix coefficients).
     pub fn cicp(self) -> (u16, u16, u16) {
         match self {
@@ -374,6 +372,36 @@ impl ColorTags {
     /// Image tags describe full-range RGB; video tags limited-range Y′CbCr.
     pub fn is_image(self) -> bool {
         matches!(self, ColorTags::SrgbImage | ColorTags::Rec709Image)
+    }
+
+    /// Where a 4:2:0 output's chroma sits: co-sited with the top-left luma
+    /// sample for BT.2100 (PQ and HLG), centred between rows for Rec.709.
+    pub fn chroma_location(self) -> ChromaLocation {
+        if self.is_hdr() {
+            ChromaLocation::TopLeft
+        } else {
+            ChromaLocation::Left
+        }
+    }
+}
+
+/// Where the chroma samples of a 4:2:0 output sit on the luma grid. Both
+/// are co-sited with the even luma column.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ChromaLocation {
+    /// Centred between luma rows `2y` and `2y + 1` (the codecs' default).
+    Left,
+    /// On luma row `2y`.
+    TopLeft,
+}
+
+impl ChromaLocation {
+    /// `chroma_sample_loc_type` (H.264 and HEVC VUI).
+    pub fn sample_loc_type(self) -> u32 {
+        match self {
+            ChromaLocation::Left => 0,
+            ChromaLocation::TopLeft => 2,
+        }
     }
 }
 
@@ -400,12 +428,29 @@ pub enum WorkingEncoding {
 /// Dither (section 17): blue-noise RPDF of ±0.5 LSB after the matrix.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Dither {
-    /// On for final 8-bit images (8-bit PNG); off for lossy codecs, which would
-    /// code the noise as content (EXPORT-DITHER-1), and for 10 bits and above.
+    /// On for final 8-bit images (8-bit PNG), and for H.264 given at least
+    /// [`H264_DITHER_BITS_PER_PIXEL`]; off for other lossy codecs and leaner
+    /// H.264, which would code the noise as content and smear it
+    /// (EXPORT-DITHER-1), and for 10 bits and above.
     Default,
     On,
     Off,
 }
+
+/// The H.264 bit rate per pixel per frame (`bitrate ÷ (width × height × fps)`)
+/// from which dither survives the encoder and removes banding. Measured on a
+/// 0.40 to 0.42 grey gradient, 1920 × 512, 24 frames at 24 fps
+/// (`tests/dither_delivery.rs`, worst 16-column window of column means, the
+/// worst of the frames): undithered 0.48 codes at every rate on both
+/// encoders. Dithered, VideoToolbox: 0.91 at 0.05, 0.61 at 0.1, 0.58 at 0.5,
+/// 0.46 at 1.0, 0.44 at 1.25, 0.31 at 1.5, 0.15 at 2.0, 0.10 at 3.0; its
+/// worst frame is the first, the predicted frames after it hold the dither
+/// at 0.08 from 0.5 up. Dithered, the software encoder (x264): 0.52 at 0.05,
+/// 0.59 at 0.1, 0.15 at 0.5, 0.05 from 1.0 up. Below 1.5 the hardware
+/// encoder spends the dither as noise (up to 500 times the undithered
+/// file's bits) for no less banding on its intra frames; the one threshold
+/// is safe for both.
+pub const H264_DITHER_BITS_PER_PIXEL: f64 = 1.5;
 
 /// What happens when the destination already exists.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -634,6 +679,10 @@ impl ExportSpec {
             if audio.codec == AudioCodec::Opus && audio.sample_rate != OPUS_SAMPLE_RATE {
                 return invalid("Opus audio is mixed at 48 kHz");
             }
+            // The AAC LC encoder takes no rate above 48 kHz.
+            if audio.codec == AudioCodec::Aac && audio.sample_rate > 48_000 {
+                return invalid("AAC audio is at most 48 kHz");
+            }
         }
         if let Some(tc) = &self.timecode {
             // AVAssetWriter refuses a timecode track in MPEG-4 (measured on macOS 27).
@@ -675,7 +724,16 @@ impl ExportSpec {
         match self.dither {
             Dither::On => true,
             Dither::Off => false,
-            Dither::Default => matches!(self.codec, Codec::Png { sixteen_bit: false }),
+            Dither::Default => match self.codec {
+                Codec::Png { sixteen_bit: false } => true,
+                Codec::H264 { bitrate_bps } => {
+                    let pixels_per_second =
+                        f64::from(self.width) * f64::from(self.height) * self.rate.num() as f64
+                            / self.rate.den() as f64;
+                    f64::from(bitrate_bps) >= H264_DITHER_BITS_PER_PIXEL * pixels_per_second
+                }
+                _ => false,
+            },
         }
     }
 }
@@ -758,9 +816,6 @@ mod tests {
     #[test]
     fn dither_defaults_on_for_8_bit_png_only() {
         for lossy in [
-            Codec::H264 {
-                bitrate_bps: 4_000_000,
-            },
             Codec::Hevc {
                 bitrate_bps: 4_000_000,
                 ten_bit: false,
@@ -778,6 +833,17 @@ mod tests {
         ] {
             assert!(!spec(lossy).dither_enabled(), "{lossy:?}");
         }
+        // H.264 is dithered from 1.5 bits per pixel per frame: 40 Mb/s
+        // holds it at 720p (1.81) but not at 1080p (0.80) at 23.976 fps.
+        let h264 = |width, height| ExportSpec {
+            width,
+            height,
+            ..spec(Codec::H264 {
+                bitrate_bps: 40_000_000,
+            })
+        };
+        assert!(h264(1280, 720).dither_enabled());
+        assert!(!h264(1920, 1080).dither_enabled());
         assert!(spec(Codec::Png { sixteen_bit: false }).dither_enabled());
         assert!(!spec(Codec::Png { sixteen_bit: true }).dither_enabled());
         assert!(!spec(Codec::ProRes(ProResProfile::Hq)).dither_enabled());

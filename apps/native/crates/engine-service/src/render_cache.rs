@@ -491,6 +491,24 @@ pub struct Kept {
     pub already: u64,
 }
 
+/// What a Render Selection is asked of: a document at a revision, one of its
+/// compositions, drawn with these definitions.
+#[derive(Clone, Copy)]
+pub struct Observation<'a> {
+    pub doc_id: u64,
+    pub revision: u64,
+    pub comp: &'a str,
+    pub definitions: &'a [DefinitionSnapshot],
+}
+impl Observation<'_> {
+    fn is(&self, frames: &Frames) -> bool {
+        frames.source.doc_id == self.doc_id
+            && frames.identity.revision == self.revision
+            && frames.identity.comp == self.comp
+            && frames.source.definitions == self.definitions
+    }
+}
+
 /// The engine's render cache, shared by the engine thread (observation,
 /// reads) and the app (commands, the render bar).
 #[derive(Clone)]
@@ -990,37 +1008,23 @@ impl DiskFrames {
             .as_ref()
             .is_none_or(|frames| frames.fingerprint.is_none() || frames.ids.is_empty())
     }
-    /// The viewer has drawn a settled frame of exactly this: document
-    /// `doc_id` at `revision`, composition `comp`, with `definitions`. An
-    /// observation of anything else (another project open in the window
-    /// before, an earlier revision, another composition, an effect's code
-    /// before its extension reloaded) is not it, so a Render Selection of
-    /// this does not start from that.
-    pub fn observed(
-        &self,
-        doc_id: u64,
-        revision: u64,
-        comp: &str,
-        definitions: &[DefinitionSnapshot],
-    ) -> bool {
+    /// The viewer has drawn a settled frame of exactly `of`. An observation
+    /// of anything else (another project open in the window before, an
+    /// earlier revision, another composition, an effect's code before its
+    /// extension reloaded) is not it, so a Render Selection of this does
+    /// not start from that.
+    pub fn observed(&self, of: Observation) -> bool {
         let state = self.inner.state.lock().unwrap();
         state.frames.as_ref().is_some_and(|frames| {
-            frames.fingerprint.is_some()
-                && !frames.ids.is_empty()
-                && frames.source.doc_id == doc_id
-                && frames.identity.revision == revision
-                && frames.identity.comp == comp
-                && frames.source.definitions == definitions
+            frames.fingerprint.is_some() && !frames.ids.is_empty() && of.is(frames)
         })
     }
-    /// [`Self::start_fill`] for the composition `comp` of document `doc_id`:
-    /// refused when the cache is on another one (the window moved on while
-    /// the Render Selection waited).
-    #[allow(clippy::too_many_arguments)]
+    /// [`Self::start_fill`] of exactly `of`, checked as the frames are
+    /// chosen: refused when the cache holds anything else (the window moved
+    /// on while the Render Selection waited, or the viewer never drew this).
     pub fn start_fill_of(
         &self,
-        doc_id: u64,
-        comp: &str,
+        of: Observation,
         from: f64,
         to: f64,
         executable: &Path,
@@ -1030,7 +1034,7 @@ impl DiskFrames {
         let frames = {
             let state = self.inner.state.lock().unwrap();
             let frames = ready(&state)?;
-            if frames.source.doc_id != doc_id || frames.identity.comp != comp {
+            if !of.is(frames) {
                 return Err("The composition changed before rendering started.".into());
             }
             frame_range(frames, from, to)
@@ -1489,6 +1493,22 @@ impl DiskFrames {
         })
     }
 
+    /// The scene the open composition's rendered frames belong to: the
+    /// viewer's own, for reading them back through a [`crate::Headless`].
+    pub fn observed_scene(&self) -> Option<Scene> {
+        let state = self.inner.state.lock().unwrap();
+        Some(state.frames.as_ref()?.source.scene.clone())
+    }
+
+    /// `scene`'s rendered frame at `time` as playback reads it (RGBA half
+    /// floats, row by row), waiting up to ten seconds for the read.
+    pub fn stored_frame(&self, scene: &Scene, time: Ticks) -> Option<Arc<Vec<u8>>> {
+        match self.read_within(scene, time, Duration::from_secs(10)) {
+            Read::Frame(_, bytes, _) => Some(bytes),
+            Read::Late(_) | Read::Absent => None,
+        }
+    }
+
     /// The media files the open composition's rendered frames are drawn
     /// from, by asset.
     pub fn rendered_from(&self) -> Option<BTreeMap<String, PathBuf>> {
@@ -1825,6 +1845,7 @@ fn fill_request(
         document: pm_model::json::to_canonical_string(&document),
         originals: source.scene.media.paths.clone(),
         proxies: Default::default(),
+        copies_of: source.scene.media.originals.clone(),
         destination: dir,
         saving_app_version: None,
         resources: crate::resources::ResourceSnapshot {
@@ -3156,20 +3177,25 @@ mod tests {
             .unwrap();
         let scene = scene();
         let revision = scene.doc.revision();
-        assert!(!disk.observed(1, revision, &scene.comp, &[]), "nothing yet");
+        let observed = |doc_id, revision, comp: &str, definitions: &[DefinitionSnapshot]| {
+            disk.observed(Observation {
+                doc_id,
+                revision,
+                comp,
+                definitions,
+            })
+        };
+        assert!(!observed(1, revision, &scene.comp, &[]), "nothing yet");
         disk.observe(&scene, &[], None, None, None, 1, Ticks::new(0).unwrap());
         ready(&disk);
-        assert!(disk.observed(1, revision, &scene.comp, &[]));
+        assert!(observed(1, revision, &scene.comp, &[]));
+        assert!(!observed(2, revision, &scene.comp, &[]), "another project");
         assert!(
-            !disk.observed(2, revision, &scene.comp, &[]),
-            "another project"
-        );
-        assert!(
-            !disk.observed(1, revision, "another", &[]),
+            !observed(1, revision, "another", &[]),
             "another composition"
         );
         assert!(
-            !disk.observed(1, revision + 1, &scene.comp, &[]),
+            !observed(1, revision + 1, &scene.comp, &[]),
             "a later revision"
         );
         let definition = pm_render::all_builtin_definitions()
@@ -3178,16 +3204,27 @@ mod tests {
             .next()
             .unwrap();
         assert!(
-            !disk.observed(1, revision, &scene.comp, &[definition]),
+            !observed(1, revision, &scene.comp, std::slice::from_ref(&definition)),
             "other definitions"
         );
         let nowhere = Path::new("/nonexistent/engine-job");
-        let fill = |doc, comp: &str| {
-            disk.start_fill_of(doc, comp, 1., 1.2, nowhere, Default::default(), |_| {})
+        let other = [definition];
+        let fill = |doc, at, comp: &str, definitions: &[DefinitionSnapshot]| {
+            let of = Observation {
+                doc_id: doc,
+                revision: at,
+                comp,
+                definitions,
+            };
+            disk.start_fill_of(of, 1., 1.2, nowhere, Default::default(), |_| {})
         };
         let changed = Err("The composition changed before rendering started.".to_owned());
-        assert_eq!(fill(2, &scene.comp), changed);
-        assert_eq!(fill(1, "another"), changed);
+        assert_eq!(fill(2, revision, &scene.comp, &[]), changed);
+        assert_eq!(fill(1, revision, "another", &[]), changed);
+        // The observation it has is of an earlier revision or other effect
+        // code than the one asked for: its frames are not rendered instead.
+        assert_eq!(fill(1, revision + 1, &scene.comp, &[]), changed);
+        assert_eq!(fill(1, revision, &scene.comp, &other), changed);
     }
     /// Render Selection through the real `--engine-job` child: the frames
     /// land on disk as the paused viewer draws them, the render bar and the

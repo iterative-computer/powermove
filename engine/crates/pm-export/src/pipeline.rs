@@ -9,7 +9,7 @@
 //! encoder input itself, so tests can compare it exactly without a codec in the way.
 
 use crate::Error;
-use crate::convert::{ConvertParams, EncoderInput, WorkingFrame, convert_tagged};
+use crate::convert::{Chroma, ConvertParams, EncoderInput, WorkingFrame, convert_tagged};
 use crate::settings::ExportSpec;
 use std::sync::atomic::AtomicBool;
 
@@ -30,6 +30,9 @@ pub trait Sink {
     fn idle(&mut self) -> Result<(), Error> {
         Ok(())
     }
+    /// Counts the frames of the written file checked while it finishes, in
+    /// `checked` (sinks that check their file frame by frame).
+    fn count_checked(&mut self, _checked: std::sync::Arc<std::sync::atomic::AtomicU64>) {}
     fn finish(self) -> Result<Self::Output, Error>;
     /// A job may be cancelled while a sink is finishing a long encoder or mux step.
     fn finish_with_cancel(self, _cancel: &AtomicBool) -> Result<Self::Output, Error>
@@ -43,6 +46,7 @@ pub trait Sink {
 enum Message {
     Video(u64, EncoderInput),
     Audio(Vec<f32>),
+    Checked(std::sync::Arc<std::sync::atomic::AtomicU64>),
 }
 
 /// Runs a sink on its own thread, one frame behind: the next frame converts
@@ -66,6 +70,7 @@ impl<S: Sink + Send + 'static> Overlapped<S> {
                     match message {
                         Message::Video(index, input) => sink.video_owned(index, input)?,
                         Message::Audio(samples) => sink.audio(&samples)?,
+                        Message::Checked(checked) => sink.count_checked(checked),
                     }
                 }
                 Ok(sink)
@@ -122,6 +127,10 @@ impl<S: Sink + Send + 'static> Sink for Overlapped<S> {
         self.send(Message::Audio(interleaved.to_vec()))
     }
 
+    fn count_checked(&mut self, checked: std::sync::Arc<std::sync::atomic::AtomicU64>) {
+        let _ = self.send(Message::Checked(checked));
+    }
+
     fn finish(mut self) -> Result<S::Output, Error> {
         self.join()?.finish()
     }
@@ -175,8 +184,14 @@ impl<S: Sink> Pipeline<S> {
     }
 
     /// Converts a premultiplied RGBA working frame on the CPU and delivers it. The frame
-    /// index seeds the dither.
+    /// index seeds the dither. Chroma is decimated band-limited ([`Chroma::Filtered`]).
     pub fn push_frame(&mut self, frame: &WorkingFrame) -> Result<(), Error> {
+        self.push_frame_with(frame, Chroma::Filtered)
+    }
+
+    /// [`Pipeline::push_frame`] with the chroma decimation the frame takes
+    /// ([`Chroma::Footage`] only for a frame of untouched footage).
+    pub fn push_frame_with(&mut self, frame: &WorkingFrame, chroma: Chroma) -> Result<(), Error> {
         let index = self.admit()?;
         if frame.width != self.spec.width || frame.height != self.spec.height {
             return Err(Error::InvalidFrame(format!(
@@ -191,7 +206,13 @@ impl<S: Sink> Pipeline<S> {
             dither: self.spec.dither_enabled(),
             frame: index as u32,
         };
-        let input = convert_tagged(frame, self.spec.input_format(), &params, self.spec.tags)?;
+        let input = convert_tagged(
+            frame,
+            self.spec.input_format(),
+            &params,
+            self.spec.tags,
+            chroma,
+        )?;
         self.sink.video_owned(index, input)?;
         self.next += 1;
         Ok(())
@@ -245,6 +266,11 @@ impl<S: Sink> Pipeline<S> {
             )));
         }
         self.sink.finish()
+    }
+
+    /// Counts the frames of the written file checked while it finishes.
+    pub fn count_checked(&mut self, checked: std::sync::Arc<std::sync::atomic::AtomicU64>) {
+        self.sink.count_checked(checked);
     }
 
     /// Finishes a job while allowing its sink to interrupt blocking encoder work.
@@ -489,12 +515,20 @@ mod tests {
         assert!(sink.frames.iter().all(|f| f.format == InputFormat::V420));
         // Same pixels, different frame index: opt-in dither differs per frame.
         assert_ne!(sink.frames[0], sink.frames[1]);
-        // H.264 is not dithered by default (EXPORT-DITHER-1): same pixels, same input.
-        let mut p = Pipeline::new(spec(h264, 2), MemorySink::default()).unwrap();
+        // Lean H.264 is not dithered by default (4 Mb/s at 640 × 360, 25 fps:
+        // 0.69 bits per pixel, under `H264_DITHER_BITS_PER_PIXEL`): same
+        // pixels, same input.
+        let lean = ExportSpec {
+            width: 640,
+            height: 360,
+            ..spec(h264, 2)
+        };
+        let f = [0.3f32, 0.5, 0.7, 1.0].repeat(640 * 360);
+        let mut p = Pipeline::new(lean, MemorySink::default()).unwrap();
         for _ in 0..2 {
             p.push_frame(&WorkingFrame {
-                width: 32,
-                height: 16,
+                width: 640,
+                height: 360,
                 rgba: &f,
             })
             .unwrap();

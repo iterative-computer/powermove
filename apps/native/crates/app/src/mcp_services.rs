@@ -190,10 +190,19 @@ pub fn headless(profile: PathBuf, exports: PathBuf, launch: Option<PathBuf>) -> 
         }
         let tools = Tools::new(host, exports);
         let jobs = connect_engine(&tools, Default::default(), Default::default())?;
+        // Start the opened project's extensions now, but answer the agent at
+        // once: a slow or failing load is each job's to wait for or report,
+        // never a reason for the tool server not to start.
         if let Some(session) = tools.host.current()
             && let Some(published) = tools.host.kernel.published(&session.project)
         {
-            jobs.resources(&published, true, &never)?;
+            std::thread::Builder::new()
+                .name("mcp-extensions-start".into())
+                .spawn(move || {
+                    if let Err(error) = jobs.resources(&published, true, &never) {
+                        eprintln!("Extensions of the opened project: {error}");
+                    }
+                })?;
         }
         let shared = tools.clone();
         let server =
@@ -213,6 +222,8 @@ pub fn headless(profile: PathBuf, exports: PathBuf, launch: Option<PathBuf>) -> 
 struct ProjectExtensions {
     project: String,
     host: Arc<pm_compat_runner::host::ExtensionHost>,
+    /// Answers the raster overrides of this project's jobs, as a window's do.
+    overrides: crate::raster_overrides::Overrides,
 }
 /// Starts engine child jobs from the running executable. `activity` lets the
 /// viewer keep precedence over export bands, as it does for panel exports.
@@ -277,29 +288,54 @@ impl EngineJobs {
                     .published(&entry.project)
                     .is_some_and(|p| p.snapshot.doc_id == *doc)
             });
-            hosts
-                .entry(published.snapshot.doc_id)
-                .or_insert_with(|| ProjectExtensions {
+            let entry = hosts.entry(published.snapshot.doc_id).or_insert_with(|| {
+                // An extension that wraps the `raster` service draws here
+                // as in a window: the same hooks, base rasters and fonts,
+                // and a realm of its own for each delivery.
+                let overrides = crate::raster_overrides::Overrides::windowless(
+                    self.kernel.clone(),
+                    published.project.clone(),
+                    self.overrides.clone(),
+                );
+                let fonts = self.overrides.painters().fonts;
+                let host = Arc::new(pm_compat_runner::host::ExtensionHost::start(
+                    pm_compat_runner::host::HostConfig {
+                        kernel: self.kernel.clone(),
+                        project: published.project.clone(),
+                        roots: crate::extensions::roots(&self.profile),
+                        cache: self.profile.join("extensions-build"),
+                        owner: None,
+                        text: Some(crate::extensions::canvas_text(fonts)),
+                        frames: None,
+                        rasters: Some(overrides.hooks()),
+                        vars: Some(crate::extensions::vars_source(&self.profile)),
+                        wake: Arc::new(|| {}),
+                    },
+                ));
+                overrides.connect(host.raster_inbox());
+                ProjectExtensions {
                     project: published.project.clone(),
-                    host: Arc::new(pm_compat_runner::host::ExtensionHost::start(
-                        pm_compat_runner::host::HostConfig {
-                            kernel: self.kernel.clone(),
-                            project: published.project.clone(),
-                            roots: crate::extensions::roots(&self.profile),
-                            cache: self.profile.join("extensions-build"),
-                            owner: None,
-                            text: None,
-                            frames: None,
-                            rasters: None,
-                            vars: Some(crate::extensions::vars_source(&self.profile)),
-                            wake: Arc::new(|| {}),
-                        },
-                    )),
-                })
-                .host
-                .clone()
+                    host,
+                    overrides,
+                }
+            });
+            // A window that had taken the project over may have closed since.
+            entry.overrides.register();
+            entry.host.clone()
         };
-        let (generation, value) = host.wait_contributions(Duration::from_secs(60))?;
+        // Cancel reaches this wait too; a load no realm will finish answers
+        // with its failure instead of a minute's wait.
+        let (generation, value) = host
+            .wait_contributions(Duration::from_secs(60), stop)
+            .map_err(|error| match error {
+                pm_runtime_v8::Error::Host(message)
+                    if message == pm_compat_runner::host::WAIT_STOPPED =>
+                {
+                    anyhow::anyhow!(CAPTURE_STOPPED)
+                }
+                pm_runtime_v8::Error::Host(message) => anyhow::anyhow!(message),
+                error => anyhow::anyhow!(error),
+            })?;
         Ok(Arc::new(pm_engine_service::resources::ResourceSnapshot {
             generation,
             definitions: crate::extensions::definitions(&value),

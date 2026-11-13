@@ -16,6 +16,7 @@ pm-kernel = { path = "../kernel" }
 pm-engine-service = { path = "../engine-service" }
 pm-design = { path = "../design" }
 pm-model = { path = "../../../../engine/crates/pm-model" }
+pm-expr = { path = "../../../../engine/crates/pm-expr" }
 pm-gpu = { path = "../../../../engine/crates/pm-gpu" }
 pm-time = { path = "../../../../engine/crates/pm-time" }
 pm-color = { path = "../../../../engine/crates/pm-color" }

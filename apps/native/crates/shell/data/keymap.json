@@ -2352,5 +2352,241 @@
     "in_fields": false,
     "repeat": false,
     "loose": false
+  },
+  {
+    "id": "native.rippleTrimIn",
+    "chord": "alt+shift+[",
+    "command": "rippleTrimIn",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "native.rippleTrimOut",
+    "chord": "alt+shift+]",
+    "command": "rippleTrimOut",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "native.extendEdit",
+    "chord": "shift+x",
+    "command": "extendEdit",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "native.slipLayers.left",
+    "chord": "cmd+alt+left",
+    "command": "slipLayers",
+    "args": [
+      -1
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": true,
+    "loose": false
+  },
+  {
+    "id": "native.slipLayers.right",
+    "chord": "cmd+alt+right",
+    "command": "slipLayers",
+    "args": [
+      1
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": true,
+    "loose": false
+  },
+  {
+    "id": "native.slipLayers.left10",
+    "chord": "cmd+alt+shift+left",
+    "command": "slipLayers",
+    "args": [
+      -10
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": true,
+    "loose": false
+  },
+  {
+    "id": "native.slipLayers.right10",
+    "chord": "cmd+alt+shift+right",
+    "command": "slipLayers",
+    "args": [
+      10
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": true,
+    "loose": false
+  },
+  {
+    "id": "native.slideLayer.left",
+    "chord": "alt+,",
+    "command": "slideLayer",
+    "args": [
+      -1
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": true,
+    "loose": false
+  },
+  {
+    "id": "native.slideLayer.right",
+    "chord": "alt+.",
+    "command": "slideLayer",
+    "args": [
+      1
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": true,
+    "loose": false
+  },
+  {
+    "id": "native.slideLayer.left10",
+    "chord": "alt+shift+,",
+    "command": "slideLayer",
+    "args": [
+      -10
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": true,
+    "loose": false
+  },
+  {
+    "id": "native.slideLayer.right10",
+    "chord": "alt+shift+.",
+    "command": "slideLayer",
+    "args": [
+      10
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": true,
+    "loose": false
+  },
+  {
+    "id": "native.timeRemap",
+    "chord": "cmd+alt+t",
+    "command": "timeRemapLayers",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "native.timeReverse",
+    "chord": "cmd+alt+r",
+    "command": "reverseLayers",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "native.freezeFrame",
+    "chord": "alt+f",
+    "command": "freezeFrame",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "native.showRed",
+    "chord": "alt+1",
+    "command": "viewer.showRed",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "native.showGreen",
+    "chord": "alt+2",
+    "command": "viewer.showGreen",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "native.showBlue",
+    "chord": "alt+3",
+    "command": "viewer.showBlue",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "native.showAlpha",
+    "chord": "alt+4",
+    "command": "viewer.showAlpha",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "native.showAlphaOverlay",
+    "chord": "alt+5",
+    "command": "viewer.showAlphaOverlay",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "native.zoom200",
+    "chord": "cmd+2",
+    "command": "viewer.zoom200",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "native.rulers",
+    "chord": "cmd+r",
+    "command": "viewer.rulers",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "native.grid",
+    "chord": "cmd+'",
+    "command": "viewer.grid",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
   }
 ]

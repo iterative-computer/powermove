@@ -111,6 +111,8 @@ impl Controller {
         if self.running() {
             self.shape_run();
         }
+        // The viewer bar's Loop shows the choice.
+        self.update_builtins(cx);
         cx.notify();
     }
     /// A run is asked for or in progress. The clock reads stopped for a

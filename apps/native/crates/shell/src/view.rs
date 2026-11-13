@@ -40,6 +40,10 @@ pub struct Editor {
     pub tokens: Tokens,
     pub host: Option<Rc<RefCell<Host>>>,
     geometry: Geometry,
+    /// Panels sliding to a new place after a drop, a maximise or a
+    /// workspace switch: each panel's offset from its new rect, springing to
+    /// nothing (v1 moved panels the same way). Live resizes never slide.
+    slides: PanelSlides,
     maximized_panel: Option<String>,
     /// Tabs of panels whose owner went away for a moment (an extension
     /// reloading), and where they were: the panel returns there.
@@ -105,6 +109,7 @@ impl Editor {
             tokens,
             host,
             geometry: Geometry::default(),
+            slides: PanelSlides::default(),
             maximized_panel: None,
             parked: HashMap::new(),
             dock_bounds: Rect::default(),
@@ -457,6 +462,9 @@ impl Editor {
     }
     /// Shell-owned commands. Returns false when the command is not the shell's.
     fn shell_command(&mut self, name: &str, cx: &mut Context<Self>) -> bool {
+        // A command that rearranges the docks moves panels to their new
+        // places (one that does not leaves every rect where it was).
+        self.slides.armed = true;
         let mut parts = name.splitn(3, ':');
         let (Some(kind), Some(verb)) = (parts.next(), parts.next()) else {
             return false;
@@ -637,6 +645,7 @@ impl Editor {
         true
     }
     pub fn command(&mut self, cmd: Command, window: &mut Window, cx: &mut Context<Self>) {
+        self.slides.armed = true;
         // Development builds: `--open reviewViews` with `--save-dir` writes
         // the window's AppKit view tree there.
         #[cfg(debug_assertions)]
@@ -656,7 +665,7 @@ impl Editor {
         #[cfg(debug_assertions)]
         if matches!(
             cmd.name.split(':').next(),
-            Some("pointer" | "click" | "dblclick" | "drag")
+            Some("pointer" | "click" | "dblclick" | "drag" | "press" | "move" | "release")
         ) {
             let name = cmd.name.clone();
             window.defer(cx, move |window, cx| {
@@ -1260,6 +1269,69 @@ fn title_width(text: &str, size: f32, window: &Window) -> f32 {
     f32::from(line.width).ceil()
 }
 pub use crate::kit::ink as tint;
+/// Panels gliding to the places a discrete layout change gave them. Each is
+/// laid out at its new size at once and travels from where it was on the
+/// layout spring; anything else (a splitter drag, a window resize) places
+/// panels where they are with no lag.
+#[derive(Default)]
+pub struct PanelSlides {
+    /// Where each panel was last drawn (its rect at rest).
+    last: HashMap<String, Rect>,
+    /// Offsets still travelling, by panel.
+    moving: HashMap<String, pm_design::motion::Animated<2>>,
+    clock: pm_design::motion::Clock,
+    /// The next placement is a discrete change: panels that moved slide.
+    pub armed: bool,
+}
+impl PanelSlides {
+    /// Takes this frame's rects; true while something still travels.
+    pub fn place(&mut self, placed: &[(String, Rect)], t: &Tokens) -> bool {
+        let dt = self.clock.tick(std::time::Instant::now());
+        if std::mem::take(&mut self.armed) {
+            for (id, rect) in placed {
+                // The viewer's picture is a Metal layer placed from the
+                // panel's rect: it takes its new place at once.
+                let Some(old) = self.last.get(id).filter(|_| id != "viewer") else {
+                    continue;
+                };
+                // From where it shows now (a slide already under way keeps going).
+                let shown = self.shown(id, *old);
+                let offset = [shown.x - rect.x, shown.y - rect.y];
+                if offset[0].abs() < 1. && offset[1].abs() < 1. {
+                    continue;
+                }
+                let mut slide = pm_design::motion::Animated::new(
+                    offset,
+                    pm_design::motion::Spring::SNAP,
+                    pm_design::motion::POINT_PRECISION,
+                );
+                slide.animate_to([0., 0.], t.spring(pm_design::motion::Preset::Layout));
+                self.moving.insert(id.clone(), slide);
+            }
+        } else if placed
+            .iter()
+            .any(|(id, r)| self.last.get(id).is_some_and(|o| o != r))
+        {
+            // A live change (a splitter, the window): no lag.
+            self.moving.clear();
+        }
+        self.last = placed.iter().cloned().collect();
+        self.moving.retain(|_, slide| slide.step(dt));
+        if self.moving.is_empty() {
+            self.clock.rest();
+        }
+        !self.moving.is_empty()
+    }
+    /// The rect a panel shows at now: its place, plus what is left of its
+    /// travel.
+    pub fn shown(&self, id: &str, rect: Rect) -> Rect {
+        self.moving.get(id).map_or(rect, |slide| Rect {
+            x: rect.x + slide.value[0],
+            y: rect.y + slide.value[1],
+            ..rect
+        })
+    }
+}
 fn positioned(r: Rect) -> Div {
     div()
         .absolute()
@@ -1397,6 +1469,18 @@ impl Render for Editor {
             &t,
             self.maximized_panel.as_deref(),
         );
+        let placed: Vec<(String, Rect)> = self
+            .geometry
+            .panels
+            .iter()
+            .map(|p| {
+                let group = &self.layout.docks[p.dock].groups[p.group];
+                (group.active().to_string(), p.rect)
+            })
+            .collect();
+        if self.slides.place(&placed, &t) {
+            w.request_animation_frame();
+        }
         let mut ordered = self.geometry.panels.clone();
         ordered.sort_by(|a, b| {
             a.rect
@@ -1575,6 +1659,8 @@ impl Render for Editor {
                         {
                             this.status = err.to_string();
                         }
+                        // A panel let go in a new place travels there.
+                        this.slides.armed = true;
                         this.save();
                         cx.notify();
                     }
@@ -1662,7 +1748,7 @@ impl Render for Editor {
                         + TAB_SPACING
                 })
                 .collect();
-            let mut panel = positioned(p.rect)
+            let mut panel = positioned(self.slides.shown(&id, p.rect))
                 .id(format!("group-{}-{}", p.dock, p.group))
                 .role(Role::Group)
                 .tab_group()
@@ -1712,7 +1798,7 @@ impl Render for Editor {
             let custom = self
                 .integration
                 .as_ref()
-                .and_then(|i| i.header(&id, p.rect, w, cx));
+                .and_then(|i| i.header(&id, p.rect, tabs.len() > 1, w, cx));
             // The header's own tools (Add Panel, or the panel's actions such as
             // Project's search and +) keep their room beside the tabs.
             let tools = if custom.is_some() {
@@ -2137,14 +2223,16 @@ impl Render for Editor {
             && drag.moved
         {
             if let Some(p) = drag.preview {
-                // Only the drop zone: `accent_wash` with a 2 pt accent outline.
+                // Only the drop zone: a light wash of the accent inside a 2 pt
+                // accent outline, so the panels it would cover stay in view
+                // (an opaque wash hid them while their hosted controls showed).
                 root = root.child(
                     positioned(p.rect)
                         .id("drop-preview")
                         .rounded(px(m.panel_radius))
                         .border(px(m.drop_stroke))
                         .border_color(rgb(c.accent))
-                        .bg(rgb(c.accent_wash)),
+                        .bg(tint(c.accent, t.translucency.selected)),
                 );
             }
             root = root.child(
@@ -2719,5 +2807,39 @@ mod tests {
                 );
             })
             .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod slide_tests {
+    use super::{PanelSlides, Rect};
+    fn r(x: f32, y: f32) -> Rect {
+        Rect {
+            x,
+            y,
+            w: 300.,
+            h: 200.,
+        }
+    }
+    /// A drop moves a panel from where it was to its new place on the layout
+    /// spring; a live change (a splitter, the window) places it at once.
+    #[::core::prelude::v1::test]
+    fn a_moved_panel_slides_and_a_live_change_does_not() {
+        let t = pm_design::Tokens::new(pm_design::Scheme::Dark, Default::default());
+        let mut s = PanelSlides::default();
+        s.place(&[("project".into(), r(8., 52.))], &t);
+        // Dropped on the other side: it starts where it was.
+        s.armed = true;
+        assert!(s.place(&[("project".into(), r(1112., 52.))], &t));
+        let shown = s.shown("project", r(1112., 52.));
+        assert!(shown.x < 1100., "still near where it was: {}", shown.x);
+        // A splitter drag moves it again: no lag, the slide stops.
+        assert!(!s.place(&[("project".into(), r(1100., 52.))], &t));
+        assert_eq!(s.shown("project", r(1100., 52.)), r(1100., 52.));
+        // The viewer never slides (its picture is a Metal layer).
+        s.place(&[("viewer".into(), r(316., 52.))], &t);
+        s.armed = true;
+        s.place(&[("viewer".into(), r(8., 52.))], &t);
+        assert_eq!(s.shown("viewer", r(8., 52.)), r(8., 52.));
     }
 }

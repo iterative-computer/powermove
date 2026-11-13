@@ -1,4 +1,5 @@
 //! Properties presentation using model-issued, selection-fenced leases.
+use pm_kernel::commands::timing::{RetimeMode, TimingCommand};
 use pm_kernel::{Caller, Request};
 use pm_panel_inspector::{
     Binding, FieldType, Inspector, PropertyId,
@@ -142,6 +143,7 @@ impl Properties {
                 == Some("audio");
             let mut content = vec![];
             let mut layer_rows = vec![];
+            let mut time_rows = vec![];
             // The model decides applicability; this adapter only maps authored
             // labels and supported control descriptors to frozen v4 rows.
             for field in model.fields().map_err(|e| e.to_string())? {
@@ -201,6 +203,8 @@ impl Properties {
                         "fit" => ("content.fit", "Fit", ""),
                         "trim" => ("content.trim", "Trim Start", "s"),
                         "speed" => ("content.speed", "Speed", ""),
+                        "timeRemap" => ("content.timeRemap", "Time Remap", ""),
+                        "sourceTime" => ("content.sourceTime", "Source Time", "s"),
                         "gain" => ("content.gain", "Gain", ""),
                         "fadeIn" => ("content.fadeIn", "Fade In", "s"),
                         "fadeOut" => ("content.fadeOut", "Fade Out", "s"),
@@ -354,6 +358,8 @@ impl Properties {
                 }
                 if id.starts_with("layer.") {
                     layer_rows.push(row);
+                } else if matches!(id, "content.timeRemap" | "content.sourceTime") {
+                    time_rows.push(row);
                 } else if studio.is_none() {
                     // A 3D layer's canvas size is not something you edit.
                     content.push(row);
@@ -361,6 +367,18 @@ impl Properties {
             }
             if !content.is_empty() {
                 sections.push(json!({"id":"content","title":"Content","collapsed":self.collapsed.get("content").copied().unwrap_or(false),"rows":content}));
+            }
+            // Time (`RetimingSection.svelte`): the three buttons, then the
+            // remapping rows once a layer has a source time channel.
+            if matches!(target["first"]["type"].as_str(), Some("video" | "precomp")) {
+                let remapped = model
+                    .layer(&layer)
+                    .ok()
+                    .is_some_and(|l| l.get("d").and_then(|d| d.get("sourceTime")).is_some());
+                if !remapped {
+                    time_rows.clear();
+                }
+                sections.push(json!({"id":"time","title":"Time","collapsed":self.collapsed.get("time").copied().unwrap_or(false),"rows":time_rows,"actions":["time-remap","freeze-frame","reverse"]}));
             }
             if let Some(section) = self.type_settings(model, &layer, time)? {
                 sections.push(section);
@@ -1933,6 +1951,48 @@ impl Properties {
                     label: Some(label),
                     expected_revision: Some(model.revision()),
                     body: pm_kernel::WriteBody::Commands(commands),
+                },
+            )));
+        }
+        if intent["type"] == "section-action"
+            && let Some((mode, label)) = match intent["action"].as_str() {
+                Some("time-remap") => Some((RetimeMode::Remap, "Enable Time Remapping")),
+                Some("freeze-frame") => Some((RetimeMode::Freeze, "Freeze Frame")),
+                Some("reverse") => Some((RetimeMode::Reverse, "Time-Reverse Layer")),
+                _ => None,
+            }
+        {
+            // The selected video and pre-comp layers, as the Layer menu's rows.
+            let layer_ids: Vec<String> = model
+                .selected_layers()
+                .iter()
+                .filter(|id| {
+                    model.editable(id)
+                        && model.layer(id).ok().is_some_and(|l| {
+                            matches!(
+                                l.get("type").and_then(pm_model::Value::as_str),
+                                Some("video" | "precomp")
+                            )
+                        })
+                })
+                .cloned()
+                .collect();
+            if layer_ids.is_empty() {
+                return Err("Select a video or pre-comp layer".into());
+            }
+            return Ok(Some(Request::new(
+                caller,
+                pm_kernel::Call::Transact {
+                    label: Some(label.into()),
+                    expected_revision: Some(model.revision()),
+                    body: pm_kernel::WriteBody::Commands(vec![
+                        TimingCommand::Retime {
+                            layer_ids,
+                            mode,
+                            time,
+                        }
+                        .into(),
+                    ]),
                 },
             )));
         }

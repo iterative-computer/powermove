@@ -317,6 +317,11 @@ pub struct ControlSpec<'a> {
     /// (macOS 26 and later; the plain bezel before): a surface's one raised
     /// action.
     pub glass: bool,
+    /// In a row's value column: as high as a value well. A pop-up has no
+    /// bezel there and fills the well its row draws under it, so it is the
+    /// same well as the fields beside it; a segmented control is the small
+    /// size.
+    pub well: bool,
 }
 
 impl NativeControl {
@@ -340,6 +345,7 @@ impl NativeControl {
             tint,
             symbol,
             glass,
+            well,
         } = spec;
         let glass = glass && objc2::runtime::AnyClass::get(c"NSGlassEffectView").is_some();
         use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -380,7 +386,7 @@ impl NativeControl {
                 }
                 watch_menu(&target, &v);
                 v.setFont(Some(&NSFont::systemFontOfSize(t.typography.body as f64)));
-                if inline {
+                if inline || well {
                     v.setBordered(false);
                 }
                 if inline && quiet {
@@ -445,6 +451,9 @@ impl NativeControl {
                     v.setAction(Some(sel!(act:)));
                 }
                 v.setSelectedSegmentBezelColor(Some(&crate::native::selected_color()));
+                if well {
+                    v.setControlSize(NSControlSize::Small);
+                }
                 v.sizeToFit();
                 Control::Segmented(v)
             }
@@ -583,7 +592,11 @@ impl NativeControl {
         } else {
             (intrinsic.width as f32).max(t.metrics.hit)
         };
-        let height = t.metrics.control.max(intrinsic.height as f32);
+        let height = if well {
+            t.metrics.field
+        } else {
+            t.metrics.control.max(intrinsic.height as f32)
+        };
         let native =
             unsafe { Retained::retain(control.view() as *const NSView as *mut NSView).unwrap() };
         let slot = Rc::new(NativeControlSlot::new(&gpui, native));
@@ -604,7 +617,7 @@ impl NativeControl {
             inline,
             // A search field is as wide as the place it is given.
             fill: matches!(kind, Kind::Search),
-            stretch: false,
+            stretch: well && matches!(kind, Kind::Popup),
             focus: Rc::default(),
             host_revision: None,
         }
@@ -637,6 +650,9 @@ impl NativeControl {
         if let Control::Search(v) = &self.control {
             v.setPlaceholderString(Some(&NSString::from_str(text)));
         }
+    }
+    pub fn is_popup(&self) -> bool {
+        matches!(self.control, Control::Popup(_))
     }
     pub fn is_search(&self) -> bool {
         matches!(self.control, Control::Search(_))

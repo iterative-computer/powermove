@@ -19,6 +19,31 @@ use std::{
 };
 
 type Task = Retained<ProtocolObject<dyn WKURLSchemeTask>>;
+
+/// How the app begins a sheet, and forgets one that has not begun. `begin`
+/// is `(parent, sheet, begin, cancel)`: `begin` makes the AppKit call,
+/// `cancel` answers the page if the sheet never begins (a development lane
+/// holds sheets while the app is inactive); it returns whether it began now.
+/// `forget` is called with a sheet its page closed before it began.
+/// A deferred AppKit call: a sheet's begin, or its cancellation.
+pub type SheetCall = Box<dyn FnOnce()>;
+#[derive(Clone, Copy)]
+pub struct SheetGate {
+    pub begin: fn(&NSWindow, &NSWindow, SheetCall, SheetCall) -> bool,
+    pub forget: fn(&NSWindow),
+}
+static SHEET_GATE: std::sync::OnceLock<SheetGate> = std::sync::OnceLock::new();
+/// Sets the [`SheetGate`] every extension sheet goes through (once per app;
+/// without one, a sheet begins at once).
+pub fn set_sheet_gate(gate: SheetGate) {
+    let _ = SHEET_GATE.set(gate);
+}
+/// A sheet its page closed: one still waiting to begin is cancelled.
+fn forget_sheet(sheet: &NSWindow) {
+    if let Some(gate) = SHEET_GATE.get() {
+        (gate.forget)(sheet);
+    }
+}
 #[derive(Default)]
 pub struct StoreDataStores {
     stores: BTreeMap<String, Retained<WKWebsiteDataStore>>,
@@ -243,7 +268,7 @@ define_class!(
         #[unsafe(method(webViewDidClose:))]
         unsafe fn child_closed(&self,web:&WKWebView){
             let mut children=self.ivars().sheets.borrow_mut();
-            if let Some(i)=children.iter().position(|(_,v)|std::ptr::eq(&**v,web)) {let (w,v)=children.remove(i);unsafe{v.setUIDelegate(None);v.setNavigationDelegate(None)};if let Some(p)=w.sheetParent(){p.endSheet(&w)}
+            if let Some(i)=children.iter().position(|(_,v)|std::ptr::eq(&**v,web)) {let (w,v)=children.remove(i);forget_sheet(&w);unsafe{v.setUIDelegate(None);v.setNavigationDelegate(None)};if let Some(p)=w.sheetParent(){p.endSheet(&w)}
                 if let Some(p)=w.parentWindow(){p.removeChildWindow(&w)}w.close();}
         }
         #[unsafe(method(webView:requestMediaCapturePermissionForOrigin:initiatedByFrame:type:decisionHandler:))]
@@ -374,7 +399,24 @@ impl Bridge {
         // A page with no window (headless tests) keeps the sheet unshown; its
         // body and actions still work.
         if let Some(parent) = parent {
-            parent.beginSheet_completionHandler(&window, None);
+            let (on, sheet) = (parent.clone(), window.clone());
+            let begin = Box::new(move || on.beginSheet_completionHandler(&sheet, None));
+            // Never begun: the page hears the modal dismissed.
+            let page = child.clone();
+            let cancel = Box::new(move || unsafe {
+                page.evaluateJavaScript_completionHandler(
+                    &NSString::from_str(
+                        "document.querySelector('[data-pm-modal-dismiss]')?.click()",
+                    ),
+                    None,
+                )
+            });
+            match SHEET_GATE.get() {
+                Some(gate) => {
+                    (gate.begin)(&parent, &window, begin, cancel);
+                }
+                None => begin(),
+            }
         }
         Some(child)
     }
@@ -949,7 +991,9 @@ impl MacDomHost {
         }
     }
     fn close_sheets(&self) {
-        for (w, v) in self.shared.sheets.borrow_mut().drain(..) {
+        let sheets: Vec<_> = self.shared.sheets.borrow_mut().drain(..).collect();
+        for (w, v) in sheets {
+            forget_sheet(&w);
             unsafe {
                 v.setNavigationDelegate(None);
                 v.setUIDelegate(None)

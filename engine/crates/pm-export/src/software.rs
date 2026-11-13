@@ -19,7 +19,7 @@ use crate::atomic::AtomicOutput;
 use crate::convert::{EncoderInput, Plane, PlaneData};
 use crate::pipeline::Sink;
 use crate::timescale::video_timing;
-use crate::verify::{self, AudioReport, BlockSample, TimecodeReport, VerifyReport};
+use crate::verify::{self, AudioReport, Evidence, TimecodeReport, VerifyReport};
 use crate::*;
 
 /// Tools are explicit so tests and headless hosts can select their own build.
@@ -109,6 +109,40 @@ fn run_to_file(mut cmd: Command, cancel: &AtomicBool, scratch: &Path) -> Result<
     Ok(())
 }
 
+/// Runs a decoder that writes raw frames of `frame_bytes` each to its
+/// standard output, and hands every frame to `each` with its index.
+fn decode_frames(
+    mut cmd: Command,
+    frame_bytes: usize,
+    cancel: &AtomicBool,
+    each: &mut dyn FnMut(u64, &[u8]),
+) -> Result<(), Error> {
+    use std::io::Read;
+    cmd.stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .stdin(Stdio::null());
+    let mut process = Process(cmd.spawn().map_err(io)?);
+    let mut out = process.0.stdout.take().expect("piped output");
+    let mut frame = vec![0u8; frame_bytes];
+    let mut index = 0u64;
+    'frames: loop {
+        if cancel.load(Ordering::Acquire) {
+            return Err(Error::Cancelled);
+        }
+        let mut filled = 0;
+        while filled < frame.len() {
+            match out.read(&mut frame[filled..]).map_err(io)? {
+                0 if filled == 0 => break 'frames,
+                0 => return Err(Error::Verify("decoded picture length mismatch".into())),
+                n => filled += n,
+            }
+        }
+        each(index, &frame);
+        index += 1;
+    }
+    process.wait(cancel)
+}
+
 /// Encodes the same engine-owned input planes as VideoToolbox, behind `Sink`.
 /// HEVC alpha has no interoperable software encoder here and is rejected
 /// before an output is created; it is never silently flattened.
@@ -122,7 +156,9 @@ pub struct SoftwareSink {
     tools: SoftwareTools,
     next: u64,
     audio_frames: u64,
-    blocks: Vec<BlockSample>,
+    evidence: Evidence,
+    /// Frames of the written file checked so far.
+    checked: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl SoftwareSink {
@@ -208,7 +244,8 @@ impl SoftwareSink {
             tools,
             next: 0,
             audio_frames: 0,
-            blocks: vec![],
+            evidence: Evidence::default(),
+            checked: Default::default(),
         })
     }
 
@@ -285,8 +322,9 @@ impl SoftwareSink {
             self.output.temp_path(),
             &self.spec,
             self.audio_frames,
-            &self.blocks,
+            &self.evidence,
             cancel,
+            &self.checked,
             &self.scratch.0,
         )?;
         if cancel.load(Ordering::Acquire) {
@@ -321,9 +359,7 @@ impl Sink for SoftwareSink {
             .ok_or_else(|| Error::Encode("encoder pipe closed".into()))?
             .write_all(&bytes)
             .map_err(io)?;
-        if verify::sampled_frames(self.spec.frames).contains(&index) {
-            self.blocks.extend(verify::block_means(input, index));
-        }
+        self.evidence.add(index, self.spec.frames, input);
         self.next += 1;
         Ok(())
     }
@@ -345,6 +381,10 @@ impl Sink for SoftwareSink {
         self.audio_frames += (samples.len() / usize::from(spec.channels)) as u64;
         Ok(())
     }
+    fn count_checked(&mut self, checked: std::sync::Arc<std::sync::atomic::AtomicU64>) {
+        self.checked = checked;
+    }
+
     fn finish(self) -> Result<Delivered, Error> {
         self.complete(&AtomicBool::new(false))
     }
@@ -496,6 +536,11 @@ fn video_options(cmd: &mut Command, s: &ExportSpec) {
         "-color_range",
         "tv",
     ]);
+    // 4:2:0 chroma that is not at the codecs' default place says where it is.
+    let rows_subsampled = !matches!(s.input_format(), InputFormat::Y416 | InputFormat::V216);
+    if rows_subsampled && s.tags.chroma_location() == ChromaLocation::TopLeft {
+        cmd.args(["-chroma_sample_location", "topleft"]);
+    }
 }
 fn mux_options(cmd: &mut Command, s: &ExportSpec) -> Result<(), Error> {
     if s.container.is_quicktime_family() {
@@ -639,13 +684,15 @@ fn rational(v: &Value, key: &str) -> Option<(u64, u64)> {
     Some((n.parse().ok()?, d.parse().ok()?))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn probe_and_verify(
     tools: &SoftwareTools,
     path: &Path,
     spec: &ExportSpec,
     audio_frames: u64,
-    blocks: &[BlockSample],
+    evidence: &Evidence,
     cancel: &AtomicBool,
+    checked: &std::sync::atomic::AtomicU64,
     scratch: &Path,
 ) -> Result<VerifyReport, Error> {
     let mut cmd = Command::new(&tools.ffprobe);
@@ -765,6 +812,17 @@ fn probe_and_verify(
             .track(b"vide")
             .ok_or_else(|| Error::Verify("no MOV video track".into()))?;
         movie_timescale = movie.movie_timescale;
+        if let Some(visual) = &track.visual {
+            let (stream, full_range) = verify::stream_problems(
+                visual,
+                spec.tags.cicp(),
+                spec.tags.chroma_location().sample_loc_type(),
+            );
+            problems.extend(stream);
+            if full_range {
+                problems.push("the stream is flagged full range".into());
+            }
+        }
         media_timescale = track.media_timescale;
         duration = track.stts_duration();
         if movie_timescale != timing.timescale as u32
@@ -860,53 +918,63 @@ fn probe_and_verify(
         }
         None
     };
-    let mut decoded = vec![];
-    for index in verify::sampled_frames(spec.frames) {
-        let mut cmd = command(&tools.ffmpeg);
-        if matches!(spec.codec, Codec::Vp9 { .. } | Codec::Vp8 { .. })
-            && spec.alpha != AlphaOutput::None
-        {
-            cmd.args([
-                "-c:v",
-                if matches!(spec.codec, Codec::Vp9 { .. }) {
-                    "libvpx-vp9"
-                } else {
-                    "libvpx"
-                },
-            ]);
-        }
-        cmd.arg("-i").arg(path).args([
-            "-map",
-            "0:v:0",
-            "-vf",
-            &format!("select=eq(n\\,{index})"),
-            "-frames:v",
-            "1",
-            "-threads",
-            "1",
-            "-f",
-            "rawvideo",
-            "-pix_fmt",
-            raw_format(spec.input_format(), spec.alpha),
-            "pipe:1",
+    // Every frame, decoded once, in order.
+    let mut cmd = command(&tools.ffmpeg);
+    if matches!(spec.codec, Codec::Vp9 { .. } | Codec::Vp8 { .. })
+        && spec.alpha != AlphaOutput::None
+    {
+        cmd.args([
+            "-c:v",
+            if matches!(spec.codec, Codec::Vp9 { .. }) {
+                "libvpx-vp9"
+            } else {
+                "libvpx"
+            },
         ]);
-        let bytes = run(cmd, cancel, scratch)?;
-        let expected = crate::convert::plane_layout(spec.input_format(), spec.width, spec.height)
+    }
+    cmd.arg("-i").arg(path).args([
+        "-map",
+        "0:v:0",
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        raw_format(spec.input_format(), spec.alpha),
+        "pipe:1",
+    ]);
+    let frame_bytes = {
+        let planes = crate::convert::plane_layout(spec.input_format(), spec.width, spec.height)
             .iter()
             .map(|(w, h, u16s)| w * h * if *u16s { 2 } else { 1 })
             .sum::<usize>();
-        let expected =
-            if spec.input_format() == InputFormat::Y416 && spec.alpha == AlphaOutput::None {
-                expected / 4 * 3
-            } else {
-                expected
-            };
-        if bytes.len() != expected {
-            return Err(Error::Verify("decoded picture length mismatch".into()));
+        if spec.input_format() == InputFormat::Y416 && spec.alpha == AlphaOutput::None {
+            planes / 4 * 3
+        } else {
+            planes
         }
-        decoded.push((index, unpack(&bytes, spec)));
-    }
-    let pixels = verify::check_pixels(spec.codec, blocks, &decoded, &mut problems);
+    };
+    let mut decoded = verify::Decoded::default();
+    decode_frames(cmd, frame_bytes, cancel, &mut |index, bytes| {
+        decoded.add(index, spec.frames, unpack(bytes, spec));
+        checked.fetch_add(1, Ordering::AcqRel);
+    })?;
+    let mut picture = verify::PictureReport::default();
+    verify::check_frames(
+        spec.codec,
+        &|n| evidence.frames.get(usize::try_from(n).ok()?),
+        Some(evidence.frames.len()),
+        &decoded.frames,
+        &mut picture,
+        &mut problems,
+    );
+    let mut notes = vec![];
+    let pixels = verify::check_pixels(
+        spec.codec,
+        &evidence.blocks,
+        &decoded.sampled,
+        &mut picture,
+        &mut problems,
+        &mut notes,
+    );
     if !problems.is_empty() {
         return Err(Error::Verify(problems.join("; ")));
     }
@@ -925,8 +993,11 @@ fn probe_and_verify(
         audio: audio_report,
         timecode,
         pixels,
+        picture,
+        notes,
         hardware_encoder: Some(false),
         bytes: fs::metadata(path).map_err(io)?.len(),
+        mix: None,
     })
 }
 

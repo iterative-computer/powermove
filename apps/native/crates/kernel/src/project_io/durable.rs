@@ -738,6 +738,24 @@ impl std::fmt::Debug for TrashHook {
     }
 }
 
+/// A file found changed when it was to go that could not be kept beside its
+/// project: where it is now, for the person to be told.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Stray {
+    /// The project file it was a version of.
+    pub project: PathBuf,
+    /// Where it is: in the Trash (`trashed`), or still under the private
+    /// name it had beside the project.
+    pub path: PathBuf,
+    pub trashed: bool,
+    /// The save's record tells the person (it could be written).
+    pub recorded: bool,
+}
+
+/// Where saves and recoveries report their [`Stray`]s; the kernel collects
+/// them once the call that ran the save or the recovery returns.
+pub type Strays = Arc<std::sync::Mutex<Vec<Stray>>>;
+
 /// What a test makes a folder's syncs answer.
 #[doc(hidden)]
 pub type FolderSyncHook = Arc<dyn Fn() -> (Option<i32>, Option<i32>) + Send + Sync>;
@@ -775,8 +793,6 @@ pub struct PublishHooks {
     /// The save's record says it was written on this machine (its name and
     /// identifier) instead of the real one.
     pub owner_host: Option<String>,
-    /// The project's volume is one other machines write (a network share).
-    pub shared_volume: bool,
     /// While set, the volume answers the exchange with success and only
     /// renames, as [`Self::exchange_renames`]: a volume whose behaviour
     /// changed while the app ran (unmounted, and another mounted in its
@@ -793,16 +809,28 @@ pub struct PublishHooks {
     /// Called with the destination half way through a copy into an
     /// exclusively created name.
     pub mid_copy: Option<PublishHook>,
+    /// Called with the destination of a copy into an exclusively created
+    /// name at the moment exactly this many bytes of it were written.
+    pub copy_stops_at: Option<(u64, PublishHook)>,
     /// While set, the next copy into an exclusively created name stops
     /// half way with "No space left on device" (and clears it).
     pub copy_fails: Option<Arc<std::sync::atomic::AtomicBool>>,
     /// Called with a file right before it is disposed of ([`dispose`]):
     /// after it was last read, immediately before it goes to the Trash.
     pub before_disposal: Option<PublishHook>,
+    /// Called with the name a file had when it was read to be disposed of,
+    /// after that read and right before the file is unlinked.
+    pub before_unlink: Option<PublishHook>,
+    /// Called with a public name right after the file under it was moved
+    /// to a private name of the save's record, before that file is judged.
+    pub after_withdrawn: Option<PublishHook>,
     /// The person's Trash, where a version of the project goes once a save
     /// no longer needs it (the kernel's host sets it; `None`: such files
     /// stay where they are).
     pub trash: Option<TrashHook>,
+    /// Not a test hook: where files that could not be kept beside their
+    /// project are reported ([`Stray`]).
+    pub strays: Strays,
 }
 impl std::fmt::Debug for PublishHooks {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -817,13 +845,15 @@ impl std::fmt::Debug for PublishHooks {
             .field("before_install", &self.before_install.is_some())
             .field("after_judged", &self.after_judged.is_some())
             .field("owner_host", &self.owner_host)
-            .field("shared_volume", &self.shared_volume)
             .field("weak_exchange", &self.weak_exchange.is_some())
             .field("step", &self.step.is_some())
             .field("folder_sync", &self.folder_sync.is_some())
             .field("mid_copy", &self.mid_copy.is_some())
+            .field("copy_stops_at", &self.copy_stops_at.is_some())
             .field("copy_fails", &self.copy_fails.is_some())
             .field("before_disposal", &self.before_disposal.is_some())
+            .field("before_unlink", &self.before_unlink.is_some())
+            .field("after_withdrawn", &self.after_withdrawn.is_some())
             .field("trash", &self.trash.is_some())
             .finish()
     }
@@ -970,23 +1000,82 @@ fn excludes(destination: &Path, hooks: &PublishHooks) -> Result<bool, ProjectIoE
     #[cfg(target_os = "macos")]
     {
         proven("exclusive rename", destination, |a, b| {
-            let refused = sys::renamex(&a.path, &b.path, sys::RENAME_EXCL)
-                .is_err_and(|e| e.kind() == io::ErrorKind::AlreadyExists)
-                && holds(&a.path, b"a")
-                && holds(&b.path, b"b");
-            let free = TempFile {
-                path: temporary_sibling(destination),
-                keep: false,
-            };
-            Ok(refused
-                && sys::renamex(&a.path, &free.path, sys::RENAME_EXCL).is_ok()
-                && holds(&free.path, b"a"))
+            Ok(exclusive_rename_probe(
+                &a.path,
+                &b.path,
+                temporary_sibling(destination),
+            ))
         })
     }
     #[cfg(not(target_os = "macos"))]
     {
         let _ = destination;
         Ok(false)
+    }
+}
+
+/// Why [`place_new`] did not place a file, and what it left.
+#[derive(Debug)]
+pub(super) struct Unplaced {
+    pub error: ProjectIoError,
+    /// The copy it was making is under the name, incomplete: the save's
+    /// record takes it back ([`Transaction::place`]).
+    pub partial: bool,
+    /// That incomplete file, as this call created it.
+    pub created: Option<FileStat>,
+}
+impl From<ProjectIoError> for Box<Unplaced> {
+    fn from(error: ProjectIoError) -> Self {
+        Box::new(Unplaced {
+            error,
+            partial: false,
+            created: None,
+        })
+    }
+}
+
+/// [`excludes`]' probe on the two staging files `a` (holding "a") and `b`
+/// (holding "b") and the name `free`, which should hold nothing.
+#[cfg(target_os = "macos")]
+fn exclusive_rename_probe(a: &Path, b: &Path, free: PathBuf) -> bool {
+    let refused = sys::renamex(a, b, sys::RENAME_EXCL)
+        .is_err_and(|e| e.kind() == io::ErrorKind::AlreadyExists)
+        && holds(a, b"a")
+        && holds(b, b"b");
+    if !refused || sys::renamex(a, &free, sys::RENAME_EXCL).is_err() {
+        return false;
+    }
+    // Only now does the name hold the probe's own file: it is the probe's
+    // to remove from here on, and never a file that was already there.
+    let free = TempFile {
+        path: free,
+        keep: false,
+    };
+    holds(&free.path, b"a")
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod probe_tests {
+    use super::*;
+
+    /// The probe moves a staging file to a name that should be free. A
+    /// file that is under that name all the same is not the probe's: the
+    /// rename refuses it, and the probe must not remove it either.
+    #[test]
+    fn the_probe_never_removes_a_file_it_found_under_its_free_name() {
+        let dir = std::env::temp_dir().join(format!("pm-probe-{}", random_uuid()));
+        fs::create_dir_all(&dir).unwrap();
+        let (a, b, taken) = (dir.join("a"), dir.join("b"), dir.join("taken"));
+        fs::write(&a, b"a").unwrap();
+        fs::write(&b, b"b").unwrap();
+        fs::write(&taken, b"someone's file").unwrap();
+        assert!(!exclusive_rename_probe(&a, &b, taken.clone()));
+        assert_eq!(fs::read(&taken).unwrap(), b"someone's file");
+        // A name that is free: the probe's file lands there and goes again.
+        let free = dir.join("free");
+        assert!(exclusive_rename_probe(&a, &b, free.clone()));
+        assert!(!free.exists());
+        fs::remove_dir_all(&dir).unwrap();
     }
 }
 
@@ -1019,8 +1108,9 @@ pub(super) fn place_new(
     to: &Path,
     hash: Option<&str>,
     hooks: &PublishHooks,
-) -> Result<Placed, ProjectIoError> {
-    let taken = || ProjectIoError::DestinationExists(to.display().to_string());
+) -> Result<Placed, Box<Unplaced>> {
+    let taken =
+        || -> Box<Unplaced> { ProjectIoError::DestinationExists(to.display().to_string()).into() };
     let about_to = || {
         if let Some(hook) = &hooks.before_install {
             hook(to);
@@ -1034,7 +1124,7 @@ pub(super) fn place_new(
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Err(taken()),
             // Proven a moment ago and refused now: not relied on again.
             Err(e) if matches!(e.raw_os_error(), Some(45) | Some(22)) => forget_probes(),
-            Err(e) => return Err(io_err(from, e)),
+            Err(e) => return Err(io_err(from, e).into()),
         }
     }
     about_to();
@@ -1090,14 +1180,23 @@ pub(super) fn rename_private(from: &Path, to: &Path, hooks: &PublishHooks) -> io
 /// over a file that is there), `source`'s bytes are copied into it and
 /// synced, and what the name then holds is read back and must be those
 /// bytes (and `hash`, when the caller knows what the source holds). A copy
-/// that fails is taken back ([`withdraw`]). A crash mid-copy leaves an
-/// incomplete file under a name that held nothing before.
+/// that fails is left under the name, incomplete, and said to be
+/// ([`Unplaced::partial`]): the save's record takes it back. A crash
+/// mid-copy leaves an incomplete file under a name that held nothing
+/// before.
+///
+/// The file's first bytes ([`HELD_BACK`] of them) are written last, after
+/// everything else is synced; until then they are zeros. So whatever the
+/// name holds while the copy runs is no project file to any reader, on
+/// this machine or on one a sync client replicates it to: a save that only
+/// appended to the previous file would otherwise pass through a moment
+/// where the name holds exactly that previous file.
 fn create_exclusive(
     source: &Path,
     destination: &Path,
     hash: Option<&str>,
     hooks: &PublishHooks,
-) -> Result<(), ProjectIoError> {
+) -> Result<(), Box<Unplaced>> {
     let from = File::open(source).map_err(|e| io_err(source, e))?;
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
@@ -1114,27 +1213,35 @@ fn create_exclusive(
     let mut out = match options.open(destination) {
         Ok(out) => out,
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-            return Err(ProjectIoError::DestinationExists(
-                destination.display().to_string(),
-            ));
+            return Err(
+                ProjectIoError::DestinationExists(destination.display().to_string()).into(),
+            );
         }
-        Err(e) => return Err(io_err(destination, e)),
+        Err(e) => return Err(io_err(destination, e).into()),
     };
     // Marked as this save's copy before it holds a byte (a volume without
     // extended attributes leaves it unmarked: recovery then never takes it
     // back on its own, and offers the versions instead).
     mark_copy(&out, source);
-    let copied = (|| {
+    let copied = (|| -> Result<(), ProjectIoError> {
         use std::io::Write;
         let mut hasher = Sha256::new();
         let mut buf = vec![0u8; 1 << 20];
         let mut reader = &from;
+        let mut written = 0u64;
+        let mut head = Vec::new();
         loop {
             let n = read_retry(|| reader.read(&mut buf)).map_err(|e| io_err(source, e))?;
             if n == 0 {
                 break;
             }
             hasher.update(&buf[..n]);
+            // The first bytes wait until the rest is there.
+            if written == 0 {
+                let held = n.min(HELD_BACK);
+                head.extend_from_slice(&buf[..held]);
+                buf[..held].fill(0);
+            }
             if hooks
                 .copy_fails
                 .as_ref()
@@ -1149,9 +1256,39 @@ fn create_exclusive(
                 hook(destination);
                 out.write_all(&buf[n / 2..n])
                     .map_err(|e| io_err(destination, e))?;
+                written += n as u64;
+                continue;
+            }
+            if let Some((at, hook)) = &hooks.copy_stops_at
+                && (written..written + n as u64).contains(at)
+                && *at > written
+            {
+                let first = (*at - written) as usize;
+                out.write_all(&buf[..first])
+                    .map_err(|e| io_err(destination, e))?;
+                hook(destination);
+                out.write_all(&buf[first..n])
+                    .map_err(|e| io_err(destination, e))?;
+                written += n as u64;
                 continue;
             }
             out.write_all(&buf[..n])
+                .map_err(|e| io_err(destination, e))?;
+            written += n as u64;
+        }
+        sync_file(&out).map_err(|e| io_err(destination, e))?;
+        // Complete but for its first bytes: they make it the file it is.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::FileExt;
+            out.write_all_at(&head, 0)
+                .map_err(|e| io_err(destination, e))?;
+        }
+        #[cfg(not(unix))]
+        {
+            use std::io::{Seek, SeekFrom};
+            out.seek(SeekFrom::Start(0))
+                .and_then(|_| out.write_all(&head))
                 .map_err(|e| io_err(destination, e))?;
         }
         sync_file(&out).map_err(|e| io_err(destination, e))?;
@@ -1174,51 +1311,43 @@ fn create_exclusive(
             ))
         }
     })();
-    if copied.is_err() {
-        drop(out);
-        withdraw(destination, source, hooks);
-    }
-    copied
-}
-
-/// Takes back the incomplete copy [`create_exclusive`] left under
-/// `destination`, a name that held nothing before it. Nothing is removed by
-/// that name: whatever the name holds is first moved to a private name
-/// ([`rename_private`]) and read. Bytes that are a beginning of `whole`, the
-/// file being copied, are that incomplete copy and are removed (`whole` still
-/// has all of them). Anything else landed there since and goes back under
-/// the name, or beside it if the name was taken again.
-pub(super) fn withdraw(destination: &Path, whole: &Path, hooks: &PublishHooks) {
-    let taken = temporary_sibling(destination).with_extension("partial");
-    if rename_private(destination, &taken, hooks).is_err() {
-        return;
-    }
-    // The incomplete copy, still exactly a beginning of the whole file when
-    // it goes; anything else (it landed there, or was written into since)
-    // goes back under the name, or beside it if the name was taken again.
-    let ours = begins(whole, &taken) && dispose(&taken, &|part, _| begins_file(whole, part), hooks);
-    if !ours
-        && place_new(&taken, destination, None, hooks).is_err()
-        && let Err(left) = keep_beside(taken, destination, "other version", hooks, &mut |_, _| {
-            Ok(())
+    copied.map_err(|error| {
+        Box::new(Unplaced {
+            error,
+            partial: true,
+            created: out.metadata().ok().map(|m| stat_of(&m)),
         })
-    {
-        trash_or_leave(left, hooks);
-    }
+    })
 }
 
-/// Whether `part`'s bytes are the beginning (or all) of `whole`'s.
+/// How many of a file's first bytes [`create_exclusive`] writes last (a
+/// project file's magic number is that long).
+const HELD_BACK: usize = 5;
+
+/// Whether `part` is a copy of `whole` in the making ([`create_exclusive`]):
+/// its bytes are the beginning (or all) of `whole`'s, but for its first
+/// [`HELD_BACK`] bytes, which may still be zeros.
 pub(super) fn begins(whole: &Path, part: &Path) -> bool {
     File::open(part).is_ok_and(|part| begins_file(whole, &part))
 }
 
-/// Whether the bytes behind `part` are the beginning (or all) of `whole`'s.
-fn begins_file(whole: &Path, part: &File) -> bool {
+/// Whether `path`'s first bytes are still the zeros a copy in the making
+/// has there ([`HELD_BACK`]).
+pub(super) fn head_held_back(path: &Path) -> bool {
+    let mut head = [0u8; HELD_BACK];
+    File::open(path)
+        .and_then(|mut file| file.read(&mut head))
+        .is_ok_and(|n| n > 0 && head[..n].iter().all(|b| *b == 0))
+}
+
+/// [`begins`] for the bytes behind `part`.
+pub(super) fn begins_file(whole: &Path, part: &File) -> bool {
     let Ok(whole) = File::open(whole) else {
         return false;
     };
     let (mut a, mut b) = (vec![0u8; 1 << 16], vec![0u8; 1 << 16]);
     let (mut whole, mut part) = (io::BufReader::new(whole), io::BufReader::new(part));
+    let mut first = true;
     loop {
         let Ok(n) = read_retry(|| part.read(&mut b)) else {
             return false;
@@ -1226,38 +1355,80 @@ fn begins_file(whole: &Path, part: &File) -> bool {
         if n == 0 {
             return true;
         }
-        if whole.read_exact(&mut a[..n]).is_err() || a[..n] != b[..n] {
+        if whole.read_exact(&mut a[..n]).is_err() {
+            return false;
+        }
+        // A buffered reader's first read is at least the held-back bytes
+        // unless the file is shorter than them.
+        let held = if first { n.min(HELD_BACK) } else { 0 };
+        first = false;
+        let head = a[..held] == b[..held] || b[..held].iter().all(|b| *b == 0);
+        if !head || a[held..n] != b[held..n] {
             return false;
         }
     }
 }
 
 /// Disposes of `path`, a file that was a version of the project (a
-/// replaced version, a copy that was under the project's name, a staged
-/// file recovery found duplicated) under a private name, if it is still
-/// exactly what its record says. It is read again at this moment, through
-/// a freshly opened descriptor (`unchanged` judges what it holds), and the
-/// descriptor's stat must be the same before and after that read and the
-/// same as the name's: then it is unlinked at once, in this call, and
-/// `true` is returned. Anything else (changed, unreadable, replaced) is
-/// never unlinked: `false`, and the caller keeps it beside the project
-/// ([`keep_or_trash`]).
+/// replaced version, a staged file recovery found duplicated) under a
+/// private name, if it is still exactly what its record says.
+///
+/// The file is first moved to `fresh`, a private name that holds nothing
+/// and that nothing else can know (taken exclusively where the volume can):
+/// that captures whatever the name holds at that instant. The captured file
+/// is then read through a newly opened descriptor (`unchanged` judges what
+/// it holds), the descriptor's stat must be the same before and after that
+/// read and the same as the fresh name's, and then the captured file is
+/// unlinked at once, in this call. A file another writer puts under the old
+/// name at any moment is therefore never what is unlinked.
+///
+/// Returns the files that were not removed and are the caller's to keep: the
+/// captured file when it is changed or unreadable (under `fresh`), the file
+/// itself when it could not be captured (under `path`), and a file that
+/// landed under `path` since. Empty when the version is gone.
 ///
 /// What remains (docs/native/p0-decisions.md): a program still holding a
 /// descriptor to the file, which writes into it in the instant between
 /// this check and the unlink, loses that write.
 pub(super) fn dispose(
     path: &Path,
+    fresh: &Path,
     unchanged: &dyn Fn(&File, &FileStat) -> bool,
     hooks: &PublishHooks,
-) -> bool {
+) -> Vec<PathBuf> {
     if let Some(hook) = &hooks.before_disposal {
         hook(path);
     }
-    let Ok(Some(named)) = lstat_file(path) else {
+    if !matches!(lstat_file(fresh), Ok(None)) || rename_private(path, fresh, hooks).is_err() {
+        return match lstat_file(path) {
+            Ok(None) => Vec::new(),
+            _ => vec![path.to_owned()],
+        };
+    }
+    let mut left = Vec::new();
+    if !dispose_captured(fresh, path, unchanged, hooks) {
+        left.push(fresh.to_owned());
+    }
+    if !matches!(lstat_file(path), Ok(None)) {
+        left.push(path.to_owned());
+    }
+    left
+}
+
+/// [`dispose`] for a file already captured under the fresh private name
+/// `captured` (`name` is the name it was known by): read now, and unlinked
+/// in this call if `unchanged` says it holds what it should and its stat
+/// did not move across the read. `false`: it is still there.
+pub(super) fn dispose_captured(
+    captured: &Path,
+    name: &Path,
+    unchanged: &dyn Fn(&File, &FileStat) -> bool,
+    hooks: &PublishHooks,
+) -> bool {
+    let Ok(Some(named)) = lstat_file(captured) else {
         return false;
     };
-    let Ok(file) = File::open(path) else {
+    let Ok(file) = File::open(captured) else {
         return false;
     };
     let Ok(before) = file.metadata().map(|m| stat_of(&m)) else {
@@ -1267,7 +1438,10 @@ pub(super) fn dispose(
         return false;
     }
     let after = file.metadata().map(|m| stat_of(&m)).ok();
-    after.as_ref() == Some(&before) && fs::remove_file(path).is_ok()
+    if let Some(hook) = &hooks.before_unlink {
+        hook(name);
+    }
+    after.as_ref() == Some(&before) && fs::remove_file(captured).is_ok()
 }
 
 /// For [`dispose`]: the file holds exactly the bytes with `hash` (and is
@@ -1304,7 +1478,7 @@ pub enum Publish {
 }
 
 /// `2026-11-12 14.03.22`, local time (a file name the person reads).
-fn local_stamp() -> String {
+pub(super) fn local_stamp() -> String {
     local_time(
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1336,51 +1510,6 @@ pub fn local_time(now: u64) -> String {
     }
     #[cfg(not(unix))]
     backup_stamp(now as i64 * 1000)
-}
-
-/// Gives `held`, a file under a private name beside `destination`, a name
-/// the person finds: `<name> (<label> <date time>).<ext>`, never over
-/// anything ([`place_new`]). `label` says what it is: `other version` for a
-/// file found at the project's path that is not the version the save could
-/// replace, `recovered` for a finished save that could not take the path.
-/// `about_to` is told each name right before it is tried (a save's record
-/// keeps it). Returns where the file is and how it got there (a copy
-/// leaves the file under its private name too; nothing is removed here):
-/// `Err` with its private name when it could not be given another.
-pub(super) fn keep_beside(
-    held: PathBuf,
-    destination: &Path,
-    label: &str,
-    hooks: &PublishHooks,
-    about_to: &mut dyn FnMut(&Path, &Path) -> Result<(), ProjectIoError>,
-) -> Result<(PathBuf, Placed), PathBuf> {
-    let dir = destination.parent().unwrap_or(Path::new("."));
-    let stem = destination
-        .file_stem()
-        .unwrap_or("project".as_ref())
-        .to_string_lossy();
-    let stamp = local_stamp();
-    for n in 1..=50 {
-        let mut name = format!("{stem} ({label} {stamp}");
-        if n > 1 {
-            name.push_str(&format!(" {n}"));
-        }
-        name.push(')');
-        if let Some(extension) = destination.extension() {
-            name.push('.');
-            name.push_str(&extension.to_string_lossy());
-        }
-        let to = dir.join(name);
-        if about_to(&held, &to).is_err() {
-            break;
-        }
-        match place_new(&held, &to, None, hooks) {
-            Ok(placed) => return Ok((to, placed)),
-            Err(ProjectIoError::DestinationExists(_)) => continue,
-            Err(_) => break,
-        }
-    }
-    Err(held)
 }
 
 /// Whether `entry` is the private name a save gives a file beside the file
@@ -1422,9 +1551,12 @@ fn installed_at(
     if !stat.same_identity(&named) {
         return None;
     }
+    // Read through the descriptor that is then held, and only believed for
+    // the state it was read in: the same stat after the read as before it.
     let ours = ours(&stat)
         || (stat.size == size
-            && hash_reader(&file, destination).is_ok_and(|h| hex(&h.finalize()) == new_hash));
+            && hash_reader(&file, destination).is_ok_and(|h| hex(&h.finalize()) == new_hash)
+            && file.metadata().is_ok_and(|after| stat_of(&after) == stat));
     ours.then_some(Installed { file, stat })
 }
 
@@ -1460,26 +1592,30 @@ fn confirm_installed(
 
 /// The last look, after everything the save did once its file was installed
 /// (judging, retaining and pruning earlier versions): the name must still
-/// hold the installed file. Another writer may have put a version there in
-/// the meantime; that version is never adopted with this save's hash. Then
-/// this save's bytes, read from the descriptor held since the install
-/// (which keeps them even where the name no longer does), are kept beside
-/// the project under a plain name, the record says so and knows the version
-/// now under the name, and the save fails ([`ProjectIoError::KeptBeside`]):
-/// the session keeps its work, its journal and its unsaved state.
+/// hold the installed file, as it was when it was installed. Another writer
+/// may have put a version there in the meantime, or written its own into
+/// that very file; neither is ever adopted with this save's hash: the name
+/// must hold a file with the stat captured at the install, or one that is
+/// read now and holds exactly this save's bytes. Otherwise this save's
+/// bytes, read from the descriptor held since the install (which keeps them
+/// where the name no longer does, and is not copied when it was itself
+/// written into), are kept beside the project under a plain name, the
+/// record says so and knows the version now under the name, and the save
+/// fails ([`ProjectIoError::KeptBeside`], or
+/// [`ProjectIoError::ChangedOnDisk`] when there is nothing of this save
+/// left to keep): the session keeps its work, its journal and its unsaved
+/// state.
 fn still_installed(
     tx: &mut Transaction,
     destination: &Path,
     installed: Installed,
     new_hash: &str,
 ) -> Result<Installed, ProjectIoError> {
-    let now = installed
-        .file
-        .metadata()
-        .map(|m| stat_of(&m))
-        .unwrap_or(installed.stat);
-    // Untouched since the install: the very same stat as the held file.
-    if let Some(again) = installed_at(destination, |at| at.same_file(&now), now.size, new_hash) {
+    // Untouched since the install: the very stat captured then. A stat
+    // that moved since (a write into the file, or only its times) is
+    // believed by its bytes alone.
+    let then = &installed.stat;
+    if let Some(again) = installed_at(destination, |at| at.same_file(then), then.size, new_hash) {
         return Ok(again);
     }
     let kept = (|| {
@@ -1580,7 +1716,7 @@ fn replace_aside(
     }
     let installed = match tx
         .step("install")
-        .and_then(|()| place_new(&temp.path, destination, Some(new_hash), hooks))
+        .and_then(|()| tx.place(&temp.path, destination, Some(new_hash)))
     {
         Ok(placed) => Some(placed),
         // Something landed at the path since it was emptied: it stays.
@@ -1588,7 +1724,7 @@ fn replace_aside(
         // Not installed and nothing arrived: what was at the path goes back
         // (never over a file that landed there since).
         Err(e) => {
-            return Err(match place_new(&aside, destination, None, hooks) {
+            return Err(match tx.place(&aside, destination, None) {
                 // Back as a copy, the same bytes in another file: the file
                 // that was moved aside stays, for a later save to prune.
                 Ok(Placed::Copied) => {
@@ -1700,10 +1836,6 @@ pub(crate) struct Published {
     /// The published file, held open since it was confirmed under the
     /// name and confirmed again after the save's last step.
     pub installed: Option<Installed>,
-    /// Earlier versions found changed when they were to go, that could not
-    /// be kept beside the project: where they are now (the Trash, or where
-    /// they were), for the person.
-    pub untrashed: Vec<PathBuf>,
     /// The file is installed but the folder did not sync after it: why.
     /// Nothing else was done (the replaced version stays named by the
     /// record); the save is reported failed, and adopted by the next save
@@ -1759,11 +1891,6 @@ pub(crate) struct Host<'a> {
 }
 
 impl Host<'_> {
-    /// Whether other machines write the volume `path` is on.
-    pub fn shared_volume(&self, path: &Path) -> bool {
-        self.hooks.shared_volume || !crate::locks::is_local_volume(path)
-    }
-
     /// Runs `work` once, inside a coordinated write of `path` where the
     /// host has a coordinator and it grants one ([`WriteCoordinator`]).
     pub fn coordinated(&self, path: &Path, work: &mut dyn FnMut(bool)) {
@@ -2151,7 +2278,7 @@ fn publish_now(
         None => {
             let placed = tx
                 .step("install")
-                .and_then(|()| place_new(&temp.path, destination, Some(new_hash), hooks));
+                .and_then(|()| tx.place(&temp.path, destination, Some(new_hash)));
             match placed {
                 Ok(Placed::Moved) => drop(temp.keep()),
                 // The copy keeps the data; `temp` unlinks its name on drop.
@@ -2187,7 +2314,7 @@ fn publish_now(
     }
     // The save stands. Versions earlier saves retained are read again and
     // go; one that changed since is kept beside the project instead.
-    (published.changed, published.untrashed) = transaction::prune_retained(destination, &tx, hooks);
+    published.changed = transaction::prune_retained(destination, &tx, hooks);
     if let Some(policy) = host.backups {
         let just_written = published.backup.as_deref().or(host.backup);
         for changed in retain(policy, just_written, hooks).unwrap_or_default() {
@@ -2864,6 +2991,35 @@ pub(crate) fn backup(policy: &BackupPolicy, destination: &Path) -> Result<PathBu
     }
 }
 
+/// The fresh private name a version in the backups is captured under while
+/// it is disposed of: `.<its name>.<uuid>.gone`, in the same folder.
+fn captured_backup(path: &Path) -> PathBuf {
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    path.with_file_name(format!(".{name}.{}.gone", random_uuid()))
+}
+
+/// Moves a captured version back under its own name in the backups, never
+/// over a file that is there.
+fn rename_back(captured: &Path, own: &Path) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        sys::renamex(captured, own, sys::RENAME_EXCL).is_ok()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        fs::hard_link(captured, own).is_ok() && fs::remove_file(captured).is_ok()
+    }
+}
+
+/// The backup a name made by [`captured_backup`] belongs to.
+fn backup_of_captured(captured: &Path) -> Option<PathBuf> {
+    let name = captured.file_name()?.to_str()?;
+    let rest = name.strip_prefix('.')?.strip_suffix(".gone")?;
+    let (own, uuid) = rest.split_at(rest.len().checked_sub(37)?);
+    (is_backup_name(own) && is_uuid_v4(uuid.strip_prefix('.')?))
+        .then(|| captured.with_file_name(own))
+}
+
 /// Keep the newest versions within the budgets (always the newest
 /// `min_versions` in save order, and always `just_written`) and delete older
 /// ones, as the old app pruned its backups after each save (v1.2.0 kept 5).
@@ -2888,6 +3044,20 @@ pub(crate) fn retain(
     let keep = just_written.and_then(Path::file_name);
     let mut bytes = 0u64;
     let mut removed = false;
+    // A version captured to be disposed of when the app was cut short goes
+    // back under its own name, and is read again when its turn comes.
+    for entry in fs::read_dir(&policy.directory)
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        let captured = entry.path();
+        if let Some(own) = backup_of_captured(&captured)
+            && matches!(lstat_file(&captured), Ok(Some(_)))
+        {
+            rename_back(&captured, &own);
+        }
+    }
     for (index, (_, name, size)) in generations(&dir)
         .map_err(folder_err)?
         .into_iter()
@@ -2905,11 +3075,15 @@ pub(crate) fn retain(
             // it since it was replaced.
             let path = policy.directory.join(&name);
             if let Some(hash) = retained_hash(&path) {
-                if dispose(&path, &holds_hash(&hash, None), hooks) {
-                    removed = true;
-                } else {
-                    changed.push(path);
-                }
+                let fresh = captured_backup(&path);
+                let left = dispose(&path, &fresh, &holds_hash(&hash, None), hooks);
+                removed |= left.is_empty();
+                // Changed: back under its own name, for the caller to keep.
+                changed.extend(
+                    left.into_iter()
+                        .filter(|left| *left == path || rename_back(left, &path))
+                        .map(|_| path.clone()),
+                );
                 continue;
             }
             // The app's own copy, made here and never under the project's

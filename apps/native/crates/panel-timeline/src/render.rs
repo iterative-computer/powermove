@@ -660,6 +660,13 @@ impl Scene {
     pub fn scroll_for(&self, id: &str) -> Option<f64> {
         self.positions.get(id).map(|i| self.tops[*i])
     }
+    /// The first row edge at or after a content-space y (the end of the last
+    /// row is one): where a pane under the rows starts without cutting one.
+    pub fn edge_from(&self, y: f64) -> Option<f64> {
+        self.tops
+            .get(self.tops.partition_point(|top| *top < y))
+            .copied()
+    }
     /// Content height of all rows, for scroll clamping.
     pub fn content_height(&self) -> f64 {
         self.tops.last().copied().unwrap_or(0.)
@@ -776,6 +783,11 @@ impl Scene {
             ax.push(json!({"id":row.id,"role":"row","label":row.accessibility_label,"rowIndex":i,"rowCount":self.total(),"selected":row.selected,"depth":row.depth,"focusable":false}));
         }
         // Outside the work area: veil track pixels only, after clips and keys.
+        // Names stand over the veil: it fades the strips toward the ground,
+        // and a name has to read there as well as inside the work area (on
+        // the palest strips of the light canvas a veiled name did not).
+        let (veil, veil_alpha) = t.work_area_veil();
+        let names = ops.len();
         for (side, (a, b)) in [
             (v.layer_column, v.x(self.work_area.0)),
             (v.x(self.work_area.1), v.width),
@@ -784,15 +796,20 @@ impl Scene {
         .enumerate()
         {
             if let Some(r) = span(a, b, m.ruler as f64, v.height - m.ruler as f64, v) {
-                let mut o = Op::new(
-                    format!("work-area-veil:{side}"),
-                    "rect",
-                    r,
-                    c.panel_secondary,
-                );
-                o.opacity = 0.3;
+                let mut o = Op::new(format!("work-area-veil:{side}"), "rect", r, veil);
+                o.opacity = veil_alpha as f64;
                 ops.push(o);
             }
+        }
+        if ops.len() > names {
+            let named = |o: &Op| {
+                o.shape == "text"
+                    && (o.id.starts_with("clip-content:") || o.id.starts_with("cue-text:"))
+            };
+            let (over, mut under): (Vec<Op>, Vec<Op>) =
+                std::mem::take(&mut ops).into_iter().partition(named);
+            under.extend(over);
+            ops = under;
         }
         // The layer column's edge, over row fills and clips: a hairline (the
         // resize handle's mark).

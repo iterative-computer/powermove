@@ -7,12 +7,14 @@ use std::sync::Arc;
 use std::time::Instant;
 
 mod chrome;
+mod footage;
 mod layer_raster;
 mod media_prepare;
 mod material_capture;
 pub use material_capture::{MaterialCaptureRequest,MaterialPixels,MaterialCaptureStats};
 mod source;
 mod source_video;
+pub use footage::FrameFootage;
 pub use layer_raster::{LayerPixels, LayerRaster};
 pub use media_prepare::MediaPreparation;
 
@@ -164,6 +166,8 @@ pub struct Frame {
     pub svg_fallbacks: Vec<crate::SvgFallback>,
     /// The composition time rendered, in seconds.
     pub seconds: f64,
+    /// The footage in the picture, from the plan the frame was drawn with.
+    pub footage: FrameFootage,
 }
 
 /// One layer's text raster ([`Renderer::text_raster`]).
@@ -198,6 +202,8 @@ pub struct Rendered {
     /// SVG layers drawn by the declared resvg fallback, with the reason.
     pub svg_fallbacks: Vec<crate::SvgFallback>,
     pub seconds: f64,
+    /// The footage in the picture, from the plan the frame was drawn with.
+    pub footage: FrameFootage,
     /// Where each top-level layer was drawn: its content quad in output
     /// pixels, top-down, corners in the order (0,0), (1,0), (1,1), (0,1)
     /// of the layer's unit quad (the viewer's overlay geometry, section 18
@@ -1793,6 +1799,7 @@ impl Renderer {
             failures: r.failures,
             svg_fallbacks: r.svg_fallbacks,
             seconds: r.seconds,
+            footage: r.footage,
         })
     }
 
@@ -2180,6 +2187,7 @@ impl Renderer {
         if !build.compat_missing.is_empty() {
             return Err(RenderError::CompatPending(build.compat_missing));
         }
+        let footage = self.footage_of(&plan, w, h);
         let region = request.region.map(|r| Region {
             x: r.x,
             y: r.y,
@@ -2441,6 +2449,7 @@ impl Renderer {
             failures,
             svg_fallbacks,
             seconds,
+            footage,
             stand_ins: std::mem::take(&mut self.media.stand_ins),
         })
     }
@@ -2560,50 +2569,10 @@ impl Renderer {
         request: &RenderRequest,
         assets: &dyn AssetResolver,
     ) -> Result<Option<PassThrough>, RenderError> {
-        request.validate()?;
-        let (plan, _) = self.plan(document, composition, time, request, assets)?;
-        let [draw] = plan.draws.as_slice() else {
-            return Ok(None);
-        };
-        // Raster content reaches the sampler as a placed draw; only a flat
-        // (non-2.5D) placement can be a 1:1 copy.
-        let content = match &draw.content {
-            plan::Content::Placed(p) if p.plane.is_none() => &p.content,
-            other => other,
-        };
-        let plan::Content::Texture { source, uv, alpha } = content else {
-            return Ok(None);
-        };
-        // An interpreted source is read differently from its file (color,
-        // geometry, or frame timing), so its planes are never copied.
-        let plan::Source::Video {
-            sequence: false,
-            path,
-            time,
-            interpret: None,
-            ..
-        } = source
-        else {
-            return Ok(None);
-        };
-        let (w, h) = (request.output_size.width, request.output_size.height);
-        let size = self
-            .media
-            .video_size(path)
-            .map_err(|e| RenderError::Media(format!("{e:?}")))?;
-        let full = [f64::from(w), 0.0, 0.0, f64::from(h), 0.0, 0.0];
-        let untransformed = draw.matrix == full
-            && *uv == [0.0, 0.0, 1.0, 1.0]
-            && size == (w, h)
-            && request.region.is_none();
-        Ok(Some(PassThrough {
-            path: path.clone(),
-            seconds: *time,
-            facts: pm_color::chroma::FrameFacts {
-                single_source: true,
-                untransformed,
-                effect_free: *alpha == 1.0,
-            },
+        let footage = self.footage(document, composition, time, request, assets)?;
+        Ok(footage.candidate.map(|mut candidate| {
+            candidate.facts.untransformed &= request.region.is_none();
+            candidate
         }))
     }
 

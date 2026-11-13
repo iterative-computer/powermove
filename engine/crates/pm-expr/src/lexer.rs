@@ -38,9 +38,53 @@ impl Token {
     }
 }
 
-/// A parse failure: the `SyntaxError` message `expression.ts` throws.
+/// A parse failure: the `SyntaxError` message `expression.ts` throws, and
+/// where in the source it happened when the message names a place.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SyntaxError(pub String);
+pub struct SyntaxError(pub String, pub Option<Location>);
+
+/// A place in an expression's source: `offset` in UTF-16 code units (the
+/// number the message ends with), and the 1-based line and column (in
+/// UTF-16 code units) an editor marks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Location {
+    pub offset: usize,
+    pub line: usize,
+    pub column: usize,
+}
+
+impl SyntaxError {
+    /// A failure at `offset`; its line and column come from [`Self::locate`].
+    pub(crate) fn at(message: String, offset: usize) -> Self {
+        Self(
+            message,
+            Some(Location {
+                offset,
+                line: 0,
+                column: 0,
+            }),
+        )
+    }
+    /// A failure that names no place (too complex, too many arguments).
+    pub(crate) fn plain(message: impl Into<String>) -> Self {
+        Self(message.into(), None)
+    }
+    /// Fills in the line and column of the place in `source`.
+    pub(crate) fn locate(mut self, source: &[u16]) -> Self {
+        if let Some(l) = &mut self.1 {
+            let before = &source[..l.offset.min(source.len())];
+            l.line = 1 + before.iter().filter(|u| **u == u16::from(b'\n')).count();
+            l.column = 1 + before
+                .iter()
+                .rposition(|u| *u == u16::from(b'\n'))
+                .map_or(before.len(), |i| before.len() - i - 1);
+        }
+        self
+    }
+    pub fn location(&self) -> Option<Location> {
+        self.1
+    }
+}
 
 impl std::fmt::Display for SyntaxError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -140,7 +184,7 @@ impl<'s> Lexer<'s> {
                 });
             }
         }
-        Err(SyntaxError(format!("Unsupported token at {at}")))
+        Err(SyntaxError::at(format!("Unsupported token at {at}"), at))
     }
 
     fn starts_with(&self, at: usize, op: &str) -> bool {
@@ -188,7 +232,7 @@ impl<'s> Lexer<'s> {
         self.at = end;
         let value = parse_decimal_literal(&text);
         if !value.is_finite() {
-            return Err(SyntaxError(format!("Invalid number at {at}")));
+            return Err(SyntaxError::at(format!("Invalid number at {at}"), at));
         }
         Ok(Token {
             tok: Tok::Number(value),
@@ -209,7 +253,7 @@ impl<'s> Lexer<'s> {
                 });
             }
             if c == u16::from(b'\n') || c == u16::from(b'\r') {
-                return Err(SyntaxError(format!("Unterminated string at {at}")));
+                return Err(SyntaxError::at(format!("Unterminated string at {at}"), at));
             }
             if c != u16::from(b'\\') {
                 value.push(c);
@@ -230,7 +274,7 @@ impl<'s> Lexer<'s> {
             };
             value.push(replaced);
         }
-        Err(SyntaxError(format!("Unterminated string at {at}")))
+        Err(SyntaxError::at(format!("Unterminated string at {at}"), at))
     }
 }
 

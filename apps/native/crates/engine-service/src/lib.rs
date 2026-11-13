@@ -75,6 +75,23 @@ pub struct OverlayLine {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct OverlayGeometry {
     lines: Vec<OverlayLine>,
+    channels: Channels,
+}
+/// What the viewer shows of the picture: a display mode of the presenter
+/// alone. It never reaches a render, the render cache, a capture, the
+/// scopes or an export (a capture is drawn again without it).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(u32)]
+pub enum Channels {
+    #[default]
+    Rgb = 0,
+    Red = 1,
+    Green = 2,
+    Blue = 3,
+    /// Alpha as grey: white where opaque.
+    Alpha = 4,
+    /// The picture, with what is transparent tinted.
+    AlphaOverlay = 5,
 }
 #[repr(C)]
 pub(crate) struct OverlayParams {
@@ -82,7 +99,8 @@ pub(crate) struct OverlayParams {
     reduced: u32,
     /// The source is the whole composition (a disk render cache frame).
     pub(crate) whole: u32,
-    pad: u32,
+    /// [`Channels`]: the viewer's display mode (0 shows the picture).
+    pub(crate) channels: u32,
     output: [f32; 4],
     canvas: [f32; 4],
     drawable: [f32; 2],
@@ -105,7 +123,14 @@ impl OverlayGeometry {
                     && (0. ..=1.).contains(&l.color[3])),
             "invalid overlay geometry"
         );
-        Ok(Self { lines })
+        Ok(Self {
+            lines,
+            channels: Channels::Rgb,
+        })
+    }
+    /// The same lines with the viewer showing `channels` of the picture.
+    pub fn with_channels(self, channels: Channels) -> Self {
+        Self { channels, ..self }
     }
     /// The lines that can be drawn, at most [`Self::MAX_LINES`] of them: a
     /// line with a non-finite end or color (geometry divided by a zero-size
@@ -123,6 +148,7 @@ impl OverlayGeometry {
                 })
                 .take(Self::MAX_LINES)
                 .collect(),
+            channels: Channels::Rgb,
         }
     }
     fn params(&self) -> OverlayParams {
@@ -130,7 +156,7 @@ impl OverlayGeometry {
             count: self.lines.len() as u32,
             reduced: 0,
             whole: 0,
-            pad: 0,
+            channels: self.channels as u32,
             output: [0.; 4],
             canvas: [0.; 4],
             drawable: [0.; 2],
@@ -177,8 +203,10 @@ fn viewer_media(
     Arc<pm_export::render::MediaPaths>,
 ) {
     let paths = |m: &MediaCatalog| {
+        let paths = m.viewer_paths(mode);
         Arc::new(pm_export::render::MediaPaths {
-            paths: m.viewer_paths(mode),
+            originals: m.copied(&paths),
+            paths,
             resolving: m.resolving.clone(),
         })
     };
@@ -215,9 +243,23 @@ impl MediaCatalog {
             paths.extend(self.proxies.clone());
         }
         pm_export::render::MediaPaths {
+            originals: self.copied(&paths),
             paths,
             ..Default::default()
         }
+    }
+    /// The originals of the assets `paths` draws from a proxy or optimized
+    /// copy: Interpret Footage describes the original, and the renderer
+    /// carries it to the copy (`pm_render::footage::for_copy`).
+    fn copied(
+        &self,
+        paths: &BTreeMap<String, std::path::PathBuf>,
+    ) -> BTreeMap<String, std::path::PathBuf> {
+        self.originals
+            .iter()
+            .filter(|(id, original)| paths.get(*id).is_some_and(|path| path != *original))
+            .map(|(id, original)| (id.clone(), original.clone()))
+            .collect()
     }
     /// The file the viewer reads for each asset in `mode`.
     pub fn viewer_paths(&self, mode: MediaMode) -> BTreeMap<String, std::path::PathBuf> {
@@ -3334,17 +3376,35 @@ impl Headless {
         spec: FrameSpec,
         overlays: &OverlayGeometry,
     ) -> Result<Vec<[f64; 3]>> {
+        Ok(self.frame_spec_read(scene, spec, overlays)?.0)
+    }
+    /// Reads rendered frames from `disk` where a viewer's engine would: a
+    /// playing, dragged or paused frame that is on disk is presented from
+    /// it instead of drawn.
+    pub fn read_rendered_frames(&mut self, disk: render_cache::DiskFrames) {
+        self.engine.disk = Some(disk);
+    }
+    /// [`Self::frame_spec_settled`], and whether the picture was a rendered
+    /// frame read from disk ([`Self::read_rendered_frames`]).
+    pub fn frame_spec_read(
+        &mut self,
+        scene: &Scene,
+        spec: FrameSpec,
+        overlays: &OverlayGeometry,
+    ) -> Result<(Vec<[f64; 3]>, bool)> {
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
         loop {
+            let trace = Arc::new(Mutex::new(trace::Trace::default()));
             match self
                 .engine
-                .frame(scene, spec, None, overlays, true, Arc::default())
+                .frame(scene, spec, None, overlays, true, trace.clone())
             {
                 Ok(s) => {
                     let s = s.ok_or_else(|| anyhow::anyhow!("no offscreen target"))?;
                     s.commit();
                     s.complete()?;
-                    return Ok(s.pixels());
+                    let from_disk = trace.lock().unwrap().disk == 2;
+                    return Ok((s.pixels(), from_disk));
                 }
                 Err(e) if render::transient(&e) && std::time::Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_secs_f64(RETRY_SECONDS));

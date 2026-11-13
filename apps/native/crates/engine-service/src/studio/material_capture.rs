@@ -506,6 +506,7 @@ impl DocumentSource {
         let mut frames = HashMap::new();
         let resolver = pm_render::MapResolver {
             paths: self.media.paths.clone(),
+            originals: self.media.originals.clone(),
         };
         for (owner, source) in refs {
             let binding_key = (owner.clone(), map_key(&source));

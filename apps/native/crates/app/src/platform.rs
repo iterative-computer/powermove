@@ -73,17 +73,35 @@ pub fn terminations() -> async_channel::Receiver<()> {
         .clone()
 }
 
+/// Puts a file panel on `window` as a sheet (`child_window::sheet`; a
+/// dropped panel drops `done` and its sender: cancelled).
+fn begin_panel(
+    panel: &objc2_app_kit::NSSavePanel,
+    window: &NSWindow,
+    done: block2::RcBlock<dyn Fn(NSModalResponse)>,
+) {
+    use objc2::Message;
+    let (on, shown) = (window.retain(), panel.retain());
+    gpui_macos::child_window::sheet(
+        window,
+        panel,
+        move || shown.beginSheetModalForWindow_completionHandler(&on, &done),
+        || {},
+    );
+}
+
 /// An open sheet that takes `.cube` files.
-pub fn cube_file(window: &NSWindow) -> async_channel::Receiver<Option<PathBuf>> {
+pub fn lut_file(window: &NSWindow) -> async_channel::Receiver<Option<PathBuf>> {
     let (tx, rx) = async_channel::bounded(1);
     let mtm = MainThreadMarker::new().unwrap();
     let panel = NSOpenPanel::openPanel(mtm);
     panel.setCanChooseDirectories(false);
     panel.setAllowsMultipleSelection(false);
-    panel.setMessage(Some(&NSString::from_str("Choose a .cube LUT")));
+    panel.setMessage(Some(&NSString::from_str("Choose a .cube or .3dl LUT")));
     #[allow(deprecated)]
     panel.setAllowedFileTypes(Some(&objc2_foundation::NSArray::from_retained_slice(&[
         NSString::from_str("cube"),
+        NSString::from_str("3dl"),
     ])));
     let retained = panel.clone();
     let done = block2::RcBlock::new(move |result: NSModalResponse| {
@@ -94,7 +112,7 @@ pub fn cube_file(window: &NSWindow) -> async_channel::Receiver<Option<PathBuf>> 
             .map(|p| PathBuf::from(p.to_string()));
         let _ = tx.try_send(path);
     });
-    panel.beginSheetModalForWindow_completionHandler(&sheet_host(window), &done);
+    begin_panel(&panel, &sheet_host(window), done);
     rx
 }
 
@@ -131,7 +149,7 @@ pub fn paths_named(
                 .map(|p| PathBuf::from(p.to_string()));
             let _ = tx.try_send(path);
         });
-        panel.beginSheetModalForWindow_completionHandler(&sheet_host(window), &done);
+        begin_panel(&panel, &sheet_host(window), done);
     } else {
         let panel = NSOpenPanel::openPanel(mtm);
         panel.setCanChooseDirectories(false);
@@ -145,7 +163,7 @@ pub fn paths_named(
                 .map(|p| PathBuf::from(p.to_string()));
             let _ = tx.try_send(path);
         });
-        panel.beginSheetModalForWindow_completionHandler(&sheet_host(window), &done);
+        begin_panel(&panel, &sheet_host(window), done);
     }
     rx
 }
@@ -343,7 +361,7 @@ pub fn choose_paths(
         };
         let _ = tx.try_send(paths);
     });
-    panel.beginSheetModalForWindow_completionHandler(&sheet_host(window), &done);
+    begin_panel(&panel, &sheet_host(window), done);
     rx
 }
 
@@ -639,7 +657,7 @@ pub fn export_destination(
             .map(|(parent, name)| parent.join(name));
         let _ = tx.try_send(path);
     });
-    panel.beginSheetModalForWindow_completionHandler(&sheet_host(window), &done);
+    begin_panel(&panel, &sheet_host(window), done);
     rx
 }
 

@@ -1447,6 +1447,179 @@ exports[`wire snapshot: selected video 1`] = `
                           "text": "",
                           "type": "div",
                         },
+                        {
+                          "children": [
+                            {
+                              "children": [
+                                {
+                                  "children": [
+                                    {
+                                      "children": [],
+                                      "props": {},
+                                      "text": "Color Tag",
+                                      "type": "text",
+                                    },
+                                  ],
+                                  "props": {
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.text",
+                                      },
+                                      "fontSize": {
+                                        "token": "typography.title",
+                                      },
+                                    },
+                                  },
+                                  "text": "",
+                                  "type": "text",
+                                },
+                                {
+                                  "children": [
+                                    {
+                                      "children": [],
+                                      "props": {},
+                                      "text": "How the file labels its color. The picture is the same either way.",
+                                      "type": "text",
+                                    },
+                                  ],
+                                  "props": {
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.muted",
+                                      },
+                                      "fontSize": {
+                                        "token": "typography.label",
+                                      },
+                                    },
+                                  },
+                                  "text": "",
+                                  "type": "text",
+                                },
+                              ],
+                              "props": {
+                                "data-pm-slot": "label",
+                                "style": {
+                                  "display": "flex",
+                                  "flexDirection": "column",
+                                  "flexGrow": 1,
+                                  "gap": {
+                                    "token": "metrics.border",
+                                  },
+                                },
+                              },
+                              "text": "",
+                              "type": "div",
+                            },
+                            {
+                              "children": [
+                                {
+                                  "children": [],
+                                  "props": {
+                                    "binding": "fixture:export:colorTag",
+                                    "control": "select",
+                                    "data-pm-component": "pop-up-button",
+                                    "disabled": false,
+                                    "id": "export.colorTag",
+                                    "label": "Color Tag",
+                                    "metadata": {
+                                      "pmKit": {
+                                        "menu": [
+                                          {
+                                            "label": "Rec.709 (QuickTime and Safari)",
+                                            "v": "rec709QuickTime",
+                                          },
+                                          {
+                                            "label": "Rec.709",
+                                            "v": "rec709",
+                                          },
+                                        ],
+                                      },
+                                    },
+                                    "options": [
+                                      {
+                                        "label": "Rec.709 (QuickTime and Safari)",
+                                        "v": "rec709QuickTime",
+                                      },
+                                      {
+                                        "label": "Rec.709",
+                                        "v": "rec709",
+                                      },
+                                    ],
+                                    "style": {
+                                      "background": {
+                                        "token": "colors.field",
+                                      },
+                                      "borderRadius": {
+                                        "token": "metrics.control_radius",
+                                      },
+                                      "color": {
+                                        "token": "colors.text",
+                                      },
+                                      "fontSize": {
+                                        "token": "typography.body",
+                                      },
+                                      "height": {
+                                        "token": "metrics.control",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                    "title": "How the file labels its color. The picture is the same either way.",
+                                    "value": "rec709QuickTime",
+                                  },
+                                  "text": "",
+                                  "type": "button",
+                                },
+                              ],
+                              "props": {
+                                "data-pm-slot": "control",
+                                "style": {
+                                  "alignItems": "center",
+                                  "display": "flex",
+                                  "flexShrink": 0,
+                                },
+                              },
+                              "text": "",
+                              "type": "div",
+                            },
+                          ],
+                          "props": {
+                            "data-pm-component": "form-row",
+                            "id": "export.row.colorTag",
+                            "label": "Color Tag",
+                            "role": "group",
+                            "style": {
+                              "alignItems": "center",
+                              "display": "flex",
+                              "flexDirection": "row",
+                              "gap": {
+                                "token": "metrics.inset",
+                              },
+                              "justifyContent": "space-between",
+                              "minHeight": {
+                                "token": "metrics.form_row",
+                              },
+                              "paddingBottom": {
+                                "token": "metrics.gap",
+                              },
+                              "paddingLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "paddingRight": {
+                                "token": "metrics.inset",
+                              },
+                              "paddingTop": {
+                                "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
                       ],
                       "props": {
                         "data-pm-component": "form-group",
@@ -2627,6 +2800,9 @@ exports[`wire snapshot: selected video 1`] = `
                                       },
                                       "minWidth": {
                                         "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.value_column",
                                       },
                                     },
                                     "title": "Name these settings to reuse them in any project.",
@@ -4471,6 +4647,179 @@ exports[`wire snapshot: known capabilities (loading N/A) 1`] = `
                           "text": "",
                           "type": "div",
                         },
+                        {
+                          "children": [
+                            {
+                              "children": [
+                                {
+                                  "children": [
+                                    {
+                                      "children": [],
+                                      "props": {},
+                                      "text": "Color Tag",
+                                      "type": "text",
+                                    },
+                                  ],
+                                  "props": {
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.text",
+                                      },
+                                      "fontSize": {
+                                        "token": "typography.title",
+                                      },
+                                    },
+                                  },
+                                  "text": "",
+                                  "type": "text",
+                                },
+                                {
+                                  "children": [
+                                    {
+                                      "children": [],
+                                      "props": {},
+                                      "text": "How the file labels its color. The picture is the same either way.",
+                                      "type": "text",
+                                    },
+                                  ],
+                                  "props": {
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.muted",
+                                      },
+                                      "fontSize": {
+                                        "token": "typography.label",
+                                      },
+                                    },
+                                  },
+                                  "text": "",
+                                  "type": "text",
+                                },
+                              ],
+                              "props": {
+                                "data-pm-slot": "label",
+                                "style": {
+                                  "display": "flex",
+                                  "flexDirection": "column",
+                                  "flexGrow": 1,
+                                  "gap": {
+                                    "token": "metrics.border",
+                                  },
+                                },
+                              },
+                              "text": "",
+                              "type": "div",
+                            },
+                            {
+                              "children": [
+                                {
+                                  "children": [],
+                                  "props": {
+                                    "binding": "fixture:export:colorTag",
+                                    "control": "select",
+                                    "data-pm-component": "pop-up-button",
+                                    "disabled": false,
+                                    "id": "export.colorTag",
+                                    "label": "Color Tag",
+                                    "metadata": {
+                                      "pmKit": {
+                                        "menu": [
+                                          {
+                                            "label": "Rec.709 (QuickTime and Safari)",
+                                            "v": "rec709QuickTime",
+                                          },
+                                          {
+                                            "label": "Rec.709",
+                                            "v": "rec709",
+                                          },
+                                        ],
+                                      },
+                                    },
+                                    "options": [
+                                      {
+                                        "label": "Rec.709 (QuickTime and Safari)",
+                                        "v": "rec709QuickTime",
+                                      },
+                                      {
+                                        "label": "Rec.709",
+                                        "v": "rec709",
+                                      },
+                                    ],
+                                    "style": {
+                                      "background": {
+                                        "token": "colors.field",
+                                      },
+                                      "borderRadius": {
+                                        "token": "metrics.control_radius",
+                                      },
+                                      "color": {
+                                        "token": "colors.text",
+                                      },
+                                      "fontSize": {
+                                        "token": "typography.body",
+                                      },
+                                      "height": {
+                                        "token": "metrics.control",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                    "title": "How the file labels its color. The picture is the same either way.",
+                                    "value": "rec709QuickTime",
+                                  },
+                                  "text": "",
+                                  "type": "button",
+                                },
+                              ],
+                              "props": {
+                                "data-pm-slot": "control",
+                                "style": {
+                                  "alignItems": "center",
+                                  "display": "flex",
+                                  "flexShrink": 0,
+                                },
+                              },
+                              "text": "",
+                              "type": "div",
+                            },
+                          ],
+                          "props": {
+                            "data-pm-component": "form-row",
+                            "id": "export.row.colorTag",
+                            "label": "Color Tag",
+                            "role": "group",
+                            "style": {
+                              "alignItems": "center",
+                              "display": "flex",
+                              "flexDirection": "row",
+                              "gap": {
+                                "token": "metrics.inset",
+                              },
+                              "justifyContent": "space-between",
+                              "minHeight": {
+                                "token": "metrics.form_row",
+                              },
+                              "paddingBottom": {
+                                "token": "metrics.gap",
+                              },
+                              "paddingLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "paddingRight": {
+                                "token": "metrics.inset",
+                              },
+                              "paddingTop": {
+                                "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
                       ],
                       "props": {
                         "data-pm-component": "form-group",
@@ -5651,6 +6000,9 @@ exports[`wire snapshot: known capabilities (loading N/A) 1`] = `
                                       },
                                       "minWidth": {
                                         "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.value_column",
                                       },
                                     },
                                     "title": "Name these settings to reuse them in any project.",
@@ -7494,6 +7846,179 @@ exports[`wire snapshot: disabled audio and unset work area 1`] = `
                           "text": "",
                           "type": "div",
                         },
+                        {
+                          "children": [
+                            {
+                              "children": [
+                                {
+                                  "children": [
+                                    {
+                                      "children": [],
+                                      "props": {},
+                                      "text": "Color Tag",
+                                      "type": "text",
+                                    },
+                                  ],
+                                  "props": {
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.text",
+                                      },
+                                      "fontSize": {
+                                        "token": "typography.title",
+                                      },
+                                    },
+                                  },
+                                  "text": "",
+                                  "type": "text",
+                                },
+                                {
+                                  "children": [
+                                    {
+                                      "children": [],
+                                      "props": {},
+                                      "text": "How the file labels its color. The picture is the same either way.",
+                                      "type": "text",
+                                    },
+                                  ],
+                                  "props": {
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.muted",
+                                      },
+                                      "fontSize": {
+                                        "token": "typography.label",
+                                      },
+                                    },
+                                  },
+                                  "text": "",
+                                  "type": "text",
+                                },
+                              ],
+                              "props": {
+                                "data-pm-slot": "label",
+                                "style": {
+                                  "display": "flex",
+                                  "flexDirection": "column",
+                                  "flexGrow": 1,
+                                  "gap": {
+                                    "token": "metrics.border",
+                                  },
+                                },
+                              },
+                              "text": "",
+                              "type": "div",
+                            },
+                            {
+                              "children": [
+                                {
+                                  "children": [],
+                                  "props": {
+                                    "binding": "fixture:export:colorTag",
+                                    "control": "select",
+                                    "data-pm-component": "pop-up-button",
+                                    "disabled": false,
+                                    "id": "export.colorTag",
+                                    "label": "Color Tag",
+                                    "metadata": {
+                                      "pmKit": {
+                                        "menu": [
+                                          {
+                                            "label": "Rec.709 (QuickTime and Safari)",
+                                            "v": "rec709QuickTime",
+                                          },
+                                          {
+                                            "label": "Rec.709",
+                                            "v": "rec709",
+                                          },
+                                        ],
+                                      },
+                                    },
+                                    "options": [
+                                      {
+                                        "label": "Rec.709 (QuickTime and Safari)",
+                                        "v": "rec709QuickTime",
+                                      },
+                                      {
+                                        "label": "Rec.709",
+                                        "v": "rec709",
+                                      },
+                                    ],
+                                    "style": {
+                                      "background": {
+                                        "token": "colors.field",
+                                      },
+                                      "borderRadius": {
+                                        "token": "metrics.control_radius",
+                                      },
+                                      "color": {
+                                        "token": "colors.text",
+                                      },
+                                      "fontSize": {
+                                        "token": "typography.body",
+                                      },
+                                      "height": {
+                                        "token": "metrics.control",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                    "title": "How the file labels its color. The picture is the same either way.",
+                                    "value": "rec709QuickTime",
+                                  },
+                                  "text": "",
+                                  "type": "button",
+                                },
+                              ],
+                              "props": {
+                                "data-pm-slot": "control",
+                                "style": {
+                                  "alignItems": "center",
+                                  "display": "flex",
+                                  "flexShrink": 0,
+                                },
+                              },
+                              "text": "",
+                              "type": "div",
+                            },
+                          ],
+                          "props": {
+                            "data-pm-component": "form-row",
+                            "id": "export.row.colorTag",
+                            "label": "Color Tag",
+                            "role": "group",
+                            "style": {
+                              "alignItems": "center",
+                              "display": "flex",
+                              "flexDirection": "row",
+                              "gap": {
+                                "token": "metrics.inset",
+                              },
+                              "justifyContent": "space-between",
+                              "minHeight": {
+                                "token": "metrics.form_row",
+                              },
+                              "paddingBottom": {
+                                "token": "metrics.gap",
+                              },
+                              "paddingLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "paddingRight": {
+                                "token": "metrics.inset",
+                              },
+                              "paddingTop": {
+                                "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
                       ],
                       "props": {
                         "data-pm-component": "form-group",
@@ -8674,6 +9199,9 @@ exports[`wire snapshot: disabled audio and unset work area 1`] = `
                                       },
                                       "minWidth": {
                                         "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.value_column",
                                       },
                                     },
                                     "title": "Name these settings to reuse them in any project.",
@@ -10367,6 +10895,336 @@ exports[`wire snapshot: ProRes alpha 1`] = `
                           "text": "",
                           "type": "div",
                         },
+                        {
+                          "children": [
+                            {
+                              "children": [
+                                {
+                                  "children": [
+                                    {
+                                      "children": [],
+                                      "props": {},
+                                      "text": "Color Tag",
+                                      "type": "text",
+                                    },
+                                  ],
+                                  "props": {
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.text",
+                                      },
+                                      "fontSize": {
+                                        "token": "typography.title",
+                                      },
+                                    },
+                                  },
+                                  "text": "",
+                                  "type": "text",
+                                },
+                                {
+                                  "children": [
+                                    {
+                                      "children": [],
+                                      "props": {},
+                                      "text": "How the file labels its color. The picture is the same either way.",
+                                      "type": "text",
+                                    },
+                                  ],
+                                  "props": {
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.muted",
+                                      },
+                                      "fontSize": {
+                                        "token": "typography.label",
+                                      },
+                                    },
+                                  },
+                                  "text": "",
+                                  "type": "text",
+                                },
+                              ],
+                              "props": {
+                                "data-pm-slot": "label",
+                                "style": {
+                                  "display": "flex",
+                                  "flexDirection": "column",
+                                  "flexGrow": 1,
+                                  "gap": {
+                                    "token": "metrics.border",
+                                  },
+                                },
+                              },
+                              "text": "",
+                              "type": "div",
+                            },
+                            {
+                              "children": [
+                                {
+                                  "children": [],
+                                  "props": {
+                                    "binding": "fixture:export:colorTag",
+                                    "control": "select",
+                                    "data-pm-component": "pop-up-button",
+                                    "disabled": false,
+                                    "id": "export.colorTag",
+                                    "label": "Color Tag",
+                                    "metadata": {
+                                      "pmKit": {
+                                        "menu": [
+                                          {
+                                            "label": "Rec.709 (QuickTime and Safari)",
+                                            "v": "rec709QuickTime",
+                                          },
+                                          {
+                                            "label": "Rec.709",
+                                            "v": "rec709",
+                                          },
+                                        ],
+                                      },
+                                    },
+                                    "options": [
+                                      {
+                                        "label": "Rec.709 (QuickTime and Safari)",
+                                        "v": "rec709QuickTime",
+                                      },
+                                      {
+                                        "label": "Rec.709",
+                                        "v": "rec709",
+                                      },
+                                    ],
+                                    "style": {
+                                      "background": {
+                                        "token": "colors.field",
+                                      },
+                                      "borderRadius": {
+                                        "token": "metrics.control_radius",
+                                      },
+                                      "color": {
+                                        "token": "colors.text",
+                                      },
+                                      "fontSize": {
+                                        "token": "typography.body",
+                                      },
+                                      "height": {
+                                        "token": "metrics.control",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                    "title": "How the file labels its color. The picture is the same either way.",
+                                    "value": "rec709QuickTime",
+                                  },
+                                  "text": "",
+                                  "type": "button",
+                                },
+                              ],
+                              "props": {
+                                "data-pm-slot": "control",
+                                "style": {
+                                  "alignItems": "center",
+                                  "display": "flex",
+                                  "flexShrink": 0,
+                                },
+                              },
+                              "text": "",
+                              "type": "div",
+                            },
+                          ],
+                          "props": {
+                            "data-pm-component": "form-row",
+                            "id": "export.row.colorTag",
+                            "label": "Color Tag",
+                            "role": "group",
+                            "style": {
+                              "alignItems": "center",
+                              "display": "flex",
+                              "flexDirection": "row",
+                              "gap": {
+                                "token": "metrics.inset",
+                              },
+                              "justifyContent": "space-between",
+                              "minHeight": {
+                                "token": "metrics.form_row",
+                              },
+                              "paddingBottom": {
+                                "token": "metrics.gap",
+                              },
+                              "paddingLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "paddingRight": {
+                                "token": "metrics.inset",
+                              },
+                              "paddingTop": {
+                                "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [
+                                {
+                                  "children": [
+                                    {
+                                      "children": [],
+                                      "props": {},
+                                      "text": "Start Timecode",
+                                      "type": "text",
+                                    },
+                                  ],
+                                  "props": {
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.text",
+                                      },
+                                      "fontSize": {
+                                        "token": "typography.title",
+                                      },
+                                    },
+                                  },
+                                  "text": "",
+                                  "type": "text",
+                                },
+                                {
+                                  "children": [
+                                    {
+                                      "children": [],
+                                      "props": {},
+                                      "text": "Timecode of the first frame, as HH:MM:SS:FF, or ;FF for drop-frame. Leave empty to use the composition's time.",
+                                      "type": "text",
+                                    },
+                                  ],
+                                  "props": {
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.muted",
+                                      },
+                                      "fontSize": {
+                                        "token": "typography.label",
+                                      },
+                                    },
+                                  },
+                                  "text": "",
+                                  "type": "text",
+                                },
+                              ],
+                              "props": {
+                                "data-pm-slot": "label",
+                                "style": {
+                                  "display": "flex",
+                                  "flexDirection": "column",
+                                  "flexGrow": 1,
+                                  "gap": {
+                                    "token": "metrics.border",
+                                  },
+                                },
+                              },
+                              "text": "",
+                              "type": "div",
+                            },
+                            {
+                              "children": [
+                                {
+                                  "children": [],
+                                  "props": {
+                                    "binding": "fixture:export:timecode",
+                                    "control": "text",
+                                    "data-pm-component": "text-field",
+                                    "disabled": false,
+                                    "id": "export.timecode",
+                                    "label": "Start Timecode",
+                                    "metadata": {
+                                      "export": {
+                                        "placeholder": "00:00:00:00",
+                                      },
+                                    },
+                                    "style": {
+                                      "background": {
+                                        "token": "colors.field",
+                                      },
+                                      "borderRadius": {
+                                        "token": "metrics.control_radius",
+                                      },
+                                      "color": {
+                                        "token": "colors.text",
+                                      },
+                                      "fontSize": {
+                                        "token": "typography.body",
+                                      },
+                                      "height": {
+                                        "token": "metrics.field",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.value_column",
+                                      },
+                                    },
+                                    "title": "Timecode of the first frame, as HH:MM:SS:FF, or ;FF for drop-frame. Leave empty to use the composition's time.",
+                                    "value": "",
+                                  },
+                                  "text": "",
+                                  "type": "input",
+                                },
+                              ],
+                              "props": {
+                                "data-pm-slot": "control",
+                                "style": {
+                                  "alignItems": "center",
+                                  "display": "flex",
+                                  "flexShrink": 0,
+                                },
+                              },
+                              "text": "",
+                              "type": "div",
+                            },
+                          ],
+                          "props": {
+                            "data-pm-component": "form-row",
+                            "id": "export.row.timecode",
+                            "label": "Start Timecode",
+                            "role": "group",
+                            "style": {
+                              "alignItems": "center",
+                              "display": "flex",
+                              "flexDirection": "row",
+                              "gap": {
+                                "token": "metrics.inset",
+                              },
+                              "justifyContent": "space-between",
+                              "minHeight": {
+                                "token": "metrics.form_row",
+                              },
+                              "paddingBottom": {
+                                "token": "metrics.gap",
+                              },
+                              "paddingLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "paddingRight": {
+                                "token": "metrics.inset",
+                              },
+                              "paddingTop": {
+                                "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
                       ],
                       "props": {
                         "data-pm-component": "form-group",
@@ -10676,6 +11534,187 @@ exports[`wire snapshot: ProRes alpha 1`] = `
                             "data-pm-component": "form-row",
                             "id": "export.row.audio",
                             "label": "Include Audio",
+                            "role": "group",
+                            "style": {
+                              "alignItems": "center",
+                              "display": "flex",
+                              "flexDirection": "row",
+                              "gap": {
+                                "token": "metrics.inset",
+                              },
+                              "justifyContent": "space-between",
+                              "minHeight": {
+                                "token": "metrics.form_row",
+                              },
+                              "paddingBottom": {
+                                "token": "metrics.gap",
+                              },
+                              "paddingLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "paddingRight": {
+                                "token": "metrics.inset",
+                              },
+                              "paddingTop": {
+                                "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [
+                                {
+                                  "children": [
+                                    {
+                                      "children": [],
+                                      "props": {},
+                                      "text": "Audio Format",
+                                      "type": "text",
+                                    },
+                                  ],
+                                  "props": {
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.text",
+                                      },
+                                      "fontSize": {
+                                        "token": "typography.title",
+                                      },
+                                    },
+                                  },
+                                  "text": "",
+                                  "type": "text",
+                                },
+                                {
+                                  "children": [
+                                    {
+                                      "children": [],
+                                      "props": {},
+                                      "text": "Sample format of the audio track.",
+                                      "type": "text",
+                                    },
+                                  ],
+                                  "props": {
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.muted",
+                                      },
+                                      "fontSize": {
+                                        "token": "typography.label",
+                                      },
+                                    },
+                                  },
+                                  "text": "",
+                                  "type": "text",
+                                },
+                              ],
+                              "props": {
+                                "data-pm-slot": "label",
+                                "style": {
+                                  "display": "flex",
+                                  "flexDirection": "column",
+                                  "flexGrow": 1,
+                                  "gap": {
+                                    "token": "metrics.border",
+                                  },
+                                },
+                              },
+                              "text": "",
+                              "type": "div",
+                            },
+                            {
+                              "children": [
+                                {
+                                  "children": [],
+                                  "props": {
+                                    "binding": "fixture:export:audioCoding",
+                                    "control": "select",
+                                    "data-pm-component": "pop-up-button",
+                                    "disabled": false,
+                                    "id": "export.audioCoding",
+                                    "label": "Audio Format",
+                                    "metadata": {
+                                      "pmKit": {
+                                        "menu": [
+                                          {
+                                            "label": "24-bit PCM",
+                                            "v": "pcm24",
+                                          },
+                                          {
+                                            "label": "16-bit PCM",
+                                            "v": "pcm16",
+                                          },
+                                          {
+                                            "label": "32-bit float PCM",
+                                            "v": "pcmFloat",
+                                          },
+                                        ],
+                                      },
+                                    },
+                                    "options": [
+                                      {
+                                        "label": "24-bit PCM",
+                                        "v": "pcm24",
+                                      },
+                                      {
+                                        "label": "16-bit PCM",
+                                        "v": "pcm16",
+                                      },
+                                      {
+                                        "label": "32-bit float PCM",
+                                        "v": "pcmFloat",
+                                      },
+                                    ],
+                                    "style": {
+                                      "background": {
+                                        "token": "colors.field",
+                                      },
+                                      "borderRadius": {
+                                        "token": "metrics.control_radius",
+                                      },
+                                      "color": {
+                                        "token": "colors.text",
+                                      },
+                                      "fontSize": {
+                                        "token": "typography.body",
+                                      },
+                                      "height": {
+                                        "token": "metrics.control",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                    "title": "Sample format of the audio track.",
+                                    "value": "pcm24",
+                                  },
+                                  "text": "",
+                                  "type": "button",
+                                },
+                              ],
+                              "props": {
+                                "data-pm-slot": "control",
+                                "style": {
+                                  "alignItems": "center",
+                                  "display": "flex",
+                                  "flexShrink": 0,
+                                },
+                              },
+                              "text": "",
+                              "type": "div",
+                            },
+                          ],
+                          "props": {
+                            "data-pm-component": "form-row",
+                            "id": "export.row.audioCoding",
+                            "label": "Audio Format",
                             "role": "group",
                             "style": {
                               "alignItems": "center",
@@ -11689,6 +12728,9 @@ exports[`wire snapshot: ProRes alpha 1`] = `
                                       },
                                       "minWidth": {
                                         "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.value_column",
                                       },
                                     },
                                     "title": "Name these settings to reuse them in any project.",
@@ -14340,6 +15382,9 @@ exports[`wire snapshot: PNG sequence 1`] = `
                                       "minWidth": {
                                         "token": "metrics.hit",
                                       },
+                                      "width": {
+                                        "token": "metrics.value_column",
+                                      },
                                     },
                                     "title": "Name these settings to reuse them in any project.",
                                     "value": "",
@@ -16454,6 +17499,9 @@ exports[`wire snapshot: still 1`] = `
                                       },
                                       "minWidth": {
                                         "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.value_column",
                                       },
                                     },
                                     "title": "Name these settings to reuse them in any project.",
@@ -18925,6 +19973,179 @@ exports[`wire snapshot: no captions 1`] = `
                           "text": "",
                           "type": "div",
                         },
+                        {
+                          "children": [
+                            {
+                              "children": [
+                                {
+                                  "children": [
+                                    {
+                                      "children": [],
+                                      "props": {},
+                                      "text": "Color Tag",
+                                      "type": "text",
+                                    },
+                                  ],
+                                  "props": {
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.text",
+                                      },
+                                      "fontSize": {
+                                        "token": "typography.title",
+                                      },
+                                    },
+                                  },
+                                  "text": "",
+                                  "type": "text",
+                                },
+                                {
+                                  "children": [
+                                    {
+                                      "children": [],
+                                      "props": {},
+                                      "text": "How the file labels its color. The picture is the same either way.",
+                                      "type": "text",
+                                    },
+                                  ],
+                                  "props": {
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.muted",
+                                      },
+                                      "fontSize": {
+                                        "token": "typography.label",
+                                      },
+                                    },
+                                  },
+                                  "text": "",
+                                  "type": "text",
+                                },
+                              ],
+                              "props": {
+                                "data-pm-slot": "label",
+                                "style": {
+                                  "display": "flex",
+                                  "flexDirection": "column",
+                                  "flexGrow": 1,
+                                  "gap": {
+                                    "token": "metrics.border",
+                                  },
+                                },
+                              },
+                              "text": "",
+                              "type": "div",
+                            },
+                            {
+                              "children": [
+                                {
+                                  "children": [],
+                                  "props": {
+                                    "binding": "fixture:export:colorTag",
+                                    "control": "select",
+                                    "data-pm-component": "pop-up-button",
+                                    "disabled": false,
+                                    "id": "export.colorTag",
+                                    "label": "Color Tag",
+                                    "metadata": {
+                                      "pmKit": {
+                                        "menu": [
+                                          {
+                                            "label": "Rec.709 (QuickTime and Safari)",
+                                            "v": "rec709QuickTime",
+                                          },
+                                          {
+                                            "label": "Rec.709",
+                                            "v": "rec709",
+                                          },
+                                        ],
+                                      },
+                                    },
+                                    "options": [
+                                      {
+                                        "label": "Rec.709 (QuickTime and Safari)",
+                                        "v": "rec709QuickTime",
+                                      },
+                                      {
+                                        "label": "Rec.709",
+                                        "v": "rec709",
+                                      },
+                                    ],
+                                    "style": {
+                                      "background": {
+                                        "token": "colors.field",
+                                      },
+                                      "borderRadius": {
+                                        "token": "metrics.control_radius",
+                                      },
+                                      "color": {
+                                        "token": "colors.text",
+                                      },
+                                      "fontSize": {
+                                        "token": "typography.body",
+                                      },
+                                      "height": {
+                                        "token": "metrics.control",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                    "title": "How the file labels its color. The picture is the same either way.",
+                                    "value": "rec709QuickTime",
+                                  },
+                                  "text": "",
+                                  "type": "button",
+                                },
+                              ],
+                              "props": {
+                                "data-pm-slot": "control",
+                                "style": {
+                                  "alignItems": "center",
+                                  "display": "flex",
+                                  "flexShrink": 0,
+                                },
+                              },
+                              "text": "",
+                              "type": "div",
+                            },
+                          ],
+                          "props": {
+                            "data-pm-component": "form-row",
+                            "id": "export.row.colorTag",
+                            "label": "Color Tag",
+                            "role": "group",
+                            "style": {
+                              "alignItems": "center",
+                              "display": "flex",
+                              "flexDirection": "row",
+                              "gap": {
+                                "token": "metrics.inset",
+                              },
+                              "justifyContent": "space-between",
+                              "minHeight": {
+                                "token": "metrics.form_row",
+                              },
+                              "paddingBottom": {
+                                "token": "metrics.gap",
+                              },
+                              "paddingLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "paddingRight": {
+                                "token": "metrics.inset",
+                              },
+                              "paddingTop": {
+                                "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
                       ],
                       "props": {
                         "data-pm-component": "form-group",
@@ -19728,6 +20949,9 @@ exports[`wire snapshot: no captions 1`] = `
                                       },
                                       "minWidth": {
                                         "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.value_column",
                                       },
                                     },
                                     "title": "Name these settings to reuse them in any project.",
@@ -21570,6 +22794,179 @@ exports[`wire snapshot: multiple captions 1`] = `
                           "text": "",
                           "type": "div",
                         },
+                        {
+                          "children": [
+                            {
+                              "children": [
+                                {
+                                  "children": [
+                                    {
+                                      "children": [],
+                                      "props": {},
+                                      "text": "Color Tag",
+                                      "type": "text",
+                                    },
+                                  ],
+                                  "props": {
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.text",
+                                      },
+                                      "fontSize": {
+                                        "token": "typography.title",
+                                      },
+                                    },
+                                  },
+                                  "text": "",
+                                  "type": "text",
+                                },
+                                {
+                                  "children": [
+                                    {
+                                      "children": [],
+                                      "props": {},
+                                      "text": "How the file labels its color. The picture is the same either way.",
+                                      "type": "text",
+                                    },
+                                  ],
+                                  "props": {
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.muted",
+                                      },
+                                      "fontSize": {
+                                        "token": "typography.label",
+                                      },
+                                    },
+                                  },
+                                  "text": "",
+                                  "type": "text",
+                                },
+                              ],
+                              "props": {
+                                "data-pm-slot": "label",
+                                "style": {
+                                  "display": "flex",
+                                  "flexDirection": "column",
+                                  "flexGrow": 1,
+                                  "gap": {
+                                    "token": "metrics.border",
+                                  },
+                                },
+                              },
+                              "text": "",
+                              "type": "div",
+                            },
+                            {
+                              "children": [
+                                {
+                                  "children": [],
+                                  "props": {
+                                    "binding": "fixture:export:colorTag",
+                                    "control": "select",
+                                    "data-pm-component": "pop-up-button",
+                                    "disabled": false,
+                                    "id": "export.colorTag",
+                                    "label": "Color Tag",
+                                    "metadata": {
+                                      "pmKit": {
+                                        "menu": [
+                                          {
+                                            "label": "Rec.709 (QuickTime and Safari)",
+                                            "v": "rec709QuickTime",
+                                          },
+                                          {
+                                            "label": "Rec.709",
+                                            "v": "rec709",
+                                          },
+                                        ],
+                                      },
+                                    },
+                                    "options": [
+                                      {
+                                        "label": "Rec.709 (QuickTime and Safari)",
+                                        "v": "rec709QuickTime",
+                                      },
+                                      {
+                                        "label": "Rec.709",
+                                        "v": "rec709",
+                                      },
+                                    ],
+                                    "style": {
+                                      "background": {
+                                        "token": "colors.field",
+                                      },
+                                      "borderRadius": {
+                                        "token": "metrics.control_radius",
+                                      },
+                                      "color": {
+                                        "token": "colors.text",
+                                      },
+                                      "fontSize": {
+                                        "token": "typography.body",
+                                      },
+                                      "height": {
+                                        "token": "metrics.control",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                    "title": "How the file labels its color. The picture is the same either way.",
+                                    "value": "rec709QuickTime",
+                                  },
+                                  "text": "",
+                                  "type": "button",
+                                },
+                              ],
+                              "props": {
+                                "data-pm-slot": "control",
+                                "style": {
+                                  "alignItems": "center",
+                                  "display": "flex",
+                                  "flexShrink": 0,
+                                },
+                              },
+                              "text": "",
+                              "type": "div",
+                            },
+                          ],
+                          "props": {
+                            "data-pm-component": "form-row",
+                            "id": "export.row.colorTag",
+                            "label": "Color Tag",
+                            "role": "group",
+                            "style": {
+                              "alignItems": "center",
+                              "display": "flex",
+                              "flexDirection": "row",
+                              "gap": {
+                                "token": "metrics.inset",
+                              },
+                              "justifyContent": "space-between",
+                              "minHeight": {
+                                "token": "metrics.form_row",
+                              },
+                              "paddingBottom": {
+                                "token": "metrics.gap",
+                              },
+                              "paddingLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "paddingRight": {
+                                "token": "metrics.inset",
+                              },
+                              "paddingTop": {
+                                "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
                       ],
                       "props": {
                         "data-pm-component": "form-group",
@@ -22750,6 +24147,9 @@ exports[`wire snapshot: multiple captions 1`] = `
                                       },
                                       "minWidth": {
                                         "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.value_column",
                                       },
                                     },
                                     "title": "Name these settings to reuse them in any project.",
@@ -24855,6 +26255,179 @@ exports[`wire snapshot: custom size 1`] = `
                           "text": "",
                           "type": "div",
                         },
+                        {
+                          "children": [
+                            {
+                              "children": [
+                                {
+                                  "children": [
+                                    {
+                                      "children": [],
+                                      "props": {},
+                                      "text": "Color Tag",
+                                      "type": "text",
+                                    },
+                                  ],
+                                  "props": {
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.text",
+                                      },
+                                      "fontSize": {
+                                        "token": "typography.title",
+                                      },
+                                    },
+                                  },
+                                  "text": "",
+                                  "type": "text",
+                                },
+                                {
+                                  "children": [
+                                    {
+                                      "children": [],
+                                      "props": {},
+                                      "text": "How the file labels its color. The picture is the same either way.",
+                                      "type": "text",
+                                    },
+                                  ],
+                                  "props": {
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.muted",
+                                      },
+                                      "fontSize": {
+                                        "token": "typography.label",
+                                      },
+                                    },
+                                  },
+                                  "text": "",
+                                  "type": "text",
+                                },
+                              ],
+                              "props": {
+                                "data-pm-slot": "label",
+                                "style": {
+                                  "display": "flex",
+                                  "flexDirection": "column",
+                                  "flexGrow": 1,
+                                  "gap": {
+                                    "token": "metrics.border",
+                                  },
+                                },
+                              },
+                              "text": "",
+                              "type": "div",
+                            },
+                            {
+                              "children": [
+                                {
+                                  "children": [],
+                                  "props": {
+                                    "binding": "fixture:export:colorTag",
+                                    "control": "select",
+                                    "data-pm-component": "pop-up-button",
+                                    "disabled": false,
+                                    "id": "export.colorTag",
+                                    "label": "Color Tag",
+                                    "metadata": {
+                                      "pmKit": {
+                                        "menu": [
+                                          {
+                                            "label": "Rec.709 (QuickTime and Safari)",
+                                            "v": "rec709QuickTime",
+                                          },
+                                          {
+                                            "label": "Rec.709",
+                                            "v": "rec709",
+                                          },
+                                        ],
+                                      },
+                                    },
+                                    "options": [
+                                      {
+                                        "label": "Rec.709 (QuickTime and Safari)",
+                                        "v": "rec709QuickTime",
+                                      },
+                                      {
+                                        "label": "Rec.709",
+                                        "v": "rec709",
+                                      },
+                                    ],
+                                    "style": {
+                                      "background": {
+                                        "token": "colors.field",
+                                      },
+                                      "borderRadius": {
+                                        "token": "metrics.control_radius",
+                                      },
+                                      "color": {
+                                        "token": "colors.text",
+                                      },
+                                      "fontSize": {
+                                        "token": "typography.body",
+                                      },
+                                      "height": {
+                                        "token": "metrics.control",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                    "title": "How the file labels its color. The picture is the same either way.",
+                                    "value": "rec709QuickTime",
+                                  },
+                                  "text": "",
+                                  "type": "button",
+                                },
+                              ],
+                              "props": {
+                                "data-pm-slot": "control",
+                                "style": {
+                                  "alignItems": "center",
+                                  "display": "flex",
+                                  "flexShrink": 0,
+                                },
+                              },
+                              "text": "",
+                              "type": "div",
+                            },
+                          ],
+                          "props": {
+                            "data-pm-component": "form-row",
+                            "id": "export.row.colorTag",
+                            "label": "Color Tag",
+                            "role": "group",
+                            "style": {
+                              "alignItems": "center",
+                              "display": "flex",
+                              "flexDirection": "row",
+                              "gap": {
+                                "token": "metrics.inset",
+                              },
+                              "justifyContent": "space-between",
+                              "minHeight": {
+                                "token": "metrics.form_row",
+                              },
+                              "paddingBottom": {
+                                "token": "metrics.gap",
+                              },
+                              "paddingLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "paddingRight": {
+                                "token": "metrics.inset",
+                              },
+                              "paddingTop": {
+                                "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
                       ],
                       "props": {
                         "data-pm-component": "form-group",
@@ -26035,6 +27608,9 @@ exports[`wire snapshot: custom size 1`] = `
                                       },
                                       "minWidth": {
                                         "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.value_column",
                                       },
                                     },
                                     "title": "Name these settings to reuse them in any project.",
@@ -28162,6 +29738,179 @@ exports[`wire snapshot: inline invalid size 1`] = `
                           "text": "",
                           "type": "div",
                         },
+                        {
+                          "children": [
+                            {
+                              "children": [
+                                {
+                                  "children": [
+                                    {
+                                      "children": [],
+                                      "props": {},
+                                      "text": "Color Tag",
+                                      "type": "text",
+                                    },
+                                  ],
+                                  "props": {
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.text",
+                                      },
+                                      "fontSize": {
+                                        "token": "typography.title",
+                                      },
+                                    },
+                                  },
+                                  "text": "",
+                                  "type": "text",
+                                },
+                                {
+                                  "children": [
+                                    {
+                                      "children": [],
+                                      "props": {},
+                                      "text": "How the file labels its color. The picture is the same either way.",
+                                      "type": "text",
+                                    },
+                                  ],
+                                  "props": {
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.muted",
+                                      },
+                                      "fontSize": {
+                                        "token": "typography.label",
+                                      },
+                                    },
+                                  },
+                                  "text": "",
+                                  "type": "text",
+                                },
+                              ],
+                              "props": {
+                                "data-pm-slot": "label",
+                                "style": {
+                                  "display": "flex",
+                                  "flexDirection": "column",
+                                  "flexGrow": 1,
+                                  "gap": {
+                                    "token": "metrics.border",
+                                  },
+                                },
+                              },
+                              "text": "",
+                              "type": "div",
+                            },
+                            {
+                              "children": [
+                                {
+                                  "children": [],
+                                  "props": {
+                                    "binding": "fixture:export:colorTag",
+                                    "control": "select",
+                                    "data-pm-component": "pop-up-button",
+                                    "disabled": false,
+                                    "id": "export.colorTag",
+                                    "label": "Color Tag",
+                                    "metadata": {
+                                      "pmKit": {
+                                        "menu": [
+                                          {
+                                            "label": "Rec.709 (QuickTime and Safari)",
+                                            "v": "rec709QuickTime",
+                                          },
+                                          {
+                                            "label": "Rec.709",
+                                            "v": "rec709",
+                                          },
+                                        ],
+                                      },
+                                    },
+                                    "options": [
+                                      {
+                                        "label": "Rec.709 (QuickTime and Safari)",
+                                        "v": "rec709QuickTime",
+                                      },
+                                      {
+                                        "label": "Rec.709",
+                                        "v": "rec709",
+                                      },
+                                    ],
+                                    "style": {
+                                      "background": {
+                                        "token": "colors.field",
+                                      },
+                                      "borderRadius": {
+                                        "token": "metrics.control_radius",
+                                      },
+                                      "color": {
+                                        "token": "colors.text",
+                                      },
+                                      "fontSize": {
+                                        "token": "typography.body",
+                                      },
+                                      "height": {
+                                        "token": "metrics.control",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                    "title": "How the file labels its color. The picture is the same either way.",
+                                    "value": "rec709QuickTime",
+                                  },
+                                  "text": "",
+                                  "type": "button",
+                                },
+                              ],
+                              "props": {
+                                "data-pm-slot": "control",
+                                "style": {
+                                  "alignItems": "center",
+                                  "display": "flex",
+                                  "flexShrink": 0,
+                                },
+                              },
+                              "text": "",
+                              "type": "div",
+                            },
+                          ],
+                          "props": {
+                            "data-pm-component": "form-row",
+                            "id": "export.row.colorTag",
+                            "label": "Color Tag",
+                            "role": "group",
+                            "style": {
+                              "alignItems": "center",
+                              "display": "flex",
+                              "flexDirection": "row",
+                              "gap": {
+                                "token": "metrics.inset",
+                              },
+                              "justifyContent": "space-between",
+                              "minHeight": {
+                                "token": "metrics.form_row",
+                              },
+                              "paddingBottom": {
+                                "token": "metrics.gap",
+                              },
+                              "paddingLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "paddingRight": {
+                                "token": "metrics.inset",
+                              },
+                              "paddingTop": {
+                                "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
                       ],
                       "props": {
                         "data-pm-component": "form-group",
@@ -29342,6 +31091,9 @@ exports[`wire snapshot: inline invalid size 1`] = `
                                       },
                                       "minWidth": {
                                         "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.value_column",
                                       },
                                     },
                                     "title": "Name these settings to reuse them in any project.",
@@ -31187,6 +32939,179 @@ exports[`wire snapshot: choosing destination (no progress) 1`] = `
                           "text": "",
                           "type": "div",
                         },
+                        {
+                          "children": [
+                            {
+                              "children": [
+                                {
+                                  "children": [
+                                    {
+                                      "children": [],
+                                      "props": {},
+                                      "text": "Color Tag",
+                                      "type": "text",
+                                    },
+                                  ],
+                                  "props": {
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.text",
+                                      },
+                                      "fontSize": {
+                                        "token": "typography.title",
+                                      },
+                                    },
+                                  },
+                                  "text": "",
+                                  "type": "text",
+                                },
+                                {
+                                  "children": [
+                                    {
+                                      "children": [],
+                                      "props": {},
+                                      "text": "How the file labels its color. The picture is the same either way.",
+                                      "type": "text",
+                                    },
+                                  ],
+                                  "props": {
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.muted",
+                                      },
+                                      "fontSize": {
+                                        "token": "typography.label",
+                                      },
+                                    },
+                                  },
+                                  "text": "",
+                                  "type": "text",
+                                },
+                              ],
+                              "props": {
+                                "data-pm-slot": "label",
+                                "style": {
+                                  "display": "flex",
+                                  "flexDirection": "column",
+                                  "flexGrow": 1,
+                                  "gap": {
+                                    "token": "metrics.border",
+                                  },
+                                },
+                              },
+                              "text": "",
+                              "type": "div",
+                            },
+                            {
+                              "children": [
+                                {
+                                  "children": [],
+                                  "props": {
+                                    "binding": "fixture:export:colorTag",
+                                    "control": "select",
+                                    "data-pm-component": "pop-up-button",
+                                    "disabled": true,
+                                    "id": "export.colorTag",
+                                    "label": "Color Tag",
+                                    "metadata": {
+                                      "pmKit": {
+                                        "menu": [
+                                          {
+                                            "label": "Rec.709 (QuickTime and Safari)",
+                                            "v": "rec709QuickTime",
+                                          },
+                                          {
+                                            "label": "Rec.709",
+                                            "v": "rec709",
+                                          },
+                                        ],
+                                      },
+                                    },
+                                    "options": [
+                                      {
+                                        "label": "Rec.709 (QuickTime and Safari)",
+                                        "v": "rec709QuickTime",
+                                      },
+                                      {
+                                        "label": "Rec.709",
+                                        "v": "rec709",
+                                      },
+                                    ],
+                                    "style": {
+                                      "background": {
+                                        "token": "colors.field",
+                                      },
+                                      "borderRadius": {
+                                        "token": "metrics.control_radius",
+                                      },
+                                      "color": {
+                                        "token": "colors.text",
+                                      },
+                                      "fontSize": {
+                                        "token": "typography.body",
+                                      },
+                                      "height": {
+                                        "token": "metrics.control",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                    "title": "How the file labels its color. The picture is the same either way.",
+                                    "value": "rec709QuickTime",
+                                  },
+                                  "text": "",
+                                  "type": "button",
+                                },
+                              ],
+                              "props": {
+                                "data-pm-slot": "control",
+                                "style": {
+                                  "alignItems": "center",
+                                  "display": "flex",
+                                  "flexShrink": 0,
+                                },
+                              },
+                              "text": "",
+                              "type": "div",
+                            },
+                          ],
+                          "props": {
+                            "data-pm-component": "form-row",
+                            "id": "export.row.colorTag",
+                            "label": "Color Tag",
+                            "role": "group",
+                            "style": {
+                              "alignItems": "center",
+                              "display": "flex",
+                              "flexDirection": "row",
+                              "gap": {
+                                "token": "metrics.inset",
+                              },
+                              "justifyContent": "space-between",
+                              "minHeight": {
+                                "token": "metrics.form_row",
+                              },
+                              "paddingBottom": {
+                                "token": "metrics.gap",
+                              },
+                              "paddingLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "paddingRight": {
+                                "token": "metrics.inset",
+                              },
+                              "paddingTop": {
+                                "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
                       ],
                       "props": {
                         "data-pm-component": "form-group",
@@ -32367,6 +34292,9 @@ exports[`wire snapshot: choosing destination (no progress) 1`] = `
                                       },
                                       "minWidth": {
                                         "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.value_column",
                                       },
                                     },
                                     "title": "Name these settings to reuse them in any project.",
@@ -35461,6 +37389,179 @@ exports[`hover/focus use system controls; op tree stays stable, with one selecte
                           "text": "",
                           "type": "div",
                         },
+                        {
+                          "children": [
+                            {
+                              "children": [
+                                {
+                                  "children": [
+                                    {
+                                      "children": [],
+                                      "props": {},
+                                      "text": "Color Tag",
+                                      "type": "text",
+                                    },
+                                  ],
+                                  "props": {
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.text",
+                                      },
+                                      "fontSize": {
+                                        "token": "typography.title",
+                                      },
+                                    },
+                                  },
+                                  "text": "",
+                                  "type": "text",
+                                },
+                                {
+                                  "children": [
+                                    {
+                                      "children": [],
+                                      "props": {},
+                                      "text": "How the file labels its color. The picture is the same either way.",
+                                      "type": "text",
+                                    },
+                                  ],
+                                  "props": {
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.muted",
+                                      },
+                                      "fontSize": {
+                                        "token": "typography.label",
+                                      },
+                                    },
+                                  },
+                                  "text": "",
+                                  "type": "text",
+                                },
+                              ],
+                              "props": {
+                                "data-pm-slot": "label",
+                                "style": {
+                                  "display": "flex",
+                                  "flexDirection": "column",
+                                  "flexGrow": 1,
+                                  "gap": {
+                                    "token": "metrics.border",
+                                  },
+                                },
+                              },
+                              "text": "",
+                              "type": "div",
+                            },
+                            {
+                              "children": [
+                                {
+                                  "children": [],
+                                  "props": {
+                                    "binding": "fixture:export:colorTag",
+                                    "control": "select",
+                                    "data-pm-component": "pop-up-button",
+                                    "disabled": false,
+                                    "id": "export.colorTag",
+                                    "label": "Color Tag",
+                                    "metadata": {
+                                      "pmKit": {
+                                        "menu": [
+                                          {
+                                            "label": "Rec.709 (QuickTime and Safari)",
+                                            "v": "rec709QuickTime",
+                                          },
+                                          {
+                                            "label": "Rec.709",
+                                            "v": "rec709",
+                                          },
+                                        ],
+                                      },
+                                    },
+                                    "options": [
+                                      {
+                                        "label": "Rec.709 (QuickTime and Safari)",
+                                        "v": "rec709QuickTime",
+                                      },
+                                      {
+                                        "label": "Rec.709",
+                                        "v": "rec709",
+                                      },
+                                    ],
+                                    "style": {
+                                      "background": {
+                                        "token": "colors.field",
+                                      },
+                                      "borderRadius": {
+                                        "token": "metrics.control_radius",
+                                      },
+                                      "color": {
+                                        "token": "colors.text",
+                                      },
+                                      "fontSize": {
+                                        "token": "typography.body",
+                                      },
+                                      "height": {
+                                        "token": "metrics.control",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                    "title": "How the file labels its color. The picture is the same either way.",
+                                    "value": "rec709QuickTime",
+                                  },
+                                  "text": "",
+                                  "type": "button",
+                                },
+                              ],
+                              "props": {
+                                "data-pm-slot": "control",
+                                "style": {
+                                  "alignItems": "center",
+                                  "display": "flex",
+                                  "flexShrink": 0,
+                                },
+                              },
+                              "text": "",
+                              "type": "div",
+                            },
+                          ],
+                          "props": {
+                            "data-pm-component": "form-row",
+                            "id": "export.row.colorTag",
+                            "label": "Color Tag",
+                            "role": "group",
+                            "style": {
+                              "alignItems": "center",
+                              "display": "flex",
+                              "flexDirection": "row",
+                              "gap": {
+                                "token": "metrics.inset",
+                              },
+                              "justifyContent": "space-between",
+                              "minHeight": {
+                                "token": "metrics.form_row",
+                              },
+                              "paddingBottom": {
+                                "token": "metrics.gap",
+                              },
+                              "paddingLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "paddingRight": {
+                                "token": "metrics.inset",
+                              },
+                              "paddingTop": {
+                                "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
                       ],
                       "props": {
                         "data-pm-component": "form-group",
@@ -36641,6 +38742,9 @@ exports[`hover/focus use system controls; op tree stays stable, with one selecte
                                       },
                                       "minWidth": {
                                         "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.value_column",
                                       },
                                     },
                                     "title": "Name these settings to reuse them in any project.",

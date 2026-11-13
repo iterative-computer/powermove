@@ -1,0 +1,248 @@
+{
+ "preset": "premiere-pro",
+ "label": "Premiere Pro",
+ "bindings": [
+  {
+   "command": "play",
+   "args": [],
+   "keys": [
+    "space"
+   ]
+  },
+  {
+   "command": "shuttleBackward",
+   "args": [],
+   "keys": [
+    "j"
+   ]
+  },
+  {
+   "command": "shuttleStop",
+   "args": [],
+   "keys": [
+    "k"
+   ]
+  },
+  {
+   "command": "shuttleForward",
+   "args": [],
+   "keys": [
+    "l"
+   ]
+  },
+  {
+   "command": "prevFrame",
+   "args": [],
+   "keys": [
+    "left"
+   ]
+  },
+  {
+   "command": "nextFrame",
+   "args": [],
+   "keys": [
+    "right"
+   ]
+  },
+  {
+   "command": "stepFrames",
+   "args": [
+    -5
+   ],
+   "keys": [
+    "shift+left"
+   ]
+  },
+  {
+   "command": "stepFrames",
+   "args": [
+    5
+   ],
+   "keys": [
+    "shift+right"
+   ]
+  },
+  {
+   "command": "prevEdge",
+   "args": [],
+   "keys": [
+    "up"
+   ]
+  },
+  {
+   "command": "nextEdge",
+   "args": [],
+   "keys": [
+    "down"
+   ]
+  },
+  {
+   "command": "workIn",
+   "args": [],
+   "keys": [
+    "i"
+   ]
+  },
+  {
+   "command": "workOut",
+   "args": [],
+   "keys": [
+    "o"
+   ]
+  },
+  {
+   "command": "gotoWorkIn",
+   "args": [],
+   "keys": [
+    "shift+i"
+   ]
+  },
+  {
+   "command": "gotoWorkOut",
+   "args": [],
+   "keys": [
+    "shift+o"
+   ]
+  },
+  {
+   "command": "timeline.addMarker",
+   "args": [],
+   "keys": [
+    "m"
+   ]
+  },
+  {
+   "command": "rippleTrimIn",
+   "args": [],
+   "keys": [
+    "q"
+   ]
+  },
+  {
+   "command": "rippleTrimOut",
+   "args": [],
+   "keys": [
+    "w"
+   ]
+  },
+  {
+   "command": "extendEdit",
+   "args": [],
+   "keys": [
+    "e"
+   ]
+  },
+  {
+   "command": "liftWorkArea",
+   "args": [],
+   "keys": [
+    ";"
+   ]
+  },
+  {
+   "command": "extractWorkArea",
+   "args": [],
+   "keys": [
+    "'"
+   ]
+  },
+  {
+   "command": "toolSelect",
+   "args": [],
+   "keys": [
+    "v"
+   ]
+  },
+  {
+   "command": "timeline.tool:ripple",
+   "args": [],
+   "keys": [
+    "b"
+   ]
+  },
+  {
+   "command": "timeline.tool:roll",
+   "args": [],
+   "keys": [
+    "n"
+   ]
+  },
+  {
+   "command": "timeline.tool:slip",
+   "args": [],
+   "keys": [
+    "y"
+   ]
+  },
+  {
+   "command": "timeline.tool:slide",
+   "args": [],
+   "keys": [
+    "u"
+   ]
+  },
+  {
+   "command": "toolHand",
+   "args": [],
+   "keys": [
+    "h"
+   ]
+  },
+  {
+   "command": "toolZoom",
+   "args": [],
+   "keys": [
+    "z"
+   ]
+  },
+  {
+   "command": "toolPen",
+   "args": [],
+   "keys": [
+    "p"
+   ]
+  },
+  {
+   "command": "toolText",
+   "args": [],
+   "keys": [
+    "t"
+   ]
+  },
+  {
+   "command": "timeline.fit",
+   "args": [],
+   "keys": [
+    "\\"
+   ]
+  },
+  {
+   "command": "fitView",
+   "args": [],
+   "keys": [
+    "shift+\\"
+   ]
+  },
+  {
+   "command": "prevSelectedEvent",
+   "args": [],
+   "keys": [
+    "alt+shift+up"
+   ]
+  },
+  {
+   "command": "nextSelectedEvent",
+   "args": [],
+   "keys": [
+    "alt+shift+down"
+   ]
+  },
+  {
+   "command": "keyboardShortcuts",
+   "args": [],
+   "keys": [
+    "cmd+alt+k"
+   ]
+  }
+ ]
+}

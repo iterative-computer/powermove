@@ -67,7 +67,7 @@ pub use capability::{
 pub use effects::{Effects, builtin_definitions};
 pub use error::{LayerFailure, RenderError, SvgFallback};
 pub use renderer::{
-    CommandBracket, Frame, HOST_COMPILE_WAITS, LayerPixels, LayerQuad, LayerRaster,
+    CommandBracket, Frame, FrameFootage, HOST_COMPILE_WAITS, LayerPixels, LayerQuad, LayerRaster,
     MediaPreparation, PassThrough, Rendered, Renderer, SnapshotRows, TextRaster,
     MaterialCaptureRequest, MaterialPixels, MaterialCaptureStats,
 };
