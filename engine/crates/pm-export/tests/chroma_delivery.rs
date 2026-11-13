@@ -456,14 +456,19 @@ fn untouched_420_footage_keeps_its_chroma_and_a_moved_clip_is_filtered() {
             .unwrap();
     }
     writer.finish().unwrap();
-    let decoded = decode_frame(
-        &source,
-        0,
-        video_timing(Rate::FPS_24).unwrap(),
-        InputFormat::V420,
-    )
-    .unwrap();
-    let reference = planes(&decoded);
+    // The source's own planes, every frame.
+    let decoded: Vec<EncoderInput> = (0..frames)
+        .map(|n| {
+            decode_frame(
+                &source,
+                n,
+                video_timing(Rate::FPS_24).unwrap(),
+                InputFormat::V420,
+            )
+            .unwrap()
+        })
+        .collect();
+    let reference = planes(&decoded[0]);
 
     let deliver = |x: f64| {
         let dur = frames as f64 / 24.0;
@@ -508,7 +513,7 @@ fn untouched_420_footage_keeps_its_chroma_and_a_moved_clip_is_filtered() {
             &mut |_| {},
         )
         .unwrap();
-        planes(&out.frames[0])
+        out.frames
     };
     let worst = |p: &Planes| {
         p.chroma
@@ -517,22 +522,35 @@ fn untouched_420_footage_keeps_its_chroma_and_a_moved_clip_is_filtered() {
             .map(|(a, b)| ((a[0] - b[0]).abs().max((a[1] - b[1]).abs()) / p.code).round())
             .fold(0.0, f64::max)
     };
-    // Drawn 1:1 (a video layer is placed by its centre): its own chroma.
+    // Drawn 1:1 (a video layer is placed by its centre): the encoder is
+    // handed the source's own planes, luma and chroma, in every frame. Bit
+    // exact means zero codes: the planes are equal.
     let untouched = deliver(f64::from(W) / 2.0);
-    let luma_exact = untouched
-        .luma
+    assert_eq!(untouched.len(), frames as usize);
+    let differing: Vec<usize> = untouched
         .iter()
-        .zip(&reference.luma)
-        .all(|(a, b)| ((a - b) * 219.0).abs() < 0.5);
+        .zip(&decoded)
+        .map(|(got, want)| {
+            got.planes
+                .iter()
+                .zip(&want.planes)
+                .map(|(a, b)| {
+                    let (a, b) = (a.u8().unwrap(), b.u8().unwrap());
+                    a.iter().zip(b).filter(|(a, b)| a != b).count()
+                })
+                .sum()
+        })
+        .collect();
     eprintln!(
-        "MEASURE untouched 4:2:0 footage through the job: luma exact {luma_exact}, chroma within {} CV",
-        worst(&untouched)
+        "MEASURE untouched 4:2:0 footage through the job: samples differing from the source's planes, per frame {differing:?}"
     );
-    assert!(luma_exact);
-    assert!(worst(&untouched) <= 1.0);
+    assert!(
+        untouched == decoded,
+        "untouched footage reaches the encoder changed: {differing:?} samples differ"
+    );
     // Moved by one pixel the clip is resampled: rendered, so filtered (its
     // chroma no longer equals the source's sample for sample).
-    let moved = deliver(f64::from(W) / 2.0 + 1.0);
+    let moved = planes(&deliver(f64::from(W) / 2.0 + 1.0)[0]);
     eprintln!(
         "MEASURE moved clip: chroma {} CV from the source",
         worst(&moved)
@@ -1018,5 +1036,49 @@ fn a_postprocessed_frame_of_untouched_footage_is_filtered() {
         red / 2.0
     );
     assert!(delivered == filtered);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn untouched_422_footage_reaches_a_422_encoder_bit_exact() {
+    let dir = scratch("exact422");
+    let source = dir.join("clip.mov");
+    still_clip(&source, Codec::ProRes(ProResProfile::Hq), busy_still);
+    let frames = 8;
+    let (delivered, _) = deliver_and_filter(
+        vec![clip_layer("v", "clip", 0, frames)],
+        &[("clip", &source)],
+        settings(
+            ExportFormat::ProRes {
+                profile: WireProRes::Hq,
+            },
+            frames,
+        ),
+        |_| {},
+        None,
+    );
+    assert_eq!(delivered.len(), frames as usize);
+    let differing: Vec<usize> = delivered
+        .iter()
+        .enumerate()
+        .map(|(n, got)| {
+            let want = decode_frame(
+                &source,
+                n as u64,
+                video_timing(Rate::FPS_24).unwrap(),
+                InputFormat::V216,
+            )
+            .unwrap();
+            let (a, b) = (got.planes[0].u16().unwrap(), want.planes[0].u16().unwrap());
+            a.iter().zip(b).filter(|(a, b)| a != b).count()
+        })
+        .collect();
+    eprintln!(
+        "MEASURE untouched 4:2:2 footage to a 4:2:2 encoder: samples (luma and chroma) differing from the source's, per frame {differing:?}"
+    );
+    assert!(
+        differing.iter().all(|d| *d == 0),
+        "untouched footage reaches the encoder changed: {differing:?} samples differ"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
