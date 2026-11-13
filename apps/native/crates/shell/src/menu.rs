@@ -322,6 +322,8 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
                 k("Snapping", "timeline.toggleSnapping", ""),
                 k("Value Graph", "graph.value", ""),
                 k("Speed Graph", "graph.speed", ""),
+                k("Merge Selected Curves", "graph.merge", ""),
+                k("Fit Selected Curves", "graph.fit", ""),
                 sep(),
                 Item::command("Tools", "tools", ""),
                 sep(),

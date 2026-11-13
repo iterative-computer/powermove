@@ -49,8 +49,8 @@ impl std::error::Error for ModelError {}
 pub enum HostEffect {
     Seek(f64),
     TogglePlayback,
-    FitCurves(Vec<String>),
-    MergeCurves,
+    /// Fit Selected Curves: show this span of composition time.
+    FitCurves(f64, f64),
     FrameComposition,
     OpenComposition(String),
     ShowLayerMenu(String),
@@ -510,14 +510,19 @@ impl TimelineModel {
                 };
                 Plan::default()
             }
+            // The timeline zooms to the keys of the curves in the graph.
             "graph.fit" => Plan {
-                effects: vec![HostEffect::FitCurves(keys)],
+                effects: self
+                    .graph_span()
+                    .map(|(first, last)| HostEffect::FitCurves(first, last))
+                    .into_iter()
+                    .collect(),
                 ..Plan::default()
             },
-            "graph.merge" => Plan {
-                effects: vec![HostEffect::MergeCurves],
-                ..Plan::default()
-            },
+            "graph.merge" => {
+                self.graph_merge = !self.graph_merge;
+                Plan::default()
+            }
             "frameView" => Plan {
                 effects: vec![HostEffect::FrameComposition],
                 ..Plan::default()
@@ -1700,7 +1705,7 @@ impl TimelineModel {
                 add("graph.value", true, self.graph_mode == GraphMode::Value);
                 add("graph.speed", true, self.graph_mode == GraphMode::Speed);
                 add("graph.fit", *series > 0, false);
-                add("graph.merge", *series >= 2, false);
+                add("graph.merge", *series >= 2, self.graph_merge);
                 add(
                     "graph.combined",
                     true,
@@ -1921,8 +1926,8 @@ pub fn menu_label(id: &str) -> &'static str {
         "layer.shared-menu" => "Layer Options…",
         "graph.value" => "Value Graph",
         "graph.speed" => "Speed Graph",
-        "graph.fit" => "Fit Curves",
-        "graph.merge" => "Merge Curves",
+        "graph.fit" => "Fit Selected Curves",
+        "graph.merge" => "Merge Selected Curves",
         "graph.combined" => "Show Dope Sheet",
         _ => "",
     }

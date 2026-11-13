@@ -728,3 +728,67 @@ fn copied_keys_paste_at_the_playhead_and_undo_removes_them(cx: &mut TestAppConte
     undo(&mut s, cx);
     assert_eq!(count(&s), 1);
 }
+/// The graph editor's Merge Selected Curves and Fit Selected Curves (View
+/// menu, the graph's right-click menu, the palette).
+#[gpui::test]
+fn the_graph_merges_its_curves_into_one_and_fits_the_time_scale_to_their_keys(
+    cx: &mut TestAppContext,
+) {
+    // Position moves 30 across and 40 down between 2 s and 4 s of the layer.
+    let project = r##"{"id":"integration","name":"Curves","compId":"c","w":640,"h":360,"fps":30,"dur":20,"bg":"#000000","assets":{},"comps":{},"layers":[{"id":"l0","type":"shape","name":"Box","from":1,"dur":12,"on":true,"separateDimensions":false,"p":{"opacity":{"v":100,"kf":[]},"position.x":{"v":0,"kf":[{"i":"x1","t":2,"v":0},{"i":"x2","t":4,"v":30}]},"position.y":{"v":0,"kf":[{"i":"y1","t":2,"v":0},{"i":"y2","t":4,"v":40}]},"scale.x":{"v":100,"kf":[]},"scale.y":{"v":100,"kf":[]},"rotation":{"v":0,"kf":[]},"anchor.x":{"v":0,"kf":[]},"anchor.y":{"v":0,"kf":[]}},"d":{"w":100,"h":100},"fx":[]}]}"##;
+    let mut s = stage_project(cx, project.into());
+    select(&mut s, cx, &["l0"]);
+    s.surface.update(&mut s.vcx, |t, cx| {
+        t.show_graph(
+            "l0".into(),
+            "position.x".into(),
+            vec!["position.x".into(), "position.y".into()],
+            cx,
+        )
+    });
+    s.idle(cx);
+    let graph = |s: &Stage| s.surface.read_with(&s.vcx, |t, _| t.graph().unwrap());
+    let ends = |s: &Stage| -> Vec<f64> {
+        graph(s)
+            .curves()
+            .iter()
+            .map(|c| c.segments.last().unwrap().to.value)
+            .collect()
+    };
+    assert_eq!(ends(&s), [30., 40.]);
+    assert!(graph(&s).curves().iter().all(|c| c.points.len() == 2));
+    // Merged: one curve, the length of the motion both axes make together,
+    // with no key points of its own.
+    run(&mut s, cx, "graph.merge", &[]);
+    s.idle(cx);
+    assert_eq!(ends(&s), [50.]);
+    assert!(graph(&s).curves()[0].points.is_empty());
+    assert_eq!(graph(&s).curves()[0].segments[0].from.seconds, 3.);
+    let merged = |s: &Stage| s.surface.read_with(&s.vcx, |t, _| t.graph_merged());
+    assert!(merged(&s), "View ▸ Merge Selected Curves is checked");
+    let menu = |s: &Stage| {
+        s.surface
+            .read_with(&s.vcx, |t, _| t.model())
+            .menu(&pm_panel_timeline::Context::Graph { series: 2 })
+    };
+    let item = |s: &Stage, id: &str| menu(s).into_iter().find(|i| i.id == id).unwrap();
+    assert!(item(&s, "graph.merge").enabled && item(&s, "graph.merge").checked);
+    assert!(item(&s, "graph.fit").enabled);
+    // Fit: the keys' span (3 s to 5 s of the composition) fills the time
+    // area, 24 points clear of each end.
+    run(&mut s, cx, "graph.fit", &[]);
+    s.idle(cx);
+    let (pps, scroll, room) = s.surface.read_with(&s.vcx, |t, _| t.time_view());
+    assert!((scroll + 24. / pps - 3.).abs() < 1e-9, "{scroll} {pps}");
+    assert!((room / pps - 2.).abs() < 1e-9, "{room} {pps}");
+    // Off again: both curves and their keys are back.
+    run(&mut s, cx, "graph.merge", &[]);
+    s.idle(cx);
+    assert_eq!(ends(&s), [30., 40.]);
+    assert!(!merged(&s));
+    // Both are View menu rows, so the palette lists them.
+    let rows = pm_shell::menu::palette_rows();
+    for label in ["Merge Selected Curves", "Fit Selected Curves"] {
+        assert!(rows.iter().any(|(m, _, l)| *m == "View" && l == label));
+    }
+}

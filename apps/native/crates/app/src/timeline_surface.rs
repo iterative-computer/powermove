@@ -504,6 +504,21 @@ impl TimelineSurface {
             self.changed(true, cx);
         }
     }
+    /// View ▸ Merge Selected Curves is on.
+    pub fn graph_merged(&self) -> bool {
+        self.model.graph_merge
+    }
+    /// Fit Selected Curves: the span from the graph's first key to its last
+    /// fills the time area, with a little room at both ends.
+    fn fit_span(&mut self, first: f64, last: f64, cx: &mut Context<Self>) {
+        const ROOM: f64 = 24.;
+        let width = f32::from(self.bounds.size.width) as f64 - self.view.layer_column - 2. * ROOM;
+        let frame = 1. / self.model.index.fps.max(1.);
+        self.view.pps = (width.max(1.) / (last - first).max(frame)).clamp(PPS.0, PPS.1);
+        self.view.scroll_time = (first - ROOM / self.view.pps).max(self.model.index.minimum_time());
+        self.fitted = true;
+        self.changed(true, cx);
+    }
     fn zoom_at(&mut self, x: f64, factor: f64, cx: &mut Context<Self>) {
         let anchor = self.view.scroll_time + (x - self.view.layer_column) / self.view.pps;
         self.view.pps = (self.view.pps * factor).clamp(PPS.0, PPS.1);
@@ -741,6 +756,7 @@ impl TimelineSurface {
                         for effect in effects {
                             match effect {
                                 HostEffect::Seek(time) => s.delegate.seek(time, cx),
+                                HostEffect::FitCurves(first, last) => s.fit_span(first, last, cx),
                                 other => s.delegate.effect(other, cx),
                             }
                         }
@@ -1678,11 +1694,7 @@ impl TimelineSurface {
             (MenuContext::Graph { .. }, _) => at("graph", None),
             _ => at("empty", None),
         };
-        let mut items = self.model.menu(&context);
-        // Graph Fit and Merge have no host. Never offer them live.
-        for item in &mut items {
-            item.enabled &= !matches!(item.id, "graph.fit" | "graph.merge");
-        }
+        let items = self.model.menu(&context);
         let ids: Vec<&'static str> = items.iter().map(|i| i.id).collect();
         let rows = items
             .iter()
@@ -1862,6 +1874,16 @@ impl TimelineSurface {
         self.graph_area()
             .and_then(|a| self.graph_ops(a))
             .unwrap_or_default()
+    }
+    /// Points a second, the time at the time area's left edge, and the
+    /// time area's width less the room Fit Selected Curves leaves.
+    #[cfg(test)]
+    pub fn time_view(&self) -> (f64, f64, f64) {
+        (
+            self.view.pps,
+            self.view.scroll_time,
+            f32::from(self.bounds.size.width) as f64 - self.view.layer_column - 48.,
+        )
     }
     #[cfg(test)]
     pub fn graph(&self) -> Option<Arc<Graph>> {

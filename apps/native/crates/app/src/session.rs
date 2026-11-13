@@ -324,6 +324,9 @@ impl pm_shell::integration::Integration for Bridge {
             if snapping {
                 on.insert("timeline.toggleSnapping".to_owned());
             }
+            if timeline.read(cx).graph_merged() {
+                on.insert("graph.merge".to_owned());
+            }
         }
         on
     }

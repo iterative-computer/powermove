@@ -59,6 +59,9 @@ pub struct TimelineModel {
     pub graph_display: GraphDisplay,
     /// Curve focus survives layer/strip clicks (timeline.ts:3110,3704).
     pub graph_focus: Option<(String, String)>,
+    /// Merge Selected Curves: the graph's curves drawn as the one motion
+    /// they describe together. A view of the same keys, not saved.
+    pub graph_merge: bool,
     pub reveal: RevealState,
     pub key_selection_active: bool,
     pub track_snap_disabled: bool,
@@ -297,6 +300,51 @@ impl TimelineModel {
         } else {
             self.index.channel(layer, path).into_iter().collect()
         }
+    }
+    /// The property the graph plots: the focused curve, else the selected
+    /// layer's selected property, else the first revealed one.
+    pub fn graph_property(&self) -> Option<(String, String)> {
+        let mut candidates: Vec<(String, String)> = vec![];
+        for row in self.rows() {
+            if let RowId::Property { layer_id, channel } = &row.id {
+                candidates.push((layer_id.clone(), channel.clone()));
+            }
+        }
+        // A focused or selected curve plots even while its row is collapsed.
+        candidates.extend(self.graph_focus.clone());
+        for id in self.selection.layers() {
+            if let Some(layer) = self.index.layer(id) {
+                candidates.extend(
+                    layer
+                        .channels
+                        .iter()
+                        .filter(|c| !c.keys.is_empty())
+                        .map(|c| (id.clone(), c.path.clone())),
+                );
+            }
+        }
+        let focus = self
+            .graph_focus
+            .as_ref()
+            .map(|(l, c)| (l.as_str(), c.as_str()));
+        graph_target(
+            &candidates,
+            focus,
+            self.selection.layers(),
+            self.selection.channel(),
+        )
+        .cloned()
+    }
+    /// Composition times of the first and last keyframe on the graph's curves.
+    pub fn graph_span(&self) -> Option<(f64, f64)> {
+        let (layer_id, path) = self.graph_property()?;
+        let from = self.index.layer(&layer_id)?.from;
+        self.track_channels(&layer_id, &path)
+            .iter()
+            .flat_map(|c| c.keys.iter().map(|k| from + k.time))
+            .fold(None, |span: Option<(f64, f64)>, t| {
+                Some(span.map_or((t, t), |(a, b)| (a.min(t), b.max(t))))
+            })
     }
     pub fn row_position(&self, id: &RowId) -> Option<usize> {
         self.row_positions.get(id).copied()

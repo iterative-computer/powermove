@@ -238,6 +238,8 @@ fn timeline_owned(name: &str) -> bool {
             | "resetWorkArea"
             | "graph.value"
             | "graph.speed"
+            | "graph.fit"
+            | "graph.merge"
             | "timeline.revealAll"
     ) || name.starts_with("timeline.revealProperty:")
         || name.starts_with("timeline.keyProperty:")
@@ -1475,6 +1477,8 @@ const DOCUMENT: &[&str] = &[
     "resetWorkArea",
     "graph.value",
     "graph.speed",
+    "graph.fit",
+    "graph.merge",
     "importSequence",
     "delete",
     "copyLayers",
