@@ -67,7 +67,10 @@ export type SectionAction =
   | "mask"
   | "animator"
   | "release-precomp"
-  | "refresh-fonts";
+  | "refresh-fonts"
+  | "time-remap"
+  | "freeze-frame"
+  | "reverse";
 export interface AnimatorPreset {
   id: string | null;
   label: string;
@@ -79,6 +82,8 @@ export interface Section {
   collapsed: boolean;
   rows: Row[];
   action?: SectionAction;
+  /** Several quiet actions in a row (Time: remap, freeze, reverse). */
+  actions?: SectionAction[];
   animators?: { id: string; name: string }[];
   presets?: AnimatorPreset[];
   /** Masks: a heading row with Remove, then that mask's rows. */

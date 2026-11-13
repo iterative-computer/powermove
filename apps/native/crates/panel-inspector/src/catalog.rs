@@ -119,6 +119,9 @@ impl Inspector {
                 ..Default::default()
             })
         };
+        // Time remapping (`RetimingSection.svelte`): shown once a video or
+        // pre-comp layer has a source time channel.
+        let remapped = d.is_some_and(|d| d.get("sourceTime").is_some());
         match kind {
             "text" => {
                 for (field, kind) in [
@@ -178,6 +181,10 @@ impl Inspector {
                         content("audioMuted", FieldType::Boolean);
                         content("audioGain", number(0.05, Some(0.0), Some(4.0)));
                     }
+                    if remapped {
+                        content("timeRemap", FieldType::Boolean);
+                        content("sourceTime", number(0.01, Some(0.0), None));
+                    }
                 }
             }
             "audio" => {
@@ -226,6 +233,10 @@ impl Inspector {
                 ) {
                     content("audioMuted", FieldType::Boolean);
                     content("audioGain", number(0.05, Some(0.0), Some(4.0)));
+                }
+                if remapped {
+                    content("timeRemap", FieldType::Boolean);
+                    content("sourceTime", number(0.01, Some(0.0), None));
                 }
             }
             _ => {}

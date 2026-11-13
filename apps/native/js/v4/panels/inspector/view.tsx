@@ -40,6 +40,15 @@ const sectionActions: Record<SectionAction, string> = {
   animator: "Add Text Animator",
   "release-precomp": "Release Pre-comp",
   "refresh-fonts": "Refresh Fonts",
+  "time-remap": "Time Remap",
+  "freeze-frame": "Freeze Frame",
+  reverse: "Reverse",
+};
+const sectionSymbols: Partial<Record<SectionAction, string>> = {
+  "refresh-fonts": "arrow.clockwise",
+  "time-remap": "timer",
+  "freeze-frame": "pause",
+  reverse: "backward",
 };
 export const alignmentButtons: {
   id: Alignment;
@@ -674,8 +683,8 @@ export function InspectorPanel({
               })
             }
           >
-            {section.action ? (
-              // A quiet text action on the label inset (it drew as an empty
+            {section.action || section.actions ? (
+              // Quiet text actions on the label inset (one drew as an empty
               // button: no symbol, no title).
               <div
                 style={{
@@ -684,37 +693,40 @@ export function InspectorPanel({
                   paddingRight: token("metrics.inset"),
                 }}
               >
-                <Action
-                  id={`section-action:${section.id}`}
-                  label={sectionActions[section.action]}
-                  symbol={
-                    section.action === "refresh-fonts"
-                      ? "arrow.clockwise"
-                      : "plus"
-                  }
-                  children={sectionActions[section.action]}
-                  style={{
-                    gap: token("metrics.inner_radius"),
-                    paddingLeft: token("metrics.inner_radius"),
-                    paddingRight: token("metrics.gap"),
-                    fontSize: token("typography.label"),
-                    symbolSize: token("metrics.symbol_inline"),
-                  }}
-                  disabled={target.kind === "layers" && target.first.locked}
-                  onActivate={(event) =>
-                    section.action === "animator"
-                      ? session.nativeRequest({
-                          type: "animator-menu",
-                          anchor: event.currentTarget,
-                          items: section.presets ?? [],
-                        })
-                      : session.send({
-                          type: "section-action",
-                          section: section.id,
-                          action: section.action!,
-                        })
-                  }
-                />
+                {(section.actions ?? [section.action!]).map((action) => (
+                  <Action
+                    key={action}
+                    id={
+                      section.actions
+                        ? `section-action:${section.id}:${action}`
+                        : `section-action:${section.id}`
+                    }
+                    label={sectionActions[action]}
+                    symbol={sectionSymbols[action] ?? "plus"}
+                    children={sectionActions[action]}
+                    style={{
+                      gap: token("metrics.inner_radius"),
+                      paddingLeft: token("metrics.inner_radius"),
+                      paddingRight: token("metrics.gap"),
+                      fontSize: token("typography.label"),
+                      symbolSize: token("metrics.symbol_inline"),
+                    }}
+                    disabled={target.kind === "layers" && target.first.locked}
+                    onActivate={(event) =>
+                      action === "animator"
+                        ? session.nativeRequest({
+                            type: "animator-menu",
+                            anchor: event.currentTarget,
+                            items: section.presets ?? [],
+                          })
+                        : session.send({
+                            type: "section-action",
+                            section: section.id,
+                            action,
+                          })
+                    }
+                  />
+                ))}
               </div>
             ) : null}
             {section.animators?.map((animator) => (
