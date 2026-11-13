@@ -49,6 +49,15 @@ pub struct StoredAsset {
     pub original_version: String,
 }
 
+/// A Project folder an import makes for a folder on disk. `parent` is another
+/// new folder; `None` is the import's destination.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NewFolder {
+    pub id: String,
+    pub name: String,
+    pub parent: Option<String>,
+}
+
 /// A reviewable one-step edit, bound to a document lifetime and revision. Uses
 /// kernel Restore's atomic identity guard (Transact currently has only a revision
 /// guard). It refuses during another open edit instead of racing project reopen.
@@ -256,6 +265,7 @@ impl Catalog {
         items: Vec<StoredAsset>,
         folder: Option<String>,
         replace: Option<String>,
+        folders: &[NewFolder],
     ) -> Result<PreparedEdit, Error> {
         if owner != &self.stamp {
             return Err(Error::Stale);
@@ -263,7 +273,7 @@ impl Catalog {
         if folder.is_some() && self.valid_folder(folder.as_deref()) != folder {
             return Err(Error::MissingItem);
         }
-        if items.is_empty() || replace.is_some() && items.len() != 1 {
+        if items.is_empty() || replace.is_some() && (items.len() != 1 || !folders.is_empty()) {
             return Err(Error::InvalidMedia);
         }
         if replace
@@ -273,6 +283,28 @@ impl Catalog {
             return Err(Error::MissingItem);
         }
         let mut next = (*self.root).clone();
+        // Folders from disk, parents first: each keeps its name unless a
+        // folder beside it already has it.
+        let mut made = HashSet::new();
+        for new in folders {
+            let parent = match &new.parent {
+                Some(parent) if made.contains(parent.as_str()) => Some(parent.as_str()),
+                Some(_) => return Err(Error::InvalidTarget),
+                None => folder.as_deref(),
+            };
+            if new.id.is_empty()
+                || self.folders.contains_key(&new.id)
+                || !made.insert(new.id.as_str())
+            {
+                return Err(Error::InvalidTarget);
+            }
+            let name = unique_name(&next, &new.name, parent);
+            let mut f = Map::new();
+            f.insert("id", Value::from(new.id.as_str()));
+            f.insert("name", Value::from(name.as_str()));
+            f.insert("parent", optional(parent));
+            ensure_map(&mut next, "assetFolders").insert(new.id.as_str(), Value::Object(f));
+        }
         let mut seen = HashSet::new();
         let mut added = vec![];
         for item in items {
@@ -315,7 +347,9 @@ impl Catalog {
                 Value::from(item.original_version.as_str()),
             );
             if replace.is_none() {
-                set_folder(&mut meta, "folder", folder.as_deref())?;
+                // An item read from a folder on disk names the folder made for it.
+                let own = text(&item.metadata, "folder").filter(|id| made.contains(id));
+                set_folder(&mut meta, "folder", own.or(folder.as_deref()))?;
             }
             // Replacing an asset keeps its id: layer timing/trim/transforms and
             // source-time interpretation remain authored exactly as before.

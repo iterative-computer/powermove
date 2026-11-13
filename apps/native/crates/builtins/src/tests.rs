@@ -1293,6 +1293,7 @@ fn media_completion_reaches_actor_with_actual_originals_and_relink_undo_keeps_by
             &catalog.stamp,
             vec![stored],
             None,
+            &[],
             None,
             vec![],
             Caller::native(),
@@ -1316,7 +1317,7 @@ fn media_completion_reaches_actor_with_actual_originals_and_relink_undo_keeps_by
         .unwrap();
     let replacement = original("replacement.bin", b"replacement complete original");
     let replacement_version = replacement.version().to_owned();
-    let ack=panels.admit_media(&catalog.stamp,vec![RetainedAsset{id:"worker-temp-id".into(),metadata:data::model(&json!({"name":"Relinked.bin","kind":"image","mimeType":"application/octet-stream","w":100,"h":50})).unwrap(),original:replacement,previous:Some(prior)}],None,Some("imported-image".into()),vec![],Caller::native()).unwrap().wait().unwrap().unwrap();
+    let ack=panels.admit_media(&catalog.stamp,vec![RetainedAsset{id:"worker-temp-id".into(),metadata:data::model(&json!({"name":"Relinked.bin","kind":"image","mimeType":"application/octet-stream","w":100,"h":50})).unwrap(),original:replacement,previous:Some(prior)}],None,&[],Some("imported-image".into()),vec![],Caller::native()).unwrap().wait().unwrap().unwrap();
     assert!(!matches!(ack.reply, pm_kernel::Reply::Throw(_)), "{ack:?}");
     assert!(ack.notice.is_none(), "{ack:?}");
     let relinked = kernel.published("synthetic").unwrap();
@@ -1362,6 +1363,7 @@ fn media_completion_reaches_actor_with_actual_originals_and_relink_undo_keeps_by
                     previous: None
                 }],
                 None,
+                &[],
                 None,
                 vec![],
                 Caller::native()

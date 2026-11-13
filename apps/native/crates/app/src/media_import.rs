@@ -72,6 +72,7 @@ impl Controller {
                         ImportRequest {
                             paths,
                             folder,
+                            keep_folders: true,
                             ..Default::default()
                         },
                         cx,

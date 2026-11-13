@@ -581,7 +581,7 @@ pub const PLANNED: [&str; 40] = [
     "unlockGroup",
 ];
 /// Menu rows with no working path yet. They stay visible and disabled.
-pub const UNAVAILABLE: [&str; 2] = ["help", "importFolder"];
+pub const UNAVAILABLE: [&str; 1] = ["help"];
 fn selection_plan(ids: Vec<String>) -> Plan {
     Plan {
         select: Some(ids),
@@ -1452,7 +1452,8 @@ const SELECTION: [&str; 20] = [
     "centerAnchor",
 ];
 /// Rows that need a document, on top of the selection-based ones.
-const DOCUMENT: [&str; 29] = [
+const DOCUMENT: [&str; 30] = [
+    "importFolder",
     "timeline.addMarker",
     "timeline.toggleHold",
     "timeline.toggleSnapping",

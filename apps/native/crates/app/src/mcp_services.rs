@@ -818,6 +818,7 @@ impl MediaImporter for EngineJobs {
                 }],
                 request.folder.clone(),
                 request.replace.clone(),
+                &[],
             )
             .map_err(|e| match e {
                 pm_panel_media::Error::MissingItem => {
