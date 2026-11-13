@@ -5019,6 +5019,77 @@ mod tests {
             first(&fixture).as_deref() == Some("alone") && fixture.name() == name
         });
     }
+    /// An edit made inside another edit that throws takes back what it wrote
+    /// and nothing else: the outer edit keeps its earlier layer, carries on,
+    /// reports success, and is one step of the history.
+    #[test]
+    fn a_failed_edit_inside_an_edit_takes_back_only_its_own_writes() {
+        let root = tempfile::tempdir().unwrap();
+        extension(
+            &root.path().join("extensions"),
+            "nested",
+            &[(
+                "index.ts",
+                "export default function(api){const PM=api.host.pm;
+                   const layer=(id)=>Object.assign(PM.mkLayer('shape',{name:id}),{id});
+                   api.commands.register({id:'nested.run',label:'Run',run(){
+                     let inner;
+                     const outer=PM.Edit.mutate('Outer',()=>{
+                       PM.addLayer(layer('a'));
+                       inner=PM.Edit.mutate('Inner',()=>{
+                         PM.addLayer(layer('b'));PM.addLayer(layer('b2'));
+                         throw new Error('preparation failed')});
+                       if(!inner.ok)PM.addLayer(layer('c'));
+                     });
+                     api.storage.set('report',{outer:outer.ok,inner:inner.ok,message:inner.message,
+                       layers:PM.proj.layers.map(l=>l.id),busy:PM.hist.busy()})}});
+                 }",
+            )],
+        );
+        let fixture = Fixture::start(root);
+        fixture.until("activation", |host| {
+            host.publication().settled && host.is_ready()
+        });
+        let ids = |fixture: &Fixture| -> Vec<String> {
+            let published = fixture.kernel.published("window").unwrap();
+            published
+                .snapshot
+                .layers(None)
+                .iter()
+                .map(|l| l.id.clone())
+                .collect()
+        };
+        let history = |call: HistoryCall| {
+            let ack = fixture
+                .kernel
+                .call_blocking(
+                    "window",
+                    Request::new(pm_kernel::Caller::native(), call.clone()),
+                )
+                .unwrap();
+            assert!(matches!(ack.reply, Reply::Bool(true)), "{call:?} refused");
+        };
+        let before = ids(&fixture);
+        let after: Vec<String> = ["c", "a"]
+            .into_iter()
+            .map(str::to_owned)
+            .chain(before.clone())
+            .collect();
+        fixture.host.run_command("nested.run", json!([]));
+        fixture.until("the command reported", |_| {
+            stored(&fixture.kernel, "report").is_some()
+        });
+        assert_eq!(
+            stored(&fixture.kernel, "report").unwrap(),
+            json!({"outer":true,"inner":false,"message":"preparation failed","layers":after,"busy":false}),
+            "what the extension was told and sees"
+        );
+        assert_eq!(ids(&fixture), after, "the project");
+        history(HistoryCall::Undo);
+        assert_eq!(ids(&fixture), before, "one Undo takes the whole edit out");
+        history(HistoryCall::Redo);
+        assert_eq!(ids(&fixture), after, "Redo puts it back");
+    }
     /// The raw members a real extension used to cut a layer out of a clip:
     /// `PM.MediaStore.get` reads the asset's file (the app answers with it, held
     /// on disk) and `PM.addLayer` inserts a layer as main did, inside an edit.

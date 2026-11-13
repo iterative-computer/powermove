@@ -56,6 +56,9 @@ fn ops(args: &Value) -> Result<Vec<Op>> {
 fn label(args: &Value) -> String {
     args["label"].as_str().unwrap_or("Edit").into()
 }
+fn lease(args: &Value) -> Result<u64> {
+    args["lease"].as_u64().ok_or(Error::Invalid("edit lease"))
+}
 fn realized(published: &Published) -> pm_model::Value {
     canonical::realize_project(
         published
@@ -146,7 +149,6 @@ pub struct KernelAdapter {
     handles: BTreeMap<String, u64>,
     pins: BTreeSet<String>,
     replies: BTreeMap<u64, (Value, Value)>,
-    mutations: u64,
     mirror: Option<(u64, QueryMirror)>,
     /// An export's realm: this publication for good (see [`Self::frozen`]).
     frozen: Option<Arc<Published>>,
@@ -171,7 +173,6 @@ impl KernelAdapter {
             handles: BTreeMap::new(),
             pins: BTreeSet::new(),
             replies: BTreeMap::new(),
-            mutations: 0,
             mirror: None,
             frozen: None,
             pinned_storage: None,
@@ -407,19 +408,6 @@ impl KernelAdapter {
             .map_err(|e| Error::Host(e.to_string()))?;
         self.reply(ack)
     }
-    /// A later step of one composite request. The kernel keeps one acknowledgement
-    /// per txid, so only the first step carries it; `replies` makes the whole
-    /// request idempotent.
-    fn step(&mut self, call: Call) -> Result<Value> {
-        if self.frozen.is_some() {
-            return Err(Error::Host(FROZEN.into()));
-        }
-        let ack = self
-            .kernel
-            .call_blocking(&self.project, Request::new(self.caller, call))
-            .map_err(|e| Error::Host(e.to_string()))?;
-        self.reply(ack)
-    }
     /// This realm is gone: its open entry records whole, its later calls are
     /// refused and its external entries become undo barriers.
     pub fn seal(&self) {
@@ -430,19 +418,13 @@ impl KernelAdapter {
         let _ = self.kernel.call_blocking(&self.project, request);
     }
     fn reply(&mut self, ack: Ack) -> Result<Value> {
-        let mut result = self.outcome(ack)?;
-        result["publication"] = self.publication()?;
-        Ok(result)
-    }
-    /// What a call answered, without the publication. A step whose reply the
-    /// realm never sees must not take the publication either: that is where
-    /// the realm learns its own writes landed, and the next reply it does
-    /// see would carry no trace of them.
-    fn outcome(&mut self, ack: Ack) -> Result<Value> {
-        let result = match ack.reply {
+        let mut result = match ack.reply {
             Reply::Unit | Reply::Applied { .. } => json!({}),
             Reply::Selection(selection) => json!({"value":selection_wire(&selection)}),
             Reply::Bool(value) => json!({"value":value}),
+            Reply::Mutation(lease) => {
+                json!({"value":{"ok":true,"message":"","data":{"lease":lease}}})
+            }
             Reply::Before(value) => {
                 json!({"value":value.map(|s|pm_model::json::to_canonical_string(&canonical::realize_project(s.document.to_value().unwrap_or(pm_model::Value::Null))))})
             }
@@ -455,6 +437,7 @@ impl KernelAdapter {
             Reply::Throw(error) => json!({"error":{"code":"Rejected","message":error.to_string()}}),
             _ => return Err(Error::Invalid("unsupported kernel reply")),
         };
+        result["publication"] = self.publication()?;
         Ok(result)
     }
     pub fn handle_name(&self, number: u64) -> Option<String> {
@@ -555,7 +538,7 @@ impl KernelAdapter {
         Ok(None)
     }
     /// Raw `PM.proj` writes are expressed on the realized document.
-    fn direct_write(&self, args: &Value, p: &Published) -> Result<Call> {
+    fn direct_ops(&self, args: &Value, p: &Published) -> Result<Vec<Op>> {
         let requested = ops(args)?;
         let open = p.snapshot.open_comp();
         let mapped: Option<Vec<Op>> = requested
@@ -579,7 +562,7 @@ impl KernelAdapter {
             })
             .collect();
         if let Some(ops) = mapped {
-            return Ok(Call::DirectWrite { ops });
+            return Ok(ops);
         }
         // Root replacements and writes through `comps`: rebuild the stored form.
         let before = p
@@ -591,9 +574,7 @@ impl KernelAdapter {
         pm_model::ops::apply_ops(&mut after, &requested)
             .map_err(|_| Error::Invalid("invalid stored-project operation"))?;
         let canonical = after.map(pm_kernel::model::to_canonical);
-        Ok(Call::DirectWrite {
-            ops: pm_model::ops::diff_ops(Some(&before), canonical.as_ref()),
-        })
+        Ok(pm_model::ops::diff_ops(Some(&before), canonical.as_ref()))
     }
     fn call_uncached(&mut self, request: &Value, txid: u64, time: f64) -> Result<Value> {
         let args = &request["args"];
@@ -631,7 +612,9 @@ impl KernelAdapter {
             });
         }
         let call: Call = match method {
-            "document.directWrite" => self.direct_write(args, &p)?,
+            "document.directWrite" => Call::DirectWrite {
+                ops: self.direct_ops(args, &p)?,
+            },
             "history.begin" => HistoryCall::Begin { label: label(args) }.into(),
             "history.commit" => HistoryCall::Commit {
                 label: args["label"].as_str().map(str::to_owned),
@@ -702,53 +685,19 @@ impl KernelAdapter {
             }
             .into(),
             "edit.cancel" => EditCall::Cancel.into(),
-            "edit.mutateBegin" => {
-                // A lease is the open entry: nested synchronous writes fold into it.
-                self.mutations += 1;
-                let lease = self.mutations;
-                let mut reply =
-                    self.execute(txid, HistoryCall::Begin { label: label(args) }.into())?;
-                if reply.get("error").is_none() {
-                    reply["value"] = json!({"ok":true,"message":"","data":{"lease":lease}});
-                }
-                return Ok(reply);
+            // The kernel's lease is the edit's own rollback boundary: an
+            // edit inside another finishes or aborts only what it wrote.
+            "edit.mutateBegin" => EditCall::MutateBegin { label: label(args) }.into(),
+            "edit.mutateFinish" => EditCall::MutateFinish {
+                lease: lease(args)?,
+                ops: self.direct_ops(args, &p)?,
+                label: args["label"].as_str().map(str::to_owned),
             }
-            "edit.mutateFinish" => {
-                let write = self.direct_write(args, &p)?;
-                // The write and the commit are one reply to the realm: the
-                // commit's publication carries the write's operations.
-                if self.frozen.is_some() {
-                    return Err(Error::Host(FROZEN.into()));
-                }
-                let request = Request::new(self.caller, write).with_txid(txid);
-                let ack = self
-                    .kernel
-                    .call_blocking(&self.project, request)
-                    .map_err(|e| Error::Host(e.to_string()))?;
-                let written = self.outcome(ack)?;
-                if written.get("error").is_some() {
-                    // A rollback that fails leaves the entry open: report that.
-                    let rolled = self.step(HistoryCall::Rollback.into())?;
-                    if rolled.get("error").is_some() {
-                        return Ok(rolled);
-                    }
-                    let message = written["error"]["message"].clone();
-                    return Ok(
-                        json!({"value":{"ok":false,"message":message},"publication":self.publication()?}),
-                    );
-                }
-                let mut reply = self.step(
-                    HistoryCall::Commit {
-                        label: args["label"].as_str().map(str::to_owned),
-                    }
-                    .into(),
-                )?;
-                if reply.get("error").is_none() {
-                    reply["value"] = json!({"ok":true,"message":""});
-                }
-                return Ok(reply);
+            .into(),
+            "edit.mutateAbort" => EditCall::MutateAbort {
+                lease: lease(args)?,
             }
-            "edit.mutateAbort" => HistoryCall::Rollback.into(),
+            .into(),
             // v1–3's `scene3d.edit`: the Studio command MCP's edit_3d runs, as
             // one undoable edit; `data.result` names the layer it made or changed.
             "scene3d.edit" => {
