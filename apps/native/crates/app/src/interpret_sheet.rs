@@ -106,9 +106,17 @@ fn popup<T: PartialEq + std::fmt::Debug>(
     read: Option<(&T, &Origin)>,
 ) -> Field {
     let automatic = read.map(|(value, _)| label(choices, value));
+    // The pop-up names the value short ("Automatic (Limited)"); the line
+    // under it says it whole.
     let mut values = vec![automatic.as_ref().map_or_else(
         || "Automatic".to_owned(),
-        |automatic| format!("Automatic ({automatic})"),
+        |automatic| {
+            let short = automatic
+                .rsplit_once(" (")
+                .filter(|_| automatic.ends_with(')'))
+                .map_or(automatic.as_str(), |(name, _)| name);
+            format!("Automatic ({short})")
+        },
     )];
     values.extend(choices.iter().map(|(label, _)| (*label).to_owned()));
     let mut field = Field::new(id, name, NativePiece::PopUpButton, values);
@@ -741,6 +749,19 @@ mod tests {
         );
         assert_eq!(field.values[0], "Automatic (Rec. 601)");
         assert_eq!(field.selected, 1);
+        // A long value is named short in the pop-up, whole under it.
+        let range = popup(
+            "range",
+            "Range",
+            &RANGES,
+            None,
+            Some((&Range::Limited, &Origin::Override)),
+        );
+        assert_eq!(range.values[0], "Automatic (Limited)");
+        assert_eq!(
+            range.description.as_deref(),
+            Some("Set here. Automatic is Limited (video, 16–235).")
+        );
         assert_eq!(
             field.description.as_deref(),
             Some("Set here. Automatic is Rec. 601.")

@@ -602,6 +602,18 @@ fn interpret_overrides_change_the_reading() {
 /// in a file that says limited. Four grey bands; `luma(frame)` gives their
 /// codes. Stored lossless (FFV1), so the file holds exactly these codes.
 fn mistagged_clip(dir: &Path, frames: usize, luma: impl Fn(usize) -> [u8; 4]) -> PathBuf {
+    banded_clip(dir, "mistagged.mkv", "tv", frames, luma)
+}
+
+/// Four bands of luma codes on neutral chroma, 64×48 FFV1 4:2:0 whose range
+/// flag says `range` ("tv" or "pc").
+fn banded_clip(
+    dir: &Path,
+    name: &str,
+    range: &str,
+    frames: usize,
+    luma: impl Fn(usize) -> [u8; 4],
+) -> PathBuf {
     let (w, h) = (64usize, 48usize);
     let mut raw = Vec::new();
     for n in 0..frames {
@@ -615,7 +627,7 @@ fn mistagged_clip(dir: &Path, frames: usize, luma: impl Fn(usize) -> [u8; 4]) ->
     }
     let input = dir.join("codes.yuv");
     std::fs::write(&input, raw).unwrap();
-    let output = dir.join("mistagged.mkv");
+    let output = dir.join(name);
     let ffmpeg = PathBuf::from(
         std::env::var_os("PM_FFMPEG_DIR").expect("source engine/env.sh before this test"),
     )
@@ -624,7 +636,7 @@ fn mistagged_clip(dir: &Path, frames: usize, luma: impl Fn(usize) -> [u8; 4]) ->
         .args(["-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "yuv420p"])
         .args(["-s", "64x48", "-r", "25", "-i"])
         .arg(&input)
-        .args(["-c:v", "ffv1", "-color_range", "tv"])
+        .args(["-c:v", "ffv1", "-color_range", range])
         .arg(&output)
         .status()
         .unwrap();
@@ -797,6 +809,28 @@ fn an_interpretation_reads_a_generated_proxy_as_it_reads_the_original() {
                 original[band][1]
             );
         }
+    }
+
+    // Y′CbCr flagged full range: the generator rescales the codes to the
+    // limited range ProRes holds. Without a correction the proxy reads as
+    // the original; a corrected range can't be carried by rescaled codes,
+    // so the clip is drawn from its original, exactly.
+    let full = banded_clip(dir.path(), "full.mkv", "pc", 8, |_| luma);
+    let full_proxy = proxy_of(dir.path(), &full);
+    for (interpret, tolerance) in [
+        (None, CODEC),
+        (Some(json!({ "range": "limited" })), 1e-6),
+        (Some(json!({ "matrix": "bt601" })), CODEC),
+        (None, CODEC),
+    ] {
+        let original = bands(&mut r, &full, None, interpret.clone());
+        let proxy = bands(&mut r, &full, Some(&full_proxy), interpret.clone());
+        let d = apart(original, proxy);
+        eprintln!("full-range Y′CbCr original, {interpret:?}: proxy {d:.4} from the original");
+        assert!(
+            d < tolerance,
+            "{interpret:?}: proxy {proxy:?}, original {original:?}"
+        );
     }
 
     // R′G′B′ tagged Rec.2020: saturated bands, where a wrong matrix shows.

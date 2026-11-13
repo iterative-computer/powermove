@@ -116,14 +116,30 @@ fn level_lines(out: &mut Raster, extended: bool, color: u32) {
     }
 }
 
-/// The vectorscope's frame: the codable circle, centre cross and the 75 %
-/// Rec.709 primary and secondary targets.
+/// The skin-tone line's angle on the component vectorscope, counter-clockwise
+/// from +Cb: 123°, between the red (103°) and yellow (167°) targets, where
+/// every complexion's hue falls (the "I" line Resolve, Final Cut and
+/// Premiere draw).
+pub const SKIN_TONE_DEGREES: f32 = 123.0;
+
+/// The vectorscope's frame: the codable circle, centre cross, the skin-tone
+/// line and the 75 % Rec.709 primary and secondary targets.
 fn vector_lines(out: &mut Raster, c: &Counts, color: u32) {
     let n = c.vector_bins;
     let middle = (n - 1) as f32 / 2.0;
     for i in 0..n {
         out.add(i, n / 2, color, 0.25);
         out.add(n / 2, i, color, 0.25);
+    }
+    // Rows run from +Cr at the top.
+    let (cos, sin) = (
+        SKIN_TONE_DEGREES.to_radians().cos(),
+        SKIN_TONE_DEGREES.to_radians().sin(),
+    );
+    for step in 0..n * 2 {
+        let r = step as f32 / (n * 2) as f32 * middle;
+        let (x, y) = (middle + r * cos, middle - r * sin);
+        out.add(x.round() as usize, y.round() as usize, color, 0.4);
     }
     for step in 0..n * 8 {
         let a = step as f32 / (n * 8) as f32 * core::f32::consts::TAU;
@@ -604,6 +620,44 @@ mod tests {
         view.extended = true;
         assert!(scale(true).iter().any(|(_, label)| *label == "SDR White"));
         assert!(lines(&view) >= 4);
+    }
+
+    /// The skin-tone line runs from the centre into the upper left, between
+    /// the red and yellow targets: a typical complexion lands on it.
+    #[::core::prelude::v1::test]
+    fn the_vectorscope_draws_the_skin_tone_line_where_skin_falls() {
+        let t = tokens();
+        let empty = [0u32; 32];
+        let vector = [0u32; 64 * 64];
+        let hist = [0u32; 8];
+        let mut view = counts(&empty, [&empty; 3], &vector, [&hist; 3], &hist);
+        view.vector_bins = 64;
+        let image = raster(&view, Kind::Vectorscope, &t.colors);
+        let background = Raster::new(1, 1, t.colors.viewer).bgra;
+        let lit = |x: usize, y: usize| {
+            image.bgra[(y * 64 + x) * 4..(y * 64 + x) * 4 + 4] != background[..]
+        };
+        // A complexion (sRGB 0.80, 0.60, 0.50) in Rec.709 Cb, Cr.
+        let (r, g, b) = (0.80f32, 0.60f32, 0.50f32);
+        let y = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        let (cb, cr) = ((b - y) / 1.8556, (r - y) / 1.5748);
+        let angle = cr.atan2(cb).to_degrees();
+        assert!((angle - SKIN_TONE_DEGREES).abs() < 10.0, "skin at {angle}°");
+        // The line is drawn along that direction, and not opposite it.
+        let at = |s: f32| {
+            let m = 63.0 / 2.0;
+            let a = SKIN_TONE_DEGREES.to_radians();
+            (
+                (m + s * m * a.cos()).round() as usize,
+                (m - s * m * a.sin()).round() as usize,
+            )
+        };
+        for s in [0.4, 0.7, 0.9] {
+            let (x, y) = at(s);
+            assert!(lit(x, y), "the line at {s} of the radius");
+        }
+        let (x, y) = at(-0.7);
+        assert!(!lit(x, y), "nothing opposite");
     }
 
     #[::core::prelude::v1::test]
