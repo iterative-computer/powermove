@@ -347,6 +347,64 @@ fn j_and_k_stop_on_keyframes_markers_and_the_work_area(cx: &mut TestAppContext) 
     }
     assert_eq!(back, [8.5, 6., 4., 3., 2., 1., 0.5, 0.]);
 }
+/// The shipped palette's Next/Previous Edge and Next/Previous Selected
+/// Event: edges are the composition's ends, layer ends and keyframes (no
+/// work area, no markers); selected events are the selected layers' own.
+#[gpui::test]
+fn edge_and_selected_event_commands_step_the_playhead(cx: &mut TestAppContext) {
+    let project = r##"{"id":"integration","name":"Stops","compId":"c","w":640,"h":360,"fps":30,"dur":10,"bg":"#000000","assets":{},"comps":{},"work":[1,6],"markers":[{"id":"m1","t":4}],"layers":[{"id":"l0","type":"shape","name":"Box","from":0.5,"dur":8,"on":true,"p":{"opacity":{"v":100,"kf":[{"i":"k1","t":1.5,"v":0},{"i":"k2","t":2.5,"v":100}]},"x":{"v":10,"kf":[]},"y":{"v":20,"kf":[]},"sx":{"v":100,"kf":[]},"sy":{"v":100,"kf":[]},"r":{"v":0,"kf":[]}},"d":{"w":100,"h":100},"fx":[]},{"id":"l1","type":"shape","name":"Bar","from":3.5,"dur":2,"on":true,"p":{"opacity":{"v":100,"kf":[]},"x":{"v":10,"kf":[]},"y":{"v":20,"kf":[]},"sx":{"v":100,"kf":[]},"sy":{"v":100,"kf":[]},"r":{"v":0,"kf":[]}},"d":{"w":100,"h":100},"fx":[]}]}"##;
+    let mut s = stage_project(cx, project.into());
+    let walk = |s: &mut Stage, cx: &mut TestAppContext, command: &str, steps: usize| {
+        (0..steps)
+            .map(|_| {
+                run(s, cx, command, &[]);
+                *s.recorder.time.borrow()
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        walk(&mut s, cx, "nextEdge", 8),
+        [0.5, 2., 3., 3.5, 5.5, 8.5, 10., 10.]
+    );
+    assert_eq!(
+        walk(&mut s, cx, "prevEdge", 8),
+        [8.5, 5.5, 3.5, 3., 2., 0.5, 0., 0.]
+    );
+    // Nothing selected: no event to go to, and the rows say so.
+    let off = |s: &Stage| {
+        let p = published(&s.rig.kernel);
+        disabled(Some(&p), &layers(s), &Clipboard::Empty)
+    };
+    assert!(off(&s).contains("nextSelectedEvent") && !off(&s).contains("nextEdge"));
+    assert_eq!(walk(&mut s, cx, "nextSelectedEvent", 1), [0.]);
+    select(&mut s, cx, &["l1"]);
+    assert!(!off(&s).contains("nextSelectedEvent"));
+    assert_eq!(walk(&mut s, cx, "nextSelectedEvent", 3), [3.5, 5.5, 5.5]);
+    select(&mut s, cx, &["l0"]);
+    assert_eq!(walk(&mut s, cx, "prevSelectedEvent", 4), [3., 2., 0.5, 0.5]);
+    // Each is a palette row under Playback; Fit and Project Settings are
+    // listed too, the latter with the key the shipped palette showed.
+    let rows = pm_shell::menu::palette_rows();
+    for (menu, label) in [
+        ("Playback", "Next Edge"),
+        ("Playback", "Previous Edge"),
+        ("Playback", "Next Selected Event"),
+        ("Playback", "Previous Selected Event"),
+        ("View", "Fit Composition and Timeline"),
+        ("File", "Project Settings…"),
+    ] {
+        assert!(
+            rows.iter().any(|(m, _, l)| *m == menu && l == label),
+            "{label}"
+        );
+    }
+    assert!(
+        pm_shell::keyboard::shipped()
+            .iter()
+            .any(|b| b.chord == "cmd+shift+," && b.command == "projectSettings")
+    );
+    assert!(disabled(None, &[], &Clipboard::Empty).contains("projectSettings"));
+}
 fn key_times(s: &Stage, id: &str, channel: &str) -> Vec<f64> {
     let p = published(&s.rig.kernel);
     let root = p.snapshot.root().unwrap();

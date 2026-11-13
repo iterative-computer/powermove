@@ -131,6 +131,8 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
                 m("export"),
                 Item::command("Export Captions…", "exportCaptions", ""),
                 sep(),
+                r("Project Settings…", "projectSettings"),
+                sep(),
                 m("closeWindow"),
             ],
         ),
@@ -298,6 +300,11 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
             vec![
                 k("Loop Playback", "toggleLoop", ""),
                 k("Reset Work Area", "resetWorkArea", ""),
+                sep(),
+                k("Previous Edge", "prevEdge", ""),
+                k("Next Edge", "nextEdge", ""),
+                k("Previous Selected Event", "prevSelectedEvent", ""),
+                k("Next Selected Event", "nextSelectedEvent", ""),
             ],
         ),
         (
@@ -307,6 +314,7 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
                 m("zoomOut"),
                 m("actualSize"),
                 m("fitComposition"),
+                k("Fit Composition and Timeline", "fitView", ""),
                 m("toggleLayerControls"),
                 Item::command("Composition Flowchart", "composition.flowchart", ""),
                 sep(),

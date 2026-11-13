@@ -2717,6 +2717,31 @@ impl Controller {
                 self.view.place(None, [0., 0.]);
                 self.write_view(None, cx);
             }
+            // The whole composition in the viewer and its whole length in
+            // the timeline.
+            "fitView" => {
+                if self.published.is_none() {
+                    return false;
+                }
+                self.view.place(None, [0., 0.]);
+                self.write_view(None, cx);
+                if let Some(timeline) = self.builtins.timeline.clone() {
+                    let time = self.time();
+                    timeline.update(cx, |t, cx| t.command("timeline.fit", time, None, false, cx));
+                }
+            }
+            // Settings, at the open project's own page.
+            "projectSettings" => {
+                if self.published.is_none() {
+                    return false;
+                }
+                self.show_builtin("settings", window, cx);
+                if let Some(view) = self.builtins.views.get("settings") {
+                    view.update(cx, |v, cx| {
+                        v.scroll_semantic("settings.section.project", cx)
+                    });
+                }
+            }
             "actualSize" => {
                 self.view.place(Some(1.), self.view.pan);
                 self.write_view(None, cx);

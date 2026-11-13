@@ -264,10 +264,20 @@ impl TimelineModel {
                 .map_or_else(Plan::default, Plan::seek),
             // The stops After Effects counts as visible: the composition's
             // ends, the work area's, markers, layer ends and keyframes.
-            "prevVisibleEvent" | "nextVisibleEvent" => {
-                let mut events = vec![0., duration, self.index.work[0], self.index.work[1]];
-                events.extend(self.index.markers.iter().map(|m| m.time));
+            // Edges are the composition's ends, layer ends and keyframes;
+            // selected events are the selected layers' ends and keyframes.
+            "prevVisibleEvent" | "nextVisibleEvent" | "prevEdge" | "nextEdge"
+            | "prevSelectedEvent" | "nextSelectedEvent" => {
+                let selected = id.ends_with("SelectedEvent");
+                let mut events = if selected { vec![] } else { vec![0., duration] };
+                if id.ends_with("VisibleEvent") {
+                    events.extend(self.index.work);
+                    events.extend(self.index.markers.iter().map(|m| m.time));
+                }
                 for l in &self.index.layers {
+                    if selected && !layers.contains(&l.id) {
+                        continue;
+                    }
                     events.extend([l.from, l.from + l.duration]);
                     for c in &l.channels {
                         events.extend(c.keys.iter().map(|k| l.from + k.time));

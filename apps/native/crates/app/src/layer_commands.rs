@@ -223,6 +223,10 @@ fn timeline_owned(name: &str) -> bool {
             | "timeline.adjacentKeyframe:next"
             | "prevVisibleEvent"
             | "nextVisibleEvent"
+            | "prevEdge"
+            | "nextEdge"
+            | "prevSelectedEvent"
+            | "nextSelectedEvent"
             | "timeline.addKeyframe"
             | "timeline.addMarker"
             | "timeline.toggleHold"
@@ -1412,6 +1416,9 @@ pub fn disabled(
         selected.iter().any(|l| !l.effectively_locked),
     );
     set("timeline.toggleHold", keys);
+    for name in ["prevSelectedEvent", "nextSelectedEvent"] {
+        set(name, chosen);
+    }
     for name in ["timeline.addKeyframe", "timeline.keyProperty:p"] {
         set(name, selected.iter().any(|l| !l.effectively_locked));
     }
@@ -1429,7 +1436,7 @@ pub fn disabled(
     off
 }
 /// Rows that act on the selected layers.
-const SELECTION: [&str; 20] = [
+const SELECTION: &[&str] = &[
     "rippleDelete",
     "nudgeLayerTime",
     "alignLayers",
@@ -1452,8 +1459,12 @@ const SELECTION: [&str; 20] = [
     "centerAnchor",
 ];
 /// Rows that need a document, on top of the selection-based ones.
-const DOCUMENT: [&str; 30] = [
+const DOCUMENT: &[&str] = &[
     "importFolder",
+    "projectSettings",
+    "fitView",
+    "prevEdge",
+    "nextEdge",
     "timeline.addMarker",
     "timeline.toggleHold",
     "timeline.toggleSnapping",
