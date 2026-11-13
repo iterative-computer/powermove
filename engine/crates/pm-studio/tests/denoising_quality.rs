@@ -337,3 +337,22 @@ fn adaptive_polished_and_catcher_pixels_keep_enough_observations() {
         }
     }
 }
+
+#[test]
+fn a_far_clipped_catcher_miss_never_shades_an_invalid_surface_at_the_horizon() {
+    let mut scene=glass_detail();scene.world=World::default();
+    scene.objects=vec![Object{mesh:mesh::sphere(v3(0.,70.,0.),30.,24,48),material:1}];
+    scene.shadow_catcher=true;scene.backdrop=Vec3::splat(0.9);
+    scene.environment=(Vec3::splat(0.08),Vec3::splat(0.08));
+    scene.camera=Camera::lens(v3(170.,140.,420.),v3(0.,70.,0.),60.,0.);
+    let (w,h)=(256u32,144u32);let mut renderer=Renderer::new(w,h).unwrap();
+    for hardware in [false,true] {for far in [600.,10000.] {
+        renderer.hardware_rt=hardware;renderer.set_scene(&scene,&scene.prepare());
+        renderer.set_clip_planes(Some(0.01),Some(far));renderer.caustics_enabled=false;
+        renderer.trace(16,8,true,0);let pixels=renderer.finish(0).0;
+        let minimum=(0..h/3).flat_map(|y|(0..w/5).map(move|x|((y*w+x)*4) as usize))
+            .map(|i|pixels[i].min(pixels[i+1]).min(pixels[i+2])).min().unwrap();
+        eprintln!("CATCHER_HORIZON hardware={hardware} far={far} min={minimum}");
+        assert!(minimum>=220,"far-clipped empty backdrop turned dark: hardware={hardware} far={far} min={minimum}");
+    }}
+}
