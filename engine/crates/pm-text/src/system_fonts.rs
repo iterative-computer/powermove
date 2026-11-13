@@ -274,14 +274,37 @@ impl Fence {
             return Err("the installed fonts changed".to_owned());
         }
         for (path, read) in files_read() {
-            if self.asked.get(&path).is_some_and(|asked| *asked != read)
-                || FileVersion::of(&path) != Some(read)
-            {
+            match self.asked.get(&path) {
+                Some(asked) if *asked != read => {
+                    return Err(format!("{} is not the file it was", path.display()));
+                }
+                Some(_) => {}
+                // A font file nobody asked for: this process resolved to a
+                // font the asking one does not list (one activated for it
+                // alone, or since). Only the system's own sealed fonts are
+                // read unlisted (hidden interface and last-resort faces
+                // CoreText falls back to): they are the same file in every
+                // process.
+                None if sealed(&path) => {}
+                None => {
+                    return Err(format!(
+                        "{} was read but is not among the fonts asked for",
+                        path.display()
+                    ));
+                }
+            }
+            if FileVersion::of(&path) != Some(read) {
                 return Err(format!("{} is not the file it was", path.display()));
             }
         }
         Ok(())
     }
+}
+
+/// Whether `path` is one of the operating system's own font files, on its
+/// sealed, read-only volume: no font manager or user puts a file there.
+fn sealed(path: &std::path::Path) -> bool {
+    path.starts_with("/System/Library")
 }
 
 /// Makes the fonts of the file at `path` available to this process only

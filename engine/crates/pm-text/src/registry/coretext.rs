@@ -883,14 +883,23 @@ impl CoreTextRegistry {
         let url = unsafe { ct.attribute(kCTFontURLAttribute) }
             .and_then(|u| u.downcast::<CFURL>().ok())
             .and_then(|u| u.to_file_path());
-        if let Some(path) = url
-            && let Some((data, key)) = self.file_bytes(&path)
+        if let Some(path) = &url
+            && let Some((data, key)) = self.file_bytes(path)
             && let Some(index) = face_index(data.as_slice(), &[&ps, &cg_ps])
         {
             return (data, index, key);
         }
         // No file (or no matching face in it): rebuild an sfnt from the
-        // tables CoreText serves, as Skia does for HarfBuzz on macOS.
+        // tables CoreText serves, as Skia does for HarfBuzz on macOS. The
+        // tables are of the font's file as it is now: its version is
+        // recorded as a read, so whoever holds work to the fonts read
+        // holds it to this file too.
+        if let Some(path) = &url
+            && !self.files.contains_key(path.as_path())
+            && let Some(version) = crate::file_version::FileVersion::of(path)
+        {
+            crate::system_fonts::note_read(path, version);
+        }
         if let Some((d, key)) = self.table_fonts.get(&ps) {
             return (d.clone(), 0, key.clone());
         }

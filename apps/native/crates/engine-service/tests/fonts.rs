@@ -410,6 +410,34 @@ fn a_font_installed_while_a_project_is_open_retires_its_rendered_frames(
         picture(&viewer) == installed
     });
 
+    // A font file read that the job was not asked to draw with (a font
+    // activated for this process alone, or after the list was taken) does
+    // not pass: the process resolved to a font the asking one never
+    // listed. With every file read listed (the system's own sealed fonts
+    // are read unlisted), the fence holds.
+    assert!(
+        system_fonts::files_read()
+            .iter()
+            .any(|(path, _)| path == &font),
+        "the app drew with the font"
+    );
+    let listed = system_fonts::Inventory::current();
+    system_fonts::Fence::new(&listed).hold().unwrap();
+    let unlisted = system_fonts::Inventory(
+        listed
+            .0
+            .iter()
+            .filter(|(path, _)| path != &font)
+            .cloned()
+            .collect(),
+    );
+    assert!(unlisted.0.len() < listed.0.len(), "the font is listed");
+    let refused = system_fonts::Fence::new(&unlisted).hold().unwrap_err();
+    assert!(
+        refused.contains("not among the fonts asked for"),
+        "a font file nobody asked for was read: {refused}"
+    );
+
     // An export waiting for its turn when a font file it draws with is
     // rewritten in place: it fails rather than deliver frames drawn with
     // other fonts than the ones it was asked for, and leaves no file.
