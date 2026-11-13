@@ -356,14 +356,11 @@ impl Index {
         for (content, record) in &mut self.contents {
             for kind in [Rendition::Proxy, Rendition::Optimized] {
                 let slot = record.slot(kind);
-                if slot
-                    .as_ref()
-                    .is_some_and(|f| {
-                        !f.attached
-                            && (f.sequence != pm_proxy::SEQUENCE_PIPELINE
-                                || f.recipe != pm_proxy::ProxyRecipe::VERSION)
-                    })
-                    && is_sequence(content)
+                if slot.as_ref().is_some_and(|f| {
+                    !f.attached
+                        && (f.sequence != pm_proxy::SEQUENCE_PIPELINE
+                            || f.recipe != pm_proxy::ProxyRecipe::VERSION)
+                }) && is_sequence(content)
                 {
                     retired.push((content.clone(), kind, slot.take().unwrap()));
                 }
@@ -2963,13 +2960,19 @@ mod tests {
             "the earlier build's proxy is used"
         );
         assert!(!earlier.exists(), "the earlier build's proxy is kept");
-        assert!(!older_recipe.exists(), "a proxy of the earlier recipe is kept");
         assert!(
-            media.inner.state.lock().unwrap().index.regenerate.contains(&(
-                "p".to_owned(),
-                "c".to_owned(),
-                Rendition::Proxy
-            )),
+            !older_recipe.exists(),
+            "a proxy of the earlier recipe is kept"
+        );
+        assert!(
+            media
+                .inner
+                .state
+                .lock()
+                .unwrap()
+                .index
+                .regenerate
+                .contains(&("p".to_owned(), "c".to_owned(), Rendition::Proxy)),
             "it is not made again"
         );
         assert_eq!(
