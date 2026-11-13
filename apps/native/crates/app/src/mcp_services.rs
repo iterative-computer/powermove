@@ -213,6 +213,7 @@ pub fn headless(profile: PathBuf, exports: PathBuf, launch: Option<PathBuf>) -> 
             tools.connect(),
         );
         drop(server);
+        let result = result.and_then(|()| tools.automation.lock().unwrap().close_headless());
         actor.shutdown();
         result.map_err(Into::into)
     })
@@ -1192,6 +1193,14 @@ impl MediaRegistry for EngineJobs {
 impl EngineHook for EngineJobs {
     fn capture(&self, _: &CaptureRequest) -> Result<Value> {
         Err(Error::invalid("Frame capture needs a frozen project"))
+    }
+    fn scene3d_assets(&self, frozen: &FrozenProject) -> Result<Arc<dyn pm_scene3d::geometry::AssetGeometry>> {
+        let published = self.published(frozen)?;
+        let media = crate::media::for_session(
+            &published.snapshot, &published.media, published.path.as_deref(),
+            &crate::media::cache_root(&self.profile),
+        ).map_err(failed)?;
+        Ok(Arc::new(pm_scene3d::geometry::FileAssets::new(media.catalog.originals.into_iter().collect())))
     }
     fn capture_snapshot(&self, request: &CaptureRequest, frozen: &FrozenProject) -> Result<Value> {
         let published = self.published(frozen)?;

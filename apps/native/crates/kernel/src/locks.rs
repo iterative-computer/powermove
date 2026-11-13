@@ -67,6 +67,8 @@ pub enum OpenDecision {
 struct LockedFile {
     file: File,
     owns_record: bool,
+    /// Stable flock carrier and atomically published ownership record.
+    record: Option<(PathBuf, PathBuf)>,
     /// A local lock's own file, removed while the lock is still held.
     remove: Option<PathBuf>,
 }
@@ -83,8 +85,11 @@ impl std::ops::DerefMut for LockedFile {
 }
 impl Drop for LockedFile {
     fn drop(&mut self) {
-        if self.owns_record {
-            let _ = write_record(&mut self.file, 0);
+        if self.owns_record
+            && let Some((carrier, record)) = &self.record
+            && names(carrier, &self.file)
+        {
+            let _ = write_record(&mut self.file, record, 0);
         }
         // Removed before the unlock: whoever opened this inode meanwhile
         // locks it, finds the name no longer leads to it, and starts over.
@@ -150,6 +155,7 @@ impl FileLock {
         let mut file = LockedFile {
             file,
             owns_record: false,
+            record: Some((path.to_path_buf(), owner_record_path(path))),
             remove: None,
         };
         // The lock is on the file we opened. If the name leads elsewhere by
@@ -166,7 +172,20 @@ impl FileLock {
         }
         let mut text = Vec::new();
         file.read_to_end(&mut text)?;
-        match record(&text) {
+        let record_path = owner_record_path(path);
+        let legacy = record(&text);
+        let atomic = match fs::read(&record_path) {
+            Ok(bytes) => record(&bytes),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e),
+        };
+        // An older app may still write the stable inode. At equal timestamps
+        // prefer it, so a fresh legacy owner cannot lose to our release record.
+        let owner = match (legacy, atomic) {
+            (Some(a), Some(b)) => Some(if a.1 >= b.1 { a } else { b }),
+            (a, b) => a.or(b),
+        };
+        match owner {
             // We hold the flock, so no process on this Mac holds it (the
             // native app and the transition release both flock). A record
             // younger than 30 s still names a live owner when its pid runs,
@@ -195,7 +214,7 @@ impl FileLock {
             }
         }
         file.owns_record = true;
-        write_record(&mut file, std::process::id())?;
+        write_record(&mut file, &record_path, std::process::id())?;
         let (stop, rx) = mpsc::channel();
         let named = path.to_path_buf();
         let worker = thread::Builder::new()
@@ -207,7 +226,7 @@ impl FileLock {
                     // A lock file replaced underneath is someone else's now:
                     // its record is not ours to refresh.
                     if names(&named, &file) {
-                        let _ = write_record(&mut file, std::process::id());
+                        let _ = write_record(&mut file, &record_path, std::process::id());
                     }
                 }
                 // LockedFile writes PID 0 and explicitly unlocks before close.
@@ -244,6 +263,7 @@ impl FileLock {
             let mut locked = LockedFile {
                 file,
                 owns_record: false,
+                record: None,
                 remove: None,
             };
             if names(path, &locked) {
@@ -287,12 +307,26 @@ fn hide(path: &Path) {
     #[cfg(not(target_os = "macos"))]
     let _ = path;
 }
-fn write_record(file: &mut File, pid: u32) -> io::Result<()> {
-    file.seek(SeekFrom::Start(0))?;
+/// The flock carrier must keep its inode. Ownership is published atomically in
+/// a sibling record instead; replacing the flock carrier would admit two writers.
+pub fn owner_record_path(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(".owner");
+    PathBuf::from(name)
+}
+fn write_record(file: &mut File, record: &Path, pid: u32) -> io::Result<()> {
     let text = format!("{{\"pid\":{pid},\"heartbeat\":{}}}", now_ms());
-    file.write_all(text.as_bytes())?;
-    file.set_len(text.len() as u64)?;
-    file.sync_all()
+    crate::persistence::atomic_write(record, text.as_bytes())?;
+    hide(record);
+    // Compatibility mirror for older apps. This inode cannot be renamed, and
+    // a failed mirror must not invalidate the already durable owner record.
+    let _ = (|| -> io::Result<()> {
+        file.seek(SeekFrom::Start(0))?;
+        file.write_all(text.as_bytes())?;
+        file.set_len(text.len() as u64)?;
+        file.sync_all()
+    })();
+    Ok(())
 }
 impl Drop for FileLock {
     fn drop(&mut self) {
