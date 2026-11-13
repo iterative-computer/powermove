@@ -78,6 +78,13 @@ pub struct Colors {
     /// Badges drawn over media (duration, offline): always dark, drawn at
     /// `metrics.media_badge_opacity`.
     pub media_badge: u32,
+    /// The viewer's ruler guides: a cyan (the accent marks selection handles
+    /// there), deeper in the light appearance, where they also cross the
+    /// light surround.
+    pub viewer_guide: u32,
+    /// The viewer's grid: a light neutral over the picture, drawn at
+    /// `translucency.line`.
+    pub viewer_grid: u32,
     /// Red channel scope trace; data colour drawn with dark-scheme viewer tokens.
     pub scope_red: u32,
     /// Green channel scope trace; data colour drawn with dark-scheme viewer tokens.
@@ -259,6 +266,8 @@ pub struct Metrics {
     pub track_row: f32,
     pub property_row: f32,
     pub ruler: f32,
+    /// The viewer's rulers: a band along the top and the leading edge.
+    pub viewer_ruler: f32,
     pub layer_column: f32,
     /// Timeline clip bar corners (v1–3's `chrome.timeline.clipRadius`).
     pub clip_radius: f32,
@@ -571,6 +580,14 @@ impl Colors {
                 oklch(0.514, 0.11, 161.)
             },
             media_badge: 0x000000,
+            // Over a light surround a lighter cyan fades; a deeper one
+            // still reads over a dark picture.
+            viewer_guide: if dark {
+                oklch(0.78, 0.13, 215.)
+            } else {
+                oklch(0.62, 0.13, 220.)
+            },
+            viewer_grid: 0xd8d8d8,
             scope_red: 0xff6b62,
             scope_green: 0x4fd58a,
             scope_blue: 0x6ba6ff,
@@ -692,6 +709,7 @@ impl Tokens {
                 track_row: 30.,
                 property_row: 22.,
                 ruler: 24.,
+                viewer_ruler: 16.,
                 layer_column: 320.,
                 clip_radius: radius.sm,
                 playhead: 1.,

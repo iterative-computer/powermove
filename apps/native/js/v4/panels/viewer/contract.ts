@@ -29,6 +29,18 @@ export interface ViewerHostFacts {
     epoch: string;
   };
   interaction: "idle" | "hover" | "focus" | "media-drop" | "effect-drop";
+  /** The composition's transport, the same state the timeline header shows.
+   * While playing, `timecode` stands still: a native layer draws the time. */
+  transport?: {
+    time: number;
+    timecode: string;
+    spokenTime: string;
+    duration: string;
+    playing: boolean;
+    looping: boolean;
+  };
+  /** The channel view, as the command that shows it (display only). */
+  channels?: string;
 }
 export interface ViewerSnapshot {
   model: ViewerModel | null;
@@ -86,6 +98,19 @@ export function snapshot(value: unknown): ViewerSnapshot {
   if (frame.resource !== null) text(frame.resource);
   if (typeof frame.loading !== "boolean" || typeof frame.failed !== "boolean")
     throw new TypeError("Invalid frame observation");
+  if (h.transport !== undefined) {
+    const t = record(h.transport);
+    finite(t.time);
+    for (const k of ["timecode", "spokenTime", "duration"])
+      if (typeof t[k] !== "string") throw new TypeError("Invalid transport");
+    if (typeof t.playing !== "boolean" || typeof t.looping !== "boolean")
+      throw new TypeError("Invalid transport");
+  }
+  if (h.channels !== undefined)
+    oneOf(
+      h.channels,
+      channelViews.map((c) => c.v),
+    );
   if (h.source !== null) {
     if (root.model === null) throw new TypeError("Source requires a project");
     const s = record(h.source);
@@ -104,6 +129,15 @@ export function snapshot(value: unknown): ViewerSnapshot {
   }
   return result as unknown as ViewerSnapshot;
 }
+/** View › Channels: what the viewer shows of the picture, by command. */
+export const channelViews = [
+  { v: "viewer.showRGB", label: "RGB" },
+  { v: "viewer.showRed", label: "Red" },
+  { v: "viewer.showGreen", label: "Green" },
+  { v: "viewer.showBlue", label: "Blue" },
+  { v: "viewer.showAlpha", label: "Alpha" },
+  { v: "viewer.showAlphaOverlay", label: "Alpha Overlay" },
+];
 export const zoomPresets = [0.05, 0.125, 0.25, 0.5, 1, 2, 4, 8] as const;
 export const resolutions = [
   { v: "auto", label: "Auto" },

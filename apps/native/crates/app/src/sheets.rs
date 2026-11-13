@@ -121,6 +121,39 @@ impl OpenSheet {
             label.setTextColor(Some(&crate::dialogs::sheet_layout::native::colour(rgb)));
         }
     }
+    /// Underlines the character at `offset` (UTF-16 code units) of a
+    /// multi-line editor in `rgb`: where a parser stopped. `None` clears it.
+    pub fn mark(&self, id: &str, offset: Option<usize>, rgb: u32) {
+        use objc2_app_kit::{NSUnderlineColorAttributeName, NSUnderlineStyleAttributeName};
+        use objc2_foundation::{NSNumber, NSRange};
+        let Some(editor) = self.sheet.editors.get(id) else {
+            return;
+        };
+        let Some(storage) = (unsafe { editor.textStorage() }) else {
+            return;
+        };
+        let len = storage.length();
+        let (style, colour) =
+            unsafe { (NSUnderlineStyleAttributeName, NSUnderlineColorAttributeName) };
+        storage.removeAttribute_range(style, NSRange::new(0, len));
+        storage.removeAttribute_range(colour, NSRange::new(0, len));
+        if let Some(at) = offset.filter(|_| len > 0) {
+            // Past the end (a value is missing there): the last character.
+            let range = NSRange::new(at.min(len - 1), 1);
+            unsafe {
+                storage.addAttribute_value_range(
+                    style,
+                    &NSNumber::new_isize(objc2_app_kit::NSUnderlineStyle::Thick.0),
+                    range,
+                );
+                storage.addAttribute_value_range(
+                    colour,
+                    &crate::dialogs::sheet_layout::native::colour(rgb),
+                    range,
+                );
+            }
+        }
+    }
     pub fn text(&self, id: &str) -> String {
         if let Some(editor) = self.sheet.editors.get(id) {
             return editor.string().to_string();

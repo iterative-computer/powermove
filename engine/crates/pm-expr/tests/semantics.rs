@@ -324,3 +324,42 @@ fn quirks_of_the_original_are_kept() {
     assert_eq!(n("-7 % 3"), -1.0);
     assert_eq!(n("Math.round(-2.5)"), -2.0);
 }
+
+/// A parse failure keeps its message (`… at <offset>`, as v1 throws it) and
+/// also says where it is, in UTF-16 code units and as a 1-based line and
+/// column, so an editor can mark the place; a reason with no place has none.
+#[test]
+fn a_parse_failure_says_where_it_is() {
+    use pm_expr::{Dialect, Expression, Location};
+    let at = |source: &str| {
+        let e = Expression::parse(source, Dialect::Native).err().unwrap();
+        (e.to_string(), e.location())
+    };
+    assert_eq!(
+        at("1 +"),
+        (
+            "Expected a value at 3".into(),
+            Some(Location {
+                offset: 3,
+                line: 1,
+                column: 4
+            })
+        )
+    );
+    // On the second line, its fifth character.
+    assert_eq!(
+        at("value\n+ 1 @ 2"),
+        (
+            "Unsupported token at 10".into(),
+            Some(Location {
+                offset: 10,
+                line: 2,
+                column: 5
+            })
+        )
+    );
+    let deep = pm_expr::MAX_DEPTH + 1;
+    let (message, place) = at(&format!("{}1{}", "(".repeat(deep), ")".repeat(deep)));
+    assert_eq!(message, "Expression is too complex");
+    assert_eq!(place, None, "a reason with no place has none");
+}
