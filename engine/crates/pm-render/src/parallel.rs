@@ -3,26 +3,26 @@
 //! passes' threads (`pm_model::parallel`). Results never depend on the
 //! thread count.
 
-/// `f(0), …, f(n - 1)` in order, on up to `pm_model::parallel::workers`
-/// threads running at the calling thread's quality of service. macOS starts
-/// a new thread at the default class, and a render thread at
-/// user-interactive would wait for helpers the scheduler holds back (on
-/// efficiency cores, behind other work) for the frame it is drawing.
+/// `f(0), …, f(n - 1)` in order, on this thread and up to
+/// `pm_model::parallel::workers() - 1` helpers that persist across frames
+/// and run at the calling thread's quality of service. macOS starts a new
+/// thread at the default class, and a render thread at user-interactive
+/// would wait for helpers the scheduler holds back (on efficiency cores,
+/// behind other work) for the frame it is drawing. Starting a thread per
+/// helper per call cost more than the work itself (thread start, a fresh
+/// allocator heap whose pages are committed and purged each frame): a frame
+/// with new text or shape geometry calls this once per layer.
 pub(crate) fn map<T: Send>(n: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
-    let qos = qos::current();
     #[cfg(not(target_arch = "wasm32"))]
-    if pm_media::decode::diag::knob("PM_FIX_POOL") == Some(1) {
-        return pool::map(n, qos, &f);
+    {
+        pool::map(n, qos::current(), &f)
     }
-    pm_model::parallel::map(n, |i| {
-        qos::adopt(qos);
-        f(i)
-    })
+    #[cfg(target_arch = "wasm32")]
+    {
+        (0..n).map(f).collect()
+    }
 }
 
-/// PM_FIX_POOL: helpers that persist across frames. Spawning a thread per
-/// helper per frame cost more than the work itself (thread start, a fresh
-/// allocator heap whose pages are committed and purged each frame).
 #[cfg(not(target_arch = "wasm32"))]
 mod pool {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -34,7 +34,10 @@ mod pool {
     struct Task {
         work: *const (dyn Fn() + Sync),
         qos: u32,
-        left: Arc<(Mutex<(usize, Option<Box<dyn std::any::Any + Send>>)>, Condvar)>,
+        left: Arc<(
+            Mutex<(usize, Option<Box<dyn std::any::Any + Send>>)>,
+            Condvar,
+        )>,
     }
     // SAFETY: `work` points at a `Sync` closure that outlives every use (the
     // caller blocks until `left` reaches zero).
@@ -58,9 +61,8 @@ mod pool {
                                 super::qos::adopt(task.qos);
                                 // SAFETY: see `Task`.
                                 let work = unsafe { &*task.work };
-                                let result = std::panic::catch_unwind(
-                                    std::panic::AssertUnwindSafe(work),
-                                );
+                                let result =
+                                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(work));
                                 let (lock, done) = &*task.left;
                                 let mut left = lock.lock().unwrap();
                                 left.0 -= 1;
@@ -172,6 +174,33 @@ mod qos {
         0
     }
     pub(super) fn adopt(_: u32) {}
+}
+
+#[cfg(test)]
+mod pool_tests {
+    /// Calls share one set of helper threads: none is started per call, and
+    /// results come back in order whoever computed them.
+    #[test]
+    fn calls_reuse_the_same_helpers_and_keep_their_order() {
+        let ids = || {
+            super::map(256, |i| {
+                std::thread::sleep(std::time::Duration::from_micros(50));
+                (i, std::thread::current().id())
+            })
+        };
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..8 {
+            let out = ids();
+            assert!(out.iter().enumerate().all(|(at, (i, _))| at == *i));
+            seen.extend(out.into_iter().map(|(_, id)| id));
+        }
+        assert!(
+            seen.len() <= pm_model::parallel::workers(),
+            "{} threads for {} workers",
+            seen.len(),
+            pm_model::parallel::workers()
+        );
+    }
 }
 
 #[cfg(all(test, target_os = "macos"))]
