@@ -2945,3 +2945,24 @@ product/caustic budgets: dense foliage, long volume/visibility paths and an
 average near 144 samples dominate rather than OIDN. A current-source real
 export and an environment-specific gate are still pending; a single newer
 40.259 s frame is not a 30-frame acceptance measurement.
+
+
+### Live fog: occupied intervals and legacy ambient scattering
+
+The integration regression reproduced the dark volume with MetalFX disabled:
+Live center RGB was 0.01013 without foreground geometry and 0.00428 with it,
+while Refine/Final remained lit. Live sampled from the camera to the far
+volume boundary, including empty space, and attenuated its local hemisphere
+ambient approximation as if it were an external light. That omitted the
+unresolved multiple-scattering contribution of conservative white fog.
+
+Live now samples only the potentially occupied interval and retains the
+legacy hemisphere's local diffuse-radiation approximation. HDRI/sky and
+practical-light paths retain their finite-medium transmittance. This changes
+only the inexpensive Live volume approximation; Refine/Final transport,
+noise targets, references and saved fog data are unchanged.
+
+The unchanged regression passes: Live RGB is 0.89347 / 0.88000 with alpha 1,
+Refine 0.58229 / 0.58550, and Final 0.62345 / 0.62375 (without / with surface).
+The existing bounded native-studio fog activation regression also passes.
+This is a foreground/volume-visibility check, not a Cycles fog-matching claim.
