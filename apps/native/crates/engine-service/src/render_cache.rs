@@ -1974,6 +1974,7 @@ fn fill_request(
         copies_of: source.scene.media.originals.clone(),
         destination: dir,
         shader_cache: crate::jobs::shader_cache(),
+        faces_of: crate::jobs::font_broker().map(|broker| broker.generation()),
         saving_app_version: None,
         resources: crate::resources::ResourceSnapshot {
             definitions: source.definitions.clone(),

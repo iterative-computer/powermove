@@ -1153,6 +1153,8 @@ impl EngineService {
         // (`run`): the app's window doesn't wait for a cold shader cache.
         // Its jobs (exports, cache fills) read the same translated shaders.
         jobs::set_shader_cache(shader_cache.clone());
+        // Its jobs' fonts are compared with the viewer's registry.
+        jobs::set_font_broker(Some(fonts.broker.clone()));
         let mut engine = render::Engine::without_definitions(gpu, shader_cache)?;
         engine.set_fonts(fonts);
         engine.builtins_pending = true;

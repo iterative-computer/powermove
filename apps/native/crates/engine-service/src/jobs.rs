@@ -72,12 +72,31 @@ pub struct ExportRequest {
     /// again before its first frame.
     #[serde(default)]
     pub shader_cache: Option<PathBuf>,
+    /// The asking app's font registry generation when the job was asked
+    /// ([`set_font_broker`]): the app compares the faces the job's fonts
+    /// resolve to with its own while it is still that generation, and the
+    /// job sends what its registry answered before it keeps anything drawn
+    /// with it. `None`: no comparison (no app registry).
+    #[serde(default)]
+    pub faces_of: Option<u64>,
 }
 /// The folder of translated shaders this process's jobs are given: the
 /// viewer engine's own (`EngineService::start_with_fonts`). Entries are
 /// named by their source and written whole, so the app and its jobs share
 /// the folder.
 static SHADER_CACHE: Mutex<Option<PathBuf>> = Mutex::new(None);
+/// The asking app's font registry ([`ExportRequest::check_faces`]): the
+/// viewer engine's broker (`EngineService::start_with_fonts`).
+static FONT_BROKER: Mutex<Option<pm_text::host::FontBroker>> = Mutex::new(None);
+pub fn set_font_broker(broker: Option<pm_text::host::FontBroker>) {
+    *FONT_BROKER.lock().unwrap_or_else(|e| e.into_inner()) = broker;
+}
+pub(crate) fn font_broker() -> Option<pm_text::host::FontBroker> {
+    FONT_BROKER
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
 pub fn set_shader_cache(dir: Option<PathBuf>) {
     *SHADER_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = dir;
 }
@@ -91,6 +110,10 @@ pub(crate) fn shader_cache() -> Option<PathBuf> {
 /// ([`ExportRequest::fonts`]), or whose fonts changed while it rendered.
 pub const FONTS_CHANGED: &str =
     "Rendering stopped because the fonts on this Mac changed. Try again.";
+/// A job whose fonts resolved some text to another face (another file,
+/// face, variation or synthesized style) than the app's do.
+pub const FACES_DIFFER: &str =
+    "Rendering stopped because a font resolved to another face than in the viewer.";
 
 /// Export children running now (render cache fills not counted).
 static EXPORTS_RUNNING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -317,6 +340,22 @@ enum ParentMessage {
         deferred_us: u64,
     },
     Cancel,
+    /// Whether the app's registry answers the questions of
+    /// [`ChildMessage::Faces`] `id` with the same faces, or why not.
+    Faces {
+        id: u64,
+        agree: std::result::Result<(), Dispute>,
+    },
+}
+/// Why the app did not agree with a job's faces.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "why", rename_all = "camelCase")]
+enum Dispute {
+    /// Its registry answered a question with another face.
+    Differ(String),
+    /// Its fonts are not the ones the job was asked to draw with any more
+    /// (or it has no registry): nothing can be compared.
+    Moved(String),
 }
 /// What the child sends the parent, one line each on its stdout.
 #[derive(Serialize, Deserialize)]
@@ -337,6 +376,14 @@ enum ChildMessage {
     },
     /// A render cache fill's frame, before the progress that counts it.
     Frame(crate::render_cache::FrameReport),
+    /// What the job's font registry answered since the last such message
+    /// (every face it handed out with them), to be compared with the app's
+    /// answers to the same questions; the job waits for
+    /// [`ParentMessage::Faces`] with the same `id` before it keeps a frame.
+    Faces {
+        id: u64,
+        answers: pm_text::answers::Answers,
+    },
 }
 /// One need's answer on the child's stdin.
 #[derive(Debug, Serialize, Deserialize)]
@@ -496,6 +543,7 @@ impl ExportRequest {
                 pm_text::system_fonts::Inventory::current()
             }),
             shader_cache: shader_cache(),
+            faces_of: font_broker().map(|broker| broker.generation()),
         })
     }
 }
@@ -630,6 +678,7 @@ impl ExportHandle {
             .spawn()?;
         let mut input = child.stdin.take().unwrap();
         let id = request.job.clone();
+        let faces_of = request.faces_of;
         let exporting = request.cache.is_none().then(Exporting::start);
         if let Err(e) = send(&mut input, &ParentMessage::Start(Box::new(request))) {
             let _ = child.kill();
@@ -687,6 +736,13 @@ impl ExportHandle {
                     }
                     Ok(ChildMessage::Status(s)) => events.set(*s),
                     Ok(ChildMessage::Frame(report)) => reports.lock().unwrap().push(report),
+                    Ok(ChildMessage::Faces { id: ask, answers }) => {
+                        let agree = faces_agree(&answers, faces_of);
+                        if let Err(why) = &agree {
+                            eprintln!("job {}: {why:?}", id.as_str());
+                        }
+                        reply(&ParentMessage::Faces { id: ask, agree });
+                    }
                     Ok(ChildMessage::Compat { id: ask, needs }) => {
                         // Background work runs extensions only while the
                         // person is away, as it renders.
@@ -854,6 +910,8 @@ pub fn run_child() -> Result<()> {
     // Why the parent's messages stopped making sense, if they did.
     let broken: Arc<Mutex<Option<String>>> = Arc::default();
     let unreadable = broken.clone();
+    let face_replies: FaceReplies = Arc::default();
+    let agreed = face_replies.clone();
     std::thread::spawn(move || {
         // A read error is the parent's end, as its EOF is.
         for line in lines.map_while(Result::ok) {
@@ -873,6 +931,13 @@ pub fn run_child() -> Result<()> {
                         Err(e) => e,
                     }
                 }
+                Ok(ParentMessage::Faces { id, agree }) => match agreed.lock().unwrap().take() {
+                    Some((asked, answer)) if asked == id => {
+                        let _ = answer.send(agree);
+                        continue;
+                    }
+                    _ => format!("an answer to a face check never asked ({id})"),
+                },
                 Ok(ParentMessage::Cancel) => break,
                 Ok(ParentMessage::Start(_)) => "a second export request".to_owned(),
                 Err(e) => e.to_string(),
@@ -899,6 +964,9 @@ pub fn run_child() -> Result<()> {
     // own registrations delivered, the list looked at once more), and
     // whatever the job draws is kept only while they still are.
     pm_text::system_fonts::watch();
+    // Everything this process's registry answers, as it answers it.
+    let resolved: Arc<Mutex<pm_text::answers::Answers>> = Arc::default();
+    let check_faces = request.faces_of.is_some();
     let job_fonts = request.fonts.take().map(|asked| {
         asked.adopt()?;
         pm_text::system_fonts::pump();
@@ -909,6 +977,13 @@ pub fn run_child() -> Result<()> {
             wake: wake.clone(),
             turns: Arc::default(),
             changed: AtomicBool::new(false),
+            faces: check_faces.then(|| Faces {
+                resolved: resolved.clone(),
+                agreed: Mutex::default(),
+                replies: face_replies.clone(),
+                next: AtomicU64::new(1),
+                differ: AtomicBool::new(false),
+            }),
         }))
     });
     let job_fonts = match job_fonts.transpose() {
@@ -1190,7 +1265,13 @@ pub fn run_child() -> Result<()> {
         if let Some(turns) = &turns {
             turns.fetch_add(1, Ordering::AcqRel);
         }
-        pm_text::host::serve(&mut font_service, broker.take_asks());
+        pm_text::host::serve(
+            &mut Recorded {
+                inner: &mut font_service,
+                answers: &resolved,
+            },
+            broker.take_asks(),
+        );
     }
     let result = worker
         .join()
@@ -1222,13 +1303,22 @@ pub fn run_child() -> Result<()> {
             emit(status(&job_id, JobState::Cancelled, 0., None, None))?
         }
         // Its output was dropped unpublished, as for any failure.
-        Err(_) if fenced.is_some_and(|fonts| fonts.changed.load(Ordering::Acquire)) => {
+        Err(_)
+            if fenced
+                .as_ref()
+                .is_some_and(|fonts| fonts.changed.load(Ordering::Acquire)) =>
+        {
+            let differ = fenced.as_ref().and_then(|fonts| fonts.faces.as_ref());
+            let why = match differ.is_some_and(|faces| faces.differ.load(Ordering::Acquire)) {
+                true => FACES_DIFFER,
+                false => FONTS_CHANGED,
+            };
             emit(status(
                 &job_id,
                 JobState::Failed,
                 0.,
                 None,
-                Some(FONTS_CHANGED.into()),
+                Some(why.into()),
             ))?
         }
         Err(ref e) if let Some(refusal) = e.downcast_ref::<OfflineRefusal>() => emit(JobStatus {
@@ -1258,6 +1348,248 @@ struct JobFonts {
     turns: Arc<AtomicU64>,
     /// The fence did not hold: why the job failed.
     changed: AtomicBool,
+    /// The faces its registry answered, compared with the app's.
+    faces: Option<Faces>,
+}
+/// Where the child waits for the app's [`ParentMessage::Faces`].
+type FaceReplies = Arc<
+    Mutex<
+        Option<(
+            u64,
+            std::sync::mpsc::SyncSender<std::result::Result<(), Dispute>>,
+        )>,
+    >,
+>;
+/// A job's registry answers and the part of them the app agreed with.
+///
+/// An interim proof: the job still resolves fonts with a registry of its
+/// own, and the app checks every answer (family, style, fallback, last
+/// resort, variable source, advances) against its registry before the job
+/// keeps a frame. What it leaves: the job's text is laid out with the
+/// job's answers, so a difference costs the job (it fails, keeps nothing)
+/// instead of being impossible; the app must still be of the fonts the job
+/// was asked with (a job whose app changed fonts since keeps nothing); and
+/// the sealed system fonts the fence lets through unlisted are compared by
+/// name and face, not by bytes. The complete fix sends the app's answers
+/// and font bytes to the job, which replays them (`ReplayResolver`, as the
+/// viewer's renderers do) and never resolves a font itself.
+struct Faces {
+    resolved: Arc<Mutex<pm_text::answers::Answers>>,
+    agreed: Mutex<pm_text::answers::Answers>,
+    replies: FaceReplies,
+    next: AtomicU64,
+    /// The app's registry answered something else.
+    differ: AtomicBool,
+}
+impl Faces {
+    /// Whether the app's registry answers everything this job's answered
+    /// so far with the same faces: what it answered since the last look is
+    /// sent to the app, and waited for.
+    fn agree(&self) -> std::result::Result<(), String> {
+        let mut agreed = self.agreed.lock().unwrap();
+        let ask = {
+            let resolved = self.resolved.lock().unwrap();
+            let new: Vec<pm_text::answers::Answer> = resolved
+                .answers
+                .iter()
+                .filter(|a| !agreed.answers.contains(a))
+                .cloned()
+                .collect();
+            if new.is_empty() {
+                return Ok(());
+            }
+            pm_text::answers::Answers {
+                faces: resolved.faces.clone(),
+                answers: new,
+            }
+        };
+        let id = self.next.fetch_add(1, Ordering::Relaxed);
+        let (answer, answered) = std::sync::mpsc::sync_channel(1);
+        *self.replies.lock().unwrap() = Some((id, answer));
+        let message = ChildMessage::Faces {
+            id,
+            answers: ask.clone(),
+        };
+        send(&mut std::io::stdout().lock(), &message).map_err(|e| e.to_string())?;
+        match answered.recv_timeout(std::time::Duration::from_secs(30)) {
+            Ok(Ok(())) => {
+                agreed.merge(&ask);
+                Ok(())
+            }
+            Ok(Err(Dispute::Differ(why))) => {
+                self.differ.store(true, Ordering::Release);
+                Err(why)
+            }
+            Ok(Err(Dispute::Moved(why))) => Err(why),
+            Err(_) => Err("the app did not compare the job's faces".to_owned()),
+        }
+    }
+}
+/// A registry whose answers are kept as it gives them.
+struct Recorded<'a, S> {
+    inner: &'a mut S,
+    answers: &'a Mutex<pm_text::answers::Answers>,
+}
+impl<S: pm_text::host::FontSource> pm_text::host::FontSource for Recorded<'_, S> {
+    fn generation(&self) -> u64 {
+        self.inner.generation()
+    }
+    fn answer(
+        &mut self,
+        queries: &[pm_text::answers::Query],
+    ) -> std::result::Result<pm_text::answers::Answers, String> {
+        let answers = self.inner.answer(queries)?;
+        self.answers.lock().unwrap().merge(&answers);
+        Ok(answers)
+    }
+    fn blob(&self, key: &str) -> Option<pm_text::font::FontBytes> {
+        self.inner.blob(key)
+    }
+}
+/// A face as two registries can both name it: its file (the registry's
+/// blob key) and face index, variation coordinates (bits), synthesized
+/// bold and italic, PostScript name.
+type FaceName = (String, u32, Vec<(u32, u32)>, bool, bool, String);
+fn face_name(answers: &pm_text::answers::Answers, id: pm_text::font::FaceId) -> Option<FaceName> {
+    let f = answers.faces.iter().find(|f| f.id == id)?;
+    Some((
+        f.blob.clone(),
+        f.index,
+        f.coords
+            .iter()
+            .map(|(tag, v)| (*tag, v.to_bits()))
+            .collect(),
+        f.synthetic_bold,
+        f.synthetic_italic,
+        f.postscript_name.clone(),
+    ))
+}
+/// A question about the child's face asked about the app's face that
+/// matched it; `None` while that face is not matched yet.
+fn in_app_terms(
+    query: &pm_text::answers::Query,
+    ours: &std::collections::HashMap<pm_text::font::FaceId, pm_text::font::FaceId>,
+) -> Option<pm_text::answers::Query> {
+    use pm_text::answers::Query;
+    let mapped = |id| ours.get(&id).copied();
+    Some(match query.clone() {
+        Query::Fallback {
+            weight,
+            italic,
+            size,
+            ch,
+            primary,
+            emoji,
+        } => Query::Fallback {
+            weight,
+            italic,
+            size,
+            ch,
+            primary: mapped(primary)?,
+            emoji,
+        },
+        Query::EmAdvance { face, size } => Query::EmAdvance {
+            face: mapped(face)?,
+            size,
+        },
+        Query::SbixMetric { face, glyph, size } => Query::SbixMetric {
+            face: mapped(face)?,
+            glyph,
+            size,
+        },
+        other => other,
+    })
+}
+/// The app's verdict on a job's registry answers: compared with its own
+/// registry's while that is still of `faces_of`, the generation the job's
+/// fonts were taken at (before and after the comparison).
+fn faces_agree(
+    child: &pm_text::answers::Answers,
+    faces_of: Option<u64>,
+) -> std::result::Result<(), Dispute> {
+    let broker = font_broker()
+        .ok_or_else(|| Dispute::Moved("the app has no font registry to compare with".into()))?;
+    let moved = || {
+        (Some(broker.generation()) != faces_of)
+            .then(|| Dispute::Moved("the app's fonts changed since the job was asked".into()))
+    };
+    if let Some(moved) = moved() {
+        return Err(moved);
+    }
+    let same = same_faces(child, &broker);
+    if let Some(moved) = moved() {
+        return Err(moved);
+    }
+    same
+}
+/// Whether `broker`'s registry (the app's) answers `child`'s questions with
+/// the same faces ([`FaceName`]) and the same advances and emoji metrics.
+/// Questions about a face (a fallback after it, its advance) are asked
+/// about the app's face that matched it. `Err`: the first difference.
+///
+/// This proves the answers the job's text was laid out with, not the
+/// bytes it drew with: the files are the fence's
+/// (`pm_text::system_fonts::Fence`).
+fn same_faces(
+    child: &pm_text::answers::Answers,
+    broker: &pm_text::host::FontBroker,
+) -> std::result::Result<(), Dispute> {
+    use pm_text::answers::Answer;
+    let mut ours = std::collections::HashMap::new();
+    let mut left: Vec<&Answer> = child.answers.iter().collect();
+    while !left.is_empty() {
+        let (asked, later): (Vec<_>, Vec<_>) = left
+            .into_iter()
+            .map(|answer| (answer, in_app_terms(&answer.query, &ours)))
+            .partition(|(_, query)| query.is_some());
+        if asked.is_empty() {
+            return Err(Dispute::Differ(format!(
+                "the job asked about a face the app never resolved: {:?}",
+                later[0].0.query
+            )));
+        }
+        let queries = asked.iter().filter_map(|(_, q)| q.clone()).collect();
+        let reply = broker
+            .ask(queries, Vec::new(), pm_text::host::ASK_TIMEOUT)
+            .map_err(|why| Dispute::Moved(format!("the app's registry did not answer: {why}")))?;
+        for (theirs, query) in &asked {
+            let query = query.as_ref().expect("partitioned");
+            let Some(mine) = reply.answers.answers.iter().find(|a| a.query == *query) else {
+                return Err(Dispute::Moved(format!("the app did not answer {query:?}")));
+            };
+            let same_face = match (theirs.face, mine.face) {
+                (Some(t), Some(m)) => {
+                    let name = face_name(child, t);
+                    let same = name.is_some() && name == face_name(&reply.answers, m);
+                    if same {
+                        ours.insert(t, m);
+                    }
+                    same
+                }
+                (None, None) => true,
+                _ => false,
+            };
+            let same = same_face
+                && theirs.advance.map(f32::to_bits) == mine.advance.map(f32::to_bits)
+                && theirs.rect.map(|r| r.map(f64::to_bits))
+                    == mine.rect.map(|r| r.map(f64::to_bits));
+            if !same {
+                let named = |answers, id: Option<pm_text::font::FaceId>| {
+                    id.and_then(|id| face_name(answers, id))
+                        .map(|f| format!("{} (face {} of {})", f.5, f.1, f.0))
+                        .unwrap_or_else(|| "nothing".into())
+                };
+                return Err(Dispute::Differ(format!(
+                    "{:?}: the job's font registry answered {}, the app's {}",
+                    theirs.query,
+                    named(child, theirs.face),
+                    named(&reply.answers, mine.face),
+                )));
+            }
+        }
+        left = later.into_iter().map(|(answer, _)| answer).collect();
+    }
+    Ok(())
 }
 impl JobFonts {
     /// Whether what was drawn until now was drawn with the fonts asked
@@ -1280,7 +1612,15 @@ impl JobFonts {
         self.fence.hold().inspect_err(|why| {
             eprintln!("the job's fonts changed while it rendered: {why}");
             self.changed.store(true, Ordering::Release);
-        })
+        })?;
+        // The same files, and the same faces of them as the app's.
+        match &self.faces {
+            Some(faces) => faces.agree().inspect_err(|why| {
+                eprintln!("the job's faces are not the app's, or cannot be compared: {why}");
+                self.changed.store(true, Ordering::Release);
+            }),
+            None => Ok(()),
+        }
     }
 }
 

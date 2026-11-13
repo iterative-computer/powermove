@@ -316,6 +316,22 @@ fn a_font_installed_while_a_project_is_open_retires_its_rendered_frames(
         Err(jobs::FONTS_CHANGED.to_owned())
     );
     assert!(!dir.path().join("unmatched").exists());
+    // Asked for a list without the font: every file the job reads is one
+    // it was asked for (its fence holds), yet it resolves the family to a
+    // fallback face where the app resolves it to the font. Its faces are
+    // compared with the app's: it fails rather than export another face.
+    assert_eq!(
+        exported(&dir.path().join("unlisted"), |fonts| {
+            fonts
+                .0
+                .retain(|(path, _)| path.file_name() != font.file_name());
+        }),
+        Err(jobs::FACES_DIFFER.to_owned())
+    );
+    assert!(
+        std::fs::read_dir(dir.path().join("unlisted")).map_or(true, |mut d| d.next().is_none()),
+        "nothing exported"
+    );
 
     // The font is active for this process alone, and a range is rendered
     // now: the fill child draws with the app's fonts, so the frame on disk
@@ -352,9 +368,12 @@ fn a_font_installed_while_a_project_is_open_retires_its_rendered_frames(
         "the rendered frame is not the picture drawn with the activated font"
     );
 
-    // A fill waiting for its turn when the font goes away draws, when its
-    // turn comes, with the fonts its frames' keys were taken from: when the
-    // font is back, those frames are that state's pictures.
+    // A fill waiting for its turn when the font goes away from the app
+    // would draw, when its turn comes, with the fonts its frames' keys
+    // were taken from; but the app can no longer say whether the faces it
+    // resolved are the ones the app resolves with those fonts, so it keeps
+    // nothing. When the font is back, the frame is drawn, and it is the
+    // picture of its time.
     let (_, drawn) = settled(&viewer, &scope, frame(61));
     let waiting = jobs::Activity::default();
     waiting.set(true);
@@ -364,7 +383,10 @@ fn a_font_installed_while_a_project_is_open_retires_its_rendered_frames(
         picture(&viewer) == fallback
     });
     waiting.set(false);
-    filled();
+    eventually("the fill ends", || {
+        !disk.bars().running && disk.bars().error.is_some()
+    });
+    assert_eq!(disk.bars().error.as_deref(), Some(jobs::FONTS_CHANGED));
     pm_text::system_fonts::register_for_process(&font).unwrap();
     eventually("the viewer draws with the font again", || {
         picture(&viewer) == installed
@@ -372,10 +394,10 @@ fn a_font_installed_while_a_project_is_open_retires_its_rendered_frames(
     settled(&viewer, &scope, frame(30));
     settled(&viewer, &scope, frame(60));
     let (report, cached) = settled(&viewer, &scope, frame(61));
-    assert_eq!(report.scale, 1., "rendered while the font was away");
+    assert_eq!(report.scale, 2., "nothing kept from the fill: drawn");
     assert!(
         cached == drawn,
-        "a frame rendered while the font was away is not its key's picture"
+        "the frame drawn again is its time's picture"
     );
     viewer.scopes(None).unwrap();
 
