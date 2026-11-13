@@ -3,6 +3,14 @@
   'use strict';
   const timers = new Map(), requests = new Map();
   let nextTimer = 0, retired = false;
+  // Which load asynchronous work belongs to. A tag entered while a task runs
+  // follows the timers, fetches and host answers that task starts, and what
+  // those start in turn, so a host can tell when the work one activation
+  // began has finished.
+  const tags = new Set(), answers = new Map();
+  let nextAnswer = 0, pumping = false;
+  const tagged = () => tags.size ? [...tags] : null;
+  const enter = list => { if (list) for (const tag of list) tags.add(tag); };
   const eventTargets = new Set(), listenerTables = new WeakMap();
   const native = (op, arg) => JSON.parse(__host(op, JSON.stringify(arg)));
   globalThis.performance = Object.freeze({now: () => __now(), get timeOrigin() { return __timeOrigin; }});
@@ -16,7 +24,7 @@
     if (timers.size >= __limits.max_host_ops) throw new RangeError('Timer quota');
     const id = ++nextTimer;
     delay = Math.max(0, Math.min(2147483647, Number(delay) || 0));
-    timers.set(id, {fn, due: __now() + delay, interval, delay: Math.max(1, delay), args});
+    timers.set(id, {fn, due: __now() + delay, interval, delay: Math.max(1, delay), args, tags: tagged()});
     return id;
   }
   globalThis.setTimeout = (fn, delay = 0, ...args) => timer(fn, delay, false, args);
@@ -318,7 +326,7 @@
     return new Promise((resolve,reject) => {
       const id=__fetch(body,JSON.stringify({url:url.href,method:String(init.method??'GET').toUpperCase(),headers:[...new Headers(init.headers)]}));
       const abort=()=>{ native('abort',id); requests.delete(id); reject(signal.reason); };
-      requests.set(id,{resolve,reject,signal,abort}); signal?.addEventListener('abort',abort,{once:true});
+      requests.set(id,{resolve,reject,signal,abort,tags:tagged()}); signal?.addEventListener('abort',abort,{once:true});
     });
   };
   let ops=[], opBytes=2;
@@ -344,21 +352,52 @@
     retire() {
       retired=true; timers.clear();
       for (const req of requests.values()) if(req.signal) { try { removeEventListener.call(req.signal,'abort',req.abort); } catch {} }
-      requests.clear();
+      requests.clear(); answers.clear(); tags.clear();
       for (const ref of eventTargets) { const target=ref.deref(); if(target) listenerTables.get(target)?.clear(); }
       eventTargets.clear(); ops=[]; opBytes=2;
     },
     pump(now, completed) {
+      // Each callback runs as the loads that started it; the microtasks that
+      // follow them all belong to every load that ran here.
+      const ran = new Set();
+      const as = list => { tags.clear(); enter(list); if (list) for (const tag of list) ran.add(tag); };
+      pumping = true;
+      try { deliver(now, completed, as); } finally { pumping = false; tags.clear(); enter(ran); }
+    }
+  });
+  function deliver(now, completed, as) {
       for (const [id,result] of completed) {
         const req=requests.get(id); if(!req) continue;
+        as(req.tags);
         requests.delete(id); req.signal?.removeEventListener('abort',req.abort);
         if(result.error) req.reject(new TypeError(result.error));
         else req.resolve(new Response(new Uint8Array(__body(result.body)),{status:result.status,url:result.url,headers:result.headers}));
       }
       for(const [id,t] of [...timers]) if(t.due<=now && timers.has(id)) {
         if(t.interval) t.due=now+t.delay; else timers.delete(id);
+        as(t.tags);
         try { t.fn(...t.args); } catch(e) { console.error(e); }
       }
-    }
+  }
+  globalThis.__work = Object.freeze({
+    /** A task from the host starts: it belongs to no load until one is entered. */
+    reset() { if (!pumping) tags.clear(); },
+    /** What runs from here on belongs to `tag` alone. */
+    only(tag) { tags.clear(); tags.add(String(tag)); },
+    /** Runs `fn` as belonging to no load: a host's own timers. */
+    apart(fn) { const kept = [...tags]; tags.clear(); try { return fn(); } finally { tags.clear(); enter(kept); } },
+    /** Work the host answers later: call the result when it has answered. */
+    hold() {
+      const list = tagged(); if (!list) return () => {};
+      const id = ++nextAnswer; answers.set(id, list);
+      return () => { if (answers.delete(id)) enter(list); };
+    },
+    /** Whether `tag` has a one-shot timer due by `deadline`, a fetch or a host answer still out. */
+    pending(tag, deadline) {
+      for (const t of timers.values()) if (!t.interval && t.due <= deadline && t.tags?.includes(tag)) return true;
+      for (const r of requests.values()) if (r.tags?.includes(tag)) return true;
+      for (const list of answers.values()) if (list.includes(tag)) return true;
+      return false;
+    },
   });
 })();

@@ -77,6 +77,23 @@ const sectionActions: Record<SectionAction, string> = {
   animator: "Add Text Animator",
   "release-precomp": "Release Pre-comp",
   "refresh-fonts": "Refresh Fonts",
+  "time-remap": "Time Remap",
+  "freeze-frame": "Freeze Frame",
+  reverse: "Reverse",
+};
+const sectionSymbols: Partial<Record<SectionAction, string>> = {
+  "refresh-fonts": "arrow.clockwise",
+  // Time's three share the heading row: short words, no glyph, so they fit
+  // beside "Time" in a narrow panel (their labels keep the full names).
+  "time-remap": "",
+  "freeze-frame": "",
+  reverse: "",
+};
+/** What a heading action shows when its full name would not fit. */
+const sectionShort: Partial<Record<SectionAction, string>> = {
+  "time-remap": "Remap",
+  "freeze-frame": "Freeze",
+  reverse: "Reverse",
 };
 export const alignmentButtons: {
   id: Alignment;
@@ -629,6 +646,47 @@ export function InspectorPanel({
   );
   const snapshot = session.inspect();
   const target = snapshot.target;
+  // A section's own action: a quiet text action at the trailing edge of its
+  // heading (design language, Properties).
+  const sectionAction = (
+    section: (typeof snapshot.sections)[number],
+    action: SectionAction,
+    several: boolean,
+  ) => (
+    <Action
+      key={action}
+      id={
+        several
+          ? `section-action:${section.id}:${action}`
+          : `section-action:${section.id}`
+      }
+      label={sectionActions[action]}
+      symbol={sectionSymbols[action] ?? "plus"}
+      children={sectionShort[action] ?? sectionActions[action]}
+      style={{
+        gap: token("metrics.border"),
+        paddingLeft: token("metrics.gap"),
+        paddingRight: token("metrics.gap"),
+        color: token("colors.muted"),
+        fontSize: token("typography.label"),
+        symbolSize: token("metrics.symbol_inline"),
+      }}
+      disabled={target.kind === "layers" && target.first.locked}
+      onActivate={(event) =>
+        action === "animator"
+          ? session.nativeRequest({
+              type: "animator-menu",
+              anchor: event.currentTarget,
+              items: section.presets ?? [],
+            })
+          : session.send({
+              type: "section-action",
+              section: section.id,
+              action,
+            })
+      }
+    />
+  );
   const [drop, setDrop] = useState(false);
   const canDrop =
     target.kind === "layers" &&
@@ -720,41 +778,15 @@ export function InspectorPanel({
               })
             }
             accessory={
-              section.action ? (
-                // The section's own action, a quiet text action at the
-                // trailing edge of its heading.
-                <Action
-                  id={`section-action:${section.id}`}
-                  label={sectionActions[section.action]}
-                  symbol={
-                    section.action === "refresh-fonts"
-                      ? "arrow.clockwise"
-                      : "plus"
-                  }
-                  children={sectionActions[section.action]}
-                  style={{
-                    gap: token("metrics.border"),
-                    paddingLeft: token("metrics.gap"),
-                    paddingRight: token("metrics.gap"),
-                    color: token("colors.muted"),
-                    fontSize: token("typography.label"),
-                    symbolSize: token("metrics.symbol_inline"),
-                  }}
-                  disabled={target.kind === "layers" && target.first.locked}
-                  onActivate={(event) =>
-                    section.action === "animator"
-                      ? session.nativeRequest({
-                          type: "animator-menu",
-                          anchor: event.currentTarget,
-                          items: section.presets ?? [],
-                        })
-                      : session.send({
-                          type: "section-action",
-                          section: section.id,
-                          action: section.action!,
-                        })
-                  }
-                />
+              section.actions ? (
+                // Several actions (Time) stand in a row at the trailing edge.
+                <div style={{ ...horizontal, gap: token("metrics.border") }}>
+                  {section.actions.map((action) =>
+                    sectionAction(section, action, true),
+                  )}
+                </div>
+              ) : section.action ? (
+                sectionAction(section, section.action, false)
               ) : undefined
             }
           >

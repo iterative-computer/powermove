@@ -25,7 +25,25 @@ enum Wait {
     /// The window shows another project or composition now (or the wait was
     /// cancelled): it never starts.
     Drop,
+    /// The viewer never drew what was asked for: nothing of it is known to
+    /// render, and what the cache last saw is something else.
+    Unread,
     Start,
+}
+/// What a Render Selection says when the viewer never drew its composition.
+const UNREAD: &str =
+    "Render Selection could not start: the viewer has not drawn this composition yet";
+/// How long the window's extensions have been loaded, from their last load.
+#[derive(Default)]
+struct Settling(Option<std::time::Instant>);
+impl Settling {
+    fn since(&mut self, pending: bool) -> Option<Duration> {
+        if pending {
+            self.0 = None;
+            return None;
+        }
+        Some(self.0.get_or_insert_with(std::time::Instant::now).elapsed())
+    }
 }
 /// `now`: what a Render Selection would be asked for at this moment (`None`
 /// once the wait was cancelled or nothing is open). `settled_for`: how long
@@ -47,8 +65,9 @@ fn wait_step(
             "Render Selection",
             resources,
         )),
-        // Past the wait it starts and says what is in the way, if anything.
-        Some(settled) if observed || settled >= SETTLED_FRAME_WAIT => Wait::Start,
+        Some(_) if observed => Wait::Start,
+        // Past the wait it says so: what the cache holds is not this.
+        Some(settled) if settled >= SETTLED_FRAME_WAIT => Wait::Unread,
         Some(_) => Wait::Keep("Reading the composition to render".to_owned()),
     }
 }
@@ -173,12 +192,14 @@ impl Controller {
     /// window's project and extensions are now.
     fn render_observed(&self, asked: &Asked) -> bool {
         self.published.as_ref().is_some_and(|p| {
-            self.engine.render_cache().observed(
-                asked.doc_id,
-                p.snapshot.revision,
-                &asked.composition,
-                &self.extensions.resources.definitions,
-            )
+            self.engine
+                .render_cache()
+                .observed(pm_engine_service::render_cache::Observation {
+                    doc_id: asked.doc_id,
+                    revision: p.snapshot.revision,
+                    comp: &asked.composition,
+                    definitions: &self.extensions.resources.definitions,
+                })
         })
     }
     /// Asked while this window's extensions load, a Render Selection waits
@@ -194,19 +215,19 @@ impl Controller {
             cx.notify();
             return;
         };
+        // This ask replaces one still waiting, whether or not it waits itself.
+        self.render_wait += 1;
+        let wait = self.render_wait;
         if !self.extensions.resources.pending && self.render_observed(&asked) {
             return self.start_render_selection(asked, cx);
         }
-        self.render_wait += 1;
-        let wait = self.render_wait;
         cx.spawn(async move |this, cx| {
             let mut shown = String::new();
-            let mut settled_at = None;
+            let mut settling = Settling::default();
             loop {
                 let Ok(step) = this.update(cx, |v, cx| {
                     let resources = &v.extensions.resources;
-                    let since = (!resources.pending)
-                        .then(|| *settled_at.get_or_insert_with(std::time::Instant::now));
+                    let since = settling.since(resources.pending);
                     let step = wait_step(
                         &asked,
                         (v.render_wait == wait)
@@ -215,7 +236,7 @@ impl Controller {
                             .as_ref(),
                         resources,
                         v.render_observed(&asked),
-                        since.map(|since| since.elapsed()),
+                        since,
                     );
                     // Only our own line is replaced; anything said since stays.
                     let ours = shown.is_empty() || v.message == shown;
@@ -226,6 +247,10 @@ impl Controller {
                         }
                         Wait::Drop | Wait::Start if v.message == shown => {
                             v.message.clear();
+                            cx.notify();
+                        }
+                        Wait::Unread if ours => {
+                            v.message = UNREAD.into();
                             cx.notify();
                         }
                         _ => {}
@@ -239,7 +264,7 @@ impl Controller {
                 };
                 match step {
                     Wait::Keep(text) => shown = text,
-                    Wait::Drop | Wait::Start => return,
+                    Wait::Drop | Wait::Unread | Wait::Start => return,
                 }
                 cx.background_executor()
                     .timer(Duration::from_millis(100))
@@ -260,6 +285,8 @@ impl Controller {
         let disk = self.engine.render_cache();
         let activity = self.engine.export_activity();
         let overrides = self.extensions.overrides.as_ref().map(|o| o.jobs());
+        // Exactly what the viewer observed for this ask, or nothing.
+        let (revision, resources) = (p.snapshot.revision, self.extensions.resources.clone());
         let tasks = self.builtins.export_tasks.clone();
         let title = p
             .snapshot
@@ -273,8 +300,13 @@ impl Controller {
             let exe = std::env::current_exe().map_err(|e| e.to_string())?;
             // Its overrides answer from the window's publication, whatever is
             // edited meanwhile.
-            let (doc_id, comp) = (asked.doc_id, asked.composition.as_str());
-            let queued = fill.start_fill_of(doc_id, comp, from, to, &exe, activity, |session| {
+            let of = pm_engine_service::render_cache::Observation {
+                doc_id: asked.doc_id,
+                revision,
+                comp: &asked.composition,
+                definitions: &resources.definitions,
+            };
+            let queued = fill.start_fill_of(of, from, to, &exe, activity, |session| {
                 if let Some(overrides) = overrides {
                     overrides.pin(session, &p, false);
                 }
@@ -506,8 +538,9 @@ mod tests {
             wait_step(&asked, Some(&same), &loaded, true, Some(second)),
             Wait::Start
         );
-        // An observation left by another project is not this one's: without
-        // its own the wait goes on, to its bound.
+        // An observation left by another project, an earlier revision or
+        // other effect code is not this one's: without its own the wait goes
+        // on to its bound, and then says so instead of rendering that.
         assert_eq!(
             wait_step(
                 &asked,
@@ -516,7 +549,7 @@ mod tests {
                 false,
                 Some(SETTLED_FRAME_WAIT)
             ),
-            Wait::Start
+            Wait::Unread
         );
         // Another composition, another project, nothing open, or replaced.
         let other_comp = Asked {
@@ -540,6 +573,19 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The viewer's settled frame is waited for from the moment extensions
+    /// last finished loading: a reload while waiting starts the count again.
+    #[test]
+    fn the_wait_for_a_settled_frame_starts_again_after_a_reload() {
+        let mut settling = Settling::default();
+        assert_eq!(settling.since(true), None);
+        let first = settling.since(false).expect("settled");
+        std::thread::sleep(Duration::from_millis(30));
+        assert!(settling.since(false).unwrap() >= first + Duration::from_millis(30));
+        assert_eq!(settling.since(true), None, "loading again");
+        assert!(settling.since(false).unwrap() < Duration::from_millis(30));
     }
 
     #[test]

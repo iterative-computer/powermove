@@ -74,6 +74,8 @@ mod platform;
 mod play_range;
 mod playback;
 mod playhead;
+#[cfg(test)]
+mod pro_edit_tests;
 mod pro_media;
 mod project_library;
 mod providers;
@@ -261,6 +263,7 @@ fn main() -> Result<()> {
     let bridge_windows = panel_bridge::Shared::default();
     let job_overrides = raster_overrides::OverrideWindows::default();
     let agent_overrides = job_overrides.clone();
+    let jobs_broker = broker.clone();
     let (actor, engine, mcp_host, tools) = std::thread::spawn(move || -> Result<_> {
         let actor = pm_kernel::KernelActor::spawn(pm_kernel::KernelConfig {
             journal_root: Some(worker_profile.join("journals")),
@@ -279,6 +282,11 @@ fn main() -> Result<()> {
             Some(worker_profile.join("shader-cache")),
         )?);
         let tools = mcp::Tools::new(mcp_host.clone(), exports);
+        // A project no window has open draws with the windows' own worker and fonts.
+        agent_overrides.set_painters(raster_overrides::Painters {
+            layers: engine.layer_rasters(),
+            fonts: jobs_broker,
+        });
         mcp_services::connect_engine(&tools, engine.export_activity(), agent_overrides)?;
         {
             let mut automation = tools.automation.lock().unwrap();

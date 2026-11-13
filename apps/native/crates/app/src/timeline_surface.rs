@@ -6,9 +6,9 @@ use gpui::{prelude::*, *};
 use pm_design::Tokens;
 use pm_kernel::{Caller, KernelHandle, Published, QueryMirror, SelectionCall};
 use pm_panel_timeline::{
-    Context as MenuContext, DragKind, DragSample, GraphDisplay, HostEffect, MarqueeSession,
-    Modifiers as Mods, Plan, PropertyFacts, RowId, Scrub, TimelineClient, TimelineMode,
-    TimelineModel,
+    Context as MenuContext, DragKind, DragSample, EditTool, GraphDisplay, HostEffect,
+    MarqueeSession, Modifiers as Mods, Plan, PropertyFacts, RowId, Scrub, TimelineClient,
+    TimelineMode, TimelineModel,
     footer::Part,
     frame,
     graph_render::{self, Graph},
@@ -467,6 +467,10 @@ impl TimelineSurface {
             self.model.mode == TimelineMode::Tracks,
             !self.model.track_snap_disabled,
         )
+    }
+    /// The edit tool a clip drag uses (View menu checkmarks).
+    pub fn edit_tool(&self) -> pm_panel_timeline::EditTool {
+        self.model.edit_tool
     }
     /// View ▸ Hide Shy Layers is on.
     pub fn hides_shy(&self) -> bool {
@@ -1229,15 +1233,20 @@ impl TimelineSurface {
                 return;
             }
             let tracks = self.model.mode == TimelineMode::Tracks;
+            // A chosen edit tool works in both modes; in Tracks the
+            // modifiers reach the same edits with the Selection tool.
+            let tool = self.model.edit_tool;
             let spec = match edge {
+                _ if tool == EditTool::Slip => Spec::Slip,
+                _ if tool == EditTool::Slide => Spec::Slide,
                 Some(edge) => {
                     let edge = match edge {
                         pm_panel_timeline::render::Edge::In => Edge::In,
                         pm_panel_timeline::render::Edge::Out => Edge::Out,
                     };
-                    if tracks && mods.alt {
+                    if tool == EditTool::Ripple || tracks && mods.alt {
                         Spec::Ripple(edge)
-                    } else if tracks && mods.control {
+                    } else if tool == EditTool::Roll || tracks && mods.control {
                         Spec::Roll(edge)
                     } else {
                         Spec::Trim(edge)
@@ -2154,6 +2163,39 @@ fn drag_kind(model: &TimelineModel, spec: Spec, time: f64) -> Result<DragKind, S
             .map(|o| o.id.clone());
         Ok::<_, &str>((before, after))
     };
+    // In Layers mode every layer is its own row: the tools run the
+    // layer-level edits (all layer kinds; what overlaps stays), as the keys do.
+    let layered = model.mode == TimelineMode::Layers;
+    let edge_time = |id: &str, edge: Edge| {
+        model.index.layer(id).map(|l| match edge {
+            Edge::In => l.from,
+            Edge::Out => l.from + l.duration,
+        })
+    };
+    let timing_edge = |edge: Edge| match edge {
+        Edge::In => pm_kernel::commands::timing::TimeEdge::In,
+        Edge::Out => pm_kernel::commands::timing::TimeEdge::Out,
+    };
+    use pm_kernel::TimingCommand as Timing;
+    if layered && matches!(spec, Spec::Ripple(_) | Spec::Roll(_) | Spec::Slide) {
+        let id = primary()?;
+        return Ok(DragKind::Timing(match spec {
+            Spec::Ripple(edge) => Timing::RippleTrim {
+                layer_ids: vec![id.clone()],
+                edge: timing_edge(edge),
+                time: edge_time(&id, edge).ok_or("Unknown clip")?,
+            },
+            Spec::Roll(edge) => Timing::Roll {
+                layer_id: id.clone(),
+                edge: timing_edge(edge),
+                time: edge_time(&id, edge).ok_or("Unknown clip")?,
+            },
+            _ => Timing::Slide {
+                layer_id: id,
+                delta: 0.,
+            },
+        }));
+    }
     Ok(match spec {
         Spec::Layers => DragKind::Layers { ids },
         Spec::Duplicate => {
