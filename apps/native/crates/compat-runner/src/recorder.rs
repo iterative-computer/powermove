@@ -1629,6 +1629,7 @@ impl EngineProxy for NativeHost {
                 return self.kernel.lock().unwrap().call(input, time);
             }
             "kernel.publication" => return self.kernel.lock().unwrap().publication(),
+            "definitions.builtin" => return Ok(self.kernel.lock().unwrap().builtin_definitions()),
             "kernel.query"
                 if matches!(
                     input["method"].as_str(),

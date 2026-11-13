@@ -232,6 +232,23 @@ impl KernelAdapter {
             None => storage_of(&self.kernel),
         }
     }
+    /// The app's own effect and transition definitions (the kernel's seeded
+    /// registrations), by id: what v1's built-in extensions registered, so
+    /// the shipped app's `PM.FX` and `PM.TRANSITIONS` held them.
+    pub fn builtin_definitions(&self) -> Value {
+        let state = self.kernel.state();
+        let native = Caller::native().writer;
+        let of = |registry: &str| -> Value {
+            let entries = state.registries.get(registry).into_iter().flatten();
+            Value::Object(
+                entries
+                    .filter(|entry| entry.owner == native)
+                    .map(|entry| (entry.id.clone(), wire(&entry.definition)))
+                    .collect(),
+            )
+        };
+        json!({"effects": of("effects"), "transitions": of("transitions")})
+    }
     pub fn store(&self, key: &str, value: &Value) -> Result<()> {
         if self.frozen.is_some() {
             return Ok(());

@@ -5022,12 +5022,25 @@ mod tests {
                      made:{type:made.type,on:made.on,amount:made.p.amount.v,id:typeof made.id},
                      def:PM.effectDef({type:'helpers.tint'}).label,
                      noDef:PM.effectDef({type:'nothing.provides'})===undefined,
-                     fx:Object.keys(PM.FX),fxLabel:PM.FX['helpers.tint'].label,
-                     transitions:Object.keys(PM.TRANSITIONS),noTransition:PM.transitionDef('nothing.provides')===undefined,
+                     fx:Object.keys(PM.FX).filter(id=>['helpers.tint','blur','nothing.provides'].includes(id)).sort(),
+                     fxLabel:PM.FX['helpers.tint'].label,
+                     // The legacy table holds the complete shader, as the shipped app assembled it.
+                     fxLegacy:(f=>({passes:f.passes,keepOrig:f.keepOrig,backdrop:f.backdrop,
+                       head:f.frag.startsWith('#version 300 es'),main:f.frag.includes('void main(){\\no = src(v_uv);\\n}'),
+                       param:f.frag.includes('uniform float u_amount;')}))(PM.FX['helpers.tint']),
+                     // Built-in effects and transitions are in the tables too.
+                     builtin:{has:'blur' in PM.FX,label:PM.effectDef({type:'blur'})?.label,group:PM.FX.blur?.group,
+                       params:(PM.FX.blur?.params??[]).map(p=>p.k).includes('amount'),
+                       made:(e=>e&&{type:e.type,on:e.on,amount:typeof e.p.amount?.v})(PM.mkEffect('blur')),
+                       transitions:['crossfade','wipe','slide','zoom'].every(id=>id in PM.TRANSITIONS&&Object.keys(PM.TRANSITIONS).includes(id)),
+                       crossfade:PM.transitionDef('crossfade')?.label,
+                       crossfadeMain:String(PM.TRANSITIONS.crossfade?.frag).includes('uniform sampler2D u_from, u_to;')&&String(PM.TRANSITIONS.crossfade?.frag).includes('void main(){'),
+                       madeTransition:PM.mkTransition('crossfade')},
+                     noTransition:PM.transitionDef('nothing.provides')===undefined,
+                     // As the shipped app: nothing made of a type nobody provides.
+                     none:[PM.mkEffect('nothing.provides'),PM.mkTransition('nothing.provides')],
                      uniforms,
                      said:{
-                       mkEffect:said(()=>PM.mkEffect('nothing.provides')),
-                       mkTransition:said(()=>PM.mkTransition('nothing.provides')),
                        precompose:said(()=>PM.precompose(['a'],'Name')),
                        comps:said(()=>PM.Comps.precompose(['a'],{})),
                        assetKind:said(()=>PM.assetKind({name:'a.png',type:'image/png'})),
@@ -5058,10 +5071,21 @@ mod tests {
         );
         assert_eq!(got["def"], "Tint");
         assert_eq!(got["noDef"], true);
-        assert_eq!(got["fx"], json!(["helpers.tint"]));
+        assert_eq!(got["fx"], json!(["blur", "helpers.tint"]));
         assert_eq!(got["fxLabel"], "Tint");
-        assert_eq!(got["transitions"], json!([]));
+        assert_eq!(
+            got["fxLegacy"],
+            json!({"passes":1,"keepOrig":false,"backdrop":false,"head":true,"main":true,"param":true})
+        );
+        assert_eq!(
+            got["builtin"],
+            json!({"has":true,"label":"Gaussian Blur","group":"Blur & Sharpen","params":true,
+                "made":{"type":"blur","on":true,"amount":"number"},
+                "transitions":true,"crossfade":"Crossfade","crossfadeMain":true,
+                "madeTransition":{"type":"crossfade","dur":0.5,"p":{}}})
+        );
         assert_eq!(got["noTransition"], true);
+        assert_eq!(got["none"], json!([null, null]));
         assert_eq!(
             got["uniforms"],
             json!([
@@ -5070,8 +5094,6 @@ mod tests {
             ])
         );
         for (tried, member) in [
-            ("mkEffect", "PM.mkEffect"),
-            ("mkTransition", "PM.mkTransition"),
             ("precompose", "PM.precompose"),
             ("comps", "PM.Comps.precompose"),
             ("assetKind", "PM.assetKind"),
