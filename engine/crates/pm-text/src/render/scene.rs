@@ -1199,6 +1199,65 @@ impl Painter<'_> {
                 let Some(outline) = self.outlines.get(run.face, run.coords, glyph.id, style) else {
                     continue;
                 };
+                #[cfg(all(target_os = "macos", feature = "canvas2d"))]
+                {
+                    let [a, b, c, d, _, _] = m.as_coeffs();
+                    if self.smoothing == super::smoothing::Smoothing::Canvas2d
+                        && stroke.is_none()
+                        && !run.synthetic_bold
+                        && device_size < 162.0
+                        && b == 0.0
+                        && c == 0.0
+                        && a > 0.0
+                        && (a - d).abs() < 1e-9
+                        && color[..3].iter().all(|c| (0.0..=1.0).contains(c))
+                        && let super::outline::Coords::User(coords) = run.coords
+                        && let Ok(id) = u16::try_from(glyph.id)
+                    {
+                        let (x, y) = weight.place(glyph_origin.x, glyph_origin.y);
+                        let quarter = ((x - x.floor()) * 4.0).round() as u8;
+                        let bounds = Affine::scale(scale).transform_rect_bbox(outline.bounds);
+                        if let Some(mask) = self.bitmaps.canvas.get(
+                            run.face,
+                            coords,
+                            id,
+                            device_size as f32,
+                            quarter,
+                            skew(run) as f32,
+                            bounds,
+                        ) {
+                            let table = super::canvas2d::mask_table([color[0], color[1], color[2]]);
+                            let mut data = Vec::with_capacity(mask.coverage.len() * 4);
+                            for &coverage in &mask.coverage {
+                                let alpha = table[usize::from(coverage)];
+                                data.extend(
+                                    color[..3]
+                                        .iter()
+                                        .map(|c| (c * f64::from(alpha)).round() as u8),
+                                );
+                                data.push(alpha);
+                            }
+                            let image = ImagePixels::Rgba8(Arc::new(Rgba8 {
+                                width: mask.width,
+                                height: mask.height,
+                                data,
+                            }));
+                            let transform = Affine::translate((
+                                x.floor() + f64::from(mask.left),
+                                y + f64::from(mask.top),
+                            ));
+                            out.push(Item {
+                                bounds: image_bounds(transform, mask.width, mask.height),
+                                content: ItemContent::Image { image, transform },
+                                color,
+                                opacity,
+                                blur,
+                                curve: super::smoothing::IDENTITY,
+                            });
+                            continue;
+                        }
+                    }
+                }
                 let mut transform =
                     m * Affine::translate((origin.0 + glyph.x, origin.1 + glyph.y + lift));
                 // Skia's subpixel grid applies to axis-aligned text only.

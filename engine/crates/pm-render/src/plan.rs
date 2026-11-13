@@ -1491,6 +1491,22 @@ fn native_content_quad<'d>(
     let d = scope.ev.resolve_drawn_content(scope.comp, layer, time)?;
     match ty.as_str() {
         "shape" => {
+            if !crate::vector::level2(layer) && !scope.is_3d_layer(layer)? {
+                let world = vector_world(scope, b, layer, time, scale)?;
+                let density = crate::text::continuous_raster_scale(&world);
+                return Ok(
+                    crate::vector::legacy_raster(scope, layer, &d, time, density)?.map(|q| {
+                        Quad::Texture {
+                            source: Source::Vector(Box::new(q.source)),
+                            w: q.w,
+                            h: q.h,
+                            ax: q.ax,
+                            ay: q.ay,
+                            uv: [0.0, 0.0, 1.0, 1.0],
+                        }
+                    }),
+                );
+            }
             if scope.is_3d_layer(layer)? {
                 let mut plan = |scope: &mut Scope<'_, 'd>, world: &Mat2d, target| {
                     crate::vector::plan_shape(scope, layer, &d, time, world, target)
@@ -2378,22 +2394,27 @@ fn text_quad<'d>(
             }
         }));
     }
-    let m = kurbo::Affine::new(world);
-    let plan = if ty == "text" {
-        text.text_layer_level1_device(scope, layer, time, m, target)?
+    // Canvas2D first paints a layer-local bitmap at the compositor's
+    // quarter-step density, then WebGL samples it through the world matrix.
+    // Rasterizing after that matrix changes glyph phase, smoothing size and
+    // edge filtering, even for a fractional translation with no rotation.
+    let density = crate::text::continuous_raster_scale(&world);
+    let quad = if ty == "text" {
+        text.text_layer(scope, layer, time, density)?
     } else {
-        text.captions_layer_level1_device(scope, layer, time, m, target)?
+        text.captions_layer(scope, layer, time, density)?
     };
     for what in text.take_unsupported() {
         b.unsupported
             .push(Unsupported::layer(&comp_id, layer, Feature::Text(what)));
     }
-    Ok(plan.map(|p| {
-        let [x0, y0, x1, y1] = p.crop.map(f64::from);
-        Quad::Device {
-            source: Source::Text(Box::new(p)),
-            rect: [x0, y0, x1 - x0, y1 - y0],
-        }
+    Ok(quad.map(|q| Quad::Texture {
+        source: Source::Text(Box::new(q.plan)),
+        w: q.w,
+        h: q.h,
+        ax: q.ax,
+        ay: q.ay,
+        uv: [0.0, 0.0, 1.0, 1.0],
     }))
 }
 

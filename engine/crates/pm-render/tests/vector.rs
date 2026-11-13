@@ -137,7 +137,7 @@ fn star_polygon(w: f64, h: f64, points: u32) -> Vec<(f64, f64)> {
 }
 
 #[test]
-fn shape_edges_are_analytic_at_every_compat_level() {
+fn native_shape_edges_are_analytic_and_legacy_sources_keep_canvas_filtering() {
     let mut renderer = Renderer::headless().unwrap();
     let (rotation, scale) = (17.0, 130.0);
     let ellipse = json!({ "shape": "ellipse", "w": 150, "h": 96, "color": "#FFFFFF", "stroke": 0 });
@@ -184,9 +184,9 @@ fn shape_edges_are_analytic_at_every_compat_level() {
             &mut renderer,
             vec![placed(name, "shape", d, 1, rotation, scale)],
         );
-        assert_eq!(
+        assert_ne!(
             level1, level2,
-            "{name}: `compat` does not change vector pixels"
+            "{name}: legacy sources retain Canvas texture filtering"
         );
         let e = edge_error(&level2, &reference);
         eprintln!(
@@ -744,4 +744,49 @@ fn svgs_draw_where_libxml2_paints_them() {
             assert!(rgba.iter().all(|&v| v == 0.0), "{name}");
         }
     }
+}
+
+#[test]
+fn fractional_translation_reuses_the_legacy_shape_source_pixel_grid() {
+    use pm_render::plan::{Content, Source};
+    let mut renderer = Renderer::headless().unwrap();
+    let mut keys = vec![];
+    let mut matrices = vec![];
+    for x in [128.0, 128.125] {
+        let shape = layer(
+            "shape",
+            "shape",
+            json!({"shape":"ellipse","w":83.5,"h":61.25,"color":"#FFFFFF","stroke":0}),
+            x,
+            128.0,
+            1.0,
+        );
+        let doc = load(&project(W, H, 1.0, no_fill(), vec![shape]));
+        let request = RenderRequest::sized(Size::new(W, H), Precision::Float32);
+        let (plan, failures) = renderer
+            .plan(
+                &doc,
+                "Ptest-root",
+                ticks(0.0),
+                &request,
+                &MapResolver::default(),
+            )
+            .unwrap();
+        assert!(failures.is_empty());
+        let draw = plan.draws.iter().find(|d| d.layer == "shape").unwrap();
+        let Content::Texture {
+            source: Source::Vector(source),
+            ..
+        } = &draw.content
+        else {
+            panic!("legacy shape must be sampled from its local texture")
+        };
+        keys.push(source.key());
+        matrices.push(draw.matrix);
+    }
+    assert_eq!(
+        keys[0], keys[1],
+        "a fractional output move must not rerasterize the local shape"
+    );
+    assert!((matrices[1][4] - matrices[0][4] - 0.125).abs() < 1e-9);
 }
