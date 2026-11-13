@@ -1477,8 +1477,11 @@ impl MediaCache {
         });
         self.image_seen.insert(key.clone(), self.frame_epoch);
         self.images.insert(key, target.clone());
-        self.trim_images(self.image_budget);
-        self.recount();
+        // While the frame draws, the frame before's stills stay: it draws
+        // its newest still first (the top layer), and pushing them out here
+        // decoded again the ones it reads next. Those it did not read again
+        // go once it is submitted ([`Self::flush`]).
+        self.evict_images(self.frame_epoch.saturating_sub(1));
         Ok(target)
     }
 
@@ -2075,14 +2078,12 @@ impl MediaCache {
         self.bytes
     }
 
-    /// Keeps the stills within `budget`, oldest first. What the frame being
-    /// drawn has read stays whatever the budget: a still whose texture alone
-    /// is larger than the budget (a full-size read on a 3D plane) was
-    /// dropped as soon as it was cached and decoded again for every frame.
-    /// What the frame before read stays while there is room (its stills
-    /// are the next to go), so a frame that reads them again first finds
-    /// them. A budget of zero (a viewer at rest, memory pressure) releases
-    /// everything.
+    /// Keeps the stills within `budget`, oldest first. What the last frame
+    /// drawn read stays whatever the budget: a still whose texture alone is
+    /// larger than the budget (a full-size read on a 3D plane) was dropped
+    /// as soon as it was cached and decoded again for every frame. The
+    /// frame before it keeps its stills while there is room. A budget of
+    /// zero (a viewer at rest, memory pressure) releases everything.
     pub fn trim_images(&mut self, budget: u64) {
         self.image_budget = budget;
         if budget == 0 {
@@ -2283,9 +2284,10 @@ impl MediaCache {
     /// After a render's commands are submitted: releases CoreVideo texture
     /// cache entries no longer in use, makes converted frames this render
     /// replaced free for reuse (two are kept), notes a frame whose own
-    /// stills exceeded the image budget, and under critical memory pressure
-    /// lets go of stills beyond the budget, this frame's too: nothing is
-    /// being drawn now (the submitted commands own what they read).
+    /// stills exceeded the image budget, and brings the stills back within
+    /// the budget: the frame before's that this one did not read go first,
+    /// and under critical memory pressure this frame's too (nothing is being
+    /// drawn now; the submitted commands own what they read).
     pub fn flush(&mut self) {
         if let Some(i) = &self.importer {
             i.flush_cache();
@@ -2299,9 +2301,7 @@ impl MediaCache {
             .map(Target::bytes)
             .sum();
         self.image_over = (current > self.image_budget).then_some((current, self.image_budget));
-        if self.image_pressure {
-            self.evict_images(u64::MAX);
-        }
+        self.evict_images(if self.image_pressure { u64::MAX } else { epoch });
         self.free_frames.append(&mut self.retired_frames);
         let excess = self.free_frames.len().saturating_sub(2);
         self.free_frames.drain(..excess);

@@ -1179,3 +1179,28 @@ fn the_still_prefetch_hold_goes_at_budget_zero_and_at_rest() {
     media.release_idle_frames();
     assert_eq!(media.still_prefetch_bytes(), 0, "at rest");
 }
+
+/// A frame draws its newest still first (the top layer): caching it must
+/// not push out the frame before's stills this frame reads next. Over the
+/// budget they stay until the frame is submitted, and only those it did not
+/// read again go then.
+#[test]
+fn a_new_still_never_pushes_out_stills_the_frame_reads_next() {
+    let gpu = pm_gpu::Gpu::new("image floor order").unwrap();
+    let pipelines = Pipelines::new(&gpu.device);
+    let (_dir, s) = distinct_stills(4);
+    let mut media = MediaCache::new(&gpu.device);
+    media.trim_images(1);
+    assert!(image_frame(&gpu, &pipelines, &mut media, &[&s[0], &s[1]]) > 0);
+    let one = media.image_bytes() / 2;
+    let before = pm_perf::snapshot();
+    image_frame(&gpu, &pipelines, &mut media, &[&s[2], &s[1], &s[0]]);
+    let decoded = pm_perf::snapshot()
+        .since(&before)
+        .get(pm_perf::Counter::MediaCacheMisses);
+    assert_eq!(decoded, 1, "only the new still is decoded");
+    assert_eq!(media.image_bytes(), 3 * one);
+    // The next frame reads one new still: the others go once it is submitted.
+    image_frame(&gpu, &pipelines, &mut media, &[&s[3]]);
+    assert_eq!(media.image_bytes(), one);
+}
