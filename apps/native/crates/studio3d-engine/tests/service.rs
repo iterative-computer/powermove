@@ -213,22 +213,28 @@ fn unsupported_or_zero_sample_final_never_claims_success() {
             )
             .is_err()
     );
-    #[cfg(not(feature = "oidn"))]
-    assert!(
-        service
-            .render(
-                &source,
-                request(),
-                Tier::Final {
-                    samples: 4,
-                    salt: 0,
-                    denoise: Denoise::Oidn
-                }
-            )
-            .unwrap_err_text()
-            .contains("without optional OIDN")
-    );
     assert!(service.device().is_none());
+}
+
+/// A build without Open Image Denoise cleans what would have gone to it with
+/// the engine's own guided filter, rather than refusing the frame.
+#[cfg(not(feature = "oidn"))]
+#[test]
+fn without_the_denoiser_its_frames_use_the_guided_filter() {
+    assert!(!pm_studio3d_engine::OIDN);
+    let mut service = StudioService::default();
+    let source = Source::new();
+    let tier = |denoise| Tier::Final { samples: 4, salt: 1, denoise };
+    let frame = service.render(&source, request(), tier(Denoise::Guided)).unwrap();
+    let guided = pixels(&service, &frame);
+    let frame = service.render(&source, request(), tier(Denoise::Oidn)).unwrap();
+    assert_eq!(guided, pixels(&service, &frame));
+    let frame = service.render(&source, request(), tier(Denoise::None)).unwrap();
+    assert_ne!(guided, pixels(&service, &frame), "the guided filter ran");
+    let frame = service
+        .render(&source, request(), Tier::QualityRefine { samples: 2 })
+        .unwrap();
+    assert!(pixels(&service, &frame).iter().all(|image| image.chunks_exact(4).any(|p| p[3] > 0)));
 }
 
 struct Screens {

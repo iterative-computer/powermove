@@ -96,6 +96,8 @@ export interface ExportSnapshot {
       estimate?: string;
       /** Where `estimate` comes from: the viewer's measurement or a static guess. */
       state?: "measured" | "measuring" | "guess";
+      /** "guided" when this build has no Open Image Denoise (the engine's own filter cleans the frames). */
+      denoiser?: "oidn" | "guided";
     };
     /** Host planner uses engine tick/rate/range semantics, including still timecode. */
     summary: string;

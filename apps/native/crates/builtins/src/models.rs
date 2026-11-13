@@ -452,6 +452,7 @@ impl Backend {
         let mut model = model;
         // Refine progress for the status capsule (3d-studio.md §3).
         if model["studio"].is_object() {
+            model["studio"]["denoiser"] = self.native.facts["studioDenoiser"].clone();
             let refine = &self.native.facts["studioRefineProgress"];
             if refine.is_object() {
                 model["studio"]["refine"] = refine.clone();
@@ -1097,6 +1098,11 @@ impl Backend {
             pm_panel_studio3d::properties::export_quality(&wire(&comp.to_value()), None)
         {
             self.native.export["project"]["studio"] = json!({ "saved": label });
+            // Which filter cleans the frames: a build without Open Image
+            // Denoise uses the engine's own, and the sheet says so.
+            if let Some(d) = self.native.facts["studioDenoiser"].as_str() {
+                self.native.export["project"]["studio"]["denoiser"] = json!(d);
+            }
         }
         // The viewer measures this export's 3D cost on its idle worker; the
         // sheet asks when the size, length or scene changes and shows the

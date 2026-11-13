@@ -173,11 +173,10 @@ impl StudioService {
             }),
             _ => Denoise::Guided,
         };
-        // Refuse unsupported optional requests before extraction or GPU work.
+        // A build without Open Image Denoise cleans these frames with the
+        // engine's own guided filter (Quality preview already takes it below).
         #[cfg(not(feature = "oidn"))]
-        if denoise == Denoise::Oidn || matches!(tier, Tier::QualityRefine { .. }) {
-            return Err("Studio built without optional OIDN support".into());
-        }
+        let denoise = if denoise == Denoise::Oidn { Denoise::Guided } else { denoise };
         if matches!(
             tier,
             Tier::Final { samples: 0, .. } | Tier::QualityRefine { samples: 0 }

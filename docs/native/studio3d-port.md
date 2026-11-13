@@ -355,6 +355,13 @@ bundled alongside OIDN/core and explicit Metal-device selection in the binding.
 That source build was deliberately not performed. Native distribution bundling
 of OIDN/TBB/licenses remains a separate gate; dev builds use installed libraries.
 
+OIDN is an opt-in build feature (`pm-studio3d-engine/oidn`, reached from the app
+as `cargo build -p pm-native-app --features pm-engine-service/studio-oidn`), off
+by default so a Mac without the library builds and tests the app. Without it,
+Quality preview and the Preview/Production/Final presets are cleaned by the
+engine's guided filter; the Export sheet's Quality row and the viewer's refine
+capsule say so.
+
 ## Integrated document/data checkpoint
 
 The data checkpoint adds the pinned World/fog/terrain/scatter/material-option schemas,

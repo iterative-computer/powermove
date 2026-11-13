@@ -127,6 +127,9 @@ export const studioPromises: Record<string, string> = {
   final: "Reference quality. It takes as long as it needs.",
   custom: "The composition's own sampling settings.",
 };
+/** Added to the Quality row when this build has no Open Image Denoise. */
+export const guidedDenoiseNote =
+  "This build has no Open Image Denoise, so the built-in filter cleans the frames.";
 /** The Render Time row's second line, by where the estimate comes from. */
 export const estimateNotes = {
   measured: "Measured on this Mac for this scene and size.",

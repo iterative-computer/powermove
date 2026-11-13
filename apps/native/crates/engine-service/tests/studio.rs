@@ -3485,8 +3485,9 @@ fn viewer_export_estimates_measure_the_shot_and_publish_four_presets_without_edi
         assert!(p.frame_ms.min > 0. && p.frame_ms.max >= p.frame_ms.min, "{p:?}");
         assert_eq!(p.total_ms.max, p.frame_ms.max * 12.);
         assert_eq!((p.calibration.cold_samples, p.calibration.warm_samples), (8,16));
-        // Draft denoises on the GPU; every other preset runs the denoiser.
-        if p.preset == "draft" {
+        // Draft denoises on the GPU; every other preset runs the denoiser,
+        // when this build has it (the guided filter otherwise).
+        if p.preset == "draft" || !studio::OIDN {
             assert_eq!((p.calibration.oidn_ms, p.oidn_ms), (0., 0.), "{p:?}");
         } else {
             assert!(p.calibration.oidn_ms > 0. && p.oidn_ms > 0., "{p:?}");

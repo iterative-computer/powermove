@@ -12,6 +12,7 @@ pub use pm_studio3d_engine::service::{
     Denoise, FastRenderer, FrameTimings, LayerTexture, RenderedScene, StudioService, Tier,
 };
 pub use pm_studio3d_engine::status::{Failure, LightKind, Progress, RefineProgress, RefineStage};
+pub use pm_studio3d_engine::OIDN;
 /// Called on the engine worker; must not perform UI work or wait for the worker.
 pub type RefineObserver = std::sync::Arc<dyn Fn(&SceneRequest, RefineProgress) -> bool + Send + Sync>;
 

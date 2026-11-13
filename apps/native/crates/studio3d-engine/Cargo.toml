@@ -14,7 +14,11 @@ glam = "0.30"
 serde = { version = "1", features = ["derive"] }
 
 [features]
-default = ["oidn", "metalfx"]
+default = ["metalfx"]
+# Intel Open Image Denoise for Quality preview and Production/Final exports.
+# Off unless asked for: it links a library that is not bundled yet (from
+# OIDN_DIR or Homebrew's open-image-denoise). Without it those tiers use the
+# engine's own guided filter (`OIDN` below says which this build has).
 oidn = ["pm-studio/oidn"]
 metalfx = ["pm-studio/metalfx"]
 

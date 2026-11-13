@@ -20,6 +20,7 @@ import {
   sidecars,
   studioQualities,
   studioPromises,
+  guidedDenoiseNote,
   estimateNotes,
 } from "./spec";
 const { token } = UI;
@@ -134,7 +135,8 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
       : key === "captionsSidecar" && p.captionLayers > 1
         ? "Also write one subtitle file per captions layer beside the video."
         : key === "studioQuality"
-          ? (studioPromises[studioPreset] ?? rows[key][1])
+          ? (studioPromises[studioPreset] ?? rows[key][1]) +
+            (p.studio?.denoiser === "guided" && studioPreset !== "draft" ? ` ${guidedDenoiseNote}` : "")
           : key === "studioTime"
             ? estimateNotes[p.studio?.state ?? "guess"]
             : rows[key][1];

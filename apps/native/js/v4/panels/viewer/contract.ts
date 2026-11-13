@@ -52,6 +52,8 @@ export interface ViewerModel {
     };
     /** Quality, paused, before the first progress report. */
     pending?: boolean;
+    /** "guided" when this build has no Open Image Denoise (the engine's own filter). */
+    denoiser?: "oidn" | "guided";
   } | null;
 }
 /** Observed host facts, never inferred from an enqueued intent. No pixel data. */

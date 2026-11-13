@@ -196,7 +196,9 @@ export function ViewerPanel({
     stage === "sampling" && refine && refine.samplesDone > 0
       ? `Refining · ${percentDone} %`
       : stage === "denoising"
-        ? "Refining · Denoising"
+        ? m.studio?.denoiser === "guided"
+          ? "Refining · Built-in denoiser"
+          : "Refining · Denoising"
         : stage === "complete" && clean
           ? "Clean"
           : pending
