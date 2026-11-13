@@ -2737,9 +2737,22 @@ impl Controller {
                 }
                 self.view.place(None, [0., 0.]);
                 self.write_view(None, cx);
+                // Each view saves the project's whole view state. The
+                // timeline fits once the viewer's save has landed, so its
+                // own save does not carry the old viewer zoom back.
                 if let Some(timeline) = self.builtins.timeline.clone() {
                     let time = self.time();
-                    timeline.update(cx, |t, cx| t.command("timeline.fit", time, None, false, cx));
+                    cx.spawn(async move |this, cx| {
+                        cx.background_executor()
+                            .timer(crate::gizmo::NAVIGATION_IDLE)
+                            .await;
+                        let _ = this.update(cx, |_, cx| {
+                            timeline.update(cx, |t, cx| {
+                                t.command("timeline.fit", time, None, false, cx)
+                            })
+                        });
+                    })
+                    .detach();
                 }
             }
             // Settings, at the open project's own page.
