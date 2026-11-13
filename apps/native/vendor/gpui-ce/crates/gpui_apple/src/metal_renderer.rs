@@ -242,6 +242,8 @@ pub struct MetalRenderer {
     /// drawable then comes from a display-link update. Cleared when the window
     /// releases the link for a synchronous present.
     display_link_bound: bool,
+    /// Link updates in a row passed over for a drawable of a previous size.
+    stale_updates: u8,
     /// For headless rendering, tracks whether output should be opaque
     opaque: bool,
     command_queue: CommandQueue,
@@ -287,6 +289,10 @@ pub struct MetalRenderer {
     /// When the last scene was encoded (`release_idle_targets`).
     last_draw: Option<std::time::Instant>,
 }
+
+/// A link holds at most this many drawables of a previous size after a
+/// resize (its frame latency); past that, draw into what it gives.
+const STALE_UPDATES: u8 = 3;
 
 impl MetalRenderer {
     /// Creates a new MetalRenderer with a CAMetalLayer for window-based rendering.
@@ -513,6 +519,7 @@ impl MetalRenderer {
             presents_with_transaction: false,
             display_link_drawable: None,
             display_link_bound: false,
+            stale_updates: 0,
             is_apple_gpu,
             is_unified_memory,
             opaque,
@@ -728,6 +735,32 @@ impl MetalRenderer {
     /// Whether a CAMetalDisplayLink currently owns this layer.
     pub fn set_display_link_bound(&mut self, bound: bool) {
         self.display_link_bound = bound;
+    }
+
+    /// Whether `draw` would reach a drawable of the layer's size. False
+    /// outside a link's update while a link owns the layer, and for the
+    /// update or two after a resize whose drawable still has the previous
+    /// size: a scene laid out for the new size drawn into it shows stretched
+    /// and cut. The caller then leaves this frame, hosted views included,
+    /// to the next update or to AppKit's display of the resized view.
+    pub fn drawable_ready(&mut self) -> bool {
+        let Some(layer) = &self.layer else {
+            return false;
+        };
+        let Some(drawable) = &self.display_link_drawable else {
+            return !self.display_link_bound;
+        };
+        let size = layer.drawable_size();
+        let texture = drawable.texture();
+        let stale = texture.width() != size.width.ceil() as u64
+            || texture.height() != size.height.ceil() as u64;
+        if stale && self.stale_updates < STALE_UPDATES {
+            self.stale_updates += 1;
+            self.display_link_drawable = None;
+            return false;
+        }
+        self.stale_updates = 0;
+        true
     }
 
     /// Whether the scene reached a drawable. While a CAMetalDisplayLink owns

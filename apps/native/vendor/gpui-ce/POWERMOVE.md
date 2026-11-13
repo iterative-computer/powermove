@@ -216,3 +216,16 @@ has been made. No measurements from a locked or occluded session certify pacing.
 - **Development review frames:** debug builds with `PM_NATIVE_DRAW_OCCLUDED`
   set keep an occluded window's display link running, so background lane checks
   see live frames without raising a window. Release builds always pause it.
+- **Hosted views and the frame that carries them:** `draw` moves AppKit slots
+  only in a frame that reaches the screen with them. A frame with no drawable
+  of the layer's size (`MetalRenderer::drawable_ready`: a link drawable of
+  the size before a resize, at most three updates in a row; a draw outside
+  the link's update) moves nothing and is painted again. A frame that moved
+  slots takes its drawable from the layer and presents with the transaction
+  (the link is released and started again), because a `CAMetalDisplayLink`
+  drawable is shown at the link's own time, after the transaction.
+- **A scene shown again moves no hosted view:** `PlatformWindow::painted`
+  (called at the end of `Window::draw`) tells the platform a new scene
+  follows. GPUI keeps presenting the last scene for a second after fast
+  input; such a `draw` staged nothing, and placing slots from it hid every
+  hosted control and field until the next paint.
