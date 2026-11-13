@@ -120,7 +120,18 @@ impl WriteFailure {
             Self::NotAllowed
         } else if has(&["changed outside powermove", "other version was preserved"]) {
             Self::ChangedElsewhere
-        } else if has(&["no such file", "os error 2)", "not found"]) {
+        } else if has(&[
+            "no such file",
+            "os error 2)",
+            "not found",
+            // A disk that was disconnected while it was written to.
+            "bad file descriptor",
+            "os error 9)",
+            "device not configured",
+            "os error 6)",
+            "input/output error",
+            "os error 5)",
+        ]) {
             Self::Missing
         } else if has(&["already in progress", "save is in flight"]) {
             Self::InProgress
@@ -388,6 +399,27 @@ pub fn version_offer(name: &str, file: &str, version: &OfferedVersion) -> Alert<
     )
 }
 
+/// The file `file` did not open, and a save of it that did not finish left
+/// `count` files beside it that could not be identified. None is offered as
+/// a version; the person is told they are there and how to see them.
+pub fn unidentified_leftovers(name: &str, file: &str, count: usize) -> Alert<Action> {
+    let (files, they_are, them) = if count == 1 {
+        ("a file", "It is", "it")
+    } else {
+        ("files", "They are", "them")
+    };
+    Alert::new(
+        format!("“{name}” couldn’t be opened."),
+        format!(
+            "The file “{file}” is incomplete or damaged. A save of it that did not finish left {files} next to it that Powermove couldn’t identify, so nothing was put in its place. {they_are} hidden: in Finder, open the project’s folder and press Shift-Command-Period to see {them}. Nothing was moved or removed."
+        ),
+        vec![
+            Button::new("OK", Action::Ok).default(),
+            Button::new("Show in Finder", Action::ShowInFinder),
+        ],
+    )
+}
+
 /// `285 MB`, `12 KB`: decimal units, as Finder shows sizes.
 fn size_text(bytes: u64) -> String {
     let units = ["bytes", "KB", "MB", "GB", "TB"];
@@ -612,6 +644,34 @@ mod write_failure_tests {
         assert!(alert.informative.contains("cut (other version 1).pmv"));
         assert!(!alert.informative.contains("cut (other version 2).pmv"));
         assert!(kept_beside_told(&[row("unknown kind", Some("x"))]).is_empty());
+    }
+
+    /// Leftovers nobody could identify are said to be there, never offered.
+    #[test]
+    fn files_a_save_left_that_could_not_be_identified_are_said_not_offered() {
+        let alert = unidentified_leftovers("cut", "cut.pmv", 2);
+        assert_eq!(alert.message, "“cut” couldn’t be opened.");
+        assert!(alert.informative.contains("left files next to it"));
+        assert!(alert.informative.contains("Shift-Command-Period"));
+        assert!(alert.informative.ends_with("Nothing was moved or removed."));
+        assert_eq!(alert.labels(), ["OK", "Show in Finder"]);
+        assert!(
+            unidentified_leftovers("cut", "cut.pmv", 1)
+                .informative
+                .contains("left a file next to it")
+        );
+    }
+
+    /// A disk that went away while it was written to is said as that.
+    #[test]
+    fn a_disk_that_went_away_mid_save_is_said_as_a_missing_place() {
+        for detail in [
+            "/Volumes/Job/.cut.pmv.0f8f.save: Bad file descriptor (os error 9)",
+            "/Volumes/Job/cut.pmv: Device not configured (os error 6)",
+            "/Volumes/Job/cut.pmv: Input/output error (os error 5)",
+        ] {
+            assert_eq!(WriteFailure::of(detail), WriteFailure::Missing, "{detail}");
+        }
     }
 
     /// A save another computer began is offered with that said: it may

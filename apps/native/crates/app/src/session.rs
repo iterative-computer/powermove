@@ -1881,7 +1881,36 @@ impl Controller {
                     })
                 });
             let Some(row) = offered else {
-                let _ = this.update(cx, |v, cx| v.report_open_error(&name, path, &error, cx));
+                // Files a save left that could not be identified are said
+                // to be there; none is offered as a version.
+                let unidentified = rows
+                    .iter()
+                    .filter(|r| text(r, "why").as_deref() != Some("active"))
+                    .count();
+                let _ = this.update(cx, |v, cx| {
+                    if unidentified == 0 {
+                        return v.report_open_error(&name, path, &error, cx);
+                    }
+                    let alert = crate::surfaces::documents::unidentified_leftovers(
+                        &name,
+                        &file_name(&file),
+                        unidentified,
+                    );
+                    v.errors.borrow_mut().push(
+                        "Project",
+                        &format!("{} {} ({error})", alert.message, alert.informative),
+                    );
+                    v.message = String::new();
+                    let answer = alert.sheet(&v.host.borrow().window);
+                    cx.spawn(async move |_, _| {
+                        if answer.recv().await.ok().flatten()
+                            == Some(crate::surfaces::documents::Action::ShowInFinder)
+                        {
+                            platform::reveal(&file);
+                        }
+                    })
+                    .detach();
+                });
                 return;
             };
             let leftover = PathBuf::from(text(row, "path").unwrap_or_default());
@@ -2213,7 +2242,16 @@ impl Controller {
                         }
                         v.write_poster(cx);
                     }
-                    other => v.save_failed(&crate::lifecycle::reason(other), cx),
+                    other => {
+                        // A Save As whose folder is gone by now (its disk
+                        // was disconnected) failed for that, whatever the
+                        // write that hit it reported.
+                        let gone = as_path
+                            .as_deref()
+                            .and_then(std::path::Path::parent)
+                            .is_some_and(|folder| !folder.exists());
+                        v.save_failed(&crate::lifecycle::reason(other), gone, cx)
+                    }
                 }
                 v.refresh(cx);
                 if let Some(intent) = close {
@@ -2301,8 +2339,13 @@ impl Controller {
     /// A save that did not happen is a sheet in plain words (S5): Save As
     /// and Show in Finder are one press away, and the kernel's own account
     /// is an Error Log row, never copy.
-    fn save_failed(&mut self, detail: &str, cx: &mut Context<Self>) {
+    fn save_failed(&mut self, detail: &str, destination_gone: bool, cx: &mut Context<Self>) {
         use crate::surfaces::documents::{Action, WriteFailure, save_failed, saved_beside};
+        let failure = if destination_gone {
+            WriteFailure::Missing
+        } else {
+            WriteFailure::of(detail)
+        };
         let name = self.project_name();
         self.message = format!("“{name}” couldn’t be saved.");
         self.errors
@@ -2316,10 +2359,7 @@ impl Controller {
                 self.message = format!("“{name}” was saved next to its file.");
                 (saved_beside(&name, &file, &file_name(&kept)), Some(kept))
             }
-            None => (
-                save_failed(&name, WriteFailure::of(detail), path.is_some()),
-                path,
-            ),
+            None => (save_failed(&name, failure, path.is_some()), path),
         };
         let kept = pm_kernel::project_io::kept_beside(detail);
         let answer = alert.sheet(&self.host.borrow().window);
