@@ -730,15 +730,30 @@ fn paused_notifications_are_coalesced_and_resource_pins_retire_cache() {
         "paused service generated a periodic wake"
     );
     let old = v.stamp().unwrap();
-    v.resources(Arc::new(resources::ResourceSnapshot {
-        generation: 2,
-        ..Default::default()
-    }))
-    .unwrap();
+    // New pins (a contributed definition) retire the cache; a snapshot that
+    // pins the same again (only its generation moved) retires nothing.
+    let mut contributed = pm_render::all_builtin_definitions()
+        .definitions
+        .into_iter()
+        .find(|d| d.id.as_str() == "invert")
+        .unwrap();
+    contributed.id = "ext.invert".into();
+    contributed.origin = pm_protocol::definitions::DefinitionOrigin::Local;
+    let pins = |generation| {
+        Arc::new(resources::ResourceSnapshot {
+            generation,
+            definitions: vec![contributed.clone()],
+            ..Default::default()
+        })
+    };
+    v.resources(pins(2)).unwrap();
     let frame = wait_frame(&v, v.stamp().unwrap());
     assert!(!frame.cache_hit);
     assert!(frame.stamp.generation > old.generation);
     assert!(rx.try_recv().is_ok());
+    let pinned = v.stamp().unwrap();
+    v.resources(pins(3)).unwrap();
+    assert_eq!(v.stamp().unwrap().generation, pinned.generation);
     assert!(v.resources(Arc::default()).is_err());
     for i in 0..100 {
         v.scrub(Ticks::new(i * 1000).unwrap()).unwrap();
