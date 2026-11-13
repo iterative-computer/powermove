@@ -322,9 +322,18 @@ impl DiskUpload {
 /// A set of media files as the engine last looked at them.
 struct MediaSeen {
     media: Arc<pm_export::render::MediaPaths>,
-    /// Their stamps' digest ([`crate::render_cache::media_identity`]).
-    identity: u64,
+    /// Their versions as keys take them ([`crate::render_cache::Stamp`]):
+    /// a frame is kept under them only when it read these very versions.
+    stamps: Vec<crate::render_cache::Stamp>,
     looked: Instant,
+}
+impl MediaSeen {
+    fn identity(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        self.stamps.hash(&mut hash);
+        hash.finish()
+    }
 }
 struct CachedFrame {
     key: crate::policy::CacheKey,
@@ -840,21 +849,23 @@ impl Engine {
     /// the output tone retire every kept frame when they change.)
     fn observed_inputs(&mut self, scene: &Scene) -> u64 {
         use std::hash::{Hash, Hasher};
-        let at = self
-            .media_seen
-            .iter()
-            .position(|seen| Arc::ptr_eq(&seen.media, &scene.media) || seen.media == scene.media);
+        let at = self.media_seen_at(scene);
         let fresh = at.is_some_and(|at| {
             self.media_seen[at].looked.elapsed() < crate::render_cache::MEDIA_RECHECK
         });
         let media = if let (Some(at), true) = (at, fresh) {
-            self.media_seen[at].identity
+            self.media_seen[at].identity()
         } else {
-            let identity = match &self.disk {
-                Some(disk) => disk.media_identity(&scene.media),
-                None => crate::render_cache::media_identity(&scene.media, None),
+            let seen = MediaSeen {
+                media: scene.media.clone(),
+                stamps: match &self.disk {
+                    Some(disk) => disk.media_stamps(&scene.media),
+                    None => crate::render_cache::stamps(&scene.media, None),
+                },
+                looked: Instant::now(),
             };
-            let before = at.map(|at| self.media_seen.remove(at).identity);
+            let identity = seen.identity();
+            let before = at.map(|at| self.media_seen.remove(at).identity());
             if before.is_some_and(|before| before != identity) {
                 // Kept draws name their files, not what was in them.
                 self.renderer.clear_draw_reuse();
@@ -863,11 +874,7 @@ impl Engine {
             if self.media_seen.len() >= 4 {
                 self.media_seen.remove(0);
             }
-            self.media_seen.push(MediaSeen {
-                media: scene.media.clone(),
-                identity,
-                looked: Instant::now(),
-            });
+            self.media_seen.push(seen);
             identity
         };
         let overrides = self
@@ -878,6 +885,41 @@ impl Engine {
         let mut hash = std::collections::hash_map::DefaultHasher::new();
         (media, overrides).hash(&mut hash);
         hash.finish()
+    }
+    fn media_seen_at(&self, scene: &Scene) -> Option<usize> {
+        self.media_seen
+            .iter()
+            .position(|seen| Arc::ptr_eq(&seen.media, &scene.media) || seen.media == scene.media)
+    }
+    /// Whether a frame of `scene` just rendered read its media as they
+    /// were last looked at (`reads`: `pm_render::media::take_reads`): only
+    /// then is it kept under the key taken from that look. A file saved
+    /// again within the two seconds between looks is drawn (the frame is
+    /// shown) but not kept as a frame of the file as it was, and the media
+    /// are looked at again for the next frame.
+    fn reads_observed(
+        &mut self,
+        scene: &Scene,
+        reads: &[(
+            std::path::PathBuf,
+            Option<pm_text::file_version::FileVersion>,
+        )],
+    ) -> bool {
+        let Some(at) = self.media_seen_at(scene) else {
+            return false;
+        };
+        let content_named = self.disk.as_ref().and_then(|disk| disk.content_named());
+        let observed = crate::render_cache::reads_are(
+            reads,
+            &self.media_seen[at].stamps,
+            content_named.as_deref(),
+        )
+        .is_ok();
+        if !observed {
+            self.media_seen.remove(at);
+            self.renderer.clear_draw_reuse();
+        }
+        observed
     }
     /// Changes when a frame a scrub or playback render missed has decoded.
     pub fn media_landed(&self) -> u64 {
@@ -1263,6 +1305,7 @@ impl Engine {
                 trace.lock().unwrap().render_start = now();
                 let cpu_start = crate::trace::thread_cpu_ms();
                 let work = trace.lock().unwrap().count_work.then(pm_perf::snapshot);
+                pm_render::media::note_reads();
                 let rendered = self.renderer.render_into(
                     &scene.doc,
                     &scene.comp,
@@ -1272,6 +1315,7 @@ impl Engine {
                     &target,
                     None,
                 );
+                let reads = pm_render::media::take_reads();
                 {
                     let mut t = trace.lock().unwrap();
                     t.render_submitted = now();
@@ -1299,8 +1343,14 @@ impl Engine {
                 }
                 let failures: Arc<[LayerFailure]> = rendered.failures.into();
                 stand_ins = !rendered.stand_ins.is_empty() || !compat_late.is_empty();
-                // A frame with stand-ins is not the exact picture of its time.
-                if self.cache_enabled && !spec.exact && !stand_ins {
+                // A frame with stand-ins is not the exact picture of its
+                // time, and one that read another version of a file than
+                // the one its key was taken from is not that key's.
+                if self.cache_enabled
+                    && !spec.exact
+                    && !stand_ins
+                    && self.reads_observed(scene, &reads)
+                {
                     self.cache.push_back(CachedFrame {
                         key,
                         surface: surface.clone(),
@@ -1575,9 +1625,11 @@ impl Engine {
         if let Some(store) = &self.compat_document {
             store.begin_frame(Moment::Paused);
         }
+        pm_render::media::note_reads();
         let drawn = self.refine_bands(
             scene, spec.time, &request, area, &surface, costs, total, stop,
         );
+        let reads = pm_render::media::take_reads();
         self.renderer.set_isolate_layers(false);
         self.release_final_stills(scene, &spec);
         let late = self
@@ -1593,8 +1645,10 @@ impl Engine {
         if let Some(error) = self.fonts.as_ref().and_then(|f| f.after_render()) {
             return Err(FontsPending(error).into());
         }
-        // A stand-in is not the exact picture: the frame draws it itself.
-        if late.is_empty() {
+        // A stand-in is not the exact picture, and bands that read another
+        // version of a file than the key's are not the key's: the frame
+        // draws it itself.
+        if late.is_empty() && self.reads_observed(scene, &reads) {
             self.cache.push_back(CachedFrame {
                 key,
                 surface,

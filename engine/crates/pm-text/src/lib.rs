@@ -25,6 +25,7 @@ pub mod blink;
 pub mod compat;
 pub mod corpus;
 pub mod fallback_cache;
+pub mod file_version;
 pub mod font;
 pub mod host;
 #[cfg(feature = "level2")]

@@ -1569,8 +1569,24 @@ fn fill_cache(
             if refused(i) {
                 continue;
             }
-            let drawn = draw(renderer, frame)?;
+            // Every file the frame looks at, in every band of it.
+            pm_render::media::note_reads();
+            let drawn = draw(renderer, frame);
+            let reads = pm_render::media::take_reads();
+            let drawn = drawn?;
             if let Some(bytes) = &drawn {
+                // The frame's key was taken from its media as the app saw
+                // them: drawn from any other version of a file (saved again
+                // since, or while it rendered), it is not that key's
+                // picture and is not stored.
+                if let Err(path) = crate::render_cache::reads_are(
+                    &reads,
+                    &fill.media,
+                    fill.content_named.as_deref(),
+                ) {
+                    eprintln!("a fill read another version of {}", path.display());
+                    anyhow::bail!(crate::render_cache::MEDIA_CHANGED);
+                }
                 store(frame, bytes)?;
             }
             report(FrameReport {

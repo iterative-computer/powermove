@@ -1364,22 +1364,13 @@ struct Custom {
 #[derive(Clone, PartialEq, Eq)]
 struct FontFileStamp {
     path: PathBuf,
-    len: u64,
-    modified: Option<std::time::SystemTime>,
-    device: u64,
-    inode: u64,
-    changed: (i64, i64),
+    version: crate::file_version::FileVersion,
 }
 impl FontFileStamp {
     fn new(path: &std::path::Path, meta: &std::fs::Metadata) -> Self {
-        use std::os::unix::fs::MetadataExt;
         Self {
             path: path.into(),
-            len: meta.len(),
-            modified: meta.modified().ok(),
-            device: meta.dev(),
-            inode: meta.ino(),
-            changed: (meta.ctime(), meta.ctime_nsec()),
+            version: crate::file_version::FileVersion::read(meta),
         }
     }
 }
