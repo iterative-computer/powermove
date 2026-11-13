@@ -634,6 +634,7 @@ pub fn disabled(
         chosen && selected.iter().all(|l| !l.effectively_locked),
     );
     set("ungroupLayers", has("group"));
+    set("interpretFootage", has("video") || has("image"));
     set("releasePrecomp", has("precomp"));
     set("toggleContinuousRaster", has("precomp"));
     for name in ["splitTextWords", "splitTextCharacters", "splitTextLines"] {
@@ -664,7 +665,7 @@ const SELECTION: [&str; 16] = [
     "centerAnchor",
 ];
 /// Rows that need a document, on top of the selection-based ones.
-const DOCUMENT: [&str; 19] = [
+const DOCUMENT: [&str; 20] = [
     "importSequence",
     "delete",
     "copyLayers",
@@ -684,6 +685,7 @@ const DOCUMENT: [&str; 19] = [
     "timeline.revealAll",
     "newComposition",
     "compositionSettings",
+    "interpretFootage",
 ];
 
 /// A command that acts on the project: asked for while one is still
