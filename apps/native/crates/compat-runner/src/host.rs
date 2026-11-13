@@ -4691,6 +4691,129 @@ mod tests {
             "now in the realm, drop from the list: {gained:?}"
         );
     }
+    /// The model helpers of the shipped app's `PM` an extension can call:
+    /// the ones that are pure model work answer as the shipped app's did, and
+    /// each of the rest fails saying which member it is, never as
+    /// "undefined is not a function".
+    #[test]
+    fn the_shipped_model_helpers_answer_or_name_the_member_that_is_missing() {
+        let root = tempfile::tempdir().unwrap();
+        extension(
+            &root.path().join("extensions"),
+            "helpers",
+            &[(
+                "index.ts",
+                "export default function(api){const PM=api.host.pm;
+                   api.effects.register({id:'helpers.tint',label:'Tint',group:'Stylize',params:[{k:'amount',label:'Amount',min:0,max:1,def:0.5}],frag:'o = src(v_uv);'});
+                   const said=(fn)=>{try{fn();return 'returned'}catch(e){return String(e.message)}};
+                   const made=PM.mkEffect('helpers.tint');
+                   const uniforms=PM.parseUniforms('uniform float uSpeed;   // @param 0.35 0 3\\nuniform vec3 uTint; // @param #FF6B1A\\nuniform float iTime;');
+                   api.storage.set('answers',{
+                     scope:Array.isArray(PM.scope)&&PM.scope.length===0,
+                     compOf:[PM.compOf(null),PM.compOf({type:'shape',d:{}}),PM.compOf({type:'precomp',d:{comp:'none'}})],
+                     made:{type:made.type,on:made.on,amount:made.p.amount.v,id:typeof made.id},
+                     def:PM.effectDef({type:'helpers.tint'}).label,
+                     noDef:PM.effectDef({type:'nothing.provides'})===undefined,
+                     fx:Object.keys(PM.FX),fxLabel:PM.FX['helpers.tint'].label,
+                     transitions:Object.keys(PM.TRANSITIONS),noTransition:PM.transitionDef('nothing.provides')===undefined,
+                     uniforms,
+                     said:{
+                       mkEffect:said(()=>PM.mkEffect('nothing.provides')),
+                       mkTransition:said(()=>PM.mkTransition('nothing.provides')),
+                       precompose:said(()=>PM.precompose(['a'],'Name')),
+                       comps:said(()=>PM.Comps.precompose(['a'],{})),
+                       assetKind:said(()=>PM.assetKind({name:'a.png',type:'image/png'})),
+                       resolveAssetKind:said(()=>PM.resolveAssetKind({name:'a.png'})),
+                       takes:said(()=>PM.takes.list()),
+                       script:said(()=>PM.Script.run('1')),
+                       importFiles:said(()=>PM.importFiles([])),
+                       pickFiles:said(()=>PM.pickFiles()),
+                       saveProject:said(()=>PM.saveProject()),
+                     }});
+                   const layer=(id)=>Object.assign(PM.mkLayer('shape',{name:id}),{id});
+                   api.commands.register({id:'helpers.add',label:'Add',run(id){PM.addLayer(layer(id),0)}});
+                   api.commands.register({id:'helpers.remove',label:'Remove',run(){PM.removeLayers('gone')}});
+                 }",
+            )],
+        );
+        let fixture = Fixture::start(root);
+        fixture.until("activation", |host| {
+            host.publication().settled && host.is_ready()
+        });
+        let got = stored(&fixture.kernel, "answers")
+            .unwrap_or_else(|| panic!("{:?}", fixture.host.records()));
+        assert_eq!(got["scope"], true);
+        assert_eq!(got["compOf"], json!([null, null, null]));
+        assert_eq!(
+            got["made"],
+            json!({"type":"helpers.tint","on":true,"amount":0.5,"id":"string"})
+        );
+        assert_eq!(got["def"], "Tint");
+        assert_eq!(got["noDef"], true);
+        assert_eq!(got["fx"], json!(["helpers.tint"]));
+        assert_eq!(got["fxLabel"], "Tint");
+        assert_eq!(got["transitions"], json!([]));
+        assert_eq!(got["noTransition"], true);
+        assert_eq!(
+            got["uniforms"],
+            json!([
+                {"name":"uSpeed","type":"float","label":"Speed","control":"num","def":0.35,"min":0,"max":3},
+                {"name":"uTint","type":"vec3","label":"Tint","control":"color","def":"#FF6B1A"}
+            ])
+        );
+        for (tried, member) in [
+            ("mkEffect", "PM.mkEffect"),
+            ("mkTransition", "PM.mkTransition"),
+            ("precompose", "PM.precompose"),
+            ("comps", "PM.Comps.precompose"),
+            ("assetKind", "PM.assetKind"),
+            ("resolveAssetKind", "PM.resolveAssetKind"),
+            ("takes", "PM.takes.list"),
+            ("script", "PM.Script.run"),
+            ("importFiles", "PM.importFiles"),
+            ("pickFiles", "PM.pickFiles"),
+            ("saveProject", "PM.saveProject"),
+        ] {
+            let said = got["said"][tried].as_str().unwrap_or_default();
+            assert!(said.contains(member), "{tried} said {said:?}, not {member}");
+        }
+        // `removeLayers` on its own is one step of the history, as `addLayer`.
+        let ids = |fixture: &Fixture| -> Vec<String> {
+            let published = fixture.kernel.published("window").unwrap();
+            published
+                .snapshot
+                .layers(None)
+                .iter()
+                .map(|l| l.id.clone())
+                .collect()
+        };
+        for id in ["kept", "gone"] {
+            fixture.host.run_command("helpers.add", json!([id]));
+            fixture.until("a layer is added", |_| {
+                ids(&fixture).first().map(String::as_str) == Some(id)
+            });
+        }
+        assert_eq!(ids(&fixture), ["gone", "kept"]);
+        fixture.host.run_command("helpers.remove", json!([]));
+        fixture.until("the layer is removed", |_| {
+            !ids(&fixture).contains(&"gone".to_owned())
+        });
+        assert!(ids(&fixture).contains(&"kept".to_owned()));
+        let ack = fixture
+            .kernel
+            .call_blocking(
+                "window",
+                Request::new(pm_kernel::Caller::native(), HistoryCall::Undo),
+            )
+            .unwrap();
+        assert!(
+            matches!(ack.reply, Reply::Bool(true)),
+            "Undo of the removal"
+        );
+        fixture.until("Undo puts it back", |_| {
+            ids(&fixture).contains(&"gone".to_owned())
+        });
+    }
     /// What an extension changes inside `PM.Edit.mutate` stays in its own
     /// project afterwards: the realm is told its edit landed, so the layer it
     /// just added is still there when it looks, and its next change does not

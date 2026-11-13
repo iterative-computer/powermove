@@ -741,12 +741,134 @@ globalThis.__compat = {
       PM.bus.emit("layers");
       return layer;
     };
+    // Called here, a member the realm does not have says which one it is
+    // (composition editing, file import and save, takes, scripting are the
+    // editor's own work in main).
+    const missing = (member) => () => {
+      throw new Error(`${member} is not available in this version of Powermove`);
+    };
+    {
+      // More of v1's model that an extension can call raw. Pure model work
+      // answers as main did; the rest of the roster says which member it is.
+      const PM = this.realm.PM;
+      const kernel = this.realm.kernel;
+      // One step of the history on its own, part of the edit inside one.
+      const edited = (label, change) => {
+        if (PM.hist.busy()) return change();
+        const done = PM.Edit.mutate(label, change);
+        if (!done.ok) throw new Error(done.message ?? `${label} could not be done`);
+      };
+      // Render scope: nested compositions render natively, so always the project.
+      PM.scope = [];
+      PM.compOf = (layer) => {
+        if (!layer || layer.type !== "precomp" || !layer.d || !layer.d.comp) return null;
+        const comp = PM.proj.comps && PM.proj.comps[layer.d.comp];
+        return comp && Array.isArray(comp.layers) ? comp : null;
+      };
+      PM.removeLayers = (ids) => {
+        ids = PM.expandGroups([].concat(ids));
+        edited("Delete Layers", () => {
+          PM.proj.layers = PM.proj.layers.filter((l) => !ids.includes(l.id));
+          PM.proj.layers.forEach((l) => {
+            if (ids.includes(l.parent)) l.parent = null;
+          });
+          PM.ProjectIndex?.invalidate();
+        });
+        PM.sel.layers = PM.sel.layers.filter((id) => !ids.includes(id));
+        PM.bus.emit("layers");
+      };
+      // The effects and transitions extensions registered here, by type.
+      // Built-in ones are drawn natively and have no definition in this realm.
+      const view = (registry) =>
+        new Proxy(
+          {},
+          {
+            get: (_, type) => (typeof type === "string" ? registry.get(type) : undefined),
+            has: (_, type) => typeof type === "string" && registry.has(type),
+            ownKeys: () => registry.ids(),
+            getOwnPropertyDescriptor: (_, type) =>
+              typeof type === "string" && registry.has(type)
+                ? { value: registry.get(type), enumerable: true, configurable: true }
+                : undefined,
+          },
+        );
+      PM.FX = view(kernel.effects);
+      PM.TRANSITIONS = view(kernel.transitions);
+      PM.effectDef = (effect) => kernel.effects.get(typeof effect === "string" ? effect : effect?.type);
+      PM.transitionDef = (type) => kernel.transitions.get(type);
+      const undefinedHere = (member, type) =>
+        new Error(
+          `${member}: no definition of "${type}" is available to extensions in this version of Powermove`,
+        );
+      PM.mkEffect = (type) => {
+        const definition = PM.effectDef(type);
+        if (!definition) throw undefinedHere("PM.mkEffect", type);
+        const effect = { id: PM.uid("f"), type, on: true, p: {} };
+        for (const param of definition.params ?? []) effect.p[param.k] = PM.P(param.def);
+        return effect;
+      };
+      PM.mkTransition = (type) => {
+        const definition = PM.transitionDef(type);
+        if (!definition) throw undefinedHere("PM.mkTransition", type);
+        const transition = { type, dur: 0.5, p: {} };
+        for (const param of definition.params ?? []) transition.p[param.k] = PM.P(param.def);
+        return transition;
+      };
+      // `// @param default min max` annotations as inspector-ready uniforms.
+      PM.parseUniforms = (code) => {
+        const out = [];
+        const re =
+          /uniform\s+(float|vec2|vec3|vec4|int|bool)\s+(\w+)\s*;\s*(?:\/\/\s*@param\s*([^\n]*))?/g;
+        let m;
+        while ((m = re.exec(code))) {
+          const [, type, name, ann] = m;
+          if (/^i(Resolution|Time|GlobalTime|Progress|Frame|Mouse)$/.test(name)) continue;
+          const a = (ann || "").trim().split(/\s+/).filter(Boolean);
+          const d = {
+            name,
+            type,
+            label: name.replace(/^u/, "").replace(/([a-z])([A-Z])/g, "$1 $2"),
+          };
+          if (type === "vec3" && a[0] && a[0].startsWith("#")) {
+            d.control = "color";
+            d.def = a[0];
+          } else if (type === "bool") {
+            d.control = "toggle";
+            d.def = a[0] === "true";
+          } else {
+            d.control = "num";
+            d.def = a[0] !== undefined ? parseFloat(a[0]) : 0;
+            d.min = a[1] !== undefined ? parseFloat(a[1]) : d.def < 0 ? d.def * 2 : 0;
+            d.max = a[2] !== undefined ? parseFloat(a[2]) : Math.max(1, Math.abs(d.def) * 2);
+            if (isNaN(d.def)) d.def = 0;
+          }
+          out.push(d);
+        }
+        return out;
+      };
+      // The editor's own work in main: each says which member it is.
+      for (const member of [
+        "precompose",
+        "assetKind",
+        "resolveAssetKind",
+        "importFiles",
+        "pickFiles",
+        "saveProject",
+      ])
+        PM[member] = missing(`PM.${member}`);
+      for (const namespace of ["Comps", "takes", "Script"])
+        PM[namespace] = new Proxy(
+          {},
+          {
+            get: (_, member) =>
+              typeof member === "string" ? missing(`PM.${namespace}.${member}`) : undefined,
+          },
+        );
+    }
     // v1's media store, read side: an asset's bytes as a Blob (the file behind
     // it on disk, read when asked), or null when it has none. The native app
     // keeps media itself, so writing to it throws by name.
-    const storeOnly = (member) => () => {
-      throw new Error(`PM.MediaStore.${member} is not available in this version of Powermove`);
-    };
+    const storeOnly = (member) => missing(`PM.MediaStore.${member}`);
     this.realm.PM.MediaStore = {
       get: async (asset) => {
         const id = typeof asset === "string" ? asset : asset?.id;
