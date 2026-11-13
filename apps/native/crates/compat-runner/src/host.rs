@@ -3112,6 +3112,118 @@ mod tests {
             assert!(fixture.host.publication().loading.is_empty());
         }
     }
+    /// An effect registered after its extension's activation returned (from a
+    /// timer, or a promise the activation did not return) is still part of
+    /// the load: the contributions are not settled, and the extension is
+    /// named as loading, until the work its activation started has finished.
+    /// An extension that says so itself (`api.readiness.hold`) is loading
+    /// until it releases, however its work is driven. Work that never
+    /// finishes holds the load for a bounded time only.
+    #[test]
+    fn an_effect_registered_after_activation_returned_is_still_loading() {
+        let root = tempfile::tempdir().unwrap();
+        let effect = |id: &str| {
+            format!(
+                "api.effects.register({{id:'{id}',label:'{id}',group:'Stylize',params:[],frag:'o = src(v_uv);'}})"
+            )
+        };
+        let extensions = root.path().join("extensions");
+        let sleep = "const sleep=(ms)=>new Promise(r=>setTimeout(r,ms));";
+        extension(
+            &extensions,
+            "a-timer",
+            &[(
+                "index.ts",
+                &format!(
+                    "export default function(api){{setTimeout(()=>setTimeout(()=>{{{}}},400),400)}}",
+                    effect("timer.tint")
+                ),
+            )],
+        );
+        extension(
+            &extensions,
+            "b-promise",
+            &[(
+                "index.ts",
+                &format!(
+                    "{sleep}export default function(api){{(async()=>{{await sleep(300);await 0;await sleep(600);{}}})()}}",
+                    effect("promise.tint")
+                ),
+            )],
+        );
+        // Released by a command the host runs: no timer of its own is out.
+        extension(
+            &extensions,
+            "c-lease",
+            &[(
+                "index.ts",
+                &format!(
+                    "export default function(api){{const ready=api.readiness.hold();
+                       api.commands.register({{id:'c-lease.finish',label:'Finish',run(){{{};ready.release()}}}})}}",
+                    effect("lease.tint")
+                ),
+            )],
+        );
+        // Re-arms for ever and registers nothing.
+        extension(
+            &extensions,
+            "d-poll",
+            &[(
+                "index.ts",
+                "export default function(api){const again=()=>setTimeout(again,20);again()}",
+            )],
+        );
+        let fixture = Fixture::start(root);
+        let has = |now: &Publication, id: &str| {
+            now.contributions.as_ref().is_some_and(|c| {
+                c["definitions"]
+                    .as_array()
+                    .is_some_and(|d| d.iter().any(|d| d["id"] == id))
+            })
+        };
+        let loading = |now: &Publication, id: &str| now.loading.iter().any(|(l, _)| l == id);
+        // Until both late effects are there, the load is never called
+        // settled, and each owner is named while its effect is missing.
+        let started = Instant::now();
+        loop {
+            let now = fixture.host.publication();
+            let (timer, promise) = (has(&now, "timer.tint"), has(&now, "promise.tint"));
+            if timer && promise {
+                break;
+            }
+            assert!(
+                !now.settled,
+                "settled without timer {timer} promise {promise}"
+            );
+            if now.contributions.is_some() && fixture.host.is_ready() {
+                assert!(timer || loading(&now, "a-timer"), "a-timer not named");
+                assert!(promise || loading(&now, "b-promise"), "b-promise not named");
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(20),
+                "never registered"
+            );
+            thread::sleep(Duration::from_millis(2));
+        }
+        // The lease holds the load on its own, past the bound on unfinished
+        // work (the polling extension's), and is named.
+        let bound = Instant::now() + Duration::from_secs(7);
+        fixture.until("only the lease is left", |host| {
+            let now = host.publication();
+            assert!(!now.settled && !has(&now, "lease.tint"));
+            assert!(
+                Instant::now() < bound,
+                "the polling extension held the load"
+            );
+            now.loading.len() == 1 && loading(&now, "c-lease")
+        });
+        fixture.host.run_command("c-lease.finish", json!([]));
+        fixture.until("released", |host| {
+            let now = host.publication();
+            assert!(!now.settled || has(&now, "lease.tint"));
+            now.settled && now.loading.is_empty()
+        });
+    }
     /// A Store helper's activation is part of the load: until it has
     /// registered its effect (at boot, or when it is installed later) the
     /// contributions are not settled.

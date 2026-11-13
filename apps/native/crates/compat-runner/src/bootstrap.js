@@ -120,7 +120,12 @@ globalThis.__compat = {
     const ask = (request) =>
       new Promise((resolve) => {
         const token = ++asked;
-        asks.set(token, resolve);
+        // The answer continues the load that asked (see `__work`).
+        const answered = globalThis.__work.hold();
+        asks.set(token, (value) => {
+          answered();
+          resolve(value);
+        });
         call("ui.request", { ...request, token });
       });
     this.answer = (token, value) => {
@@ -367,7 +372,14 @@ globalThis.__compat = {
         if (settled.has(key)) return Promise.resolve();
         if (!pending.has(key)) {
           let resolve;
-          const promise = new Promise((done) => (resolve = done));
+          const answered = globalThis.__work.hold();
+          const promise = new Promise(
+            (done) =>
+              (resolve = () => {
+                answered();
+                done();
+              }),
+          );
           pending.set(key, { promise, resolve });
           fresh.push(face);
         }
@@ -1262,6 +1274,7 @@ globalThis.__compat = {
       // its manifest declares (apiVersion 2+); a key without one is absent.
       // The host chose them from the manifests it read (`__compatHost`).
       vars: (record) => varsOf(record.id),
+      work: globalThis.__work,
       document: this.dom?.document,
     });
     this.realm.PM.Kernel.loader = this.loader;

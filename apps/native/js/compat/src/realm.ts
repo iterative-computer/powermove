@@ -647,6 +647,8 @@ export class CompatRealm {
   /** Every host→JS entry and microtask checkpoint must use this boundary. */
   task<T>(run: () => T): T {
     this.live();
+    // What a host task starts belongs to no extension's load (see `__work`).
+    (globalThis as Data).__work?.reset();
     try {
       return run();
     } finally {
