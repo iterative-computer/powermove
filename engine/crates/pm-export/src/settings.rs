@@ -439,12 +439,17 @@ pub enum Dither {
 
 /// The H.264 bit rate per pixel per frame (`bitrate ÷ (width × height × fps)`)
 /// from which dither survives the encoder and removes banding. Measured on a
-/// 0.40 to 0.42 grey gradient, 1920 × 512 at 24 fps, VideoToolbox H.264
-/// (`tests/dither_delivery.rs`, worst 16-column window of column means):
-/// undithered 0.48 codes at every rate; dithered 0.91 at 0.05, 0.53 at 0.1,
-/// 0.58 at 0.5, 0.46 at 1.0, 0.44 at 1.25, 0.31 at 1.5, 0.15 at 2.0, 0.08 at
-/// 3.0. Below 1.5 the encoder spends the dither as noise (up to 500 times the
-/// undithered file's bits) for no less banding.
+/// 0.40 to 0.42 grey gradient, 1920 × 512, 24 frames at 24 fps
+/// (`tests/dither_delivery.rs`, worst 16-column window of column means, the
+/// worst of the frames): undithered 0.48 codes at every rate on both
+/// encoders. Dithered, VideoToolbox: 0.91 at 0.05, 0.61 at 0.1, 0.58 at 0.5,
+/// 0.46 at 1.0, 0.44 at 1.25, 0.31 at 1.5, 0.15 at 2.0, 0.10 at 3.0; its
+/// worst frame is the first, the predicted frames after it hold the dither
+/// at 0.08 from 0.5 up. Dithered, the software encoder (x264): 0.52 at 0.05,
+/// 0.59 at 0.1, 0.15 at 0.5, 0.05 from 1.0 up. Below 1.5 the hardware
+/// encoder spends the dither as noise (up to 500 times the undithered
+/// file's bits) for no less banding on its intra frames; the one threshold
+/// is safe for both.
 pub const H264_DITHER_BITS_PER_PIXEL: f64 = 1.5;
 
 /// What happens when the destination already exists.

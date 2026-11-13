@@ -162,15 +162,16 @@ fn export(
     .unwrap_or_else(|e| panic!("{}: {e}", destination.display()));
 }
 
-/// The first frame's luma plane as coded (Y′CbCr) or its green (RGB),
-/// decoded by FFmpeg, in codes of the output's depth, with the ideal ramp's
-/// codes.
+/// Every frame's luma plane as coded (Y′CbCr) or its green (RGB), decoded
+/// by FFmpeg, in codes of the output's depth, with the ideal ramp's codes.
+/// A lossy file's later frames are predicted from earlier ones: whether
+/// dither survives is a question about all of them.
 fn decoded(
     path: &Path,
     rows: u32,
     ycbcr: bool,
     ten_bit: bool,
-) -> (Vec<f64>, Box<dyn Fn(f64) -> f64>) {
+) -> (Vec<Vec<f64>>, Box<dyn Fn(f64) -> f64>) {
     // Planar 4:2:0 output: its first plane is the coded Y′, copied.
     let pix = match (ycbcr, ten_bit) {
         (true, false) => "yuv420p",
@@ -180,15 +181,7 @@ fn decoded(
     let out = Command::new("ffmpeg")
         .args(["-v", "error", "-i"])
         .arg(path)
-        .args([
-            "-frames:v",
-            "1",
-            "-f",
-            "rawvideo",
-            "-pix_fmt",
-            pix,
-            "pipe:1",
-        ])
+        .args(["-f", "rawvideo", "-pix_fmt", pix, "pipe:1"])
         .output()
         .unwrap();
     assert!(
@@ -196,22 +189,50 @@ fn decoded(
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let b = out.stdout;
     let n = (W * rows) as usize;
-    let values: Vec<f64> = match pix {
-        "yuv420p" => b[..n].iter().map(|&v| f64::from(v)).collect(),
-        "yuv420p10le" => b[..2 * n]
-            .chunks_exact(2)
-            .map(|p| f64::from(u16::from_le_bytes([p[0], p[1]])))
-            .collect(),
-        _ => b.chunks_exact(3).map(|p| f64::from(p[1])).collect(),
+    // Bytes of one frame: 4:2:0 planes are luma and half as much chroma.
+    let frame = match pix {
+        "yuv420p" => n * 3 / 2,
+        "yuv420p10le" => n * 3,
+        _ => n * 3,
     };
+    assert!(!out.stdout.is_empty() && out.stdout.len().is_multiple_of(frame));
+    let values: Vec<Vec<f64>> = out
+        .stdout
+        .chunks_exact(frame)
+        .map(|b| match pix {
+            "yuv420p" => b[..n].iter().map(|&v| f64::from(v)).collect(),
+            "yuv420p10le" => b[..2 * n]
+                .chunks_exact(2)
+                .map(|p| f64::from(u16::from_le_bytes([p[0], p[1]])))
+                .collect(),
+            _ => b.chunks_exact(3).map(|p| f64::from(p[1])).collect(),
+        })
+        .collect();
     let ideal: Box<dyn Fn(f64) -> f64> = match (ycbcr, ten_bit) {
         (true, false) => Box::new(|v| v * 219.0 + 16.0),
         (true, true) => Box::new(|v| v * 876.0 + 64.0),
         (false, _) => Box::new(|v| v * 255.0),
     };
     (values, ideal)
+}
+
+/// Banding of each frame, and of the frames averaged (what the eye
+/// integrates when the dither changes every frame).
+fn banding_over(frames: &[Vec<f64>], ideal: &dyn Fn(f64) -> f64) -> (Vec<f64>, f64) {
+    let each = frames.iter().map(|f| banding(f, ideal)).collect();
+    let mean: Vec<f64> = (0..frames[0].len())
+        .map(|i| frames.iter().map(|f| f[i]).sum::<f64>() / frames.len() as f64)
+        .collect();
+    (each, banding(&mean, ideal))
+}
+
+fn worst(values: &[f64]) -> f64 {
+    values.iter().cloned().fold(0.0, f64::max)
+}
+
+fn best(values: &[f64]) -> f64 {
+    values.iter().cloned().fold(f64::MAX, f64::min)
 }
 
 /// Worst 16-column window of column means against the ideal, in codes.
@@ -317,19 +338,24 @@ fn dither_follows_the_measured_rule_for_every_format() {
             let out = dir.join(format!("{name}-{dither}.{ext}"));
             export(&clip, format, quality, dither, &out);
             let (values, ideal) = decoded(&out, H, ycbcr, ten_bit);
+            // A still is one frame; a video every frame it was asked for.
+            assert_eq!(values.len() as u64, if ext == "png" { 1 } else { FRAMES });
             let bps = size(&out) as f64 * 8.0 * 24.0 / FRAMES as f64;
-            measured.push((banding(&values, &*ideal), bps, values));
+            let (each, mean) = banding_over(&values, &*ideal);
+            measured.push((each, mean, bps, values));
         }
-        let [(off_band, off_bps, off), (on_band, on_bps, on)] =
+        let [(off_each, _, off_bps, off), (on_each, on_mean, on_bps, on)] =
             <[_; 2]>::try_from(measured).unwrap_or_else(|_| unreachable!());
+        let (off_band, on_band) = (best(&off_each), worst(&on_each));
         eprintln!(
-            "MEASURE dither {name}: off banding {off_band:.3} codes, {:.0} kb/s; on banding {on_band:.3} codes, {:.0} kb/s",
+            "MEASURE dither {name}: off banding {off_each:.2?} codes per frame, {:.0} kb/s; on banding {on_each:.2?} per frame, {on_mean:.3} over the frames averaged, {:.0} kb/s",
             off_bps / 1000.0,
             on_bps / 1000.0
         );
         if dithered {
-            assert!(on_band < 0.25, "{name}: dithered banding {on_band}");
-            assert!(off_band > 0.4, "{name}: undithered banding {off_band}");
+            // Every frame, the predicted ones after the first included.
+            assert!(on_band < 0.25, "{name}: dithered banding {on_each:.2?}");
+            assert!(off_band > 0.4, "{name}: undithered banding {off_each:.2?}");
         } else {
             assert!(
                 on == off,
@@ -342,16 +368,14 @@ fn dither_follows_the_measured_rule_for_every_format() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The H.264 dither threshold's measurement: the gradient encoded straight
-/// from working frames at a sweep of bits per pixel per frame, dither off
-/// and on, banding and the bitrate the encoder spent.
-#[test]
-#[ignore = "measurement: run with --ignored to print the sweep"]
-fn measure_h264_dither_against_bits_per_pixel() {
-    let dir = scratch("sweep");
+/// The gradient encoded straight from working frames at `bpp` bits per
+/// pixel per frame by the hardware or the software H.264 encoder: banding
+/// of every decoded frame, of the frames averaged, and the kb/s spent.
+fn h264_at(dir: &Path, bpp: f64, dither: Dither, software: bool) -> (Vec<f64>, f64, f64) {
     // Taller than the job tests' frame: the encoder's lowest rate (0.1
     // Mb/s) is then 0.008 bits per pixel.
     let rows = 512u32;
+    let frames = 24u64;
     let rgba: Vec<f32> = (0..rows)
         .flat_map(|_| {
             (0..W).flat_map(|x| {
@@ -360,51 +384,121 @@ fn measure_h264_dither_against_bits_per_pixel() {
             })
         })
         .collect();
-    let pixels = f64::from(W * rows) * 24.0;
-    for bpp in [0.05, 0.1, 0.5, 1.0, 1.25, 1.5, 2.0, 3.0] {
-        let mut row = Vec::new();
-        for dither in [Dither::Off, Dither::On] {
-            let out = dir.join(format!("sweep-{bpp}-{dither:?}.mp4"));
-            let mut job = pm_export::export(ExportSpec {
-                width: W,
-                height: rows,
-                rate: Rate::FPS_24,
-                frames: 24,
-                codec: Codec::H264 {
-                    bitrate_bps: (bpp * pixels) as u32,
-                },
-                container: Container::Mp4,
-                tags: ColorTags::Rec709QuickTime,
-                alpha: AlphaOutput::None,
-                working: WorkingEncoding::Standard,
-                dither,
-                audio: None,
-                timecode: None,
-                destination: out.clone(),
-                overwrite: Overwrite::Replace,
-                mode: None,
-            })
-            .unwrap();
-            for _ in 0..24 {
-                job.push_frame(&WorkingFrame {
-                    width: W,
-                    height: rows,
-                    rgba: &rgba,
-                })
-                .unwrap();
-            }
-            job.finish().unwrap();
-            let (values, ideal) = decoded(&out, rows, true, false);
-            row.push((banding(&values, &*ideal), size(&out) as f64 * 8.0 / 1000.0));
+    let out = dir.join(format!("h264-{software}-{bpp}-{dither:?}.mp4"));
+    let spec = ExportSpec {
+        width: W,
+        height: rows,
+        rate: Rate::FPS_24,
+        frames,
+        codec: Codec::H264 {
+            bitrate_bps: (bpp * f64::from(W * rows) * 24.0) as u32,
+        },
+        container: Container::Mp4,
+        tags: ColorTags::Rec709QuickTime,
+        alpha: AlphaOutput::None,
+        working: WorkingEncoding::Standard,
+        dither,
+        audio: None,
+        timecode: None,
+        destination: out.clone(),
+        overwrite: Overwrite::Replace,
+        mode: None,
+    };
+    let mut job = if software {
+        let sink = pm_export::software::SoftwareSink::new(&spec).unwrap();
+        pm_export::pipeline::Pipeline::new(spec, OutputSink::Software(Box::new(sink))).unwrap()
+    } else {
+        pm_export::export(spec).unwrap()
+    };
+    for _ in 0..frames {
+        job.push_frame(&WorkingFrame {
+            width: W,
+            height: rows,
+            rgba: &rgba,
+        })
+        .unwrap();
+    }
+    job.finish().unwrap();
+    let (values, ideal) = decoded(&out, rows, true, false);
+    assert_eq!(values.len() as u64, frames);
+    let (each, mean) = banding_over(&values, &*ideal);
+    (each, mean, size(&out) as f64 * 8.0 / 1000.0)
+}
+
+fn software_h264() -> bool {
+    Command::new("ffmpeg")
+        .args(["-hide_banner", "-encoders"])
+        .output()
+        .is_ok_and(|out| String::from_utf8_lossy(&out.stdout).contains("libx264"))
+}
+
+/// The rule's two sides on each H.264 encoder, over a whole second of
+/// frames (one intra frame, the rest predicted): above the threshold the
+/// default rule dithers and every frame is free of banding; below it the
+/// default rule leaves the picture as it is with dither off.
+#[test]
+fn h264_dither_holds_on_predicted_frames_on_both_encoders() {
+    let dir = scratch("gop");
+    for software in [false, true] {
+        let encoder = if software { "software" } else { "VideoToolbox" };
+        if software && !software_h264() {
+            eprintln!("SKIP software H.264 dither: ffmpeg lacks libx264");
+            continue;
         }
+        let (on, on_mean, on_kb) = h264_at(&dir, 3.0, Dither::Default, software);
+        let (off, _, off_kb) = h264_at(&dir, 3.0, Dither::Off, software);
         eprintln!(
-            "MEASURE h264 {bpp} bpp ({:.0} kb/s asked): off banding {:.3} codes, {:.0} kb/s; on banding {:.3} codes, {:.0} kb/s",
-            bpp * pixels / 1000.0,
-            row[0].0,
-            row[0].1,
-            row[1].0,
-            row[1].1
+            "MEASURE h264 {encoder} 3.0 bpp, 24 frames: default rule banding {:.2}..{:.2} codes per frame ({on_mean:.3} averaged), {on_kb:.0} kb; off {:.2}..{:.2}, {off_kb:.0} kb",
+            best(&on),
+            worst(&on),
+            best(&off),
+            worst(&off)
         );
+        assert!(
+            worst(&on) < 0.25,
+            "{encoder}: banding on a predicted frame with dither: {on:.2?}"
+        );
+        assert!(best(&off) > 0.4, "{encoder}: undithered banding {off:.2?}");
+        let (lean, _, lean_kb) = h264_at(&dir, 1.0, Dither::Default, software);
+        let (lean_off, _, lean_off_kb) = h264_at(&dir, 1.0, Dither::Off, software);
+        eprintln!(
+            "MEASURE h264 {encoder} 1.0 bpp: default rule banding {:.2}..{:.2}, {lean_kb:.0} kb; off {:.2}..{:.2}, {lean_off_kb:.0} kb",
+            best(&lean),
+            worst(&lean),
+            best(&lean_off),
+            worst(&lean_off)
+        );
+        assert!(
+            lean == lean_off && lean_kb == lean_off_kb,
+            "{encoder}: below the threshold the default rule is dither off"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The H.264 dither threshold's measurement: the gradient at a sweep of
+/// bits per pixel per frame, dither off and on, on the hardware and the
+/// software encoder: banding of the worst frame and of the frames averaged,
+/// and the bits the encoder spent.
+#[test]
+#[ignore = "measurement: run with --ignored to print the sweep"]
+fn measure_h264_dither_against_bits_per_pixel() {
+    let dir = scratch("sweep");
+    for software in [false, true] {
+        if software && !software_h264() {
+            continue;
+        }
+        let encoder = if software { "software" } else { "VideoToolbox" };
+        for bpp in [0.05, 0.1, 0.5, 1.0, 1.25, 1.5, 2.0, 3.0] {
+            let (off, off_mean, off_kb) = h264_at(&dir, bpp, Dither::Off, software);
+            let (on, on_mean, on_kb) = h264_at(&dir, bpp, Dither::On, software);
+            eprintln!(
+                "MEASURE h264 {encoder} {bpp} bpp: off banding worst frame {:.3} (averaged {off_mean:.3}), {off_kb:.0} kb; on worst frame {:.3}, best {:.3} (averaged {on_mean:.3}), {on_kb:.0} kb",
+                worst(&off),
+                worst(&on),
+                best(&on)
+            );
+        }
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
