@@ -110,6 +110,8 @@ pub struct Ax {
     pub disabled: bool,
     pub selected: Option<bool>,
     pub expanded: Option<bool>,
+    /// Checked state of radios, checkboxes and pressed buttons.
+    pub toggled: Option<Toggled>,
 }
 /// Facts that vary by kit component and have no generic style expression.
 #[derive(Clone, Debug, Default)]
@@ -210,8 +212,10 @@ pub struct Prepared {
 impl NumberFacts {
     /// The shipped field's reading: the declared precision, else two places
     /// for fine steps, one under ten and none above; trailing zeros trimmed.
+    /// Without a declared precision, a small value keeps two significant
+    /// digits.
     pub fn text(self, value: f64) -> String {
-        let places = self.precision.map_or(
+        let mut places = self.precision.map_or(
             if self.step > 0. && self.step < 1. {
                 2
             } else if value.abs() < 10. {
@@ -221,6 +225,15 @@ impl NumberFacts {
             },
             |digits| digits as usize,
         );
+        // A field without a declared precision keeps two significant digits
+        // of a small value (fog density 0.002, not "0").
+        if self.precision.is_none()
+            && value != 0.
+            && value.is_finite()
+            && value.abs() * 10f64.powi(places as i32) < 10.
+        {
+            places = places.max(((-value.abs().log10()).ceil() as usize + 1).min(6));
+        }
         let mut text = format!("{value:.places$}");
         if places > 0 && text.contains('.') {
             text = text.trim_end_matches('0').trim_end_matches('.').to_owned();
@@ -254,6 +267,7 @@ impl Prepared {
                         disabled: n.is_disabled(),
                         selected: n.is_selected(),
                         expanded: n.is_expanded(),
+                        toggled: n.toggled(),
                     },
                 )
             })
@@ -1193,6 +1207,26 @@ fn apply(mut e: StyleRefinement, style: &pm_surface::Props, table: &TokenTable) 
 
 #[cfg(test)]
 mod tests {
+    #[::core::prelude::v1::test]
+    fn a_small_number_keeps_its_digits_and_never_reads_zero() {
+        let n = |step: f64, precision: Option<u32>| NumberFacts {
+            value: 0.,
+            step,
+            speed: 1.,
+            min: f64::NEG_INFINITY,
+            max: f64::INFINITY,
+            precision,
+        };
+        assert_eq!(n(0.01, None).text(0.002), "0.002");
+        assert_eq!(n(0.01, None).text(0.0025), "0.0025");
+        assert_eq!(n(0.01, None).text(0.06), "0.06");
+        assert_eq!(n(0.01, None).text(0.4), "0.4");
+        assert_eq!(n(1., None).text(45.), "45");
+        assert_eq!(n(0.01, None).text(0.), "0");
+        // A declared precision holds.
+        assert_eq!(n(1., Some(1)).text(0.004), "0");
+    }
+
     use super::*;
     use serde_json::json;
     #[::core::prelude::v1::test]

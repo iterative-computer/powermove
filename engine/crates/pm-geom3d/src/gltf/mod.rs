@@ -653,6 +653,9 @@ pub struct Model {
     pub objects: Vec<Object>,
     pub geometries: Vec<Geometry>,
     pub materials: Vec<Material>,
+    /// Original glTF material index for each final/derived material. A default
+    /// material has no source. Variants retain identity across geometry flags.
+    pub material_sources: Vec<Option<usize>>,
     pub textures: Vec<Texture>,
     pub images: Vec<Image>,
     pub lights: Vec<Light>,

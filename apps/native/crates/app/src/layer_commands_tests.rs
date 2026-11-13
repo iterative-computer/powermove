@@ -497,3 +497,36 @@ fn project_commands_wait_for_an_arriving_project_and_others_do_not() {
         assert!(!waits_for_project(name), "{name}");
     }
 }
+
+/// Arrow keys move a 3D layer in scene units, up is up: 0.1 a press, 1 with ⇧.
+#[test]
+fn a_nudge_moves_a_3d_layer_in_scene_units() {
+    let model = r##"{"id":"m","type":"extension","name":"Cube","from":0,"dur":3,"on":true,
+        "lock":false,"parent":null,"group":null,"blend":"normal","mblur":false,"masks":[],
+        "p":{"position.x":{"v":0.3,"kf":[]},"position.y":{"v":0,"kf":[]},"position.z":{"v":0,"kf":[]}},
+        "d":{"definition":"powermove.3d.object","data":{"object":{"source":{"primitive":"box"}}}},
+        "fx":[]}"##;
+    let (_actor, kernel) = open(&[model.to_string()]);
+    let value = |kernel: &KernelHandle, channel: &str| {
+        let p = kernel.published("synthetic").unwrap();
+        let root = p.snapshot.root().unwrap();
+        let loc = pm_kernel::model::find_layer(root, "m").unwrap();
+        let layer = pm_kernel::model::layer_at(root, &loc).unwrap().to_value();
+        layer
+            .get("p")
+            .and_then(|p| p.get(channel))
+            .and_then(|c| c.get("v"))
+            .and_then(Value::as_f64)
+    };
+    select(&kernel, &["m"]);
+    for step in [[1., 0.], [0., -10.]] {
+        let published = kernel.published("synthetic").unwrap();
+        let step = step.map(|v| serde_json::json!(v));
+        run(
+            &kernel,
+            command_plan("nudgeSelection", &step, &published, 0.).unwrap(),
+        );
+    }
+    assert_eq!(value(&kernel, "position.x"), Some(0.4));
+    assert_eq!(value(&kernel, "position.y"), Some(1.));
+}

@@ -131,7 +131,7 @@ fn captured_installed_stdio_pairs_replay_with_owner_3d_contract() {
                     catalog::legacy_catalog()["tools"]
                 );
                 let studio: Value =
-                    serde_json::from_str(include_str!("../fixtures/scene3d-source-catalog.json"))
+                    serde_json::from_str(include_str!("../fixtures/studio3d-native-catalog.json"))
                         .unwrap();
                 let mut tools = main["tools"].as_array().unwrap().clone();
                 for replacement in studio["tools"].as_array().unwrap() {

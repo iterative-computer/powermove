@@ -35,6 +35,8 @@ pub enum Component {
     ViewerOverlay,
     Banner,
     PushButton,
+    /// A native NSSlider for a bounded value (linear or logarithmic).
+    Slider,
 }
 impl Component {
     /// Original kit catalog, retained for consumers that enumerate its frozen recipes.
@@ -71,6 +73,7 @@ impl Component {
         Self::ViewerOverlay,
         Self::Banner,
         Self::PushButton,
+        Self::Slider,
     ];
     pub fn catalog() -> impl Iterator<Item = Self> {
         Self::ALL.iter().chain(Self::ADDITIONS).copied()
@@ -96,6 +99,7 @@ impl Component {
                 | Self::SecureField
                 | Self::ViewerGizmo
                 | Self::PushButton
+                | Self::Slider
         )
     }
     pub fn surface(self) -> Surface {
@@ -139,6 +143,7 @@ pub enum Widget {
     ViewerOverlay,
     Banner,
     PushButton,
+    Slider,
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct Recipe {
@@ -222,6 +227,7 @@ impl Recipe {
             ViewerOverlay => Widget::ViewerOverlay,
             Banner => Widget::Banner,
             PushButton => Widget::PushButton,
+            Slider => Widget::Slider,
         };
         let floating = matches!(
             kind,
@@ -263,7 +269,7 @@ impl Recipe {
                 }
                 // Standalone pop-ups are `control` tall; inside an InspectorRow
                 // `Panel::prepare` narrows them to `field` (language §9 rows).
-                PopUpButton | PushButton => Some(t.metrics.control),
+                PopUpButton | PushButton | Slider => Some(t.metrics.control),
                 InspectorRow | ListItem | TreeItem | ProgressRow => Some(t.metrics.row),
                 _ => None,
             },

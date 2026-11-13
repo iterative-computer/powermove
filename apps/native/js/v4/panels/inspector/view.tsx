@@ -17,6 +17,7 @@ import type { SurfaceProps } from "../../src/jsx-runtime";
 import type { SurfaceEvent } from "../../src/protocol";
 import type {
   Alignment,
+  Finish,
   Binding,
   MenuItem,
   Row,
@@ -77,12 +78,14 @@ const sectionActions: Record<SectionAction, string> = {
   animator: "Add Text Animator",
   "release-precomp": "Release Pre-comp",
   "refresh-fonts": "Refresh Fonts",
+  "set-up-studio": "Set Up Studio",
   "time-remap": "Time Remap",
   "freeze-frame": "Freeze Frame",
   reverse: "Reverse",
 };
 const sectionSymbols: Partial<Record<SectionAction, string>> = {
   "refresh-fonts": "arrow.clockwise",
+  "set-up-studio": "light.max",
   // Time's three share the heading row: short words, no glyph, so they fit
   // beside "Time" in a narrow panel (their labels keep the full names).
   "time-remap": "",
@@ -633,6 +636,130 @@ function Property({
     </div>
   );
 }
+/** 3d-studio.md §8 Finish shelf: `m.row` squares, `m.gap` apart, with a
+ * hairline edge. Swatches are content, so they are the one coloured thing
+ * here. No selected state: a finish is a starting point. One click, one Undo. */
+function FinishShelf({
+  finishes,
+  disabled,
+  session,
+}: {
+  finishes: Finish[];
+  disabled: boolean;
+  session: InspectorSession;
+}) {
+  // The kit has no wrapping row: split into balanced rows that fit the
+  // narrowest docked inspector (six tiles of m.row plus gaps).
+  const perRow = Math.ceil(finishes.length / Math.ceil(finishes.length / 6));
+  const rows: (typeof finishes)[] = [];
+  for (let i = 0; i < finishes.length; i += perRow)
+    rows.push(finishes.slice(i, i + perRow));
+  return (
+    <div
+      id="finish-shelf"
+      role="group"
+      label="Finish"
+      style={{
+        ...column,
+        gap: token("metrics.gap"),
+        paddingLeft: token("metrics.inset"),
+        paddingRight: token("metrics.inset"),
+        paddingTop: token("metrics.inner_radius"),
+        paddingBottom: token("metrics.gap"),
+      }}
+    >
+      {rows.map((row, index) => (
+        <div
+          key={`finish-row-${index}`}
+          role="presentation"
+          style={{ ...horizontal, gap: token("metrics.gap") }}
+        >
+          {row.map((finish) => (
+            <div
+              key={finish.id}
+              role="presentation"
+              style={{
+                position: "relative",
+                width: token("metrics.row"),
+                height: token("metrics.row"),
+                minWidth: token("metrics.row"),
+              }}
+            >
+              {/* Rim, lit body up-left, highlight, and a coat's glint. */}
+              <div
+                role="presentation"
+                style={{
+                  position: "absolute",
+                  inset: "fill",
+                  borderRadius: token("metrics.row"),
+                  background: finish.rim,
+                  borderWidth: token("metrics.border"),
+                  borderColor: token("colors.separator"),
+                }}
+              />
+              <div
+                role="presentation"
+                style={{
+                  position: "absolute",
+                  left: "8%",
+                  top: "6%",
+                  width: finish.size,
+                  height: finish.size,
+                  borderRadius: token("metrics.row"),
+                  background: finish.body,
+                }}
+              />
+              <div
+                role="presentation"
+                style={{
+                  position: "absolute",
+                  left: "20%",
+                  top: "18%",
+                  width: finish.spot,
+                  height: finish.spot,
+                  borderRadius: token("metrics.row"),
+                  background: finish.highlight,
+                }}
+              />
+              {finish.glint ? (
+                <div
+                  role="presentation"
+                  style={{
+                    position: "absolute",
+                    left: "26%",
+                    top: "24%",
+                    width: finish.glintSize,
+                    height: finish.glintSize,
+                    borderRadius: token("metrics.row"),
+                    background: finish.glint,
+                  }}
+                />
+              ) : null}
+              <Action
+                id={`finish:${finish.id}`}
+                label={finish.label}
+                tooltip={finish.label}
+                disabled={disabled}
+                style={{
+                  position: "absolute",
+                  inset: "fill",
+                  borderRadius: token("metrics.row"),
+                }}
+                onActivate={() =>
+                  session.send({
+                    type: "set-value",
+                    row: "3d.finish",
+                    value: finish.id,
+                  })
+                }
+              />
+            </div>
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+}
 export function InspectorPanel({
   session,
 }: {
@@ -713,7 +840,7 @@ export function InspectorPanel({
               label={
                 target.count > 1
                   ? `${target.count} layers selected`
-                  : `${target.first.name}, ${target.first.typeLabel.toLowerCase()} layer`
+                  : `${target.first.name}, ${target.first.typeLabel.toLowerCase().replace(/\b3d\b/g, "3D")} layer`
               }
               style={{
                 ...horizontal,
@@ -761,7 +888,42 @@ export function InspectorPanel({
                 />
               ) : null}
             </div>
-            <AlignmentStrip key={target.key} session={session} />
+            {target.count === 1 && target.first.error ? (
+              <div
+                role="status"
+                label={target.first.error}
+                style={{
+                  ...horizontal,
+                  alignItems: "start",
+                  gap: token("metrics.gap"),
+                  paddingLeft: token("metrics.inset"),
+                  paddingRight: token("metrics.inset"),
+                  paddingTop: token("metrics.inner_radius"),
+                  paddingBottom: token("metrics.inner_radius"),
+                }}
+              >
+                <text
+                  attr={{ symbol: "exclamationmark.triangle.fill" }}
+                  style={{
+                    color: token("colors.danger"),
+                    symbolSize: token("metrics.symbol_inline"),
+                    // Centred on the first line of the message, not its top.
+                    paddingTop: token("metrics.inner_radius"),
+                  }}
+                />
+                <text
+                  style={{
+                    color: token("colors.danger"),
+                    fontSize: token("typography.body"),
+                  }}
+                >
+                  {target.first.error}
+                </text>
+              </div>
+            ) : null}
+            {target.first.studio ? null : (
+              <AlignmentStrip key={target.key} session={session} />
+            )}
           </>
         ) : null}
         {snapshot.sections.map((section) => (
@@ -790,6 +952,13 @@ export function InspectorPanel({
               ) : undefined
             }
           >
+            {section.finishes ? (
+              <FinishShelf
+                finishes={section.finishes}
+                disabled={target.kind === "layers" && target.first.locked}
+                session={session}
+              />
+            ) : null}
             {section.animators?.map((animator) => (
               <InspectorRow
                 key={animator.id}
@@ -828,9 +997,24 @@ export function InspectorPanel({
                 <Property key={row.id} row={row} session={session} />
               )),
             ])}
-            {section.rows.map((row) => (
-              <Property key={row.id} row={row} session={session} />
-            ))}
+            {section.rows
+              .filter((row) => !row.hidden)
+              .map((row) => (
+                <Property key={row.id} row={row} session={session} />
+              ))}
+            {section.note ? (
+              <text
+                style={{
+                  color: token("colors.muted"),
+                  fontSize: token("typography.minimum"),
+                  paddingLeft: token("metrics.inset"),
+                  paddingRight: token("metrics.inset"),
+                  paddingBottom: token("metrics.inner_radius"),
+                }}
+              >
+                {section.note}
+              </text>
+            ) : null}
           </DisclosureGroup>
         ))}
         {target.kind === "composition" ? (

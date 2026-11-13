@@ -349,6 +349,8 @@ pub fn error_alert(code: ServiceErrorCode, name: &str) -> Alert<bool> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Failure {
     Service(ServiceErrorCode),
+    /// Preserve the kernel's diagnostic locally while retaining typed copy.
+    Kernel { code: ServiceErrorCode, detail: String },
     /// Inspectable technical reason, never used as product copy.
     Unsupported(&'static str),
     Stale,
