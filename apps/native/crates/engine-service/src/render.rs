@@ -226,15 +226,15 @@ impl std::error::Error for FontsPending {}
 #[derive(Debug)]
 pub(crate) struct DefinitionsPending(String);
 impl DefinitionsPending {
-    /// Names who is loading: the extensions whose id prefixes the waiting
-    /// effects' ids (an effect is registered as `<extension>.<name>`), or
+    /// Names who is loading: the extensions whose id is the waiting effects'
+    /// id or prefixes it (`<extension>` or `<extension>.<name>`), or
     /// every extension still loading when one isn't so named.
     pub(crate) fn new(effects: &[&str], loading: &[(String, String)]) -> Self {
         let owner = |effect: &str| {
             loading.iter().find(|(id, _)| {
                 effect
                     .strip_prefix(id.as_str())
-                    .is_some_and(|rest| rest.starts_with('.'))
+                    .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
             })
         };
         let mut names: Vec<&str> = vec![];
@@ -2910,6 +2910,11 @@ mod definitions_pending_tests {
         assert_eq!(
             line(&["deep-glow.effect", "blur-kit.radial"], &both),
             "Deep Glow and Blur Kit are loading (deep-glow.effect, blur-kit.radial)"
+        );
+        // An effect registered under its extension's own id.
+        assert_eq!(
+            line(&["blur-kit"], &both),
+            "Blur Kit is loading (blur-kit)"
         );
         // An id that names no loading extension: everyone still loading.
         assert_eq!(
