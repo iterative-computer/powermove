@@ -2637,3 +2637,38 @@ The combined native build passes (4 min 57 s, including pruned dependencies),
 and a real saved product project returns all four preset estimates without
 layer warnings. Estimate accuracy remains under measurement; a broad bound
 must not be reported as an accurate point estimate.
+
+### Matched CPU full-size and explicit 75% export, November 13
+
+The same native development executable and unchanged saved product project
+were exported for 30 frames through the real exporter. Diagnostic sample-count
+and per-step readbacks were disabled. The selected CPU device remained type 1
+even with `OIDN_DEFAULT_DEVICE=metal` in the environment.
+
+| Production render size → delivery size | Total | Seconds/frame | Trace/frame | OIDN/frame |
+| --- | ---: | ---: | ---: | ---: |
+| 1920×1080 → 1920×1080 | 89.871 s | 2.996 s | 1980.0 ms | 782.6 ms |
+| Explicit 1440×810 → 1920×1080 | 53.817 s | 1.794 s | 1130.4 ms | 480.0 ms |
+
+All 30 transport frames had the requested render dimensions; delivery remained
+1920×1080. Full size is still the default. The warm full-size result is a thin
+pass, while the earlier cold result was 3.214 s/frame. Trace and denoise times
+are essentially unchanged between those full-size runs; the difference is
+startup/cache overhead, not a claimed renderer speed improvement. The smaller
+render is an explicit option and does not count toward the full-size gate.
+
+The existing estimator returned a Production range of 2.420–9.272 s/frame.
+Its 5.846 s midpoint is 95.2% above the matched actual time and is not an
+accepted accurate point estimate. In particular, scaling the 320×180 OIDN
+measurement by area projected 1.635 s of denoising versus 0.783 s measured.
+The approved correction is a two-size affine denoise model, actual adaptive
+trace calibration at first/middle/last frames, and explicit fixed per-frame
+costs. The UI contract remains `frameMs`/`totalMs` with `min`/`max`; the planned
+band is 0.85–1.20 times the point estimate. Accuracy is judged by actual time
+falling within −20%/+30% of that point, with any miss recorded honestly.
+Calibration changes are still under validation at this checkpoint.
+
+The designer's round-6 branch is merged for the next combined native build.
+Its additional real-content findings remain tracked: headless Auto Studio
+requires loaded model geometry, and a requested highlight can reflect toward
+a point below the floor. Neither is counted as fixed by the visual fixes above.
