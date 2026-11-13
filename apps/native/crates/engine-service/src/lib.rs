@@ -1172,19 +1172,14 @@ impl EngineService {
         let thread = std::thread::Builder::new()
             .name("pm-engine-service".into())
             .spawn(move || {
-                // PM_FIX_RENDER_QOS=1: the viewer's render thread runs at the
-                // UI's class, as the frames it draws are interactive; at the
-                // default class the app's scheduler can place it on slower
-                // cores (same work cost ~1.6x more CPU time in the app).
-                if pm_media::decode::diag::knob("PM_FIX_RENDER_QOS") == Some(1) {
-                    // SAFETY: affects only the calling thread.
-                    unsafe {
-                        libc::pthread_set_qos_class_self_np(
-                            libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE,
-                            0,
-                        );
-                    }
-                }
+                // The frames this thread draws are what the person is looking
+                // at: it runs at the UI's class. At the default class a busy
+                // machine left it waiting for a core half the time (a heavy
+                // range played at 4 fps instead of 9), and the scheduler can
+                // place it on slower cores. Set on the thread itself, through
+                // pthread: `NSThread.qualityOfService` set after a thread
+                // has started does not change its class.
+                qos::set_interactive_qos();
                 supervise(engine, worker, wakes)
             })?;
         Ok(Self {
@@ -1726,12 +1721,6 @@ impl Drop for LoopPool {
 }
 
 fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc::Receiver<()>) {
-    // Same interactive class as pm-node/present; export remains separately
-    // governed. A default-class worker can miss display deadlines under load.
-    objc2::rc::autoreleasepool(|_| {
-        objc2_foundation::NSThread::currentThread()
-            .setQualityOfService(objc2_foundation::NSQualityOfService::UserInteractive);
-    });
     if std::mem::take(&mut engine.builtins_pending)
         && let Err(error) = engine.load_builtin_definitions()
     {
