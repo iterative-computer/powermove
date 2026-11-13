@@ -156,6 +156,7 @@ pub struct StoreExtension {
     router: RemoteDomPanel,
 }
 impl StoreExtension {
+    #[allow(clippy::too_many_arguments)]
     pub fn start(
         kernel: Arc<dyn StoreAuthority>,
         project: &str,
@@ -164,6 +165,7 @@ impl StoreExtension {
         graph: &ModuleGraph,
         owner: Writer,
         views: Arc<dyn StoreViews>,
+        vars: Value,
     ) -> Result<Self> {
         let marker = found.store.as_ref().unwrap_or(&Value::Null);
         adopt(&*kernel, namespace, found, graph, marker)?;
@@ -194,7 +196,7 @@ impl StoreExtension {
             .as_ref()
             .map_err(|_| Error::Invalid("Store manifest"))?;
         let init = json!({"id":found.id,"apiVersion":manifest["apiVersion"],"manifest":manifest,
-            "vars":{},"theme":{"scheme":"light","tokens":{}},"bundleUrl":found.id,
+            "vars":vars,"theme":{"scheme":"light","tokens":{}},"bundleUrl":found.id,
             "state":{"time":0,"playing":false,"revision":0,"generation":1,
                 "selection":{"layers":[],"keys":[],"chan":null}}});
         let runner = StoreCompatRunner::new(&helper(), host, crate::STORE_BUNDLE, &init)?;

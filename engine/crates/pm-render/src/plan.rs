@@ -625,7 +625,7 @@ pub(crate) fn comp_pass<'d>(
         background(scope.comp)
     };
     let view = b.level_view(scope, width, height, scale);
-    // The effect pixel contract: an effect or transition without an owner
+    // The built-in pixel contract: an effect or transition without an owner
     // binding reads its pixel sizes (`u_texel`, `u_res`, `v_px`,
     // `texelFetch`) on the grid it is drawn on. At another density than the
     // composition's (a resized export, a viewer zoom or playback scale) a
@@ -633,7 +633,8 @@ pub(crate) fn comp_pass<'d>(
     // final output; in a viewer frame, one whose shader addresses physical
     // texels) is drawn whole at the composition's size and density, then
     // resampled to its output, so an export's look never depends on its size.
-    // A window onto the composition (an origin) keeps its own density.
+    // Electron extension effects use the output raster directly and do not
+    // request this replay. A window onto the composition keeps its density.
     if view.is_none()
         && ((scale.0 - 1.0).abs() > 1e-9 || (scale.1 - 1.0).abs() > 1e-9)
         && let Some(host) = b.effects
@@ -1691,7 +1692,12 @@ fn native_content_quad<'d>(
             let bh = js::or_number(js::get(&d, "h"), hf);
             let fit = js::string(js::get(&d, "fit"));
             let uv = fit_uv(&fit, sw, sh, bw, bh);
-            let interpret = crate::footage::interpretation(record);
+            let mut interpret = crate::footage::interpretation(record);
+            // Drawn from a proxy or optimized copy: the interpretation as
+            // the copy carries it.
+            if let Some(original) = b.assets.original(&asset_id).filter(|o| *o != path) {
+                interpret = interpret.and_then(|i| crate::footage::for_copy(i, &original));
+            }
             let source = if ty == "video" {
                 // Inside motion-blur samples video keeps the center time's
                 // frame (`crate::motion`).

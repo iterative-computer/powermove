@@ -853,6 +853,41 @@ impl SurfaceView {
             self.send(id, event, detail, cx);
         }
     }
+    /// Development builds: the panel's longest scroller swept end to end for
+    /// `seconds`, a step a frame, as a fast scroll moves it (so the cost of
+    /// frames that move hosted controls can be measured without a pointer).
+    #[cfg(debug_assertions)]
+    pub fn review_scroll(&mut self, seconds: f32, cx: &mut Context<Self>) {
+        let Some(scroll) = self
+            .scrolls
+            .values()
+            .max_by(|a, b| f32::from(a.max_offset().y).total_cmp(&f32::from(b.max_offset().y)))
+            .cloned()
+        else {
+            return;
+        };
+        let timer = cx.background_executor().clone();
+        cx.spawn(async move |this, cx| {
+            let started = std::time::Instant::now();
+            loop {
+                let t = started.elapsed().as_secs_f32();
+                // A sweep down and back up every 0.8 s.
+                let along = 1. - ((t / 0.4) % 2. - 1.).abs();
+                let done = t >= seconds;
+                let y = if done {
+                    0.
+                } else {
+                    along * f32::from(scroll.max_offset().y)
+                };
+                scroll.set_offset(point(px(0.), px(-y)));
+                if this.update(cx, |_, cx| cx.notify()).is_err() || done {
+                    break;
+                }
+                timer.timer(std::time::Duration::from_micros(8_333)).await;
+            }
+        })
+        .detach();
+    }
     #[cfg(test)]
     pub fn click_semantic(&mut self, semantic: &str, cx: &mut Context<Self>) {
         let id = self.prepared.semantics[semantic];

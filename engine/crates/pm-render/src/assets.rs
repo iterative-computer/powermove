@@ -17,6 +17,13 @@ pub trait AssetResolver: Send + Sync {
     fn resolving(&self, _asset: &str) -> bool {
         false
     }
+    /// The original file of `asset` when [`Self::path`] gives a converted
+    /// copy of it (a proxy or optimized media): Interpret Footage describes
+    /// the original, and is carried to the copy by what the copy's maker did
+    /// (`crate::footage::for_copy`).
+    fn original(&self, _asset: &str) -> Option<PathBuf> {
+        None
+    }
 }
 
 /// Reads the record's `sourcePath` (linked media).
@@ -37,10 +44,15 @@ impl AssetResolver for SourcePaths {
 #[derive(Default)]
 pub struct MapResolver {
     pub paths: std::collections::BTreeMap<String, PathBuf>,
+    /// The original of an asset whose path is a converted copy.
+    pub originals: std::collections::BTreeMap<String, PathBuf>,
 }
 
 impl AssetResolver for MapResolver {
     fn path(&self, asset: &str, _record: Option<&Node>) -> Option<PathBuf> {
         self.paths.get(asset).cloned()
+    }
+    fn original(&self, asset: &str) -> Option<PathBuf> {
+        self.originals.get(asset).cloned()
     }
 }

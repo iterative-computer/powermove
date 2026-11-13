@@ -64,6 +64,9 @@ pub enum Feature {
     /// An effect or transition whose definition the renderer was not given
     /// and that is not marked missing (contract 10: `pm-cli` fails on it).
     Definition(String),
+    /// A file an effect reads (a LUT, an image) that is missing or cannot
+    /// be read: the sentence a person sees.
+    EffectAsset(String),
     /// A program WebGL draws but the native pipeline cannot translate (a
     /// shader layer's code or a definition): it needs the decision 19
     /// fallback runner (`crate::shader_layers::fallback`), so it is not
@@ -110,6 +113,7 @@ impl fmt::Display for Feature {
             Feature::Media(m) => write!(f, "media: {m}"),
             Feature::Request(r) => write!(f, "request: {r}"),
             Feature::Definition(d) => write!(f, "no definition for {d}"),
+            Feature::EffectAsset(sentence) => f.write_str(sentence),
             Feature::ShaderFallback(d) => write!(f, "{d} needs the GLSL fallback runner"),
             Feature::Text(t) => write!(f, "text: {t}"),
         }

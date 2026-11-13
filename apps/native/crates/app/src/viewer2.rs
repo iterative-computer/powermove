@@ -159,6 +159,8 @@ pub enum Action {
     ApplyLut,
     /// An index of [`crate::colour::CAMERA_LOGS`], or the file's own reading.
     Interpret(Option<usize>),
+    /// The Interpret Footage sheet: every member of the clip's colour reading.
+    InterpretFootage,
     CleanAperture,
     RenderSelection,
     KeepRendered,
@@ -174,7 +176,7 @@ const MEDIA_MODES: [(MediaMode, &str); 4] = [
     (MediaMode::ProxyOnly, "Proxy Only"),
 ];
 impl Action {
-    const ALL: [Action; 26] = [
+    const ALL: [Action; 27] = [
         Action::Output(OutputMode::Sdr),
         Action::Output(OutputMode::Pq),
         Action::Output(OutputMode::Hlg),
@@ -201,6 +203,7 @@ impl Action {
         Action::DeleteRendered,
         Action::Skimming,
         Action::AudioSkimming,
+        Action::InterpretFootage,
     ];
     fn tag(self) -> isize {
         Self::ALL.iter().position(|a| *a == self).unwrap() as isize
@@ -367,6 +370,13 @@ pub fn install(entity: &gpui::Entity<Controller>, cx: &mut App) {
             skim_delegate = Some(display_only);
             view.addItem(&NSMenuItem::separatorItem(mtm));
             view.addItem(&menu_item(mtm, "Apply LUT…", Action::ApplyLut, &target, ""));
+            view.addItem(&menu_item(
+                mtm,
+                "Interpret Footage…",
+                Action::InterpretFootage,
+                &target,
+                "",
+            ));
             let interpret = NSMenu::initWithTitle(
                 NSMenu::alloc(mtm),
                 &NSString::from_str("Interpret Selection As"),
@@ -485,6 +495,7 @@ pub fn update_checks(output: OutputMode, media: MediaMode, safe: bool, guides: b
                     Action::Popout => popout,
                     Action::ApplyLut
                     | Action::Interpret(_)
+                    | Action::InterpretFootage
                     | Action::CleanAperture
                     | Action::RenderSelection
                     | Action::KeepRendered
@@ -784,6 +795,21 @@ pub fn review_action(title: &str) -> Option<Action> {
     }
 }
 
+/// The viewer action a palette or keyboard command names.
+pub fn command_action(command: &str) -> Option<Action> {
+    Some(match command {
+        "viewer.safeAreas" => Action::SafeAreas,
+        "viewer.guides" => Action::Guides,
+        "viewer.popout" => Action::Popout,
+        "viewer.toggleProxies" => Action::ToggleProxies,
+        "viewer.renderSelection" => Action::RenderSelection,
+        "viewer.keepRendered" => Action::KeepRendered,
+        "viewer.deleteRendered" => Action::DeleteRendered,
+        "viewer.applyLut" => Action::ApplyLut,
+        _ => return None,
+    })
+}
+
 impl Controller {
     pub fn viewer_action(&mut self, action: Action, cx: &mut Context<Self>) {
         match action {
@@ -807,6 +833,7 @@ impl Controller {
                 let log = log.map(|index| crate::colour::CAMERA_LOGS[index]);
                 self.interpret_selection(log, cx);
             }
+            Action::InterpretFootage => self.interpret_footage_sheet(cx),
             Action::CleanAperture => self.crop_selection(cx),
             Action::RenderSelection => self.render_selection(cx),
             Action::KeepRendered => self.keep_rendered(cx),
@@ -941,7 +968,9 @@ impl Controller {
             audio: false,
         }) {
             Ok(viewer) => {
-                if let Err(e) = viewer.resources(self.extensions.resources.clone()) {
+                // The popout follows the window's extensions from here on,
+                // as the editor's viewer does.
+                if let Err(e) = self.resource_feed.attach(&viewer) {
                     self.message = e.to_string();
                 }
                 popout.bind(viewer, hz)

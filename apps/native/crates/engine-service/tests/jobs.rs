@@ -516,6 +516,21 @@ fn a_still_capture_bypasses_an_uninstalled_effect_and_a_delivery_names_it() {
     ));
     assert_eq!(off.state, JobState::Done, "{off:?}");
 }
+/// A delivery sent while extensions still load (the app waits, so only a
+/// stray one) never says the effect isn't installed.
+#[test]
+fn a_delivery_sent_while_extensions_load_never_calls_an_effect_not_installed() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut early = request_for(&with_uninstalled_effect(true), dir.path().join("early"), 1);
+    early.resources.pending = true;
+    let refused = finish(early);
+    assert_eq!(refused.state, JobState::Failed, "{refused:?}");
+    let message = refused.error.unwrap().message;
+    assert!(
+        message.contains("acme.glow is still loading") && !message.contains("installed"),
+        "{message}"
+    );
+}
 /// An agent's still is a look at the project, as the viewer shows it: an
 /// extension layer whose extension isn't installed draws today's
 /// missing-definition checkerboard, not a refusal of the whole frame. A

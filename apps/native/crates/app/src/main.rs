@@ -27,6 +27,7 @@ mod error_log;
 mod export_coordinator;
 mod expression_sheet;
 mod extension_authoring;
+mod extension_vars;
 mod extensions;
 mod figma_paste;
 mod file_coordination;
@@ -35,6 +36,7 @@ mod generated_panel;
 mod gizmo;
 #[cfg(all(test, target_os = "macos"))]
 mod gpui_memory_tests;
+mod interpret_sheet;
 mod keyframe_sheets;
 mod poster;
 
@@ -69,6 +71,7 @@ mod parity_tests;
 mod perf_gate;
 mod perf_panel;
 mod platform;
+mod play_range;
 mod playback;
 mod playhead;
 mod pro_media;
@@ -82,6 +85,7 @@ mod session;
 mod shader_panel;
 mod shape_tool;
 mod sheets;
+mod shuttle;
 mod skimming;
 mod smoke;
 mod store_window;
@@ -344,6 +348,7 @@ fn main() -> Result<()> {
                 entity.update(cx, |c, cx| {
                     c.apply_skimming(cx);
                     c.load_skimming(cx);
+                    c.load_playback(cx);
                 });
                 // Each window owns its project: MCP's slot for this window, and
                 // the window wakes only when MCP changes that slot.

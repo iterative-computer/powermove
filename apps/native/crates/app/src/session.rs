@@ -103,7 +103,15 @@ pub struct Controller {
     pub safe_areas: bool,
     pub guides: bool,
     pub skimming: crate::skimming::Skimming,
+    pub shuttle: crate::shuttle::Shuttle,
+    pub playback: crate::play_range::Playback,
     pub popout: Option<crate::viewer2::Popout>,
+    /// The Render Selection waiting to start, by count: asking again
+    /// replaces the one that waits.
+    pub(crate) render_wait: u64,
+    /// This window's extension resources as they change: every viewer of the
+    /// window (the editor's, the popout's) is attached and follows them.
+    pub resource_feed: pm_engine_service::resources::ResourceFeed,
     /// The editor viewer's last configured output (size, display, headroom).
     pub main_output: Rc<std::cell::Cell<Option<pm_engine_service::Output>>>,
     pub selected: Option<String>,
@@ -307,6 +315,29 @@ impl pm_shell::integration::Integration for Bridge {
     }
     fn command(&self, cmd: &ShellCommand, w: &mut Window, cx: &mut App) -> bool {
         self.0.update(cx, |v, cx| v.command(cmd, w, cx))
+    }
+    fn checked(&self, cx: &App) -> std::collections::BTreeSet<String> {
+        let v = self.0.read(cx);
+        let mut on = std::collections::BTreeSet::new();
+        if v.playback.looping {
+            on.insert("toggleLoop".to_owned());
+        }
+        if let Some(timeline) = &v.builtins.timeline {
+            if timeline.read(cx).hides_shy() {
+                on.insert("timeline.toggleShy".to_owned());
+            }
+            let (tracks, snapping) = timeline.read(cx).toggles();
+            if tracks {
+                on.insert("timeline.toggleMode".to_owned());
+            }
+            if snapping {
+                on.insert("timeline.toggleSnapping".to_owned());
+            }
+            if timeline.read(cx).graph_merged() {
+                on.insert("graph.merge".to_owned());
+            }
+        }
+        on
     }
     fn disabled(&self, cx: &App) -> std::collections::BTreeSet<String> {
         let v = self.0.read(cx);
@@ -574,24 +605,6 @@ impl Controller {
             }
         })
         .detach();
-        for (chord, command) in [
-            ("j", "shuttleJ"),
-            ("k", "shuttleK"),
-            ("l", "shuttleL"),
-            ("ctrl+j", "shuttleReverse"),
-        ] {
-            host.borrow_mut()
-                .add_bindings([pm_shell::keyboard::Binding {
-                    id: format!("app.{command}"),
-                    chord: chord.into(),
-                    command: command.into(),
-                    args: vec![],
-                    priority: 200,
-                    in_fields: false,
-                    repeat: false,
-                    loose: false,
-                }]);
-        }
         let layer = host.borrow().viewer_layer();
         pm_engine_service::layers::configure_layer(
             objc2::MainThreadMarker::new().unwrap(),
@@ -602,9 +615,14 @@ impl Controller {
         host.borrow().set_viewer_label("Composition viewer");
         let mut builtins = crate::builtins::Host::default();
         builtins.export_tasks = crate::export_coordinator::tasks();
+        // A viewer made before the window's extensions start draws their
+        // first state (still loading), not an empty settled one.
+        let extensions = crate::extensions::Extensions::default();
+        let resource_feed =
+            pm_engine_service::resources::ResourceFeed::new(extensions.resources.clone());
         Self {
             builtins,
-            extensions: Default::default(),
+            extensions,
             font_broker: None,
             composition_views: Default::default(),
             kernel,
@@ -651,7 +669,11 @@ impl Controller {
             safe_areas: false,
             guides: false,
             skimming: Default::default(),
+            shuttle: Default::default(),
+            playback: Default::default(),
             popout: None,
+            render_wait: 0,
+            resource_feed,
             main_output: Default::default(),
             selected: None,
             // The status bar holds facts, not instructions (review shell 2 #11).
@@ -1153,6 +1175,11 @@ impl Controller {
         if self.paste_figma(cx) {
             return true;
         }
+        // Then media copied elsewhere. Copying layers or keyframes here
+        // replaces it on the pasteboard, so the newest copy is what pastes.
+        if self.paste_media(cx) {
+            return true;
+        }
         let time = self.time();
         match self.clipboard.clone() {
             Clipboard::Empty => false,
@@ -1616,40 +1643,36 @@ impl Controller {
         })
         .detach();
     }
-    /// Files kept beside this project's file that nobody was told about: a
-    /// version that arrived during a save no window showed the end of (at
-    /// quit), or what a save that was cut short left. Said once, in a sheet
-    /// with a way to them, and in the Error Log.
-    /// The person has been shown the notice about the kept files `paths`
-    /// (and, with `restored`, that the last saved version was put back;
-    /// with `other`, the notices that are not about a kept file): the
-    /// kernel stops reporting them. Called only once the sheet was answered.
+    /// The person has been shown, and has answered, the notice about the
+    /// kept files `paths` (and, with `restored`, the ones about no file):
+    /// the kernel stops reporting exactly those. `session` is the one the
+    /// notice was about, captured before the sheet went up: never whatever
+    /// the window shows by the time the sheet is answered.
     fn kept_seen(
-        &mut self,
+        &self,
+        session: SessionHandle,
         paths: Vec<PathBuf>,
         restored: bool,
         other: bool,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(session) = self.session.clone() else {
-            return;
-        };
-        let seen = self.kernel.shell(ShellCall::KeptSeen {
+    ) -> pm_kernel::Pending<Result<ShellReply, KernelFailure>> {
+        self.kernel.shell(ShellCall::KeptSeen {
             session,
             paths,
             restored,
             other,
-        });
-        cx.spawn(async move |_, _| {
-            let _ = seen.await;
         })
-        .detach();
     }
+    /// Files kept beside this project's file that nobody was told about: a
+    /// version that arrived during a save no window showed the end of (at
+    /// quit), or what a save that was cut short left. Said in a sheet with
+    /// a way to them, and in the Error Log. Only a sheet the person
+    /// answered counts as seen, and only for the rows it told; what it had
+    /// no room for is told in the next one.
     fn tell_kept_beside(&mut self, cx: &mut Context<Self>) {
         let Some(session) = self.session.clone() else {
             return;
         };
-        let asked = self.kernel.shell(ShellCall::KeptBeside(session));
+        let asked = self.kernel.shell(ShellCall::KeptBeside(session.clone()));
         cx.spawn(async move |this, cx| {
             let Some(Ok(ShellReply::Kept(rows))) = asked.await else {
                 return;
@@ -1661,39 +1684,57 @@ impl Controller {
                     Some((text("why")?.to_owned(), text("path").map(PathBuf::from)))
                 })
                 .collect();
-            let Ok(Some((answer, reveal))) = this.update(cx, |v, _| {
+            let Ok(Some((answer, reveal, told))) = this.update(cx, |v, _| {
+                // The window shows another project by now: not its notice.
+                if v.session.as_ref() != Some(&session) {
+                    return None;
+                }
                 let file = v.path.as_deref().map(file_name).unwrap_or_default();
                 let named: Vec<_> = rows
                     .iter()
                     .map(|(why, path)| (why.clone(), path.as_deref().map(file_name)))
                     .collect();
                 let alert = crate::surfaces::documents::kept_beside(&file, &named)?;
+                let told: Vec<_> = crate::surfaces::documents::kept_beside_told(&named)
+                    .into_iter()
+                    .map(|at| rows[at].clone())
+                    .collect();
                 v.errors.borrow_mut().push(
                     "Project",
                     &format!("{} {}", alert.message, alert.informative),
                 );
-                let reveal = rows
+                // A file that went to the Trash is not where it was.
+                let reveal = told
                     .iter()
-                    .find_map(|(_, path)| path.clone())
+                    .find_map(|(why, path)| path.clone().filter(|_| why != "trashed"))
                     .or(v.path.clone());
-                Some((alert.sheet(&v.host.borrow().window), reveal))
+                Some((alert.sheet(&v.host.borrow().window), reveal, told))
             }) else {
                 return;
             };
-            let answered = answer.recv().await.ok().flatten();
-            // Shown and answered: only now is it not to be told again.
-            let _ = this.update(cx, |v, cx| {
+            // A sheet that went away unanswered (its window closed) was not
+            // seen: the next open tells it again.
+            let Some(answered) = answer.recv().await.ok().flatten() else {
+                return;
+            };
+            let Ok(seen) = this.update(cx, |v, _| {
                 v.kept_seen(
-                    rows.iter().filter_map(|(_, path)| path.clone()).collect(),
-                    rows.iter().any(|(why, _)| why == "restored"),
+                    session,
+                    told.iter().filter_map(|(_, path)| path.clone()).collect(),
+                    told.iter().any(|(_, path)| path.is_none()),
                     true,
-                    cx,
                 )
-            });
-            if answered == Some(crate::surfaces::documents::Action::ShowInFinder)
+            }) else {
+                return;
+            };
+            let _ = seen.await;
+            if answered == crate::surfaces::documents::Action::ShowInFinder
                 && let Some(path) = reveal
             {
                 platform::reveal(&path);
+            }
+            if told.len() < rows.len() {
+                let _ = this.update(cx, |v, cx| v.tell_kept_beside(cx));
             }
         })
         .detach();
@@ -1844,19 +1885,66 @@ impl Controller {
                     .and_then(pm_model::Value::as_str)
                     .map(str::to_owned)
             };
-            // Never a save that is going on right now; the newest work first.
-            let offered = ["saving", "previous"].iter().find_map(|role| {
-                rows.iter().find(|r| {
-                    text(r, "role").as_deref() == Some(role)
+            // Only a file read and found to be a whole version is offered
+            // as one, and never one of a save that is going on right now.
+            // Of those: the newest save's, and of one save the version it
+            // was writing before the one it replaced.
+            let at = |row: &pm_model::Value| {
+                row.get("at")
+                    .and_then(pm_model::Value::as_f64)
+                    .unwrap_or(0.0)
+            };
+            let offered = rows
+                .iter()
+                .filter(|r| {
+                    r.get("proven") == Some(&pm_model::Value::Bool(true))
                         && text(r, "why").as_deref() != Some("active")
                 })
-            });
+                .max_by(|a, b| {
+                    at(a).total_cmp(&at(b)).then_with(|| {
+                        let saving =
+                            |r: &pm_model::Value| text(r, "role").as_deref() == Some("saving");
+                        saving(a).cmp(&saving(b))
+                    })
+                });
             let Some(row) = offered else {
-                let _ = this.update(cx, |v, cx| v.report_open_error(&name, path, &error, cx));
+                // Files a save left that could not be identified are said
+                // to be there; none is offered as a version.
+                let unidentified = rows
+                    .iter()
+                    .filter(|r| text(r, "why").as_deref() != Some("active"))
+                    .count();
+                let _ = this.update(cx, |v, cx| {
+                    if unidentified == 0 {
+                        return v.report_open_error(&name, path, &error, cx);
+                    }
+                    let alert = crate::surfaces::documents::unidentified_leftovers(
+                        &name,
+                        &file_name(&file),
+                        unidentified,
+                    );
+                    v.errors.borrow_mut().push(
+                        "Project",
+                        &format!("{} {} ({error})", alert.message, alert.informative),
+                    );
+                    v.message = String::new();
+                    let answer = alert.sheet(&v.host.borrow().window);
+                    cx.spawn(async move |_, _| {
+                        if answer.recv().await.ok().flatten()
+                            == Some(crate::surfaces::documents::Action::ShowInFinder)
+                        {
+                            platform::reveal(&file);
+                        }
+                    })
+                    .detach();
+                });
                 return;
             };
             let leftover = PathBuf::from(text(row, "path").unwrap_or_default());
             let saving = text(row, "role").as_deref() == Some("saving");
+            // Another computer's save: it may still be going on there.
+            let computer =
+                text(row, "computer").filter(|_| text(row, "why").as_deref() == Some("elsewhere"));
             let at = row
                 .get("at")
                 .and_then(pm_model::Value::as_f64)
@@ -1875,6 +1963,7 @@ impl Controller {
                         saving,
                         at: &at,
                         bytes,
+                        computer: computer.as_deref(),
                     },
                 );
                 v.errors.borrow_mut().push(
@@ -1892,6 +1981,7 @@ impl Controller {
                         v.kernel.shell(ShellCall::UseLeftover {
                             path: file.clone(),
                             leftover: leftover.clone(),
+                            unproven: false,
                         })
                     }) else {
                         return;
@@ -2039,6 +2129,9 @@ impl Controller {
                 let _ = viewer.adapt_drags(true);
                 let _ = viewer.skim_audio(self.skimming.on && self.skimming.audio);
                 self.skimming.at = None;
+                if let Err(error) = self.resource_feed.attach(&viewer) {
+                    self.message = error.to_string();
+                }
                 self.viewer = Some(viewer)
             }
             Err(e) => {
@@ -2046,7 +2139,6 @@ impl Controller {
                 self.message = format!("Viewer failed: {e}")
             }
         }
-        self.apply_extension_resources();
     }
     /// MCP placed a project in this window (open_project, create_project): an
     /// empty window shows it; a window that shows a project keeps it and the
@@ -2179,7 +2271,16 @@ impl Controller {
                         }
                         v.write_poster(cx);
                     }
-                    other => v.save_failed(&crate::lifecycle::reason(other), cx),
+                    other => {
+                        // A Save As whose folder is gone by now (its disk
+                        // was disconnected) failed for that, whatever the
+                        // write that hit it reported.
+                        let gone = as_path
+                            .as_deref()
+                            .and_then(std::path::Path::parent)
+                            .is_some_and(|folder| !folder.exists());
+                        v.save_failed(&crate::lifecycle::reason(other), gone, cx)
+                    }
                 }
                 v.refresh(cx);
                 if let Some(intent) = close {
@@ -2202,13 +2303,42 @@ impl Controller {
             .unwrap_or("Untitled")
             .to_owned()
     }
-    /// The save went through, and a version that arrived meanwhile was kept
-    /// beside the file: a sheet that names it, a way to it, an Error Log row.
+    /// The save went through and kept a file beside the project. Why is in
+    /// the save's record: a version that arrived during this save gets the
+    /// sheet that says so; anything else (an earlier version found changed
+    /// when it was to go) is told as what it is.
     fn other_version_kept(&mut self, kept: PathBuf, cx: &mut Context<Self>) {
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        let name = self.project_name();
+        self.message = format!("“{name}” was saved. Another version of its file was kept.");
+        let asked = self.kernel.shell(ShellCall::KeptBeside(session.clone()));
+        cx.spawn(async move |this, cx| {
+            let arrived = match asked.await {
+                Some(Ok(ShellReply::Kept(rows))) => rows.iter().any(|row| {
+                    let text = |key: &str| row.get(key).and_then(pm_model::Value::as_str);
+                    text("why") == Some("arrived")
+                        && text("path").map(PathBuf::from) == Some(kept.clone())
+                }),
+                _ => false,
+            };
+            let _ = this.update(cx, |v, cx| {
+                if arrived {
+                    v.tell_arrived(kept, session, cx)
+                } else {
+                    v.tell_kept_beside(cx)
+                }
+            });
+        })
+        .detach();
+    }
+    /// A version that arrived while this save ran was kept beside the
+    /// file: a sheet that names it, a way to it, an Error Log row.
+    fn tell_arrived(&mut self, kept: PathBuf, session: SessionHandle, cx: &mut Context<Self>) {
         use crate::surfaces::documents::{Action, other_version_kept};
         let name = self.project_name();
         let file = self.path.as_deref().map(file_name).unwrap_or_default();
-        self.message = format!("“{name}” was saved. Another version of its file was kept.");
         self.errors.borrow_mut().push(
             "Save",
             &format!(
@@ -2219,12 +2349,17 @@ impl Controller {
         let answer =
             other_version_kept(&name, &file, &file_name(&kept)).sheet(&self.host.borrow().window);
         cx.spawn(async move |this, cx| {
-            let answered = answer.recv().await.ok().flatten();
-            // Shown and answered: the notice about this file was seen.
-            let _ = this.update(cx, |v, cx| {
-                v.kept_seen(vec![kept.clone()], false, false, cx)
-            });
-            if answered == Some(Action::ShowInFinder) {
+            // Shown and answered: only then was the notice about this file
+            // seen, by the session it was about.
+            let Some(answered) = answer.recv().await.ok().flatten() else {
+                return;
+            };
+            if let Ok(seen) = this.update(cx, |v, _| {
+                v.kept_seen(session, vec![kept.clone()], false, false)
+            }) {
+                let _ = seen.await;
+            }
+            if answered == Action::ShowInFinder {
                 platform::reveal(&kept);
             }
         })
@@ -2233,8 +2368,13 @@ impl Controller {
     /// A save that did not happen is a sheet in plain words (S5): Save As
     /// and Show in Finder are one press away, and the kernel's own account
     /// is an Error Log row, never copy.
-    fn save_failed(&mut self, detail: &str, cx: &mut Context<Self>) {
+    fn save_failed(&mut self, detail: &str, destination_gone: bool, cx: &mut Context<Self>) {
         use crate::surfaces::documents::{Action, WriteFailure, save_failed, saved_beside};
+        let failure = if destination_gone {
+            WriteFailure::Missing
+        } else {
+            WriteFailure::of(detail)
+        };
         let name = self.project_name();
         self.message = format!("“{name}” couldn’t be saved.");
         self.errors
@@ -2248,22 +2388,23 @@ impl Controller {
                 self.message = format!("“{name}” was saved next to its file.");
                 (saved_beside(&name, &file, &file_name(&kept)), Some(kept))
             }
-            None => (
-                save_failed(&name, WriteFailure::of(detail), path.is_some()),
-                path,
-            ),
+            None => (save_failed(&name, failure, path.is_some()), path),
         };
         let kept = pm_kernel::project_io::kept_beside(detail);
         let answer = alert.sheet(&self.host.borrow().window);
+        let session = self.session.clone();
         cx.spawn(async move |this, cx| {
             let answered = answer.recv().await.ok().flatten();
-            // The save's own kept file was shown. Whatever else that save
-            // kept (another version it found on the way) is told next.
-            if let Some(kept) = kept {
-                let _ = this.update(cx, |v, cx| {
-                    v.kept_seen(vec![kept], false, false, cx);
-                    v.tell_kept_beside(cx);
-                });
+            // The save's own kept file was shown and the sheet answered:
+            // seen. Whatever else that save kept (another version it found
+            // on the way) is told next.
+            if let (Some(kept), Some(session), Some(_)) = (kept, session, &answered) {
+                if let Ok(seen) =
+                    this.update(cx, |v, _| v.kept_seen(session, vec![kept], false, false))
+                {
+                    let _ = seen.await;
+                }
+                let _ = this.update(cx, |v, cx| v.tell_kept_beside(cx));
             }
             match answered {
                 Some(Action::SaveAs) => {
@@ -2438,6 +2579,27 @@ impl Controller {
                 let Some(timeline) = self.builtins.timeline.clone() else {
                     return false;
                 };
+                // A property's keyframe key with no layer selected has
+                // nothing to key: the chord goes on to its next meaning.
+                if cmd.name.starts_with("timeline.keyProperty:")
+                    && self
+                        .published
+                        .as_ref()
+                        .is_none_or(|p| p.selection.layers().is_empty())
+                {
+                    return false;
+                }
+                // Option-Command-H holds keyframes when some are selected;
+                // otherwise it is the system's Hide Others.
+                if cmd.name == "timeline.toggleHold"
+                    && cmd.token.is_some()
+                    && self
+                        .published
+                        .as_ref()
+                        .is_none_or(|p| p.selection.keys().is_empty())
+                {
+                    return false;
+                }
                 let time = self.time();
                 timeline.update(cx, |t, cx| t.command(&cmd.name, time, frames, shift, cx));
                 return true;
@@ -2451,6 +2613,23 @@ impl Controller {
                     return false;
                 };
                 return gizmos.update(cx, |g, cx| g.edit_selected_text(window, cx));
+            }
+            // The viewer's View-menu actions, for the palette and for keys.
+            "viewer.safeAreas"
+            | "viewer.guides"
+            | "viewer.popout"
+            | "viewer.toggleProxies"
+            | "viewer.renderSelection"
+            | "viewer.keepRendered"
+            | "viewer.deleteRendered"
+            | "viewer.applyLut" => {
+                let Some(action) = crate::viewer2::command_action(&cmd.name) else {
+                    return false;
+                };
+                if self.viewer.is_none() {
+                    return false;
+                }
+                self.viewer_action(action, cx);
             }
             "toggleSkimming" => self.toggle_skimming(cx),
             "toggleAudioSkimming" => self.toggle_audio_skimming(cx),
@@ -2466,6 +2645,7 @@ impl Controller {
                 }
             }
             "settings" | "agent" => self.show_builtin(&cmd.name, window, cx),
+            "bringWorkspace" => self.bring_workspace(window, cx),
             "quit" => cx.defer(crate::lifecycle::begin_quit),
             "closeWindow" | "closeTab" => self.request_close(crate::lifecycle::Intent::Window, cx),
             "cancel" | "deselect" if self.importing.is_some() => {
@@ -2676,15 +2856,99 @@ impl Controller {
                 self.view.place(None, [0., 0.]);
                 self.write_view(None, cx);
             }
+            // The whole composition in the viewer and its whole length in
+            // the timeline.
+            "fitView" => {
+                if self.published.is_none() {
+                    return false;
+                }
+                self.view.place(None, [0., 0.]);
+                self.write_view(None, cx);
+                // Each view saves the project's whole view state. The
+                // timeline fits once the viewer's save has landed, so its
+                // own save does not carry the old viewer zoom back.
+                if let Some(timeline) = self.builtins.timeline.clone() {
+                    let time = self.time();
+                    cx.spawn(async move |this, cx| {
+                        cx.background_executor()
+                            .timer(crate::gizmo::NAVIGATION_IDLE)
+                            .await;
+                        let _ = this.update(cx, |_, cx| {
+                            timeline.update(cx, |t, cx| {
+                                t.command("timeline.fit", time, None, false, cx)
+                            })
+                        });
+                    })
+                    .detach();
+                }
+            }
+            // Settings, at the open project's own page.
+            "projectSettings" => {
+                if self.published.is_none() {
+                    return false;
+                }
+                self.show_builtin("settings", window, cx);
+                if let Some(view) = self.builtins.views.get("settings") {
+                    view.update(cx, |v, cx| {
+                        v.scroll_semantic("settings.section.project", cx)
+                    });
+                }
+            }
             "actualSize" => {
                 self.view.place(Some(1.), self.view.pan);
                 self.write_view(None, cx);
             }
             "zoomIn" => self.step_zoom(1.25, cx),
             "zoomOut" => self.step_zoom(0.8, cx),
-            "play" | "prevFrame" | "nextFrame" | "stepFrames" | "gotoStart" | "gotoEnd"
-            | "shuttleJ" | "shuttleK" | "shuttleL" | "shuttleReverse" | "prevVisibleEvent"
-            | "nextVisibleEvent" => {
+            "shuttleBackward" | "shuttleStop" | "shuttleForward" | "shuttleRelease" => {
+                use crate::shuttle::Press;
+                use pm_engine_service::transport::ShuttleKey;
+                let Some(key) = crate::shuttle::key(&cmd.name, &cmd.args) else {
+                    return false;
+                };
+                if cmd.name == "shuttleRelease" {
+                    if let Some(command) = self.shuttle.release(key) {
+                        self.transport(command);
+                    }
+                    return true;
+                }
+                // A menu row or the palette starts from a stop; a key does
+                // when its binding says so, and otherwise leaves a stopped
+                // J, K or L to its other meaning.
+                let from_pause =
+                    cmd.token.is_none() || cmd.args.first().and_then(|a| a.as_bool()) == Some(true);
+                let handled = match self.shuttle.press(key) {
+                    Press::Speeds => {
+                        let stopped = !self.running();
+                        if stopped && from_pause && key != ShuttleKey::K {
+                            self.shape_run();
+                        }
+                        let acted = self
+                            .viewer
+                            .as_ref()
+                            .is_some_and(|v| v.shuttle(key, from_pause).unwrap_or(false));
+                        if key == ShuttleKey::K && acted {
+                            self.end_run();
+                        }
+                        acted || (from_pause && key == ShuttleKey::K)
+                    }
+                    Press::Send(command) => self.transport(command),
+                    Press::Held => true,
+                };
+                if handled
+                    && let Some(token) = cmd.token
+                    && self.host.borrow().on_release(
+                        token,
+                        "shuttleRelease",
+                        vec![cmd.name.clone().into()],
+                    )
+                {
+                    self.shuttle.hold(key);
+                }
+                return handled;
+            }
+            "toggleLoop" => self.toggle_loop(cx),
+            "play" | "prevFrame" | "nextFrame" | "stepFrames" | "gotoStart" | "gotoEnd" => {
                 // Final Cut: Space plays from the skimmer, only while the
                 // pointer is over the timeline now; otherwise from the playhead.
                 let over = self
@@ -2710,13 +2974,12 @@ impl Controller {
                 {
                     self.seek(at);
                 }
-                let Some(v) = &self.viewer else { return false };
+                if self.viewer.is_none() {
+                    return false;
+                }
                 let command = match cmd.name.as_str() {
                     "play" => {
-                        if v.status()
-                            .clock
-                            .is_some_and(|c| c.state != TransportState::Stopped)
-                        {
+                        if self.running() {
                             TransportCommand::Pause
                         } else {
                             TransportCommand::Play {
@@ -2737,39 +3000,21 @@ impl Controller {
                         self.seek((self.duration - 1. / self.rate.to_f64()).max(0.));
                         return true;
                     }
-                    "prevVisibleEvent" | "nextVisibleEvent" => {
-                        let time = self.time();
-                        let mut times: Vec<_> = self
-                            .layers()
-                            .iter()
-                            .flat_map(|l| [l.in_time, l.out_time])
-                            .collect();
-                        times.sort_by(f64::total_cmp);
-                        let t = if cmd.name == "prevVisibleEvent" {
-                            times.into_iter().rev().find(|t| *t < time - 0.00001)
-                        } else {
-                            times.into_iter().find(|t| *t > time + 0.00001)
-                        };
-                        if let Some(t) = t {
-                            self.seek(t);
-                        }
+                    _ => return false,
+                };
+                // A step never leaves the composition: past its first or
+                // last frame it lands on that frame.
+                if let TransportCommand::Step { frames } = command {
+                    let frame = 1. / self.rate.to_f64();
+                    let last = (self.duration - frame).max(0.);
+                    let target = self.time() + f64::from(frames) * frame;
+                    if target < -frame / 2. || target > last + frame / 2. {
+                        self.end_run();
+                        self.seek(target.clamp(0., last));
                         return true;
                     }
-                    name => {
-                        use pm_engine_service::transport::ShuttleKey::*;
-                        let key = if name == "shuttleK" {
-                            K
-                        } else if name == "shuttleL" {
-                            L
-                        } else {
-                            J
-                        };
-                        return v.shuttle(key, name == "shuttleReverse").unwrap_or(false);
-                    }
-                };
-                if let Err(e) = v.command(command) {
-                    self.message = e.to_string();
                 }
+                self.transport(command);
             }
             name => return self.surface_command(name, cx),
         }

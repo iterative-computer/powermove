@@ -425,6 +425,7 @@ fn probe_check(
                     | Feature::Transition
                     | Feature::ExtensionDefinition(_)
                     | Feature::Definition(_)
+                    | Feature::EffectAsset(_)
             )
         })
         .collect()

@@ -12,8 +12,13 @@ pub fn scopes(v: &mut Controller, id: &str, cx: &mut Context<Controller>) -> Opt
 /// the panels it fills say so instead of offering to open one.
 pub fn opening(v: &Controller, id: &str, bounds: Rect) -> Option<AnyElement> {
     let name = v.opening_name.as_ref()?;
+    // The viewer stays opening while the project waits for effects its
+    // extensions are still loading: it never shows them bypassed.
+    let waiting = id == "viewer" && v.extensions.settle_after.is_some();
     if !matches!(id, "assets" | "viewer" | "timeline")
-        || (v.session.is_some() && (v.settling.is_none() || v.builtins.ready.contains(id)))
+        || (v.session.is_some()
+            && (v.settling.is_none() || v.builtins.ready.contains(id))
+            && !waiting)
     {
         return None;
     }

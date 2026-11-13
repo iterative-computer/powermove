@@ -51,14 +51,15 @@ pub enum ShellCall {
     /// not seen a notice about yet: a version that arrived during a save,
     /// what a save that was cut short left, a retained version found
     /// changed. They are read from the saves' own records beside the file
-    /// (written before each file was kept, so a crash loses none), and only
-    /// from records that know the file now open. Replies `Kept`; nothing is
+    /// (written before each file was kept, so a crash loses none). A record
+    /// that does not know the file now open (it was changed since by
+    /// another program) is told as `earlier`. Replies `Kept`; nothing is
     /// forgotten until `KeptSeen`.
     KeptBeside(SessionHandle),
-    /// The person was shown the notices about the kept files `paths` (and,
-    /// with `restored`, that the last saved version was put back; with
-    /// `other`, the notices that are not about a kept file): they are not
-    /// reported again.
+    /// The person was shown, and answered, the notices about the kept
+    /// files `paths` (and, with `restored`, the ones about no file: that
+    /// the last saved version was put back). Exactly those are not reported
+    /// again; with `other`, the session's own rows about them go too.
     KeptSeen {
         session: SessionHandle,
         paths: Vec<PathBuf>,
@@ -77,6 +78,9 @@ pub enum ShellCall {
     UseLeftover {
         path: PathBuf,
         leftover: PathBuf,
+        /// The file is not one `Leftovers` listed as `proven`, and the
+        /// person, told so, chose it all the same.
+        unproven: bool,
     },
     Save(SessionHandle),
     SaveAs {
@@ -342,11 +346,172 @@ pub(crate) struct Session {
     pub rejected_history: Option<Value>,
     pub pending_save: Option<PendingSave>,
     /// A save whose file was installed but whose folder did not sync after
-    /// it ([`crate::ProjectIoError::Finalize`]): adopted by the next save in
-    /// place once the folder syncs, so that save expects the file that is
-    /// there.
-    pub unfinalized: Option<Box<crate::SaveReceipt>>,
+    /// it ([`crate::ProjectIoError::Finalize`]): adopted by the next save of
+    /// that file once the folder syncs, so that save expects the file that
+    /// is there.
+    pub unfinalized: Option<Unfinalized>,
 }
+/// A save that installed its file and could not sync the folder, whole:
+/// what it wrote, and for a Save As where to and the lock taken there. All
+/// of it is adopted together or none of it.
+pub struct Unfinalized {
+    receipt: Box<crate::SaveReceipt>,
+    path: Option<PathBuf>,
+    lock: Option<FileLock>,
+}
+/// What a save or a recovery needs from the kernel besides the files, owned,
+/// so a worker can run it.
+#[derive(Clone)]
+struct OwnedHost {
+    hooks: project_io::PublishHooks,
+    coordinator: Option<project_io::SharedWriteCoordinator>,
+    profile: Option<PathBuf>,
+}
+impl OwnedHost {
+    fn host(&self) -> project_io::Host<'_> {
+        project_io::Host {
+            hooks: &self.hooks,
+            coordinator: self.coordinator.as_ref(),
+            profile: self.profile.as_deref(),
+            backups: None,
+            backup: None,
+            unconfirmed: None,
+        }
+    }
+}
+
+/// The disk work of opening a project file, apart from the kernel: the
+/// lock, what a save that was cut short left (read whole, hashed, moved),
+/// and the file itself (read whole, hashed, parsed). A large project or a
+/// slow disk makes this long, so the actor hands it to a worker and goes on
+/// answering every other project; a direct caller runs it in place.
+pub struct OpenJob {
+    path: PathBuf,
+    /// The open names the library entry that stands for this file: it is
+    /// the file's only if the file is there or a save of it was cut short.
+    entry: bool,
+    electron_profile: Option<PathBuf>,
+    lock_root: PathBuf,
+    host: OwnedHost,
+}
+/// What an [`OpenJob`] found and did.
+pub struct OpenPrelude {
+    pub(crate) path: PathBuf,
+    /// `false`: the entry's file is gone and nothing of it waits beside
+    /// where it was. The open is the library entry's own.
+    file_route: bool,
+    decision: OpenDecision,
+    lock: Option<FileLock>,
+    settled: project_io::Settled,
+    opened: Option<Result<project_io::OpenedProject, crate::ProjectIoError>>,
+}
+impl OpenJob {
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+    /// **Blocking**: whole-file reads on the project's disk.
+    pub fn run(self) -> OpenPrelude {
+        let path = self.path;
+        let mut pre = OpenPrelude {
+            path: path.clone(),
+            file_route: true,
+            decision: OpenDecision::Writable,
+            lock: None,
+            settled: project_io::Settled::default(),
+            opened: None,
+        };
+        if self.entry && !(path.is_file() || project_io::pending(&path)) {
+            pre.file_route = false;
+            return pre;
+        }
+        pre.decision = locks::open_decision(&path, self.electron_profile.as_deref());
+        if pre.decision == OpenDecision::Writable {
+            match locks::lock_project(&self.lock_root, &path) {
+                Ok(lock) => {
+                    pre.lock = Some(lock);
+                    // Staging files a save cut short by Quit Now left.
+                    crate::project_io::remove_abandoned_temps(&path);
+                    // What a save that was cut short left is settled from
+                    // its record: the version it moved aside and never got
+                    // to replace is the file again.
+                    pre.settled = project_io::settle(&path, &self.host.host());
+                }
+                Err(e) => {
+                    pre.decision =
+                        OpenDecision::AsCopy(if e.kind() == std::io::ErrorKind::WouldBlock {
+                            CopyReason::Locked
+                        } else {
+                            CopyReason::UncertainLock
+                        })
+                }
+            }
+        }
+        // The file itself, where the open is certain to read it.
+        if pre.decision == OpenDecision::Writable
+            && pre.settled.unsynced.is_none()
+            && path.is_file()
+        {
+            pre.opened = Some(project_io::open_project(&path, OpenOptions::default()));
+        }
+        pre
+    }
+}
+
+/// What a save does before the kernel freezes what it writes, apart from
+/// the kernel: what the save works out about a long undo history
+/// ([`crate::DocumentStore::save_warmup`]), and for a save in place the
+/// disk work: the folder of a save that could not sync it is synced again,
+/// what an earlier save of the file left is settled, and a file that was
+/// renamed since is proven to be the same one (a whole-file read). The
+/// actor hands it to a worker; a direct caller runs each step in place.
+pub struct SaveJob {
+    project: String,
+    /// The file a save in place writes.
+    path: Option<PathBuf>,
+    version: Option<std::sync::Arc<project_io::FileVersion>>,
+    unsynced: Option<PathBuf>,
+    warm: Box<dyn FnOnce() + Send>,
+    host: OwnedHost,
+}
+/// What a [`SaveJob`] found and did.
+pub struct SavePrelude {
+    pub(crate) project: String,
+    path: Option<PathBuf>,
+    settled: project_io::Settled,
+    /// The folder of the save that could not sync it, and how it went now.
+    synced: Option<(PathBuf, Result<(), String>)>,
+}
+impl SaveJob {
+    pub fn project(&self) -> &str {
+        &self.project
+    }
+    /// **Blocking**: whole-file reads on the project's disk, and seconds
+    /// of work on a long undo history.
+    pub fn run(self) -> SavePrelude {
+        let synced = self.unsynced.map(|dir| {
+            let synced = project_io::folder_sync_now(&dir, &self.host.hooks);
+            (dir, synced.map_err(|e| e.to_string()))
+        });
+        let settled = match &self.path {
+            Some(path) => project_io::settle(path, &self.host.host()),
+            None => project_io::Settled::default(),
+        };
+        // Proven once per state of the file: the kernel's own look at it
+        // then finds the proof and reads nothing.
+        if let (Some(_), Some(version)) = (&self.path, &self.version) {
+            let _ = version.moved();
+        }
+        // Found once and kept where the save looks for it.
+        (self.warm)();
+        SavePrelude {
+            project: self.project,
+            path: self.path,
+            settled,
+            synced,
+        }
+    }
+}
+
 /// The session metadata member that lists files kept beside the project
 /// file which the person has not been told about.
 const KEPT_BESIDE: &str = "keptBeside";
@@ -385,6 +550,7 @@ fn leftover_row(left: &project_io::Leftover) -> Value {
         }),
     );
     m.insert("size", Value::from(left.size as f64));
+    m.insert("proven", Value::Bool(left.proven));
     if let Some(owner) = &left.owner {
         m.insert("computer", Value::from(owner.computer.as_str()));
         m.insert("user", Value::from(owner.user.as_str()));
@@ -474,6 +640,12 @@ fn saved_state(source: &OpenSource) -> Option<(crate::History, Value)> {
 
 impl Kernel {
     pub fn shell(&mut self, call: ShellCall) -> Result<ShellReply, KernelFailure> {
+        let reply = self.shell_call(call);
+        self.open_prelude = None;
+        self.tell_strays();
+        reply
+    }
+    fn shell_call(&mut self, call: ShellCall) -> Result<ShellReply, KernelFailure> {
         match call {
             ShellCall::AttachLibrary {
                 profile,
@@ -550,20 +722,11 @@ impl Kernel {
                         .project(&handle.project)
                         .and_then(|p| p.store().file().version.clone())
                         .map(|v| v.hash.clone());
-                    let (told, strangers) = project_io::kept_notices(&path, hash.as_deref());
                     rows.extend(
-                        told.iter()
+                        project_io::kept_notices(&path, hash.as_deref())
+                            .iter()
                             .map(|(why, kept)| kept_row(why, kept.as_deref())),
                     );
-                    // A notice about another project that was under this
-                    // name is not this project's: left, and logged.
-                    for record in strangers {
-                        self.log(format!(
-                            "A save's record beside {} tells of files kept for a project that                              is no longer under that name; it was left as it is: {}",
-                            path.display(),
-                            record.display()
-                        ));
-                    }
                 }
                 if let Some(Value::Array(more)) = self
                     .state
@@ -587,27 +750,45 @@ impl Kernel {
                 {
                     project_io::kept_seen(path, &paths, restored);
                 }
+                // The session's own rows: exactly the ones that were shown.
+                let shown = |row: &Value| match row.get("path").and_then(Value::as_str) {
+                    Some(path) => paths.iter().any(|p| p.as_os_str() == path),
+                    None => restored,
+                };
+                let rows = std::sync::Arc::make_mut(&mut self.state.ui)
+                    .get_mut(&session.project)
+                    .and_then(|ui| ui.session.as_object_mut());
                 if other
-                    && std::sync::Arc::make_mut(&mut self.state.ui)
-                        .get_mut(&session.project)
-                        .and_then(|ui| ui.session.as_object_mut()?.remove(KEPT_BESIDE))
-                        .is_some()
+                    && let Some(meta) = rows
+                    && let Some(Value::Array(mut kept)) = meta.remove(KEPT_BESIDE)
                 {
-                    self.save_session_meta(&session.project)?;
+                    let before = kept.len();
+                    kept.retain(|row| !shown(row));
+                    let changed = kept.len() != before;
+                    if !kept.is_empty() {
+                        meta.insert(KEPT_BESIDE, Value::Array(kept));
+                    }
+                    if changed {
+                        self.save_session_meta(&session.project)?;
+                    }
                 }
                 Ok(ShellReply::Kept(Vec::new()))
             }
             ShellCall::Leftovers(path) => Ok(ShellReply::Leftovers(
-                project_io::leftovers(&path, &self.host())
+                project_io::leftovers(&path)
                     .iter()
                     .map(leftover_row)
                     .collect(),
             )),
-            ShellCall::UseLeftover { path, leftover } => {
+            ShellCall::UseLeftover {
+                path,
+                leftover,
+                unproven,
+            } => {
                 // Under the project's lock: no save of it is in its steps.
                 let _lock = self.lock_project(&path).map_err(failure)?;
-                let left =
-                    project_io::use_leftover(&path, &leftover, &self.host()).map_err(failure)?;
+                let left = project_io::use_leftover(&path, &leftover, unproven, &self.host())
+                    .map_err(failure)?;
                 Ok(ShellReply::Kept(left.iter().map(left_row).collect()))
             }
             ShellCall::DecideRecovery { ticket, decision } => {
@@ -894,7 +1075,9 @@ impl Kernel {
             return self.ensure_idle(handle);
         }
         self.check_session(handle)?;
-        if self.project(&handle.project).unwrap().store().is_saving() {
+        if self.project(&handle.project).unwrap().store().is_saving()
+            || self.preparing.contains(&handle.project)
+        {
             return Err(failure("A save is in flight; close again when it finishes"));
         }
         Ok(())
@@ -903,7 +1086,10 @@ impl Kernel {
         self.check_session(handle)?;
         self.refuse_faulted(&handle.project)?;
         let p = self.project(&handle.project).unwrap();
-        if p.store().is_saving() || self.sessions[&handle.project].pending_save.is_some() {
+        if p.store().is_saving()
+            || self.sessions[&handle.project].pending_save.is_some()
+            || self.preparing.contains(&handle.project)
+        {
             return Err(failure(
                 "A save is in flight; finish it before saving or closing",
             ));
@@ -944,9 +1130,36 @@ impl Kernel {
         path: Option<PathBuf>,
         replace: bool,
     ) -> Result<SessionSave, KernelFailure> {
+        let prepared = self.prepare_save_of(session, path, replace);
+        self.save_prelude = None;
+        self.tell_strays();
+        prepared
+    }
+    fn prepare_save_of(
+        &mut self,
+        session: SessionHandle,
+        path: Option<PathBuf>,
+        replace: bool,
+    ) -> Result<SessionSave, KernelFailure> {
         self.ensure_idle(&session)?;
-        if path.is_none() {
+        // A save whose folder did not sync is adopted first, by a save in
+        // place and by a Save As to that same file again (which is then a
+        // save in place of the file the session has become).
+        let mut path = path;
+        let again = self.sessions[&session.project]
+            .unfinalized
+            .as_ref()
+            .is_some_and(|ticket| ticket.path.is_some() && ticket.path == path);
+        if path.is_none() || again {
             self.adopt_unfinalized(&session.project)?;
+            if again
+                && matches!(&self.sessions[&session.project].destination,
+                    Destination::File(now) if Some(now) == path.as_ref())
+            {
+                path = None;
+            }
+        }
+        if path.is_none() {
             self.follow_file(&session.project);
         }
         let mut lock = None;
@@ -1001,6 +1214,14 @@ impl Kernel {
         &mut self,
         completion: SessionSaveCompletion,
     ) -> Result<ShellReply, KernelFailure> {
+        let finished = self.finish_save_of(completion);
+        self.tell_strays();
+        finished
+    }
+    fn finish_save_of(
+        &mut self,
+        completion: SessionSaveCompletion,
+    ) -> Result<ShellReply, KernelFailure> {
         let SessionSaveCompletion {
             session,
             ticket,
@@ -1027,9 +1248,14 @@ impl Kernel {
                 message,
                 receipt: Some(mut receipt),
             }) => {
-                // Kept as a ticket, not as a save still running.
+                // Kept as a ticket, not as a save still running: with where
+                // a Save As went and the lock taken there.
                 receipt.ticket = std::sync::Arc::new(());
-                self.sessions.get_mut(&session.project).unwrap().unfinalized = Some(receipt);
+                self.sessions.get_mut(&session.project).unwrap().unfinalized = Some(Unfinalized {
+                    receipt,
+                    path: pending.path,
+                    lock: pending.lock,
+                });
                 return Err(failure(crate::ProjectIoError::Finalize {
                     message,
                     receipt: None,
@@ -1331,6 +1557,8 @@ impl Kernel {
         // A library entry that stands for an external file is that file. The
         // file route gives it the same journal base, lock and recovery as
         // opening the file itself, so recents never turns a recover into a copy.
+        // The disk work of a file open, when a worker did it already.
+        let mut prelude = self.open_prelude.take();
         let source = match source {
             SessionSource::Library { profile, project }
                 if project == id && self.owns_library(&profile) =>
@@ -1338,10 +1566,13 @@ impl Kernel {
                 // A file a save was cut short on is still that file: its last
                 // saved version waits beside its path, and the file route
                 // puts it back.
-                match self
-                    .file_entry(&project)
-                    .filter(|p| p.is_file() || project_io::pending(p))
-                {
+                let entry = self.file_entry(&project);
+                let file_route = match (&prelude, &entry) {
+                    (Some(pre), Some(path)) if pre.path == *path => pre.file_route,
+                    (_, Some(path)) => path.is_file() || project_io::pending(path),
+                    _ => false,
+                };
+                match entry.filter(|_| file_route) {
                     Some(path) => SessionSource::File(path),
                     None => SessionSource::Library { profile, project },
                 }
@@ -1522,37 +1753,34 @@ impl Kernel {
                         ));
                     }
                 }
-                decision = locks::open_decision(&path, electron_profile.as_deref());
-                let mut left_aside = project_io::Settled::default();
+                // The lock, what a cut-short save left, and the file: done
+                // by a worker already, or here.
+                let pre = match prelude
+                    .take()
+                    .filter(|pre| pre.path == path && pre.file_route)
+                {
+                    Some(pre) => *pre,
+                    None => OpenJob {
+                        path: path.clone(),
+                        entry: false,
+                        electron_profile: electron_profile.clone(),
+                        lock_root: self.lock_root(),
+                        host: self.owned_host(),
+                    }
+                    .run(),
+                };
+                decision = pre.decision;
+                lock = pre.lock;
+                let left_aside = pre.settled;
+                let mut pre_opened = pre.opened;
                 if decision == OpenDecision::Writable {
-                    match self.lock_project(&path) {
-                        Ok(l) => {
-                            lock = Some(l);
-                            // Staging files a save cut short by Quit Now left.
-                            crate::project_io::remove_abandoned_temps(&path);
-                            // What a save that was cut short left is settled
-                            // from its record: the version it moved aside
-                            // and never got to replace is the file again.
-                            left_aside = project_io::settle(&path, &self.host());
-                            self.log_unrecorded(&left_aside);
-                            if let Some(e) = &left_aside.unsynced {
-                                return Err(failure(format!(
-                                    "The last save of this project did not finish. Its files \
-                                     were put back in order, but the folder could not be \
-                                     synced to make that last ({e}). Nothing was removed. \
-                                     Try opening it again."
-                                )));
-                            }
-                        }
-                        Err(e) => {
-                            decision = OpenDecision::AsCopy(
-                                if e.kind() == std::io::ErrorKind::WouldBlock {
-                                    CopyReason::Locked
-                                } else {
-                                    CopyReason::UncertainLock
-                                },
-                            )
-                        }
+                    self.log_unrecorded(&left_aside);
+                    if let Some(e) = &left_aside.unsynced {
+                        return Err(failure(format!(
+                            "The last save of this project did not finish. Its files were put \
+                             back in order, but the folder could not be synced to make that \
+                             last ({e}). Nothing was removed. Try opening it again."
+                        )));
                     }
                 }
                 // The copy made the last time this file could not open in
@@ -1616,8 +1844,11 @@ impl Kernel {
                         names.join(", ")
                     )));
                 }
-                let mut opened =
-                    project_io::open_project(&path, OpenOptions::default()).map_err(failure)?;
+                let mut opened = match pre_opened.take() {
+                    Some(opened) => opened,
+                    None => project_io::open_project(&path, OpenOptions::default()),
+                }
+                .map_err(failure)?;
                 // The copy's entry names the file it stands in for (where it
                 // was and which file it was), and why, so that file finds it
                 // again and its window can say what it is.
@@ -2188,19 +2419,16 @@ impl Kernel {
             }
             let p = self.project_mut(id).unwrap();
             let mut changed = Vec::new();
-            let mut untrashed = Vec::new();
             let mut unproven = None;
             let result = plan.and_then(|plan| plan.run()).and_then(|receipt| {
                 displaced = receipt.displaced.clone();
                 changed = receipt.changed.clone();
-                untrashed = receipt.untrashed.clone();
                 unproven = Some(receipt.unproven);
                 p.store_mut().finish_save(receipt)
             });
             if let Some(unproven) = unproven {
                 self.note_unproven(id, unproven);
             }
-            self.log_untrashed(&untrashed);
             // A retained version found changed is another version to tell
             // about: named by the reply where nothing else is.
             displaced = displaced.or_else(|| changed.into_iter().next());
@@ -2641,6 +2869,102 @@ impl Kernel {
         }
         maybe
     }
+    fn owned_host(&self) -> OwnedHost {
+        OwnedHost {
+            hooks: self.publish_hooks.clone(),
+            coordinator: self.write_coordinator().cloned(),
+            profile: self.profile_dir().map(Into::into),
+        }
+    }
+    /// The disk work of `call`, if it opens a project file that is not open
+    /// here ([`OpenJob`]). `Err`: that file is being opened right now.
+    pub fn open_job(&self, call: &ShellCall) -> Result<Option<OpenJob>, KernelFailure> {
+        let (ShellCall::Open {
+            id,
+            source,
+            electron_profile,
+        }
+        | ShellCall::PrepareOpen {
+            id,
+            source,
+            electron_profile,
+        }) = call
+        else {
+            return Ok(None);
+        };
+        if self.project(id).is_some() {
+            return Ok(None);
+        }
+        let (path, entry) = match source {
+            SessionSource::File(path) => (path.clone(), false),
+            SessionSource::Library { profile, project }
+                if project == id && self.owns_library(profile) =>
+            {
+                match self.file_entry(project) {
+                    Some(path) => (path, true),
+                    None => return Ok(None),
+                }
+            }
+            _ => return Ok(None),
+        };
+        if self
+            .sessions
+            .values()
+            .any(|s| matches!(&s.destination, Destination::File(p) if *p == path))
+        {
+            return Ok(None);
+        }
+        if self.opening.contains(&path) {
+            return Err(failure("This project is already being opened."));
+        }
+        Ok(Some(OpenJob {
+            path,
+            entry,
+            electron_profile: electron_profile.clone(),
+            lock_root: self.lock_root(),
+            host: self.owned_host(),
+        }))
+    }
+    /// What a save of `session` to `path` (`None`: in place) does before the
+    /// kernel freezes it ([`SaveJob`]). `Err`: the session cannot save now
+    /// (another save of it is under way).
+    pub fn save_job(
+        &self,
+        session: &SessionHandle,
+        path: Option<&std::path::Path>,
+    ) -> Result<Option<SaveJob>, KernelFailure> {
+        self.ensure_idle(session)?;
+        let s = &self.sessions[&session.project];
+        let Some(project) = self.project(&session.project) else {
+            return Ok(None);
+        };
+        // The file's disk work is a save in place's (or a Save As again to
+        // the file of a save that could not finish); a Save As elsewhere
+        // settles nothing of the file it leaves.
+        let ticket = s.unfinalized.as_ref();
+        let in_place = match &s.destination {
+            Destination::File(file)
+                if path.is_none() || ticket.and_then(|t| t.path.as_deref()) == path =>
+            {
+                Some(file.clone())
+            }
+            _ => None,
+        };
+        Ok(Some(SaveJob {
+            project: session.project.clone(),
+            version: project.store().file().version.clone(),
+            unsynced: ticket.filter(|_| in_place.is_some()).map(|t| {
+                t.receipt
+                    .path
+                    .parent()
+                    .unwrap_or(std::path::Path::new("."))
+                    .to_owned()
+            }),
+            path: in_place,
+            warm: Box::new(project.store().save_warmup()),
+            host: self.owned_host(),
+        }))
+    }
     /// What a save needs from this kernel besides the files.
     pub(crate) fn host(&self) -> project_io::Host<'_> {
         project_io::Host {
@@ -2718,7 +3042,6 @@ impl Kernel {
     /// them is in a save's record until the person has seen it
     /// (`ShellCall::KeptBeside`).
     fn note_changed(&mut self, _id: &str, receipt: &crate::SaveReceipt) -> Option<PathBuf> {
-        self.log_untrashed(&receipt.untrashed);
         receipt
             .displaced
             .clone()
@@ -2730,22 +3053,44 @@ impl Kernel {
     /// still holds exactly that save's file it is adopted, as the save it
     /// is; edits made since stay unsaved and are what this save writes. A
     /// file changed since is not adopted: this save then finds it changed.
+    ///
+    /// A Save As is adopted whole: the store's file, the session's
+    /// destination and the lock taken at the new file change together, and
+    /// the library entry names the new file. Not adopted, none of them
+    /// changes: the session stays the file's it was, and the lock goes.
     fn adopt_unfinalized(&mut self, id: &str) -> Result<(), KernelFailure> {
-        let Some(receipt) = self.sessions.get_mut(id).and_then(|s| s.unfinalized.take()) else {
+        let Some(ticket) = self.sessions.get_mut(id).and_then(|s| s.unfinalized.take()) else {
             return Ok(());
         };
-        let dir = receipt
+        let dir = ticket
+            .receipt
             .path
             .parent()
             .unwrap_or(std::path::Path::new("."))
             .to_owned();
-        if let Err(e) = project_io::folder_sync_now(&dir, &self.publish_hooks) {
-            self.sessions.get_mut(id).unwrap().unfinalized = Some(receipt);
+        // Synced by the worker that ran this save's disk work, or here.
+        let presynced = self
+            .save_prelude
+            .as_mut()
+            .filter(|pre| pre.project == id)
+            .and_then(|pre| pre.synced.take())
+            .filter(|(synced, _)| *synced == dir)
+            .map(|(_, result)| result);
+        let synced = presynced.unwrap_or_else(|| {
+            project_io::folder_sync_now(&dir, &self.publish_hooks).map_err(|e| e.to_string())
+        });
+        if let Err(message) = synced {
+            self.sessions.get_mut(id).unwrap().unfinalized = Some(ticket);
             return Err(failure(crate::ProjectIoError::Finalize {
-                message: e.to_string(),
+                message,
                 receipt: None,
             }));
         }
+        let Unfinalized {
+            receipt,
+            path,
+            lock,
+        } = ticket;
         if !receipt.version.is_unchanged().unwrap_or(false) {
             return Ok(());
         }
@@ -2757,18 +3102,56 @@ impl Kernel {
             .finish_save(*receipt)
             .map_err(failure)?;
         self.save_published(id);
+        if let Some(path) = path {
+            let s = self.sessions.get_mut(id).unwrap();
+            s.destination = Destination::File(path);
+            s.lock = lock;
+            if self.library.is_some() {
+                self.save_library_slot(id, id, false)?;
+            }
+        }
         Ok(())
     }
-    /// Earlier versions found changed when a save was to remove them, that
-    /// could not be kept beside the project: the Error Log says where they
-    /// are (the Trash, or where they were).
-    fn log_untrashed(&mut self, untrashed: &[PathBuf]) {
-        for path in untrashed {
+    /// Files a save or a recovery found changed when they were to go and
+    /// could not keep beside their project ([`project_io::Stray`]): the
+    /// Error Log says where each is (the Trash, or hidden where it was).
+    /// The save's record tells the person until they have seen it; one
+    /// whose record could not be written is told by the open session's own
+    /// rows instead.
+    fn tell_strays(&mut self) {
+        let strays = match self.publish_hooks.strays.lock() {
+            Ok(mut strays) => std::mem::take(&mut *strays),
+            Err(_) => return,
+        };
+        for stray in strays {
             self.log(format!(
-                "An earlier version of a project was changed after it was saved and could not \
-                 be kept next to the project; it is here: {}",
-                path.display()
+                "A file from an earlier save of {} was changed after it was saved and could \
+                 not be kept next to the project; it is {}: {}",
+                stray.project.display(),
+                if stray.trashed {
+                    "in the Trash"
+                } else {
+                    "still hidden in the project's folder"
+                },
+                stray.path.display()
             ));
+            if stray.recorded {
+                continue;
+            }
+            let Some(id) = self.sessions.iter().find_map(|(id, s)| {
+                matches!(&s.destination, Destination::File(p) if *p == stray.project)
+                    .then(|| id.clone())
+            }) else {
+                continue;
+            };
+            let why = if stray.trashed { "trashed" } else { "hidden" };
+            if let Some(Value::Object(meta)) = std::sync::Arc::make_mut(&mut self.state.ui)
+                .get_mut(&id)
+                .map(|ui| &mut ui.session)
+            {
+                push_kept(meta, [kept_row(why, Some(&stray.path))]);
+                let _ = self.save_session_meta(&id);
+            }
         }
     }
     /// The file session `id` saves to was renamed or moved while open: carry
@@ -2783,7 +3166,15 @@ impl Kernel {
         // A save that could not put the file back under its name left it
         // aside: it is put back now, not followed to its private name.
         let path = path.clone();
-        let left = project_io::settle(&path, &self.host());
+        // Settled by the worker that ran this save's disk work, or here.
+        let left = match self
+            .save_prelude
+            .take()
+            .filter(|pre| pre.project == id && pre.path.as_ref() == Some(&path))
+        {
+            Some(pre) => pre.settled,
+            None => project_io::settle(&path, &self.host()),
+        };
         if let Some(e) = &left.unsynced {
             self.log(format!(
                 "Recovery beside {} could not sync its folder: {e}",

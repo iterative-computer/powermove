@@ -8,35 +8,39 @@ use pm_protocol::{
 };
 
 pub use crate::clock::PREROLL_US;
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShuttleKey {
     J,
     K,
     L,
 }
-/// Shipped state-dependent decline while stopped unless from_pause is set.
-/// Repeated J/L saturate at ±2x and remain consumed, as PM.jkl does.
+/// The shuttle's speeds, as Premiere and Final Cut step them: each further
+/// press in the direction of travel doubles, to eight times real time.
+pub const SHUTTLE_SPEEDS: [i32; 4] = [1, 2, 4, 8];
+/// K held with J or L held: this fraction of real time.
+pub const SHUTTLE_SLOW: u32 = 4;
+/// J and L start at real time in their direction (a press against the
+/// direction of travel turns around at once) and step up `SHUTTLE_SPEEDS`,
+/// staying consumed at the top; K pauses. While stopped they decline unless
+/// `from_pause` is set, so a keymap can give the keys another meaning then.
 pub fn shuttle(key: ShuttleKey, rate: PlaybackRate, from_pause: bool) -> Option<TransportCommand> {
     let r = rate.num as f64 / rate.den.max(1) as f64;
     if r == 0. && !from_pause {
         return None;
     }
+    let faster = |speed: f64| {
+        SHUTTLE_SPEEDS
+            .into_iter()
+            .find(|s| f64::from(*s) > speed)
+            .unwrap_or(SHUTTLE_SPEEDS[SHUTTLE_SPEEDS.len() - 1])
+    };
     let num = match key {
         ShuttleKey::K => return (r != 0.).then_some(TransportCommand::Pause),
-        ShuttleKey::J => {
-            if r < 0. {
-                -2
-            } else {
-                -1
-            }
-        }
-        ShuttleKey::L => {
-            if r > 0. {
-                2
-            } else {
-                1
-            }
-        }
+        // Slower than real time (a K+J release that never came) starts over.
+        ShuttleKey::J if r <= -1. => -faster(-r),
+        ShuttleKey::J => -1,
+        ShuttleKey::L if r >= 1. => faster(r),
+        ShuttleKey::L => 1,
     };
     Some(TransportCommand::Play {
         rate: PlaybackRate { num, den: 1 },

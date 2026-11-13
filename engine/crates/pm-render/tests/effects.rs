@@ -1528,7 +1528,7 @@ fn builtin_costs_at_uhd() {
     }
 }
 
-/// An effect's pixel-sized values are composition pixels at any render
+/// A built-in effect's pixel-sized values are composition pixels at any render
 /// scale: `v_px` counts them and `u_texel` is one of them, so a frame drawn
 /// at half scale (a playing viewer, a reduced quality) shows the effect at
 /// the size the 1:1 export does. A full-frame solid paints red from
@@ -1538,12 +1538,14 @@ fn effect_pixels_are_composition_pixels_at_any_render_scale() {
     let _gpu = gpu();
     const EDGE: &str = "#version 300 es\nprecision highp float;\nin vec2 v_st;\nin vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_texel;\nuniform float u_edge;\nout vec4 o;\nvoid main(){ o = vec4(step(u_edge, v_px.x), step(u_edge * u_texel.x, v_st.x), 0.0, 1.0); }\n";
     let mut set = builtin_definitions();
-    set.definitions.push(raw_effect(
+    let mut definition = raw_effect(
         "acme.edge",
         EDGE,
         json!([{ "type": "number", "key": "edge", "default": 40, "min": 0, "max": 1000, "step": null }]),
         false,
-    ));
+    );
+    definition.origin = pm_protocol::definitions::DefinitionOrigin::BuiltIn;
+    set.definitions.push(definition);
     let mut r = Renderer::headless().unwrap();
     assert!(r.set_definitions(&set).unwrap().is_empty());
     let (w, h) = (128u32, 64u32);
@@ -1579,7 +1581,7 @@ fn effect_pixels_are_composition_pixels_at_any_render_scale() {
     }
 }
 
-/// The effect pixel contract in final output: an effect without an owner
+/// The built-in pixel contract in final output: an effect without an owner
 /// binding is drawn on the composition's own pixel grid at any output size,
 /// so a resized export (half or twice the composition) shows the 1:1
 /// export's picture resampled, whatever idiom its shader uses: a radius in
@@ -1620,8 +1622,9 @@ fn resized_frames_draw_effects_on_the_composition_grid() {
     ];
     let mut set = builtin_definitions();
     for (id, source) in &shaders {
-        set.definitions
-            .push(raw_effect(id, source, json!([]), false));
+        let mut definition = raw_effect(id, source, json!([]), false);
+        definition.origin = pm_protocol::definitions::DefinitionOrigin::BuiltIn;
+        set.definitions.push(definition);
     }
     let mut r = Renderer::headless().unwrap();
     assert!(r.set_definitions(&set).unwrap().is_empty());
@@ -1687,6 +1690,78 @@ fn resized_frames_draw_effects_on_the_composition_grid() {
         if *id == "acme.fetch" {
             let (px, width) = at(&mut r, 2.0, false);
             compare(&px, width, 2.0, "viewer at 2x");
+        }
+    }
+}
+
+/// Electron's runEffects uses output pixels, LINEAR/CLAMP_TO_EDGE sampling
+/// and one texel of the current input. The same synthetic extension runs as a
+/// viewer frame and an export, at half, full and double size. An adjustment
+/// layer samples the accumulated white plate below it.
+#[test]
+fn extension_pixels_and_bilinear_taps_match_electron_at_each_output_size() {
+    let _gpu = gpu();
+    let source = "#version 300 es\nprecision highp float;\nin vec2 v_st;\nin vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_texel;\nuniform vec2 u_res;\nuniform vec2 u_pixelScale;\nuniform vec2 u_effectScale;\nuniform vec2 u_sourceRes;\nout vec4 o;\nvoid main(){ float tap = texture(u_tex, v_st - vec2(4.5 * u_texel.x, 0.0)).r; o = vec4(step(12.0,v_px.x),tap,step(0.001,abs(u_res.x-u_sourceRes.x)+abs(u_pixelScale.x-u_effectScale.x)),1.0); }\n";
+    for origin in [
+        pm_protocol::definitions::DefinitionOrigin::Local,
+        pm_protocol::definitions::DefinitionOrigin::Store,
+    ] {
+        let mut set = builtin_definitions();
+        let mut def = raw_effect("synthetic.raster", source, json!([]), false);
+        def.origin = origin;
+        set.definitions.push(def);
+        let mut r = Renderer::headless().unwrap();
+        assert!(r.set_definitions(&set).unwrap().is_empty());
+        let (w, h) = (64, 32);
+        let plate = layer(
+            "plate",
+            "solid",
+            json!({"color":"#FFFFFF","w":44,"h":h}),
+            20.0,
+            0.0,
+            1.0,
+        );
+        let mut adjustment = layer("adjust", "adjustment", json!({}), 0.0, 0.0, 1.0);
+        adjustment["fx"] = json!([fx("e", "synthetic.raster", json!({}))]);
+        let doc = load(&project(
+            w,
+            h,
+            1.0,
+            solid_fill("#000000"),
+            vec![adjustment, plate],
+        ));
+        for scale in [0.5, 1.0, 2.0] {
+            for final_output in [false, true] {
+                let req = RenderRequest {
+                    export: final_output,
+                    output_kind: if final_output {
+                        pm_render::OutputKind::Final
+                    } else {
+                        pm_render::OutputKind::Preview
+                    },
+                    ..RenderRequest::at_scale(Size::new(w, h), scale, Precision::Float16)
+                };
+                let px = render(&mut r, &doc, &MapResolver::default(), 0.0, &req).unwrap();
+                let width = req.output_size.width as usize;
+                let at = |x: usize, c: usize| {
+                    px[(width * (req.output_size.height as usize / 2) + x) * 4 + c]
+                };
+                assert!(
+                    at(11, 0) < 0.01 && at(12, 0) > 0.99,
+                    "output grid at {scale}, final={final_output}"
+                );
+                let edge = (20.0 * scale) as usize + 4;
+                assert!(
+                    (at(edge, 1) - 0.5).abs() < 0.03,
+                    "bilinear tap at {scale}: {}",
+                    at(edge, 1)
+                );
+                assert!(at(edge - 1, 1) < 0.03 && at(edge + 1, 1) > 0.97);
+                assert!(
+                    px.chunks_exact(4).all(|p| p[2] < 0.01),
+                    "source resolution and scale uniforms"
+                );
+            }
         }
     }
 }

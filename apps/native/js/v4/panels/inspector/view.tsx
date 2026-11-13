@@ -61,6 +61,23 @@ export const alignmentButtons: {
   },
   { id: "bottom", label: "Align Bottom", symbol: "align.vertical.bottom" },
 ];
+/** Equal gaps between three or more selected layers. */
+export const distributeButtons: {
+  id: "horizontal" | "vertical";
+  label: string;
+  symbol: string;
+}[] = [
+  {
+    id: "horizontal",
+    label: "Distribute Horizontally",
+    symbol: "distribute.horizontal.center",
+  },
+  {
+    id: "vertical",
+    label: "Distribute Vertically",
+    symbol: "distribute.vertical.center",
+  },
+];
 export const newLayerItems = [
   "Text",
   "Shape",
@@ -226,6 +243,24 @@ function AlignmentStrip({
           </div>
         ),
       )}
+      {/* Equal gaps between three or more layers, the outermost staying
+          put. The well keeps its place with fewer, its buttons dimmed. */}
+      <div style={{ ...horizontal, ...well, gap: token("metrics.gap") }}>
+        {distributeButtons.map((button) => (
+          <Action
+            key={button.id}
+            id={`distribute:${button.id}`}
+            label={button.label}
+            tooltip={`${button.label}\nEqual gaps between three or more layers`}
+            symbol={button.symbol}
+            disabled={target.first.locked || target.count < 3}
+            tabIndex={-1}
+            onActivate={() =>
+              session.send({ type: "distribute", axis: button.id })
+            }
+          />
+        ))}
+      </div>
     </div>
   );
 }

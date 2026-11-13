@@ -367,6 +367,67 @@ fn application_agent_and_settings_mount_without_creating_a_project() {
 }
 
 #[test]
+fn bring_my_workspace_opens_a_thread_with_the_request_and_sends_the_agent_its_steps() {
+    let actor = KernelActor::spawn(KernelConfig::default());
+    let mut panels = Builtins::application(actor.handle(), || {}, None).unwrap();
+    // The Agent panel is what carries it: closed, there is nowhere to ask.
+    assert!(panels.bring_workspace().is_err());
+    finish(panels.mount("agent").unwrap());
+    finish(panels.show("agent").unwrap());
+    let agent = {
+        let backend = panels.backend("agent").unwrap();
+        let backend = backend.shared();
+        backend.native.agent.clone().unwrap()
+    };
+    // No agent is signed in: the request waits in the composer of the
+    // visible thread (a blank one is reused, as New Thread reuses it).
+    assert_eq!(panels.bring_workspace(), Ok(false));
+    {
+        let state = agent.shared();
+        let thread = state.panel.active_id();
+        let session = state.panel.session(thread).unwrap();
+        assert_eq!(session.draft.text(), agent_host::WORKSPACE_IMPORT_LABEL);
+        assert_eq!(session.settings.access, pm_agents::Access::Project);
+        assert!(session.run.is_none());
+    }
+    // Sent, the conversation shows the one line and the agent gets the steps.
+    let sent = agent_host::expand_request(agent_host::WORKSPACE_IMPORT_LABEL);
+    assert!(sent.starts_with(agent_host::WORKSPACE_IMPORT_LABEL));
+    for tool in [
+        "inspect_creative_workspace",
+        "inspect_creative_extension",
+        "get_panel_layout",
+        "set_panel_layout",
+    ] {
+        assert!(sent.contains(tool), "{tool}");
+    }
+    assert_eq!(agent_host::expand_request("Make it blue"), "Make it blue");
+    panels.close();
+
+    // The Settings row's button hands the transfer to the app's window.
+    let identity = pm_surface::host_api::Identity {
+        realm: "settings".into(),
+        generation: 1,
+        project: "builtin-application".into(),
+    };
+    let mut settings = data::Backend::new(actor.handle(), identity, "settings", true).unwrap();
+    let revision = settings.settings_snapshot().unwrap()["revision"].clone();
+    settings
+        .native_command(
+            "panel.settings",
+            &json!({"revision":revision,"action":{"type":"row","id":"workspace","action":"workspace.import"}}),
+        )
+        .expect("the button no longer ends in an error");
+    assert!(
+        settings
+            .native
+            .platform
+            .iter()
+            .any(|(kind, request)| kind == "command" && request["name"] == "bringWorkspace")
+    );
+}
+
+#[test]
 fn application_profile_writes_are_actor_owned_and_document_commands_refuse() {
     let actor = KernelActor::spawn(KernelConfig::default());
     let identity = pm_surface::host_api::Identity {
@@ -657,6 +718,80 @@ fn application_scope_never_exposes_a_real_document_with_the_transport_id() {
 }
 
 #[test]
+fn the_distribute_buttons_space_three_selected_layers_as_one_undo_step() {
+    let actor = KernelActor::spawn(KernelConfig::default());
+    let layer = |id: &str, x: f64| {
+        json!({"id":id,"type":"shape","name":id,"from":0,"dur":10,"on":true,"lock":false,
+        "p":{"opacity":{"v":100,"kf":[]},"position.x":{"v":x,"kf":[]},"position.y":{"v":180,"kf":[]}},
+        "d":{"w":40,"h":40},"fx":[]})
+    };
+    let project = json!({"id":"synthetic","name":"Synthetic","compId":"c","w":640,"h":360,"fps":30,"dur":10,
+        "bg":"#000000","assets":{},"comps":{},"layers":[layer("a",100.),layer("b",150.),layer("c",500.)]});
+    let kernel = actor.handle();
+    kernel
+        .open(
+            "synthetic",
+            OpenSource::Untitled(pm_model::json::parse(&project.to_string()).unwrap()),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    let select = |ids: &[&str]| {
+        kernel
+            .call(
+                "synthetic",
+                Request::new(
+                    Caller::native(),
+                    SelectionCall::Layers {
+                        ids: ids.iter().map(|id| (*id).to_owned()).collect(),
+                        add: false,
+                    },
+                ),
+            )
+            .wait()
+            .unwrap()
+            .unwrap();
+    };
+    let identity = pm_surface::host_api::Identity {
+        realm: "inspector".into(),
+        generation: 1,
+        project: "synthetic".into(),
+    };
+    let mut backend = data::Backend::new(kernel.clone(), identity, "inspector", false).unwrap();
+    let press = |backend: &mut data::Backend| {
+        backend.native_command(
+            "panel.inspector",
+            &json!({"type":"distribute","axis":"horizontal"}),
+        )
+    };
+    // Two layers: nothing to distribute, and the panel says why.
+    select(&["a", "b"]);
+    backend.inspector_snapshot().unwrap();
+    assert!(press(&mut backend).is_err());
+    select(&["a", "b", "c"]);
+    backend.inspector_snapshot().unwrap();
+    let Ok(models::NativeCommand::Kernel(request)) = press(&mut backend) else {
+        panic!("the button edits the project")
+    };
+    kernel.call("synthetic", request).wait().unwrap().unwrap();
+    let published = kernel.published("synthetic").unwrap();
+    let x = |id: &str| {
+        pm_kernel::QueryMirror::new(&published)
+            .queries()
+            .evaluate(None, id, "position.x", 0.)
+            .unwrap()
+            .as_f64()
+            .unwrap()
+    };
+    // The outer two stay; the middle one takes the midpoint.
+    assert_eq!((x("a"), x("b"), x("c")), (100., 300., 500.));
+    assert_eq!(
+        published.history.undo_label.as_deref(),
+        Some("Distribute Layers")
+    );
+}
+
+#[test]
 fn render_presets_use_the_legacy_actor_key_and_archive_same_name_records() {
     let actor = actor();
     let identity = pm_surface::host_api::Identity {
@@ -723,6 +858,100 @@ fn running_export_refuses_replacement_or_reset_without_mutating_its_run() {
         assert_eq!(backend.native.export["run"], run);
     }
     assert!(backend.native.platform.is_empty());
+}
+
+/// An export whose destination is chosen and that waits to start (for the
+/// window's extensions to load) is shown as preparing: its panel's Cancel is
+/// live and reaches the coordinator. While the destination is being chosen
+/// the form's Cancel is off, so a wait left in that phase could not be
+/// cancelled from the panel.
+#[test]
+fn an_export_waiting_to_start_is_cancelled_from_its_panel() {
+    let actor = actor();
+    let mut panels = Builtins::new(actor.handle(), "synthetic", || {}).unwrap();
+    finish(panels.mount("export").unwrap());
+    finish(panels.show("export").unwrap());
+    let shown = std::cell::RefCell::new(None::<Publication>);
+    // Presses the panel's control `id` as the view does: a disabled one
+    // sends nothing. Returns whether it was pressed.
+    let press = |panels: &Builtins, id: &str| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(p) = panels
+                .take_publications()
+                .into_iter()
+                .rfind(|p| p.panel == "export")
+            {
+                *shown.borrow_mut() = Some(p);
+            }
+            let p = shown.borrow().clone();
+            let found = p.as_ref().and_then(|p| {
+                p.surface.nodes().iter().find_map(|(target, n)| {
+                    (n.props.get("id").and_then(Value::as_str) == Some(id))
+                        .then(|| (*target, n.props.get("disabled") == Some(&Value::Bool(true))))
+                })
+            });
+            if let (Some(p), Some((target, disabled))) = (p, found) {
+                if disabled {
+                    return false;
+                }
+                finish(
+                    panels
+                        .activate(
+                            "export",
+                            p.generation,
+                            p.surface.revision(),
+                            target,
+                            Some(id),
+                            "click",
+                            Default::default(),
+                        )
+                        .unwrap(),
+                );
+                return true;
+            }
+            assert!(Instant::now() < deadline, "no {id} in the export panel");
+            thread::sleep(Duration::from_millis(2));
+        }
+    };
+    // What the panel asked of the coordinator so far; waits up to `wait`
+    // for `operation` to be among it.
+    let seen = std::cell::RefCell::new(Vec::<String>::new());
+    let asked = |panels: &Builtins, operation: &str, wait: Duration| {
+        let deadline = Instant::now() + wait;
+        loop {
+            seen.borrow_mut().extend(
+                panels
+                    .take_platform_requests()
+                    .into_iter()
+                    .map(|r| r.operation),
+            );
+            if seen.borrow().iter().any(|o| o == operation) {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+    };
+    assert!(press(&panels, "export.start"));
+    assert!(
+        asked(&panels, "export.begin", Duration::from_secs(10)),
+        "{:?} {:?}",
+        seen.borrow(),
+        panels.take_errors()
+    );
+    // Choosing the destination: the form's Cancel is off.
+    assert!(!press(&panels, "export.cancel"), "Cancel while choosing");
+    assert!(!asked(&panels, "export.cancel", Duration::from_millis(300)));
+    // The destination is chosen and the export waits: the coordinator says
+    // so before it waits, and Cancel reaches it.
+    finish(panels.observe_export(json!({"phase":"preparing"})).unwrap());
+    thread::sleep(Duration::from_millis(100));
+    assert!(press(&panels, "export.cancel"), "Cancel while it waits");
+    assert!(asked(&panels, "export.cancel", Duration::from_secs(10)));
+    assert!(panels.take_errors().is_empty());
 }
 
 #[test]
@@ -1292,7 +1521,7 @@ fn media_completion_reaches_actor_with_actual_originals_and_relink_undo_keeps_by
         .admit_media(
             &catalog.stamp,
             vec![stored],
-            None,
+            &Default::default(),
             None,
             vec![],
             Caller::native(),
@@ -1316,7 +1545,7 @@ fn media_completion_reaches_actor_with_actual_originals_and_relink_undo_keeps_by
         .unwrap();
     let replacement = original("replacement.bin", b"replacement complete original");
     let replacement_version = replacement.version().to_owned();
-    let ack=panels.admit_media(&catalog.stamp,vec![RetainedAsset{id:"worker-temp-id".into(),metadata:data::model(&json!({"name":"Relinked.bin","kind":"image","mimeType":"application/octet-stream","w":100,"h":50})).unwrap(),original:replacement,previous:Some(prior)}],None,Some("imported-image".into()),vec![],Caller::native()).unwrap().wait().unwrap().unwrap();
+    let ack=panels.admit_media(&catalog.stamp,vec![RetainedAsset{id:"worker-temp-id".into(),metadata:data::model(&json!({"name":"Relinked.bin","kind":"image","mimeType":"application/octet-stream","w":100,"h":50})).unwrap(),original:replacement,previous:Some(prior)}],&Default::default(),Some("imported-image".into()),vec![],Caller::native()).unwrap().wait().unwrap().unwrap();
     assert!(!matches!(ack.reply, pm_kernel::Reply::Throw(_)), "{ack:?}");
     assert!(ack.notice.is_none(), "{ack:?}");
     let relinked = kernel.published("synthetic").unwrap();
@@ -1361,7 +1590,7 @@ fn media_completion_reaches_actor_with_actual_originals_and_relink_undo_keeps_by
                     original: stale,
                     previous: None
                 }],
-                None,
+                &Default::default(),
                 None,
                 vec![],
                 Caller::native()
@@ -1979,6 +2208,80 @@ fn root_level_project_has_a_timeline_composition_and_tab() {
     assert_eq!(frame["tabs"][0]["id"], "root");
     assert_eq!(frame["tabs"][0]["name"], "Root Film");
     assert_eq!(frame["window"]["total"], 1);
+}
+
+/// View ▸ Timeline in Tracks, Hide Shy Layers, the graph and the reveal keys
+/// change the timeline's saved view from outside its panel. The panel's
+/// project subscription moves with that view, so its header and rows follow.
+#[test]
+fn the_timeline_panel_hears_of_a_view_change_made_outside_it() {
+    use pm_kernel::state::{StateOp, StateTransaction};
+    use pm_surface::host_data::KernelData;
+    let actor = KernelActor::spawn(KernelConfig::default());
+    let kernel = actor.handle();
+    let project = pm_model::json::parse(r##"{"id":"view-film","name":"View Film","compId":"c","w":32,"h":18,"fps":30,"dur":2,"assets":{},"comps":{},"layers":[{"id":"a","type":"shape","name":"Box","from":0,"dur":2,"on":true,"shy":true,"p":{"opacity":{"v":100,"kf":[]}},"d":{"w":10,"h":10},"fx":[]},{"id":"b","type":"shape","name":"Bar","from":0,"dur":2,"on":true,"p":{"opacity":{"v":100,"kf":[]}},"d":{"w":10,"h":10},"fx":[]}]}"##).unwrap();
+    kernel
+        .open("view-film", OpenSource::Untitled(project))
+        .wait()
+        .unwrap()
+        .unwrap();
+    let identity = pm_surface::host_api::Identity {
+        realm: "view-timeline".into(),
+        generation: 1,
+        project: "view-film".into(),
+    };
+    let backend = Arc::new(Mutex::new(
+        data::Backend::new(kernel.clone(), identity.clone(), "timeline", false).unwrap(),
+    ));
+    let mut service = data::Data(backend.clone());
+    let subscribed = |service: &mut data::Data| {
+        service
+            .query(&identity, &pm_surface::host_api::Query::Project, None, None)
+            .unwrap()
+    };
+    let frame = |backend: &Arc<Mutex<data::Backend>>| {
+        backend
+            .lock()
+            .unwrap()
+            .timeline_frame(&json!({"first":0,"visible":20}))
+            .unwrap()
+    };
+    let before = subscribed(&mut service);
+    assert_eq!(frame(&backend)["mode"], "Layers");
+    assert_eq!(frame(&backend)["window"]["total"], 2);
+    assert_eq!(frame(&backend)["shyLayers"], true);
+    // What the tracks' own model saves when a command changes the view.
+    let save = |key: &str, value: pm_model::Value| {
+        let state = kernel.state();
+        let mut ui = state.ui.get("view-film").cloned().unwrap_or_default();
+        let mut timeline = ui.timeline.as_object().cloned().unwrap_or_default();
+        timeline.insert(key, value);
+        ui.timeline = pm_model::Value::Object(timeline);
+        kernel
+            .state_transaction(StateTransaction {
+                expected_revision: Some(state.revision),
+                ops: vec![StateOp::Ui {
+                    project: "view-film".into(),
+                    next: ui,
+                }],
+            })
+            .wait()
+            .unwrap()
+            .unwrap();
+    };
+    // Hide Shy Layers: the shy layer's row goes; the layer stays in the project.
+    save("hideShy", pm_model::Value::Bool(true));
+    let hidden = subscribed(&mut service);
+    assert_eq!(hidden.revision, before.revision, "no document edit");
+    assert_ne!(hidden.value, before.value, "the subscription moved");
+    let shown = frame(&backend);
+    assert_eq!(shown["hideShy"], true);
+    assert_eq!(shown["window"]["total"], 1);
+    assert_eq!(shown["window"]["rows"][0]["layer"], "b");
+    // Timeline in Tracks: the header's mode follows.
+    save("mode", pm_model::Value::from("tracks"));
+    assert_ne!(subscribed(&mut service).value, hidden.value);
+    assert_eq!(frame(&backend)["mode"], "Tracks");
 }
 
 /// A viewer pane shorter than two insets still publishes (fit edge to edge),

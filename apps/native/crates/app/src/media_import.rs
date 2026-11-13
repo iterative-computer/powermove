@@ -72,6 +72,7 @@ impl Controller {
                         ImportRequest {
                             paths,
                             folder,
+                            keep_folders: true,
                             ..Default::default()
                         },
                         cx,
@@ -80,6 +81,68 @@ impl Controller {
             }
         })
         .detach();
+    }
+    /// Paste with media on the pasteboard (`pasteMedia`): files copied in
+    /// Finder, or a copied picture such as a screenshot, become layers at the
+    /// playhead, stored with the project as an import stores them.
+    pub(crate) fn paste_media(&mut self, cx: &mut Context<Self>) -> bool {
+        match platform::pasteboard_media() {
+            Some(media) => self.paste_pasted(media, cx),
+            None => false,
+        }
+    }
+    pub(crate) fn paste_pasted(
+        &mut self,
+        media: platform::PastedMedia,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.session.is_none() {
+            return false;
+        }
+        let place_at = Some(self.time());
+        match media {
+            platform::PastedMedia::Files(paths) => {
+                // Files that are no media (a copied document) are not a
+                // paste for the importer: the app's own clipboard has it.
+                if !pasted_files_hold_media(&paths) {
+                    return false;
+                }
+                self.import(
+                    ImportRequest {
+                        paths,
+                        place_at,
+                        ..Default::default()
+                    },
+                    cx,
+                );
+            }
+            platform::PastedMedia::Image { data, png } => {
+                // Converting and writing a large screenshot is worker work.
+                let staged = cx
+                    .background_executor()
+                    .spawn(async move { stage_pasted_image(data, png) });
+                cx.spawn(async move |this, cx| {
+                    let staged = staged.await;
+                    let _ = this.update(cx, |v, cx| match staged {
+                        Some((dir, path)) => v.import(
+                            ImportRequest {
+                                paths: vec![path],
+                                place_at,
+                                staged: Some(dir),
+                                ..Default::default()
+                            },
+                            cx,
+                        ),
+                        None => {
+                            v.message = "The copied image could not be read".into();
+                            cx.notify();
+                        }
+                    });
+                })
+                .detach();
+            }
+        }
+        true
     }
     /// Files dropped on the window: projects open, media lands at the playhead.
     pub(crate) fn import_dropped(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
@@ -284,6 +347,36 @@ impl Controller {
         })
         .detach();
     }
+    /// `PM.MediaStore.get`: the original file of a project asset, held like a
+    /// picked file (read only when the extension reads it), or null.
+    pub(crate) fn media_file_for_extension(
+        &mut self,
+        answer: u64,
+        asset: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let path = self.media.originals.get(asset).cloned();
+        let executor = cx.background_executor().clone();
+        cx.spawn(async move |this, cx| {
+            let file = executor
+                .spawn(async move {
+                    let path = path?;
+                    let meta = std::fs::metadata(&path).ok().filter(|m| m.is_file())?;
+                    let name = path.file_name()?.to_string_lossy().into_owned();
+                    let kind = pm_builtins::media_import::classify(&path).map(|(_, mime)| mime);
+                    let token = pm_compat_runner::files::hold_picked(path);
+                    Some(json!({"token":token.to_string(),"name":name,"type":kind.unwrap_or_default(),
+                        "size":meta.len(),"lastModified":0}))
+                })
+                .await;
+            let _ = this.update(cx, |v, _| {
+                if let Some(host) = &v.extensions.host {
+                    host.answer(answer, file.unwrap_or(serde_json::Value::Null));
+                }
+            });
+        })
+        .detach();
+    }
     /// The encode's progress line in the status bar until the import ends.
     fn show_sequence_progress(
         &mut self,
@@ -381,4 +474,27 @@ impl Controller {
         })
         .detach();
     }
+}
+
+/// Whether copied files give the importer anything: a media file, or a
+/// folder (which it reads for media).
+pub(crate) fn pasted_files_hold_media(paths: &[PathBuf]) -> bool {
+    paths
+        .iter()
+        .any(|p| pm_builtins::media_import::classify(p).is_some() || p.is_dir())
+}
+/// A copied picture as a PNG file in scratch that lasts until its import is done.
+pub(crate) fn stage_pasted_image(data: Vec<u8>, png: bool) -> Option<(tempfile::TempDir, PathBuf)> {
+    let png = if png {
+        data
+    } else {
+        platform::tiff_to_png(&data)?
+    };
+    let dir = tempfile::Builder::new()
+        .prefix("powermove-paste-")
+        .tempdir()
+        .ok()?;
+    let path = dir.path().join("Pasted Image.png");
+    std::fs::write(&path, png).ok()?;
+    Some((dir, path))
 }

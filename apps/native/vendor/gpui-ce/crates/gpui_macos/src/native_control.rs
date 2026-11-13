@@ -12,8 +12,54 @@ struct State {
     gpui: Retained<NSView>,
     wrapper: Retained<NSView>,
     control: Retained<NSView>,
-    geometry: Cell<Option<(NSRect, NSRect)>>,
+    /// What a paint staged, with that paint's number: placed by the present
+    /// that follows that paint, and by no later one.
+    geometry: Cell<Option<(u64, NSRect, NSRect)>>,
     staged: Cell<Option<(NSRect, NSRect)>>,
+}
+impl State {
+    fn key(&self) -> usize {
+        Retained::as_ptr(&self.gpui) as usize
+    }
+    fn stage(&self, geometry: Option<(NSRect, NSRect)>) {
+        let paint = crate::composition::open_paint(self.key());
+        self.geometry.set(geometry.map(|(bounds, clip)| (paint, bounds, clip)));
+    }
+    /// Where the last complete paint put this control, if it staged it.
+    fn placed(&self) -> Option<(NSRect, NSRect)> {
+        let last = crate::composition::last_paint(self.key());
+        self.geometry
+            .get()
+            .filter(|(paint, ..)| Some(*paint) == last)
+            .map(|(_, bounds, clip)| (bounds, clip))
+    }
+    /// The wrapper's frame, the control's frame inside it and whether the
+    /// wrapper is hidden, for what the last paint staged.
+    fn target(&self) -> Option<(NSRect, NSRect, bool)> {
+        let (bounds, clip) = self.placed()?;
+        let x = bounds.origin.x.max(clip.origin.x);
+        let y = bounds.origin.y.max(clip.origin.y);
+        let visible = NSSize::new(
+            ((bounds.origin.x + bounds.size.width).min(clip.origin.x + clip.size.width) - x)
+                .max(0.),
+            ((bounds.origin.y + bounds.size.height).min(clip.origin.y + clip.size.height) - y)
+                .max(0.),
+        );
+        let h = self
+            .gpui
+            .window()
+            .and_then(|w| w.contentView())
+            .map_or(0., |v| v.bounds().size.height);
+        let frame = NSRect::new(NSPoint::new(x, h - y - visible.height), visible);
+        let local = NSRect::new(
+            NSPoint::new(
+                bounds.origin.x - x,
+                y + visible.height - bounds.origin.y - bounds.size.height,
+            ),
+            bounds.size,
+        );
+        Some((frame, local, visible.width <= 0. || visible.height <= 0.))
+    }
 }
 thread_local! {static SLOTS:RefCell<HashMap<usize,Vec<Weak<State>>>>=RefCell::new(HashMap::new());}
 pub struct NativeControlSlot {
@@ -56,12 +102,17 @@ impl NativeControlSlot {
         Self { state }
     }
     pub fn stage(&self, bounds: NSRect, clip: NSRect) {
-        self.state.geometry.set(Some((bounds, clip)));
+        self.state.stage(Some((bounds, clip)));
         self.state.staged.set(Some((bounds, clip)));
     }
     /// A cached GPUI view reuses its paint, so its slot keeps the last geometry.
     pub fn keep(&self) {
-        self.state.geometry.set(self.state.staged.get());
+        self.state.stage(self.state.staged.get());
+    }
+    /// The control's wrapper, for tests that read where a present put it.
+    #[doc(hidden)]
+    pub fn wrapper(&self) -> &NSView {
+        &self.state.wrapper
     }
 }
 impl Drop for NativeControlSlot {
@@ -98,50 +149,42 @@ pub(crate) fn accessibility(key: usize) -> Vec<crate::composition::Accessibility
             .collect()
     })
 }
+/// Whether [`present`] would move a control. Nothing is touched.
+pub(crate) fn pending(key: usize) -> bool {
+    let slots = SLOTS.with(|s| s.borrow().get(&key).cloned().unwrap_or_default());
+    slots
+        .into_iter()
+        .filter_map(|s| s.upgrade())
+        .any(|state| match state.target() {
+            None => !state.wrapper.isHidden(),
+            Some((frame, local, hidden)) => {
+                state.wrapper.frame() != frame
+                    || state.control.frame() != local
+                    || state.wrapper.isHidden() != hidden
+            }
+        })
+}
 pub(crate) fn present(key: usize) -> crate::composition::SlotChange {
     let slots = SLOTS.with(|s| s.borrow().get(&key).cloned().unwrap_or_default());
     let mut moved = false;
     for state in slots.into_iter().filter_map(|s| s.upgrade()) {
-        let Some((bounds, clip)) = state.geometry.take() else {
+        let target = state.target();
+        state.geometry.set(None);
+        let Some((frame, local, hidden)) = target else {
             if !state.wrapper.isHidden() {
                 state.wrapper.setHidden(true);
                 moved = true;
             }
             continue;
         };
-        let x = bounds.origin.x.max(clip.origin.x);
-        let y = bounds.origin.y.max(clip.origin.y);
-        let visible = NSRect::new(
-            NSPoint::new(x, y),
-            NSSize::new(
-                ((bounds.origin.x + bounds.size.width).min(clip.origin.x + clip.size.width) - x)
-                    .max(0.),
-                ((bounds.origin.y + bounds.size.height).min(clip.origin.y + clip.size.height) - y)
-                    .max(0.),
-            ),
-        );
-        let h = state
-            .gpui
-            .window()
-            .and_then(|w| w.contentView())
-            .map_or(0., |v| v.bounds().size.height);
-        let frame = NSRect::new(NSPoint::new(x, h - y - visible.size.height), visible.size);
         if state.wrapper.frame() != frame {
             state.wrapper.setFrame(frame);
             moved = true;
         }
-        let local = NSRect::new(
-            NSPoint::new(
-                bounds.origin.x - x,
-                y + visible.size.height - bounds.origin.y - bounds.size.height,
-            ),
-            bounds.size,
-        );
         if state.control.frame() != local {
             state.control.setFrame(local);
             moved = true;
         }
-        let hidden = visible.size.width <= 0. || visible.size.height <= 0.;
         if state.wrapper.isHidden() != hidden {
             state.wrapper.setHidden(hidden);
             moved = true;

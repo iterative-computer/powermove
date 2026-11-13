@@ -47,6 +47,18 @@ impl Controller {
                     view.update(cx, |v, cx| v.review_send(semantic, event, cx));
                 }
             }
+            // Development builds: a panel's scroller swept for some seconds
+            // (`reviewScroll:<panel>:<seconds>`).
+            #[cfg(debug_assertions)]
+            command if command.starts_with("reviewScroll:") => {
+                let mut parts = command.splitn(3, ':').skip(1);
+                if let (Some(panel), Some(Ok(seconds))) =
+                    (parts.next(), parts.next().map(str::parse::<f32>))
+                    && let Some(view) = self.builtins.views.get(panel).cloned()
+                {
+                    view.update(cx, |v, cx| v.review_scroll(seconds, cx));
+                }
+            }
             // Development builds: a panel's own command with its intent, as
             // its controls send it, for actions that sit behind a context
             // menu (`reviewIntent:<panel>:<command>:<the JSON intent in hex>`).
@@ -73,6 +85,12 @@ impl Controller {
                     .detach();
                 }
             }
+            // Development builds: hold a modifier for the pointer input
+            // an on-screen review sends (`reviewModifiers:alt`).
+            #[cfg(debug_assertions)]
+            command if command.starts_with("reviewModifiers:") => {
+                crate::panel_bridge::hold_review_modifier(&command["reviewModifiers:".len()..]);
+            }
             // Development builds: the control kit in every state, on Home.
             #[cfg(debug_assertions)]
             "reviewKit" => {
@@ -81,6 +99,7 @@ impl Controller {
             }
             "newComposition" => self.composition_sheet(false, None, cx),
             "compositionSettings" => self.composition_sheet(true, None, cx),
+            "interpretFootage" => self.interpret_footage_sheet(cx),
             command if crate::keyframe_sheets::Kind::of(command).is_some() => {
                 self.keyframe_sheet(crate::keyframe_sheets::Kind::of(command).unwrap(), cx)
             }

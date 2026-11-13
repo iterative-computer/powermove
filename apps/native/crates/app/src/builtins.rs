@@ -223,6 +223,7 @@ impl Controller {
             }
             let _ = this.update(cx, |v, cx| {
                 v.settled(&mounting);
+                v.bound_open_wait(&mounting, cx);
                 cx.notify();
             });
         })
@@ -250,8 +251,17 @@ impl Controller {
         })
         .detach();
     }
-    /// Every panel of `project` has mounted or failed: the open is over.
-    fn settled(&mut self, project: &str) {
+    /// Every panel of `project` has mounted or failed: the open is over,
+    /// unless its viewer waits for effects its extensions are still loading.
+    pub(crate) fn settled(&mut self, project: &str) {
+        if self.settling.as_deref() == Some(project) && self.awaiting_extension_effects() {
+            self.extensions.settle_after = Some(project.to_owned());
+            return;
+        }
+        self.finish_open(project);
+    }
+    /// The open of `project` is over: its panels show it.
+    pub(crate) fn finish_open(&mut self, project: &str) {
         if self.settling.as_deref() == Some(project) {
             self.settling = None;
             self.opening_name = None;
@@ -720,6 +730,50 @@ impl Controller {
             .entry(id.into())
             .or_insert_with(|| cx.new(|cx| crate::v4_view::HeaderView::new(view, cx)));
         Some(div().w_full().child(header.clone()).into_any_element())
+    }
+    /// Settings › General › Bring My Workspace…: Settings gives way to the
+    /// Agent panel, where a new thread asks for the After Effects workspace.
+    pub(crate) fn bring_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.session.is_none() {
+            self.message = "Open a project to bring your workspace into".into();
+            cx.notify();
+            return;
+        }
+        if let Some(handle) = self.builtins.windows.remove("settings") {
+            let _ = handle.update(cx, |_, w, _| w.remove_window());
+        }
+        self.show_builtin("agent", window, cx);
+        let Some(runtime) = self.builtins.runtime.clone() else {
+            return;
+        };
+        // The panel's backing opens with its window: wait for it off the
+        // main thread, then start the thread there too (it saves).
+        let started = cx.background_executor().spawn(async move {
+            let mut result = runtime.bring_workspace();
+            for _ in 0..50 {
+                if result.is_ok() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                result = runtime.bring_workspace();
+            }
+            result
+        });
+        cx.spawn(async move |this, cx| {
+            let result = started.await;
+            let _ = this.update(cx, |v, cx| {
+                v.message = match result {
+                    Ok(true) => "Bringing your After Effects workspace".into(),
+                    Ok(false) => {
+                        "Connect an agent, then send the request in the Agent panel".into()
+                    }
+                    Err(_) => "Could not start the workspace transfer. Try again.".into(),
+                };
+                v.drain_builtins(cx);
+                cx.notify();
+            });
+        })
+        .detach();
     }
     pub fn show_builtin(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.start_builtins(cx);
