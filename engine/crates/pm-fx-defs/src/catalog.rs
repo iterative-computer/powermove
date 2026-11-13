@@ -306,7 +306,7 @@ fn add_unclipped_revisions(main: &mut MainEffects) {
 
 /// The Apply Color LUT program, including its stated input and output spaces.
 const LUT_SOURCE: &str = include_str!("apply-color-lut.glsl");
-const LUT_SPACES: [&str; 9] = [
+const LUT_SPACES: [&str; 15] = [
     "Project Display (Rec.709)",
     "Rec.709 Linear",
     "Apple Log (Rec.2020)",
@@ -316,6 +316,12 @@ const LUT_SPACES: [&str; 9] = [
     "LogC3 (AWG3)",
     "LogC4 (AWG4)",
     "PQ (Rec.2020)",
+    "HLG (Rec.2020)",
+    "ACEScct (AP1)",
+    "RED Log3G10 (REDWideGamutRGB)",
+    "Blackmagic Film Gen 5 (Wide Gamut Gen 5)",
+    "F-Log (F-Gamut)",
+    "N-Log (N-Gamut)",
 ];
 
 /// Revision 2 of Apply Color LUT, added here and not in main: tetrahedral
