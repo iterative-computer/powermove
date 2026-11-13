@@ -3208,6 +3208,96 @@ fn a_save_finished_after_its_folder_failed_to_sync_is_proven_off_the_kernel_thre
     assert_eq!(*read.lock().unwrap(), Vec::<std::path::PathBuf>::new());
     actor.shutdown();
 }
+/// Every file under `dir`, at any depth.
+fn files_under(dir: &Path) -> Vec<std::path::PathBuf> {
+    let mut found = Vec::new();
+    for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            found.extend(files_under(&path));
+        } else {
+            found.push(path);
+        }
+    }
+    found
+}
+/// A save whose folder did not sync leaves a ticket, and the next save
+/// first proves the file is still that save's. If another project replaces
+/// the file right after that proof, the ticket is not adopted on the proof
+/// of the file that was there: the work is still unsaved, and its journal
+/// is still there after Close, whether Close saves it or is refused.
+#[test]
+fn a_file_replaced_right_after_a_save_was_proven_is_never_adopted_as_that_save() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let dir = common::TempDir::new("finalize-replaced");
+    fs::create_dir_all(dir.path("job")).unwrap();
+    let file = dir.path("job/cut.pmv");
+    fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+    let native = dir.path("native");
+    // Once armed, the save's second folder sync (its last) fails.
+    let syncs = std::sync::Arc::new(std::sync::atomic::AtomicIsize::new(-1));
+    let counted = syncs.clone();
+    let swap = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let swapping = swap.clone();
+    let other = fs::read(common::ts_fixture("save-as.pmv")).unwrap();
+    let actor = actor_with_hooks(
+        &native,
+        pm_kernel::project_io::PublishHooks {
+            folder_sync: Some(std::sync::Arc::new(move || {
+                let n = counted.load(SeqCst);
+                if n >= 0 {
+                    counted.store(if n == 1 { -1 } else { n + 1 }, SeqCst);
+                }
+                if n == 1 {
+                    (Some(5), None)
+                } else {
+                    (None, None)
+                }
+            })),
+            after_proof: Some(std::sync::Arc::new(move |path: &Path| {
+                if swapping.swap(false, SeqCst) {
+                    land(path, &other);
+                }
+            })),
+            ..Default::default()
+        },
+    );
+    let k = actor.handle();
+    let session = open_on(&k, "P", &file);
+    rename_on(&k, "P", "One").wait().unwrap().unwrap();
+    let save = k
+        .prepare_save(session.clone(), None)
+        .wait()
+        .unwrap()
+        .unwrap();
+    syncs.store(0, SeqCst);
+    let failed = k
+        .finish_save(save.run())
+        .wait()
+        .unwrap()
+        .expect_err("the folder did not sync");
+    assert!(failed.to_string().contains("finalization"), "{failed}");
+    assert!(k.published("P").unwrap().dirty, "not saved yet");
+    swap.store(true, SeqCst);
+    let retried = match k.prepare_save(session.clone(), None).wait().unwrap() {
+        Ok(save) => k.finish_save(save.run()).wait().unwrap().map(|_| ()),
+        Err(e) => Err(e),
+    };
+    assert!(!swap.load(SeqCst), "the file was replaced after the proof");
+    assert!(retried.is_err(), "the replaced file is not saved over");
+    assert!(
+        k.published("P").unwrap().dirty,
+        "the work is still unsaved: {retried:?}"
+    );
+    let journals = native.join("journals");
+    assert!(!files_under(&journals).is_empty(), "journalled");
+    let _ = k.shell(ShellCall::Close(session)).wait();
+    assert!(
+        !files_under(&journals).is_empty(),
+        "the work's journal is still there after Close"
+    );
+    actor.shutdown();
+}
 /// When the system refuses the thread a project's open, save or recovery
 /// choice needs (it has run out of them), the call is answered at once
 /// with a plain failure and nothing stays reserved: once threads can be

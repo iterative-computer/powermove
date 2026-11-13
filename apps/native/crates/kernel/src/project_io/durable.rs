@@ -871,6 +871,9 @@ pub struct PublishHooks {
     /// Called with a public name right after the file under it was moved
     /// to a private name of the save's record, before that file is judged.
     pub after_withdrawn: Option<PublishHook>,
+    /// Called with a file's path right after a worker proved it is still
+    /// the version a save left there, before the kernel is given that proof.
+    pub after_proof: Option<PublishHook>,
     /// While it answers true for a step's name, that step's line cannot be
     /// written to the save's record (a full or failing disk).
     pub record_fails: Option<StepFails>,

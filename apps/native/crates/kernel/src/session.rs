@@ -516,9 +516,10 @@ pub struct SavePrelude {
     settled: project_io::Settled,
     /// The folder of the save that could not sync it, and how it went now.
     synced: Option<(PathBuf, Result<(), String>)>,
-    /// Whether the file of that save is still its version, and the file's
-    /// stat right after that was proven.
-    ticket: Option<(bool, Option<project_io::FileStat>)>,
+    /// Whether the file of that save was proven to be still its version:
+    /// the stat that proof covers (the same before and after it), or
+    /// `None` when it was not proven.
+    ticket: Option<Option<project_io::FileStat>>,
 }
 impl SaveJob {
     pub fn project(&self) -> &str {
@@ -535,12 +536,16 @@ impl SaveJob {
             Some(path) => project_io::settle(path, &self.host.host()),
             None => project_io::Settled::default(),
         };
+        // The proof covers the file only if the name led to the same file,
+        // unchanged, before and after it: that stat goes with the proof.
         let ticket = self.ticket.map(|version| {
+            let before = project_io::lstat_file(&version.path).ok().flatten();
             let unchanged = version.is_unchanged().unwrap_or(false);
-            (
-                unchanged,
-                project_io::lstat_file(&version.path).ok().flatten(),
-            )
+            if let Some(hook) = &self.host.hooks.after_proof {
+                hook(&version.path);
+            }
+            let after = project_io::lstat_file(&version.path).ok().flatten();
+            after.filter(|after| unchanged && before.as_ref() == Some(after))
         });
         // Proven once per state of the file: the kernel's own look at it
         // then finds the proof and reads nothing.
@@ -3187,20 +3192,25 @@ impl Kernel {
             path,
             lock,
         } = ticket;
-        // Proven by the worker that ran this save's disk work, where the
-        // file has not moved since; else (a direct caller) here. A file that
-        // moved between the two is not adopted: the save finds it changed.
+        // Proven by the worker that ran this save's disk work, only if the
+        // name still leads to exactly the file that proof covered; else (a
+        // direct caller) here. Anything else is not adopted: the work stays
+        // unsaved, with its journal, and the save finds the file changed.
         let proven = self
             .save_prelude
             .as_mut()
             .filter(|pre| pre.project == id)
             .and_then(|pre| pre.ticket.take());
         let unchanged = match proven {
-            Some((unchanged, seen)) => {
-                unchanged
-                    && seen.is_some()
-                    && project_io::lstat_file(&receipt.version.path).ok().flatten() == seen
+            Some(Some(covered)) => {
+                covered.same_identity(&receipt.version.stat)
+                    && project_io::lstat_file(&receipt.version.path)
+                        .ok()
+                        .flatten()
+                        .as_ref()
+                        == Some(&covered)
             }
+            Some(None) => false,
             None => receipt.version.is_unchanged().unwrap_or(false),
         };
         if !unchanged {
@@ -3371,8 +3381,8 @@ impl Kernel {
         let meta = w.store().read(&format!("projectMeta.{id}")).ok()??;
         let path = PathBuf::from(meta.get("file")?.get("path")?.as_str()?);
         let backing = w.store().dir().parent()?.join("recovery-files");
-        let has_body = path.starts_with(backing)
-            && w.store().read(&format!("project.{id}")).ok()?.is_some();
+        let has_body =
+            path.starts_with(backing) && w.store().read(&format!("project.{id}")).ok()?.is_some();
         (!has_body).then_some(path)
     }
     /// A closed file entry as a library project, read from its file.
