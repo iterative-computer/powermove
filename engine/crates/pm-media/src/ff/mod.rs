@@ -438,6 +438,21 @@ pub struct CodecInfo {
     pub sample_aspect: (i32, i32),
 }
 
+impl CodecInfo {
+    /// The samples are R′G′B′ (or palette or XYZ colour), not Y′CbCr: the
+    /// file has no matrix or range of its own to read them with.
+    pub fn is_rgb(&self) -> bool {
+        let p = self.pix_fmt.as_str();
+        // H.273 matrix code 0: identity (GBR).
+        self.color_space == 0
+            || p.contains("rgb")
+            || p.contains("bgr")
+            || p.starts_with("gbr")
+            || p.starts_with("pal")
+            || p.starts_with("xyz")
+    }
+}
+
 impl Input {
     pub fn codec_info(&self, i: usize) -> CodecInfo {
         unsafe {

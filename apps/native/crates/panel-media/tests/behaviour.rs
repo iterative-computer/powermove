@@ -1200,6 +1200,7 @@ fn import_is_batch_atomic_and_undoable() {
             }],
             Some("f1".into()),
             None,
+            &[],
         )
         .unwrap();
     applied(&h, &edit);
@@ -1208,6 +1209,77 @@ fn import_is_batch_atomic_and_undoable() {
     assert!(!current(&h).assets.contains_key("imported"));
     history(&h, HistoryCall::Redo);
     assert!(current(&h).assets.contains_key("imported"));
+}
+#[test]
+fn an_import_makes_its_folders_inside_the_destination_in_one_undo_step() {
+    let (_a, h, c) = actor();
+    let item = |id: &str, folder: Option<&str>| StoredAsset {
+        id: id.into(),
+        metadata: parse(&match folder {
+            Some(folder) => format!(r#"{{"name":"{id}.png","kind":"image","folder":"{folder}"}}"#),
+            None => format!(r#"{{"name":"{id}.png","kind":"image"}}"#),
+        })
+        .unwrap(),
+        original_version: "fixture-original-v1".into(),
+    };
+    let folder = |id: &str, name: &str, parent: Option<&str>| NewFolder {
+        id: id.into(),
+        name: name.into(),
+        parent: parent.map(str::to_owned),
+    };
+    let before = current(&h).folders.len();
+    let edit = c
+        .prepare_import(
+            &c.stamp,
+            vec![
+                item("top", Some("n1")),
+                item("deep", Some("n2")),
+                item("loose", None),
+            ],
+            Some("f1".into()),
+            None,
+            &[
+                folder("n1", "Shots", None),
+                folder("n2", "Plates", Some("n1")),
+            ],
+        )
+        .unwrap();
+    applied(&h, &edit);
+    let now = current(&h);
+    assert_eq!(now.folders["n1"].name, "Shots");
+    assert_eq!(now.folders["n1"].parent.as_deref(), Some("f1"));
+    assert_eq!(now.folders["n2"].parent.as_deref(), Some("n1"));
+    assert_eq!(now.assets["top"].folder.as_deref(), Some("n1"));
+    assert_eq!(now.assets["deep"].folder.as_deref(), Some("n2"));
+    assert_eq!(now.assets["loose"].folder.as_deref(), Some("f1"));
+    // A second folder of the same name beside the first is numbered.
+    let again = now
+        .prepare_import(
+            &now.stamp,
+            vec![item("more", Some("n3"))],
+            Some("f1".into()),
+            None,
+            &[folder("n3", "Shots", None)],
+        )
+        .unwrap();
+    applied(&h, &again);
+    assert_eq!(current(&h).folders["n3"].name, "Shots 2");
+    history(&h, HistoryCall::Undo);
+    history(&h, HistoryCall::Undo);
+    assert_eq!(current(&h).folders.len(), before);
+    assert!(!current(&h).assets.contains_key("top"));
+    // A child whose parent is not made first, or a relink, takes no folders.
+    assert_eq!(
+        c.prepare_import(
+            &c.stamp,
+            vec![item("x", None)],
+            None,
+            None,
+            &[folder("n2", "Plates", Some("n1"))],
+        )
+        .unwrap_err(),
+        Error::InvalidTarget
+    );
 }
 #[test]
 fn relink_keeps_id_unknown_data_and_authored_layer_timing() {
@@ -1225,6 +1297,7 @@ fn relink_keeps_id_unknown_data_and_authored_layer_timing() {
             }],
             None,
             Some("a".into()),
+            &[],
         )
         .unwrap(),
     );
@@ -1253,7 +1326,8 @@ fn import_rejects_stale_owner_missing_version_and_duplicate_ids() {
     let mut owner = c.stamp.clone();
     owner.document += 1;
     assert_eq!(
-        c.prepare_import(&owner, vec![], None, None).unwrap_err(),
+        c.prepare_import(&owner, vec![], None, None, &[])
+            .unwrap_err(),
         Error::Stale
     );
     let item = StoredAsset {
@@ -1262,7 +1336,7 @@ fn import_rejects_stale_owner_missing_version_and_duplicate_ids() {
         original_version: "".into(),
     };
     assert_eq!(
-        c.prepare_import(&c.stamp, vec![item.clone()], None, None)
+        c.prepare_import(&c.stamp, vec![item.clone()], None, None, &[])
             .unwrap_err(),
         Error::InvalidMedia
     );
@@ -1271,7 +1345,7 @@ fn import_rejects_stale_owner_missing_version_and_duplicate_ids() {
         ..item
     };
     assert_eq!(
-        c.prepare_import(&c.stamp, vec![item.clone(), item], None, None)
+        c.prepare_import(&c.stamp, vec![item.clone(), item], None, None, &[])
             .unwrap_err(),
         Error::InvalidMedia
     );
@@ -1676,6 +1750,7 @@ fn relink_cannot_move_media_to_import_worker_folder() {
             }],
             None,
             Some("e".into()),
+            &[],
         )
         .unwrap();
     applied(&h, &edit);

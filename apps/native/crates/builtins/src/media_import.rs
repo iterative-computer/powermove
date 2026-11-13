@@ -124,6 +124,60 @@ pub fn expand(paths: Vec<PathBuf>) -> Vec<PathBuf> {
     out
 }
 
+/// File ▸ Import Folder…: each chosen folder becomes a Project folder with
+/// its subfolders, in name order. A folder with no media anywhere inside is
+/// left out. Answers the folders (parents first) and every media file with
+/// the folder it goes in; a loose file goes to the destination.
+pub fn folder_tree(
+    paths: Vec<PathBuf>,
+) -> (
+    Vec<pm_panel_media::NewFolder>,
+    Vec<(PathBuf, Option<String>)>,
+) {
+    fn walk(
+        paths: Vec<PathBuf>,
+        parent: Option<&str>,
+        folders: &mut Vec<pm_panel_media::NewFolder>,
+        files: &mut Vec<(PathBuf, Option<String>)>,
+    ) {
+        for path in paths {
+            if !path.is_dir() {
+                files.push((path, parent.map(str::to_owned)));
+                continue;
+            }
+            let mut entries: Vec<_> = std::fs::read_dir(&path)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|p| {
+                    !p.file_name()
+                        .is_some_and(|n| n.to_string_lossy().starts_with('.'))
+                        && (p.is_dir() || kind(p).is_some())
+                })
+                .collect();
+            // A folder's own files come before its subfolders, each by name.
+            entries.sort_by_key(|p| (p.is_dir(), p.clone()));
+            let (at, had) = (folders.len(), files.len());
+            let id = pm_kernel::new_id("f");
+            folders.push(pm_panel_media::NewFolder {
+                id: id.clone(),
+                name: path
+                    .file_name()
+                    .map_or_else(String::new, |n| n.to_string_lossy().into_owned()),
+                parent: parent.map(str::to_owned),
+            });
+            walk(entries, Some(&id), folders, files);
+            if files.len() == had {
+                folders.truncate(at);
+            }
+        }
+    }
+    let (mut folders, mut files) = (vec![], vec![]);
+    walk(paths, None, &mut folders, &mut files);
+    (folders, files)
+}
+
 /// `assetIdentity`: what the Project panel and layers read from an asset,
 /// and the file's audio streams. Lengths are measured as an asset with
 /// `timing` reads the file.
@@ -224,6 +278,8 @@ pub struct ImportRequest {
     pub staged: Option<tempfile::TempDir>,
     /// What the status bar says once it lands, instead of the summary.
     pub note: Option<String>,
+    /// Import Folder: chosen folders stay folders in the Project panel.
+    pub keep_folders: bool,
 }
 /// Figma's image fallback: the layer is named for the selection and fitted
 /// into the selection's size, keeping the image's aspect.
@@ -392,8 +448,22 @@ impl Builtins {
             },
             None => None,
         };
+        let (mut folders, mut folder_of) = (vec![], std::collections::HashMap::new());
         let paths = match &encoded {
             Some(encoded) => vec![encoded.path.clone()],
+            None if request.keep_folders && request.replace.is_none() => {
+                let (made, files) = folder_tree(request.paths);
+                folders = made;
+                files
+                    .into_iter()
+                    .map(|(path, folder)| {
+                        if let Some(folder) = folder {
+                            folder_of.insert(path.clone(), folder);
+                        }
+                        path
+                    })
+                    .collect()
+            }
             None => expand(request.paths),
         };
         // A relink retains the old bytes and reads which of the old file's
@@ -460,11 +530,16 @@ impl Builtins {
                 if let Some(definition) = &request.layer_definition {
                     asset["layerDefinition"] = json!(definition);
                 }
+                if let Some(folder) = folder_of.get(&path) {
+                    asset["folder"] = json!(folder);
+                }
+                // Generated in scratch: no source file to relink to.
+                if (encoded.is_some() || request.staged.is_some())
+                    && let Some(asset) = asset.as_object_mut()
+                {
+                    asset.remove("sourcePath");
+                }
                 if let Some(encoded) = &encoded {
-                    // Generated in scratch: no source file to relink to.
-                    if let Some(asset) = asset.as_object_mut() {
-                        asset.remove("sourcePath");
-                    }
                     asset["fps"] = json!(encoded.fps);
                     asset["imageSequence"] = json!({"fps": encoded.fps, "frames": encoded.frames});
                 }
@@ -498,6 +573,23 @@ impl Builtins {
         if items.is_empty() {
             return Ok(outcome);
         }
+        // A folder whose every file was refused is not made.
+        let mut used: std::collections::HashSet<String> = items
+            .iter()
+            .filter_map(|item| Some(item.metadata.get("folder")?.as_str()?.to_owned()))
+            .collect();
+        for folder in folders.iter().rev() {
+            if used.contains(&folder.id)
+                && let Some(parent) = &folder.parent
+            {
+                used.insert(parent.clone());
+            }
+        }
+        folders.retain(|folder| used.contains(&folder.id));
+        let into = pm_panel_media::Destination {
+            folder: request.folder.clone(),
+            new_folders: folders,
+        };
         let names: Vec<String> = items
             .iter()
             .filter_map(|item| Some(item.metadata.get("name")?.as_str()?.to_owned()))
@@ -526,7 +618,7 @@ impl Builtins {
                 .admit_media(
                     &stamp,
                     items.clone(),
-                    request.folder.clone(),
+                    &into,
                     request.replace.clone(),
                     place,
                     Caller::native(),
@@ -1506,5 +1598,63 @@ mod tests {
             .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
         assert_eq!(names, ["a.png", "b.mov", "c.wav"]);
+    }
+
+    #[test]
+    fn import_folder_keeps_folders_that_hold_media_and_says_where_each_file_goes() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for folder in ["shots/inner", "shots/notes", "shots/deep/plates"] {
+            std::fs::create_dir_all(root.join(folder)).unwrap();
+        }
+        for name in [
+            "loose.png",
+            "shots/b.mov",
+            "shots/a.png",
+            "shots/.hidden.png",
+            "shots/inner/c.wav",
+            "shots/notes/read.txt",
+            "shots/deep/plates/d.png",
+        ] {
+            std::fs::write(root.join(name), b"x").unwrap();
+        }
+        let (folders, files) = folder_tree(vec![root.join("shots"), root.join("loose.png")]);
+        let name = |id: &Option<String>| {
+            id.as_ref()
+                .map(|id| folders.iter().find(|f| f.id == *id).unwrap().name.clone())
+        };
+        // Parents come first; the folder of text notes holds no media.
+        let made: Vec<_> = folders
+            .iter()
+            .map(|f| (f.name.clone(), name(&f.parent)))
+            .collect();
+        assert_eq!(
+            made,
+            [
+                ("shots".to_owned(), None),
+                ("deep".to_owned(), Some("shots".to_owned())),
+                ("plates".to_owned(), Some("deep".to_owned())),
+                ("inner".to_owned(), Some("shots".to_owned())),
+            ]
+        );
+        let placed: Vec<_> = files
+            .iter()
+            .map(|(p, folder)| {
+                (
+                    p.file_name().unwrap().to_string_lossy().into_owned(),
+                    name(folder),
+                )
+            })
+            .collect();
+        assert_eq!(
+            placed,
+            [
+                ("a.png".to_owned(), Some("shots".to_owned())),
+                ("b.mov".to_owned(), Some("shots".to_owned())),
+                ("d.png".to_owned(), Some("plates".to_owned())),
+                ("c.wav".to_owned(), Some("inner".to_owned())),
+                ("loose.png".to_owned(), None),
+            ]
+        );
     }
 }

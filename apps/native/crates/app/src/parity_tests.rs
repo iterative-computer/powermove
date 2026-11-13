@@ -1081,3 +1081,185 @@ fn align_and_distribute_run_on_the_selection_as_one_undo_step() {
     desk.undo();
     assert_eq!(desk.document(), before);
 }
+
+#[test]
+fn import_folder_is_live_in_the_file_menu_and_keeps_the_folders_as_media_folders() {
+    // File ▸ Import Folder… is a live row whenever a project is open.
+    let (_, file) = pm_shell::menu::menus()
+        .into_iter()
+        .find(|(menu, _)| *menu == "File")
+        .unwrap();
+    assert!(
+        file.iter()
+            .any(|i| i.command == "importFolder" && i.label == "Import Folder…")
+    );
+    let desk = Desk::new(project(vec![shape("a")]));
+    let off = |published: Option<&Published>| {
+        crate::layer_commands::disabled(published, &[], &Default::default())
+    };
+    assert!(!off(Some(&desk.published())).contains("importFolder"));
+    assert!(off(None).contains("importFolder"));
+
+    // What the folder sheet hands the importer: one folder with media, a
+    // subfolder with media and a subfolder with none.
+    let source = tempfile::tempdir().unwrap();
+    let shots = source.path().join("Shots");
+    std::fs::create_dir_all(shots.join("Plates")).unwrap();
+    std::fs::create_dir_all(shots.join("Notes")).unwrap();
+    let still = crate::mcp_services::png(&[200, 40, 40, 255], 1, 1).unwrap();
+    std::fs::write(shots.join("wide.png"), &still).unwrap();
+    std::fs::write(shots.join("Plates/close.png"), &still).unwrap();
+    std::fs::write(shots.join("Notes/read.txt"), b"not media").unwrap();
+    // The project without the kernel's record of retained bytes, which an
+    // undone import keeps so that Redo still has its files.
+    let authored = |desk: &Desk| {
+        let mut document = desk.document();
+        document
+            .as_object_mut()
+            .unwrap()
+            .remove("nativeMediaVersions");
+        document
+    };
+    let before = authored(&desk);
+    let panels = pm_builtins::Builtins::new(desk.kernel(), &desk.session.project, || {}).unwrap();
+    let outcome = panels
+        .import_media(
+            desk.published().snapshot.doc_id,
+            desk.dir.path(),
+            pm_builtins::media_import::ImportRequest {
+                paths: vec![shots],
+                keep_folders: true,
+                ..Default::default()
+            },
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+        .unwrap();
+    assert_eq!(outcome.imported, ["wide.png", "close.png"]);
+    let read = |published: &Published| {
+        let root = published.snapshot.root().unwrap().to_value();
+        let named = |map: &str, name: &str| {
+            root.get(map)
+                .and_then(Value::as_object)
+                .and_then(|m| {
+                    m.iter()
+                        .map(|(_, v)| v)
+                        .find(|v| v.get("name").and_then(Value::as_str) == Some(name))
+                })
+                .cloned()
+        };
+        let text = |v: &Value, key: &str| v.get(key).and_then(Value::as_str).map(str::to_owned);
+        let shots = named("assetFolders", "Shots").expect("the chosen folder is a media folder");
+        let plates = named("assetFolders", "Plates").expect("its subfolder is one too");
+        assert!(
+            named("assetFolders", "Notes").is_none(),
+            "no media, no folder"
+        );
+        assert_eq!(text(&shots, "parent"), None);
+        assert_eq!(text(&plates, "parent"), text(&shots, "id"));
+        let wide = named("assets", "wide.png").unwrap();
+        let close = named("assets", "close.png").unwrap();
+        assert_eq!(text(&wide, "folder"), text(&shots, "id"));
+        assert_eq!(text(&close, "folder"), text(&plates, "id"));
+    };
+    read(&desk.published());
+    // Media lands in the Project panel only: no layer per file.
+    assert_eq!(desk.layers().len(), 1);
+    read(&desk.reopened().published);
+    // One undo step for the folders and their media.
+    desk.undo();
+    assert_eq!(authored(&desk), before);
+    desk.redo();
+    read(&desk.published());
+}
+
+#[test]
+fn pasting_a_copied_picture_or_file_makes_a_layer_at_the_playhead_stored_with_the_project() {
+    // Command-V reaches Paste, which asks the pasteboard for media before
+    // the app's own clipboard (`Controller::paste_clipboard`).
+    let (command, args) = crate::layer_commands::commands_tests::dispatch("cmd+v");
+    assert_eq!(route(&command, &args), Some(Route::Paste));
+    let desk = Desk::new(project(vec![shape("a")]));
+    let authored = |desk: &Desk| {
+        let mut document = desk.document();
+        document
+            .as_object_mut()
+            .unwrap()
+            .remove("nativeMediaVersions");
+        document
+    };
+    let before = authored(&desk);
+    let panels = pm_builtins::Builtins::new(desk.kernel(), &desk.session.project, || {}).unwrap();
+    let import = |request: pm_builtins::media_import::ImportRequest| {
+        panels
+            .import_media(
+                desk.published().snapshot.doc_id,
+                desk.dir.path(),
+                request,
+                &std::sync::atomic::AtomicBool::new(false),
+            )
+            .unwrap()
+    };
+    // A screenshot on the pasteboard: staged as a PNG, imported at 2 s.
+    let picture = crate::mcp_services::png(&[9; 4 * 32 * 18], 32, 18).unwrap();
+    let (dir, path) = crate::media_import::stage_pasted_image(picture, true).unwrap();
+    let outcome = import(pm_builtins::media_import::ImportRequest {
+        paths: vec![path],
+        place_at: Some(2.),
+        staged: Some(dir),
+        ..Default::default()
+    });
+    assert_eq!(outcome.imported, ["Pasted Image.png"]);
+    let read = |published: &Published, id: &str, asset_name: &str| {
+        let layer = layer_of(published, id);
+        let text = |v: &Value, key: &str| v.get(key).and_then(Value::as_str).map(str::to_owned);
+        assert_eq!(text(&layer, "type").as_deref(), Some("image"));
+        assert_eq!(layer.get("from").and_then(Value::as_f64), Some(2.));
+        let asset = text(layer.get("d").unwrap(), "asset").unwrap();
+        let root = published.snapshot.root().unwrap().to_value();
+        let record = root.get("assets").and_then(|a| a.get(&asset)).unwrap();
+        assert_eq!(text(record, "name").as_deref(), Some(asset_name));
+        // The bytes are kept by the project, as an import keeps them.
+        assert!(
+            published.media.get(&asset).is_some(),
+            "{asset} has its bytes"
+        );
+        text(record, "sourcePath")
+    };
+    let pasted = desk.selected().pop().expect("the pasted layer is selected");
+    // It came from the pasteboard: there is no file on disk to relink to.
+    assert_eq!(read(&desk.published(), &pasted, "Pasted Image.png"), None);
+    assert_eq!(desk.layers().len(), 2);
+    read(&desk.reopened().published, &pasted, "Pasted Image.png");
+    // One undo step removes the layer and its media; redo brings both back.
+    desk.undo();
+    assert_eq!(authored(&desk), before);
+    desk.redo();
+    read(&desk.published(), &pasted, "Pasted Image.png");
+
+    // A file copied in Finder: the same, from the file where it lies.
+    let source = tempfile::tempdir().unwrap();
+    let still = source.path().join("Plate.png");
+    std::fs::write(
+        &still,
+        crate::mcp_services::png(&[200, 40, 40, 255], 1, 1).unwrap(),
+    )
+    .unwrap();
+    let notes = source.path().join("notes.txt");
+    std::fs::write(&notes, b"words").unwrap();
+    assert!(crate::media_import::pasted_files_hold_media(&[
+        notes.clone(),
+        still.clone()
+    ]));
+    // Copied files with no media among them are left to the app's own paste.
+    assert!(!crate::media_import::pasted_files_hold_media(&[notes]));
+    import(pm_builtins::media_import::ImportRequest {
+        paths: vec![still.clone()],
+        place_at: Some(2.),
+        ..Default::default()
+    });
+    let pasted = desk.selected().pop().unwrap();
+    assert_eq!(
+        read(&desk.published(), &pasted, "Plate.png").as_deref(),
+        Some(&*still.to_string_lossy())
+    );
+}

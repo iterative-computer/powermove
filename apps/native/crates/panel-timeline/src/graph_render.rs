@@ -63,36 +63,7 @@ pub fn sample(
 ) -> Option<Graph> {
     const SAMPLES: usize = 24;
     let index = &model.index;
-    let mut candidates: Vec<(String, String)> = vec![];
-    for row in model.rows() {
-        if let crate::RowId::Property { layer_id, channel } = &row.id {
-            candidates.push((layer_id.clone(), channel.clone()));
-        }
-    }
-    // A focused or selected curve plots even while its row is collapsed.
-    candidates.extend(model.graph_focus.clone());
-    for id in model.selection.layers() {
-        if let Some(layer) = index.layer(id) {
-            candidates.extend(
-                layer
-                    .channels
-                    .iter()
-                    .filter(|c| !c.keys.is_empty())
-                    .map(|c| (id.clone(), c.path.clone())),
-            );
-        }
-    }
-    let focus = model
-        .graph_focus
-        .as_ref()
-        .map(|(l, c)| (l.as_str(), c.as_str()));
-    let (layer_id, path) = crate::graph_target(
-        &candidates,
-        focus,
-        model.selection.layers(),
-        model.selection.channel(),
-    )?
-    .clone();
+    let (layer_id, path) = model.graph_property()?;
     let layer = index.layer(&layer_id)?;
     let speed = model.graph_mode == crate::GraphMode::Speed;
     let mut curves = vec![];
@@ -197,6 +168,82 @@ pub fn sample(
     }
     if curves.is_empty() {
         return None;
+    }
+    // Merge Selected Curves: two axes of one motion read as one curve, the
+    // length of the vector they make together (their combined speed in the
+    // Speed Graph). It is a view of the same keys, so it shows no key
+    // points or handles of its own.
+    if model.graph_merge && curves.len() > 1 {
+        let length = |points: &[Point]| Point {
+            seconds: points[0].seconds,
+            value: points.iter().map(|p| p.value * p.value).sum::<f64>().sqrt(),
+        };
+        // Every curve was sampled between the same key times only when its
+        // keys agree; sample each span of the union of key times instead.
+        let mut times: Vec<f64> = curves
+            .iter()
+            .flat_map(|c| c.points.iter().map(|p| p.point.seconds))
+            .collect();
+        times.sort_by(f64::total_cmp);
+        times.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+        let channels: Vec<String> = model
+            .track_channels(&layer_id, &path)
+            .into_iter()
+            .filter(|c| !c.keys.is_empty())
+            .map(|c| c.path.clone())
+            .collect();
+        let mut at = |seconds: f64, side: i8, reach: f64| -> Option<Point> {
+            let mut points = vec![];
+            for channel in &channels {
+                let value = if speed {
+                    let h = reach.clamp(1e-6, 1e-3);
+                    let (a, b) = match side {
+                        -1 => (seconds - h, seconds),
+                        1 => (seconds, seconds + h),
+                        _ => (seconds - h / 2., seconds + h / 2.),
+                    };
+                    (value(&layer_id, channel, b)? - value(&layer_id, channel, a)?) / (b - a)
+                } else {
+                    value(&layer_id, channel, seconds)?
+                };
+                points.push(Point { seconds, value });
+            }
+            Some(length(&points)).filter(|p| p.value.is_finite())
+        };
+        let mut segments = vec![];
+        range = (f64::INFINITY, f64::NEG_INFINITY);
+        for pair in times.windows(2) {
+            let (from, to) = (pair[0], pair[1]);
+            let reach = (to - from) / SAMPLES as f64 / 4.;
+            let mut previous = None;
+            for step in 0..=SAMPLES {
+                let seconds = from + (to - from) * step as f64 / SAMPLES as f64;
+                let side = match step {
+                    0 => 1,
+                    SAMPLES => -1,
+                    _ => 0,
+                };
+                let point = at(seconds, side, reach)?;
+                range = (range.0.min(point.value), range.1.max(point.value));
+                if let Some(previous) = previous {
+                    segments.push(Segment {
+                        from: previous,
+                        to: point,
+                        controls: None,
+                    });
+                }
+                previous = Some(point);
+            }
+        }
+        if !segments.is_empty() {
+            curves = vec![Curve {
+                id: format!("{layer_id}:{path}"),
+                name: crate::property_label(&path),
+                focused: true,
+                segments,
+                points: vec![],
+            }];
+        }
     }
     let margin = ((range.1 - range.0) * 0.1).max(1.);
     Graph::new(curves, range.0 - margin, range.1 + margin).ok()

@@ -81,6 +81,8 @@ export interface LayerRow extends RowBase {
   expanded: boolean;
   visible: boolean;
   solo: boolean;
+  /** Shy: no row while Hide Shy Layers is on. */
+  shy?: boolean;
   transformable: boolean;
   parent: { name: string; set: boolean };
   nameEditor?: TextLease;
@@ -118,6 +120,9 @@ export interface TimelineFrame {
   view: View;
   playing: boolean;
   snapping: boolean;
+  /** Hide Shy Layers is on; `shyLayers`: the composition has a shy layer. */
+  hideShy?: boolean;
+  shyLayers?: boolean;
   timecode: string;
   spokenTime: string;
   frameRate: string;
@@ -141,6 +146,7 @@ export type Intent =
   | { type: "mode"; mode: Mode }
   | { type: "view"; view: View }
   | { type: "snap" }
+  | { type: "hideShy" }
   | { type: "graphOptions" }
   | { type: "timeEdit" }
   | { type: "tab"; id: string; close: boolean }
@@ -152,7 +158,7 @@ export type Intent =
   | {
       type: "switch";
       id: string;
-      name: "visibility" | "lock" | "solo" | "parent" | "mute";
+      name: "visibility" | "lock" | "solo" | "shy" | "parent" | "mute";
     }
   | { type: "keyToggle"; layer: string; path: string }
   | {

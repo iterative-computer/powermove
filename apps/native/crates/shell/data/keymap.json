@@ -2342,5 +2342,15 @@
     "in_fields": false,
     "repeat": false,
     "loose": false
+  },
+  {
+    "id": "native.projectSettings",
+    "chord": "cmd+shift+,",
+    "command": "projectSettings",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
   }
 ]
