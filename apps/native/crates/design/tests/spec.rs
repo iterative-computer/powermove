@@ -191,6 +191,8 @@ const ROLES: &[(&str, &str)] = &[
     ("metrics.property_row", "Timeline property sub-row"),
     ("metrics.ruler", "Timeline ruler height"),
     ("metrics.viewer_ruler", "The viewer's ruler bands"),
+    ("metrics.grade_wheel", "A colour wheel's diameter"),
+    ("metrics.curve_editor", "The curve editor's graph height"),
     ("metrics.layer_column", "Timeline layer list column width"),
     ("metrics.clip_radius", "Timeline clip bar corner radius"),
     ("metrics.playhead", "Playhead line width"),

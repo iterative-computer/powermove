@@ -1123,8 +1123,21 @@ impl Backend {
             plan.settings.as_ref(),
             pm_panel_studio3d::properties::export_quality(&wire(&comp.to_value()), choice),
         ) {
-            let (w, h, frames) = (settings.size.width, settings.size.height, plan.frames.max(1));
-            let render_scale=if options.opaque.get("studioReducedSize").and_then(Value::as_bool)==Some(true){0.75}else{1.};
+            let (w, h, frames) = (
+                settings.size.width,
+                settings.size.height,
+                plan.frames.max(1),
+            );
+            let render_scale = if options
+                .opaque
+                .get("studioReducedSize")
+                .and_then(Value::as_bool)
+                == Some(true)
+            {
+                0.75
+            } else {
+                1.
+            };
             let key = format!("{w}x{h}x{frames}@{}:{render_scale}", p.revision());
             let status = self.native.facts["studioExportEstimate"]["status"]
                 .as_str()
@@ -1174,7 +1187,9 @@ impl Backend {
             }
             // The estimate on its own, for the sheet's Render Time row: the
             // measured range, "measuring…", or the static guess.
-            let summary = self.native.export["project"]["summary"].as_str().unwrap_or("");
+            let summary = self.native.export["project"]["summary"]
+                .as_str()
+                .unwrap_or("");
             if let Some((_, time)) = summary
                 .split(" · 3D ")
                 .nth(1)
@@ -1183,8 +1198,13 @@ impl Backend {
                 let measuring = time.ends_with("measuring…");
                 let measured = !measuring && from_viewer;
                 self.native.export["project"]["studio"]["estimate"] = json!(time);
-                self.native.export["project"]["studio"]["state"] =
-                    json!(if measuring { "measuring" } else if measured { "measured" } else { "guess" });
+                self.native.export["project"]["studio"]["state"] = json!(if measuring {
+                    "measuring"
+                } else if measured {
+                    "measured"
+                } else {
+                    "guess"
+                });
                 self.native.export["project"]["studio"]["preset"] = json!(preset);
             }
         }
@@ -1314,7 +1334,7 @@ impl Backend {
                 // Effect Controls and the Color panel write effect parameters.
                 if matches!(self.panel_id.as_str(), "layer-effects" | "color") {
                     return self
-                        .parameter_write(handle, model(&args["value"])?, time)
+                        .parameter_write(handle, &args["value"], time)
                         .map(NativeCommand::Kernel);
                 }
                 let request = self.native.properties.write(

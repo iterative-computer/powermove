@@ -268,6 +268,10 @@ pub struct Metrics {
     pub ruler: f32,
     /// The viewer's rulers: a band along the top and the leading edge.
     pub viewer_ruler: f32,
+    /// A colour wheel's diameter (Lift, Gamma, Gain, Offset).
+    pub grade_wheel: f32,
+    /// The curve editor's graph height.
+    pub curve_editor: f32,
     pub layer_column: f32,
     /// Timeline clip bar corners (v1–3's `chrome.timeline.clipRadius`).
     pub clip_radius: f32,
@@ -710,6 +714,8 @@ impl Tokens {
                 property_row: 22.,
                 ruler: 24.,
                 viewer_ruler: 16.,
+                grade_wheel: 112.,
+                curve_editor: 200.,
                 layer_column: 320.,
                 clip_radius: radius.sm,
                 playhead: 1.,
