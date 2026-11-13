@@ -256,6 +256,10 @@ struct File {
     /// and for an earlier build's sequence renditions).
     #[serde(default, skip_serializing_if = "is_zero")]
     sequence: u32,
+    /// A generated rendition: the `pm_proxy::ProxyRecipe::VERSION` it was
+    /// encoded with (0 for an attached file, and for an earlier build's).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    recipe: u32,
 }
 
 fn is_zero(v: &u32) -> bool {
@@ -334,7 +338,7 @@ struct Index {
 
 impl Index {
     /// Retires every generated rendition of an image sequence that an
-    /// earlier sequence pipeline made (its alpha or PQ white may be wrong),
+    /// earlier sequence pipeline or proxy recipe made (its alpha or PQ white may be wrong),
     /// including an earlier build's association of a sequence by its
     /// manifest object (`obj:`), and notes the assets that had one so they
     /// are made again. Attached files are never touched.
@@ -354,7 +358,11 @@ impl Index {
                 let slot = record.slot(kind);
                 if slot
                     .as_ref()
-                    .is_some_and(|f| !f.attached && f.sequence != pm_proxy::SEQUENCE_PIPELINE)
+                    .is_some_and(|f| {
+                        !f.attached
+                            && (f.sequence != pm_proxy::SEQUENCE_PIPELINE
+                                || f.recipe != pm_proxy::ProxyRecipe::VERSION)
+                    })
                     && is_sequence(content)
                 {
                     retired.push((content.clone(), kind, slot.take().unwrap()));
@@ -1108,6 +1116,7 @@ impl Inner {
                 path: file.to_path_buf(),
                 attached: true,
                 sequence: 0,
+                recipe: 0,
             },
         );
         state.present.insert(file.to_path_buf());
@@ -1325,6 +1334,7 @@ impl Inner {
             path: generated.stored.path,
             attached: false,
             sequence: generated.stored.recipe.sequence.unwrap_or(0),
+            recipe: generated.stored.recipe.version,
         };
         self.publish(&content, kind, before.as_ref(), made);
         self.save();
@@ -2386,6 +2396,7 @@ mod tests {
                 path: path.to_path_buf(),
                 attached: false,
                 sequence: 0,
+                recipe: 0,
             },
         )
     }
@@ -2439,6 +2450,7 @@ mod tests {
                 path: proxy.clone(),
                 attached: true,
                 sequence: 0,
+                recipe: 0,
             },
         );
         media.clear("none".into(), vec![]).recv_blocking().unwrap();
@@ -2529,6 +2541,7 @@ mod tests {
             path: files[0].clone(),
             attached: true,
             sequence: 0,
+            recipe: 0,
         };
         let inner = &media.inner;
         inner
@@ -2926,6 +2939,17 @@ mod tests {
         saved["contents"][&other]["proxy"] =
             serde_json::json!({"path": attached, "attached": true});
         saved["assets"]["p"]["b"] = serde_json::json!(other);
+        // A proxy of the current sequence pipeline made under the proxy
+        // recipe before (colour tags read from the original): retired too.
+        let older_recipe = dir.path().join("older-recipe.mov");
+        std::fs::copy(&earlier, &older_recipe).unwrap();
+        let third = format!("seq:{}", "e".repeat(64));
+        saved["contents"][&third]["proxy"] = serde_json::json!({
+            "path": older_recipe,
+            "sequence": pm_proxy::SEQUENCE_PIPELINE,
+            "recipe": pm_proxy::ProxyRecipe::VERSION - 1,
+        });
+        saved["assets"]["p"]["c"] = serde_json::json!(third);
         // (Hashed-file stamps hold u128 times a JSON value can't carry.)
         saved["stamps"] = serde_json::json!([]);
         std::fs::write(&index, serde_json::to_vec(&saved).unwrap()).unwrap();
@@ -2939,6 +2963,15 @@ mod tests {
             "the earlier build's proxy is used"
         );
         assert!(!earlier.exists(), "the earlier build's proxy is kept");
+        assert!(!older_recipe.exists(), "a proxy of the earlier recipe is kept");
+        assert!(
+            media.inner.state.lock().unwrap().index.regenerate.contains(&(
+                "p".to_owned(),
+                "c".to_owned(),
+                Rendition::Proxy
+            )),
+            "it is not made again"
+        );
         assert_eq!(
             media.inner.state.lock().unwrap().index.contents[&other]
                 .proxy
