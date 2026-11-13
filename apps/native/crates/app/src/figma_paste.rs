@@ -105,6 +105,7 @@ impl Controller {
                     layers: plan.layers,
                 })],
                 select: Some(plan.roots),
+                count_keys: None,
             },
             cx,
         );

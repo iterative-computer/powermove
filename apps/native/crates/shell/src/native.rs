@@ -816,14 +816,25 @@ const SHAPE_SEGMENT: isize = 5;
 /// A tool segment's width, and the room AppKit's menu indicator takes in one.
 const TOOL_SEGMENT: f64 = 34.;
 const TOOL_MENU_INDICATOR: f64 = 12.;
-const TOOLBAR: [&str; 7] = [
+const TOOLBAR: [&str; 8] = [
     "home",
     "title",
     "tools",
+    "add",
     "agent",
     "export",
     "panelLibrary",
     "settings",
+];
+/// The toolbar's Add menu, as v1's "+" beside the tools: media, then the
+/// layers that are made by a command, not drawn with a tool. An empty row
+/// is a separator.
+pub const ADD: [(&str, &str); 5] = [
+    ("import", "Import Media…"),
+    ("", ""),
+    ("newSolid", "New Solid"),
+    ("newAdjustment", "New Adjustment Layer"),
+    ("newNull", "New Null Object"),
 ];
 /// One open project in the toolbar's tab strip.
 #[derive(Clone, Debug, PartialEq)]
@@ -1562,14 +1573,14 @@ define_class!(
 fn toolbar_ids() -> Retained<NSArray<NSString>> {
     let mut v: Vec<_> = TOOLBAR.iter().map(|s| NSString::from_str(s)).collect();
     let f = unsafe { NSToolbarFlexibleSpaceItemIdentifier };
-    // Home and the tabs lead; the tools are the centred item between two
-    // flexible spaces; Export, a space, then Panels and Settings trail.
+    // Home and the tabs lead; the tools and Add stand in the middle between
+    // two flexible spaces; Export, a space, then Panels and Settings trail.
     // Home is the strip's first cell, not an item of its own.
     v.remove(0);
     v.insert(1, NSString::from_str(&f.to_string()));
-    v.insert(3, NSString::from_str(&f.to_string()));
+    v.insert(4, NSString::from_str(&f.to_string()));
     v.insert(
-        6,
+        7,
         NSString::from_str(&unsafe { NSToolbarSpaceItemIdentifier }.to_string()),
     );
     NSArray::from_retained_slice(&v)
@@ -1712,6 +1723,31 @@ impl ToolbarDelegate {
             item.setView(Some(&control));
             item.setLabel(&NSString::from_str("Tools"));
             return Some(item);
+        }
+        if name == "add" {
+            let item = objc2_app_kit::NSMenuToolbarItem::initWithItemIdentifier(
+                objc2_app_kit::NSMenuToolbarItem::alloc(mtm),
+                id,
+            );
+            let menu = NSMenu::new(mtm);
+            // Rows follow the document state (`enable_tools`), not a responder.
+            menu.setAutoenablesItems(false);
+            for (command, label) in ADD {
+                if command.is_empty() {
+                    menu.addItem(&NSMenuItem::separatorItem(mtm));
+                    continue;
+                }
+                let row = named_item(mtm, label, command);
+                unsafe { row.setTarget(Some(target)) };
+                menu.addItem(&row);
+            }
+            item.setMenu(&menu);
+            item.setShowsIndicator(true);
+            item.setImage(Some(&toolbar_symbol("plus", "Add", t)));
+            item.setBordered(true);
+            item.setLabel(&NSString::from_str("Add"));
+            item.setToolTip(Some(&NSString::from_str("Add Layer or Media")));
+            return Some(Retained::into_super(item));
         }
         if name == "title" {
             // Home and the open projects, as v1 had them in its title bar:
@@ -2822,7 +2858,7 @@ impl Host {
         for item in self._toolbar.items().to_vec() {
             let name = item.itemIdentifier().to_string();
             // The tabs stay, as in v1's title bar on Home.
-            if matches!(name.as_str(), "tools" | "export" | "panelLibrary") {
+            if matches!(name.as_str(), "tools" | "add" | "export" | "panelLibrary") {
                 item.setHidden(home);
             }
         }
@@ -3349,6 +3385,17 @@ impl Host {
     /// A tool with no gesture yet dims in the toolbar like its menu row.
     fn enable_tools(&self, disabled: &std::collections::BTreeSet<String>) {
         for item in self._toolbar.items().to_vec() {
+            if item.itemIdentifier().to_string() == "add"
+                && let Ok(add) = item.clone().downcast::<objc2_app_kit::NSMenuToolbarItem>()
+            {
+                for row in add.menu().itemArray().to_vec() {
+                    let command: Option<Retained<NSString>> =
+                        unsafe { row.representedObject().map(|o| Retained::cast_unchecked(o)) };
+                    if let Some(command) = command {
+                        row.setEnabled(!disabled.contains(&command.to_string()));
+                    }
+                }
+            }
             if item.itemIdentifier().to_string() == "tools"
                 && let Some(view) = item.view()
             {
@@ -5050,8 +5097,12 @@ pub fn install_menus() {
     let mut index = 0;
     for (title, items) in menus {
         let submenu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str(title));
+        // These menus dim a row whose command cannot run now (`validateMenuItem`).
         submenu.setAutoenablesItems(
-            title == "Edit" || menu::DISPLAY_ONLY.contains(&title) || title == "View",
+            title == "Edit"
+                || title == "Composition"
+                || menu::DISPLAY_ONLY.contains(&title)
+                || title == "View",
         );
         if menu::DISPLAY_ONLY.contains(&title) {
             delegate(&submenu, MenuKind::DisplayOnly);
