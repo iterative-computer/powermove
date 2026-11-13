@@ -1530,29 +1530,32 @@ pub(super) fn carry_notices(destination: &Path, current: &Transaction, old: &str
 
 /// What the records beside `destination` have to tell the person and have
 /// not been seen: (why, where) of each file a save or a recovery kept
-/// beside the project (`arrived`, `other`, `unfinished`), and `restored`.
-/// Only from records that know the file now under the project's name
-/// (`hash`; see [`Record::knows`]): a notice is about the project it
-/// happened to, not about another one later put under that name. The
-/// records that have something to tell but do not know this file are
-/// returned too, untouched.
+/// beside the project (`arrived`, `other`, `unfinished`, `trashed`,
+/// `hidden`), and `restored`.
+///
+/// A record that knows the file now under the project's name (`hash`; see
+/// [`Record::knows`]) tells it as it happened. One that does not (another
+/// program changed the project since, or another project was put under the
+/// name) still has a kept file nobody was told about: its notices are told
+/// as `earlier`, a file an earlier save under this name kept, without a
+/// claim about the file that is open. Nothing goes untold for want of a
+/// matching hash.
 pub(crate) fn kept_notices(
     destination: &Path,
     hash: Option<&str>,
-) -> (Vec<(String, Option<PathBuf>)>, Vec<PathBuf>) {
-    let (mut notices, mut strangers) = (Vec::new(), Vec::new());
+) -> Vec<(String, Option<PathBuf>)> {
+    let mut notices = Vec::new();
     for record in records_of(destination).0 {
-        let told = record.notices();
-        if told.is_empty() {
-            continue;
-        }
-        if hash.is_none_or(|hash| record.knows(hash)) {
-            notices.extend(told);
-        } else {
-            strangers.push(record.path.clone());
-        }
+        let knows = hash.is_none_or(|hash| record.knows(hash));
+        notices.extend(record.notices().into_iter().map(|(why, path)| {
+            if knows {
+                (why, path)
+            } else {
+                ("earlier".to_owned(), path)
+            }
+        }));
     }
-    (notices, strangers)
+    notices
 }
 
 /// The person has seen the notices about the kept files `paths` (and, with

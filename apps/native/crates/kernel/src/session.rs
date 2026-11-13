@@ -51,14 +51,15 @@ pub enum ShellCall {
     /// not seen a notice about yet: a version that arrived during a save,
     /// what a save that was cut short left, a retained version found
     /// changed. They are read from the saves' own records beside the file
-    /// (written before each file was kept, so a crash loses none), and only
-    /// from records that know the file now open. Replies `Kept`; nothing is
+    /// (written before each file was kept, so a crash loses none). A record
+    /// that does not know the file now open (it was changed since by
+    /// another program) is told as `earlier`. Replies `Kept`; nothing is
     /// forgotten until `KeptSeen`.
     KeptBeside(SessionHandle),
-    /// The person was shown the notices about the kept files `paths` (and,
-    /// with `restored`, that the last saved version was put back; with
-    /// `other`, the notices that are not about a kept file): they are not
-    /// reported again.
+    /// The person was shown, and answered, the notices about the kept
+    /// files `paths` (and, with `restored`, the ones about no file: that
+    /// the last saved version was put back). Exactly those are not reported
+    /// again; with `other`, the session's own rows about them go too.
     KeptSeen {
         session: SessionHandle,
         paths: Vec<PathBuf>,
@@ -555,20 +556,11 @@ impl Kernel {
                         .project(&handle.project)
                         .and_then(|p| p.store().file().version.clone())
                         .map(|v| v.hash.clone());
-                    let (told, strangers) = project_io::kept_notices(&path, hash.as_deref());
                     rows.extend(
-                        told.iter()
+                        project_io::kept_notices(&path, hash.as_deref())
+                            .iter()
                             .map(|(why, kept)| kept_row(why, kept.as_deref())),
                     );
-                    // A notice about another project that was under this
-                    // name is not this project's: left, and logged.
-                    for record in strangers {
-                        self.log(format!(
-                            "A save's record beside {} tells of files kept for a project that                              is no longer under that name; it was left as it is: {}",
-                            path.display(),
-                            record.display()
-                        ));
-                    }
                 }
                 if let Some(Value::Array(more)) = self
                     .state
@@ -592,13 +584,27 @@ impl Kernel {
                 {
                     project_io::kept_seen(path, &paths, restored);
                 }
+                // The session's own rows: exactly the ones that were shown.
+                let shown = |row: &Value| match row.get("path").and_then(Value::as_str) {
+                    Some(path) => paths.iter().any(|p| p.as_os_str() == path),
+                    None => restored,
+                };
+                let rows = std::sync::Arc::make_mut(&mut self.state.ui)
+                    .get_mut(&session.project)
+                    .and_then(|ui| ui.session.as_object_mut());
                 if other
-                    && std::sync::Arc::make_mut(&mut self.state.ui)
-                        .get_mut(&session.project)
-                        .and_then(|ui| ui.session.as_object_mut()?.remove(KEPT_BESIDE))
-                        .is_some()
+                    && let Some(meta) = rows
+                    && let Some(Value::Array(mut kept)) = meta.remove(KEPT_BESIDE)
                 {
-                    self.save_session_meta(&session.project)?;
+                    let before = kept.len();
+                    kept.retain(|row| !shown(row));
+                    let changed = kept.len() != before;
+                    if !kept.is_empty() {
+                        meta.insert(KEPT_BESIDE, Value::Array(kept));
+                    }
+                    if changed {
+                        self.save_session_meta(&session.project)?;
+                    }
                 }
                 Ok(ShellReply::Kept(Vec::new()))
             }

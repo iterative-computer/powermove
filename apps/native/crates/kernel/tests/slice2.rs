@@ -3084,7 +3084,8 @@ fn a_kept_version_is_told_until_it_was_seen_whatever_happens_in_between() {
     let mut k = kernel(&native);
     let (session, _) = open_file(&mut k, &file);
     assert_eq!(kept_beside(&mut k, &session), told);
-    // Another project put under that name is not told about it.
+    // Another project put under that name is told there is a kept file,
+    // and that it is from an earlier save under the name.
     let mine = fs::read(&file).unwrap();
     let elsewhere = dir.path("elsewhere/cut.pmv");
     fs::create_dir_all(elsewhere.parent().unwrap()).unwrap();
@@ -3109,14 +3110,8 @@ fn a_kept_version_is_told_until_it_was_seen_whatever_happens_in_between() {
     };
     assert_eq!(
         kept_beside(&mut k, &session),
-        [],
-        "not this project's notice"
-    );
-    assert!(
-        k.take_log()
-            .iter()
-            .any(|l| l.contains("no longer under that name")),
-        "the Error Log says a notice was left"
+        [("earlier".to_owned(), Some(kept.clone()))],
+        "told as a file an earlier save under this name kept, not as this project's"
     );
     k.shell(ShellCall::Close(session)).unwrap();
     // The project it is about, again: told, seen, and then not told again.
@@ -3131,6 +3126,57 @@ fn a_kept_version_is_told_until_it_was_seen_whatever_happens_in_between() {
         b"version B",
         "the file itself stays"
     );
+}
+/// A save kept another version beside the project, and before anyone was
+/// told another program legitimately changed the project file (an editor
+/// on another computer, synced in). The file under the name is no longer
+/// one the save's record knows, but the kept file is still there and still
+/// untold: the person is told about it, as a file an earlier save kept,
+/// until they have seen it.
+#[test]
+fn a_kept_version_is_still_told_after_another_program_changed_the_project() {
+    let dir = common::TempDir::new("notice-edited");
+    fs::create_dir_all(dir.path("job")).unwrap();
+    let file = dir.path("job/cut.pmv");
+    fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+    let native = dir.path("native");
+    let mut k = kernel(&native);
+    let (session, _) = open_file(&mut k, &file);
+    rename_comp(&mut k, "P", "One");
+    k.set_publish_hooks(pm_kernel::project_io::PublishHooks {
+        before_exchange: Some(std::sync::Arc::new(|path| land(path, b"version B"))),
+        ..Default::default()
+    });
+    let plan = k
+        .prepare_session_save(session.clone(), None, false)
+        .unwrap();
+    let ShellReply::Saved {
+        displaced: Some(kept),
+        ..
+    } = k.finish_session_save(plan.run()).unwrap()
+    else {
+        panic!()
+    };
+    k.set_publish_hooks(Default::default());
+    k.shell(ShellCall::Close(session)).unwrap();
+    drop(k);
+    // Edited elsewhere before the notice was ever shown.
+    write_through(&file, &fs::read(common::ts_fixture("save-as.pmv")).unwrap());
+    let mut k = kernel(&native);
+    let (session, _) = open_file(&mut k, &file);
+    let told = kept_beside(&mut k, &session);
+    assert_eq!(told, [("earlier".to_owned(), Some(kept.clone()))]);
+    // And a save by this app does not make it forget.
+    rename_comp(&mut k, "P", "Two");
+    let plan = k
+        .prepare_session_save(session.clone(), None, false)
+        .unwrap();
+    k.finish_session_save(plan.run()).unwrap();
+    assert_eq!(kept_beside(&mut k, &session).len(), 1, "still told");
+    let told = kept_beside(&mut k, &session);
+    seen(&mut k, &session, &told);
+    assert_eq!(kept_beside(&mut k, &session), []);
+    assert_eq!(fs::read(&kept).unwrap(), b"version B");
 }
 /// A save that dies right after it kept another version (before anything
 /// could reply or write a notice elsewhere) has already recorded it: the
