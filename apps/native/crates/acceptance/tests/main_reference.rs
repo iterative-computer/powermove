@@ -323,13 +323,14 @@ fn studio_overlays_preserve_all_main_operations_and_unrelated_contracts() {
             }
             // 19 product-film operations, then the native Studio ones: world,
             // fog, terrain, scatter, material options, render quality,
-            // extrusion and per-surface materials.
+            // extrusion and per-surface materials, then aiming a light and
+            // light presets.
             assert_eq!(
                 studio["properties"]["operation"]["enum"]
                     .as_array()
                     .unwrap()
                     .len(),
-                33
+                35
             );
         } else if tool["name"] == "export_video" {
             // A per-export 3D quality and render scale; everything else as main.
@@ -353,9 +354,28 @@ fn studio_overlays_preserve_all_main_operations_and_unrelated_contracts() {
                     .unwrap()
                     .starts_with(tool["description"].as_str().unwrap())
             );
-        } else if tool["name"] == "get_3d_scene" {
-            // Native Studio readback only adds to the description.
-            assert_eq!(tool["inputSchema"], actual["inputSchema"]);
+        } else if tool["name"] == "get_3d_scene" || tool["name"] == "open_project" {
+            // Native Studio readback adds an optional pick point; the native
+            // open_project an explicit recovery choice. Main's fields stay.
+            let (base, native) = (&tool["inputSchema"], &actual["inputSchema"]);
+            for (field, schema) in base["properties"].as_object().unwrap() {
+                assert_eq!(schema, &native["properties"][field], "{field}");
+            }
+            for field in ["required", "additionalProperties", "type"] {
+                assert_eq!(base[field], native[field]);
+            }
+            let added: Vec<_> = native["properties"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .filter(|k| base["properties"].get(k.as_str()).is_none())
+                .collect();
+            let expected_added = if tool["name"] == "get_3d_scene" {
+                "pick"
+            } else {
+                "recovery"
+            };
+            assert_eq!(added, [expected_added]);
             assert!(
                 actual["description"]
                     .as_str()
