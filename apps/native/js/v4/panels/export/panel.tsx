@@ -4,17 +4,22 @@ import type { SurfaceEvent } from "../../src";
 import * as UI from "../../src/components";
 import { ExportModel, isProgress, progress, type Options } from "./model";
 import {
+  audioCodings,
   codecs,
   colorNote,
+  colorNoteRec709,
+  colorTags,
   depths,
   descriptions,
+  fieldDefaults,
   formats,
   kinds,
   kindOf,
   profiles,
   dynamicRanges,
   qualities,
-  rates,
+  listedRate,
+  rateOptions,
   rows,
   shows,
   sidecars,
@@ -149,7 +154,15 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
             : undefined
         }
         binding={s.bindings[key]}
-        value={key === "dynamicRange" ? (o[key] ?? "sdr") : o[key]}
+        value={
+          key === "dynamicRange"
+            ? (o[key] ?? "sdr")
+            : key === "colorTag" || key === "audioCoding"
+              ? (o[key] ?? fieldDefaults[key])
+              : key === "fps"
+                ? listedRate(o.fps)
+                : o[key]
+        }
         options={options}
         disabled={busy}
         onChange={(e) => edit(key, e.value as Options[typeof key])}
@@ -455,7 +468,7 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
                       ) : null}
                     </FormRow>
                   ) : null}
-                  {shows(o, "fps") ? select("fps", rates) : null}
+                  {shows(o, "fps") ? select("fps", rateOptions(o.fps)) : null}
                   {shows(o, "range")
                     ? select("range", [
                         {
@@ -471,10 +484,36 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
                   {p.hdr && (o.format === "prores" || o.format === "mp4")
                     ? select("dynamicRange", dynamicRanges)
                     : null}
+                  {/* HDR delivery carries its own label. */}
+                  {shows(o, "colorTag") &&
+                  !(p.hdr && (o.dynamicRange ?? "sdr") !== "sdr")
+                    ? select("colorTag", colorTags)
+                    : null}
+                  {shows(o, "timecode") ? (
+                    <FormRow name="timecode" help={help("timecode")}>
+                      <UI.TextField
+                        id="export.timecode"
+                        label={rows.timecode[0]}
+                        title={help("timecode")}
+                        binding={s.bindings.timecode}
+                        value={o.timecode ?? ""}
+                        disabled={busy}
+                        // A field has no width of its own while it is empty.
+                        style={{ width: token("metrics.value_column") }}
+                        metadata={{ export: { placeholder: "00:00:00:00" } }}
+                        onInput={(e) =>
+                          edit("timecode", String(e.value ?? "").trim())
+                        }
+                      />
+                    </FormRow>
+                  ) : null}
                 </Group>
                 <Group label="Rendering">
                   {shows(o, "mblur") ? toggle("mblur") : null}
                   {shows(o, "audio") ? toggle("audio") : null}
+                  {shows(o, "audioCoding") && p.hasAudio && o.audio
+                    ? select("audioCoding", audioCodings)
+                    : null}
                   {shows(o, "alpha") ? toggle("alpha") : null}
                   {shows(o, "useProxies") ? toggle("useProxies") : null}
                 </Group>
@@ -512,6 +551,7 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
                       binding={s.bindings.presetName}
                       value={model.presetName}
                       disabled={busy}
+                      style={{ width: token("metrics.value_column") }}
                       metadata={{ export: { placeholder: "Preset name" } }}
                       onInput={(e) => model.namePreset(String(e.value ?? ""))}
                       onKeyDown={(e) => {
@@ -545,7 +585,13 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
                     Couldn’t save the preset. Try again.
                   </text>
                 ) : null}
-                <text style={{ ...detail, ...column }}>{colorNote}</text>
+                <text style={{ ...detail, ...column }}>
+                  {shows(o, "colorTag") &&
+                  o.colorTag === "rec709" &&
+                  !(p.hdr && (o.dynamicRange ?? "sdr") !== "sdr")
+                    ? colorNoteRec709
+                    : colorNote}
+                </text>
               </scroll>
             )}
           </div>

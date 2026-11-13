@@ -16,11 +16,16 @@
 //! * normalization: 16-bit Y′ = 4096 + 56064·Y′, C = 32768 + 57344·C (section 13);
 //!   10-bit Y′ = 64 + 876·Y′, C = 512 + 896·C; 8-bit Y′ = 16 + 219·Y′,
 //!   C = 128 + 224·C; RGB full range 0..2ⁿ − 1;
-//! * chroma: 4:2:2 by point decimation at the co-sited (even) column; 4:2:0 with
-//!   siting type 0 by point decimation horizontally and, vertically, the declared
-//!   filter `[−1, 3, 3, −1] / 4` on rows 2y − 1 to 2y + 2 (clamped), on Y′CbCr: the
-//!   exact inverse of the renderer's linear vertical upsampling
-//!   (`pm_color::chroma::VERTICAL_420`, section 2 invariant (1));
+//! * chroma ([`Chroma`]): rendered frames are decimated band-limited by the
+//!   tent kernel, `[1, 2, 1] / 4` across on the co-sited (even) column for
+//!   4:2:2 and 4:2:0, and between rows for 4:2:0 where the output's chroma
+//!   sits (`ColorTags::chroma_location`): `[1, 3, 3, 1] / 8` on rows 2y − 1
+//!   to 2y + 2 for Rec.709 (siting type 0), `[1, 2, 1] / 4` on rows 2y − 1
+//!   to 2y + 1 for BT.2100 (top-left, type 2), clamped, on Y′CbCr; a frame
+//!   of untouched footage takes
+//!   the exact inverse of the renderer's upsampling instead (point decimation
+//!   across, `pm_color::chroma::VERTICAL_420` down), so a 4:2:x source keeps
+//!   its chroma (section 2 invariant (1));
 //! * dither (when on): `dither_offset` at the output's LSB — 16 units of `y416`
 //!   (12-bit), 64 units of `v216` (10-bit), one code of `x420` (10-bit), one 8-bit
 //!   or 16-bit code; never on alpha;
@@ -30,7 +35,7 @@
 
 use crate::Error;
 use crate::dither::dither_offset;
-use crate::settings::{AlphaOutput, ColorTags, InputFormat, WorkingEncoding};
+use crate::settings::{AlphaOutput, ChromaLocation, ColorTags, InputFormat, WorkingEncoding};
 
 pub const KR: f64 = 0.2126;
 pub const KB: f64 = 0.0722;
@@ -150,7 +155,7 @@ impl EncoderInput {
 pub struct ConvertParams {
     pub working: WorkingEncoding,
     pub alpha: AlphaOutput,
-    /// Output transfer/tag; mapping always happens in sRGB E first.
+    /// Output tags; the codes are display-encoded (E) whatever the transfer tag.
     pub tags: ColorTags,
     pub dither: bool,
     /// Frame index: the dither seed.
@@ -223,12 +228,14 @@ pub fn output_rgba(w: [f32; 4], working: WorkingEncoding, alpha: AlphaOutput) ->
     }
 }
 
-/// Resolve output alpha and transfer while RGB is floating. With `deliver`
-/// (every SDR RGB output, 8 and 16 bit) the shared delivery rule
-/// (`pm_color::delivery`) applies to straight display-encoded Rec.709 before
-/// the transfer. SDR Y′CbCr keeps its codable headroom (superwhites and
-/// sub-blacks of untouched footage pass through, section 2's transparency
-/// bar), which players show as the same clipped picture.
+/// Resolve output alpha while RGB is floating. With `deliver` (every SDR RGB
+/// output, 8 and 16 bit) the shared delivery rule (`pm_color::delivery`)
+/// applies to straight display-encoded Rec.709. SDR Y′CbCr keeps its codable
+/// headroom (superwhites and sub-blacks of untouched footage pass through,
+/// section 2's transparency bar), which players show as the same clipped
+/// picture. The output's transfer tag is a label: Standard reads transfers 1
+/// and 13 as the same display encoding (`pm_color::cicp::output_encoding`),
+/// so every SDR output carries the same codes whichever it is tagged with.
 fn tagged_output_rgba(
     w: [f32; 4],
     working: WorkingEncoding,
@@ -236,40 +243,15 @@ fn tagged_output_rgba(
     tags: ColorTags,
     deliver: bool,
 ) -> ([f64; 3], f64) {
-    let sdr = deliver && !tags.is_hdr();
-    if alpha == AlphaOutput::Premultiplied && !tags.bt709_transfer() {
+    let (rgb, a) = output_rgba(w, working, alpha);
+    let rgb = match (deliver && !tags.is_hdr(), alpha) {
+        (false, _) => rgb,
         // The identity output transform: premultiplied values as they are,
         // each channel bounded by its coverage.
-        let (rgb, a) = output_rgba(w, working, alpha);
-        let rgb = if sdr {
-            pm_color::delivery::sdr_premultiplied(rgb, a)
-        } else {
-            rgb
-        };
-        return (rgb, a);
-    }
-    let straight_alpha = if alpha == AlphaOutput::Premultiplied {
-        AlphaOutput::Straight
-    } else {
-        alpha
+        (true, AlphaOutput::Premultiplied) => pm_color::delivery::sdr_premultiplied(rgb, a),
+        (true, _) => pm_color::delivery::sdr(rgb),
     };
-    let (rgb, a) = output_rgba(w, working, straight_alpha);
-    let rgb = if sdr {
-        pm_color::delivery::sdr(rgb)
-    } else {
-        rgb
-    };
-    let rgb = if tags.bt709_transfer() {
-        rgb.map(|v| pm_color::transfer::bt709_oetf(e_decode(v)))
-    } else {
-        rgb
-    };
-    let scale = if alpha == AlphaOutput::Premultiplied {
-        a
-    } else {
-        1.0
-    };
-    (rgb.map(|v| v * scale), a)
+    (rgb, a)
 }
 
 /// The normalized luma and chroma a Y′CbCr input format can code (its
@@ -331,10 +313,153 @@ fn pixel(frame: &WorkingFrame, x: usize, y: usize) -> [f32; 4] {
     ]
 }
 
-/// The declared 4:2:0 vertical filter (`pm_color::chroma::VERTICAL_420`): the
-/// exact inverse of the renderer's linear vertical upsampling, so 4:2:0 sources
-/// keep their chroma (section 2 invariant (1)). Taps on rows 2y − 1 to 2y + 2.
-const VERTICAL_420: [(i64, f64); 4] = [(-1, -0.25), (0, 0.75), (1, 0.75), (2, -0.25)];
+/// How a frame's chroma is decimated for a subsampled output.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Chroma {
+    /// Band-limited, for every rendered frame: the tent kernel sited where
+    /// the output's chroma sits (`pm_color::chroma::TENT_COSITED` across;
+    /// between rows `TENT_CENTERED`, or `TENT_COSITED` for a top-left
+    /// output). Thin coloured detail keeps its colour at either pixel
+    /// parity, and no tap is negative.
+    #[default]
+    Filtered,
+    /// The exact inverse of the renderer's upsampling (point decimation at
+    /// the co-sited column, `pm_color::chroma::VERTICAL_420` between rows),
+    /// for a frame that is untouched footage whose chroma the renderer
+    /// upsampled at the output's factors and siting: it passes through.
+    Footage,
+}
+
+/// Filter taps: (offset in luma pixels, weight).
+type Taps = &'static [(i64, f64)];
+
+impl Chroma {
+    /// Taps across (columns from `2x`) and down (rows from `2y`, 4:2:0)
+    /// for an output whose chroma sits at `location`.
+    fn taps(self, location: ChromaLocation) -> (Taps, Taps) {
+        use pm_color::chroma::{TENT_CENTERED, TENT_COSITED, VERTICAL_420};
+        match (self, location) {
+            (Chroma::Filtered, ChromaLocation::Left) => (&TENT_COSITED, &TENT_CENTERED),
+            (Chroma::Filtered, ChromaLocation::TopLeft) => (&TENT_COSITED, &TENT_COSITED),
+            // The inverse of the renderer's upsampling of a source centred
+            // between rows (the only footage the exporter passes through).
+            (Chroma::Footage, _) => (&[(0, 1.0)], &VERTICAL_420),
+        }
+    }
+}
+
+/// One luma row of a frame as normalized Y′CbCr and alpha.
+struct YccRow {
+    /// The row this holds (`usize::MAX`: none yet).
+    y: usize,
+    luma: Vec<f64>,
+    chroma: Vec<[f64; 2]>,
+    alpha: Vec<f64>,
+}
+
+/// A conversion worker's scratch, made once and kept across its rows: the
+/// luma rows around the chroma row it is on (each converted once, whichever
+/// taps and planes read it; four consecutive rows never share a slot), the
+/// blocks' fit decisions for one row of blocks, and the chroma accumulator.
+struct RowCache {
+    rows: [YccRow; 4],
+    fits: Vec<bool>,
+    /// The luma row `fits` was decided on (`usize::MAX`: none yet).
+    fits_row: usize,
+    acc: Vec<[f64; 2]>,
+}
+
+impl RowCache {
+    fn new(w: usize) -> Self {
+        Self {
+            rows: std::array::from_fn(|_| YccRow {
+                y: usize::MAX,
+                luma: vec![0.0; w],
+                chroma: vec![[0.0; 2]; w],
+                alpha: vec![0.0; w],
+            }),
+            fits: vec![false; w / 2],
+            fits_row: usize::MAX,
+            acc: vec![[0.0; 2]; w / 2],
+        }
+    }
+}
+
+/// Decimates chroma into `cache.acc`: rows `base + k` for each tap of
+/// `down`, columns `2x + k` for each tap of `across`, clamped to the frame.
+fn decimate(
+    cache: &mut RowCache,
+    fill: &impl Fn(usize, &mut RowCache),
+    base: usize,
+    down: Taps,
+    across: Taps,
+    w: usize,
+    h: usize,
+) {
+    cache.acc.fill([0.0; 2]);
+    for &(k, wy) in down {
+        let y = (base as i64 + k).clamp(0, h as i64 - 1) as usize;
+        fill(y, cache);
+        let RowCache { rows, acc, .. } = cache;
+        let line = &rows[y & 3].chroma;
+        for (cx, o) in acc.iter_mut().enumerate() {
+            for &(dx, wx) in across {
+                let c = line[(2 * cx as i64 + dx).clamp(0, w as i64 - 1) as usize];
+                o[0] += wy * wx * c[0];
+                o[1] += wy * wx * c[1];
+            }
+        }
+    }
+}
+
+/// The planes of a 4:2:0 output in one pass over the frame: luma rows
+/// `2y` and `2y + 1`, interleaved CbCr row `y`, and alpha when asked for.
+#[allow(clippy::too_many_arguments)]
+fn planes_420<T: Send + Clone + Default>(
+    w: usize,
+    h: usize,
+    with_alpha: bool,
+    fill: &(impl Fn(usize, &mut RowCache) + Sync),
+    across: Taps,
+    down: Taps,
+    luma_code: impl Fn(f64, usize, usize) -> T + Sync,
+    chroma_code: impl Fn(f64, usize, usize, u32) -> T + Sync,
+) -> (Vec<T>, Vec<T>, Vec<u8>) {
+    let mut luma = vec![T::default(); w * h];
+    let mut cbcr = vec![T::default(); w * h / 2];
+    let (mut alpha, alpha_len) = if with_alpha {
+        (vec![0u8; w * h], 2 * w)
+    } else {
+        (Vec::new(), 0)
+    };
+    crate::par::planes_with(
+        (&mut luma, 2 * w),
+        (&mut cbcr, w),
+        (&mut alpha, alpha_len),
+        || RowCache::new(w),
+        |cache, cy, l, c, a| {
+            for r in 0..2 {
+                let y = 2 * cy + r;
+                fill(y, cache);
+                let row = &cache.rows[y & 3];
+                for (x, o) in l[r * w..(r + 1) * w].iter_mut().enumerate() {
+                    *o = luma_code(row.luma[x], x, y);
+                }
+                if with_alpha {
+                    for (x, o) in a[r * w..(r + 1) * w].iter_mut().enumerate() {
+                        *o = code(row.alpha[x] * 255.0, 0.0, 255.0) as u8;
+                    }
+                }
+            }
+            decimate(cache, fill, 2 * cy, down, across, w, h);
+            for (cx, v) in cache.acc.iter().enumerate() {
+                c[cx * 2] = chroma_code(v[0], cx, cy, 1);
+                c[cx * 2 + 1] = chroma_code(v[1], cx, cy, 2);
+            }
+        },
+    );
+    (luma, cbcr, alpha)
+}
 
 fn u16_plane(data: Vec<u16>, row_samples: usize, rows: usize) -> Plane {
     Plane {
@@ -431,23 +556,29 @@ pub fn convert_rgba8_into(
     Ok(())
 }
 
-/// Converts one working frame to `format`. Rows are converted in parallel
-/// (`crate::par`); every sample depends only on its own inputs, so the result is
-/// the same bytes on any number of threads.
+/// Converts one frame of untouched footage to `format`: chroma by the exact
+/// inverse of the renderer's upsampling ([`Chroma::Footage`]), the reference
+/// section 2's pass-through invariants are measured against. Deliveries
+/// convert with [`convert_tagged`] and the decimation their frame takes.
+/// Rows are converted in parallel (`crate::par`); every sample depends only
+/// on its own inputs, so the result is the same bytes on any number of
+/// threads.
 pub fn convert(
     frame: &WorkingFrame,
     format: InputFormat,
     params: &ConvertParams,
 ) -> Result<EncoderInput, Error> {
-    convert_tagged(frame, format, params, params.tags)
+    convert_tagged(frame, format, params, params.tags, Chroma::Footage)
 }
 
-/// Applies the selected SDR/HDR output transform before quantization and chroma sampling.
+/// Applies the selected SDR/HDR output transform before quantization and
+/// chroma decimation (`chroma`).
 pub fn convert_tagged(
     frame: &WorkingFrame,
     format: InputFormat,
     params: &ConvertParams,
     tags: crate::settings::ColorTags,
+    chroma: Chroma,
 ) -> Result<EncoderInput, Error> {
     if tags.is_hdr() {
         crate::hdr::validate(tags)?;
@@ -461,6 +592,7 @@ pub fn convert_tagged(
         }
     }
     let params = &ConvertParams { tags, ..*params };
+    let (across, down) = chroma.taps(tags.chroma_location());
     let (w, h) = working_dimensions(frame)?;
     let horizontal = !matches!(
         format,
@@ -502,39 +634,90 @@ pub fn convert_tagged(
             false,
         )
     };
-    let fits = |x: usize, y: usize| {
-        let (x, y) = (
-            if horizontal { x - x % 2 } else { x },
-            if vertical { y - y % 2 } else { y },
-        );
-        let v = rgb_to_ycbcr(extended(x, y).0);
+    // Whether the stream can code a colour (extended RGB in the output
+    // encoding) as it is.
+    let fit_of = |c: [f64; 3]| {
+        let v = rgb_to_ycbcr(c);
         (luma[0]..=luma[1]).contains(&v[0])
             && (chroma[0]..=chroma[1]).contains(&v[1])
             && (chroma[0]..=chroma[1]).contains(&v[2])
     };
+    let delivered = |x: usize, y: usize| {
+        tagged_output_rgba(pixel(frame, x, y), params.working, params.alpha, tags, true)
+    };
+    // A pixel of an output that is not subsampled: it decides for itself.
     let ycc = |x: usize, y: usize| -> ([f64; 3], f64) {
         if tags.is_hdr() {
             crate::hdr::output_ycbcra(pixel(frame, x, y), params.working, params.alpha, tags)
         } else {
-            let (c, a) = if fits(x, y) {
-                extended(x, y)
-            } else {
-                tagged_output_rgba(pixel(frame, x, y), params.working, params.alpha, tags, true)
-            };
+            let own = extended(x, y);
+            let (c, a) = if fit_of(own.0) { own } else { delivered(x, y) };
             (rgb_to_ycbcr(c), a)
         }
     };
-    // Chroma of 4:2:0 sample (cx, cy): siting type 0, point decimation
-    // horizontally (the even column), the declared filter vertically.
-    let chroma420 = |cx: usize, cy: usize| -> (f64, f64) {
-        let (mut cb, mut cr) = (0.0, 0.0);
-        for (k, wt) in VERTICAL_420 {
-            let row = (2 * cy as i64 + k).clamp(0, h as i64 - 1) as usize;
-            let (v, _) = ycc(2 * cx, row);
-            cb += wt * v[1];
-            cr += wt * v[2];
+    // One luma row of a subsampled output as normalized Y′CbCr, every pixel
+    // evaluated once: the values `ycc` gives, with each block's fit decided
+    // once (on its first pixel, on the row it is sited on) for the pixels
+    // sharing it.
+    let fill = |y: usize, cache: &mut RowCache| {
+        if cache.rows[y & 3].y == y {
+            return;
         }
-        (cb, cr)
+        let RowCache {
+            rows,
+            fits,
+            fits_row,
+            ..
+        } = cache;
+        let row = &mut rows[y & 3];
+        let mut put = |x: usize, (c, a): ([f64; 3], f64)| {
+            row.luma[x] = c[0];
+            row.chroma[x] = [c[1], c[2]];
+            row.alpha[x] = a;
+        };
+        if tags.is_hdr() {
+            for x in 0..w {
+                put(
+                    x,
+                    crate::hdr::output_ycbcra(
+                        pixel(frame, x, y),
+                        params.working,
+                        params.alpha,
+                        tags,
+                    ),
+                );
+            }
+        } else {
+            // The row the blocks of this row are sited on.
+            let sited = if vertical { y - y % 2 } else { y };
+            if sited != y && *fits_row != sited {
+                for (cx, fit) in fits.iter_mut().enumerate() {
+                    *fit = fit_of(extended(2 * cx, sited).0);
+                }
+                *fits_row = sited;
+            }
+            for (cx, fit) in fits.iter_mut().enumerate() {
+                let (x0, x1) = (2 * cx, 2 * cx + 1);
+                let first = if sited == y {
+                    let own = extended(x0, y);
+                    *fit = fit_of(own.0);
+                    if *fit { own } else { delivered(x0, y) }
+                } else if *fit {
+                    extended(x0, y)
+                } else {
+                    delivered(x0, y)
+                };
+                let second = if *fit {
+                    extended(x1, y)
+                } else {
+                    delivered(x1, y)
+                };
+                put(x0, (rgb_to_ycbcr(first.0), first.1));
+                put(x1, (rgb_to_ycbcr(second.0), second.1));
+            }
+            *fits_row = sited;
+        }
+        row.y = y;
     };
     // Quantizers at the output depth (dither in the output domain, then round
     // half to even and clip to the codable range).
@@ -542,49 +725,27 @@ pub fn convert_tagged(
     let chroma8 = |c: f64, x: usize, y: usize, ch: u32| {
         code(c * 224.0 + 128.0 + d(x, y, ch), 1.0, 254.0) as u8
     };
-    let alpha8 = |a: f64| code(a * 255.0, 0.0, 255.0) as u8;
     let luma10 =
         |v: f64, x: usize, y: usize| (code(v * 876.0 + 64.0 + d(x, y, 0), 4.0, 1019.0) as u16) << 6;
     let chroma10 = |c: f64, x: usize, y: usize, ch: u32| {
         (code(c * 896.0 + 512.0 + d(x, y, ch), 4.0, 1019.0) as u16) << 6
     };
-    let luma_plane8 = || {
-        let mut luma = vec![0u8; w * h];
-        crate::par::rows(&mut luma, w, |y, row| {
-            for (x, o) in row.iter_mut().enumerate() {
-                *o = luma8(ycc(x, y).0[0], x, y);
-            }
-        });
-        u8_plane(luma, w, h)
-    };
-    let alpha_plane8 = || {
-        let mut alpha = vec![0u8; w * h];
-        crate::par::rows(&mut alpha, w, |y, row| {
-            for (x, o) in row.iter_mut().enumerate() {
-                *o = alpha8(ycc(x, y).1);
-            }
-        });
-        u8_plane(alpha, w, h)
-    };
-    // Interleaved CbCr (`420v`, `v0a8`).
-    let cbcr_plane8 = || {
-        let mut chroma = vec![0u8; w * h / 2];
-        crate::par::rows(&mut chroma, w, |cy, row| {
-            for cx in 0..w / 2 {
-                let (cb, cr) = chroma420(cx, cy);
-                row[cx * 2] = chroma8(cb, cx, cy, 1);
-                row[cx * 2 + 1] = chroma8(cr, cx, cy, 2);
-            }
-        });
-        u8_plane(chroma, w, h / 2)
-    };
-    // Planar Cb and Cr (`yuv420p`): one chroma pass, split.
-    let chroma_planes8 = || {
-        let PlaneData::U8(cbcr) = cbcr_plane8().data else {
-            unreachable!("8-bit chroma")
-        };
-        let (cb, cr): (Vec<u8>, Vec<u8>) = cbcr.chunks_exact(2).map(|p| (p[0], p[1])).unzip();
-        [u8_plane(cb, w / 2, h / 2), u8_plane(cr, w / 2, h / 2)]
+    // 8-bit 4:2:0: luma, interleaved CbCr (`420v`, `v0a8`) or planar Cb and
+    // Cr (`yuv420p`), and alpha.
+    let planes8 = |with_alpha: bool, planar: bool| {
+        let (luma, cbcr, alpha) = planes_420(w, h, with_alpha, &fill, across, down, luma8, chroma8);
+        let mut planes = vec![u8_plane(luma, w, h)];
+        if planar {
+            let (cb, cr): (Vec<u8>, Vec<u8>) = cbcr.chunks_exact(2).map(|p| (p[0], p[1])).unzip();
+            planes.push(u8_plane(cb, w / 2, h / 2));
+            planes.push(u8_plane(cr, w / 2, h / 2));
+        } else {
+            planes.push(u8_plane(cbcr, w, h / 2));
+        }
+        if with_alpha {
+            planes.push(u8_plane(alpha, w, h));
+        }
+        planes
     };
     let planes = match format {
         InputFormat::Y416 => {
@@ -605,50 +766,42 @@ pub fn convert_tagged(
         }
         InputFormat::V216 => {
             let mut out = vec![0u16; w * h * 2];
-            crate::par::rows(&mut out, w * 2, |y, row| {
-                for t in 0..w / 2 {
-                    let (x0, x1) = (2 * t, 2 * t + 1);
-                    let (a, _) = ycc(x0, y);
-                    let (b, _) = ycc(x1, y);
-                    let o = &mut row[t * 4..t * 4 + 4];
-                    o[0] =
-                        code(a[1] * 57344.0 + 32768.0 + 64.0 * d(t, y, 1), 256.0, 65216.0) as u16;
-                    o[1] =
-                        code(a[0] * 56064.0 + 4096.0 + 64.0 * d(x0, y, 0), 256.0, 65216.0) as u16;
-                    o[2] =
-                        code(a[2] * 57344.0 + 32768.0 + 64.0 * d(t, y, 2), 256.0, 65216.0) as u16;
-                    o[3] =
-                        code(b[0] * 56064.0 + 4096.0 + 64.0 * d(x1, y, 0), 256.0, 65216.0) as u16;
-                }
-            });
+            crate::par::rows_with(
+                &mut out,
+                w * 2,
+                || RowCache::new(w),
+                |cache, y, row| {
+                    decimate(cache, &fill, y, &[(0, 1.0)], across, w, h);
+                    let line = &cache.rows[y & 3];
+                    for (t, [cb, cr]) in cache.acc.iter().copied().enumerate() {
+                        let (x0, x1) = (2 * t, 2 * t + 1);
+                        let o = &mut row[t * 4..t * 4 + 4];
+                        o[0] =
+                            code(cb * 57344.0 + 32768.0 + 64.0 * d(t, y, 1), 256.0, 65216.0) as u16;
+                        o[1] = code(
+                            line.luma[x0] * 56064.0 + 4096.0 + 64.0 * d(x0, y, 0),
+                            256.0,
+                            65216.0,
+                        ) as u16;
+                        o[2] =
+                            code(cr * 57344.0 + 32768.0 + 64.0 * d(t, y, 2), 256.0, 65216.0) as u16;
+                        o[3] = code(
+                            line.luma[x1] * 56064.0 + 4096.0 + 64.0 * d(x1, y, 0),
+                            256.0,
+                            65216.0,
+                        ) as u16;
+                    }
+                },
+            );
             vec![u16_plane(out, w * 2, h)]
         }
-        InputFormat::V420 => vec![luma_plane8(), cbcr_plane8()],
-        InputFormat::V0a8 => vec![luma_plane8(), cbcr_plane8(), alpha_plane8()],
-        InputFormat::I420 => {
-            let [cb, cr] = chroma_planes8();
-            vec![luma_plane8(), cb, cr]
-        }
-        InputFormat::I420a => {
-            let [cb, cr] = chroma_planes8();
-            vec![luma_plane8(), cb, cr, alpha_plane8()]
-        }
+        InputFormat::V420 => planes8(false, false),
+        InputFormat::V0a8 => planes8(true, false),
+        InputFormat::I420 => planes8(false, true),
+        InputFormat::I420a => planes8(true, true),
         InputFormat::X420 => {
-            let mut luma = vec![0u16; w * h];
-            crate::par::rows(&mut luma, w, |y, row| {
-                for (x, o) in row.iter_mut().enumerate() {
-                    *o = luma10(ycc(x, y).0[0], x, y);
-                }
-            });
-            let mut chroma = vec![0u16; w * h / 2];
-            crate::par::rows(&mut chroma, w, |cy, row| {
-                for cx in 0..w / 2 {
-                    let (cb, cr) = chroma420(cx, cy);
-                    row[cx * 2] = chroma10(cb, cx, cy, 1);
-                    row[cx * 2 + 1] = chroma10(cr, cx, cy, 2);
-                }
-            });
-            vec![u16_plane(luma, w, h), u16_plane(chroma, w, h / 2)]
+            let (luma, cbcr, _) = planes_420(w, h, false, &fill, across, down, luma10, chroma10);
+            vec![u16_plane(luma, w, h), u16_plane(cbcr, w, h / 2)]
         }
         InputFormat::Rgba8 | InputFormat::Rgba16 => {
             // Full-range RGB in the output encoding, straight alpha (PNG), never
@@ -844,52 +997,63 @@ mod tests {
     }
 
     #[test]
-    fn bt709_tags_reencode_after_the_delivery_clip() {
-        use pm_reference::color::Transfer;
-
-        let source = [0.6f32, -0.1, 0.2, 0.5];
-        let straight =
-            [source[0], source[1], source[2]].map(|v| f64::from(v) / f64::from(source[3]));
-        let mapped = delivered(straight);
-        let expected = mapped.map(|v| {
-            let linear = Transfer::Srgb.to_linear(v);
-            (Transfer::Bt709.from_linear(linear) * 255.0)
-                .round_ties_even()
-                .clamp(0.0, 255.0) as u8
-        });
-        for tags in [ColorTags::Rec709Broadcast, ColorTags::Rec709Image] {
-            let actual = rgba8_pixel(
-                source,
-                WorkingEncoding::Standard,
-                AlphaOutput::Straight,
-                tags,
-                [0.0; 3],
+    fn bt709_tags_label_the_same_codes() {
+        // Transfer 1 and transfer 13 tag the same display-encoded codes:
+        // "Rec.709 (1-1-1)" retags, it never re-encodes (code 0.5 stays 0.5).
+        for (source, alpha) in [
+            ([0.6f32, -0.1, 0.2, 0.5], AlphaOutput::Straight),
+            ([0.6, -0.1, 0.2, 0.5], AlphaOutput::Premultiplied),
+            ([0.25, 0.5, 0.75, 1.0], AlphaOutput::None),
+        ] {
+            let bytes =
+                |tags| rgba8_pixel(source, WorkingEncoding::Standard, alpha, tags, [0.0; 3]);
+            assert_eq!(bytes(ColorTags::Rec709Image), bytes(ColorTags::SrgbImage));
+            assert_eq!(
+                bytes(ColorTags::Rec709Broadcast),
+                bytes(ColorTags::Rec709QuickTime)
             );
-            for ch in 0..3 {
-                assert!(
-                    actual[ch].abs_diff(expected[ch]) <= 1,
-                    "{tags:?} channel {ch}: {actual:?} vs {expected:?}"
-                );
-            }
-            assert_eq!(actual[3], 128);
         }
-        let quicktime = rgba8_pixel(
-            [0.25, 0.5, 0.75, 1.0],
-            WorkingEncoding::Standard,
-            AlphaOutput::None,
-            ColorTags::Rec709QuickTime,
-            [0.0; 3],
+        let f = frame(4, 2, |x, _| [x as f32 / 4.0, 0.5, 0.75, 1.0]);
+        let wf = WorkingFrame {
+            width: 4,
+            height: 2,
+            rgba: &f,
+        };
+        for format in [InputFormat::V420, InputFormat::V216, InputFormat::Y416] {
+            let with = |tags| {
+                convert(
+                    &wf,
+                    format,
+                    &ConvertParams {
+                        tags,
+                        ..params(AlphaOutput::None, false)
+                    },
+                )
+                .unwrap()
+                .planes
+            };
+            assert_eq!(
+                with(ColorTags::Rec709Broadcast),
+                with(ColorTags::Rec709QuickTime)
+            );
+        }
+        let mid = convert(
+            &WorkingFrame {
+                width: 2,
+                height: 2,
+                rgba: &[0.5, 0.5, 0.5, 1.0].repeat(4),
+            },
+            InputFormat::V216,
+            &ConvertParams {
+                tags: ColorTags::Rec709Broadcast,
+                ..params(AlphaOutput::None, false)
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            mid.planes[0].u16().unwrap()[1],
+            ((0.5f64 * 876.0 + 64.0).round() as u16) << 6
         );
-        let broadcast = rgba8_pixel(
-            [0.25, 0.5, 0.75, 1.0],
-            WorkingEncoding::Standard,
-            AlphaOutput::None,
-            ColorTags::Rec709Broadcast,
-            [0.0; 3],
-        );
-        assert_ne!(quicktime[..3], broadcast[..3]);
-        assert_eq!(quicktime[3], 255);
-        assert_eq!(broadcast[3], 255);
     }
 
     #[test]

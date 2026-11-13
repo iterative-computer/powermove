@@ -361,6 +361,11 @@ impl Sink for PngSink {
                             expected: b.mean,
                             decoded: b.mean,
                             error_cv: 0.0,
+                            activity_cv: 0.0,
+                            excess: 0.0,
+                            correlation: None,
+                            detail: None,
+                            foreign_cv: 0.0,
                         }),
                 );
             }
@@ -383,8 +388,11 @@ impl Sink for PngSink {
             audio: None,
             timecode: None,
             pixels,
+            picture: Default::default(),
+            notes: vec![],
             hardware_encoder: None,
             bytes,
+            mix: None,
         };
         if cancel.load(std::sync::atomic::Ordering::Acquire) {
             return Err(Error::Cancelled);
