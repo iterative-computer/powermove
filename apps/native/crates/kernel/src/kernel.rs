@@ -55,6 +55,11 @@ pub struct KernelConfig {
     /// its own thread); `trash` above still names the Trash.
     #[doc(hidden)]
     pub publish_hooks: Option<crate::project_io::PublishHooks>,
+    /// While above zero, each worker thread the actor asks for is refused
+    /// (and the count goes down), as the system refuses one when it runs
+    /// out of threads.
+    #[doc(hidden)]
+    pub refused_workers: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
     /// Optional allocator collection on the actor after two seconds idle.
     /// Snapshots allocated here may be freed later by UI/render owners;
     /// thread-local allocators need their allocating thread to collect.

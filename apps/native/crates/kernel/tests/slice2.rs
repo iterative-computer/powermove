@@ -3208,6 +3208,82 @@ fn a_save_finished_after_its_folder_failed_to_sync_is_proven_off_the_kernel_thre
     assert_eq!(*read.lock().unwrap(), Vec::<std::path::PathBuf>::new());
     actor.shutdown();
 }
+/// When the system refuses the thread a project's open, save or recovery
+/// choice needs (it has run out of them), the call is answered at once
+/// with a plain failure and nothing stays reserved: once threads can be
+/// had again, the same open, save and choice go through, and the project
+/// closes.
+#[test]
+fn work_whose_worker_cannot_start_is_refused_and_reserves_nothing() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let dir = common::TempDir::new("worker-refused");
+    fs::create_dir_all(dir.path("job")).unwrap();
+    let file = dir.path("job/cut.pmv");
+    fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+    let native = dir.path("native");
+    let refused = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let actor = KernelActor::spawn(KernelConfig {
+        journal_root: Some(native.join("journals")),
+        trash: Some(common::trash(&native.join("Trash"))),
+        refused_workers: Some(refused.clone()),
+        ..Default::default()
+    });
+    let k = actor.handle();
+    k.shell(ShellCall::AttachLibrary {
+        profile: native.clone(),
+        format: DiskFormat::V1_2,
+        electron_profile: None,
+    })
+    .wait()
+    .unwrap()
+    .unwrap();
+    let open = || {
+        k.shell(ShellCall::Open {
+            id: "P".into(),
+            source: SessionSource::File(file.clone()),
+            electron_profile: None,
+        })
+        .wait()
+    };
+    refused.store(1, SeqCst);
+    let first = open();
+    assert!(
+        matches!(first, Some(Err(_))),
+        "the open is refused: {first:?}"
+    );
+    let session = match open() {
+        Some(Ok(ShellReply::Opened { session, .. })) => session,
+        other => panic!("the open goes through afterwards: {other:?}"),
+    };
+    rename_on(&k, "P", "One").wait().unwrap().unwrap();
+    refused.store(1, SeqCst);
+    let first = k.prepare_save(session.clone(), None).wait();
+    assert!(matches!(first, Some(Err(_))), "the save is refused");
+    let save = k
+        .prepare_save(session.clone(), None)
+        .wait()
+        .unwrap()
+        .unwrap_or_else(|e| panic!("the save goes through afterwards: {e}"));
+    k.finish_save(save.run()).wait().unwrap().unwrap();
+    assert_eq!(saved_name(&file).as_deref(), Some("One"));
+    k.shell(ShellCall::Close(session)).wait().unwrap().unwrap();
+    // A recovery choice reserves the file while it runs: refused, it
+    // leaves the file free to open.
+    refused.store(1, SeqCst);
+    let chosen = k
+        .shell(ShellCall::UseLeftover {
+            path: file.clone(),
+            leftover: dir.path("job/.cut.pmv.missing.aside"),
+            unproven: false,
+        })
+        .wait();
+    assert!(matches!(chosen, Some(Err(_))), "{chosen:?}");
+    assert!(
+        matches!(open(), Some(Ok(ShellReply::Opened { .. }))),
+        "the file opens afterwards"
+    );
+    actor.shutdown();
+}
 /// A save's publication runs inside a coordinated write of the project
 /// file (other programs that take part in file coordination wait for it,
 /// and are asked to write their own changes first), and so do the moves a

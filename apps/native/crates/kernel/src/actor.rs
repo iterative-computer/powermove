@@ -336,6 +336,17 @@ struct Shared {
     journal_sync: Mutex<Option<crate::journal::JournalSync>>,
     /// The actor's own mailbox, for a worker to hand back what it did.
     back: Mutex<Option<mpsc::Sender<Msg>>>,
+    /// [`KernelConfig::refused_workers`].
+    refused_workers: Option<Arc<std::sync::atomic::AtomicUsize>>,
+}
+impl Shared {
+    /// Whether the next worker thread is refused ([`Self::refused_workers`]).
+    fn refuses_worker(&self) -> bool {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.refused_workers
+            .as_ref()
+            .is_some_and(|n| n.fetch_update(SeqCst, SeqCst, |n| n.checked_sub(1)).is_ok())
+    }
 }
 
 type Reply<T> = Box<dyn FnOnce(T) + Send>;
@@ -455,7 +466,10 @@ pub struct KernelHandle {
 impl KernelActor {
     pub fn spawn(config: KernelConfig) -> KernelActor {
         let (tx, rx) = mpsc::channel::<Msg>();
-        let shared = Arc::new(Shared::default());
+        let shared = Arc::new(Shared {
+            refused_workers: config.refused_workers.clone(),
+            ..Default::default()
+        });
         *shared.state.lock().expect("state") = Arc::new(crate::state::StateSnapshot::seeded());
         *shared.back.lock().expect("back") = Some(tx.clone());
         let thread = {
@@ -1167,19 +1181,43 @@ fn contain(
 
 /// Runs `work` on a worker thread and posts `done(result)` back to the
 /// actor (`None` if `work` panicked): the actor never waits on it.
+///
+/// When no worker can be started (the system refuses a thread), nothing
+/// runs and the message `done(None)` makes is returned instead: the caller
+/// releases what it reserved for the work and answers it at once, so the
+/// project or file is never left reserved for work that never began.
 fn off_actor<T: Send + 'static>(
     name: &str,
+    shared: &Shared,
     back: mpsc::Sender<Msg>,
     work: impl FnOnce() -> T + Send + 'static,
     done: impl FnOnce(Option<Box<T>>) -> Msg + Send + 'static,
-) {
+) -> Option<Msg> {
+    let job = Arc::new(Mutex::new(Some((work, done))));
+    let taken = job.clone();
     let run = move || {
+        let Some((work, done)) = taken.lock().ok().and_then(|mut job| job.take()) else {
+            return;
+        };
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)).ok();
         let _ = back.send(done(result.map(Box::new)));
     };
-    // A thread that cannot be started leaves the caller unanswered (its
-    // reply closes), as any call the kernel could not serve.
-    let _ = thread::Builder::new().name(name.into()).spawn(run);
+    let started =
+        !shared.refuses_worker() && thread::Builder::new().name(name.into()).spawn(run).is_ok();
+    if started {
+        return None;
+    }
+    let (_, done) = job.lock().ok()?.take()?;
+    Some(done(None))
+}
+
+/// The answer to a call whose worker could not be started ([`off_actor`]).
+fn not_started() -> KernelFailure {
+    KernelFailure::Storage(
+        "Powermove could not start the work this needs (the system refused a new thread). \
+         Nothing was changed; try again."
+            .into(),
+    )
 }
 
 /// One shell call, with what it publishes and emits.
@@ -1345,7 +1383,7 @@ fn step(kernel: &mut Kernel, shared: &Arc<Shared>, turns: &mut Turns, msg: Msg) 
                     Ok(Some(job)) => {
                         let back = shared.back.lock().expect("back").clone();
                         if let Some(back) = back {
-                            kernel.preparing.push(id);
+                            kernel.preparing.push(id.clone());
                             let again = move |prelude| Msg::PrepareSave {
                                 session,
                                 path,
@@ -1354,7 +1392,13 @@ fn step(kernel: &mut Kernel, shared: &Arc<Shared>, turns: &mut Turns, msg: Msg) 
                                 prelude: Some(prelude),
                                 reply,
                             };
-                            off_actor("pm-kernel-save", back, move || job.run(), again);
+                            let run = move || job.run();
+                            if let Some(Msg::PrepareSave { reply, .. }) =
+                                off_actor("pm-kernel-save", shared, back, run, again)
+                            {
+                                kernel.preparing.retain(|p| *p != id);
+                                reply(Err(not_started()));
+                            }
                             return;
                         }
                     }
@@ -1444,7 +1488,15 @@ fn step(kernel: &mut Kernel, shared: &Arc<Shared>, turns: &mut Turns, msg: Msg) 
                             result,
                             reply,
                         };
-                        off_actor("pm-kernel-disk", back, move || job.run(), done);
+                        let run = move || job.run();
+                        if let Some(Msg::DiskDone { path, reply, .. }) =
+                            off_actor("pm-kernel-disk", shared, back, run, done)
+                        {
+                            if let Some(path) = path {
+                                kernel.opening.retain(|p| *p != path);
+                            }
+                            reply(Err(not_started()));
+                        }
                         return;
                     }
                 }
@@ -1467,7 +1519,13 @@ fn step(kernel: &mut Kernel, shared: &Arc<Shared>, turns: &mut Turns, msg: Msg) 
                             prelude,
                             reply,
                         };
-                        off_actor("pm-kernel-open", back, move || job.run(), opened);
+                        let run = move || job.run();
+                        if let Some(Msg::Opened { path, reply, .. }) =
+                            off_actor("pm-kernel-open", shared, back, run, opened)
+                        {
+                            kernel.opening.retain(|p| *p != path);
+                            reply(Err(not_started()));
+                        }
                         return;
                     }
                 }
