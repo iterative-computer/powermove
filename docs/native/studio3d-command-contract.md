@@ -48,3 +48,34 @@ archived privately under the profile and removed from discovery, using the
 same publication lock as server startup. Startup can then create a headless
 host normally. Live or uncertain owners are preserved. A normal server
 shutdown still removes only its own descriptor.
+
+## Explicit recovery over MCP
+
+A normal headless EOF closes library projects durably and retires their
+journals. An unsaved named working file is deferred instead: EOF never
+silently overwrites it. A proxy disconnect only ends that client session;
+it does not close the application's projects.
+
+If interrupted work needs a decision, `open_project` returns
+`recoveryRequired: true`, a `ticket`, and the available `recovery.choices`.
+It does not change the active project or accept recovery implicitly. For
+example, after inspecting that response:
+
+```json
+{
+  "projectId": "project-id",
+  "recovery": {"ticket": "returned-ticket", "decision": "recover"}
+}
+```
+
+Pass that object to `open_project`. Available decisions are `recover`,
+`discard` (open the saved base and archive the rejected journal), and
+`open_as_copy`. An unrecoverable journal instead offers
+`open_saved_version`, preserving the rejected files. Tickets are bound to
+one project and consumed once. The kernel still checks whether the
+recovery inputs changed before accepting a choice.
+
+`list_projects.pendingRecoveries` also exposes pending opens, including
+a recovery encountered while opening a launch-file argument before MCP
+connects. Existing `open_project` calls need no new arguments when there
+is no interrupted work.
