@@ -917,8 +917,9 @@ mod tests {
     fn a_mutation_commits_its_entry_and_a_failed_one_rolls_back() {
         let (actor, mut adapter) = adapter();
         let begin = |txid| request(txid, "edit.mutateBegin", json!({"label":"Synthetic"}));
-        let marker = json!({"ops":[{"path":["markers"],"exists":true,"value":[{"id":"synthetic-marker","t":0,"name":"Synthetic"}]}],"label":"Synthetic"});
-        adapter.call(&begin(1), 0.).unwrap();
+        let lease = adapter.call(&begin(1), 0.).unwrap()["value"]["data"]["lease"].clone();
+        assert!(lease.is_u64(), "the edit's lease: {lease}");
+        let marker = json!({"lease":lease,"ops":[{"path":["markers"],"exists":true,"value":[{"id":"synthetic-marker","t":0,"name":"Synthetic"}]}],"label":"Synthetic"});
         let finish = request(2, "edit.mutateFinish", marker);
         let reply = adapter.call(&finish, 0.).unwrap();
         assert_eq!(reply["value"]["ok"], true);
@@ -935,13 +936,18 @@ mod tests {
             .call(&request(4, "history.undo", json!({})), 0.)
             .unwrap();
         assert_eq!(undo["value"], true);
-        adapter.call(&begin(5), 0.).unwrap();
-        let bad = json!({"ops":[{"path":["markers",0,"t"],"exists":true,"value":1}]});
+        let lease = adapter.call(&begin(5), 0.).unwrap()["value"]["data"]["lease"].clone();
+        let bad = json!({"lease":lease,"ops":[{"path":["markers",0,"t"],"exists":true,"value":1}]});
         let reply = adapter
-            .call(&request(6, "edit.mutateFinish", bad), 0.)
+            .call(&request(6, "edit.mutateFinish", bad.clone()), 0.)
             .unwrap();
         assert_eq!(reply["value"]["ok"], false);
         assert_eq!(busy(&mut adapter, 7), false, "the failed entry rolled back");
+        // The lease is spent: finishing it again changes nothing and says so.
+        let again = adapter
+            .call(&request(8, "edit.mutateFinish", bad), 0.)
+            .unwrap();
+        assert_eq!(again["value"]["ok"], false);
         drop(adapter);
         actor.shutdown();
     }
