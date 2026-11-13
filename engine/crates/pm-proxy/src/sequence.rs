@@ -280,8 +280,12 @@ fn direct_color(
     still: &pm_media::image::StillImage,
     _path: &Path,
 ) -> Result<Option<SequenceColor>> {
+    // Associated alpha (OpenEXR, a premultiplied TIFF): FFmpeg would carry
+    // the premultiplied samples into a movie read as straight alpha, and
+    // the edge would darken. The native reader unpremultiplies them.
     if still.color.gamma.is_some()
         || matches!(still.color.icc_class, Some(IccClass::Other))
+        || !matches!(still.color.alpha, AlphaMode::Opaque | AlphaMode::Straight)
         || float_outside_sdr(still)?
     {
         return Ok(None);
@@ -480,12 +484,14 @@ fn source_to_bt2020(still: &pm_media::image::StillImage) -> Result<Mat3> {
     Ok(pm_color::primaries::conversion(source, Primaries::Bt2020).unwrap())
 }
 
-/// ST 2084, treating scene-linear 1.0 as reference white at 100 cd/m².
-/// This maps positive EXR highlights up to 100× reference white without the
-/// sRGB clip. Values beyond PQ's 10,000 cd/m² ceiling saturate at that
-/// display limit, and the original frames remain the source for export.
+/// ST 2084, treating scene-linear 1.0 as reference white at the 203 cd/m²
+/// the renderer reads a PQ movie's white at (`pm_color::tonemap::SDR_WHITE`,
+/// BT.2408), so the proxy shows its originals' levels. This maps positive
+/// EXR highlights up to ~49× reference white without the sRGB clip. Values
+/// beyond PQ's 10,000 cd/m² ceiling saturate at that display limit, and the
+/// original frames remain the source for export.
 fn pq_code(linear: f64) -> f64 {
-    let y = (linear.max(0.0) / 100.0).min(1.0);
+    let y = (linear.max(0.0) * pm_color::tonemap::SDR_WHITE / 10_000.0).min(1.0);
     const M1: f64 = 2610.0 / 16384.0;
     const M2: f64 = 2523.0 / 32.0;
     const C1: f64 = 3424.0 / 4096.0;
@@ -504,7 +510,8 @@ fn source_linear(transfer: Transfer, encoded: f64) -> f64 {
             const C2: f64 = 2413.0 / 128.0;
             const C3: f64 = 2392.0 / 128.0;
             let p = encoded.max(0.0).powf(1.0 / M2);
-            ((p - C1).max(0.0) / (C2 - C3 * p)).max(0.0).powf(1.0 / M1) * 100.0
+            ((p - C1).max(0.0) / (C2 - C3 * p)).max(0.0).powf(1.0 / M1) * 10_000.0
+                / pm_color::tonemap::SDR_WHITE
         }
         Transfer::Hlg => {
             const A: f64 = 0.178_832_77;

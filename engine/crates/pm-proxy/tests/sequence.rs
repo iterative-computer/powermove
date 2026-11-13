@@ -566,10 +566,10 @@ mod real {
                 );
                 let red = f64::from(u16::from_le_bytes(decoded.stdout[0..2].try_into().unwrap()))
                     / 65535.0;
-                // PQ(100 nits), the scene 1.0 reference white, is ~0.508.
+                // PQ(203 nits), the scene 1.0 reference white, is ~0.581.
                 // A linear EXR red of 4.0 must survive the codec above it.
                 assert!(
-                    red > 0.56,
+                    red > 0.62,
                     "EXR highlight clipped to SDR white: PQ red {red}"
                 );
             }
