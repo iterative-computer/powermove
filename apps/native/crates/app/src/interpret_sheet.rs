@@ -14,20 +14,25 @@ use pm_model::{Map, Value};
 use pm_protocol::color::{AlphaMode, MatrixCoefficients, Primaries, Range, Transfer};
 use std::{path::Path, rc::Rc};
 
-const PRIMARIES: [(&str, Primaries); 11] = [
+// Every value the engine reads is a choice here: an override the sheet could
+// not show would look like Automatic.
+const PRIMARIES: [(&str, Primaries); 14] = [
     ("Rec. 709", Primaries::Bt709),
     ("Rec. 601 (625-line, PAL)", Primaries::Bt601_625),
     ("Rec. 601 (525-line, NTSC)", Primaries::Bt601_525),
     ("Rec. 2020", Primaries::Bt2020),
     ("Display P3", Primaries::DisplayP3),
     ("DCI-P3", Primaries::DciP3),
+    ("NTSC 1953 (BT.470 System M)", Primaries::Bt470M),
+    ("EBU Tech 3213", Primaries::Ebu3213),
+    ("Generic Film", Primaries::GenericFilm),
     ("S-Gamut3", Primaries::SGamut3),
     ("S-Gamut3.Cine", Primaries::SGamut3Cine),
     ("V-Gamut", Primaries::VGamut),
     ("ARRI Wide Gamut 3", Primaries::AwgGen3),
     ("ARRI Wide Gamut 4", Primaries::AwgGen4),
 ];
-const TRANSFERS: [(&str, Transfer); 12] = [
+const TRANSFERS: [(&str, Transfer); 14] = [
     ("sRGB / Rec. 709 (display)", Transfer::DisplayE),
     ("Rec. 1886 (gamma 2.4)", Transfer::Bt1886),
     ("Rec. 709 (scene)", Transfer::SceneReferredBt709),
@@ -40,21 +45,31 @@ const TRANSFERS: [(&str, Transfer); 12] = [
     ("V-Log", Transfer::VLog),
     ("LogC3 EI 800", Transfer::LogC3),
     ("LogC4", Transfer::LogC4),
+    ("Logarithmic (100:1)", Transfer::Log100),
+    ("Logarithmic (316:1)", Transfer::Log316),
 ];
-const MATRICES: [(&str, MatrixCoefficients); 4] = [
+const MATRICES: [(&str, MatrixCoefficients); 5] = [
     ("Rec. 709", MatrixCoefficients::Bt709),
     ("Rec. 601", MatrixCoefficients::Bt601),
     ("Rec. 2020", MatrixCoefficients::Bt2020Ncl),
+    (
+        "Rec. 2020 (constant luminance)",
+        MatrixCoefficients::Bt2020Cl,
+    ),
     ("RGB (no matrix)", MatrixCoefficients::Identity),
 ];
 const RANGES: [(&str, Range); 2] = [
     ("Limited (video, 16–235)", Range::Limited),
     ("Full (data, 0–255)", Range::Full),
 ];
-const ALPHAS: [(&str, AlphaChoice); 3] = [
+const ALPHAS: [(&str, AlphaChoice); 4] = [
     ("Ignore", AlphaChoice::Ignore),
     ("Straight", AlphaChoice::Straight),
     ("Premultiplied", AlphaChoice::Premultiplied),
+    (
+        "Premultiplied (Matted With Color)",
+        AlphaChoice::PremultipliedWithColor,
+    ),
 ];
 
 /// A value as the document stores it (the engine's own name for it).
@@ -110,10 +125,15 @@ fn alpha_choice(mode: &AlphaMode) -> AlphaChoice {
     match mode {
         AlphaMode::Opaque => AlphaChoice::Ignore,
         AlphaMode::Straight => AlphaChoice::Straight,
-        AlphaMode::Premultiplied | AlphaMode::PremultipliedWithColor { .. } => {
-            AlphaChoice::Premultiplied
-        }
+        AlphaMode::Premultiplied => AlphaChoice::Premultiplied,
+        AlphaMode::PremultipliedWithColor { .. } => AlphaChoice::PremultipliedWithColor,
     }
+}
+
+/// The matte as the document stores it.
+fn matte_hex(matte: [f64; 3]) -> String {
+    let c = |v: f64| (v.clamp(0., 1.) * 255.).round() as u8;
+    format!("#{:02X}{:02X}{:02X}", c(matte[0]), c(matte[1]), c(matte[2]))
 }
 
 /// The automatic value of a read field and where it came from.
@@ -172,6 +192,15 @@ pub fn surface(
             chosen.alpha.as_ref(),
             alpha.as_ref().map(|(value, origin)| (value, origin)),
         ),
+        Field {
+            description: Some("The color a matted file’s edges were blended with.".into()),
+            ..Field::new(
+                "alphaMatte",
+                "Matte Color",
+                NativePiece::ColourWell,
+                vec![matte_hex(chosen.alpha_matte)],
+            )
+        },
     ];
     let mut surface = Surface::sheet(id, owner, "Interpret Footage", fields, "Apply");
     surface.line = Some(name.to_owned());
@@ -182,24 +211,26 @@ pub fn surface(
         },
         FieldGroup {
             title: "Alpha",
-            fields: vec!["alpha"],
+            fields: vec!["alpha", "alphaMatte"],
         },
     ];
     surface
 }
 
 /// What the pop-ups say, as indexes: 0 is Automatic.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Chosen {
     pub primaries: usize,
     pub transfer: usize,
     pub matrix: usize,
     pub range: usize,
     pub alpha: usize,
+    /// The matte well's colour, once the person has changed it.
+    pub matte: Option<String>,
 }
 
 impl Chosen {
-    pub fn read(popup: impl Fn(&str) -> Option<usize>) -> Self {
+    pub fn read(popup: impl Fn(&str) -> Option<usize>, matte: Option<String>) -> Self {
         let at = |id: &str| popup(id).unwrap_or(0);
         Self {
             primaries: at("primaries"),
@@ -207,18 +238,45 @@ impl Chosen {
             matrix: at("matrix"),
             range: at("range"),
             alpha: at("alpha"),
+            matte,
         }
     }
 
-    /// Writes the choices into an asset's `interpret` member: Automatic
-    /// removes the override, and every other member stays as it was.
-    pub fn write(&self, interpret: &mut Map) {
+    /// What the sheet showed when it opened.
+    pub fn shown(surface: &Surface) -> Self {
+        Self::read(
+            |id| {
+                surface
+                    .fields
+                    .iter()
+                    .find(|f| f.id == id)
+                    .map(|f| f.selected)
+            },
+            None,
+        )
+    }
+
+    fn matted(&self) -> bool {
+        self.alpha
+            .checked_sub(1)
+            .and_then(|i| ALPHAS.get(i))
+            .is_some_and(|(_, alpha)| *alpha == AlphaChoice::PremultipliedWithColor)
+    }
+
+    /// Writes what the person changed since the sheet `opened` into an
+    /// asset's `interpret` member. A pop-up left alone leaves its member as
+    /// stored, whatever that is; Automatic removes the override; every other
+    /// member stays as it was. Returns whether anything was written.
+    pub fn write(&self, opened: &Chosen, interpret: &mut Map) -> bool {
         fn set<T: serde::Serialize>(
             interpret: &mut Map,
             key: &str,
             choices: &[(&str, T)],
-            index: usize,
-        ) {
+            (index, opened): (usize, usize),
+        ) -> bool {
+            if index == opened {
+                return false;
+            }
             match index.checked_sub(1).and_then(|i| choices.get(i)) {
                 Some((_, value)) => {
                     interpret.insert(key, Value::from(stored(value).as_str()));
@@ -227,12 +285,34 @@ impl Chosen {
                     interpret.remove(key);
                 }
             }
+            true
         }
-        set(interpret, "primaries", &PRIMARIES, self.primaries);
-        set(interpret, "transfer", &TRANSFERS, self.transfer);
-        set(interpret, "matrix", &MATRICES, self.matrix);
-        set(interpret, "range", &RANGES, self.range);
-        set(interpret, "alpha", &ALPHAS, self.alpha);
+        let mut changed = set(
+            interpret,
+            "primaries",
+            &PRIMARIES,
+            (self.primaries, opened.primaries),
+        );
+        changed |= set(
+            interpret,
+            "transfer",
+            &TRANSFERS,
+            (self.transfer, opened.transfer),
+        );
+        changed |= set(interpret, "matrix", &MATRICES, (self.matrix, opened.matrix));
+        changed |= set(interpret, "range", &RANGES, (self.range, opened.range));
+        let alpha = set(interpret, "alpha", &ALPHAS, (self.alpha, opened.alpha));
+        changed |= alpha;
+        // The matte belongs to the matted choice: it leaves with it, and a
+        // colour picked under any other choice is not stored.
+        if alpha && !self.matted() {
+            interpret.remove("alphaMatte");
+        }
+        if let Some(matte) = self.matte.as_deref().filter(|_| self.matted()) {
+            interpret.insert("alphaMatte", Value::from(matte));
+            changed = true;
+        }
+        changed
     }
 }
 
@@ -294,6 +374,7 @@ impl Controller {
                 &chosen,
                 reading.as_ref(),
             );
+            let opened = Chosen::shown(&surface);
             let Ok(open) = this.update(cx, |v, _| {
                 let host = v.host.borrow();
                 Rc::new(OpenSheet::present(
@@ -309,17 +390,22 @@ impl Controller {
                 match action.as_str() {
                     "cancel" => break,
                     "apply" => {
-                        let chosen = Chosen::read(|id| open.popup(id));
-                        let _ = this.update(cx, |v, cx| {
-                            v.change_interpretation(
-                                |p, _| {
-                                    crate::colour::edit_interpretation(p, &layer, |interpret| {
-                                        chosen.write(interpret)
-                                    })
-                                },
-                                cx,
-                            )
-                        });
+                        let chosen =
+                            Chosen::read(|id| open.popup(id), open.changed_colour("alphaMatte"));
+                        // Nothing changed: nothing is written, and Undo gains
+                        // no step.
+                        if chosen.write(&opened, &mut Map::new()) {
+                            let _ = this.update(cx, |v, cx| {
+                                v.change_interpretation(
+                                    |p, _| {
+                                        crate::colour::edit_interpretation(p, &layer, |interpret| {
+                                            chosen.write(&opened, interpret);
+                                        })
+                                    },
+                                    cx,
+                                )
+                            });
+                        }
                         break;
                     }
                     _ => {}
@@ -339,33 +425,37 @@ mod tests {
         (DialogId("i".into()), WindowId("w".into()))
     }
 
+    fn parsed(interpret: &Map) -> Interpretation {
+        let json: serde_json::Value = serde_json::from_str(&pm_model::json::to_canonical_string(
+            &Value::Object(interpret.clone()),
+        ))
+        .unwrap();
+        let (parsed, issues) = Interpretation::from_json(&json);
+        assert!(issues.is_empty(), "{issues:?}");
+        parsed
+    }
+
+    fn sheet(chosen: &Interpretation) -> Surface {
+        let (id, owner) = ids();
+        surface(id, owner, "Clip.mov", true, chosen, None)
+    }
+
     /// Every stored name is one the engine parses back to the same value.
     #[test]
     fn every_choice_is_a_value_the_engine_reads() {
-        let all = Chosen {
-            primaries: PRIMARIES.len(),
-            transfer: TRANSFERS.len(),
-            matrix: MATRICES.len(),
-            range: RANGES.len(),
-            alpha: ALPHAS.len(),
-        };
         for step in 0..PRIMARIES.len().max(TRANSFERS.len()) {
             let at = |count: usize| 1 + step % count;
             let chosen = Chosen {
-                primaries: at(all.primaries),
-                transfer: at(all.transfer),
-                matrix: at(all.matrix),
-                range: at(all.range),
-                alpha: at(all.alpha),
+                primaries: at(PRIMARIES.len()),
+                transfer: at(TRANSFERS.len()),
+                matrix: at(MATRICES.len()),
+                range: at(RANGES.len()),
+                alpha: at(ALPHAS.len()),
+                matte: None,
             };
             let mut interpret = Map::new();
-            chosen.write(&mut interpret);
-            let json: serde_json::Value = serde_json::from_str(
-                &pm_model::json::to_canonical_string(&Value::Object(interpret)),
-            )
-            .unwrap();
-            let (parsed, issues) = Interpretation::from_json(&json);
-            assert!(issues.is_empty(), "{issues:?}");
+            assert!(chosen.write(&Chosen::default(), &mut interpret));
+            let parsed = parsed(&interpret);
             assert_eq!(parsed.primaries, Some(PRIMARIES[chosen.primaries - 1].1));
             assert_eq!(parsed.transfer, Some(TRANSFERS[chosen.transfer - 1].1));
             assert_eq!(parsed.matrix, Some(MATRICES[chosen.matrix - 1].1));
@@ -374,16 +464,227 @@ mod tests {
         }
     }
 
+    /// Every value the engine reads has a choice: an override the sheet
+    /// could not show would look like Automatic.
+    #[test]
+    fn every_value_the_engine_reads_is_a_choice() {
+        fn offered<T: PartialEq + serde::de::DeserializeOwned>(
+            choices: &[(&str, T)],
+            names: &[&str],
+        ) {
+            for name in names {
+                let value: T = serde_json::from_value(serde_json::json!(name)).expect(name);
+                assert!(choices.iter().any(|(_, v)| *v == value), "{name}");
+            }
+            assert_eq!(choices.len(), names.len());
+        }
+        offered(
+            &PRIMARIES,
+            &[
+                "bt709",
+                "bt601_625",
+                "bt601_525",
+                "bt2020",
+                "displayP3",
+                "bt470M",
+                "genericFilm",
+                "dciP3",
+                "ebu3213",
+                "sGamut3",
+                "sGamut3Cine",
+                "vGamut",
+                "awgGen3",
+                "awgGen4",
+            ],
+        );
+        offered(
+            &TRANSFERS,
+            &[
+                "displayE",
+                "bt1886",
+                "sceneReferredBt709",
+                "linear",
+                "gamma22",
+                "log100",
+                "log316",
+                "pq",
+                "hlg",
+                "appleLog",
+                "sLog3",
+                "vLog",
+                "logC3",
+                "logC4",
+            ],
+        );
+        offered(
+            &MATRICES,
+            &["identity", "bt709", "bt601", "bt2020Ncl", "bt2020Cl"],
+        );
+        offered(&RANGES, &["limited", "full"]);
+        offered(
+            &ALPHAS,
+            &[
+                "ignore",
+                "straight",
+                "premultiplied",
+                "premultipliedWithColor",
+            ],
+        );
+        // A variant added to the engine fails to compile here until it is
+        // offered above.
+        let _ = |p: Primaries, t: Transfer, m: MatrixCoefficients, a: AlphaChoice| {
+            match p {
+                Primaries::Bt709
+                | Primaries::Bt601_625
+                | Primaries::Bt601_525
+                | Primaries::Bt2020
+                | Primaries::DisplayP3
+                | Primaries::Bt470M
+                | Primaries::GenericFilm
+                | Primaries::DciP3
+                | Primaries::Ebu3213
+                | Primaries::SGamut3
+                | Primaries::SGamut3Cine
+                | Primaries::VGamut
+                | Primaries::AwgGen3
+                | Primaries::AwgGen4
+                | Primaries::Unspecified => {}
+            }
+            match t {
+                Transfer::DisplayE
+                | Transfer::Bt1886
+                | Transfer::SceneReferredBt709
+                | Transfer::Linear
+                | Transfer::Gamma22
+                | Transfer::Log100
+                | Transfer::Log316
+                | Transfer::Pq
+                | Transfer::Hlg
+                | Transfer::AppleLog
+                | Transfer::SLog3
+                | Transfer::VLog
+                | Transfer::LogC3
+                | Transfer::LogC4 => {}
+            }
+            match m {
+                MatrixCoefficients::Identity
+                | MatrixCoefficients::Bt709
+                | MatrixCoefficients::Bt601
+                | MatrixCoefficients::Bt2020Ncl
+                | MatrixCoefficients::Bt2020Cl => {}
+            }
+            match a {
+                AlphaChoice::Ignore
+                | AlphaChoice::Straight
+                | AlphaChoice::Premultiplied
+                | AlphaChoice::PremultipliedWithColor => {}
+            }
+        };
+    }
+
+    /// Opening the sheet on any stored override and pressing Apply writes
+    /// nothing: the override is shown as itself, never as Automatic, and a
+    /// pop-up the person left alone leaves its member as stored.
+    #[test]
+    fn apply_with_nothing_changed_keeps_every_override() {
+        for stored in [
+            serde_json::json!({"alpha":"premultipliedWithColor","alphaMatte":"#FFFFFF"}),
+            serde_json::json!({"primaries":"bt470M","transfer":"log100"}),
+            serde_json::json!({"primaries":"genericFilm","transfer":"log316","matrix":"bt2020Cl"}),
+            serde_json::json!({"primaries":"ebu3213","range":"full","cleanAperture":true}),
+            // Members this build cannot read stay too.
+            serde_json::json!({"transfer":"aLaterCurve","primaries":"bt2020","siting":"left"}),
+        ] {
+            let mut interpret = Map::new();
+            for (key, value) in stored.as_object().unwrap() {
+                let value = match value {
+                    serde_json::Value::Bool(b) => Value::from(*b),
+                    other => Value::from(other.as_str().unwrap()),
+                };
+                interpret.insert(key.as_str(), value);
+            }
+            let before = interpret.clone();
+            let chosen = Interpretation::from_json(&stored).0;
+            let surface = sheet(&chosen);
+            let opened = Chosen::shown(&surface);
+            // What the engine reads is on show, not Automatic.
+            for (id, member) in [
+                ("primaries", chosen.primaries.is_some()),
+                ("transfer", chosen.transfer.is_some()),
+                ("matrix", chosen.matrix.is_some()),
+                ("range", chosen.range.is_some()),
+                ("alpha", chosen.alpha.is_some()),
+            ] {
+                let field = surface.fields.iter().find(|f| f.id == id).unwrap();
+                assert_eq!(field.selected != 0, member, "{id} of {stored}");
+            }
+            assert!(!opened.clone().write(&opened, &mut interpret), "{stored}");
+            assert_eq!(interpret, before, "{stored}");
+            // Changing one field leaves the others as stored.
+            let other = Chosen {
+                range: if opened.range == 1 { 2 } else { 1 },
+                ..opened.clone()
+            };
+            assert!(other.write(&opened, &mut interpret));
+            for (key, value) in before.iter() {
+                if key.to_string_lossy() != "range" {
+                    assert_eq!(interpret.get_key(key), Some(value), "{stored}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_matte_is_stored_with_its_choice_and_leaves_with_it() {
+        let matted = ALPHAS.len();
+        let mut interpret = Map::new();
+        // A colour picked under another choice is not stored.
+        let straight = Chosen {
+            alpha: 2,
+            matte: Some("#FF0000".into()),
+            ..Chosen::default()
+        };
+        assert!(straight.write(&Chosen::default(), &mut interpret));
+        assert!(interpret.get("alphaMatte").is_none());
+        let white = Chosen {
+            alpha: matted,
+            matte: Some("#FFFFFF".into()),
+            ..Chosen::default()
+        };
+        assert!(white.write(&straight, &mut interpret));
+        let read = parsed(&interpret);
+        assert_eq!(read.alpha, Some(AlphaChoice::PremultipliedWithColor));
+        assert_eq!(read.alpha_matte, [1.0, 1.0, 1.0]);
+        // The sheet shows the stored matte in its well.
+        let surface = sheet(&read);
+        let well = surface
+            .fields
+            .iter()
+            .find(|f| f.id == "alphaMatte")
+            .unwrap();
+        assert_eq!(well.values, ["#FFFFFF"]);
+        assert_eq!(Chosen::shown(&surface).alpha, matted);
+        // Back to Automatic: the matte goes with the choice.
+        assert!(Chosen::default().write(&Chosen::shown(&surface), &mut interpret));
+        assert!(interpret.is_empty(), "{interpret:?}");
+    }
+
     #[test]
     fn automatic_removes_an_override_and_keeps_the_other_members() {
         let mut interpret = Map::new();
         interpret.insert("range", Value::from("full"));
         interpret.insert("cleanAperture", Value::from(true));
+        // The sheet opened showing Full; the person chose Automatic, and a
+        // matrix.
+        let opened = Chosen {
+            range: 2,
+            ..Chosen::default()
+        };
         Chosen {
             matrix: 2,
             ..Chosen::default()
         }
-        .write(&mut interpret);
+        .write(&opened, &mut interpret);
         assert!(interpret.get("range").is_none(), "Automatic removes it");
         assert_eq!(interpret.get("matrix"), Some(&Value::from("bt601")));
         assert_eq!(interpret.get("cleanAperture"), Some(&Value::from(true)));
@@ -403,8 +704,9 @@ mod tests {
         assert_eq!(field("primaries").selected, 0, "Automatic");
         assert_eq!(field("primaries").values[0], "Automatic");
         // The pop-ups read back as what they show.
-        let read = Chosen::read(|id| Some(field(id).selected));
+        let read = Chosen::read(|id| Some(field(id).selected), None);
         assert_eq!(read.range, 2);
+        assert_eq!(read, Chosen::shown(&sheet));
         // A still has no matrix or range to set.
         let (id, owner) = ids();
         let still = surface(
