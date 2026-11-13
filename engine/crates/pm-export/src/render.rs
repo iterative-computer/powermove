@@ -1537,6 +1537,7 @@ where
             .and_then(|comp| timeline.composition_frames(comp.duration())),
     );
     let pass = pass_key(job.seed, request.output_size);
+    let sound = spec.audio.map(|a| a.codec);
     let mut pipeline = Pipeline::new(spec, sink)?;
     let mut mixer = audio.map(|a| {
         let first = pm_audio::offline::sample_of_ticks(timeline.tick(0).get(), a.sample_rate);
@@ -1575,7 +1576,7 @@ where
             let _qos_refresh = crate::par::install_qos_refresh(encoder_gate.worker_qos_refresh());
             encoder_gate.sync_worker_qos();
             let mut last_preview: Option<Instant> = None;
-            let mut levels = crate::verify::MixLevels::default();
+            let mut levels = sound.map(crate::verify::MixLevels::of).unwrap_or_default();
             let profiling = std::env::var("PM_EXPORT_PROFILE").as_deref() == Ok("1");
             let (mut video_ns, mut preview_ns, mut audio_ns, mut progress_ns) = (0, 0, 0, 0);
             for expected in 0..frames {

@@ -79,17 +79,29 @@ pub struct TimecodeReport {
 }
 
 /// How loud the mixed sound got: its largest sample, and how much of it was
-/// over full scale. An integer PCM or AAC track cannot hold a sample over
-/// full scale and clips it; the person exporting is told how much.
+/// over full scale. An integer PCM, AAC or Opus track cannot hold a sample
+/// over full scale and clips it; a 32-bit float track keeps it. The person
+/// exporting is told how much, and which.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct MixLevels {
     /// The largest absolute sample of the mix (1.0 is full scale).
     pub peak: f32,
     /// Samples, counted in every channel, above full scale.
     pub overs: u64,
+    /// The track holds the mix as it is (32-bit float PCM): what is over
+    /// full scale is in the file, not clipped.
+    pub kept: bool,
 }
 
 impl MixLevels {
+    /// The levels of a mix delivered as `codec`, before any of it is heard.
+    pub fn of(codec: AudioCodec) -> Self {
+        Self {
+            kept: codec == AudioCodec::PcmF32,
+            ..Self::default()
+        }
+    }
+
     /// Takes in a block of the mix.
     pub fn add(&mut self, samples: &[f32]) {
         for s in samples {
@@ -105,15 +117,24 @@ impl MixLevels {
     }
 
     /// One line for the person, when part of the sound is over full scale:
-    /// "Audio clipped: 1,204 samples over full scale, peak +2.1 dB."
+    /// "Audio clipped: 1,204 samples over full scale, peak +2.1 dB.", or for
+    /// a float track, which keeps them, "Audio over full scale: 1,204
+    /// samples, peak +2.1 dB (kept in the 32-bit float track)."
     pub fn warning(&self) -> Option<String> {
         (self.overs > 0).then(|| {
-            format!(
-                "Audio clipped: {} sample{} over full scale, peak +{:.1} dB.",
+            let samples = format!(
+                "{} sample{}",
                 self.overs,
-                if self.overs == 1 { "" } else { "s" },
-                self.peak_db().unwrap_or(0.0)
-            )
+                if self.overs == 1 { "" } else { "s" }
+            );
+            let peak = self.peak_db().unwrap_or(0.0);
+            if self.kept {
+                format!(
+                    "Audio over full scale: {samples}, peak +{peak:.1} dB (kept in the 32-bit float track)."
+                )
+            } else {
+                format!("Audio clipped: {samples} over full scale, peak +{peak:.1} dB.")
+            }
         })
     }
 }

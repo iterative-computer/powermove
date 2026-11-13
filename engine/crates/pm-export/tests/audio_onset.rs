@@ -446,7 +446,8 @@ fn the_encoder_places_sound_at_its_sample_at_every_rate() {
 }
 
 /// Sound over full scale is counted and reported: an integer PCM or AAC
-/// track clips it, and the person exporting is told how much.
+/// track clips it, a 32-bit float track keeps it, and the person exporting
+/// is told how much and which.
 #[test]
 fn sound_over_full_scale_is_counted_and_reported() {
     let dir = scratch("overs");
@@ -458,7 +459,14 @@ fn sound_over_full_scale_is_counted_and_reported() {
         .collect();
     let clip = dir.join("tone.wav");
     write_wav(&clip, rate, &tone);
-    for (gain, loud) in [(1.0, false), (2.0, true)] {
+    use pm_protocol::priority::{AudioCoding, DeliveryOptions};
+    for (gain, loud, coding) in [
+        (1.0, false, None),
+        (2.0, true, None),
+        (2.0, true, Some(AudioCoding::Pcm16)),
+        (2.0, true, Some(AudioCoding::PcmFloat)),
+    ] {
+        let float = coding == Some(AudioCoding::PcmFloat);
         let mut layer = audio("sound", "tone", 0.0, dur);
         layer["d"]["gain"] = json!(gain);
         let mut doc = project(64, 36, dur, solid_fill("#14161C"), vec![layer]);
@@ -466,7 +474,7 @@ fn sound_over_full_scale_is_counted_and_reported() {
         asset(&mut doc, "tone", "audio", "wav", 0, 0, dur);
         let mut media = MediaPaths::default();
         media.insert("tone", clip.clone());
-        let destination = dir.join(format!("gain-{gain}.mov"));
+        let destination = dir.join(format!("gain-{gain}-{coding:?}.mov"));
         let job = ExportJob {
             document: Arc::new(load(&doc)),
             composition: "Ptest-root".into(),
@@ -491,7 +499,10 @@ fn sound_over_full_scale_is_counted_and_reported() {
                 precision: Precision::Float16,
                 dither: false,
                 draft_from_proxies: false,
-                delivery: Default::default(),
+                delivery: DeliveryOptions {
+                    audio_coding: coding,
+                    ..Default::default()
+                },
             },
             media: Arc::new(media),
             destination: destination.clone(),
@@ -513,7 +524,7 @@ fn sound_over_full_scale_is_counted_and_reported() {
         let decoded = ffmpeg_decode(&destination);
         let ceiling = decoded.iter().fold(0f32, |m, v| m.max(v.abs()));
         eprintln!(
-            "MEASURE tone at 0.8 with gain {gain}: mix peak {:.3} ({:+.1} dB), {} samples over full scale; the file's own peak {ceiling:.3}; said to the person: {:?}",
+            "MEASURE tone at 0.8 with gain {gain} as {coding:?}: mix peak {:.3} ({:+.1} dB), {} samples over full scale; the file's own peak {ceiling:.3}; said to the person: {:?}",
             mix.peak,
             mix.peak_db().unwrap(),
             mix.overs,
@@ -527,14 +538,27 @@ fn sound_over_full_scale_is_counted_and_reported() {
         );
         assert_eq!(mix.overs > 0, loud);
         assert_eq!(mix.warning().is_some(), loud);
-        // The 24-bit track cannot hold what is over: it is clipped there.
-        assert!(ceiling <= 1.0 && (ceiling > 0.99) == loud, "{ceiling}");
-        if loud {
+        assert_eq!(mix.kept, float);
+        if float {
+            // The float track holds what is over: nothing was clipped.
+            assert!((f64::from(ceiling) - 0.8 * gain).abs() < 0.01, "{ceiling}");
             let said = mix.warning().unwrap();
             assert!(
-                said.starts_with("Audio clipped: ") && said.ends_with("peak +4.1 dB."),
+                said.starts_with("Audio over full scale: ")
+                    && said.ends_with("peak +4.1 dB (kept in the 32-bit float track).")
+                    && !said.contains("clipped"),
                 "{said}"
             );
+        } else {
+            // An integer track cannot hold what is over: it is clipped there.
+            assert!(ceiling <= 1.0 && (ceiling > 0.99) == loud, "{ceiling}");
+            if loud {
+                let said = mix.warning().unwrap();
+                assert!(
+                    said.starts_with("Audio clipped: ") && said.ends_with("peak +4.1 dB."),
+                    "{said}"
+                );
+            }
         }
     }
     let _ = std::fs::remove_dir_all(&dir);
