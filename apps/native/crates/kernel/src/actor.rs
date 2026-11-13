@@ -387,6 +387,13 @@ enum Msg {
         call: crate::session::ShellCall,
         reply: Reply<Result<crate::session::ShellReply, KernelFailure>>,
     },
+    /// A choice after a failed open whose disk work a worker has done
+    /// ([`crate::session::DiskJob`]); `result` is `None` if it failed.
+    DiskDone {
+        path: Option<std::path::PathBuf>,
+        result: Option<Box<Result<crate::session::ShellReply, KernelFailure>>>,
+        reply: Reply<Result<crate::session::ShellReply, KernelFailure>>,
+    },
     /// A file open whose disk work a worker has done
     /// ([`crate::session::OpenJob`]); `prelude` is `None` if it failed.
     Opened {
@@ -971,6 +978,8 @@ fn scope(msg: &Msg) -> Scope {
         Msg::PrepareSave { session, .. } => Scope::Project(session.project.clone()),
         Msg::FinishSave { completion, .. } => Scope::Project(completion.project().to_owned()),
         Msg::Shell { call, .. } | Msg::Opened { call, .. } => shell_scope(call),
+        // As the shell call it finishes (a choice after a failed open).
+        Msg::DiskDone { .. } => Scope::Every,
         Msg::State { .. }
         | Msg::ProClock { .. }
         | Msg::Profile { .. }
@@ -1419,6 +1428,29 @@ fn step(kernel: &mut Kernel, shared: &Arc<Shared>, turns: &mut Turns, msg: Msg) 
             }
         }
         Msg::Shell { call, reply } => {
+            // The disk work of a choice after a failed open (the versions a
+            // record proves, read whole; the chosen one put in place) runs
+            // on a worker; it comes back as `DiskDone`.
+            match kernel.disk_job(&call) {
+                Ok(Some(job)) => {
+                    let back = shared.back.lock().expect("back").clone();
+                    if let Some(back) = back {
+                        let path = job.path().map(ToOwned::to_owned);
+                        if let Some(path) = &path {
+                            kernel.opening.push(path.clone());
+                        }
+                        let done = move |result| Msg::DiskDone {
+                            path,
+                            result,
+                            reply,
+                        };
+                        off_actor("pm-kernel-disk", back, move || job.run(), done);
+                        return;
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => return reply(Err(e)),
+            }
             // The disk work of opening a project file (its lock, what a
             // cut-short save left, the file itself read whole) runs on a
             // worker; the open comes back as `Opened` with what it did, and
@@ -1443,6 +1475,32 @@ fn step(kernel: &mut Kernel, shared: &Arc<Shared>, turns: &mut Turns, msg: Msg) 
                 Err(e) => return reply(Err(e)),
             }
             shell_step(kernel, shared, call, reply)
+        }
+        Msg::DiskDone {
+            path,
+            result,
+            reply,
+        } => {
+            if let Some(path) = path {
+                kernel.opening.retain(|p| *p != path);
+            }
+            kernel.disk_job_done();
+            *shared.state.lock().expect("state") = Arc::new(kernel.state().clone());
+            let ids: Vec<_> = kernel.projects().map(str::to_owned).collect();
+            for id in &ids {
+                publish(kernel, shared, id);
+            }
+            reply(result.map_or_else(
+                || {
+                    Err(KernelFailure::Storage(
+                        "The disk work stopped unexpectedly; nothing more was done.".into(),
+                    ))
+                },
+                |result| *result,
+            ));
+            for message in kernel.take_log() {
+                emit(shared, KernelEvent::Log { message });
+            }
         }
         Msg::Opened {
             call,

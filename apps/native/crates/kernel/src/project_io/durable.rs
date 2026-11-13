@@ -408,11 +408,53 @@ pub fn check_version(
     Ok(())
 }
 
+/// Test hook: called with a file's path (on the thread that reads it) as
+/// that file is about to be read whole.
+#[doc(hidden)]
+pub type ReadHook = Arc<dyn Fn(&Path) + Send + Sync>;
+type ReadHooks = std::sync::Mutex<Vec<(u64, PathBuf, ReadHook)>>;
+static READ_HOOKS: ReadHooks = std::sync::Mutex::new(Vec::new());
+/// Calls `hook` with every file under `dir` read whole (hashed, or read to
+/// open it), until the guard is dropped.
+#[doc(hidden)]
+pub fn watch_whole_reads(dir: &Path, hook: ReadHook) -> WholeReads {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if let Ok(mut hooks) = READ_HOOKS.lock() {
+        hooks.push((id, dir.to_owned(), hook));
+    }
+    WholeReads(id)
+}
+#[doc(hidden)]
+pub struct WholeReads(u64);
+impl Drop for WholeReads {
+    fn drop(&mut self) {
+        if let Ok(mut hooks) = READ_HOOKS.lock() {
+            hooks.retain(|(id, _, _)| *id != self.0);
+        }
+    }
+}
+/// Tells the [`watch_whole_reads`] hooks that `path` is read whole now.
+pub(super) fn reading_whole(path: &Path) {
+    let hooks: Vec<ReadHook> = match READ_HOOKS.lock() {
+        Ok(hooks) if !hooks.is_empty() => hooks
+            .iter()
+            .filter(|(_, dir, _)| path.starts_with(dir))
+            .map(|(_, _, hook)| hook.clone())
+            .collect(),
+        _ => return,
+    };
+    for hook in hooks {
+        hook(path);
+    }
+}
+
 /// SHA-256 of everything behind `file`, read by position from its start. A
 /// descriptor's cursor belongs to whatever read through it last (a held
 /// descriptor is hashed more than once, and its duplicates share the
 /// cursor), so it says nothing about where the file begins.
 pub(crate) fn hash_reader(file: &File, path: &Path) -> Result<Sha256, ProjectIoError> {
+    reading_whole(path);
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; 1 << 20];
     let mut offset = 0u64;

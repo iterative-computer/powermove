@@ -51,6 +51,10 @@ pub struct KernelConfig {
     /// needs go, instead of being deleted (`project_io::TrashHook`).
     /// `None`: they stay where they are and the Error Log lists them.
     pub trash: Option<crate::project_io::TrashHook>,
+    /// Test hooks on publication for a kernel a test does not hold (one on
+    /// its own thread); `trash` above still names the Trash.
+    #[doc(hidden)]
+    pub publish_hooks: Option<crate::project_io::PublishHooks>,
     /// Optional allocator collection on the actor after two seconds idle.
     /// Snapshots allocated here may be freed later by UI/render owners;
     /// thread-local allocators need their allocating thread to collect.
@@ -171,17 +175,15 @@ impl Kernel {
             .journal_root
             .as_ref()
             .map(|_| Durability::new(config.journal.clone()));
-        let trash = config.trash.clone();
+        let mut publish_hooks = config.publish_hooks.clone().unwrap_or_default();
+        publish_hooks.trash = config.trash.clone().or(publish_hooks.trash);
         Kernel {
             config,
             history_order: Vec::new(),
             history_max_bytes: crate::history::DEFAULT_MAX_BYTES,
             history_max_entries: crate::history::MAX_ENTRIES,
             trimmed_projects: Vec::new(),
-            publish_hooks: crate::project_io::PublishHooks {
-                trash,
-                ..Default::default()
-            },
+            publish_hooks,
             unproven: Default::default(),
             log: Vec::new(),
             durability,
