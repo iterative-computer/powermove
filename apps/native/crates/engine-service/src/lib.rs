@@ -3489,12 +3489,14 @@ mod worker_tests {
             entered.send(()).unwrap();
             barrier.recv_timeout(Duration::from_secs(10)).unwrap();
         }));
+        // A captured frame is exact: it never lands as a drag picture of an
+        // earlier state (`only_moved`), so the change below makes it stale.
+        v.capture_next().unwrap();
         let input = trace::now();
         v.scrub_at(Ticks::from_whole_seconds(1), input).unwrap();
         signal.recv_timeout(Duration::from_secs(10)).unwrap();
         // Like a UI publication arriving while its first frame encodes.
         v.studio_preview(studio::Preview::Refine).unwrap();
-        v.capture_next().unwrap();
         release.send(()).unwrap();
         let status = drawn(&v);
         assert!(status.stale_rejections > 0);

@@ -2394,9 +2394,9 @@ fn absent_saved_quality_uses_source_production_defaults_without_mutating_legacy_
             quality.max_samples,
             quality.max_bounces
         ),
-        (32, 256, 8)
+        (8, 128, 8)
     );
-    assert_eq!(quality.noise_threshold, 0.03);
+    assert_eq!(quality.noise_threshold, 0.12);
     assert!(quality.denoise && quality.caustics);
     assert_eq!(doc.to_value(), before);
 }
@@ -3485,7 +3485,12 @@ fn viewer_export_estimates_measure_the_shot_and_publish_four_presets_without_edi
         assert!(p.frame_ms.min > 0. && p.frame_ms.max >= p.frame_ms.min, "{p:?}");
         assert_eq!(p.total_ms.max, p.frame_ms.max * 12.);
         assert_eq!((p.calibration.cold_samples, p.calibration.warm_samples), (8,16));
-        assert!(p.calibration.oidn_ms > 0. && p.oidn_ms > 0.);
+        // Draft denoises on the GPU; every other preset runs the denoiser.
+        if p.preset == "draft" {
+            assert_eq!((p.calibration.oidn_ms, p.oidn_ms), (0., 0.), "{p:?}");
+        } else {
+            assert!(p.calibration.oidn_ms > 0. && p.oidn_ms > 0., "{p:?}");
+        }
     }
     assert!(matches!(viewer.status().export_estimate, ExportEstimateState::Ready { .. }));
     assert_eq!(viewer.stamp(), Some(stamp));
