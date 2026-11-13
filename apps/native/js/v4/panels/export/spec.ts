@@ -142,6 +142,19 @@ export const rates = [
   { v: 60000 / 1001, label: "59.94 fps" },
   { v: 60, label: "60 fps" },
 ];
+/** The listed rate a stored rate is: a project keeps 29.97 as that float,
+ * and the engine exports any rate within 0.02 % of a listed one as it. */
+export function listedRate(fps: number): number {
+  return rates.find((r) => Math.abs(fps - r.v) <= 0.0002 * r.v)?.v ?? fps;
+}
+/** The Frame Rate choices for an export at `fps`: the list, led by the
+ * export's own rate when it is none of them (a 12 fps composition). */
+export function rateOptions(fps: number) {
+  const own = listedRate(fps);
+  return rates.some((r) => r.v === own)
+    ? rates
+    : [{ v: own, label: `${+own.toFixed(3)} fps` }, ...rates];
+}
 export const dynamicRanges = [
   { v: "sdr", label: "SDR" },
   { v: "pq", label: "HDR · PQ" },

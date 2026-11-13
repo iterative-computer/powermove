@@ -2,7 +2,15 @@ import { describe, expect, test } from "bun:test";
 import { HostClient, json } from "../../src";
 import { fixture, initial } from "./fixtures";
 import { ExportModel, progress, snapshot } from "./model";
-import { fields, formats, rates, shows, sizeError } from "./spec";
+import {
+  fields,
+  formats,
+  listedRate,
+  rateOptions,
+  rates,
+  shows,
+  sizeError,
+} from "./spec";
 const commands = (f: ReturnType<typeof fixture>) =>
   f.requests.flatMap((r) =>
     r.operation.type === "command" ? [r.operation.command] : [],
@@ -499,4 +507,18 @@ test("color tag, start timecode and audio format are options of the export, and 
   expect(shows({ format: "mp4" }, "timecode")).toBe(false);
   expect(shows({ format: "mp4" }, "audioCoding")).toBe(false);
   expect(shows({ format: "webm" }, "colorTag")).toBe(false);
+});
+
+test("the Frame Rate row shows the rate the export uses", () => {
+  // A project stores 29.97 as that float; the engine exports it as
+  // 30000/1001, and the pop-up must not fall back to its first item.
+  expect(listedRate(29.97)).toBe(30000 / 1001);
+  expect(listedRate(23.976)).toBe(24000 / 1001);
+  expect(listedRate(59.94)).toBe(60000 / 1001);
+  expect(listedRate(30)).toBe(30);
+  expect(rateOptions(29.97)).toEqual(rates);
+  // A rate that is none of the listed ones is offered as itself.
+  expect(listedRate(12)).toBe(12);
+  expect(rateOptions(12)[0]).toEqual({ v: 12, label: "12 fps" });
+  expect(rateOptions(12).slice(1)).toEqual(rates);
 });

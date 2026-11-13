@@ -18,7 +18,8 @@ import {
   profiles,
   dynamicRanges,
   qualities,
-  rates,
+  listedRate,
+  rateOptions,
   rows,
   shows,
   sidecars,
@@ -158,7 +159,9 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
             ? (o[key] ?? "sdr")
             : key === "colorTag" || key === "audioCoding"
               ? (o[key] ?? fieldDefaults[key])
-              : o[key]
+              : key === "fps"
+                ? listedRate(o.fps)
+                : o[key]
         }
         options={options}
         disabled={busy}
@@ -465,7 +468,7 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
                       ) : null}
                     </FormRow>
                   ) : null}
-                  {shows(o, "fps") ? select("fps", rates) : null}
+                  {shows(o, "fps") ? select("fps", rateOptions(o.fps)) : null}
                   {shows(o, "range")
                     ? select("range", [
                         {
