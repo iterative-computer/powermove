@@ -2118,6 +2118,16 @@ impl Host {
                     .any(|(_, r)| r.contains(p.x as f32, p.y as f32))
             }),
         );
+        let weak = Rc::downgrade(&host);
+        gpui_macos::composition::set_pending(
+            &gpui,
+            // A host that is being changed (borrowed) is asked again by the
+            // frame that presents it.
+            Rc::new(move || {
+                weak.upgrade()
+                    .is_some_and(|h| h.try_borrow().is_ok_and(|h| h.pending()))
+            }),
+        );
         host.borrow_mut().registration = Some(reg);
         let weak = Rc::downgrade(&host);
         let handler =
@@ -3302,9 +3312,10 @@ impl Host {
     /// P-120: returns `Moved` only when the viewer slot's frame, layer frame,
     /// drawable size or visibility changed, so GPUI blocks on the composition
     /// transaction only on those frames.
-    fn present(&mut self) -> gpui_macos::composition::SlotChange {
+    /// Where the viewer slot stands for what GPUI last laid out.
+    fn viewer_geometry(&self) -> Option<SlotGeometry> {
         let h = self.content.bounds().size.height;
-        let geometry = self.viewer_rect.get().map(|r| {
+        self.viewer_rect.get().map(|r| {
             let scale = self.window.backingScaleFactor();
             let (canvas, pan) = if let Some((dimensions, zoom, pan)) = self.viewer_transform {
                 let fit = (r.w as f64 / dimensions[0]).min(r.h as f64 / dimensions[1]);
@@ -3320,7 +3331,15 @@ impl Host {
                 scale,
                 crop,
             }
-        });
+        })
+    }
+    /// Whether `present` would move the viewer slot now (the window asks
+    /// before it moves anything; native panel bodies cannot say beforehand).
+    fn pending(&self) -> bool {
+        self.last_geometry != Some(self.viewer_geometry())
+    }
+    fn present(&mut self) -> gpui_macos::composition::SlotChange {
+        let geometry = self.viewer_geometry();
         let moved = self.last_geometry != Some(geometry);
         if moved {
             if let Some(g) = geometry {

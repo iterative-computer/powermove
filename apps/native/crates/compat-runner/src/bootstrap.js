@@ -1129,7 +1129,10 @@ globalThis.__compat = {
     this.loader
       .update(this.trusted(records), ids, reason)
       .catch((error) => this.reportFailure(error))
-      .finally(() => this.publishContributions());
+      .finally(() => {
+        this.publishContributions();
+        runtime.engine("extensions.ready", {});
+      });
   },
   reportFailure(error) {
     runtime.engine("ui.toast", {
