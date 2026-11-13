@@ -39,3 +39,12 @@ After acquiring the advisory lock on a local volume, an unreadable or empty
 legacy lock record can be recovered. Another process's live advisory lock
 still prevents recovery; valid fresh owner records remain protected. An
 unreadable record on a shared volume is still treated conservatively.
+
+## Headless connection discovery
+
+Headless startup probes `profile/mcp/connection.json` before selecting proxy
+mode. A dead PID, refused loopback endpoint, or unusable descriptor is
+archived privately under the profile and removed from discovery, using the
+same publication lock as server startup. Startup can then create a headless
+host normally. Live or uncertain owners are preserved. A normal server
+shutdown still removes only its own descriptor.
