@@ -442,20 +442,12 @@ impl TimelineSurface {
         shift: bool,
         cx: &mut Context<Self>,
     ) {
-        // The time scale is this surface's own view, not the model's.
+        // The time scale is this surface's own view, not the model's: the
+        // keys zoom as the bottom bar's ends do.
+        use pm_panel_timeline::footer::ZOOM_STEP;
         match id {
-            "timeline.zoomIn" | "timeline.zoomOut" => {
-                let factor = if id.ends_with("In") { 1.5 } else { 1. / 1.5 };
-                // About the playhead when it is in view, else the middle.
-                let width = f32::from(self.bounds.size.width) as f64;
-                let at = self.view.layer_column + (time - self.view.scroll_time) * self.view.pps;
-                let x = if at > self.view.layer_column && at < width {
-                    at
-                } else {
-                    (self.view.layer_column + width) / 2.
-                };
-                return self.zoom_at(x, factor, cx);
-            }
+            "timeline.zoomIn" => return self.zoom_to(self.view.pps * ZOOM_STEP, cx),
+            "timeline.zoomOut" => return self.zoom_to(self.view.pps / ZOOM_STEP, cx),
             "timeline.fit" => return self.fit_time(cx),
             _ => {}
         }
