@@ -457,22 +457,26 @@ impl OpenJob {
     }
 }
 
-/// The disk work a save in place does before the kernel freezes what it
-/// writes: the folder of a save that could not sync it is synced again,
+/// What a save does before the kernel freezes what it writes, apart from
+/// the kernel: what the save works out about a long undo history
+/// ([`crate::DocumentStore::save_warmup`]), and for a save in place the
+/// disk work: the folder of a save that could not sync it is synced again,
 /// what an earlier save of the file left is settled, and a file that was
 /// renamed since is proven to be the same one (a whole-file read). The
 /// actor hands it to a worker; a direct caller runs each step in place.
 pub struct SaveJob {
     project: String,
-    path: PathBuf,
+    /// The file a save in place writes.
+    path: Option<PathBuf>,
     version: Option<std::sync::Arc<project_io::FileVersion>>,
     unsynced: Option<PathBuf>,
+    warm: Box<dyn FnOnce() + Send>,
     host: OwnedHost,
 }
 /// What a [`SaveJob`] found and did.
 pub struct SavePrelude {
     pub(crate) project: String,
-    path: PathBuf,
+    path: Option<PathBuf>,
     settled: project_io::Settled,
     /// The folder of the save that could not sync it, and how it went now.
     synced: Option<(PathBuf, Result<(), String>)>,
@@ -481,18 +485,24 @@ impl SaveJob {
     pub fn project(&self) -> &str {
         &self.project
     }
-    /// **Blocking**: whole-file reads on the project's disk.
+    /// **Blocking**: whole-file reads on the project's disk, and seconds
+    /// of work on a long undo history.
     pub fn run(self) -> SavePrelude {
         let synced = self.unsynced.map(|dir| {
             let synced = project_io::folder_sync_now(&dir, &self.host.hooks);
             (dir, synced.map_err(|e| e.to_string()))
         });
-        let settled = project_io::settle(&self.path, &self.host.host());
+        let settled = match &self.path {
+            Some(path) => project_io::settle(path, &self.host.host()),
+            None => project_io::Settled::default(),
+        };
         // Proven once per state of the file: the kernel's own look at it
         // then finds the proof and reads nothing.
-        if let Some(version) = &self.version {
+        if let (Some(_), Some(version)) = (&self.path, &self.version) {
             let _ = version.moved();
         }
+        // Found once and kept where the save looks for it.
+        (self.warm)();
         SavePrelude {
             project: self.project,
             path: self.path,
@@ -2915,8 +2925,9 @@ impl Kernel {
             host: self.owned_host(),
         }))
     }
-    /// The disk work of a save in place of `session`'s file ([`SaveJob`]).
-    /// `Err`: the session cannot save now (another save of it is under way).
+    /// What a save of `session` to `path` (`None`: in place) does before the
+    /// kernel freezes it ([`SaveJob`]). `Err`: the session cannot save now
+    /// (another save of it is under way).
     pub fn save_job(
         &self,
         session: &SessionHandle,
@@ -2924,27 +2935,33 @@ impl Kernel {
     ) -> Result<Option<SaveJob>, KernelFailure> {
         self.ensure_idle(session)?;
         let s = &self.sessions[&session.project];
-        let Destination::File(file) = &s.destination else {
+        let Some(project) = self.project(&session.project) else {
             return Ok(None);
         };
-        // A Save As elsewhere settles nothing of the file it leaves.
+        // The file's disk work is a save in place's (or a Save As again to
+        // the file of a save that could not finish); a Save As elsewhere
+        // settles nothing of the file it leaves.
         let ticket = s.unfinalized.as_ref();
-        if path.is_some() && ticket.and_then(|t| t.path.as_deref()) != path {
-            return Ok(None);
-        }
+        let in_place = match &s.destination {
+            Destination::File(file)
+                if path.is_none() || ticket.and_then(|t| t.path.as_deref()) == path =>
+            {
+                Some(file.clone())
+            }
+            _ => None,
+        };
         Ok(Some(SaveJob {
             project: session.project.clone(),
-            path: file.clone(),
-            version: self
-                .project(&session.project)
-                .and_then(|p| p.store().file().version.clone()),
-            unsynced: ticket.map(|t| {
+            version: project.store().file().version.clone(),
+            unsynced: ticket.filter(|_| in_place.is_some()).map(|t| {
                 t.receipt
                     .path
                     .parent()
                     .unwrap_or(std::path::Path::new("."))
                     .to_owned()
             }),
+            path: in_place,
+            warm: Box::new(project.store().save_warmup()),
             host: self.owned_host(),
         }))
     }
@@ -3153,7 +3170,7 @@ impl Kernel {
         let left = match self
             .save_prelude
             .take()
-            .filter(|pre| pre.project == id && pre.path == path)
+            .filter(|pre| pre.project == id && pre.path.as_ref() == Some(&path))
         {
             Some(pre) => pre.settled,
             None => project_io::settle(&path, &self.host()),
