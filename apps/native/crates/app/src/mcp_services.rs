@@ -920,8 +920,11 @@ impl EngineHook for EngineJobs {
             project["h"].as_f64().unwrap_or(1080.),
         );
         let fps = project["fps"].as_f64().unwrap_or(30.);
-        let width = request.width.clamp(16, 8192);
-        let height = ((width as f64 * h / w).round() as u32).max(16);
+        // Electron's snapshot width is a maximum: small compositions retain
+        // their authored pixel grid instead of being enlarged for an agent.
+        let scale = (f64::from(request.width.clamp(160, 1280)) / w).min(1.0);
+        let width = (w * scale).round().max(2.0) as u32;
+        let height = (h * scale).round().max(2.0) as u32;
         std::fs::create_dir_all(&self.cache)?;
         let mut images = vec![];
         for time in &request.times {
