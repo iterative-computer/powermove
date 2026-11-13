@@ -230,6 +230,7 @@ fn main() {
         r
     };
     level1_plans_are_reused_until_their_inputs_change(&mut gpu, &mut fresh(), &mut failures);
+    legacy_flat_plane_keeps_canvas(&mut gpu, &mut failures);
     direct_fractional_coverage(&mut gpu, &mut failures);
     half_paint_stores_the_nearest_half(&mut gpu, &mut failures);
     unchanged_text_is_uploaded_once_across_viewer_frames(&mut fresh(), &mut failures);
@@ -929,3 +930,61 @@ fn linear_project_text_source(renderer: &mut pm_render::Renderer, failures: &mut
 
 #[cfg(not(target_os = "macos"))]
 fn main() {}
+
+/// The legacy compositor rasterizes text before projecting its quad,
+/// including a plane with no perspective. Check the actual default masks
+/// and sampling at fractional phases, both rotated and axis aligned.
+#[cfg(target_os = "macos")]
+fn legacy_flat_plane_keeps_canvas(renderer: &mut pm_render::Renderer, failures: &mut Vec<String>) {
+    use serde_json::json;
+    use support::doc::*;
+    renderer
+        .text()
+        .set_weight(pm_render::text::TextWeight::Smoothed);
+    let request = pm_render::RenderRequest::sized(
+        pm_protocol::common::Size::new(320, 180),
+        pm_protocol::color::Precision::Float32,
+    );
+    for rotation in [0.0, 17.0] {
+        let mut l = layer(
+            "text",
+            "text",
+            json!({"text":"Canvas glyphs", "font":"Arial", "size":32, "weight":600, "color":"#E0D0C0", "align":"left"}),
+            80.125,
+            100.375,
+            2.0,
+        );
+        set(&mut l, "scale.x", json!(123));
+        set(&mut l, "scale.y", json!(123));
+        set(&mut l, "rotation", json!(rotation));
+        let mut pixels = vec![];
+        for three_d in [false, true] {
+            l["threeD"] = json!(three_d);
+            let doc = load(&project(320, 180, 2.0, no_fill(), vec![l.clone()]));
+            let frame = renderer
+                .render(
+                    &doc,
+                    "Ptest-root",
+                    support::ticks(0.0),
+                    &request,
+                    &pm_render::MapResolver::default(),
+                )
+                .unwrap();
+            assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+            pixels.push(renderer.read_rgba(&frame).unwrap());
+        }
+        let max = pixels[0]
+            .iter()
+            .zip(&pixels[1])
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        if max >= 1.0 / 255.0 {
+            failures.push(format!(
+                "legacy text flat plane at {rotation} degrees changes canvas edge by {max}"
+            ));
+        }
+    }
+    renderer
+        .text()
+        .set_weight(pm_render::text::TextWeight::Exact);
+}

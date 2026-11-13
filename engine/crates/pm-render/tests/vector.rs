@@ -790,3 +790,42 @@ fn fractional_translation_reuses_the_legacy_shape_source_pixel_grid() {
     );
     assert!((matrices[1][4] - matrices[0][4] - 0.125).abs() < 1e-9);
 }
+
+/// Electron projects the same local canvas when a layer's 3D switch is
+/// enabled. A flat plane must therefore preserve fractional edge phases.
+#[test]
+fn a_legacy_shape_keeps_its_canvas_when_3d_is_enabled() {
+    let mut renderer = Renderer::headless().unwrap();
+    for rotation in [0.0, 17.0] {
+        let mut l = placed(
+            "shape",
+            "shape",
+            json!({ "shape": "ellipse", "w": 75.0, "h": 49.0, "color": "#8AB4F8", "stroke": 0 }),
+            1,
+            rotation,
+            123.0,
+        );
+        set(&mut l, "position.x", json!(128.125));
+        set(&mut l, "position.y", json!(128.375));
+        let flat = render_rgba(
+            &mut renderer,
+            project(W, H, 2.0, no_fill(), vec![l.clone()]),
+            &MapResolver::default(),
+        );
+        l["threeD"] = json!(true);
+        let plane = render_rgba(
+            &mut renderer,
+            project(W, H, 2.0, no_fill(), vec![l]),
+            &MapResolver::default(),
+        );
+        let max = flat
+            .iter()
+            .zip(&plane)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            max < 1.0 / 255.0,
+            "flat legacy plane changes its canvas edge by {max}"
+        );
+    }
+}

@@ -208,5 +208,8 @@ Compatibility level 1 shapes and editable paths retain the Canvas source
 raster: quarter-step density, transparent padding, ceil-rounded dimensions,
 and the original anchor. Coverage is painted on that local grid and the
 compositor samples its retained ink crop through the layer transform.
+This also applies to 3D planes: the plane projects the same local source
+with bilinear sampling. Enabling 3D without perspective does not change
+its raster grid or edge coverage.
 Level 2 retains device-space analytic coverage. A fractional output move
 reuses the level 1 source, while level 2 recomputes coverage at that position.

@@ -120,6 +120,9 @@ scratch, one texture per chunk.
 **TEXT-RASTER-1:** exact outline coverage remains the native and explicit
 Exact painter. Legacy macOS fills use the Canvas masks described above to
 preserve authored pixels. Neither path changes font selection or layout.
+Legacy text and captions retain the same local canvas density and bilinear
+sampling on 2D layers and 3D planes. Native level-2 planes retain their
+perspective-density raster and output resampler.
 
 **TEXT-SMOOTH-1:** frames draw with the authored platform weight by default
 (`TextWeight::Smoothed`): legacy macOS fills use the Canvas masks above;
