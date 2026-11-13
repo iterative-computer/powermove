@@ -3879,7 +3879,7 @@ fn the_color_panel_lists_the_grade_and_writes_through_its_controls() {
         false,
     )
     .unwrap();
-    for effect in ["colorWheels", "blur", "synthetic.look"] {
+    for effect in ["colorWheels", "blur", "synthetic.look", "applyColorLut"] {
         setup.sync().unwrap();
         let request = setup
             .model
@@ -3926,6 +3926,7 @@ fn the_color_panel_lists_the_grade_and_writes_through_its_controls() {
             (json!("colorWheels"), json!(true)),
             (json!("blur"), json!(false)),
             (json!("synthetic.look"), json!(true)),
+            (json!("applyColorLut"), json!(true)),
         ]
     );
     // What the person sees: the grade's controls and not Blur's.
@@ -3942,6 +3943,8 @@ fn the_color_panel_lists_the_grade_and_writes_through_its_controls() {
         })
         .collect();
     for label in [
+        "Amount",
+        "Input Space",
         "Color Wheels",
         "Lift",
         "Temperature",

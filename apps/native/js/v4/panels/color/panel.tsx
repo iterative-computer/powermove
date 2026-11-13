@@ -74,7 +74,8 @@ export function ColorPanel({ controller: c, command }: ColorProps) {
       style={{
         background: t("colors.panel"),
         borderRadius: t("metrics.panel_radius"),
-        overflow: "scroll",
+        display: "flex",
+        flexDirection: "column",
       }}
     >
       {p.target !== "Layer" ? (
@@ -93,54 +94,42 @@ export function ColorPanel({ controller: c, command }: ColorProps) {
       ) : (
         <>
           <Heading title={p.name} detail={p.typeLabel} />
-          <Section
-            title="Color Wheels"
-            tool={wheels}
-            send={send}
-            editable={editable}
+          <scroll
+            id={`${PANEL_ID}:content`}
+            role="group"
+            label={PANEL_TITLE}
+            style={{ display: "flex", flexDirection: "column" }}
           >
-            {wheels
-              ? WHEEL_SECTIONS.map((s) => (
-                  <div key={s.title} role="group" label={s.title}>
-                    <Subheading title={s.title} />
-                    {rows(s.keys.map((k) => parameter(wheels, k)))}
-                  </div>
-                ))
-              : add(WHEELS, "Add Color Wheels")}
-          </Section>
-          <Section title="Curves" send={send} editable={editable}>
-            {curves.map((g) => (
-              <Tool key={g.header.id} tool={g} send={send} editable={editable}>
-                {rows(curveRows(g))}
-              </Tool>
-            ))}
-            {add(CURVES, "Add Curve")}
-          </Section>
-          <Section title="LUT" send={send} editable={editable}>
-            {luts.map((g) => (
-              <Tool key={g.header.id} tool={g} send={send} editable={editable}>
-                {rows(g.parameters)}
-              </Tool>
-            ))}
-            <UI.PushButton
-              id={`${PANEL_ID}:load-lut`}
-              label="Load LUT…"
-              disabled={!editable}
-              onClick={(e) => {
-                stop(e);
-                command(LOAD_LUT);
-              }}
-              style={{
-                height: t("metrics.control"),
-                marginTop: t("metrics.inset"),
-              }}
+            <Section
+              title="Color Wheels"
+              tool={wheels}
+              send={send}
+              editable={editable}
             >
-              Load LUT…
-            </UI.PushButton>
-          </Section>
-          {others.length > 0 && (
-            <Section title="More" send={send} editable={editable}>
-              {others.map((g) => (
+              {wheels
+                ? WHEEL_SECTIONS.map((s) => (
+                    <div key={s.title} role="group" label={s.title}>
+                      <Subheading title={s.title} />
+                      {rows(s.keys.map((k) => parameter(wheels, k)))}
+                    </div>
+                  ))
+                : add(WHEELS, "Add Color Wheels")}
+            </Section>
+            <Section title="Curves" send={send} editable={editable}>
+              {curves.map((g) => (
+                <Tool
+                  key={g.header.id}
+                  tool={g}
+                  send={send}
+                  editable={editable}
+                >
+                  {rows(curveRows(g))}
+                </Tool>
+              ))}
+              {add(CURVES, "Add Curve")}
+            </Section>
+            <Section title="LUT" send={send} editable={editable}>
+              {luts.map((g) => (
                 <Tool
                   key={g.header.id}
                   tool={g}
@@ -150,8 +139,37 @@ export function ColorPanel({ controller: c, command }: ColorProps) {
                   {rows(g.parameters)}
                 </Tool>
               ))}
+              <UI.PushButton
+                id={`${PANEL_ID}:load-lut`}
+                label="Load LUT…"
+                disabled={!editable}
+                onClick={(e) => {
+                  stop(e);
+                  command(LOAD_LUT);
+                }}
+                style={{
+                  height: t("metrics.control"),
+                  marginTop: t("metrics.inset"),
+                }}
+              >
+                Load LUT…
+              </UI.PushButton>
             </Section>
-          )}
+            {others.length > 0 && (
+              <Section title="More" send={send} editable={editable}>
+                {others.map((g) => (
+                  <Tool
+                    key={g.header.id}
+                    tool={g}
+                    send={send}
+                    editable={editable}
+                  >
+                    {rows(g.parameters)}
+                  </Tool>
+                ))}
+              </Section>
+            )}
+          </scroll>
         </>
       )}
     </div>

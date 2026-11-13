@@ -358,6 +358,8 @@ fn add_lut_revision(main: &mut MainEffects) {
     revision.params.push(space("inputSpace", "Input Space"));
     revision.params.push(space("outputSpace", "Output Space"));
     revision.metadata.insert("version".into(), Value::from(2));
+    // A grading tool: the Color panel lists it (`grade`).
+    revision.metadata.insert("grade".into(), Value::Bool(true));
     revision.metadata.insert(
         "legacy".into(),
         Value::Array(vec![

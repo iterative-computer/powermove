@@ -45,6 +45,8 @@ fn number(
     if !group.is_empty() {
         param["group"] = json!(group);
     }
+    // As many decimals as the step: Pivot reads 0.435, not 0.43.
+    param["precision"] = json!((-step.log10()).ceil().max(0.) as u32);
     serde_json::from_value(param).expect("a grading parameter")
 }
 
