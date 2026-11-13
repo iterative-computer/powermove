@@ -45,12 +45,14 @@ const NATIVE_BINDINGS: &[(&str, &str, &str)] = &[
     ("main.viewer.tab", "tab", "composition.flowchart"),
     ("native.skimming", "alt+s", "toggleSkimming"),
     ("native.audioSkimming", "alt+shift+s", "toggleAudioSkimming"),
+    ("native.newNull", "cmd+alt+shift+y", "newNull"),
+    ("native.newNull.ctrl", "ctrl+alt+shift+y", "newNull"),
 ];
 #[test]
-fn all_200_real_bindings_under_seven_routing_contexts() {
+fn all_202_real_bindings_under_seven_routing_contexts() {
     let c = pm_acceptance::catalog::Catalog::embedded().unwrap();
     let shipped = keyboard::production::shipped();
-    assert_eq!(shipped.len(), 200);
+    assert_eq!(shipped.len(), 202);
     assert_eq!(c.bindings.len() + NATIVE_BINDINGS.len(), shipped.len());
     for real in &shipped {
         let binding = match c.bindings.iter().find(|b| b.id == real.id) {
