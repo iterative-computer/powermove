@@ -4390,6 +4390,85 @@ mod worker_tests {
         );
     }
 
+    /// A paused viewer keeps its settled picture beside a playing one.
+    /// Asked to draw again under the same stamp (a picture that did not
+    /// reach the glass is presented once more; a monitor change), it
+    /// presents that picture again: it is not drawn as a preview and
+    /// settled a second time, each such round taking the worker from the
+    /// viewer that plays (the playing viewer's frames had taken its place
+    /// among the kept frames, and two projects' viewers, whose resources
+    /// are pinned apart, dropped every kept frame at each turn).
+    #[test]
+    fn a_paused_viewer_keeps_its_settled_picture_beside_a_playing_one() {
+        let service = EngineService::start(pm_gpu::Gpu::new("settled-kept-test").unwrap()).unwrap();
+        let playing = shapes_viewer(&service, None);
+        playing
+            .command(TransportCommand::SetLoop {
+                range: Some(pm_protocol::common::TickRange {
+                    start: seconds(0.),
+                    end: seconds(2.),
+                }),
+            })
+            .unwrap();
+        playing
+            .command(TransportCommand::Play {
+                rate: pm_protocol::common::PlaybackRate::NORMAL,
+            })
+            .unwrap();
+        let paused = shapes_viewer(&service, None);
+        // Another project: its resources are pinned on their own.
+        paused
+            .resources(Arc::new(resources::ResourceSnapshot {
+                generation: 1,
+                ..Default::default()
+            }))
+            .unwrap();
+        wait_for(&paused, "its settled picture", |s| {
+            s.frame
+                .as_ref()
+                .is_some_and(|f| f.settled && Some(f.stamp) == paused.stamp())
+        });
+        let doc = paused.stamp().unwrap().doc_id;
+        // What the paused viewer has drawn at the drawable's size (its
+        // previews), and how often it has settled.
+        let previews = || {
+            service
+                .shared
+                .drawn
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(stamp, _, scale)| stamp.doc_id == doc && *scale == 1.)
+                .count()
+        };
+        let settles = || {
+            service
+                .shared
+                .settling
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(viewer, ..)| *viewer == paused.id)
+                .count()
+        };
+        let (drawn, settled) = (previews(), settles());
+        for _ in 0..4 {
+            // The playing viewer draws more frames than are kept.
+            let shown = playing.status().presented;
+            wait_for(&playing, "the other viewer plays on", |s| {
+                s.presented >= shown + 12
+            });
+            paused.monitor_solo(Vec::new()).unwrap();
+            std::thread::sleep(Duration::from_secs_f64(2. * policy::SETTLE_IDLE_SECONDS));
+        }
+        assert_eq!(
+            (previews(), settles()),
+            (drawn, settled),
+            "a redraw of the settled picture drew a preview and settled again"
+        );
+        assert!(paused.status().frame.unwrap().settled);
+    }
+
     /// Override answers landing redraw the viewers of their own document
     /// that wait for them. A whole picture of another document (a second
     /// project window, paused) is not drawn again for them: each redraw of

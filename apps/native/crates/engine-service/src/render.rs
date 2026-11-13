@@ -399,6 +399,12 @@ pub struct Engine {
     /// A settled picture handed over and not shown yet: the frame of its
     /// key presents it.
     settled: Option<CachedFrame>,
+    /// The settled picture each viewer shows, by its layer: kept whatever
+    /// other viewers' frames take the cache's room, so a paused viewer
+    /// asked to draw again presents it again instead of being drawn and
+    /// settled a second time. Let go with the kept frames (a font or tone
+    /// change, the idle release).
+    showing: Vec<(usize, CachedFrame)>,
     /// The media of the scenes drawn lately ([`Engine::observed_inputs`]).
     media_seen: Vec<MediaSeen>,
     /// How long a look at the media stands (a test holds it open).
@@ -862,6 +868,7 @@ impl Engine {
             settler: None,
             settle_fonts: None,
             settled: None,
+            showing: Vec::new(),
             media_seen: Vec::new(),
             #[cfg(test)]
             media_look: crate::render_cache::MEDIA_RECHECK,
@@ -942,6 +949,7 @@ impl Engine {
     pub fn clear_cache(&mut self) {
         self.cache.clear();
         self.settled = None;
+        self.showing.clear();
     }
     /// The key a frame of `spec` is kept in memory under.
     fn cache_key(
@@ -1141,11 +1149,16 @@ impl Engine {
     pub(crate) fn definitions(&self) -> &[pm_protocol::definitions::DefinitionSnapshot] {
         &self.resources.definitions
     }
+    /// The definitions the next frames draw with. The kept frames stay: a
+    /// frame's key carries its viewer's content identity, which is another
+    /// one whenever that viewer's resources change, and no other viewer's.
+    /// (Dropping them here dropped every kept frame each time the worker
+    /// turned from one project's viewer to another's: a paused window
+    /// beside a playing one was drawn again at every turn.)
     pub fn set_resources(&mut self, resources: Arc<crate::resources::ResourceSnapshot>) {
         if !crate::resources::ResourceSnapshot::same_pins(&self.resources, &resources) {
             self.resources = resources;
             self.studio_content = None;
-            self.clear_cache();
         }
     }
     fn sync_studio(&mut self, scene: &Scene) -> Result<()> {
@@ -1309,21 +1322,30 @@ impl Engine {
         // storage until completion.
         let current = |c: &CachedFrame| c.key.content != key.content || c.key.same_content(key);
         self.cache.retain(current);
+        self.showing.retain(|(_, c)| current(c));
         if self.settled.as_ref().is_some_and(|c| !current(c)) {
             self.settled = None;
         }
         // A settled picture handed over is shown by the frame of its key,
-        // and kept from then on like any drawn frame.
+        // and stays its viewer's from then on.
+        let viewer = layer.map_or(0, |layer| layer.as_ptr() as usize);
         if !spec.exact
             && let Some(handed) = self.settled.take_if(|c| c.key == key)
         {
-            self.cache.retain(|c| c.key != key);
-            self.cache.push_back(handed);
+            self.showing.retain(|(of, _)| *of != viewer);
+            // A main viewer and a popout of each of two projects.
+            if self.showing.len() >= 4 {
+                self.showing.remove(0);
+            }
+            self.showing.push((viewer, handed));
         }
-        let hit = (!spec.exact)
-            .then(|| self.cache.iter().position(|c| c.key == key))
+        let shown = (!spec.exact)
+            .then(|| self.showing.iter().find(|(_, c)| c.key == key))
             .flatten()
-            .filter(|index| self.cache_enabled || *index + 1 == self.cache.len());
+            .map(|(_, c)| (c.surface.clone(), c.failures.clone()));
+        let hit = (self.cache_enabled && !spec.exact && shown.is_none())
+            .then(|| self.cache.iter().position(|c| c.key == key))
+            .flatten();
         let mut stand_ins = false;
         let mut compat_late = Vec::new();
         // A frame rendered on disk: shown in an uncropped viewer instead of
@@ -1336,7 +1358,7 @@ impl Engine {
         let canvas = output.crop.map_or((output.width, output.height), |c| {
             (c.canvas_width, c.canvas_height)
         });
-        let looked = hit.is_none() && !spec.exact;
+        let looked = hit.is_none() && shown.is_none() && !spec.exact;
         // A playing or paused frame waits a moment for its frame on disk
         // rather than drawing what was rendered because it can't be drawn
         // in time (a dragged one never waits).
@@ -1414,6 +1436,9 @@ impl Engine {
         let (surface, failures) = if let Some(next) = uploaded {
             trace.lock().unwrap().cache_hit = true;
             (next.surface, Arc::from(Vec::new()))
+        } else if let Some(shown) = shown {
+            trace.lock().unwrap().cache_hit = true;
+            shown
         } else if let Some(index) = hit {
             let entry = self.cache.remove(index).unwrap();
             let found = (entry.surface.clone(), entry.failures.clone());
@@ -1758,6 +1783,7 @@ impl Engine {
         let size = spec.size_in(scene);
         let key = self.cache_key(scene, &spec, size);
         if self.settled.as_ref().is_some_and(|c| c.key == key)
+            || self.showing.iter().any(|(_, c)| c.key == key)
             || (self.cache_enabled && self.cache.iter().any(|c| c.key == key))
         {
             return Ok(Asked::Ready);
@@ -2272,8 +2298,8 @@ mod lifetime_tests {
             )
             .unwrap()
             .unwrap();
-        assert!(engine.settled.is_none() && engine.cache.len() == 1);
-        assert!(Arc::ptr_eq(&shown.surface, &engine.cache[0].surface));
+        assert!(engine.settled.is_none() && engine.showing.len() == 1);
+        assert!(Arc::ptr_eq(&shown.surface, &engine.showing[0].1.surface));
     }
 
     /// The frame cache holds viewer pictures only. A paused viewer frame at
@@ -2332,14 +2358,17 @@ mod lifetime_tests {
         // this thread, handed over and kept.
         assert!(engine.settle_now(&scene, viewer, || false).unwrap());
         assert!(draw(&mut engine, viewer), "the settled picture is shown");
-        assert_eq!(engine.cache.len(), 1, "and kept at its scale");
+        assert_eq!(engine.showing.len(), 1, "and kept at its scale");
         assert!(draw(&mut engine, viewer), "the same viewer frame is served");
         for read in 1..=2 {
             assert!(
                 !draw(&mut engine, exact),
                 "exact read {read} took a cached picture"
             );
-            assert_eq!(engine.cache.len(), 1, "exact read {read} was kept");
+            assert!(
+                engine.cache.is_empty() && engine.showing.len() == 1,
+                "exact read {read} was kept"
+            );
         }
         assert!(
             draw(&mut engine, viewer),
