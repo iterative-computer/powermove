@@ -167,6 +167,7 @@ fn main() -> Result<()> {
     let mut launch = None;
     let mut agent_run = None;
     let mut profile = std::env::var_os("PM_NATIVE_PROFILE").map(PathBuf::from);
+    let mut lane_flags: Vec<&'static str> = Vec::new();
     let mut i = 0;
     while i < args.len() {
         if args[i] == "--powermove-mcp" {
@@ -186,6 +187,7 @@ fn main() -> Result<()> {
                 args.get(i).context("--profile needs a directory")?,
             ));
         } else if let Some(name) = review_override(&args[i], cfg!(debug_assertions)) {
+            lane_flags.push(name);
             i += 1;
             let value = args.get(i).context("development overrides need a value")?;
             // SAFETY: single-threaded here; nothing has read the environment yet.
@@ -198,6 +200,14 @@ fn main() -> Result<()> {
         }
         i += 1;
     }
+    // The lane launcher's development flag (never the environment): sheets
+    // wait while the app is inactive, and with `--open` stand for captures.
+    #[cfg(debug_assertions)]
+    if let Some(stage) = sheet_hold(&lane_flags) {
+        gpui_macos::child_window::hold_sheets_while_inactive(stage);
+    }
+    #[cfg(not(debug_assertions))]
+    let _ = lane_flags;
     let plan = first_run::Plan::resolve(
         profile,
         std::env::var_os("PM_NATIVE_ELECTRON_PROFILE").map(PathBuf::from),
@@ -439,6 +449,17 @@ fn review_override(arg: &std::ffi::OsStr, dev: bool) -> Option<&'static str> {
     }
 }
 
+/// A lane launch (the launcher always passes `--draw-occluded`) holds sheets
+/// while the app is inactive; with `--open` it also stands them for review
+/// captures. Read from this process's own command-line flags only: an
+/// inherited environment variable never turns it on.
+#[cfg(debug_assertions)]
+fn sheet_hold(flags: &[&str]) -> Option<bool> {
+    flags
+        .contains(&"PM_NATIVE_DRAW_OCCLUDED")
+        .then(|| flags.contains(&"PM_NATIVE_REVIEW_OPEN"))
+}
+
 /// The isolate cage account (`pm_runtime_v8::Admission::cage`), once a second.
 fn cage_report(path: PathBuf) {
     std::thread::spawn(move || {
@@ -479,5 +500,17 @@ mod review_override_tests {
             assert!(super::review_override(OsStr::new(arg), true).is_some());
         }
         assert_eq!(super::review_override(OsStr::new("--profile"), true), None);
+    }
+    #[test]
+    fn only_the_lane_flag_holds_sheets_and_only_with_open_stands_them() {
+        // Flags this process was launched with, never the environment:
+        // `--open` alone (or an inherited variable) holds nothing.
+        assert_eq!(super::sheet_hold(&[]), None);
+        assert_eq!(super::sheet_hold(&["PM_NATIVE_REVIEW_OPEN"]), None);
+        assert_eq!(super::sheet_hold(&["PM_NATIVE_DRAW_OCCLUDED"]), Some(false));
+        assert_eq!(
+            super::sheet_hold(&["PM_NATIVE_REVIEW_OPEN", "PM_NATIVE_DRAW_OCCLUDED"]),
+            Some(true)
+        );
     }
 }

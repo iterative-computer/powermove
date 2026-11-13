@@ -80,6 +80,7 @@ impl OpenSheet {
     ) -> Self {
         let mtm = MainThreadMarker::new().unwrap();
         let (tx, actions) = async_channel::unbounded();
+        let cancelled = tx.clone();
         let target: Retained<Target> = unsafe {
             msg_send![
                 super(Target::alloc(mtm).set_ivars(TargetState { tx })),
@@ -95,7 +96,10 @@ impl OpenSheet {
         for editor in sheet.editors.values() {
             editor.setDelegate(Some(ProtocolObject::from_ref(&*target)));
         }
-        sheet.present(owner, first);
+        // Never begun (held, then dropped): the loop hears Cancel.
+        sheet.present(owner, first, move || {
+            let _ = cancelled.try_send("cancel".into());
+        });
         let seeded = sheet
             .controls
             .iter()
@@ -159,6 +163,7 @@ impl OpenSheet {
         (self.seeded.get(id) != Some(&colour)).then_some(colour)
     }
     pub fn close(&self) {
+        gpui_macos::child_window::forget_sheet(&self.sheet.window);
         self.owner.endSheet(&self.sheet.window);
         self.sheet.window.orderOut(None);
     }
