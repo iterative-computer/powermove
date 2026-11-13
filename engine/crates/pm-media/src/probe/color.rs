@@ -72,17 +72,20 @@ pub fn frame_reading(color: &ColorInfo, sequence: bool) -> ColorDescription {
     desc
 }
 
-/// Electron's legacy Canvas video path. An invalid/partial frame colour
-/// space falls back to Rec.601 in Chromium's PaintCanvasVideoRenderer,
-/// independently of dimensions (crbug.com/41380578). This is opt-in per
-/// imported asset; the native video table above is deliberately unchanged.
+/// Electron's legacy video path. Software Canvas frames with an invalid/
+/// partial colour space fall back to Rec.601, independently of dimensions
+/// (crbug.com/41380578). On macOS H.264/HEVC instead go through VideoToolbox:
+/// CoreVideo supplies the missing matrix (HD Rec.709, SD Rec.601). Keep that
+/// decoder distinction even when FFmpeg reports identical partial tags.
+/// This is opt-in per imported asset; the native video table is unchanged.
 ///
 /// Electron's `proxyColorArgs` preserves non-HDR BT.2020 camera R′G′B′ code
 /// values and relabels them Rec.709 before grading. Keep the input YUV matrix
 /// (decode those values first); suppress only the gamut/transfer conversion.
-pub fn electron_frame_reading(color: &ColorInfo, sequence: bool) -> ColorDescription {
+pub fn electron_frame_reading(color: &ColorInfo, codec: &str, sequence: bool) -> ColorDescription {
     let mut desc = frame_reading(color, sequence);
-    if color.tagged.matrix.is_none() && desc.matrix != MatrixCoefficients::Identity {
+    let core_video = cfg!(target_os = "macos") && matches!(codec, "h264" | "hevc");
+    if !core_video && color.tagged.matrix.is_none() && desc.matrix != MatrixCoefficients::Identity {
         desc.matrix = MatrixCoefficients::Bt601;
     }
     if !matches!(desc.transfer, Transfer::Pq | Transfer::Hlg)
@@ -677,14 +680,37 @@ mod electron_tests {
         let c = color([1, 13, 2]);
         assert_eq!(frame_reading(&c, false).matrix, MatrixCoefficients::Bt709);
         assert_eq!(
-            electron_frame_reading(&c, false).matrix,
+            electron_frame_reading(&c, "vp9", false).matrix,
             MatrixCoefficients::Bt601
         );
         let tagged = color([1, 13, 1]);
         assert_eq!(
-            electron_frame_reading(&tagged, false).matrix,
+            electron_frame_reading(&tagged, "vp9", false).matrix,
             MatrixCoefficients::Bt709
         );
+    }
+
+    #[test]
+    fn legacy_matrix_defaults_follow_the_codec_decoder_path() {
+        for tags in [[2, 2, 2], [1, 13, 2]] {
+            let c = color(tags);
+            assert_eq!(frame_reading(&c, false).matrix, MatrixCoefficients::Bt709);
+            assert_eq!(
+                electron_frame_reading(&c, "vp9", false).matrix,
+                MatrixCoefficients::Bt601
+            );
+            for codec in ["h264", "hevc"] {
+                assert_eq!(
+                    electron_frame_reading(&c, codec, false).matrix,
+                    if cfg!(target_os = "macos") {
+                        MatrixCoefficients::Bt709
+                    } else {
+                        MatrixCoefficients::Bt601
+                    },
+                    "{codec} {tags:?}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -692,14 +718,14 @@ mod electron_tests {
         let c = color([9, 1, 9]);
         let native = frame_reading(&c, false);
         assert_eq!(native.primaries, Primaries::Bt2020);
-        let legacy = electron_frame_reading(&c, false);
+        let legacy = electron_frame_reading(&c, "hevc", false);
         assert_eq!(legacy.primaries, Primaries::Bt709);
         assert_eq!(legacy.transfer, Transfer::DisplayE);
         assert_eq!(legacy.matrix, MatrixCoefficients::Bt2020Ncl);
         for transfer in [16, 18] {
             let hdr = color([9, transfer, 9]);
             assert_eq!(
-                electron_frame_reading(&hdr, false),
+                electron_frame_reading(&hdr, "hevc", false),
                 frame_reading(&hdr, false)
             );
         }
