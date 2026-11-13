@@ -3298,6 +3298,105 @@ fn a_file_replaced_right_after_a_save_was_proven_is_never_adopted_as_that_save()
     );
     actor.shutdown();
 }
+/// The same for a library project's first Save As whose folder did not
+/// sync: the session stays the library's, and Save As again to that file
+/// adopts the save. Proving the file (read whole, its times having moved)
+/// and syncing its folder are not done on the kernel's own thread.
+#[test]
+fn a_first_save_as_retried_after_its_folder_failed_to_sync_is_proven_off_the_kernel_thread() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let dir = common::TempDir::new("finalize-save-as-off-actor");
+    fs::create_dir_all(dir.path("job")).unwrap();
+    let file = dir.path("job/cut.pmv");
+    // Once armed, the save's second folder sync (its last) fails; every
+    // sync on the kernel's own thread is noted.
+    let syncs = std::sync::Arc::new(std::sync::atomic::AtomicIsize::new(-1));
+    let counted = syncs.clone();
+    let on_kernel = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let noted = on_kernel.clone();
+    let actor = actor_with_hooks(
+        &dir.path("native"),
+        pm_kernel::project_io::PublishHooks {
+            folder_sync: Some(std::sync::Arc::new(move || {
+                if std::thread::current().name() == Some("pm-kernel") {
+                    noted.fetch_add(1, SeqCst);
+                }
+                let n = counted.load(SeqCst);
+                if n >= 0 {
+                    counted.store(if n == 1 { -1 } else { n + 1 }, SeqCst);
+                }
+                if n == 1 {
+                    (Some(5), None)
+                } else {
+                    (None, None)
+                }
+            })),
+            ..Default::default()
+        },
+    );
+    let k = actor.handle();
+    let session = match k
+        .shell(ShellCall::Open {
+            id: "P".into(),
+            source: SessionSource::New(value()),
+            electron_profile: None,
+        })
+        .wait()
+    {
+        Some(Ok(ShellReply::Opened { session, .. })) => session,
+        other => panic!("{other:?}"),
+    };
+    rename_on(&k, "P", "One").wait().unwrap().unwrap();
+    let save = k
+        .prepare_save(session.clone(), Some(file.clone()))
+        .wait()
+        .unwrap()
+        .unwrap();
+    syncs.store(0, SeqCst);
+    let failed = k
+        .finish_save(save.run())
+        .wait()
+        .unwrap()
+        .expect_err("the folder did not sync");
+    assert!(failed.to_string().contains("finalization"), "{failed}");
+    assert_ne!(
+        k.published("P").unwrap().path.as_deref(),
+        Some(file.as_path()),
+        "the session is still the library's"
+    );
+    // Its times move; its bytes do not.
+    let touched = std::time::SystemTime::now() + Duration::from_secs(5);
+    fs::File::options()
+        .write(true)
+        .open(&file)
+        .unwrap()
+        .set_modified(touched)
+        .unwrap();
+    on_kernel.store(0, SeqCst);
+    let (_watch, read) = read_on_the_kernel_thread(&dir.path("job"));
+    let save = k
+        .prepare_save(session, Some(file.clone()))
+        .wait()
+        .unwrap()
+        .unwrap_or_else(|e| panic!("Save As again goes through: {e}"));
+    k.finish_save(save.run())
+        .wait()
+        .unwrap()
+        .unwrap_or_else(|e| panic!("Save As again goes through: {e}"));
+    assert_eq!(saved_name(&file).as_deref(), Some("One"));
+    assert_eq!(
+        k.published("P").unwrap().path.as_deref(),
+        Some(file.as_path()),
+        "the session is that file's now"
+    );
+    assert_eq!(*read.lock().unwrap(), Vec::<std::path::PathBuf>::new());
+    assert_eq!(
+        on_kernel.load(SeqCst),
+        0,
+        "folder synced on the kernel thread"
+    );
+    actor.shutdown();
+}
 /// When the system refuses the thread a project's open, save or recovery
 /// choice needs (it has run out of them), the call is answered at once
 /// with a plain failure and nothing stays reserved: once threads can be

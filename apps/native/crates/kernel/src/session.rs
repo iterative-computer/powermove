@@ -370,6 +370,12 @@ pub struct Unfinalized {
     path: Option<PathBuf>,
     lock: Option<FileLock>,
 }
+/// Whether a save to `path` (`None`: in place) adopts `ticket`, the save
+/// that could not sync its folder: a save in place does, and so does a
+/// Save As again to the file that save wrote.
+fn adopts(ticket: Option<&Unfinalized>, path: Option<&std::path::Path>) -> bool {
+    ticket.is_some_and(|t| path.is_none() || (t.path.is_some() && t.path.as_deref() == path))
+}
 /// What a save or a recovery needs from the kernel besides the files, owned,
 /// so a worker can run it.
 #[derive(Clone)]
@@ -1191,6 +1197,7 @@ impl Kernel {
             .unfinalized
             .as_ref()
             .is_some_and(|ticket| ticket.path.is_some() && ticket.path == path);
+        // As [`adopts`] decides it for the save's worker.
         if path.is_none() || again {
             self.adopt_unfinalized(&session.project)?;
             if again
@@ -3041,19 +3048,23 @@ impl Kernel {
             }
             _ => None,
         };
+        // The ticket of a save that could not sync its folder is proven and
+        // its folder synced here whenever this save adopts it (decided as
+        // [`Kernel::prepare_session_save`] decides it, whatever the
+        // session's own destination is: a library project's first Save As
+        // again to that file adopts it too).
+        let ticket = ticket.filter(|t| adopts(Some(t), path));
         Ok(Some(SaveJob {
             project: session.project.clone(),
             version: project.store().file().version.clone(),
-            unsynced: ticket.filter(|_| in_place.is_some()).map(|t| {
+            unsynced: ticket.map(|t| {
                 t.receipt
                     .path
                     .parent()
                     .unwrap_or(std::path::Path::new("."))
                     .to_owned()
             }),
-            ticket: ticket
-                .filter(|_| in_place.is_some())
-                .map(|t| t.receipt.version.clone()),
+            ticket: ticket.map(|t| t.receipt.version.clone()),
             path: in_place,
             warm: Box::new(project.store().save_warmup()),
             host: self.owned_host(),
