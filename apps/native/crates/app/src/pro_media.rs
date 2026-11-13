@@ -482,6 +482,9 @@ struct State {
     /// Runtime facts, independent of the saved project and user proxy intent.
     preview_checked: HashSet<String>,
     preview_large: HashSet<String>,
+    /// Originals the sequence watch follows, with the (project, asset)s
+    /// that use each.
+    watched: HashMap<PathBuf, BTreeSet<(String, String)>>,
 }
 
 type IoJob = Box<dyn FnOnce(&Arc<Inner>) + Send>;
@@ -896,24 +899,24 @@ impl Inner {
         let Ok(Some(sequence)) = pm_media::image::sequence::Manifest::read(path) else {
             return Ok(None);
         };
-        let mut stamps = blake3::Hasher::new();
+        // A missing frame: no identity, and no rendition stands in.
         for number in sequence.first..=sequence.last {
             let file = sequence.file(number);
-            let Some(frame) = Source::of(&file) else {
+            if !file.is_file() {
                 let name = file.file_name().unwrap_or_default().to_string_lossy();
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::NotFound,
                     format!("frame {number} of the image sequence is missing: {name}"),
                 ));
-            };
-            stamps.update(&frame.len.to_le_bytes());
-            stamps.update(&frame.modified.to_le_bytes());
+            }
         }
-        let digest = stamps.finalize();
+        // The member generation the sequence watch and the render cache
+        // follow (length, modification and change times, inode, device):
+        // the frames are hashed again whenever it moves.
         let stamp = Source {
             path: path.to_path_buf(),
             len: sequence.frames(),
-            modified: u128::from_le_bytes(digest.as_bytes()[..16].try_into().unwrap()),
+            modified: u128::from(pm_engine_service::sequence_watch::generation(&sequence)),
         };
         if let Some((_, content)) = self
             .state
@@ -1361,6 +1364,180 @@ fn storage_root(profile: &Path, prefs: &Preferences) -> PathBuf {
         .unwrap_or_else(|| profile.join("Media Storage"))
 }
 
+impl Inner {
+    /// [`ProMedia::identify`] on the file thread. `all`: `originals` are all
+    /// of `project`'s (the watch follows exactly these), else some of them
+    /// again (a sequence whose files changed).
+    fn identify(self: &Arc<Self>, project: &str, originals: &[(String, PathBuf)], all: bool) {
+        let inner = self;
+        let project = project.to_owned();
+        inner.watch(&project, originals, all);
+        let originals = originals.to_vec();
+        let mut changed = inner.refresh_present();
+        let stop = AtomicBool::new(false);
+        let mut previews = Vec::new();
+        let mut renew: Vec<(Rendition, Original)> = Vec::new();
+        for (asset, path) in &originals {
+            let content = inner.content_of(path, &stop);
+            if content.is_err()
+                && matches!(pm_media::image::sequence::Manifest::read(path), Ok(Some(_)))
+            {
+                // A sequence with a frame missing now: its earlier
+                // content's renditions are not its picture.
+                changed |= inner.state.lock().unwrap().known.remove(path).is_some();
+            }
+            if let Ok(content) = content {
+                // Its file (or a sequence's frame) rendered again: the
+                // proxy and optimized media made of the earlier bytes
+                // are made again of these.
+                {
+                    let state = inner.state.lock().unwrap();
+                    let earlier = state
+                        .index
+                        .assets
+                        .get(&project)
+                        .and_then(|a| a.get(asset))
+                        .filter(|earlier| **earlier != content)
+                        .and_then(|earlier| state.index.contents.get(earlier));
+                    for (kind, title) in [
+                        (Rendition::Proxy, "Update proxy"),
+                        (Rendition::Optimized, "Update optimized media"),
+                    ] {
+                        if earlier
+                            .and_then(|r| r.get(kind))
+                            .is_some_and(|f| !f.attached)
+                        {
+                            renew.push((kind, (asset.clone(), title.into(), path.clone())));
+                        }
+                    }
+                }
+                // Retired at load: an earlier sequence pipeline made it.
+                {
+                    let mut state = inner.state.lock().unwrap();
+                    for (kind, title) in [
+                        (Rendition::Proxy, "Update proxy"),
+                        (Rendition::Optimized, "Update optimized media"),
+                    ] {
+                        let key = (project.clone(), asset.clone(), kind);
+                        if state.index.regenerate.remove(&key) {
+                            renew.push((kind, (asset.clone(), title.into(), path.clone())));
+                            changed = true;
+                        }
+                    }
+                }
+                changed |= inner.note(&project, asset, path, &content);
+                let unchecked = !inner
+                    .state
+                    .lock()
+                    .unwrap()
+                    .preview_checked
+                    .contains(&content);
+                if unchecked {
+                    let large = picture(path).is_some_and(|(w, h, ..)| w > 1920 || h > 1080);
+                    let mut state = inner.state.lock().unwrap();
+                    state.preview_checked.insert(content.clone());
+                    if large {
+                        state.preview_large.insert(content.clone());
+                        changed = true;
+                    }
+                }
+                let state = inner.state.lock().unwrap();
+                let original_only = state
+                    .index
+                    .play_original
+                    .get(&project)
+                    .is_some_and(|ids| ids.contains(asset));
+                let ready = state
+                    .index
+                    .contents
+                    .get(&content)
+                    .and_then(|r| r.proxy.as_ref())
+                    .is_some_and(|proxy| state.present.contains(&proxy.path));
+                if state.preview_large.contains(&content) && !original_only && !ready {
+                    previews.push((asset.clone(), "Prepare HD preview".into(), path.clone()));
+                }
+            }
+        }
+        changed |= inner.refresh_present();
+        if changed {
+            inner.save();
+            let _ = inner.events.try_send(Event::Renditions);
+        }
+        if !previews.is_empty() {
+            // This derived preview does not change Create Proxies on
+            // Import, or any authored proxy/export preference.
+            let prefs = Preferences {
+                size: ProxySize::P1080,
+                format: ProxyFormat::ProResProxy,
+                ..inner.preferences()
+            };
+            let _ = inner.create(&project, Rendition::Proxy, &prefs, previews);
+        }
+        for kind in [Rendition::Proxy, Rendition::Optimized] {
+            let again: Vec<Original> = renew
+                .iter()
+                .filter(|(k, _)| *k == kind)
+                .map(|(_, original)| original.clone())
+                .collect();
+            if !again.is_empty() {
+                let _ = inner.create(&project, kind, &inner.preferences(), again);
+            }
+        }
+        }
+
+    /// Follows `project`'s originals with the sequence watch: when a
+    /// sequence's files change, its renditions are withdrawn and it is
+    /// identified again ([`Inner::sequences_changed`]).
+    fn watch(self: &Arc<Self>, project: &str, originals: &[(String, PathBuf)], all: bool) {
+        let files: Vec<PathBuf> = {
+            let mut state = self.state.lock().unwrap();
+            if all {
+                for owners in state.watched.values_mut() {
+                    owners.retain(|(p, _)| p != project);
+                }
+            }
+            for (asset, path) in originals {
+                state
+                    .watched
+                    .entry(path.clone())
+                    .or_default()
+                    .insert((project.to_owned(), asset.clone()));
+            }
+            state.watched.retain(|_, owners| !owners.is_empty());
+            state.watched.keys().cloned().collect()
+        };
+        pm_engine_service::sequence_watch::global()
+            .track(&format!("pro media {:p}", Arc::as_ptr(self)), files);
+    }
+
+    /// The sequence watch saw these sequences' files change: their
+    /// proxies and optimized media are withdrawn now (the catalog follows),
+    /// and they are identified again on the file thread, which makes the
+    /// renditions again from the new files.
+    fn sequences_changed(self: &Arc<Self>, changed: &[PathBuf]) {
+        let mut again: BTreeMap<String, Vec<(String, PathBuf)>> = BTreeMap::new();
+        {
+            let mut state = self.state.lock().unwrap();
+            for path in changed {
+                let Some(owners) = state.watched.get(path).cloned() else {
+                    continue;
+                };
+                state.known.remove(path);
+                for (project, asset) in owners {
+                    again.entry(project).or_default().push((asset, path.clone()));
+                }
+            }
+        }
+        if again.is_empty() {
+            return;
+        }
+        let _ = self.events.try_send(Event::Renditions);
+        for (project, originals) in again {
+            self.io(move |inner| inner.identify(&project, &originals, false));
+        }
+    }
+}
+
 impl ProMedia {
     pub fn new(profile: PathBuf, objects: PathBuf, interactive: Arc<AtomicBool>) -> Self {
         let (events, event_receiver) = async_channel::unbounded();
@@ -1368,7 +1545,7 @@ impl ProMedia {
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
             .unwrap_or_default();
-        Self {
+        let media = Self {
             inner: Arc::new(Inner {
                 state: Mutex::new(State {
                     index: load(&profile, &objects),
@@ -1378,6 +1555,7 @@ impl ProMedia {
                     waiting: None,
                     preview_checked: HashSet::new(),
                     preview_large: HashSet::new(),
+                    watched: HashMap::new(),
                 }),
                 profile,
                 objects,
@@ -1393,7 +1571,15 @@ impl ProMedia {
                 wake: Mutex::new(None),
             }),
             event_receiver,
-        }
+        };
+        let inner = Arc::downgrade(&media.inner);
+        pm_engine_service::sequence_watch::global().listen(move |changed| {
+            inner.upgrade().is_some_and(|inner| {
+                inner.sequences_changed(changed);
+                true
+            })
+        });
+        media
     }
 
     /// Runs `job` on the file thread and hands its answer back.
@@ -1481,118 +1667,8 @@ impl ProMedia {
     /// their content (hashing a linked file once per state), and which
     /// rendition files exist. `Renditions` follows when anything changed.
     pub fn identify(&self, project: String, originals: Vec<(String, PathBuf)>) {
-        self.inner.io(move |inner| {
-            let mut changed = inner.refresh_present();
-            let stop = AtomicBool::new(false);
-            let mut previews = Vec::new();
-            let mut renew: Vec<(Rendition, Original)> = Vec::new();
-            for (asset, path) in &originals {
-                let content = inner.content_of(path, &stop);
-                if content.is_err()
-                    && matches!(pm_media::image::sequence::Manifest::read(path), Ok(Some(_)))
-                {
-                    // A sequence with a frame missing now: its earlier
-                    // content's renditions are not its picture.
-                    changed |= inner.state.lock().unwrap().known.remove(path).is_some();
-                }
-                if let Ok(content) = content {
-                    // Its file (or a sequence's frame) rendered again: the
-                    // proxy and optimized media made of the earlier bytes
-                    // are made again of these.
-                    {
-                        let state = inner.state.lock().unwrap();
-                        let earlier = state
-                            .index
-                            .assets
-                            .get(&project)
-                            .and_then(|a| a.get(asset))
-                            .filter(|earlier| **earlier != content)
-                            .and_then(|earlier| state.index.contents.get(earlier));
-                        for (kind, title) in [
-                            (Rendition::Proxy, "Update proxy"),
-                            (Rendition::Optimized, "Update optimized media"),
-                        ] {
-                            if earlier
-                                .and_then(|r| r.get(kind))
-                                .is_some_and(|f| !f.attached)
-                            {
-                                renew.push((kind, (asset.clone(), title.into(), path.clone())));
-                            }
-                        }
-                    }
-                    // Retired at load: an earlier sequence pipeline made it.
-                    {
-                        let mut state = inner.state.lock().unwrap();
-                        for (kind, title) in [
-                            (Rendition::Proxy, "Update proxy"),
-                            (Rendition::Optimized, "Update optimized media"),
-                        ] {
-                            let key = (project.clone(), asset.clone(), kind);
-                            if state.index.regenerate.remove(&key) {
-                                renew.push((kind, (asset.clone(), title.into(), path.clone())));
-                                changed = true;
-                            }
-                        }
-                    }
-                    changed |= inner.note(&project, asset, path, &content);
-                    let unchecked = !inner
-                        .state
-                        .lock()
-                        .unwrap()
-                        .preview_checked
-                        .contains(&content);
-                    if unchecked {
-                        let large = picture(path).is_some_and(|(w, h, ..)| w > 1920 || h > 1080);
-                        let mut state = inner.state.lock().unwrap();
-                        state.preview_checked.insert(content.clone());
-                        if large {
-                            state.preview_large.insert(content.clone());
-                            changed = true;
-                        }
-                    }
-                    let state = inner.state.lock().unwrap();
-                    let original_only = state
-                        .index
-                        .play_original
-                        .get(&project)
-                        .is_some_and(|ids| ids.contains(asset));
-                    let ready = state
-                        .index
-                        .contents
-                        .get(&content)
-                        .and_then(|r| r.proxy.as_ref())
-                        .is_some_and(|proxy| state.present.contains(&proxy.path));
-                    if state.preview_large.contains(&content) && !original_only && !ready {
-                        previews.push((asset.clone(), "Prepare HD preview".into(), path.clone()));
-                    }
-                }
-            }
-            changed |= inner.refresh_present();
-            if changed {
-                inner.save();
-                let _ = inner.events.try_send(Event::Renditions);
-            }
-            if !previews.is_empty() {
-                // This derived preview does not change Create Proxies on
-                // Import, or any authored proxy/export preference.
-                let prefs = Preferences {
-                    size: ProxySize::P1080,
-                    format: ProxyFormat::ProResProxy,
-                    ..inner.preferences()
-                };
-                let _ = inner.create(&project, Rendition::Proxy, &prefs, previews);
-            }
-            for kind in [Rendition::Proxy, Rendition::Optimized] {
-                let again: Vec<Original> = renew
-                    .iter()
-                    .filter(|(k, _)| *k == kind)
-                    .map(|(_, original)| original.clone())
-                    .collect();
-                if !again.is_empty() {
-                    let _ = inner.create(&project, kind, &inner.preferences(), again);
-                }
-            }
-        });
+        self.inner
+            .io(move |inner| inner.identify(&project, &originals, true));
     }
 
     /// Adds `project`'s renditions to `media` from memory: proxies (an
@@ -2668,6 +2744,83 @@ mod tests {
         let original = objects.join("retained-sequence");
         std::fs::write(&original, sequence.to_bytes()).unwrap();
         original
+    }
+
+    /// A project stays open while a 3D app renders one of its sequence's
+    /// frames again: with no other call (the project is not reopened, its
+    /// media not refreshed), the sequence watch sees the files change, the
+    /// proxy of the earlier frames is withdrawn from the catalog the viewer
+    /// and draft exports read, and a new proxy is made from the new frames.
+    #[test]
+    fn an_open_project_follows_a_sequence_rendered_again() {
+        if ffmpeg().is_none() {
+            eprintln!("NOT RUN: no FFmpeg pair (PM_FFMPEG_DIR/bin)");
+            return;
+        }
+        pm_proxy::set_test_disk_reserve(Some(1 << 30));
+        let (dir, media) = service();
+        let objects = crate::media::objects_dir(&dir.path().join("profile"));
+        let folder = dir.path().join("renders");
+        let original = small_sequence(&objects, &folder);
+        // What the app does when it resolves the project's media.
+        identify(&media, "p", &[("a", &original)]);
+        let prefs = media.preferences();
+        media
+            .create("p", Rendition::Proxy, &prefs, vec![("a".into(), "shot".into(), original.clone())])
+            .unwrap();
+        finish_tasks(&media);
+        let catalog = || {
+            let mut catalog = MediaCatalog::default();
+            catalog.originals.insert("a".into(), original.clone());
+            media.decorate("p", &mut catalog, &["a".into()]);
+            catalog
+        };
+        let first = catalog().proxies["a"].clone();
+        assert_eq!(catalog().export_paths(true).paths["a"], first);
+
+        // Frame 12 rendered again (written beside, renamed over).
+        let staged = folder.join("render.tmp.png");
+        let made = std::process::Command::new(ffmpeg().unwrap().0)
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i", "color=c=0x808080:size=320x180"])
+            .args(["-frames:v", "1", "-pix_fmt", "rgb48be"])
+            .arg(&staged)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        std::fs::rename(&staged, folder.join("shot.0012.png")).unwrap();
+
+        // Withdrawn while the new frames are identified, then made again.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let mut withdrawn = false;
+        let second = loop {
+            let now = catalog();
+            match now.proxies.get("a") {
+                None => withdrawn = true,
+                Some(p) if *p != first && p.is_file() => break p.clone(),
+                Some(_) => {}
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the proxy of the earlier frames is still used"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        assert!(withdrawn, "the earlier proxy was not withdrawn while identifying");
+        let draft = catalog().export_paths(true);
+        assert_eq!(draft.paths["a"], second, "a draft export reads the earlier proxy");
+        // Its second frame is the grey file.
+        let grey = std::process::Command::new(ffmpeg().unwrap().0)
+            .args(["-v", "error", "-i"])
+            .arg(&second)
+            .args(["-vf", "select=eq(n\\,1)", "-frames:v", "1"])
+            .args(["-f", "rawvideo", "-pix_fmt", "gray", "-"])
+            .output()
+            .unwrap();
+        let (lo, hi) = grey
+            .stdout
+            .iter()
+            .fold((255u8, 0u8), |(lo, hi), &v| (lo.min(v), hi.max(v)));
+        assert!(lo > 110 && hi < 150, "frame 2 of the new proxy: {lo}..{hi}");
     }
 
     /// A sequence proxy an earlier build made (before its associated alpha
