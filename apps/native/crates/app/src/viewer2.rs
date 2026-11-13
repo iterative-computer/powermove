@@ -784,6 +784,21 @@ pub fn review_action(title: &str) -> Option<Action> {
     }
 }
 
+/// The viewer action a palette or keyboard command names.
+pub fn command_action(command: &str) -> Option<Action> {
+    Some(match command {
+        "viewer.safeAreas" => Action::SafeAreas,
+        "viewer.guides" => Action::Guides,
+        "viewer.popout" => Action::Popout,
+        "viewer.toggleProxies" => Action::ToggleProxies,
+        "viewer.renderSelection" => Action::RenderSelection,
+        "viewer.keepRendered" => Action::KeepRendered,
+        "viewer.deleteRendered" => Action::DeleteRendered,
+        "viewer.applyLut" => Action::ApplyLut,
+        _ => return None,
+    })
+}
+
 impl Controller {
     pub fn viewer_action(&mut self, action: Action, cx: &mut Context<Self>) {
         match action {

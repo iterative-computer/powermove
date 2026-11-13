@@ -232,8 +232,12 @@ impl TimelineModel {
             self.reveal_property(key, shift, millis, facts)?;
             return Ok(Plan::default());
         }
+        if let Some(property) = id.strip_prefix("timeline.keyProperty:") {
+            return self.key_property(property, time);
+        }
         let duration = self.index.duration;
         Ok(match id {
+            "timeline.addKeyframe" => self.add_keyframes(time)?,
             "play" => Plan {
                 effects: vec![HostEffect::TogglePlayback],
                 ..Plan::default()
@@ -258,32 +262,28 @@ impl TimelineModel {
             "timeline.adjacentKeyframe:prev" | "timeline.adjacentKeyframe:next" => self
                 .adjacent_key(if id.ends_with("prev") { -1 } else { 1 }, time, None)
                 .map_or_else(Plan::default, Plan::seek),
+            // The stops After Effects counts as visible: the composition's
+            // ends, the work area's, markers, layer ends and keyframes.
             "prevVisibleEvent" | "nextVisibleEvent" => {
-                let direction = if id.starts_with("prev") { -1 } else { 1 };
-                let mut events = vec![0., duration];
+                let mut events = vec![0., duration, self.index.work[0], self.index.work[1]];
+                events.extend(self.index.markers.iter().map(|m| m.time));
                 for l in &self.index.layers {
                     events.extend([l.from, l.from + l.duration]);
                     for c in &l.channels {
                         events.extend(c.keys.iter().map(|k| l.from + k.time));
                     }
                 }
+                events.retain(|t| t.is_finite() && *t >= 0. && *t <= duration);
                 for e in &mut events {
-                    *e = (*e * 10000.).round() / 10000.;
+                    *e = (*e * 1e6).round() / 1e6;
                 }
                 events.sort_by(f64::total_cmp);
-                let next = if direction > 0 {
-                    events
-                        .into_iter()
-                        .find(|t| *t > time + 1e-4)
-                        .unwrap_or(duration)
+                let next = if id.starts_with("next") {
+                    events.into_iter().find(|t| *t > time + 1e-5)
                 } else {
-                    events
-                        .into_iter()
-                        .rev()
-                        .find(|t| *t < time - 1e-4)
-                        .unwrap_or(0.)
+                    events.into_iter().rev().find(|t| *t < time - 1e-5)
                 };
-                Plan::seek(next)
+                next.map_or_else(Plan::default, Plan::seek)
             }
             "gotoLayerIn" | "gotoLayerOut" => {
                 let selected: Vec<_> = self
@@ -421,6 +421,25 @@ impl TimelineModel {
                 ..Plan::default()
             },
             "timeline.addMarker" => self.add_marker(time)?,
+            // Toggle Hold Keyframe (After Effects): hold every selected key,
+            // or release them when all of them hold.
+            "timeline.toggleHold" => {
+                if keys.is_empty() {
+                    return Ok(Plan::default());
+                }
+                let hold = !self.all_held(&keys);
+                edit(
+                    KeyframeCommand::SetHold {
+                        key_ids: keys,
+                        hold,
+                    }
+                    .into(),
+                )
+            }
+            "timeline.toggleSnapping" => {
+                self.track_snap_disabled = !self.track_snap_disabled;
+                Plan::default()
+            }
             "timeline.removeMarker" => {
                 if let Some(marker) = self.index.marker_at(time) {
                     let id = marker
@@ -494,6 +513,132 @@ impl TimelineModel {
                 ..Plan::default()
             },
             _ => return Err(ModelError::UnknownCommand(id.into())),
+        })
+    }
+    /// Option-Shift-P, S, R, T or A (After Effects): a keyframe at the
+    /// playhead on that transform property of the selected layers, or its
+    /// removal when every one of its channels has a key there. The property
+    /// shows in the timeline afterwards.
+    pub fn key_property(&mut self, property: &str, time: f64) -> Result<Plan, ModelError> {
+        let wanted = |path: &str| match property {
+            "p" => path.starts_with("position."),
+            "s" => path.starts_with("scale."),
+            "r" => path == "rotation" || path.starts_with("rotation."),
+            "t" => path == "opacity",
+            "a" => path.starts_with("anchor."),
+            _ => false,
+        };
+        if !["p", "s", "r", "t", "a"].contains(&property) {
+            return Err(ModelError::UnknownCommand(property.into()));
+        }
+        let targets = self.channels_of_selection(|_, path, _| wanted(path));
+        if targets.is_empty() {
+            return Ok(Plan::default());
+        }
+        let plan = self.property_diamond(&targets, time)?;
+        self.show_channels(&targets);
+        Ok(plan)
+    }
+    /// Add Keyframe: a key at the playhead on the selected property (the
+    /// properties of the selected keys, else every animated property) of the
+    /// selected layers. Channels that have a key there are left alone.
+    pub fn add_keyframes(&mut self, time: f64) -> Result<Plan, ModelError> {
+        finite(time)?;
+        let property = self.selection.channel().map(str::to_owned);
+        let keyed: Vec<(String, String)> = self
+            .selection
+            .keys()
+            .iter()
+            .filter_map(|id| self.index.key(id))
+            .map(|(l, c, _)| (l.id.clone(), c.path.clone()))
+            .collect();
+        let targets = self.channels_of_selection(|layer, path, animated| match &property {
+            Some(chosen) => path == chosen || path.starts_with(&format!("{chosen}.")),
+            None if !keyed.is_empty() => keyed.iter().any(|(l, c)| l == layer && c == path),
+            None => animated,
+        });
+        let half = 0.5 / self.index.fps;
+        let commands: Vec<Command> = targets
+            .iter()
+            .filter(|(l, c)| {
+                let from = self.index.layer(l).map_or(0., |l| l.from);
+                !self
+                    .index
+                    .channel(l, c)
+                    .is_some_and(|c| c.keys.iter().any(|k| (from + k.time - time).abs() < half))
+            })
+            .map(|(l, c)| {
+                KeyframeCommand::Add {
+                    layer_id: l.clone(),
+                    channel: c.clone(),
+                    time,
+                    key_id: new_id("K"),
+                    value: None,
+                }
+                .into()
+            })
+            .collect();
+        if commands.is_empty() {
+            return Ok(Plan::default());
+        }
+        self.show_channels(&targets);
+        Ok(Plan::edit(commands, self.index.revision))
+    }
+    /// `(layer, channel)` of the selected, unlocked layers whose channel
+    /// `wanted(layer, path, has keys)` accepts.
+    fn channels_of_selection(
+        &self,
+        wanted: impl Fn(&str, &str, bool) -> bool,
+    ) -> Vec<(String, String)> {
+        self.index
+            .layers
+            .iter()
+            .filter(|l| self.selection.contains(&l.id) && !l.effectively_locked)
+            .flat_map(|l| {
+                l.channels
+                    .iter()
+                    .filter(|c| wanted(&l.id, &c.path, !c.keys.is_empty()))
+                    .map(|c| (l.id.clone(), c.path.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+    /// Opens these layers' rows on these channels (with what they showed).
+    fn show_channels(&mut self, targets: &[(String, String)]) {
+        for (layer, path) in targets {
+            let Some(l) = self.index.layer(layer) else {
+                continue;
+            };
+            let shown = self.reveal.layers.entry(layer.clone()).or_insert_with(|| {
+                crate::reveal::Disclosure {
+                    collapsed: l.collapsed,
+                    group_collapsed: l.group_collapsed,
+                    paths: None,
+                }
+            });
+            if shown.collapsed {
+                // Closed, it showed nothing: open on what gets a key.
+                shown.collapsed = false;
+                shown.paths = Some(vec![]);
+            }
+            // `None` lists the animated channels, which these now are.
+            if let Some(paths) = &mut shown.paths
+                && !paths.iter().any(|p| p == "*" || p == path)
+            {
+                paths.push(path.clone());
+            }
+        }
+    }
+    /// Every one of these keys holds its value to the next key: the legacy
+    /// `hold` flag, or the outgoing interpolation the kernel writes now.
+    fn all_held(&self, keys: &[String]) -> bool {
+        keys.iter().all(|id| {
+            self.index.key(id).is_some_and(|(_, _, k)| {
+                crate::snapshot::boolean(k.stored.get("hold"))
+                    || k.stored
+                        .get("outInterp")
+                        .is_some_and(|n| n.to_value().as_str() == Some("hold"))
+            })
         })
     }
     pub fn add_marker(&self, time: f64) -> Result<Plan, ModelError> {
@@ -740,6 +885,12 @@ pub enum DragKind {
     Layers {
         ids: Vec<String>,
     },
+    /// Option-drag: copies of `ids` (`new_ids`, in the same order) follow the
+    /// pointer and the originals stay. One Undo step.
+    DuplicateLayers {
+        ids: Vec<String>,
+        new_ids: Vec<String>,
+    },
     TrimIn {
         ids: Vec<String>,
     },
@@ -837,6 +988,19 @@ impl Drag {
                     }
                 }
             }
+            DragKind::DuplicateLayers { ids, new_ids } => {
+                if ids.is_empty() || ids.len() != new_ids.len() {
+                    return Err(ModelError::InvalidGesture);
+                }
+                for id in ids.iter() {
+                    let layer = index
+                        .layer(id)
+                        .ok_or_else(|| ModelError::UnknownId(id.clone()))?;
+                    if layer.effectively_locked {
+                        return Err(ModelError::Locked(id.clone()));
+                    }
+                }
+            }
             DragKind::Keys { ids }
             | DragKind::GraphKeys { ids }
             | DragKind::StretchKeys { ids, .. }
@@ -868,7 +1032,7 @@ impl Drag {
         }
         let mut anchors = Vec::new();
         match &kind {
-            DragKind::Layers { ids } => {
+            DragKind::Layers { ids } | DragKind::DuplicateLayers { ids, .. } => {
                 for id in ids {
                     let l = index.layer(id).unwrap();
                     if l.kind != "group" {
@@ -933,7 +1097,10 @@ impl Drag {
         let track_snap = if model.mode == TimelineMode::Tracks
             && matches!(
                 kind,
-                DragKind::Layers { .. } | DragKind::TrimIn { .. } | DragKind::TrimOut { .. }
+                DragKind::Layers { .. }
+                    | DragKind::DuplicateLayers { .. }
+                    | DragKind::TrimIn { .. }
+                    | DragKind::TrimOut { .. }
             ) {
             Some(!model.track_snap_disabled)
         } else {
@@ -966,6 +1133,7 @@ impl Drag {
                 }
             }
             DragKind::Layers { .. } => "Move clip",
+            DragKind::DuplicateLayers { .. } => "Duplicate Layers",
             DragKind::TrimIn { .. } | DragKind::TrimOut { .. } => "Trim clip",
             DragKind::QuickOffsetLayers { .. } => "Quick offset layers",
             DragKind::Keys { .. } => "Move keyframe",
@@ -1077,6 +1245,30 @@ impl Drag {
                         .into(),
                     );
                 }
+            }
+            // The copies exist only in this gesture's writes: each step
+            // makes them again from the start and places them.
+            DragKind::DuplicateLayers { ids, new_ids } => {
+                let first = self.start.layer(&ids[0]).unwrap();
+                let step = if self.snap.lock.is_some() {
+                    delta
+                } else {
+                    frame(first.from + sample.time_delta, self.start.fps) - first.from
+                };
+                out.push(
+                    LayerCommand::Duplicate {
+                        layer_ids: ids.clone(),
+                        new_ids: new_ids.clone(),
+                    }
+                    .into(),
+                );
+                out.push(
+                    TimingCommand::Move {
+                        layer_ids: new_ids.clone(),
+                        delta: step,
+                    }
+                    .into(),
+                );
             }
             DragKind::TrimIn { ids } | DragKind::TrimOut { ids } => {
                 for id in ids {
@@ -1287,6 +1479,13 @@ impl Drag {
             | DragKind::TrimOut { ids }
             | DragKind::QuickOffsetLayers { ids } => ids,
             _ => &[],
+        }
+    }
+    /// The copies an Option-drag made, to select when it ends.
+    pub fn copies(&self) -> Option<&[String]> {
+        match &self.kind {
+            DragKind::DuplicateLayers { new_ids, .. } => Some(new_ids),
+            _ => None,
         }
     }
     fn moving_keys(&self) -> &[String] {
@@ -1571,11 +1770,7 @@ impl TimelineModel {
             }
             "keys.delete" => edit(KeyframeCommand::Delete { key_ids: keys }.into()),
             "keys.hold" => {
-                let hold = !keys.iter().all(|id| {
-                    self.index
-                        .key(id)
-                        .is_some_and(|(_, _, k)| crate::snapshot::boolean(k.stored.get("hold")))
-                });
+                let hold = !self.all_held(&keys);
                 edit(
                     KeyframeCommand::SetHold {
                         key_ids: keys,

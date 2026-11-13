@@ -79,7 +79,20 @@ fn transport_jkl_pause_seek_step_and_loop() {
     let mut t = transport::Transport::new(TICKS_PER_SECOND / 30);
     assert!(shuttle(K, PlaybackRate::STOPPED, true).is_none());
     assert!(shuttle(J, PlaybackRate::STOPPED, false).is_none());
-    for (key, expected) in [(L, 1), (L, 2), (L, 2), (J, -1), (J, -2), (J, -2), (L, 1)] {
+    let ladder = [
+        (L, 1),
+        (L, 2),
+        (L, 4),
+        (L, 8),
+        (L, 8),
+        (J, -1),
+        (J, -2),
+        (J, -4),
+        (J, -8),
+        (J, -8),
+        (L, 1),
+    ];
+    for (key, expected) in ladder {
         t.command(shuttle(key, t.rate(), true).unwrap(), 1_000_000);
         assert_eq!(t.rate().num, expected);
     }

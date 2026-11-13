@@ -899,6 +899,16 @@ impl Viewer {
             Ok(())
         })
     }
+    /// Whether a run is asked for or in progress, including the moment a
+    /// new run waits for the audio clock (when the clock itself reads
+    /// stopped).
+    pub fn running(&self) -> bool {
+        let state = self.shared.state.lock().unwrap();
+        state
+            .views
+            .get(&self.id)
+            .is_some_and(|v| v.desired_rate.num != 0)
+    }
     pub fn shuttle(&self, key: transport::ShuttleKey, from_pause: bool) -> Result<bool> {
         let mut consumed = false;
         self.edit(|v| {
