@@ -823,6 +823,9 @@ pub struct PublishHooks {
     /// Called with the name a file had when it was read to be disposed of,
     /// after that read and right before the file is unlinked.
     pub before_unlink: Option<PublishHook>,
+    /// Called with a public name right after the file under it was moved
+    /// to a private name of the save's record, before that file is judged.
+    pub after_withdrawn: Option<PublishHook>,
     /// The person's Trash, where a version of the project goes once a save
     /// no longer needs it (the kernel's host sets it; `None`: such files
     /// stay where they are).
@@ -853,6 +856,7 @@ impl std::fmt::Debug for PublishHooks {
             .field("copy_fails", &self.copy_fails.is_some())
             .field("before_disposal", &self.before_disposal.is_some())
             .field("before_unlink", &self.before_unlink.is_some())
+            .field("after_withdrawn", &self.after_withdrawn.is_some())
             .field("trash", &self.trash.is_some())
             .finish()
     }
@@ -1019,6 +1023,26 @@ fn excludes(destination: &Path, hooks: &PublishHooks) -> Result<bool, ProjectIoE
     }
 }
 
+/// Why [`place_new`] did not place a file, and what it left.
+#[derive(Debug)]
+pub(super) struct Unplaced {
+    pub error: ProjectIoError,
+    /// The copy it was making is under the name, incomplete: the save's
+    /// record takes it back ([`Transaction::place`]).
+    pub partial: bool,
+    /// That incomplete file, as this call created it.
+    pub created: Option<FileStat>,
+}
+impl From<ProjectIoError> for Box<Unplaced> {
+    fn from(error: ProjectIoError) -> Self {
+        Box::new(Unplaced {
+            error,
+            partial: false,
+            created: None,
+        })
+    }
+}
+
 /// How a file came to be under a name nothing held ([`place_new`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Placed {
@@ -1048,8 +1072,9 @@ pub(super) fn place_new(
     to: &Path,
     hash: Option<&str>,
     hooks: &PublishHooks,
-) -> Result<Placed, ProjectIoError> {
-    let taken = || ProjectIoError::DestinationExists(to.display().to_string());
+) -> Result<Placed, Box<Unplaced>> {
+    let taken =
+        || -> Box<Unplaced> { ProjectIoError::DestinationExists(to.display().to_string()).into() };
     let about_to = || {
         if let Some(hook) = &hooks.before_install {
             hook(to);
@@ -1063,7 +1088,7 @@ pub(super) fn place_new(
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Err(taken()),
             // Proven a moment ago and refused now: not relied on again.
             Err(e) if matches!(e.raw_os_error(), Some(45) | Some(22)) => forget_probes(),
-            Err(e) => return Err(io_err(from, e)),
+            Err(e) => return Err(io_err(from, e).into()),
         }
     }
     about_to();
@@ -1119,8 +1144,10 @@ pub(super) fn rename_private(from: &Path, to: &Path, hooks: &PublishHooks) -> io
 /// over a file that is there), `source`'s bytes are copied into it and
 /// synced, and what the name then holds is read back and must be those
 /// bytes (and `hash`, when the caller knows what the source holds). A copy
-/// that fails is taken back ([`withdraw`]). A crash mid-copy leaves an
-/// incomplete file under a name that held nothing before.
+/// that fails is left under the name, incomplete, and said to be
+/// ([`Unplaced::partial`]): the save's record takes it back. A crash
+/// mid-copy leaves an incomplete file under a name that held nothing
+/// before.
 ///
 /// The file's first bytes ([`HELD_BACK`] of them) are written last, after
 /// everything else is synced; until then they are zeros. So whatever the
@@ -1133,7 +1160,7 @@ fn create_exclusive(
     destination: &Path,
     hash: Option<&str>,
     hooks: &PublishHooks,
-) -> Result<(), ProjectIoError> {
+) -> Result<(), Box<Unplaced>> {
     let from = File::open(source).map_err(|e| io_err(source, e))?;
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
@@ -1150,17 +1177,17 @@ fn create_exclusive(
     let mut out = match options.open(destination) {
         Ok(out) => out,
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-            return Err(ProjectIoError::DestinationExists(
-                destination.display().to_string(),
-            ));
+            return Err(
+                ProjectIoError::DestinationExists(destination.display().to_string()).into(),
+            );
         }
-        Err(e) => return Err(io_err(destination, e)),
+        Err(e) => return Err(io_err(destination, e).into()),
     };
     // Marked as this save's copy before it holds a byte (a volume without
     // extended attributes leaves it unmarked: recovery then never takes it
     // back on its own, and offers the versions instead).
     mark_copy(&out, source);
-    let copied = (|| {
+    let copied = (|| -> Result<(), ProjectIoError> {
         use std::io::Write;
         let mut hasher = Sha256::new();
         let mut buf = vec![0u8; 1 << 20];
@@ -1248,43 +1275,13 @@ fn create_exclusive(
             ))
         }
     })();
-    if copied.is_err() {
-        drop(out);
-        withdraw(destination, source, hooks);
-    }
-    copied
-}
-
-/// Takes back the incomplete copy [`create_exclusive`] left under
-/// `destination`, a name that held nothing before it. Nothing is removed by
-/// that name: whatever the name holds is first moved to a private name
-/// ([`rename_private`]) and read. Bytes that are a beginning of `whole`, the
-/// file being copied, are that incomplete copy and are removed (`whole` still
-/// has all of them). Anything else landed there since and goes back under
-/// the name, or beside it if the name was taken again.
-pub(super) fn withdraw(destination: &Path, whole: &Path, hooks: &PublishHooks) {
-    let taken = temporary_sibling(destination).with_extension("partial");
-    if rename_private(destination, &taken, hooks).is_err() {
-        return;
-    }
-    // The incomplete copy, still exactly a beginning of the whole file when
-    // it goes; anything else (it landed there, or was written into since)
-    // goes back under the name, or beside it if the name was taken again.
-    let ours = begins(whole, &taken)
-        && dispose_captured(
-            &taken,
-            destination,
-            &|part, _| begins_file(whole, part),
-            hooks,
-        );
-    if !ours
-        && place_new(&taken, destination, None, hooks).is_err()
-        && let Err(left) = keep_beside(taken, destination, "other version", hooks, &mut |_, _| {
-            Ok(())
+    copied.map_err(|error| {
+        Box::new(Unplaced {
+            error,
+            partial: true,
+            created: out.metadata().ok().map(|m| stat_of(&m)),
         })
-    {
-        trash_or_leave(left, hooks);
-    }
+    })
 }
 
 /// How many of a file's first bytes [`create_exclusive`] writes last (a
@@ -1308,7 +1305,7 @@ pub(super) fn head_held_back(path: &Path) -> bool {
 }
 
 /// [`begins`] for the bytes behind `part`.
-fn begins_file(whole: &Path, part: &File) -> bool {
+pub(super) fn begins_file(whole: &Path, part: &File) -> bool {
     let Ok(whole) = File::open(whole) else {
         return false;
     };
@@ -1445,7 +1442,7 @@ pub enum Publish {
 }
 
 /// `2026-11-12 14.03.22`, local time (a file name the person reads).
-fn local_stamp() -> String {
+pub(super) fn local_stamp() -> String {
     local_time(
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1477,51 +1474,6 @@ pub fn local_time(now: u64) -> String {
     }
     #[cfg(not(unix))]
     backup_stamp(now as i64 * 1000)
-}
-
-/// Gives `held`, a file under a private name beside `destination`, a name
-/// the person finds: `<name> (<label> <date time>).<ext>`, never over
-/// anything ([`place_new`]). `label` says what it is: `other version` for a
-/// file found at the project's path that is not the version the save could
-/// replace, `recovered` for a finished save that could not take the path.
-/// `about_to` is told each name right before it is tried (a save's record
-/// keeps it). Returns where the file is and how it got there (a copy
-/// leaves the file under its private name too; nothing is removed here):
-/// `Err` with its private name when it could not be given another.
-pub(super) fn keep_beside(
-    held: PathBuf,
-    destination: &Path,
-    label: &str,
-    hooks: &PublishHooks,
-    about_to: &mut dyn FnMut(&Path, &Path) -> Result<(), ProjectIoError>,
-) -> Result<(PathBuf, Placed), PathBuf> {
-    let dir = destination.parent().unwrap_or(Path::new("."));
-    let stem = destination
-        .file_stem()
-        .unwrap_or("project".as_ref())
-        .to_string_lossy();
-    let stamp = local_stamp();
-    for n in 1..=50 {
-        let mut name = format!("{stem} ({label} {stamp}");
-        if n > 1 {
-            name.push_str(&format!(" {n}"));
-        }
-        name.push(')');
-        if let Some(extension) = destination.extension() {
-            name.push('.');
-            name.push_str(&extension.to_string_lossy());
-        }
-        let to = dir.join(name);
-        if about_to(&held, &to).is_err() {
-            break;
-        }
-        match place_new(&held, &to, None, hooks) {
-            Ok(placed) => return Ok((to, placed)),
-            Err(ProjectIoError::DestinationExists(_)) => continue,
-            Err(_) => break,
-        }
-    }
-    Err(held)
 }
 
 /// Whether `entry` is the private name a save gives a file beside the file
@@ -1728,7 +1680,7 @@ fn replace_aside(
     }
     let installed = match tx
         .step("install")
-        .and_then(|()| place_new(&temp.path, destination, Some(new_hash), hooks))
+        .and_then(|()| tx.place(&temp.path, destination, Some(new_hash)))
     {
         Ok(placed) => Some(placed),
         // Something landed at the path since it was emptied: it stays.
@@ -1736,7 +1688,7 @@ fn replace_aside(
         // Not installed and nothing arrived: what was at the path goes back
         // (never over a file that landed there since).
         Err(e) => {
-            return Err(match place_new(&aside, destination, None, hooks) {
+            return Err(match tx.place(&aside, destination, None) {
                 // Back as a copy, the same bytes in another file: the file
                 // that was moved aside stays, for a later save to prune.
                 Ok(Placed::Copied) => {
@@ -2295,7 +2247,7 @@ fn publish_now(
         None => {
             let placed = tx
                 .step("install")
-                .and_then(|()| place_new(&temp.path, destination, Some(new_hash), hooks));
+                .and_then(|()| tx.place(&temp.path, destination, Some(new_hash)));
             match placed {
                 Ok(Placed::Moved) => drop(temp.keep()),
                 // The copy keeps the data; `temp` unlinks its name on drop.
@@ -3015,6 +2967,19 @@ fn captured_backup(path: &Path) -> PathBuf {
     path.with_file_name(format!(".{name}.{}.gone", random_uuid()))
 }
 
+/// Moves a captured version back under its own name in the backups, never
+/// over a file that is there.
+fn rename_back(captured: &Path, own: &Path) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        sys::renamex(captured, own, sys::RENAME_EXCL).is_ok()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        fs::hard_link(captured, own).is_ok() && fs::remove_file(captured).is_ok()
+    }
+}
+
 /// The backup a name made by [`captured_backup`] belongs to.
 fn backup_of_captured(captured: &Path) -> Option<PathBuf> {
     let name = captured.file_name()?.to_str()?;
@@ -3059,7 +3024,7 @@ pub(crate) fn retain(
         if let Some(own) = backup_of_captured(&captured)
             && matches!(lstat_file(&captured), Ok(Some(_)))
         {
-            let _ = place_new(&captured, &own, None, hooks);
+            rename_back(&captured, &own);
         }
     }
     for (index, (_, name, size)) in generations(&dir)
@@ -3085,7 +3050,7 @@ pub(crate) fn retain(
                 // Changed: back under its own name, for the caller to keep.
                 changed.extend(
                     left.into_iter()
-                        .filter(|left| *left == path || place_new(left, &path, None, hooks).is_ok())
+                        .filter(|left| *left == path || rename_back(left, &path))
                         .map(|_| path.clone()),
                 );
                 continue;

@@ -3311,7 +3311,8 @@ fn child_disk(disk: &str) -> pm_kernel::project_io::PublishHooks {
 /// `PM_KERNEL_TEST_SAVE_ACTION=open`) and is killed at a point of the save
 /// or of the recovery at open: `between` (between the two renames),
 /// `mid-copy`, `unlink` (a version was captured and read, and is about to
-/// be unlinked), or the name of a step of the save's record, optionally
+/// be unlinked), `withdrawn` (a file was moved off a public name and is not
+/// judged yet), or the name of a step of the save's record, optionally
 /// `step#n` for its n-th occurrence. Killed: nothing after that instant
 /// runs, not even a destructor. Exits 3 when the point was never reached.
 #[test]
@@ -3329,6 +3330,7 @@ fn save_child_process() {
         None => (kill.clone(), 1),
     };
     let seen = std::sync::atomic::AtomicUsize::new(0);
+    let land_at = var("PM_KERNEL_TEST_SAVE_LAND_AT");
     // Paused, not killed: says it got there, waits to be told to go on.
     let die: pm_kernel::project_io::PublishHook =
         match std::env::var_os("PM_KERNEL_TEST_SAVE_PAUSE").map(std::path::PathBuf::from) {
@@ -3344,7 +3346,13 @@ fn save_child_process() {
         between_renames: (kill == "between").then(|| die.clone()),
         mid_copy: (kill == "mid-copy").then(|| die.clone()),
         before_unlink: (kill == "unlink").then(|| die.clone()),
-        step: Some(std::sync::Arc::new(move |reached, _| {
+        after_withdrawn: (kill == "withdrawn").then(|| die.clone()),
+        step: Some(std::sync::Arc::new(move |reached, path| {
+            // Another program's file lands at the project's name right as
+            // this step is about to be taken.
+            if land_at.as_deref() == Some(reached) {
+                land(path, b"version B");
+            }
             if reached == step && seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1 == nth
             {
                 unsafe { libc::_exit(0) }
@@ -3395,6 +3403,29 @@ fn killed(native: &Path, file: &Path, disk: &str, kill: &str, action: &str) -> b
     assert!(
         matches!(killed.status.code(), Some(0 | 3)),
         "{disk} {kill} {action}: {}",
+        String::from_utf8_lossy(&killed.stderr)
+    );
+    killed.status.code() == Some(0)
+}
+/// Opens `file` in a child process ([`save_child_process`]) in which another
+/// program's file lands under the project's name as recovery reaches the
+/// step `land_at`, and which is killed right after recovery moved a file off
+/// a public name. True when it got there.
+fn killed_landing(native: &Path, file: &Path, disk: &str, land_at: &str) -> bool {
+    let mut child = Process::new(std::env::current_exe().unwrap());
+    child
+        .args(["--exact", "save_child_process"])
+        .env("PM_KERNEL_TEST_SAVE_PROFILE", native)
+        .env("PM_KERNEL_TEST_SAVE_FILE", file)
+        .env("PM_KERNEL_TEST_SAVE_DISK", disk)
+        .env("PM_KERNEL_TEST_SAVE_KILL", "withdrawn")
+        .env("PM_KERNEL_TEST_SAVE_LAND_AT", land_at)
+        .env("PM_KERNEL_TEST_SAVE_ACTION", "open")
+        .stdout(Stdio::null());
+    let killed = child.output().unwrap();
+    assert!(
+        matches!(killed.status.code(), Some(0 | 3)),
+        "{disk} {land_at}: {}",
         String::from_utf8_lossy(&killed.stderr)
     );
     killed.status.code() == Some(0)
@@ -3956,6 +3987,78 @@ fn a_second_crash_during_recovery_is_carried_on_by_the_next_open() {
             );
             decide(&mut k, ticket, RecoveryDecision::Recover);
         }
+    }
+}
+/// A save is cut short in the middle of copying its file to the name, and
+/// the recovery that takes that incomplete copy back is itself cut short
+/// right after it moved the copy off the name. The name it was moved to is
+/// one the save's record names, written there before the move: the next
+/// open finds it, judges it and finishes. Nothing is left under a private
+/// name no record knows.
+#[test]
+fn a_second_crash_while_an_incomplete_copy_is_taken_back_leaves_nothing_unrecorded() {
+    let dir = common::TempDir::new("withdraw-crash");
+    fs::create_dir_all(dir.path("job")).unwrap();
+    let file = dir.path("job/cut.pmv");
+    fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+    let original = fs::read(&file).unwrap();
+    let native = dir.path("native");
+    assert!(killed(&native, &file, "no-exclusive", "mid-copy", "save"));
+    assert!(killed(&native, &file, "no-exclusive", "unlink", "open"));
+    let mut k = kernel(&native);
+    k.set_publish_hooks(child_disk("no-exclusive"));
+    let _ = open_file(&mut k, &file);
+    assert_eq!(fs::read(&file).unwrap(), original);
+    assert_eq!(private_leftovers(&file), [""; 0]);
+    let kept = visible_siblings(&file);
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert_eq!(saved_name(&kept[0]).as_deref(), Some("One"));
+}
+/// Another program puts a file of its own under the project's name at the
+/// instant recovery moves the incomplete copy off it. What recovery then
+/// holds is not the copy: it is never removed. It is kept beside the
+/// project and told, also when the app is killed right then.
+#[test]
+fn a_file_that_lands_as_an_incomplete_copy_is_taken_back_is_kept_and_told() {
+    for crash in [false, true] {
+        let dir = common::TempDir::new("withdraw-landing");
+        fs::create_dir_all(dir.path("job")).unwrap();
+        let file = dir.path("job/cut.pmv");
+        fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+        let original = fs::read(&file).unwrap();
+        let native = dir.path("native");
+        assert!(killed(&native, &file, "no-exclusive", "mid-copy", "save"));
+        if crash {
+            // Killed with the landed file already moved to the record's
+            // name and nothing judged yet.
+            assert!(killed_landing(&native, &file, "no-exclusive", "withdraw"));
+        }
+        let mut k = kernel(&native);
+        let project = file.clone();
+        k.set_publish_hooks(pm_kernel::project_io::PublishHooks {
+            step: (!crash).then(|| -> pm_kernel::project_io::StepHook {
+                std::sync::Arc::new(move |step, _| {
+                    if step == "withdraw" {
+                        land(&project, b"version B");
+                    }
+                })
+            }),
+            ..child_disk("no-exclusive")
+        });
+        let (session, _) = open_file(&mut k, &file);
+        assert_eq!(fs::read(&file).unwrap(), original, "{crash}");
+        let landed: Vec<_> = visible_siblings(&file)
+            .into_iter()
+            .filter(|p| fs::read(p).unwrap() == b"version B")
+            .collect();
+        assert_eq!(landed.len(), 1, "{crash}: kept beside the project");
+        let told = kept_beside(&mut k, &session);
+        assert!(
+            told.iter()
+                .any(|(_, path)| path.as_ref() == Some(&landed[0])),
+            "{crash}: and told: {told:?}"
+        );
+        assert_eq!(private_leftovers(&file), [""; 0], "{crash}");
     }
 }
 /// Puts `bytes` at `path` the way a sync client lands a version: written

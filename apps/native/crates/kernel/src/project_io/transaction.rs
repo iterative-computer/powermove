@@ -27,11 +27,10 @@ use std::path::{Path, PathBuf};
 
 use pm_model::json::{Map, Value, parse, to_canonical_string};
 
-use super::durable::head_held_back;
 use super::durable::{
-    FileVersion, Folder, Host, Placed, PublishHooks, Stray, begins, copy_of, dispose,
-    dispose_captured, folder_sync, holds_hash, is_backup_name, is_uuid_v4, keep_beside, lstat_file,
-    place_new, probing, rename_private, sync_file, trash_or_leave, withdraw,
+    FileStat, FileVersion, Folder, Host, Placed, PublishHooks, Stray, begins, begins_file, copy_of,
+    dispose, dispose_captured, folder_sync, head_held_back, holds_hash, is_backup_name, is_uuid_v4,
+    local_stamp, lstat_file, place_new, probing, rename_private, sync_file, trash_or_leave,
 };
 use crate::error::{ProjectIoError, io_err};
 
@@ -322,13 +321,19 @@ fn known_step(step: &Value, destination: &Path, staged: &Path, aside: &Path) -> 
         Some("retained") => own("name"),
         Some("dispose") => own("name") && text("hash").is_some(),
         Some("left") => own("name") && matches!(text("where"), Some("trash" | "hidden")),
+        // A file moved off a public name (the project's, or a kept file's)
+        // to the record's own, and the file it was a copy of, if any.
+        Some("withdraw") => {
+            (text("from").map(OsStr::new) == destination.file_name() || kept("from"))
+                && (step.get("whole").is_none() || own("whole"))
+        }
         Some("settled") => step.get("holds").is_none() || text("holds").is_some(),
         Some("seen") => step.get("to").is_none() || kept("to") || own("to"),
         _ => false,
     }
 }
 
-/// Whether `name` is a name [`keep_beside`] gives a file beside
+/// Whether `name` is a name [`Transaction::keep_file`] gives a file beside
 /// `destination`: one plain file name (no folder, no `..`), the project's
 /// name with a label in brackets, and the project's extension.
 fn is_kept_name(name: &str, destination: &Path) -> bool {
@@ -432,6 +437,22 @@ impl Record {
                 .names()
                 .iter()
                 .all(|p| self.retains(p) || matches!(lstat_file(p), Ok(None)))
+    }
+    fn partial(&self) -> PathBuf {
+        self.path.with_extension(PARTIAL)
+    }
+    /// The last file this record moved off a public name: the name, and the
+    /// file it was an incomplete copy of (none for a file moved off because
+    /// it does not open).
+    fn withdrawing(&self) -> Option<(PathBuf, Option<PathBuf>)> {
+        let dir = self.path.parent().unwrap_or(Path::new("."));
+        let step = self
+            .steps
+            .iter()
+            .rev()
+            .find(|s| s.get("step").and_then(Value::as_str) == Some("withdraw"))?;
+        let name = |key: &str| step.get(key).and_then(Value::as_str).map(|n| dir.join(n));
+        Some((name("from")?, name("whole")))
     }
     /// What the version captured under [`Self::gone`] was to hold: the last
     /// disposal this record began.
@@ -676,7 +697,107 @@ impl Transaction {
                 tx.keep_changed(vec![gone], None);
             }
         }
+        // A file moved off a public name and not judged yet: judged now.
+        let partial = record.partial();
+        if !record.retains(&partial) && !matches!(lstat_file(&partial), Ok(None)) {
+            match record.withdrawing() {
+                Some((from, whole)) => tx.judge_withdrawn(&from, whole.as_deref(), None),
+                None => {
+                    tx.keep_changed(vec![partial], None);
+                }
+            }
+        }
         Ok(tx)
+    }
+
+    /// Puts the file `from` under the name `to`, which nothing may hold
+    /// ([`place_new`]). A copy that failed part way is taken back from
+    /// under the name ([`Self::withdraw`]).
+    pub fn place(
+        &mut self,
+        from: &Path,
+        to: &Path,
+        hash: Option<&str>,
+    ) -> Result<Placed, ProjectIoError> {
+        let hooks = self.hooks.clone();
+        place_new(from, to, hash, &hooks).map_err(|unplaced| {
+            if unplaced.partial {
+                self.withdraw(to, Some(from), unplaced.created.as_ref());
+            }
+            unplaced.error
+        })
+    }
+
+    /// Moves the file under the public name `to` to the record's own
+    /// private name, written into the record before the move, and says
+    /// where it is now. `whole` is the file it is an incomplete copy of,
+    /// when that is why it is moved. `None`: nothing was moved (an earlier
+    /// file is still under that private name, the record cannot be written,
+    /// or the name holds nothing).
+    pub fn capture(&mut self, to: &Path, whole: Option<&Path>) -> Option<PathBuf> {
+        let partial = self.record.with_extension(PARTIAL);
+        if !matches!(lstat_file(&partial), Ok(None)) {
+            self.strand();
+            return None;
+        }
+        let name = |path: &Path| {
+            Value::from(
+                path.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned(),
+            )
+        };
+        let mut members = Map::new();
+        members.insert("from", name(to));
+        // Named when it is one of the record's own files; another file (a
+        // version from the backups) is known only while this call runs.
+        if let Some(whole) = whole.filter(|whole| {
+            [STAGED, ASIDE, GONE]
+                .iter()
+                .any(|e| self.record.with_extension(e) == **whole)
+        }) {
+            members.insert("whole", name(whole));
+        }
+        self.step_with("withdraw", members).ok()?;
+        rename_private(to, &partial, &self.hooks).ok()?;
+        if let Some(hook) = &self.hooks.after_withdrawn {
+            hook(to);
+        }
+        Some(partial)
+    }
+
+    /// Takes back the incomplete copy of `whole` under the public name
+    /// `to`, a name that held nothing before the copy began. Nothing is
+    /// removed by that name: whatever it holds is first moved to the
+    /// record's private name ([`Self::capture`]) and judged there
+    /// ([`Self::judge_withdrawn`]). `created` is the file the copy made,
+    /// when this process made it.
+    pub fn withdraw(&mut self, to: &Path, whole: Option<&Path>, created: Option<&FileStat>) {
+        if self.capture(to, whole).is_some() {
+            self.judge_withdrawn(to, whole, created);
+        }
+    }
+
+    /// Judges the file moved off the public name `to` to the record's
+    /// private name. It is the incomplete copy of `whole` only if it is the
+    /// very file the copy created (`created`) or carries this save's mark,
+    /// and its bytes are a beginning of `whole`'s: then it is removed
+    /// (`whole` has all of them). Anything else landed there or was written
+    /// into since: it is kept beside the project and told.
+    fn judge_withdrawn(&mut self, to: &Path, whole: Option<&Path>, created: Option<&FileStat>) {
+        let partial = self.record.with_extension(PARTIAL);
+        let hooks = self.hooks.clone();
+        let ours = whole.is_some_and(|whole| {
+            let made_here = created.is_some_and(|created| {
+                matches!(lstat_file(&partial), Ok(Some(now)) if now.same_identity(created))
+            });
+            (made_here || copy_of(&partial, whole))
+                && dispose_captured(&partial, to, &|part, _| begins_file(whole, part), &hooks)
+        });
+        if !ours {
+            self.keep_changed(vec![partial], None);
+        }
     }
 
     /// How far the project's folder could be synced when the save began.
@@ -781,7 +902,7 @@ impl Transaction {
     }
 
     /// Gives `held`, a file under a private name, a name the person finds
-    /// beside the project ([`keep_beside`]), recording each name before it
+    /// beside the project ([`Self::keep_file`]), recording each name before it
     /// is tried. `label` is `other version` (a file that was under the
     /// project's name and is not the version the save could replace) or
     /// `recovered` (this save's own finished file). Where the name could
@@ -918,10 +1039,7 @@ impl Transaction {
             _ if self.live => "arrived",
             _ => "other",
         };
-        let (destination, hooks) = (self.destination.clone(), self.hooks.clone());
-        let kept = keep_beside(held, &destination, label, &hooks, &mut |from, to| {
-            self.keeping(from, to, why)
-        })?;
+        let kept = self.name_beside(held, label, why)?;
         // It has its name: the person is to be told, and the record keeps
         // that until they were.
         let mut members = Map::new();
@@ -939,6 +1057,46 @@ impl Transaction {
         let _ = self.step_with("kept", members);
         self.tells = true;
         Ok(kept)
+    }
+
+    /// Gives `held` the name `<project> (<label> <date time>).<ext>` beside
+    /// the project, never over anything ([`Self::place`]): each name is
+    /// recorded right before it is tried, and a taken one is passed over.
+    /// `Err` with its private name when it could not be given another.
+    fn name_beside(
+        &mut self,
+        held: PathBuf,
+        label: &str,
+        why: &str,
+    ) -> Result<(PathBuf, Placed), PathBuf> {
+        let destination = self.destination.clone();
+        let dir = destination.parent().unwrap_or(Path::new("."));
+        let stem = destination
+            .file_stem()
+            .unwrap_or("project".as_ref())
+            .to_string_lossy();
+        let stamp = local_stamp();
+        for n in 1..=50 {
+            let mut name = format!("{stem} ({label} {stamp}");
+            if n > 1 {
+                name.push_str(&format!(" {n}"));
+            }
+            name.push(')');
+            if let Some(extension) = destination.extension() {
+                name.push('.');
+                name.push_str(&extension.to_string_lossy());
+            }
+            let to = dir.join(name);
+            if self.keeping(&held, &to, why).is_err() {
+                break;
+            }
+            match self.place(&held, &to, None) {
+                Ok(placed) => return Ok((to, placed)),
+                Err(ProjectIoError::DestinationExists(_)) => continue,
+                Err(_) => break,
+            }
+        }
+        Err(held)
     }
 
     /// The last saved version is back under the project's name: the person
@@ -1238,7 +1396,7 @@ fn settle_one(
     let Ok(mut tx) = Transaction::resume(record, destination, hooks) else {
         return Some(Undecided::Unreadable);
     };
-    take_back_copies(record, destination, hooks);
+    take_back_copies(record, destination, &mut tx);
     let mut at_path = holds(destination, record);
     let aside = holds(&record.aside, record);
     let staged = holds(&record.staged, record);
@@ -1251,7 +1409,7 @@ fn settle_one(
         if tx.step("restore").is_err() {
             return Some(Undecided::Unknown);
         }
-        match place_new(&record.aside, destination, old, hooks) {
+        match tx.place(&record.aside, destination, old) {
             Ok(placed) => {
                 // Back as a copy: the file itself stays, for a later save
                 // to read again and prune.
@@ -1484,8 +1642,8 @@ pub(super) fn prune_retained(
 /// A copy that was cut short: the record says a file was about to be placed
 /// under a name (the project's, by `install` or `restore`; a kept file's,
 /// by `keep`), and that name holds a beginning of the file. It is taken
-/// back ([`withdraw`]); the whole file is still under its private name.
-fn take_back_copies(record: &Record, destination: &Path, hooks: &PublishHooks) {
+/// back ([`Transaction::withdraw`]); the whole file is still under its private name.
+fn take_back_copies(record: &Record, destination: &Path, tx: &mut Transaction) {
     let dir = destination.parent().unwrap_or(Path::new("."));
     let mut copies: Vec<(PathBuf, &Path)> = Vec::new();
     for step in &record.steps {
@@ -1525,7 +1683,7 @@ fn take_back_copies(record: &Record, destination: &Path, hooks: &PublishHooks) {
             && matches!(holds(whole, record), Holds::New | Holds::Old)
             && begins(whole, &to)
         {
-            withdraw(&to, whole, hooks);
+            tx.withdraw(&to, Some(whole), None);
         }
     }
 }
@@ -1659,7 +1817,7 @@ fn use_leftover_now(
     }
     let mut tx =
         Transaction::resume(record, destination, hooks).map_err(|e| io_err(&record.path, e))?;
-    take_back_copies(record, destination, hooks);
+    take_back_copies(record, destination, &mut tx);
     let mut left = Vec::new();
     // The name holds a file that does not open as a project (a copy cut
     // short and changed since, or a file no save of this one made): it is
@@ -1672,13 +1830,15 @@ fn use_leftover_now(
                 "The project's file opens as it is; nothing was changed.".into(),
             ));
         }
-        let unreadable = record.path.with_extension(PARTIAL);
-        if lstat_file(&unreadable)?.is_some() {
+        // Recorded before it is moved, so a crash right then leaves a
+        // file the record names.
+        let Some(unreadable) = tx.capture(destination, None) else {
             return Err(ProjectIoError::Invalid(
-                "A file this save left is in the way; nothing was changed.".into(),
+                "The file under the project's name could not be moved aside; nothing was \
+                 changed."
+                    .into(),
             ));
-        }
-        rename_private(destination, &unreadable, hooks).map_err(|e| io_err(destination, e))?;
+        };
         match tx.keep(unreadable.clone(), "unreadable") {
             Ok(kept) => left.push(LeftAside::Kept(kept)),
             Err(_) => {
@@ -1688,7 +1848,7 @@ fn use_leftover_now(
         }
     }
     tx.step("chosen")?;
-    if place_new(chosen, destination, None, hooks)? == Placed::Copied {
+    if tx.place(chosen, destination, None)? == Placed::Copied {
         // The name holds a verified copy: the file itself stays, for a
         // later save to read again and prune.
         tx.retain(chosen, None);
