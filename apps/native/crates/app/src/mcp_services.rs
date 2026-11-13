@@ -159,6 +159,8 @@ pub fn headless(profile: PathBuf, exports: PathBuf, launch: Option<PathBuf>) -> 
         let actor = pm_kernel::KernelActor::spawn(pm_kernel::KernelConfig {
             journal_root: Some(profile.join("journals")),
             backup_root: Some(profile.join("backups")),
+            write_coordinator: Some(crate::file_coordination::system()),
+            trash: Some(crate::file_coordination::trash()),
             ..Default::default()
         });
         let host = crate::mcp::Host::new(actor.handle(), profile.clone());

@@ -1489,3 +1489,122 @@ mod color_family;
 
 #[path = "advanced/layer_consumers.rs"]
 mod layer_consumers;
+
+#[test]
+fn viewer_bypasses_a_refused_effect_but_keeps_its_layer_and_remaining_effects() {
+    let mut renderer = Renderer::headless().unwrap();
+    for input_failure in [false, true] {
+        let mut value = if input_failure {
+            fixture(
+                "displacementMap",
+                1,
+                json!({}),
+                json!({"map":{"kind":"layer","layerId":"absent","stage":"source","space":"composition"}}),
+                None,
+            )
+        } else {
+            fixture(
+                "applyColorLut",
+                1,
+                json!({"amount":100}),
+                json!({"lut":{"kind":"asset","assetId":"grade"}}),
+                None,
+            )
+        };
+        let good = json!({"id":"good","type":"invert","version":2,"on":true,"p":{}});
+        value["layers"][0]["fx"]
+            .as_array_mut()
+            .unwrap()
+            .push(good.clone());
+        let mut plain = value.clone();
+        plain["layers"][0]["fx"] = json!([good]);
+        let expected = draw(&mut renderer, &plain, &MapResolver::default(), 16);
+        let mut doc = load(&value);
+        doc.set_saving_app_version(Some("1.3.0".into()));
+        renderer.set_main_effects_for_document(&doc).unwrap();
+        let request = RenderRequest::sized(Size::new(32, 32), Precision::Float16);
+        renderer.set_bypass_missing_effects(false);
+        assert!(matches!(
+            renderer.render(
+                &doc,
+                "Ptest-root",
+                Ticks::ZERO,
+                &request,
+                &MapResolver::default()
+            ),
+            Err(pm_render::RenderError::Unsupported(_))
+        ));
+        // Agent stills bypass missing effects without isolating the layer;
+        // interactive viewers additionally enable draw reuse.
+        for reuse in [false, true] {
+            renderer.set_isolate_layers(reuse);
+            renderer.set_draw_reuse(reuse);
+            renderer.set_bypass_missing_effects(true);
+            for _ in 0..2 {
+                let frame = renderer
+                    .render(
+                        &doc,
+                        "Ptest-root",
+                        Ticks::ZERO,
+                        &request,
+                        &MapResolver::default(),
+                    )
+                    .unwrap();
+                assert!(
+                    frame
+                        .failures
+                        .iter()
+                        .any(|f| f.layer == "owner" && f.message.contains("bypassed")),
+                    "{:?}",
+                    frame.failures
+                );
+                assert_eq!(
+                    renderer.read_rgba(&frame).unwrap(),
+                    expected,
+                    "remaining invert must still draw"
+                );
+            }
+        }
+        renderer.set_isolate_layers(false);
+        renderer.set_bypass_missing_effects(false);
+    }
+}
+
+#[test]
+fn composition_blur_keeps_its_radius_on_a_scaled_group() {
+    let mut renderer = Renderer::headless().unwrap();
+    let mut plain = fixture(
+        "blur",
+        2,
+        json!({"amount":6,"repeatEdgePixels":false}),
+        json!({}),
+        None,
+    );
+    plain["layers"][0]["d"] = json!({"w":16,"h":16,"color":"#4080C0"});
+    set(&mut plain["layers"][0], "position.x", json!(8));
+    set(&mut plain["layers"][0], "position.y", json!(8));
+    let expected = draw(&mut renderer, &plain, &MapResolver::default(), 16);
+    let mut grouped = plain.clone();
+    let mut child = plain["layers"][0].clone();
+    child["group"] = json!("group");
+    child["fx"] = json!([]);
+    child["d"]["w"] = json!(80);
+    child["d"]["h"] = json!(80);
+    set(&mut child, "position.x", json!(40));
+    set(&mut child, "position.y", json!(40));
+    let mut group = layer("group", "group", json!({}), 0., 0., 1.);
+    set(&mut group, "scale.x", json!(20));
+    set(&mut group, "scale.y", json!(20));
+    group["fx"] = plain["layers"][0]["fx"].clone();
+    grouped["layers"] = json!([group, child]);
+    let actual = draw(&mut renderer, &grouped, &MapResolver::default(), 16);
+    let error = actual
+        .iter()
+        .zip(&expected)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0., f32::max);
+    assert!(
+        error < 1. / 1024.,
+        "composition-pixel blur must not shrink with the group: {error}"
+    );
+}

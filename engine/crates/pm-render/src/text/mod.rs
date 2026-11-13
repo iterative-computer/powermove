@@ -338,6 +338,11 @@ impl Default for TextContext {
 }
 
 impl TextContext {
+    pub(crate) fn measure(&mut self) -> Option<&mut dyn TextMeasure> {
+        self.sync_fonts();
+        self.fonts.as_deref_mut().map(|fonts| fonts.measure())
+    }
+
     /// Asks the registry ahead, in one round trip, for the faces every text
     /// layer of `document` lays out with (each family of its canvas font,
     /// and the standard font, at its weight, slope, and size), once per

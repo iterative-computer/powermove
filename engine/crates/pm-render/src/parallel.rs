@@ -10,10 +10,132 @@
 /// efficiency cores, behind other work) for the frame it is drawing.
 pub(crate) fn map<T: Send>(n: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
     let qos = qos::current();
+    #[cfg(not(target_arch = "wasm32"))]
+    if pm_media::decode::diag::knob("PM_FIX_POOL") == Some(1) {
+        return pool::map(n, qos, &f);
+    }
     pm_model::parallel::map(n, |i| {
         qos::adopt(qos);
         f(i)
     })
+}
+
+/// PM_FIX_POOL: helpers that persist across frames. Spawning a thread per
+/// helper per frame cost more than the work itself (thread start, a fresh
+/// allocator heap whose pages are committed and purged each frame).
+#[cfg(not(target_arch = "wasm32"))]
+mod pool {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::mpsc::{Receiver, Sender, channel};
+    use std::sync::{Arc, Condvar, Mutex, OnceLock};
+
+    /// One call's work, shared with helpers by address. The caller waits
+    /// for every helper it handed this to before the borrow ends.
+    struct Task {
+        work: *const (dyn Fn() + Sync),
+        qos: u32,
+        left: Arc<(Mutex<(usize, Option<Box<dyn std::any::Any + Send>>)>, Condvar)>,
+    }
+    // SAFETY: `work` points at a `Sync` closure that outlives every use (the
+    // caller blocks until `left` reaches zero).
+    unsafe impl Send for Task {}
+
+    struct Pool {
+        helpers: Mutex<Vec<Sender<Task>>>,
+    }
+
+    fn pool() -> &'static Pool {
+        static POOL: OnceLock<Pool> = OnceLock::new();
+        POOL.get_or_init(|| {
+            let count = pm_model::parallel::workers().saturating_sub(1);
+            let helpers = (0..count)
+                .filter_map(|i| {
+                    let (tx, rx): (Sender<Task>, Receiver<Task>) = channel();
+                    std::thread::Builder::new()
+                        .name(format!("pm-render-helper-{i}"))
+                        .spawn(move || {
+                            for task in rx {
+                                super::qos::adopt(task.qos);
+                                // SAFETY: see `Task`.
+                                let work = unsafe { &*task.work };
+                                let result = std::panic::catch_unwind(
+                                    std::panic::AssertUnwindSafe(work),
+                                );
+                                let (lock, done) = &*task.left;
+                                let mut left = lock.lock().unwrap();
+                                left.0 -= 1;
+                                if let Err(panic) = result {
+                                    left.1.get_or_insert(panic);
+                                }
+                                done.notify_all();
+                            }
+                        })
+                        .ok()
+                        .map(|_| tx)
+                })
+                .collect();
+            Pool {
+                helpers: Mutex::new(helpers),
+            }
+        })
+    }
+
+    pub(super) fn map<T: Send>(n: usize, qos: u32, f: &(dyn Fn(usize) -> T + Sync)) -> Vec<T> {
+        let next = AtomicUsize::new(0);
+        let results: Mutex<Vec<(usize, T)>> = Mutex::new(Vec::with_capacity(n));
+        let work = || {
+            let mut done = Vec::new();
+            loop {
+                let i = next.fetch_add(1, Ordering::Relaxed);
+                if i >= n {
+                    break;
+                }
+                done.push((i, f(i)));
+            }
+            results.lock().unwrap().extend(done);
+        };
+        let left = Arc::new((Mutex::new((0usize, None)), Condvar::new()));
+        let work_ref: &(dyn Fn() + Sync) = &work;
+        // SAFETY: erases the borrow's lifetime; `wait` below outlives every use.
+        let ptr: *const (dyn Fn() + Sync) = unsafe { std::mem::transmute(work_ref) };
+        {
+            // Another frame's map (another renderer) runs its own work inline.
+            if let Ok(helpers) = pool().helpers.try_lock() {
+                let wanted = n.saturating_sub(1).min(helpers.len());
+                for tx in helpers.iter().take(wanted) {
+                    left.0.lock().unwrap().0 += 1;
+                    if tx
+                        .send(Task {
+                            work: ptr,
+                            qos,
+                            left: left.clone(),
+                        })
+                        .is_err()
+                    {
+                        left.0.lock().unwrap().0 -= 1;
+                    }
+                }
+            }
+        }
+        // The caller's own share must not unwind while helpers still read
+        // `work`: wait for them first, then rethrow.
+        let mine = std::panic::catch_unwind(std::panic::AssertUnwindSafe(&work));
+        let (lock, done) = &*left;
+        let mut state = lock.lock().unwrap();
+        while state.0 > 0 {
+            state = done.wait(state).unwrap();
+        }
+        if let Err(panic) = mine {
+            std::panic::resume_unwind(panic);
+        }
+        if let Some(panic) = state.1.take() {
+            std::panic::resume_unwind(panic);
+        }
+        drop(state);
+        let mut pairs = results.into_inner().unwrap();
+        pairs.sort_unstable_by_key(|(i, _)| *i);
+        pairs.into_iter().map(|(_, v)| v).collect()
+    }
 }
 
 #[cfg(target_os = "macos")]

@@ -716,6 +716,7 @@ impl Exec<'_> {
                 request: asset.request(),
                 target,
                 owner: crate::effects::plan::Owner {
+                    valid: true,
                     uv: [1., 0., 0., 0., 1., 0., 0., 0., 1.],
                     size: [asset.width as f64, asset.height as f64],
                     bounds: [0., 0., asset.width as f64, asset.height as f64],

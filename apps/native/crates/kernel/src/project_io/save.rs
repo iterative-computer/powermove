@@ -32,7 +32,9 @@
 //!   pass. Media is copied range to range, never loaded whole.
 //! * **Durable.** `F_FULLFSYNC`, then a read-back verification
 //!   ([`VerifyLevel`]), then an atomic publication (exchange + verification
-//!   of the displaced file, or exclusive install), then a directory sync.
+//!   of the displaced file; on a volume without an exchange the old file is
+//!   moved aside and the new one installed exclusively; a new file is
+//!   installed exclusively), then a directory sync.
 //! * **A failed save changes nothing.** Disk full, a vanished or corrupt
 //!   media source, failed verification, or a conflicting change on disk all
 //!   remove the temp file and leave the previous file byte-identical.
@@ -145,6 +147,15 @@ pub struct SaveOptions {
     pub fault: Option<WriteFault>,
     #[doc(hidden)]
     pub hooks: durable::PublishHooks,
+    /// The profile folder of the instance that saves: a save's record names
+    /// who is saving.
+    pub profile: Option<PathBuf>,
+    /// Asked for a coordinated write around the publication.
+    pub coordinator: Option<durable::SharedWriteCoordinator>,
+    /// A folder on this machine for a copy of the saved version where the
+    /// project's volume cannot prove the save durable (see
+    /// [`SaveReceipt::unproven`]).
+    pub unconfirmed: Option<PathBuf>,
 }
 
 /// The `history` member a plan writes.
@@ -245,6 +256,19 @@ pub struct SaveReceipt {
     /// after the last check, or cannot be read), kept beside the project
     /// under this name. The person must be told.
     pub displaced: Option<PathBuf>,
+    /// Versions an earlier save had replaced and kept, found changed since
+    /// (something wrote into them after they were replaced): kept beside
+    /// the project under these names. The person must be told.
+    pub changed: Vec<PathBuf>,
+    /// The file is in place and its bytes are synced, but the volume cannot
+    /// prove that its name survives a power cut (a network share: the server
+    /// decides when a rename is durable). `local_copy` is the copy of this
+    /// version kept on this machine until a later save's copy takes its place.
+    pub unproven: bool,
+    pub local_copy: Option<PathBuf>,
+    /// Earlier versions this save no longer needed that could not be moved
+    /// to the Trash: they stay where they are, and the person is told.
+    pub untrashed: Vec<PathBuf>,
     /// Keeps the store's "save in progress" guard alive until adopted.
     #[allow(dead_code)]
     pub(crate) ticket: Arc<()>,
@@ -632,12 +656,6 @@ impl SavePlan {
                 Publish::CreateNew
             }
         };
-        // A disk that cannot replace a file conditionally is refused before
-        // anything is staged beside the project or copied to its backups.
-        if matches!(publish, Publish::Replace(_)) && !durable::exchanges(dest, &self.options.hooks)?
-        {
-            return Err(ProjectIoError::NoSafeReplace);
-        }
         let previous = match &publish {
             Publish::Replace(v) => Some(v),
             Publish::CreateNew => None,
@@ -894,7 +912,15 @@ impl SavePlan {
             (Some(policy), Some(_)) => Some(durable::backup(policy, dest)?),
             _ => None,
         };
-        let published = durable::publish(temp, dest, &publish, &file_hash, &self.options.hooks);
+        let host = durable::Host {
+            hooks: &self.options.hooks,
+            coordinator: self.options.coordinator.as_ref(),
+            profile: self.options.profile.as_deref(),
+            backups: self.options.backups.as_ref(),
+            backup: backup.as_deref(),
+            unconfirmed: self.options.unconfirmed.as_deref(),
+        };
+        let published = durable::publish(temp, dest, &publish, &file_hash, &host);
         if published.is_err()
             && let (Some(path), Some(prev)) = (&backup, previous)
         {
@@ -913,26 +939,22 @@ impl SavePlan {
                 }
             }
         }
-        let published = published?;
-        if let Some(policy) = &self.options.backups {
-            let _ = durable::retain(policy, backup.as_deref());
-        }
+        let mut published = published?;
+        let unfinalized = published.unfinalized.take();
+        let backup = published.backup.take().or(backup);
 
-        let stat = lstat_file(dest)?.ok_or(ProjectIoError::ChangedOnDisk)?;
-        // Held from here on, so the session can follow this file if it is
-        // renamed or moved (only if the path still names what was published).
-        let held = File::open(dest)
-            .ok()
-            .filter(|f| {
-                f.metadata()
-                    .is_ok_and(|m| durable::stat_of(&m).same_identity(&stat))
-            })
-            .map(durable::HeldFile::new);
+        // The file the save installed and found under the name after its
+        // last step, held from here on, so the session can follow it if it
+        // is renamed or moved. Never whatever the name holds by then.
+        let installed = published
+            .installed
+            .take()
+            .ok_or(ProjectIoError::ChangedOnDisk)?;
         let version = Arc::new(FileVersion {
             path: dest.clone(),
-            stat,
+            stat: installed.stat,
             hash: file_hash.clone(),
-            held,
+            held: Some(durable::HeldFile::new(installed.file)),
         });
         let reused_media_bytes: u64 = records[..reused_count].iter().map(|r| r.length).sum();
         let mut table = MediaTable::default();
@@ -949,7 +971,7 @@ impl SavePlan {
                 },
             });
         }
-        Ok(SaveReceipt {
+        let receipt = SaveReceipt {
             portable: self.options.portable,
             unavailable_links,
             path: dest.clone(),
@@ -966,8 +988,21 @@ impl SavePlan {
             reused_media_bytes,
             backup,
             displaced: published.displaced,
+            changed: published.changed,
+            unproven: published.unproven,
+            local_copy: published.local_copy,
+            untrashed: published.untrashed,
             ticket: self.ticket.clone(),
-        })
+        };
+        // Installed, but its folder did not sync: reported failed, with the
+        // receipt for the session to adopt once the folder syncs.
+        match unfinalized {
+            Some(message) => Err(ProjectIoError::Finalize {
+                message,
+                receipt: Some(Box::new(receipt)),
+            }),
+            None => Ok(receipt),
+        }
     }
 
     fn verify(

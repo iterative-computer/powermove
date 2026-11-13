@@ -30,6 +30,10 @@ struct Entry {
     /// The frame of the last use; entries of the current frame are its
     /// working set and are never evicted while it records.
     frame: u64,
+    /// Made by [`VectorCache::prepare_scenes_in`] and not yet asked for: the
+    /// first resolve takes it without counting a hit (the miss was counted
+    /// when the batch made it).
+    prepared: bool,
 }
 
 /// Today's raster cache bounds (legacy/gl/raster.ts: `MAX` entries and the
@@ -287,6 +291,7 @@ impl SceneOutlines {
         self.tick += 1;
         let [a, b, c, d, tx, ty] = item.transform.as_coeffs();
         let Some(scale) = upper_outline_scale([a, b, c, d]) else {
+            pm_media::decode::diag::bump(&pm_media::decode::diag::OUTLINE_UNCACHEABLE, 1);
             return SceneOutline {
                 path: Arc::new(item.device_outline_with(scratch)),
                 transform: Affine::IDENTITY,
@@ -295,14 +300,19 @@ impl SceneOutlines {
         let key = outline_key(item, scale);
         let placement = Affine::new([a / scale, b / scale, c / scale, d / scale, tx, ty]);
         if let Some(entry) = self.entries.get_mut(&key) {
+            pm_media::decode::diag::bump(&pm_media::decode::diag::OUTLINE_HITS, 1);
             entry.used = self.tick;
             return SceneOutline {
                 path: Arc::clone(&entry.path),
                 transform: placement,
             };
         }
+        pm_media::decode::diag::bump(&pm_media::decode::diag::OUTLINE_MISSES, 1);
         let canonical = Arc::new(match self.prepared.remove(&key) {
-            Some(outline) => outline,
+            Some(outline) => {
+                pm_media::decode::diag::bump(&pm_media::decode::diag::OUTLINE_PREPARED, 1);
+                outline
+            }
             None => item.device_outline_at_scale(scale, scratch),
         });
         let bytes = (key.capacity() * size_of::<u64>()
@@ -613,6 +623,73 @@ pub struct VectorCache {
     svg_unpaintable_rasters: HashSet<[u8; 32]>,
     svg_raster_hits: u64,
     svg_raster_misses: u64,
+    /// Whether [`Self::prepare_scenes_in`] batches a draw list's missing
+    /// coverage scenes (on by default; tests turn it off to compare).
+    batching: bool,
+    /// The paint target batched scenes share before each is copied into
+    /// its own texture (scratch: held by the frame's encoder).
+    batch_atlas: Option<BatchAtlas>,
+}
+
+/// The shared paint target of a batch of coverage scenes.
+struct BatchAtlas {
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    width: u32,
+    height: u32,
+    format: wgpu::TextureFormat,
+}
+
+impl BatchAtlas {
+    fn bytes(&self) -> u64 {
+        u64::from(self.width) * u64::from(self.height) * bytes_per_pixel(self.format)
+    }
+}
+
+/// The widest batch atlas (pixels); scenes past it resolve on their own.
+const BATCH_ATLAS_SIDE: u32 = 4096;
+
+/// The target pixels one sub-batch covers at most (its coverage values are
+/// four bytes per covered pixel).
+const BATCH_AREA: u64 = 1 << 20;
+
+/// Each size's origin (`None`: did not fit) and the placed extent.
+type Packed = (Vec<Option<(u32, u32)>>, (u32, u32));
+
+/// A missing coverage scene: its cache key, the scene, and its rect.
+type MissingScene<'s> = (([u8; 32], u8), &'s CoverageScene, PixelRect);
+
+/// A placed scene: index into the missing scenes, its own layout, its page
+/// origin on the shared coverage page, and its region origin on the atlas.
+type Chosen<'l> = (usize, &'l AtlasLayout, (u32, u32), (u32, u32));
+
+/// Shelf placement of `sizes` (tallest first, then in order) in rows at most
+/// `max_w` wide and `max_h` tall, `gutter` pixels after each. A size that
+/// does not fit is `None`; the extent covers the placed ones.
+fn shelf_pack(sizes: &[(u32, u32)], max_w: u32, max_h: u32, gutter: u32) -> Packed {
+    let mut order: Vec<usize> = (0..sizes.len()).collect();
+    order.sort_by(|&a, &b| sizes[b].1.cmp(&sizes[a].1).then(a.cmp(&b)));
+    let mut at = vec![None; sizes.len()];
+    let (mut x, mut y, mut shelf, mut extent) = (0u32, 0u32, 0u32, (0u32, 0u32));
+    for i in order {
+        let (w, h) = sizes[i];
+        if w > max_w || h > max_h {
+            continue;
+        }
+        if x + w > max_w {
+            x = 0;
+            y += shelf + gutter;
+            shelf = 0;
+        }
+        if y + h > max_h {
+            continue;
+        }
+        at[i] = Some((x, y));
+        extent = (extent.0.max(x + w), extent.1.max(y + h));
+        x += w + gutter;
+        shelf = shelf.max(h);
+    }
+    (at, extent)
 }
 
 fn record_fallback(
@@ -661,7 +738,21 @@ impl VectorCache {
             svg_unpaintable_rasters: HashSet::new(),
             svg_raster_hits: 0,
             svg_raster_misses: 0,
+            batching: true,
+            batch_atlas: None,
         }
+    }
+
+    /// Whether [`Self::prepare_scenes_in`] batches missing scenes (on by
+    /// default). Off, every scene renders on its own as it is resolved.
+    pub fn set_batching(&mut self, enabled: bool) {
+        self.batching = enabled;
+    }
+
+    /// Lowers the bound on GPU scratch a frame's encoder holds (tests force
+    /// split and refused batches); never raises it past [`FRAME_HELD_BYTES`].
+    pub fn limit_frame_scratch(&mut self, bytes: u64) {
+        self.frame_held_limit = bytes.min(FRAME_HELD_BYTES);
     }
 
     /// Bytes retained by cached textures and reusable scene resources.
@@ -743,7 +834,18 @@ impl VectorCache {
     /// stay (lease pressure, between frames: every entry may go).
     pub fn trim(&mut self, budget: u64) {
         if self.scene_scratch_bytes() > budget {
+            // The exact outline cache (CPU, bounded by SceneOutlines::MAX_BYTES,
+            // counted in `bytes`) survives a frame's trim; only a zero budget
+            // (idle, close) drops it. Otherwise a budget below one frame's
+            // scratch rebuilds every outline every frame.
+            // `PM_FIX_KEEP_OUTLINES=0` restores clearing it.
+            let keep = budget > 0
+                && pm_media::decode::diag::knob("PM_FIX_KEEP_OUTLINES") != Some(0);
+            let outlines = keep.then(|| std::mem::take(&mut self.scene_outlines));
             self.clear_scene_scratch();
+            if let Some(outlines) = outlines {
+                self.scene_outlines = outlines;
+            }
         }
         self.evict(
             budget.saturating_sub(self.scene_scratch_bytes()),
@@ -761,6 +863,7 @@ impl VectorCache {
             + self.own_pages.iter().map(ScenePage::bytes).sum::<u64>()
             + self.frame_slots.bytes()
             + self.own_slots.bytes()
+            + self.batch_atlas.as_ref().map_or(0, BatchAtlas::bytes)
     }
 
     /// GPU scratch the frame's open encoder holds: the frame's pages and
@@ -770,9 +873,11 @@ impl VectorCache {
         self.scene_pages.iter().map(ScenePage::bytes).sum::<u64>()
             + self.frame_slots.bytes()
             + self.frame_replaced
+            + self.batch_atlas.as_ref().map_or(0, BatchAtlas::bytes)
     }
 
     fn clear_scene_scratch(&mut self) {
+        pm_perf::bump(pm_perf::Counter::VectorScratchClears);
         self.scene_batch = Batch::default();
         self.outline_scratch = OutlineScratch::default();
         self.scene_outlines.clear();
@@ -785,6 +890,7 @@ impl VectorCache {
         self.frame_slots = UploadSlots::default();
         self.frame_replaced = 0;
         self.frame_scratch_over = false;
+        self.batch_atlas = None;
     }
 
     /// [`Self::clear_scene_scratch`] while a frame's encoder is open: only
@@ -864,6 +970,10 @@ impl VectorCache {
         if let Some(e) = self.entries.get_mut(&key) {
             e.used = self.tick;
             e.frame = self.frame;
+            if std::mem::take(&mut e.prepared) {
+                // Its miss was counted when the batch made it.
+                return Ok(e.view.clone());
+            }
             if let VectorSource::SvgRaster { path, .. } = source {
                 self.svg_fallback_reason = self.svg_fallback_reasons.get(&key).cloned();
                 if let Some(reason) = &self.svg_fallback_reason {
@@ -1063,9 +1173,428 @@ impl VectorCache {
                 bytes,
                 used: self.tick,
                 frame: self.frame,
+                prepared: false,
             },
         );
         view
+    }
+
+    /// Renders the coverage scenes of `sources` the cache misses together,
+    /// recording into the frame's `encoder`: one coverage batch, one paint
+    /// pass into a shared atlas, then each scene's region copied into its
+    /// own `rect`-sized texture. Each texture holds exactly what
+    /// [`Self::render_scene`] paints for that scene alone (coverage is
+    /// computed per cell from the item's own bounds, and the paint reads it
+    /// per texel), so callers resolve them as before. Scenes that do not fit
+    /// one batch, SVG sources and anything the frame's scratch bound refuses
+    /// are left to [`Self::resolve_in`]. Returns how many scenes it made.
+    pub fn prepare_scenes_in(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        sources: &[&VectorSource],
+        precision: Precision,
+    ) -> usize {
+        if !self.batching || sources.len() < 2 {
+            return 0;
+        }
+        // The missing scenes, each once, in draw order.
+        let mut missing: Vec<MissingScene<'_>> = Vec::new();
+        for source in sources {
+            let VectorSource::Scene { scene, rect } = source else {
+                continue;
+            };
+            let key = (source.key(), precision as u8);
+            if self.entries.contains_key(&key) || missing.iter().any(|(k, _, _)| *k == key) {
+                continue;
+            }
+            missing.push((key, scene, *rect));
+        }
+        if missing.len() < 2 {
+            return 0;
+        }
+        // Sub-batches of bounded area: the scratch one batch holds (its
+        // coverage page and values, its atlas region) stays near one
+        // sub-batch's worth instead of a whole composition's, and the pages
+        // and atlas are reused by the next sub-batch in the encoder's order.
+        let mut made = 0;
+        let mut start = 0;
+        while start < missing.len() {
+            let (mut end, mut area) = (start, 0u64);
+            while end < missing.len()
+                && (end == start || area + missing[end].2.area().max(1) <= BATCH_AREA)
+            {
+                area += missing[end].2.area().max(1);
+                end += 1;
+            }
+            if end - start >= 2 {
+                made += self.batch_missing(device, queue, encoder, &missing[start..end], precision);
+            }
+            start = end;
+        }
+        made
+    }
+
+    /// One sub-batch of [`Self::prepare_scenes_in`]: `missing` scenes (each
+    /// missing once) rendered together, or left to [`Self::resolve_in`].
+    fn batch_missing(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        missing: &[MissingScene<'_>],
+        precision: Precision,
+    ) -> usize {
+        let limits = device.limits();
+        let value_limit = limits
+            .max_buffer_size
+            .min(limits.max_storage_buffer_binding_size);
+        let max_side = limits
+            .max_texture_dimension_2d
+            .min(8192)
+            .min((value_limit / 4).isqrt().min(u64::from(u32::MAX)) as u32);
+        if max_side < 16 {
+            pm_perf::add(
+                pm_perf::Counter::VectorBatchRefusedLimit,
+                missing.len() as u64,
+            );
+            return 0;
+        }
+        let format = pm_gpu::working_format(precision);
+        let pixel = bytes_per_pixel(format);
+        let atlas_w = limits.max_texture_dimension_2d.min(BATCH_ATLAS_SIDE);
+        // Rows the scratch bound allows at that width.
+        let atlas_h = atlas_w.min(
+            (MAX_SCENE_SCRATCH_BYTES / 4 / (u64::from(atlas_w) * pixel)).min(u64::from(u32::MAX))
+                as u32,
+        );
+        // Each scene's cells on one coverage page of its own, as alone.
+        let mut layouts: Vec<(usize, AtlasLayout)> = Vec::new();
+        for (i, (_, scene, rect)) in missing.iter().enumerate() {
+            if rect.width.max(1) > atlas_w || rect.height.max(1) > atlas_h {
+                continue;
+            }
+            let layout = AtlasLayout::pack(scene, *rect, max_side);
+            if layout.pages.len() == 1 {
+                layouts.push((i, layout));
+            }
+        }
+        // Their pages side by side on one coverage page (each page already
+        // ends in its cells' gutter), and their regions on the atlas.
+        let (page_at, _) = shelf_pack(
+            &layouts.iter().map(|(_, l)| l.pages[0]).collect::<Vec<_>>(),
+            max_side,
+            max_side,
+            0,
+        );
+        let (region_at, _) = shelf_pack(
+            &layouts
+                .iter()
+                .map(|(i, _)| (missing[*i].2.width.max(1), missing[*i].2.height.max(1)))
+                .collect::<Vec<_>>(),
+            atlas_w,
+            atlas_h,
+            1,
+        );
+        // (missing index, layout, page origin, atlas origin)
+        let chosen: Vec<Chosen<'_>> = layouts
+            .iter()
+            .zip(page_at.iter().zip(&region_at))
+            .filter_map(|((i, l), (p, r))| Some((*i, l, (*p)?, (*r)?)))
+            .collect();
+        pm_perf::add(
+            pm_perf::Counter::VectorBatchUnplaced,
+            (missing.len() - chosen.len()) as u64,
+        );
+        if chosen.len() < 2 {
+            pm_perf::add(pm_perf::Counter::VectorBatchUnplaced, chosen.len() as u64);
+            return 0;
+        }
+        let page = chosen.iter().fold((1u32, 1u32), |e, (_, l, (x, y), _)| {
+            (e.0.max(x + l.pages[0].0), e.1.max(y + l.pages[0].1))
+        });
+        let extent = chosen.iter().fold((1u32, 1u32), |e, (i, _, _, (x, y))| {
+            let r = missing[*i].2;
+            (e.0.max(x + r.width.max(1)), e.1.max(y + r.height.max(1)))
+        });
+        // Outlines, made on several threads when there are enough.
+        let cells: usize = chosen.iter().map(|(_, l, _, _)| l.cells.len()).sum();
+        if cells >= PREPARE_IN_PARALLEL {
+            self.scene_outlines
+                .prepare(chosen.iter().flat_map(|(i, l, _, _)| {
+                    let scene = missing[*i].1;
+                    l.cells.iter().map(move |c| &scene.items[c.item])
+                }));
+        }
+        let mut outlines: Vec<Vec<Option<SceneOutline>>> = chosen
+            .iter()
+            .map(|(i, _, _, _)| (0..missing[*i].1.items.len()).map(|_| None).collect())
+            .collect();
+        for (n, (i, l, _, _)) in chosen.iter().enumerate() {
+            for cell in &l.cells {
+                if outlines[n][cell.item].is_none() {
+                    outlines[n][cell.item] = Some(
+                        self.scene_outlines
+                            .outline(&missing[*i].1.items[cell.item], &mut self.outline_scratch),
+                    );
+                }
+            }
+        }
+        let items: Vec<TransformedItem<'_>> = chosen
+            .iter()
+            .enumerate()
+            .flat_map(|(n, (_, l, (px, py), _))| {
+                let outlines = &outlines[n];
+                l.cells.iter().map(move |c| {
+                    let outline = outlines[c.item].as_ref().expect("item outline");
+                    TransformedItem {
+                        path: &outline.path,
+                        transform: outline.transform,
+                        bounds: c.device,
+                        at: [c.x + px, c.y + py],
+                    }
+                })
+            })
+            .collect();
+        self.scene_batch.reset_transformed(&items);
+        drop(items);
+        if self.scene_batch.fits_gpu_limits(&limits).is_err() {
+            pm_perf::add(
+                pm_perf::Counter::VectorBatchRefusedLimit,
+                chosen.len() as u64,
+            );
+            return 0;
+        }
+        // What the frame's encoder would hold: past its bound, the scenes
+        // resolve on their own (which records or submits as it must).
+        let paint_bytes = 16 + cells as u64 * 40;
+        // A same-format atlas grows to the union of its size and the
+        // extent, so the bound is charged what is actually allocated.
+        let atlas_dims = match &self.batch_atlas {
+            Some(a) if a.format == format => (a.width.max(extent.0), a.height.max(extent.1)),
+            _ => extent,
+        };
+        let atlas_growth = match &self.batch_atlas {
+            Some(a) if a.format == format && a.width >= extent.0 && a.height >= extent.1 => 0,
+            _ => u64::from(atlas_dims.0) * u64::from(atlas_dims.1) * pixel,
+        };
+        let adds = self.frame_slots.paint_growth(paint_bytes)
+            + self.frame_slots.input_growth(device, 0, &self.scene_batch)
+            + self.scene_pages.first().map_or_else(
+                || ScenePage::default().growth(device, page.0, page.1, self.scene_batch.bytes()),
+                |p| p.growth(device, page.0, page.1, self.scene_batch.bytes()),
+            )
+            + atlas_growth;
+        if self.frame_held() + adds > self.frame_held_limit {
+            // Nothing is recorded yet: halves need less page, values and
+            // atlas growth, so they may fit the same bound.
+            if missing.len() >= 4 {
+                pm_perf::bump(pm_perf::Counter::VectorBatchSplits);
+                let (a, b) = missing.split_at(missing.len() / 2);
+                return self.batch_missing(device, queue, encoder, a, precision)
+                    + self.batch_missing(device, queue, encoder, b, precision);
+            }
+            pm_perf::add(
+                pm_perf::Counter::VectorBatchRefusedScratch,
+                chosen.len() as u64,
+            );
+            return 0;
+        }
+        if self.scene_pages.is_empty() {
+            self.scene_pages.push(ScenePage::default());
+        }
+        match self.scene_pages[0].ensure(device, page.0, page.1, self.scene_batch.bytes()) {
+            Ok(replaced) => self.frame_replaced += replaced,
+            Err(_) => {
+                pm_perf::add(
+                    pm_perf::Counter::VectorBatchRefusedLimit,
+                    chosen.len() as u64,
+                );
+                return 0;
+            }
+        }
+        let inputs = self.frame_slots.next_inputs();
+        let coverage = self
+            .coverage
+            .get_or_insert_with(|| AreaCoverage::new(device));
+        let coverage_page = &self.scene_pages[0];
+        if coverage
+            .encode_pooled(
+                device,
+                queue,
+                encoder,
+                &self.scene_batch,
+                crate::coverage::CoverageOutput {
+                    values: coverage_page.values.as_ref().expect("coverage values"),
+                    page: coverage_page.view.as_ref(),
+                },
+                &mut self.frame_slots.inputs[inputs],
+            )
+            .is_err()
+        {
+            pm_perf::add(
+                pm_perf::Counter::VectorBatchRefusedLimit,
+                chosen.len() as u64,
+            );
+            return 0;
+        }
+        if atlas_growth > 0 {
+            let (w, h) = atlas_dims;
+            if let Some(old) = self.batch_atlas.take() {
+                // The frame's encoder may still hold it.
+                self.frame_replaced += old.bytes();
+            }
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("pm vector batch atlas"),
+                size: wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            self.batch_atlas = Some(BatchAtlas {
+                texture,
+                view,
+                width: w,
+                height: h,
+                format,
+            });
+        }
+        let atlas = self.batch_atlas.as_ref().expect("batch atlas");
+        let (atlas_texture, atlas_view) = (atlas.texture.clone(), atlas.view.clone());
+        let paint = self.paint.get_or_insert_with(|| Paint::new(device));
+        // As `render_scene`, with each scene's region offset on the atlas.
+        self.paint_data.clear();
+        self.paint_data.reserve(4 + cells * 10);
+        self.paint_data
+            .extend_from_slice(&[atlas.width as f32, atlas.height as f32, 0.0, 0.0]);
+        for (i, l, (px, py), (ox, oy)) in &chosen {
+            let (scene, rect) = (missing[*i].1, missing[*i].2);
+            for c in &l.cells {
+                self.paint_data.extend_from_slice(&[
+                    (c.device.x - rect.x) as f32 + *ox as f32,
+                    (c.device.y - rect.y) as f32 + *oy as f32,
+                    c.device.width as f32,
+                    c.device.height as f32,
+                    (c.x + px) as f32,
+                    (c.y + py) as f32,
+                ]);
+                self.paint_data
+                    .extend_from_slice(&scene.items[c.item].premultiplied());
+            }
+        }
+        let bytes = crate::composite::gaussian::f32_bytes(&self.paint_data);
+        let Ok(paint_slot) = self.frame_slots.next_paint(device, bytes.len() as u64) else {
+            return 0;
+        };
+        let paint_buffer = &self.frame_slots.paints[paint_slot].0;
+        queue.write_buffer(paint_buffer, 0, bytes);
+        {
+            let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("pm vector batch paint"),
+                layout: &paint.layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(
+                            self.scene_pages[0]
+                                .view
+                                .as_ref()
+                                .expect("coverage page view"),
+                        ),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                            buffer: paint_buffer,
+                            offset: 0,
+                            size: std::num::NonZeroU64::new(16),
+                        }),
+                    },
+                ],
+            });
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("pm vector batch paint"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &atlas_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(if format == wgpu::TextureFormat::Rgba32Float {
+                &paint.pipeline_f32
+            } else if format == wgpu::TextureFormat::Rgba8Unorm {
+                &paint.pipeline_u8
+            } else {
+                &paint.pipeline_f16
+            });
+            pass.set_vertex_buffer(0, paint_buffer.slice(16..));
+            pass.set_bind_group(0, &bind, &[]);
+            // Scenes in draw order, each scene's items in its order: items
+            // of different scenes never share a pixel of the atlas.
+            pass.draw(0..4, 0..cells as u32);
+        }
+        let made = chosen.len();
+        for (i, _, _, (ox, oy)) in chosen {
+            let (key, _, rect) = missing[i];
+            let size = wgpu::Extent3d {
+                width: rect.width.max(1),
+                height: rect.height.max(1),
+                depth_or_array_layers: 1,
+            };
+            let out = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("pm vector level 2"),
+                size,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_SRC
+                    | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            encoder.copy_texture_to_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &atlas_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d { x: ox, y: oy, z: 0 },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                out.as_image_copy(),
+                size,
+            );
+            let bytes = u64::from(size.width) * u64::from(size.height) * pixel;
+            self.tick += 1;
+            self.insert(key, out, bytes);
+            if let Some(e) = self.entries.get_mut(&key) {
+                e.prepared = true;
+            }
+            pm_perf::bump(pm_perf::Counter::VectorCacheMisses);
+            pm_perf::bump(pm_perf::Counter::VectorBatchedScenes);
+        }
+        pm_perf::bump(pm_perf::Counter::VectorBatches);
+        if self.frame_held() > MAX_SCENE_SCRATCH_BYTES.min(self.max_bytes) {
+            self.frame_scratch_over = true;
+        }
+        made
     }
 
     /// Renders a coverage scene: each item's exact coverage in `r32float`
