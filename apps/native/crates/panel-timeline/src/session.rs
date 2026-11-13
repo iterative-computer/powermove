@@ -24,6 +24,7 @@ impl TimelineModel {
             .and_then(Value::as_bool)
             .unwrap_or(false);
         self.track_snap_disabled = value.get("trackSnap").and_then(Value::as_bool) == Some(false);
+        self.hide_shy = value.get("hideShy").and_then(Value::as_bool) == Some(true);
         self.mode = if value.get("mode").and_then(Value::as_str) == Some("tracks") {
             TimelineMode::Tracks
         } else {
@@ -88,6 +89,7 @@ impl TimelineModel {
             }),
         );
         timeline.insert("trackSnap", Value::Bool(!self.track_snap_disabled));
+        timeline.insert("hideShy", Value::Bool(self.hide_shy));
         let mut native = timeline
             .get("nativeModel")
             .and_then(Value::as_object)

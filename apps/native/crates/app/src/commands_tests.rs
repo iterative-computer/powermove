@@ -277,6 +277,66 @@ fn arrow_keys_nudge_position_and_undo_restores(cx: &mut TestAppContext) {
     undo(&mut s, cx);
     assert_eq!(value(&s, "position.x"), before);
 }
+/// Shy, as After Effects has it: a switch on each layer, and Hide Shy Layers
+/// taking those rows out of the timeline while they keep drawing.
+#[gpui::test]
+fn shy_layers_leave_the_timeline_while_hide_shy_layers_is_on(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 3);
+    let rows = |s: &Stage| -> Vec<String> {
+        s.surface
+            .read_with(&s.vcx, |t, _| t.model())
+            .rows()
+            .iter()
+            .filter_map(|row| match &row.id {
+                pm_panel_timeline::RowId::Layer(id) => Some(id.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+    let shy = |s: &Stage, id: &str| {
+        let p = published(&s.rig.kernel);
+        let root = p.snapshot.root().unwrap();
+        let at = pm_kernel::model::find_layer(root, id).unwrap();
+        pm_kernel::model::layer_at(root, &at)
+            .unwrap()
+            .to_value()
+            .get("shy")
+            .and_then(Value::as_bool)
+            == Some(true)
+    };
+    assert_eq!(rows(&s), ["l0", "l1", "l2"]);
+    // Composition ▸ Shy Selected Layers: one Undo step, the row stays.
+    select(&mut s, cx, &["l1"]);
+    run(&mut s, cx, "toggleShy", &[]);
+    assert!(shy(&s, "l1") && !shy(&s, "l0"));
+    assert_eq!(rows(&s), ["l0", "l1", "l2"]);
+    // View ▸ Hide Shy Layers: the shy row goes, and the menu row is checked.
+    let hidden = |s: &Stage| s.surface.read_with(&s.vcx, |t, _| t.hides_shy());
+    run(&mut s, cx, "timeline.toggleShy", &[]);
+    assert!(hidden(&s));
+    assert_eq!(rows(&s), ["l0", "l2"]);
+    // The layer is still in the project and still on.
+    assert!(layer(&s, "l1").visible);
+    // Unshy it (it is still selected) and it is back while hiding stays on.
+    run(&mut s, cx, "toggleShy", &[]);
+    assert_eq!(rows(&s), ["l0", "l1", "l2"]);
+    undo(&mut s, cx);
+    assert!(shy(&s, "l1"));
+    assert_eq!(rows(&s), ["l0", "l2"]);
+    run(&mut s, cx, "timeline.toggleShy", &[]);
+    assert!(!hidden(&s));
+    assert_eq!(rows(&s), ["l0", "l1", "l2"]);
+    // Both are menu rows, so the palette lists them.
+    let palette = pm_shell::menu::palette_rows();
+    for (menu, label) in [
+        ("View", "Hide Shy Layers"),
+        ("Composition", "Shy Selected Layers"),
+    ] {
+        assert!(palette.iter().any(|(m, _, l)| *m == menu && l == label));
+    }
+    let off = disabled(None, &[], &Clipboard::Empty);
+    assert!(off.contains("toggleShy") && off.contains("timeline.toggleShy"));
+}
 #[gpui::test]
 fn selection_chords_walk_the_stack(cx: &mut TestAppContext) {
     let mut s = stage(cx, 3);
@@ -346,6 +406,64 @@ fn j_and_k_stop_on_keyframes_markers_and_the_work_area(cx: &mut TestAppContext) 
         back.push(*s.recorder.time.borrow());
     }
     assert_eq!(back, [8.5, 6., 4., 3., 2., 1., 0.5, 0.]);
+}
+/// The shipped palette's Next/Previous Edge and Next/Previous Selected
+/// Event: edges are the composition's ends, layer ends and keyframes (no
+/// work area, no markers); selected events are the selected layers' own.
+#[gpui::test]
+fn edge_and_selected_event_commands_step_the_playhead(cx: &mut TestAppContext) {
+    let project = r##"{"id":"integration","name":"Stops","compId":"c","w":640,"h":360,"fps":30,"dur":10,"bg":"#000000","assets":{},"comps":{},"work":[1,6],"markers":[{"id":"m1","t":4}],"layers":[{"id":"l0","type":"shape","name":"Box","from":0.5,"dur":8,"on":true,"p":{"opacity":{"v":100,"kf":[{"i":"k1","t":1.5,"v":0},{"i":"k2","t":2.5,"v":100}]},"x":{"v":10,"kf":[]},"y":{"v":20,"kf":[]},"sx":{"v":100,"kf":[]},"sy":{"v":100,"kf":[]},"r":{"v":0,"kf":[]}},"d":{"w":100,"h":100},"fx":[]},{"id":"l1","type":"shape","name":"Bar","from":3.5,"dur":2,"on":true,"p":{"opacity":{"v":100,"kf":[]},"x":{"v":10,"kf":[]},"y":{"v":20,"kf":[]},"sx":{"v":100,"kf":[]},"sy":{"v":100,"kf":[]},"r":{"v":0,"kf":[]}},"d":{"w":100,"h":100},"fx":[]}]}"##;
+    let mut s = stage_project(cx, project.into());
+    let walk = |s: &mut Stage, cx: &mut TestAppContext, command: &str, steps: usize| {
+        (0..steps)
+            .map(|_| {
+                run(s, cx, command, &[]);
+                *s.recorder.time.borrow()
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        walk(&mut s, cx, "nextEdge", 8),
+        [0.5, 2., 3., 3.5, 5.5, 8.5, 10., 10.]
+    );
+    assert_eq!(
+        walk(&mut s, cx, "prevEdge", 8),
+        [8.5, 5.5, 3.5, 3., 2., 0.5, 0., 0.]
+    );
+    // Nothing selected: no event to go to, and the rows say so.
+    let off = |s: &Stage| {
+        let p = published(&s.rig.kernel);
+        disabled(Some(&p), &layers(s), &Clipboard::Empty)
+    };
+    assert!(off(&s).contains("nextSelectedEvent") && !off(&s).contains("nextEdge"));
+    assert_eq!(walk(&mut s, cx, "nextSelectedEvent", 1), [0.]);
+    select(&mut s, cx, &["l1"]);
+    assert!(!off(&s).contains("nextSelectedEvent"));
+    assert_eq!(walk(&mut s, cx, "nextSelectedEvent", 3), [3.5, 5.5, 5.5]);
+    select(&mut s, cx, &["l0"]);
+    assert_eq!(walk(&mut s, cx, "prevSelectedEvent", 4), [3., 2., 0.5, 0.5]);
+    // Each is a palette row under Playback; Fit and Project Settings are
+    // listed too, the latter with the key the shipped palette showed.
+    let rows = pm_shell::menu::palette_rows();
+    for (menu, label) in [
+        ("Playback", "Next Edge"),
+        ("Playback", "Previous Edge"),
+        ("Playback", "Next Selected Event"),
+        ("Playback", "Previous Selected Event"),
+        ("View", "Fit Composition and Timeline"),
+        ("File", "Project Settings…"),
+    ] {
+        assert!(
+            rows.iter().any(|(m, _, l)| *m == menu && l == label),
+            "{label}"
+        );
+    }
+    assert!(
+        pm_shell::keyboard::shipped()
+            .iter()
+            .any(|b| b.chord == "cmd+shift+," && b.command == "projectSettings")
+    );
+    assert!(disabled(None, &[], &Clipboard::Empty).contains("projectSettings"));
 }
 fn key_times(s: &Stage, id: &str, channel: &str) -> Vec<f64> {
     let p = published(&s.rig.kernel);
@@ -669,4 +787,68 @@ fn copied_keys_paste_at_the_playhead_and_undo_removes_them(cx: &mut TestAppConte
     assert_eq!(count(&s), 2);
     undo(&mut s, cx);
     assert_eq!(count(&s), 1);
+}
+/// The graph editor's Merge Selected Curves and Fit Selected Curves (View
+/// menu, the graph's right-click menu, the palette).
+#[gpui::test]
+fn the_graph_merges_its_curves_into_one_and_fits_the_time_scale_to_their_keys(
+    cx: &mut TestAppContext,
+) {
+    // Position moves 30 across and 40 down between 2 s and 4 s of the layer.
+    let project = r##"{"id":"integration","name":"Curves","compId":"c","w":640,"h":360,"fps":30,"dur":20,"bg":"#000000","assets":{},"comps":{},"layers":[{"id":"l0","type":"shape","name":"Box","from":1,"dur":12,"on":true,"separateDimensions":false,"p":{"opacity":{"v":100,"kf":[]},"position.x":{"v":0,"kf":[{"i":"x1","t":2,"v":0},{"i":"x2","t":4,"v":30}]},"position.y":{"v":0,"kf":[{"i":"y1","t":2,"v":0},{"i":"y2","t":4,"v":40}]},"scale.x":{"v":100,"kf":[]},"scale.y":{"v":100,"kf":[]},"rotation":{"v":0,"kf":[]},"anchor.x":{"v":0,"kf":[]},"anchor.y":{"v":0,"kf":[]}},"d":{"w":100,"h":100},"fx":[]}]}"##;
+    let mut s = stage_project(cx, project.into());
+    select(&mut s, cx, &["l0"]);
+    s.surface.update(&mut s.vcx, |t, cx| {
+        t.show_graph(
+            "l0".into(),
+            "position.x".into(),
+            vec!["position.x".into(), "position.y".into()],
+            cx,
+        )
+    });
+    s.idle(cx);
+    let graph = |s: &Stage| s.surface.read_with(&s.vcx, |t, _| t.graph().unwrap());
+    let ends = |s: &Stage| -> Vec<f64> {
+        graph(s)
+            .curves()
+            .iter()
+            .map(|c| c.segments.last().unwrap().to.value)
+            .collect()
+    };
+    assert_eq!(ends(&s), [30., 40.]);
+    assert!(graph(&s).curves().iter().all(|c| c.points.len() == 2));
+    // Merged: one curve, the length of the motion both axes make together,
+    // with no key points of its own.
+    run(&mut s, cx, "graph.merge", &[]);
+    s.idle(cx);
+    assert_eq!(ends(&s), [50.]);
+    assert!(graph(&s).curves()[0].points.is_empty());
+    assert_eq!(graph(&s).curves()[0].segments[0].from.seconds, 3.);
+    let merged = |s: &Stage| s.surface.read_with(&s.vcx, |t, _| t.graph_merged());
+    assert!(merged(&s), "View ▸ Merge Selected Curves is checked");
+    let menu = |s: &Stage| {
+        s.surface
+            .read_with(&s.vcx, |t, _| t.model())
+            .menu(&pm_panel_timeline::Context::Graph { series: 2 })
+    };
+    let item = |s: &Stage, id: &str| menu(s).into_iter().find(|i| i.id == id).unwrap();
+    assert!(item(&s, "graph.merge").enabled && item(&s, "graph.merge").checked);
+    assert!(item(&s, "graph.fit").enabled);
+    // Fit: the keys' span (3 s to 5 s of the composition) fills the time
+    // area, 24 points clear of each end.
+    run(&mut s, cx, "graph.fit", &[]);
+    s.idle(cx);
+    let (pps, scroll, room) = s.surface.read_with(&s.vcx, |t, _| t.time_view());
+    assert!((scroll + 24. / pps - 3.).abs() < 1e-9, "{scroll} {pps}");
+    assert!((room / pps - 2.).abs() < 1e-9, "{room} {pps}");
+    // Off again: both curves and their keys are back.
+    run(&mut s, cx, "graph.merge", &[]);
+    s.idle(cx);
+    assert_eq!(ends(&s), [30., 40.]);
+    assert!(!merged(&s));
+    // Both are View menu rows, so the palette lists them.
+    let rows = pm_shell::menu::palette_rows();
+    for label in ["Merge Selected Curves", "Fit Selected Curves"] {
+        assert!(rows.iter().any(|(m, _, l)| *m == "View" && l == label));
+    }
 }

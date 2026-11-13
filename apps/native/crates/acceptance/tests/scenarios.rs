@@ -156,12 +156,18 @@ const NATIVE_BINDINGS: &[(&str, &str, &str, &str)] = &[
     ),
     ("native.safeAreas", "'", "viewer.safeAreas", "[]"),
     ("native.guides", "cmd+;", "viewer.guides", "[]"),
+    (
+        "native.projectSettings",
+        "cmd+shift+,",
+        "projectSettings",
+        "[]",
+    ),
 ];
 #[test]
-fn all_227_real_bindings_under_seven_routing_contexts() {
+fn all_228_real_bindings_under_seven_routing_contexts() {
     let c = pm_acceptance::catalog::Catalog::embedded().unwrap();
     let shipped = keyboard::production::shipped();
-    assert_eq!(shipped.len(), 227);
+    assert_eq!(shipped.len(), 228);
     assert_eq!(c.bindings.len() + NATIVE_BINDINGS.len(), shipped.len());
     for real in &shipped {
         let binding = match c.bindings.iter().find(|b| b.id == real.id) {
