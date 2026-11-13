@@ -267,6 +267,7 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                         let colors=&host.tokens.colors;
                         let _:()=msg_send![&*layers.timecode,setContentsScale:scale];
                         let _:()=msg_send![&*layers.timecode,setFontSize:host.tokens.typography.timecode as f64];
+                        // The text ink, as the paused readout (the accent marks the playhead alone).
                         let _:()=msg_send![&*layers.timecode,setForegroundColor:&*cg!(colors.text)];
                         if let Some(p)=&playhead { p.style(&host.tokens, scale); }
                         let geometry=v.builtins.timeline_place;
@@ -298,7 +299,9 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                             let _:()=msg_send![&*viewer_time,setFrame:NSRect::new(NSPoint::new((b.x+metrics.inset) as f64,height-(top+slot.h) as f64),NSSize::new(slot.w as f64,slot.h as f64))];
                         }
                         if let Some((r,y))=geometry {
-                            let top=r.y+(metrics.header-slot.h)/2.;
+                            // The timeline's head sits over the layer column, beside the
+                            // ruler and under the tab row (`y`): play, then the time.
+                            let top=r.y+y+(metrics.ruler-slot.h)/2.;
                             let _:()=msg_send![&*layers.timecode,setFrame:NSRect::new(NSPoint::new((r.x+metrics.inset+metrics.hit+metrics.gap) as f64,height-(top+slot.h) as f64),NSSize::new(slot.w as f64,slot.h as f64))];
                             let foot=bar.max(metrics.inset);
                             let tall=(r.h-y-foot).max(0.) as f64;

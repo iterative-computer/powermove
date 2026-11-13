@@ -86,17 +86,22 @@ impl Outline {
 /// The only pointer the host models. Multi-touch reaches panels as gestures.
 const POINTER: u64 = 1;
 
+#[path = "v4_grade.rs"]
+mod grade;
+
 /// A press on a number field: a click edits, a drag scrubs (language.md §9).
+/// A press on a grading control (`grade`) drags it through the same gesture.
 struct ScrubDrag {
     id: Id,
     start: Point<Pixels>,
     number: crate::v4_compile::NumberFacts,
     binding: Option<SharedString>,
     active: bool,
+    grade: Option<grade::GradeDrag>,
 }
 enum ScrubOp {
     Begin,
-    Value(SharedString, f64),
+    Value(SharedString, Value),
     Finish(bool),
 }
 #[derive(Clone, Copy)]
@@ -127,6 +132,9 @@ pub struct SurfaceView {
     focus: BTreeMap<Id, FocusHandle>,
     /// Hover washes (pm-design springs), stepped once per render.
     motion: pm_shell::motion::Motion<Id>,
+    /// Floating surfaces marked `pmKit.presence` (the Light panel): how far
+    /// in they are this frame, 0–1. Set before the motion frame steps.
+    presence: HashMap<Id, f32>,
     subscriptions: BTreeMap<Id, Vec<Subscription>>,
     origin: Rc<Cell<Point<Pixels>>>,
     anchors: Rc<RefCell<HashMap<Id, Bounds<Pixels>>>>,
@@ -142,6 +150,7 @@ pub struct SurfaceView {
     scrub_gesture: Option<u64>,
     scrub_busy: bool,
     scrub_shown: Option<(Id, f64)>,
+    grade_drawn: grade::Drawn,
     move_busy: bool,
     /// Last label of each `role="status"` node; `None` until the first frame,
     /// so a panel's opening state is not read out.
@@ -161,6 +170,8 @@ pub struct SurfaceView {
     /// A text layer whose Properties text to focus once its row shows
     /// (`inspector.focusText`), until the moment passes.
     focus_text: Option<(String, std::time::Instant)>,
+    /// A semantic id to scroll into view once a publication has it.
+    reveal: Option<(String, std::time::Instant)>,
     #[cfg(test)]
     pub renders: usize,
     #[cfg(test)]
@@ -194,6 +205,7 @@ impl SurfaceView {
             option_sets: BTreeMap::new(),
             focus: BTreeMap::new(),
             motion: Default::default(),
+            presence: HashMap::new(),
             subscriptions: BTreeMap::new(),
             origin: Rc::new(Cell::new(Point::default())),
             anchors: Default::default(),
@@ -206,6 +218,7 @@ impl SurfaceView {
             scrub_gesture: None,
             scrub_busy: false,
             scrub_shown: None,
+            grade_drawn: Default::default(),
             move_busy: false,
             statuses: None,
             queued_move: None,
@@ -216,6 +229,7 @@ impl SurfaceView {
             parked: None,
             requested: None,
             focus_text: None,
+            reveal: None,
             #[cfg(test)]
             renders: 0,
             #[cfg(test)]
@@ -309,6 +323,7 @@ impl SurfaceView {
         self.prepared = Rc::new(compiled.prepared);
         self.reconcile(window, cx);
         self.try_focus_text(cx);
+        self.try_reveal(cx);
         cx.notify();
     }
     /// A new generation (an extension reloaded, a fork swapped in) reuses node
@@ -980,6 +995,23 @@ impl SurfaceView {
         }
         cx.notify();
     }
+    /// Scroll `semantic` into view now, or when a publication within two
+    /// seconds first has it (a section the panel is about to add or open).
+    pub fn reveal_semantic(&mut self, semantic: String, cx: &mut Context<Self>) {
+        self.reveal = Some((semantic, std::time::Instant::now()));
+        self.try_reveal(cx);
+    }
+    fn try_reveal(&mut self, cx: &mut Context<Self>) {
+        let Some((semantic, asked)) = self.reveal.clone() else {
+            return;
+        };
+        if asked.elapsed() > std::time::Duration::from_secs(2) {
+            self.reveal = None;
+        } else if self.prepared.semantics.contains_key(&semantic) {
+            self.reveal = None;
+            self.scroll_semantic(&semantic, cx);
+        }
+    }
     pub fn scroll_semantic(&mut self, semantic: &str, cx: &mut Context<Self>) {
         if let Some(id) = self.prepared.semantics.get(semantic)
             && let Some(node) = self.prepared.node(*id)
@@ -1288,9 +1320,13 @@ impl SurfaceView {
             number,
             binding: node.binding.clone().filter(|_| !node.local_change),
             active: false,
+            grade: None,
         });
     }
     fn scrub_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        if self.scrub.as_ref().is_some_and(|d| d.grade.is_some()) {
+            return self.grade_move(event, cx);
+        }
         let threshold = self.table.tokens.metrics.drag_threshold;
         let Some(drag) = &mut self.scrub else {
             return;
@@ -1322,7 +1358,8 @@ impl SurfaceView {
         self.scrub_shown = Some((id, value));
         match drag.binding.clone() {
             Some(binding) => {
-                self.scrub_ops.push_back(ScrubOp::Value(binding, value));
+                self.scrub_ops
+                    .push_back(ScrubOp::Value(binding, json!(value)));
                 self.scrub_pump(cx);
             }
             None => self.change(id, json!(value), cx),
@@ -1342,6 +1379,11 @@ impl SurfaceView {
                 self.scrub_ops.push_back(ScrubOp::Finish(commit));
                 self.scrub_pump(cx);
             }
+            if drag.grade.is_some() {
+                cx.notify();
+            }
+        } else if drag.grade.is_some() {
+            // A press on a grading control that never moved changes nothing.
         } else if let Some(field) = self.fields.get(&drag.id) {
             field.update(cx, |f, cx| f.begin_editing(cx));
         }
@@ -1378,7 +1420,7 @@ impl SurfaceView {
                     let pending = match (op, gesture) {
                         (ScrubOp::Begin, _) => runtime.scrub_begin(&panel),
                         (ScrubOp::Value(handle, value), Some(gesture)) => {
-                            runtime.scrub_step(&panel, &handle, gesture, json!(value))
+                            runtime.scrub_step(&panel, &handle, gesture, value)
                         }
                         (ScrubOp::Finish(commit), Some(gesture)) => {
                             runtime.scrub_finish(&panel, gesture, commit)
@@ -1647,6 +1689,16 @@ impl SurfaceView {
                 });
             }));
         }
+        // A floating surface springs in when it appears and out while its
+        // panel keeps it for the exit (`pmKit.closing`): opacity, and a
+        // short rise from `motion.start_scale` worth of its height.
+        if let Some(amount) = self.presence.get(&id).copied()
+            && amount < 1.
+        {
+            let t = &self.table.tokens;
+            let rise = (1. - amount) * (1. - t.motion.start_scale as f32) * 160.;
+            element = element.opacity(amount).mt(px(rise));
+        }
         element = self.accessible(element, node);
         if let Some(focus) = self.focus.get(&id) {
             let t = &self.table.tokens;
@@ -1663,6 +1715,19 @@ impl SurfaceView {
         }
         element = self.interactive(element, node, cx);
         element = self.decorate(element, node, window);
+        if let Some(drawing) = self.grade_canvas(id, &node.kit, node.disabled) {
+            element = element.relative().child(drawing);
+            if !node.disabled {
+                element = element.on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |v, event: &MouseDownEvent, window, cx| {
+                        window.prevent_default();
+                        v.grade_press(id, event, cx);
+                        cx.stop_propagation();
+                    }),
+                );
+            }
+        }
         let mut children: Vec<AnyElement> = vec![];
         // A disabled field mounts no editor; it still shows its value, dimmed.
         if let Some(text) = self.disabled_field_text(node) {
@@ -2315,6 +2380,8 @@ impl SurfaceView {
                     ));
                 }
             }
+            // Drawn with their own canvas (`grade_canvas`).
+            Kit::Wheel { .. } | Kit::Curve { .. } => {}
             Kit::Disclosure(open) => {
                 let group: SharedString = format!("disclosure-{}", node.id).into();
                 element = element.group(group.clone()).child(
@@ -2486,6 +2553,25 @@ impl Render for SurfaceView {
         {
             self.renders += 1;
         }
+        // Presences take their targets before the frame steps, so a surface
+        // that just appeared or was marked closing starts moving now.
+        let surface = self.publication.surface.clone();
+        let mut presence = HashMap::new();
+        for id in self.prepared.nodes.keys() {
+            let Some(kit) = surface
+                .node(*id)
+                .and_then(|n| n.props.get("metadata"))
+                .and_then(|m| m.get("pmKit"))
+            else {
+                continue;
+            };
+            if kit.get("presence") == Some(&Value::Bool(true)) {
+                let shown = kit.get("closing") != Some(&Value::Bool(true));
+                let amount = self.motion.presence(*id, shown, &self.table.tokens);
+                presence.insert(*id, amount);
+            }
+        }
+        self.presence = presence;
         self.motion.frame(window);
         let t = &self.table.tokens;
         div()

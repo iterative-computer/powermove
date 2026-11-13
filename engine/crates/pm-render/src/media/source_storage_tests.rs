@@ -355,6 +355,7 @@ fn source(
     format: wgpu::TextureFormat,
 ) -> Target {
     let color = SourceColor {
+        unorm8: false,
         transfer: Transfer::DisplayE,
         primaries: Primaries::Bt709,
         matrix: MatrixCoefficients::Identity,
@@ -482,6 +483,7 @@ fn camera_log_reaches_the_working_space_as_the_vendor_transform_says() {
         (Transfer::LogC4, Curve::LogC4, Primaries::AwgGen4, P::AWG4),
     ] {
         let color = SourceColor {
+            unorm8: false,
             transfer,
             primaries,
             matrix: MatrixCoefficients::Identity,
@@ -530,6 +532,7 @@ fn hdr_projects_keep_bt2100_light_and_sdr_projects_tone_map_it() {
         })
         .collect();
     let mut color = SourceColor {
+        unorm8: false,
         transfer: Transfer::Pq,
         primaries: Primaries::Bt2020,
         matrix: MatrixCoefficients::Identity,
@@ -795,6 +798,7 @@ fn chroma_follows_its_siting_with_section_9_filters_at_every_storage_depth() {
         ),
     };
     let color = SourceColor {
+        unorm8: false,
         transfer: Transfer::DisplayE,
         primaries: Primaries::Bt709,
         matrix: MatrixCoefficients::Bt601,
@@ -917,6 +921,7 @@ fn packed_still_fusion_matches_separate_normalization_byte_for_byte() {
     let pipelines = Pipelines::new(&gpu.device);
     let importer = DecodeImporter::new(&gpu.device).unwrap();
     let color = SourceColor {
+        unorm8: false,
         transfer: Transfer::DisplayE,
         primaries: Primaries::Bt709,
         matrix: MatrixCoefficients::Identity,
@@ -1203,4 +1208,55 @@ fn a_new_still_never_pushes_out_stills_the_frame_reads_next() {
     // The next frame reads one new still: the others go once it is submitted.
     image_frame(&gpu, &pipelines, &mut media, &[&s[3]]);
     assert_eq!(media.image_bytes(), one);
+}
+
+#[test]
+fn legacy_video_uploads_clip_and_round_to_rgba8_before_float_effects() {
+    let gpu = pm_gpu::Gpu::new("legacy RGBA8 upload").unwrap();
+    let pipelines = Pipelines::new(&gpu.device);
+    let mut color = SourceColor {
+        unorm8: true,
+        transfer: Transfer::DisplayE,
+        primaries: Primaries::Bt709,
+        matrix: MatrixCoefficients::Identity,
+        siting: ChromaSiting::Left,
+        alpha: AlphaMode::Opaque,
+        tone_map: None,
+        chromaticities: None,
+        power: None,
+    };
+    let pixels = [[0.1234, 0.503, 1.1, 1.], [-0.1, 0.25, 0.75, 1.]];
+    let legacy = source_read(
+        &gpu,
+        &pipelines,
+        &pixels,
+        &color,
+        WorkingEncoding::Standard,
+        Precision::Float32,
+        wgpu::TextureFormat::Rgba32Float,
+    );
+    let values = read_f32(&gpu.device, &gpu.queue, &legacy.texture).unwrap();
+    for (pixel, expected) in values.chunks_exact(4).zip(pixels) {
+        for i in 0..3 {
+            assert!(
+                (pixel[i] - (expected[i].clamp(0., 1.) * 255. + 0.5).floor() / 255.).abs() < 1e-6
+            );
+        }
+    }
+    color.unorm8 = false;
+    let native = source_read(
+        &gpu,
+        &pipelines,
+        &pixels,
+        &color,
+        WorkingEncoding::Standard,
+        Precision::Float32,
+        wgpu::TextureFormat::Rgba32Float,
+    );
+    let values = read_f32(&gpu.device, &gpu.queue, &native.texture).unwrap();
+    for (pixel, expected) in values.chunks_exact(4).zip(pixels) {
+        for i in 0..3 {
+            assert!((pixel[i] - expected[i]).abs() < 1e-6);
+        }
+    }
 }

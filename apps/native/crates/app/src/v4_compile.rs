@@ -142,6 +142,18 @@ pub enum Kit {
     },
     Secure,
     Disclosure(bool),
+    /// A colour wheel: its red, green and blue, where they are neutral, and
+    /// the limits of one channel.
+    Wheel {
+        rgb: [f64; 3],
+        neutral: f64,
+        range: [f64; 2],
+    },
+    /// A curve editor: `[count, x0, y0, …]` and its channel's ink.
+    Curve {
+        values: Vec<f64>,
+        channel: usize,
+    },
 }
 #[derive(Clone, Debug)]
 pub struct NodeView {
@@ -193,7 +205,7 @@ pub struct NodeView {
     /// actions, which gives way while the sheet's height changes.
     pub sheet_body: bool,
 }
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct NumberFacts {
     pub value: f64,
     pub step: f64,
@@ -843,6 +855,13 @@ fn number_facts(node: &Node) -> NumberFacts {
             .map(|n| n.min(9) as u32),
     }
 }
+/// A list of numbers (a grouped control's values); anything else is none.
+fn numbers(value: Option<&Value>) -> Vec<f64> {
+    value
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_f64).collect())
+        .unwrap_or_default()
+}
 fn kit(node: &Node, component: Option<Component>, panel: &Panel, table: &TokenTable) -> Kit {
     let t = &table.tokens;
     let decoration = panel.decorations.get(&node.id);
@@ -908,6 +927,33 @@ fn kit(node: &Node, component: Option<Component>, panel: &Panel, table: &TokenTa
             },
         },
         Some(Component::SecureField) => Kit::Secure,
+        Some(Component::ColorWheel) => {
+            let numbers = numbers(value);
+            let option = |key: &str| {
+                node.props
+                    .get("metadata")
+                    .and_then(|m| m.get("pmKit"))
+                    .and_then(|k| k.get(key))
+                    .and_then(Value::as_f64)
+            };
+            let neutral = option("neutral").unwrap_or(0.);
+            Kit::Wheel {
+                rgb: std::array::from_fn(|i| numbers.get(i).copied().unwrap_or(neutral)),
+                neutral,
+                range: [option("min").unwrap_or(-1.), option("max").unwrap_or(1.)],
+            }
+        }
+        Some(Component::CurveEditor) => Kit::Curve {
+            values: numbers(value),
+            channel: node
+                .props
+                .get("metadata")
+                .and_then(|m| m.get("pmKit"))
+                .and_then(|k| k.get("channel"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+                .min(3) as usize,
+        },
         Some(Component::DisclosureButton) => {
             Kit::Disclosure(node.props.get("aria-expanded") == Some(&Value::Bool(true)))
         }

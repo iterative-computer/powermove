@@ -110,11 +110,24 @@ pub use native::DocumentSource;
 /// Freeze scene/resources onto the renderer on its worker, for both the viewer
 /// and same-executable export child. No document mutation or platform UI work.
 #[cfg(feature = "kernel")]
+fn keep_electron_renderer(renderer: &mut pm_render::Renderer, doc: &pm_model::Document) -> bool {
+    // Legacy scenes retain their authored Three.js lighting and ACES tone curve.
+    let legacy = pm_eval::node::is_str(pm_eval::node::member(doc.root(), "render3d"), "electron");
+    if legacy {
+        renderer.set_studio_source(None, Default::default());
+    }
+    legacy
+}
+
+#[cfg(feature = "kernel")]
 pub fn attach(
     renderer: &mut pm_render::Renderer,
     doc: std::sync::Arc<pm_model::Document>,
     media: &pm_export::render::MediaPaths,
 ) {
+    if keep_electron_renderer(renderer, &doc) {
+        return;
+    }
     attach_source(
         renderer,
         DocumentSource::new(doc, media.clone()),
@@ -163,6 +176,9 @@ pub(crate) fn attach_with_camera_fonts_progress(
     fonts: Option<&pm_render::text::host::RenderFonts>,
     observer: Option<RefineObserver>,
 ) -> Result<(), String> {
+    if keep_electron_renderer(renderer, &doc) {
+        return Ok(());
+    }
     camera.validate()?;
     use pm_studio3d_engine::compositor::Source;
     let source = DocumentSource::new(doc, media.clone())
@@ -202,6 +218,7 @@ pub fn attach_with_export_options_fonts(
     quality:Option<serde_json::Value>, scale:f32,
     fonts:Option<&pm_render::text::host::RenderFonts>,
 )->Result<(),String>{
+    if keep_electron_renderer(renderer, &doc) { return Ok(()); }
     let mut source=DocumentSource::new(doc,media.clone()).with_native_fonts(fonts).with_export_render_scale(scale)?;
     if let Some(quality)=quality {source=source.with_quality_override(composition,quality)?;}
     attach_source(renderer,source,Tier::QualityLive);Ok(())

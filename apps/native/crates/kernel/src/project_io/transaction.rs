@@ -496,15 +496,27 @@ impl Record {
                 push("restored".into(), None);
             } else if is(step, "left") {
                 // Could not be kept beside the project: in the Trash, or
-                // still under its private name.
-                if let (Some(name), Some(place)) = (text(step, "name"), text(step, "where")) {
-                    let why = if place == "trash" {
-                        "trashed"
-                    } else {
-                        "hidden"
-                    };
-                    push(why.into(), Some(dir.join(name)));
+                // still under its private name. The line is written before
+                // the move to the Trash; a file still under its name never
+                // got there. A later attempt to keep it, or a later word on
+                // where it is, is what counts.
+                let (Some(name), Some(place)) = (text(step, "name"), text(step, "where")) else {
+                    continue;
+                };
+                let superseded = self.steps[at + 1..].iter().any(|later| {
+                    (is(later, "keep") || is(later, "left"))
+                        && [text(later, "from"), text(later, "name")].contains(&Some(name.clone()))
+                });
+                if superseded {
+                    continue;
                 }
+                let still_there = !matches!(lstat_file(&dir.join(&name)), Ok(None));
+                let why = if place == "trash" && !still_there {
+                    "trashed"
+                } else {
+                    "hidden"
+                };
+                push(why.into(), Some(dir.join(name)));
             } else if is(step, "keep") {
                 let (Some(from), Some(to), Some(why)) =
                     (text(step, "from"), text(step, "to"), text(step, "why"))
@@ -818,6 +830,17 @@ impl Transaction {
     }
 
     fn step_with(&mut self, step: &str, mut members: Map) -> Result<(), ProjectIoError> {
+        if self
+            .hooks
+            .record_fails
+            .as_ref()
+            .is_some_and(|fails| fails(step))
+        {
+            return Err(io_err(
+                &self.record,
+                io::Error::other("the record cannot be written"),
+            ));
+        }
         members.insert("step", Value::from(step));
         self.file
             .write_all(line(&Value::Object(members)).as_bytes())
@@ -992,28 +1015,43 @@ impl Transaction {
                     }
                 }
                 Err(file) => {
-                    let now = trash_or_leave(file.clone(), &self.hooks);
-                    let trashed = now != file;
-                    if !trashed {
-                        self.strand();
-                    }
-                    // The record tells the person until they have seen it;
-                    // where even that cannot be written, the host does.
-                    let mut members = Map::new();
-                    members.insert(
-                        "name",
+                    // Where it goes is recorded before it goes, so a crash
+                    // right after the move still tells it. A file whose
+                    // fate cannot be recorded stays under the private name
+                    // the record already gives it, where the next open
+                    // takes it up again.
+                    let name = |file: &Path| {
                         Value::from(
                             file.file_name()
                                 .unwrap_or_default()
                                 .to_string_lossy()
                                 .into_owned(),
-                        ),
-                    );
-                    members.insert(
-                        "where",
-                        Value::from(if trashed { "trash" } else { "hidden" }),
-                    );
-                    let recorded = self.step_with("left", members).is_ok();
+                        )
+                    };
+                    let left = |place: &str| {
+                        let mut members = Map::new();
+                        members.insert("name", name(&file));
+                        members.insert("where", Value::from(place));
+                        members
+                    };
+                    let to_trash = self.hooks.trash.is_some();
+                    let recorded = self
+                        .step_with("left", left(if to_trash { "trash" } else { "hidden" }))
+                        .is_ok();
+                    let now = if recorded {
+                        trash_or_leave(file.clone(), &self.hooks)
+                    } else {
+                        file.clone()
+                    };
+                    let trashed = now != file;
+                    if !trashed {
+                        self.strand();
+                        if recorded && to_trash {
+                            // Told as hidden even where this line is lost:
+                            // the file is still under its name.
+                            let _ = self.step_with("left", left("hidden"));
+                        }
+                    }
                     self.tells |= recorded;
                     if let Ok(mut strays) = self.hooks.strays.lock() {
                         strays.push(Stray {
@@ -1259,6 +1297,21 @@ fn held_by_another(record: &Record) -> Option<Undecided> {
     } else {
         None
     }
+}
+
+/// Whether `record` is a save of this Mac that stopped while it was
+/// copying a file under the project's name (its last step there is the
+/// placement, never that it was done): a file whose first bytes are still
+/// zeros under that name may be that copy.
+fn copying_here(record: &Record) -> bool {
+    held_by_another(record).is_none()
+        && record.steps.iter().rev().find_map(|step| {
+            match step.get("step").and_then(Value::as_str) {
+                Some("install" | "restore") => Some(true),
+                Some("installed" | "exchanged" | "restored") => Some(false),
+                _ => None,
+            }
+        }) == Some(true)
 }
 
 /// A file recovery did not move, for the person to decide about.
@@ -1730,9 +1783,18 @@ fn take_back_copies(record: &Record, destination: &Path, tx: &mut Transaction) {
 /// `undecided`), without moving anything.
 pub(crate) fn leftovers(destination: &Path) -> Vec<Leftover> {
     let (records, unreadable) = records_of(destination);
-    let records: Vec<_> = records.into_iter().filter(|r| !r.only_retains()).collect();
+    // A file still being copied to the project's name is answered only by
+    // a save of this Mac that was copying there when it stopped: no other
+    // record says anything about that file.
+    let copying = head_held_back(destination);
+    let answers = |r: &Record| !copying || copying_here(r);
+    let records: Vec<_> = records
+        .into_iter()
+        .filter(|r| !r.only_retains() && answers(r))
+        .collect();
     let mut found: Vec<_> = unreadable
         .iter()
+        .filter(|_| !copying)
         .map(|path| leftover(path, "record", Undecided::Unreadable, None))
         .collect();
     let why = if records.len() > 1 {
@@ -1752,7 +1814,7 @@ pub(crate) fn leftovers(destination: &Path) -> Vec<Leftover> {
     // private name, retained, or kept beside the project), for when the file
     // under the project's name does not open.
     for record in records_of(destination).0 {
-        if held_by_another(&record) == Some(Undecided::Active) {
+        if held_by_another(&record) == Some(Undecided::Active) || !answers(&record) {
             continue;
         }
         for path in proven_candidates(&record) {
@@ -1772,12 +1834,12 @@ pub(crate) fn leftovers(destination: &Path) -> Vec<Leftover> {
 /// version offered to the person is what it holds, and a file a share is
 /// still settling the times of right after it was written is that too.
 fn proves(path: &Path, record: &Record) -> Holds {
-    let Ok(Some(stat)) = lstat_file(path) else {
+    let Ok(Some(_)) = lstat_file(path) else {
         return Holds::Nothing;
     };
-    match super::durable::hash_file(path) {
-        Ok(hash) if hash == record.new && stat.size == record.size => Holds::New,
-        Ok(hash) if Some(&hash) == record.old.as_ref() => Holds::Old,
+    match super::durable::hash_held(path) {
+        Some((hash, size)) if hash == record.new && size == record.size => Holds::New,
+        Some((hash, _)) if Some(&hash) == record.old.as_ref() => Holds::Old,
         _ => Holds::Other,
     }
 }
@@ -1853,6 +1915,11 @@ fn use_leftover_now(
         .ok_or_else(|| {
             ProjectIoError::Invalid("That file is not one a save of this project left.".into())
         })?;
+    // A file still arriving under the name is never replaced on the word
+    // of a save that was not copying it there ([`leftovers`]).
+    if head_held_back(destination) && !copying_here(record) {
+        return Err(ProjectIoError::StillCopying);
+    }
     // A save that is going on right now is not for anyone to choose from.
     if held_by_another(record) == Some(Undecided::Active) {
         return Err(ProjectIoError::Invalid(
@@ -1914,7 +1981,42 @@ fn use_leftover_now(
         return Err(unidentified());
     }
     tx.step("chosen")?;
-    if tx.place(chosen, destination, expected.as_deref())? == Placed::Copied {
+    let placed = tx.place(chosen, destination, expected.as_deref())?;
+    // A rename or a link places whatever the chosen name led to at that
+    // instant, which a sync client may have replaced since it was proven:
+    // what the project's name holds now must be the version proven, or it
+    // is taken back off the name and kept beside the project.
+    if let Some(expected) = &expected
+        && super::durable::hash_held(destination)
+            .map(|(hash, _)| hash)
+            .as_ref()
+            != Some(expected)
+    {
+        let kept = tx.capture(destination, None).map(|arrived| {
+            tx.keep(arrived.clone(), "other version")
+                .inspect_err(|_| tx.retain(&arrived, None))
+                .is_ok()
+        });
+        let what = match kept {
+            Some(true) => {
+                "so it was not opened. That file is kept beside the project; nothing \
+                           else was changed."
+            }
+            Some(false) => {
+                "so it was not opened. That file is kept hidden in the project's \
+                            folder; nothing else was changed."
+            }
+            None => {
+                "and that file is now under the project's name. It was not opened; check \
+                     it before you open it."
+            }
+        };
+        return Err(ProjectIoError::Invalid(format!(
+            "{}, {what}",
+            crate::error::CHOICE_REPLACED
+        )));
+    }
+    if placed == Placed::Copied {
         // The name holds a verified copy: the file itself stays, for a
         // later save to read again and prune.
         tx.retain(chosen, None);

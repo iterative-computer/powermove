@@ -7,6 +7,7 @@
 //! (`shaders/source.wgsl`): chroma upsampling, matrix, transfer and
 //! primaries into the working encoding, and premultiplication.
 
+use pm_text::file_version::FileVersion;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -53,6 +54,8 @@ pub enum ProbeIssue {
 /// What the source pass needs to know about a source.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SourceColor {
+    /// Legacy WebGL video uploads are RGBA8 even in a float composition.
+    pub unorm8: bool,
     pub transfer: Transfer,
     pub primaries: Primaries,
     pub matrix: MatrixCoefficients,
@@ -77,18 +80,28 @@ pub(crate) fn stamp(path: &Path) -> Option<(u64, u128)> {
             frame,
             active,
             seen,
+            reads,
         } = &mut *f;
+        // Every look is noted for whoever binds what was drawn to the
+        // files it was drawn from ([`note_reads`]).
+        let mut look = |path: &Path| {
+            let version = stat_version(path);
+            if let Some(reads) = reads {
+                reads.push((path.to_path_buf(), version));
+            }
+            version.map(cache_stamp)
+        };
         if !*active {
-            return stat_stamp(path);
+            return look(path);
         }
         if let Some((at, found)) = seen.get_mut(path) {
             if *at != *frame {
                 *at = *frame;
-                *found = stat_stamp(path);
+                *found = look(path);
             }
             return *found;
         }
-        let found = stat_stamp(path);
+        let found = look(path);
         // Bounded: a project with more files than this looks again.
         if seen.len() >= 4096 {
             seen.clear();
@@ -106,6 +119,24 @@ struct FrameStamps {
     frame: u64,
     active: bool,
     seen: HashMap<PathBuf, (u64, Option<(u64, u128)>)>,
+    /// The versions looked at since [`note_reads`], while it is on.
+    reads: Option<Vec<(PathBuf, Option<FileVersion>)>>,
+}
+
+/// From now on this thread's renders note the version of every file they
+/// look at: media, vector art, 3D textures and effect resources are read
+/// (or taken from a cache) under the version seen, one look per file and
+/// frame. [`take_reads`] hands them over. A frame kept under a key taken
+/// from its files' versions (a frame cache, rendered frames on disk) is
+/// that key's picture only when every version it read is the key's.
+pub fn note_reads() {
+    FRAME_STAMPS.with(|f| f.borrow_mut().reads = Some(Vec::new()));
+}
+
+/// The versions looked at since [`note_reads`] (`None`: a file that could
+/// not be looked at), in order; noting stops.
+pub fn take_reads() -> Vec<(PathBuf, Option<FileVersion>)> {
+    FRAME_STAMPS.with(|f| f.borrow_mut().reads.take().unwrap_or_default())
 }
 
 thread_local! {
@@ -143,26 +174,25 @@ impl Drop for StampFrame {
     }
 }
 
-fn stat_stamp(path: &Path) -> Option<(u64, u128)> {
+/// One look at the file: its version ([`pm_text::file_version`], the
+/// identity the font registry and the keys of rendered frames use too).
+fn stat_version(path: &Path) -> Option<FileVersion> {
     pm_perf::bump(pm_perf::Counter::FileStats);
-    let m = std::fs::metadata(path).ok()?;
-    let modified = m
-        .modified()
-        .ok()?
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()?
-        .as_nanos();
-    #[cfg(unix)]
-    let modified = {
-        use std::hash::{Hash, Hasher};
-        use std::os::unix::fs::MetadataExt;
-        // Keep replacement and same-size edits observable even if a caller
-        // restores mtime. Frame-local memoization still issues one stat.
-        let mut version = std::collections::hash_map::DefaultHasher::new();
-        (m.dev(), m.ino(), m.ctime(), m.ctime_nsec()).hash(&mut version);
-        (u128::from(version.finish()) << 64) | (modified & u128::from(u64::MAX))
-    };
-    Some((m.len(), modified))
+    FileVersion::of(path)
+}
+
+/// A version as the caches key it: the length, and the rest in one number
+/// (device, inode and status-change time over the modification time), so
+/// replacement and same-size edits stay observable even if a caller
+/// restores the modification time.
+fn cache_stamp(version: FileVersion) -> (u64, u128) {
+    use std::hash::{Hash, Hasher};
+    let mut node = std::collections::hash_map::DefaultHasher::new();
+    (version.device, version.inode, version.changed).hash(&mut node);
+    (
+        version.len,
+        (u128::from(node.finish()) << 64) | u128::from(version.modified),
+    )
 }
 
 /// How the source pass reads a still: its colour, and whether ColorSync
@@ -261,6 +291,7 @@ fn still_reading(
     if si.colorsync {
         return Ok(InterpretedStill {
             color: SourceColor {
+                unorm8: false,
                 transfer: Transfer::Linear,
                 primaries: Primaries::Bt709,
                 matrix,
@@ -287,6 +318,7 @@ fn still_reading(
     let profile = color.icc_class.is_some();
     Ok(InterpretedStill {
         color: SourceColor {
+            unorm8: false,
             transfer: r.transfer.value,
             primaries: r.primaries.value,
             matrix,
@@ -776,8 +808,15 @@ fn video_color(
     // The file's reading is the source monitor's (`frame_reading`, with its
     // image-sequence rule); Interpret Footage members replace their fields,
     // and the host's per-file override replaces it all.
-    let file = pm_media::probe::color::frame_reading(&v.color, sequence);
+    let file = if interp.electron_color {
+        pm_media::probe::color::electron_frame_reading(&v.color, &v.codec.codec, sequence)
+    } else {
+        pm_media::probe::color::frame_reading(&v.color, sequence)
+    };
     let mut desc = reading.color;
+    if interp.transfer.is_none() {
+        desc.transfer = file.transfer;
+    }
     if interp.matrix.is_none() {
         desc.matrix = file.matrix;
     }
@@ -786,6 +825,12 @@ fn video_color(
     }
     let desc = override_color.unwrap_or(desc);
     SourceColor {
+        unorm8: interp.electron_color
+            && interp.primaries.is_none()
+            && interp.transfer.is_none()
+            && interp.matrix.is_none()
+            && desc.primaries == Primaries::Bt709
+            && desc.transfer == Transfer::DisplayE,
         transfer: desc.transfer,
         primaries: desc.primaries,
         matrix: desc.matrix,
@@ -907,7 +952,7 @@ fn source_uniform(
         c: [
             0,
             0,
-            u32::from(precision == Precision::Float16),
+            u32::from(precision == Precision::Float16) | (u32::from(color.unorm8) << 1),
             u32::from(convert_primaries),
         ],
         matte,
@@ -1048,7 +1093,7 @@ fn convert_format_scaled(
     if format != working_format(Precision::Float16) {
         // Only half-float storage rounds through f16; any other format
         // stores the f32 conversion directly.
-        uniform.c[2] = 0;
+        uniform.c[2] &= !1;
     }
     let buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("pm source params"),
@@ -2104,6 +2149,11 @@ impl MediaCache {
     /// Bytes of converted textures held (images and decoded frames).
     pub fn texture_bytes(&self) -> u64 {
         self.bytes
+    }
+
+    /// Whether a still kept here is in `texture`.
+    pub(crate) fn holds_image(&self, texture: &wgpu::Texture) -> bool {
+        self.images.values().any(|image| image.texture == *texture)
     }
 
     /// Drops the stills read whole (not at a view's size). A viewer's

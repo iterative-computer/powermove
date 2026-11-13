@@ -141,7 +141,9 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
         ? "Also write one subtitle file per captions layer beside the video."
         : key === "studioQuality"
           ? (studioPromises[studioPreset] ?? rows[key][1]) +
-            (p.studio?.denoiser === "guided" && studioPreset !== "draft" ? ` ${guidedDenoiseNote}` : "")
+            (p.studio?.denoiser === "guided" && studioPreset !== "draft"
+              ? ` ${guidedDenoiseNote}`
+              : "")
           : key === "studioTime"
             ? estimateNotes[p.studio?.state ?? "guess"]
             : rows[key][1];
@@ -178,7 +180,7 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
                 ? (o[key] ?? fieldDefaults[key])
                 : key === "fps"
                   ? listedRate(o.fps)
-                  : o[key]
+                  : (o[key] ?? null)
         }
         options={options}
         disabled={busy}
@@ -689,52 +691,54 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
                       ? "Measuring the render time…"
                       : `${timed.time} to render`}
                   </text>
-              <text
-                id="export.summary"
-                label={summary}
-                title={blocked ? s.capabilities[o.format].detail : undefined}
-                metadata={{
-                  export: { announce: "polite" },
-                  ...(model.planningError || blocked
-                    ? { symbol: "exclamationmark.triangle.fill" }
-                    : {}),
-                }}
-                style={{
-                  color: token(
-                    model.planningError || blocked
-                      ? "colors.warning"
-                      : "colors.secondary",
-                  ),
-                  fontSize: token("typography.body"),
-                  fontVariantNumeric: "tabular-nums",
-                }}
-              >
-                {timed.lead.replace(/,\s*$/, "")}
-              </text>
+                  <text
+                    id="export.summary"
+                    label={summary}
+                    title={
+                      blocked ? s.capabilities[o.format].detail : undefined
+                    }
+                    metadata={{
+                      export: { announce: "polite" },
+                      ...(model.planningError || blocked
+                        ? { symbol: "exclamationmark.triangle.fill" }
+                        : {}),
+                    }}
+                    style={{
+                      color: token(
+                        model.planningError || blocked
+                          ? "colors.warning"
+                          : "colors.secondary",
+                      ),
+                      fontSize: token("typography.body"),
+                      fontVariantNumeric: "tabular-nums",
+                    }}
+                  >
+                    {timed.lead.replace(/,\s*$/, "")}
+                  </text>
                 </>
               ) : (
-              <text
-                id="export.summary"
-                label={summary}
-                title={blocked ? s.capabilities[o.format].detail : undefined}
-                metadata={{
-                  export: { announce: "polite" },
-                  ...(model.planningError || blocked
-                    ? { symbol: "exclamationmark.triangle.fill" }
-                    : {}),
-                }}
-                style={{
-                  color: token(
-                    model.planningError || blocked
-                      ? "colors.warning"
-                      : "colors.secondary",
-                  ),
-                  fontSize: token("typography.body"),
-                  fontVariantNumeric: "tabular-nums",
-                }}
-              >
-                {summary}
-              </text>
+                <text
+                  id="export.summary"
+                  label={summary}
+                  title={blocked ? s.capabilities[o.format].detail : undefined}
+                  metadata={{
+                    export: { announce: "polite" },
+                    ...(model.planningError || blocked
+                      ? { symbol: "exclamationmark.triangle.fill" }
+                      : {}),
+                  }}
+                  style={{
+                    color: token(
+                      model.planningError || blocked
+                        ? "colors.warning"
+                        : "colors.secondary",
+                    ),
+                    fontSize: token("typography.body"),
+                    fontVariantNumeric: "tabular-nums",
+                  }}
+                >
+                  {summary}
+                </text>
               )}
               {p.note ? <text style={detail}>{p.note}</text> : null}
             </div>

@@ -336,6 +336,17 @@ struct Shared {
     journal_sync: Mutex<Option<crate::journal::JournalSync>>,
     /// The actor's own mailbox, for a worker to hand back what it did.
     back: Mutex<Option<mpsc::Sender<Msg>>>,
+    /// [`KernelConfig::refused_workers`].
+    refused_workers: Option<Arc<std::sync::atomic::AtomicUsize>>,
+}
+impl Shared {
+    /// Whether the next worker thread is refused ([`Self::refused_workers`]).
+    fn refuses_worker(&self) -> bool {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.refused_workers
+            .as_ref()
+            .is_some_and(|n| n.fetch_update(SeqCst, SeqCst, |n| n.checked_sub(1)).is_ok())
+    }
 }
 
 type Reply<T> = Box<dyn FnOnce(T) + Send>;
@@ -385,6 +396,13 @@ enum Msg {
     },
     Shell {
         call: crate::session::ShellCall,
+        reply: Reply<Result<crate::session::ShellReply, KernelFailure>>,
+    },
+    /// A choice after a failed open whose disk work a worker has done
+    /// ([`crate::session::DiskJob`]); `result` is `None` if it failed.
+    DiskDone {
+        path: Option<std::path::PathBuf>,
+        result: Option<Box<Result<crate::session::ShellReply, KernelFailure>>>,
         reply: Reply<Result<crate::session::ShellReply, KernelFailure>>,
     },
     /// A file open whose disk work a worker has done
@@ -448,7 +466,10 @@ pub struct KernelHandle {
 impl KernelActor {
     pub fn spawn(config: KernelConfig) -> KernelActor {
         let (tx, rx) = mpsc::channel::<Msg>();
-        let shared = Arc::new(Shared::default());
+        let shared = Arc::new(Shared {
+            refused_workers: config.refused_workers.clone(),
+            ..Default::default()
+        });
         *shared.state.lock().expect("state") = Arc::new(crate::state::StateSnapshot::seeded());
         *shared.back.lock().expect("back") = Some(tx.clone());
         let thread = {
@@ -971,6 +992,8 @@ fn scope(msg: &Msg) -> Scope {
         Msg::PrepareSave { session, .. } => Scope::Project(session.project.clone()),
         Msg::FinishSave { completion, .. } => Scope::Project(completion.project().to_owned()),
         Msg::Shell { call, .. } | Msg::Opened { call, .. } => shell_scope(call),
+        // As the shell call it finishes (a choice after a failed open).
+        Msg::DiskDone { .. } => Scope::Every,
         Msg::State { .. }
         | Msg::ProClock { .. }
         | Msg::Profile { .. }
@@ -1158,19 +1181,43 @@ fn contain(
 
 /// Runs `work` on a worker thread and posts `done(result)` back to the
 /// actor (`None` if `work` panicked): the actor never waits on it.
+///
+/// When no worker can be started (the system refuses a thread), nothing
+/// runs and the message `done(None)` makes is returned instead: the caller
+/// releases what it reserved for the work and answers it at once, so the
+/// project or file is never left reserved for work that never began.
 fn off_actor<T: Send + 'static>(
     name: &str,
+    shared: &Shared,
     back: mpsc::Sender<Msg>,
     work: impl FnOnce() -> T + Send + 'static,
     done: impl FnOnce(Option<Box<T>>) -> Msg + Send + 'static,
-) {
+) -> Option<Msg> {
+    let job = Arc::new(Mutex::new(Some((work, done))));
+    let taken = job.clone();
     let run = move || {
+        let Some((work, done)) = taken.lock().ok().and_then(|mut job| job.take()) else {
+            return;
+        };
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)).ok();
         let _ = back.send(done(result.map(Box::new)));
     };
-    // A thread that cannot be started leaves the caller unanswered (its
-    // reply closes), as any call the kernel could not serve.
-    let _ = thread::Builder::new().name(name.into()).spawn(run);
+    let started =
+        !shared.refuses_worker() && thread::Builder::new().name(name.into()).spawn(run).is_ok();
+    if started {
+        return None;
+    }
+    let (_, done) = job.lock().ok()?.take()?;
+    Some(done(None))
+}
+
+/// The answer to a call whose worker could not be started ([`off_actor`]).
+fn not_started() -> KernelFailure {
+    KernelFailure::Storage(
+        "Powermove could not start the work this needs (the system refused a new thread). \
+         Nothing was changed; try again."
+            .into(),
+    )
 }
 
 /// One shell call, with what it publishes and emits.
@@ -1336,7 +1383,7 @@ fn step(kernel: &mut Kernel, shared: &Arc<Shared>, turns: &mut Turns, msg: Msg) 
                     Ok(Some(job)) => {
                         let back = shared.back.lock().expect("back").clone();
                         if let Some(back) = back {
-                            kernel.preparing.push(id);
+                            kernel.preparing.push(id.clone());
                             let again = move |prelude| Msg::PrepareSave {
                                 session,
                                 path,
@@ -1345,7 +1392,13 @@ fn step(kernel: &mut Kernel, shared: &Arc<Shared>, turns: &mut Turns, msg: Msg) 
                                 prelude: Some(prelude),
                                 reply,
                             };
-                            off_actor("pm-kernel-save", back, move || job.run(), again);
+                            let run = move || job.run();
+                            if let Some(Msg::PrepareSave { reply, .. }) =
+                                off_actor("pm-kernel-save", shared, back, run, again)
+                            {
+                                kernel.preparing.retain(|p| *p != id);
+                                reply(Err(not_started()));
+                            }
                             return;
                         }
                     }
@@ -1419,6 +1472,37 @@ fn step(kernel: &mut Kernel, shared: &Arc<Shared>, turns: &mut Turns, msg: Msg) 
             }
         }
         Msg::Shell { call, reply } => {
+            // The disk work of a choice after a failed open (the versions a
+            // record proves, read whole; the chosen one put in place) runs
+            // on a worker; it comes back as `DiskDone`.
+            match kernel.disk_job(&call) {
+                Ok(Some(job)) => {
+                    let back = shared.back.lock().expect("back").clone();
+                    if let Some(back) = back {
+                        let path = job.path().map(ToOwned::to_owned);
+                        if let Some(path) = &path {
+                            kernel.opening.push(path.clone());
+                        }
+                        let done = move |result| Msg::DiskDone {
+                            path,
+                            result,
+                            reply,
+                        };
+                        let run = move || job.run();
+                        if let Some(Msg::DiskDone { path, reply, .. }) =
+                            off_actor("pm-kernel-disk", shared, back, run, done)
+                        {
+                            if let Some(path) = path {
+                                kernel.opening.retain(|p| *p != path);
+                            }
+                            reply(Err(not_started()));
+                        }
+                        return;
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => return reply(Err(e)),
+            }
             // The disk work of opening a project file (its lock, what a
             // cut-short save left, the file itself read whole) runs on a
             // worker; the open comes back as `Opened` with what it did, and
@@ -1435,7 +1519,13 @@ fn step(kernel: &mut Kernel, shared: &Arc<Shared>, turns: &mut Turns, msg: Msg) 
                             prelude,
                             reply,
                         };
-                        off_actor("pm-kernel-open", back, move || job.run(), opened);
+                        let run = move || job.run();
+                        if let Some(Msg::Opened { path, reply, .. }) =
+                            off_actor("pm-kernel-open", shared, back, run, opened)
+                        {
+                            kernel.opening.retain(|p| *p != path);
+                            reply(Err(not_started()));
+                        }
                         return;
                     }
                 }
@@ -1443,6 +1533,32 @@ fn step(kernel: &mut Kernel, shared: &Arc<Shared>, turns: &mut Turns, msg: Msg) 
                 Err(e) => return reply(Err(e)),
             }
             shell_step(kernel, shared, call, reply)
+        }
+        Msg::DiskDone {
+            path,
+            result,
+            reply,
+        } => {
+            if let Some(path) = path {
+                kernel.opening.retain(|p| *p != path);
+            }
+            kernel.disk_job_done();
+            *shared.state.lock().expect("state") = Arc::new(kernel.state().clone());
+            let ids: Vec<_> = kernel.projects().map(str::to_owned).collect();
+            for id in &ids {
+                publish(kernel, shared, id);
+            }
+            reply(result.map_or_else(
+                || {
+                    Err(KernelFailure::Storage(
+                        "The disk work stopped unexpectedly; nothing more was done.".into(),
+                    ))
+                },
+                |result| *result,
+            ));
+            for message in kernel.take_log() {
+                emit(shared, KernelEvent::Log { message });
+            }
         }
         Msg::Opened {
             call,

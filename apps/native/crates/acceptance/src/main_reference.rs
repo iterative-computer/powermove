@@ -37,6 +37,20 @@ pub fn expected_catalog() -> Value {
             .expect("existing main tool");
         *base = overlay.clone();
     }
+    // The native open_project offers an explicit recovery choice.
+    let projects: Value =
+        serde_json::from_str(include_str!("../data/fixtures/project-native-catalog.json"))
+            .expect("pinned native project contracts");
+    for overlay in projects["tools"].as_array().unwrap() {
+        assert_eq!(overlay["name"], "open_project");
+        let base = catalog["tools"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|tool| tool["name"] == overlay["name"])
+            .expect("existing main tool");
+        *base = overlay.clone();
+    }
     catalog
 }
 pub fn declarations() -> &'static Value {

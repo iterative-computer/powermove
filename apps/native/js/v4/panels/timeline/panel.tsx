@@ -92,6 +92,12 @@ function refusal(value: Announcement): boolean {
     value.kind === "locked"
   );
 }
+/** The graph view the switch returns to: the last one shown (v1 keeps "Show
+ * Layer Bars with Graph" apart from the switch itself). */
+let lastGraphView: "Graph" | "Combined" = "Graph";
+/** v1's tab row: one tab per open composition (the active one in the text
+ * ink on the kit's selected ground, a raised neutral cell: the accent marks
+ * the playhead alone), and the Layers / Tracks switch at its end. */
 function Header({ frame: f, send }: { frame: TimelineFrame; send: Send }) {
   return (
     <div
@@ -99,135 +105,60 @@ function Header({ frame: f, send }: { frame: TimelineFrame; send: Send }) {
       data-pm-slot="header"
       style={{
         ...split,
+        alignItems: "stretch",
         height: t("metrics.header"),
-        paddingLeft: t("metrics.inset"),
-        paddingRight: t("metrics.inset"),
+        paddingLeft: t("metrics.gap"),
+        paddingRight: t("metrics.gap"),
       }}
     >
-      <div style={{ ...line, gap: t("metrics.gap") }}>
-        <Icon
-          id="timeline:play"
-          label={f.playing ? "Pause" : "Play"}
-          title="Play / Pause (Space)"
-          symbol={f.playing ? "pause.fill" : "play.fill"}
-          disabled={!f.hasComposition}
-          primary
-          send={send}
-          intent={{ type: "play" }}
-        />
-        {f.hasComposition && (
-          <>
-            {f.timeEditor ? (
-              <UI.TextField
-                id="timeline:time"
-                label="Current time"
-                value={f.timeEditor.value}
-                binding={f.timeEditor.binding}
-                metadata={{ cancelChange: true }}
-                onChange={(e) =>
-                  send({ type: "editDone", value: String(e.value ?? "") })
-                }
-                style={{
-                  color: t("colors.text"),
-                  fontSize: t("typography.timecode"),
-                  fontWeight: t("typography.medium_weight"),
-                  fontVariantNumeric: "tabular-nums",
-                }}
-              />
-            ) : (
+      <div
+        id="timeline:tabs"
+        label="Open compositions"
+        role="tablist"
+        style={{ ...line, alignItems: "stretch" }}
+      >
+        {f.hasComposition &&
+          f.tabs.map((tab) => (
+            <div key={tab.id} style={line}>
               <UI.ToolbarItem
-                id="timeline:time"
-                label="Current time"
-                value={f.spokenTime}
-                onClick={action(send, { type: "timeEdit" })}
-                metadata={{ designTodo: "T2", fixedWidthSample: "00:00:00:00" }}
+                id={`timeline:tab:${tab.id}`}
+                label={tab.name}
+                title={tab.name}
+                role="tab"
+                tabIndex={tab.active ? 0 : -1}
+                aria-selected={tab.active}
+                onClick={action(send, {
+                  type: "tab",
+                  id: tab.id,
+                  close: false,
+                })}
                 style={{
-                  color: t("colors.text"),
-                  fontSize: t("typography.timecode"),
-                  fontWeight: t("typography.medium_weight"),
-                  fontVariantNumeric: "tabular-nums",
+                  color: t(tab.active ? "colors.text" : "colors.muted"),
+                  fontSize: t("typography.reading"),
+                  ...(tab.active
+                    ? { fontWeight: t("typography.medium_weight") }
+                    : {}),
                 }}
               >
-                {/* While playing, the native timecode layer draws the time in
-                    this fixed-width slot every frame; the readout steps aside
-                    (S3: panels hear only play start and stop). */}
-                {f.playing ? "" : f.timecode}
+                {tab.name}
               </UI.ToolbarItem>
-            )}
-            <text
-              style={{
-                color: t("colors.muted"),
-                fontSize: t("typography.minimum"),
-              }}
-            >
-              {f.frameRate}
-            </text>
-            {f.tabs.length > 0 && (
-              <div
-                id="timeline:header-separator"
-                role="presentation"
-                style={{
-                  width: t("metrics.border"),
-                  height: t("metrics.symbol_panel"),
-                  background: t("colors.separator"),
-                }}
-              />
-            )}
-            {f.tabs.length > 0 && (
-              <div
-                id="timeline:tabs"
-                label="Open compositions"
-                role="tablist"
-                metadata={{ designTodo: "T3" }}
-                style={line}
-              >
-                {f.tabs.map((tab) => (
-                  <div key={tab.id} style={line}>
-                    {f.tabs.length > 1 && tab.showClose && (
-                      <Icon
-                        id={`timeline:tab-close:${tab.id}`}
-                        label={`Close ${tab.name}`}
-                        title={`Close ${tab.name} (⌘W)`}
-                        symbol="xmark"
-                        tabIndex={-1}
-                        send={send}
-                        intent={{ type: "tab", id: tab.id, close: true }}
-                      />
-                    )}
-                    <UI.ToolbarItem
-                      id={`timeline:tab:${tab.id}`}
-                      label={tab.name}
-                      title={tab.name}
-                      role="tab"
-                      tabIndex={tab.active ? 0 : -1}
-                      aria-selected={tab.active}
-                      onClick={action(send, {
-                        type: "tab",
-                        id: tab.id,
-                        close: false,
-                      })}
-                      style={{
-                        color: t(
-                          tab.active ? "colors.text" : "colors.secondary",
-                        ),
-                        fontSize: t("typography.body"),
-                        // The selected tab is a filled pill: its name stands
-                        // clear of the pill's ends.
-                        paddingLeft: t("metrics.gap"),
-                        paddingRight: t("metrics.gap"),
-                      }}
-                    >
-                      {tab.name}
-                    </UI.ToolbarItem>
-                  </div>
-                ))}
-              </div>
-            )}
-          </>
-        )}
+              {f.tabs.length > 1 && tab.showClose && (
+                <Icon
+                  id={`timeline:tab-close:${tab.id}`}
+                  label={`Close ${tab.name}`}
+                  title={`Close ${tab.name} (⌘W)`}
+                  symbol="xmark"
+                  quiet
+                  tabIndex={-1}
+                  send={send}
+                  intent={{ type: "tab", id: tab.id, close: true }}
+                />
+              )}
+            </div>
+          ))}
       </div>
       {f.hasComposition && (
-        <div style={{ ...line, gap: t("metrics.gap") }}>
+        <div style={line}>
           <UI.SegmentedControl
             id="timeline:mode"
             label="Timeline mode"
@@ -239,59 +170,108 @@ function Header({ frame: f, send }: { frame: TimelineFrame; send: Send }) {
             onChange={(mode) =>
               send({ type: "mode", mode: mode as "Layers" | "Tracks" })
             }
+            style={{ fontSize: t("typography.body") }}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+/** v1's head: the corner over the layer column, beside the ruler. Play and
+ * the time lead; the graph switch (its options while shown, and Tracks'
+ * snapping) sits at the column's edge. */
+function Head({ frame: f, send }: { frame: TimelineFrame; send: Send }) {
+  if (f.view !== "DopeSheet") lastGraphView = f.view;
+  const graph = f.view !== "DopeSheet";
+  return (
+    <div
+      id="timeline:head"
+      style={{
+        ...split,
+        height: t("metrics.ruler"),
+        paddingLeft: t("metrics.inset"),
+        paddingRight: t("metrics.gap"),
+      }}
+    >
+      <div style={{ ...line, gap: t("metrics.gap") }}>
+        <Icon
+          id="timeline:play"
+          label={f.playing ? "Pause" : "Play"}
+          title="Play / Pause (Space)"
+          symbol={f.playing ? "pause.fill" : "play.fill"}
+          send={send}
+          intent={{ type: "play" }}
+        />
+        {f.timeEditor ? (
+          <UI.TextField
+            id="timeline:time"
+            label="Current time"
+            value={f.timeEditor.value}
+            binding={f.timeEditor.binding}
+            metadata={{ cancelChange: true }}
+            onChange={(e) =>
+              send({ type: "editDone", value: String(e.value ?? "") })
+            }
             style={{
-              fontSize: t("typography.minimum"),
+              color: t("colors.text"),
+              fontSize: t("typography.timecode"),
               fontWeight: t("typography.medium_weight"),
+              fontVariantNumeric: "tabular-nums",
             }}
           />
-          <UI.SegmentedControl
-            id="timeline:view"
-            label="Timeline view"
-            value={f.view}
-            options={[
-              {
-                id: "DopeSheet",
-                label: "Dope Sheet",
-                symbol: "chart.bar.doc.horizontal",
-              },
-              {
-                id: "Combined",
-                label: "Dope Sheet and Graph",
-                symbol: "rectangle.split.1x2",
-              },
-              {
-                id: "Graph",
-                label: "Graph Editor",
-                symbol: "point.topleft.down.to.point.bottomright.curvepath",
-              },
-            ]}
-            onChange={(view) =>
-              send({
-                type: "view",
-                view: view as "DopeSheet" | "Combined" | "Graph",
-              })
-            }
+        ) : (
+          <UI.ToolbarItem
+            id="timeline:time"
+            label="Current time"
+            title={`Current time (${f.frameRate})`}
+            value={f.spokenTime}
+            onClick={action(send, { type: "timeEdit" })}
+            metadata={{ fixedWidthSample: "00:00:00:00" }}
+            style={{
+              color: t("colors.text"),
+              fontSize: t("typography.timecode"),
+              fontWeight: t("typography.medium_weight"),
+              fontVariantNumeric: "tabular-nums",
+            }}
+          >
+            {/* While playing, the native timecode layer draws the time in
+                this fixed-width slot every frame; the readout steps aside
+                (S3: panels hear only play start and stop). */}
+            {f.playing ? "" : f.timecode}
+          </UI.ToolbarItem>
+        )}
+      </div>
+      <div style={line}>
+        {graph && (
+          <Icon
+            id="timeline:graph-options"
+            label="Graph Options"
+            symbol="ellipsis"
+            send={send}
+            intent={{ type: "graphOptions" }}
           />
-          {f.view !== "DopeSheet" && (
-            <Icon
-              id="timeline:graph-options"
-              label="Graph Options"
-              symbol="ellipsis.circle"
-              send={send}
-              intent={{ type: "graphOptions" }}
-            />
-          )}
-          {(f.shyLayers || f.hideShy) && (
-            <Icon
-              id="timeline:hide-shy"
-              label="Hide Shy Layers"
-              symbol={f.hideShy ? "face.dashed.fill" : "face.dashed"}
-              active={f.hideShy === true}
-              title="Hide Shy Layers"
-              send={send}
-              intent={{ type: "hideShy" }}
-            />
-          )}
+        )}
+        <Icon
+          id="timeline:graph"
+          label="Graph Editor"
+          title="Graph Editor"
+          symbol="point.topleft.down.to.point.bottomright.curvepath"
+          active={graph}
+          send={send}
+          intent={{ type: "view", view: graph ? "DopeSheet" : lastGraphView }}
+        />
+        {(f.shyLayers || f.hideShy) && (
+          <Icon
+            id="timeline:hide-shy"
+            label="Hide Shy Layers"
+            symbol={f.hideShy ? "face.dashed.fill" : "face.dashed"}
+            active={f.hideShy === true}
+            title="Hide Shy Layers"
+            send={send}
+            intent={{ type: "hideShy" }}
+          />
+        )}
+        {f.mode === "Tracks" && (
           <Icon
             id="timeline:snap"
             label="Snapping"
@@ -301,8 +281,8 @@ function Header({ frame: f, send }: { frame: TimelineFrame; send: Send }) {
             send={send}
             intent={{ type: "snap" }}
           />
-        </div>
-      )}
+        )}
+      </div>
     </div>
   );
 }
@@ -826,13 +806,14 @@ export function TimelinePanel({
               id="timeline:outline"
               metadata={{ nativeColumn: true }}
               style={{
-                // The ruler's band above the rows, the bottom bar's below.
-                paddingTop: t("metrics.ruler"),
+                // The head over the ruler's band above the rows, the bottom
+                // bar's below.
                 paddingBottom: t("metrics.ruler"),
                 width: t("metrics.layer_column"),
                 flexGrow: 1,
               }}
             >
+              <Head frame={f} send={send} />
               <div
                 style={{
                   position: "relative",

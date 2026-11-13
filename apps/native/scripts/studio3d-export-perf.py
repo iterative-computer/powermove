@@ -96,6 +96,8 @@ def main():
     parser.add_argument("--frames", type=int, default=30)
     parser.add_argument("--library-dir", type=Path, action="append", help="library directory for an unbundled snapshot; repeat for OIDN and FFmpeg")
     parser.add_argument("--sample-counts", action="store_true", help="record measured per-pixel counts and readback overhead")
+    parser.add_argument("--trace-detail", action="store_true", help="diagnostic per-step GPU waits and per-object sample readbacks; never use for speed gates")
+    parser.add_argument("--oidn-device", choices=["auto","cpu","metal"], help="explicit denoiser backend for controlled timings")
     parser.add_argument("--fixed-spp", type=int, help="diagnostic fixed samples with the chosen preset's other settings")
     parser.add_argument("--quality-patch", type=json.loads, help="explicit diagnostic preset overrides as a JSON object")
     parser.add_argument("--render-scale", type=float, default=1.0, help="explicit 3D-only render scale; output stays 1920x1080")
@@ -137,10 +139,18 @@ def main():
     profile = out / "profile"
     profile.mkdir()
     env = dict(os.environ, STUDIO_TIMINGS="1", PM_EXPORT_PROFILE="1")
+    if args.oidn_device:env["PM_STUDIO_OIDN_DEVICE"]=args.oidn_device
     if args.library_dir:
         env["DYLD_LIBRARY_PATH"] = os.pathsep.join(str(p.resolve(strict=True)) for p in args.library_dir)
     if args.sample_counts:
         env["STUDIO_SAMPLE_COUNTS"] = "1"
+    else:
+        env.pop("STUDIO_SAMPLE_COUNTS", None)
+    for key in ["STUDIO_TRACE_STEPS", "STUDIO_TRACE_OBJECTS"]:
+        if args.trace_detail:
+            env[key] = "1"
+        else:
+            env.pop(key, None)
     env["STUDIO_SECONDARY_LIGHT_TREE"] = "1" if args.secondary_tree else "0"
     env["STUDIO_SINGLE_LIGHT_TREE"] = "1" if args.single_tree else "0"
     env["STUDIO_STRATIFIED_LIGHTS"] = "1" if args.stratified_lights else "0"
@@ -151,6 +161,9 @@ def main():
     with (out / "native.log").open("wb") as log:
         process = subprocess.Popen([str(executable), "--powermove-mcp", "--profile", str(profile), str(cloned)],
                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=log, env=env, start_new_session=True)
+        # Read-only footprint samplers attach to this private instance, never
+        # to another lane's process or the owner's running editor.
+        (out / "native-pid.txt").write_text(str(process.pid) + "\n")
         client = Client(process)
         try:
             client.rpc("initialize", {"protocolVersion": "2025-06-18", "capabilities": {},
@@ -186,21 +199,50 @@ def main():
                 raise RuntimeError(f"Export did not complete: {result}")
             timing_log=(out / "native.log").read_text(errors="replace")
             frames=[]
+            steps=[]
+            objects=None
             for line in timing_log.splitlines():
+                if line.startswith("STUDIO_OIDN_TIMING ") and frames:
+                    backend=re.search(r"backend: (Cpu|Metal)",line)
+                    if backend:frames[-1]["oidn_backend"]=backend[1].lower()
+                    frames[-1]["oidn_cpu_fallback"]="cpu_fallback: true" in line
+                    for name in ["upload_ms","download_ms","albedo_ms","normal_ms","beauty_ms","beauty_pixels","guide_scale"]:
+                        match=re.search(r"\b"+name+r":\s*([0-9.eE+-]+)",line)
+                        if match:frames[-1]["oidn_"+name]=float(match[1])
+                    continue
+                if line.startswith("STUDIO_TRACE_STEP "):
+                    steps.append(json.loads(line.split(" ",1)[1]))
+                    continue
+                if line.startswith("STUDIO_TRACE_OBJECTS "):
+                    objects=json.loads(line.split(" ",1)[1])
+                    continue
                 if not line.startswith("STUDIO_FRAME_TIMING "):
                     continue
                 frame={}
+                if args.trace_detail:
+                    frame["trace_steps"]=steps
+                    frame["trace_objects"]=objects
+                    frame["steps_17_to_32_ms"]=sum(s["ms"] for s in steps if s["first_sample"]>=64 and s["end_sample"]<=128)
+                    steps=[]
+                    objects=None
                 dimensions=re.search(r"\bsize=(\d+)x(\d+)",line)
                 if dimensions:frame["render_size"]=[int(v) for v in dimensions.groups()]
-                for field in ["prepare_ms","total_ms","trace_ms","guides_ms","guide_readback_ms","denoise_ms","sample_statistics_ms"]:
+                for field in ["prepare_ms","total_ms","trace_ms","guides_ms","guide_readback_ms","denoise_ms","sample_statistics_ms","photon_setup_ms"]:
                     match=re.search(r"\b"+field+r"[=:]\s*([0-9.eE+-]+)",line)
                     if match:frame[field]=float(match[1])
+                for field in ["geometry_uploads", "texture_uploads", "scene_updates", "blas_builds"]:
+                    match = re.search(r"\b" + field + r"=(\d+)", line)
+                    if match:
+                        frame[field] = int(match[1])
+                hardware = re.search(r"\bhardware_rt=(true|false)", line)
+                if hardware:
+                    frame["hardware_rt"] = hardware[1] == "true"
                 for field in ["sample_mean","sample_p95"]:
                     match=re.search(r"\b"+field+r": Some\(([0-9.eE+-]+)\)",line)
                     if match:frame[field]=float(match[1])
                 frames.append(frame)
             report = {"frame_timings":frames,"executable_sha256": executable_hash, "input_sha256": source_hash, "preset": args.preset, "frames": args.frames,
-                      "requested_quality":export_quality,"studio_render_scale":args.render_scale,"fixed_spp":args.fixed_spp,"bounces_override":args.bounces,"sample_count_profiling":args.sample_counts,
+                      "oidn_device_override":args.oidn_device,"requested_quality":export_quality,"studio_render_scale":args.render_scale,"fixed_spp":args.fixed_spp,"bounces_override":args.bounces,"sample_count_profiling":args.sample_counts,"trace_detail_profiling":args.trace_detail,
                       "secondary_light_tree": args.secondary_tree,
                       "single_light_tree": args.single_tree,
                       "stratified_lights": args.stratified_lights,

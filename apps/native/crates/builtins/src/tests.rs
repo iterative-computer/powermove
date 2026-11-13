@@ -3780,6 +3780,67 @@ fn powermove_account_rows_and_actions_reach_the_app_through_settings() {
         assert!(backend.native.platform.is_empty());
     }
 }
+/// Settings › General › Timeline › Hover to Scrub: the app's skimming choice
+/// (View ▸ Skimming), on until turned off, shown with or without a project,
+/// written through the app, and republished when the menu changes it.
+#[test]
+fn hover_to_scrub_is_a_settings_switch_that_follows_and_drives_skimming() {
+    let actor = actor();
+    let identity = pm_surface::host_api::Identity {
+        realm: "settings".into(),
+        generation: 1,
+        project: "synthetic".into(),
+    };
+    let mut backend = data::Backend::new(actor.handle(), identity, "settings", false).unwrap();
+    let skim = |p: &Value| {
+        p["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["id"] == "timeline.skimming")
+            .cloned()
+            .unwrap()
+    };
+    // Never chosen: on, as hovering has always scrubbed.
+    let first = backend.settings_snapshot().unwrap();
+    let row = skim(&first);
+    assert_eq!(row["control"], "switch");
+    assert_eq!(row["section"], "general");
+    assert_eq!(row["label"], "Hover to Scrub");
+    assert_eq!(row["value"], true);
+    assert!(row["binding"].as_str().is_some_and(|b| !b.is_empty()));
+    // Turned off in Settings: the app is told, and the row shows it at once.
+    backend.native.platform.clear();
+    let models::NativeCommand::Value(after) = backend
+        .native_command(
+            "panel.settings",
+            &json!({"revision":first["revision"],"action":{"type":"write","id":"timeline.skimming","value":false}}),
+        )
+        .unwrap()
+    else {
+        panic!("the new publication")
+    };
+    assert_eq!(
+        backend.native.platform,
+        [("command".to_owned(), json!({ "name": "skimmingOff" }))]
+    );
+    assert_eq!(skim(&after)["value"], false);
+    // Only on or off.
+    let latest = backend.settings_snapshot().unwrap();
+    assert!(
+        backend
+            .native_command(
+                "panel.settings",
+                &json!({"revision":latest["revision"],"action":{"type":"write","id":"timeline.skimming","value":"yes"}}),
+            )
+            .is_err()
+    );
+    // View ▸ Skimming turned it back on: a new publication shows it.
+    backend.native.facts["skimming"] = json!(true);
+    let menu = backend.settings_snapshot().unwrap();
+    assert_ne!(menu["revision"], latest["revision"]);
+    assert_eq!(skim(&menu)["value"], true);
+}
 /// A press from an older Settings publication acts only on the account or
 /// provider that publication showed: provider B replacing A, or another
 /// account signing in, refuses a stale Disconnect / Sign Out / Delete.
@@ -4200,6 +4261,244 @@ fn the_color_panel_lists_the_grade_and_writes_through_its_controls() {
     assert_eq!(state.value.as_f64(), Some(1.4));
 }
 
+/// A colour wheel, as a person drags it: the Color panel draws the wheel with
+/// one binding over its red, green and blue, and a drag writes all three in
+/// one gesture: the grade changes as one Undo step, the luma kept by the
+/// wheel's own values (the binding refuses a wrong length or a foreign row).
+#[test]
+fn a_color_wheel_drag_writes_red_green_and_blue_as_one_undo_step() {
+    let actor = actor();
+    let kernel = actor.handle();
+    select_layer(&kernel, "a");
+    let mut setup = data::Backend::new(
+        kernel.clone(),
+        pm_surface::host_api::Identity {
+            realm: "wheel-setup".into(),
+            generation: 1,
+            project: "synthetic".into(),
+        },
+        "layer-effects",
+        false,
+    )
+    .unwrap();
+    setup.sync().unwrap();
+    let request = setup
+        .model
+        .as_mut()
+        .unwrap()
+        .add_effect_at(Caller::native(), "a", "colorWheels", 0.)
+        .unwrap();
+    kernel.call("synthetic", request).wait().unwrap().unwrap();
+    let mut panels = Builtins::new(kernel.clone(), "synthetic", || {}).unwrap();
+    panels.update_facts(json!({"time":0,"playing":false,"stage":[640.,360.]}));
+    finish(panels.mount("color").unwrap());
+    // The Lift wheel the panel draws, and the binding it drags through.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let binding = loop {
+        let found = panels.take_publications().into_iter().rev().find_map(|p| {
+            p.surface.nodes().values().find_map(|n| {
+                (n.props.get("data-pm-component") == Some(&json!("color-wheel"))
+                    && n.props.get("label") == Some(&json!("Lift colour")))
+                .then(|| n.props["binding"].as_str().unwrap().to_owned())
+            })
+        });
+        if let Some(b) = found {
+            break b;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the panel never drew the Lift wheel"
+        );
+        thread::sleep(Duration::from_millis(5));
+    };
+    assert_eq!(
+        binding.matches('+').count(),
+        2,
+        "red, green and blue: {binding}"
+    );
+    let before = kernel.published("synthetic").unwrap().history.entries;
+    let ack = |pending: Result<
+        pm_kernel::Pending<std::result::Result<pm_kernel::Ack, pm_kernel::KernelFailure>>,
+    >| pending.unwrap().wait().unwrap().unwrap();
+    let gesture = match ack(panels.scrub_begin("color")).reply {
+        pm_kernel::Reply::Gesture(id) => id,
+        other => panic!("no gesture: {other:?}"),
+    };
+    for value in [json!([0.05, -0.02, 0.1]), json!([0.1, -0.04, 0.2])] {
+        ack(panels.scrub_step("color", &binding, gesture, value));
+    }
+    // A step of the wrong length is refused; the drag goes on.
+    assert!(
+        panels
+            .scrub_step("color", &binding, gesture, json!([0.3]))
+            .is_err()
+    );
+    ack(panels.scrub_finish("color", gesture, true));
+    let p = kernel.published("synthetic").unwrap();
+    assert_eq!(p.history.entries, before + 1, "one Undo step");
+    let backend = panels
+        .broker
+        .entry("color")
+        .unwrap()
+        .lock()
+        .unwrap()
+        .backend
+        .clone();
+    let projection = backend.lock().unwrap().projection().unwrap();
+    let mut model = pm_panel_inspector::Inspector::new(p, Default::default());
+    for (key, want) in [("liftRed", 0.1), ("liftGreen", -0.04), ("liftBlue", 0.2)] {
+        let id = projection["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["kind"] == "parameter" && r["parameter"]["key"] == key)
+            .unwrap()["parameter"]["id"]
+            .clone();
+        let id = pm_panel_inspector::PropertyId::from_value(
+            &pm_model::json::parse(id.as_str().unwrap()).unwrap(),
+        )
+        .unwrap();
+        let state = model
+            .binding_state(&pm_panel_inspector::Binding::Property(id), 0.)
+            .unwrap();
+        assert_eq!(state.value.as_f64(), Some(want), "{key}");
+    }
+    // A group naming rows of two effects, or out of order, is no binding.
+    let rows: Vec<&Value> = projection["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["kind"] == "parameter")
+        .collect();
+    let pick = |key: &str| {
+        rows.iter()
+            .find(|r| r["parameter"]["key"] == key)
+            .map(|r| r["parameter"].clone())
+            .unwrap()
+    };
+    let (r, g) = (pick("liftRed"), pick("liftGreen"));
+    let handle = format!(
+        "{}+{}",
+        r["binding"].as_str().unwrap(),
+        g["binding"].as_str().unwrap()
+    );
+    let ids = |list: &[&Value]| {
+        list.iter()
+            .map(|v| v["id"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    assert!(data::effect_binding_rows(&projection, &handle, &ids(&[&r, &g])).is_some());
+    assert!(data::effect_binding_rows(&projection, &handle, &ids(&[&g, &r])).is_none());
+    assert!(data::effect_binding_rows(&projection, &handle, &ids(&[&r, &r])).is_none());
+}
+
+/// Two Color Wheels on one layer both grade the picture, so the Color panel
+/// shows each with its own controls, switch and Reset (it showed the first
+/// and hid the second everywhere).
+#[test]
+fn every_color_wheels_on_the_layer_has_its_controls_in_the_color_panel() {
+    let actor = actor();
+    let kernel = actor.handle();
+    select_layer(&kernel, "a");
+    let mut setup = data::Backend::new(
+        kernel.clone(),
+        pm_surface::host_api::Identity {
+            realm: "color-setup".into(),
+            generation: 1,
+            project: "synthetic".into(),
+        },
+        "layer-effects",
+        false,
+    )
+    .unwrap();
+    for _ in 0..2 {
+        setup.sync().unwrap();
+        let request = setup
+            .model
+            .as_mut()
+            .unwrap()
+            .add_effect_at(Caller::native(), "a", "colorWheels", 0.)
+            .unwrap();
+        kernel.call("synthetic", request).wait().unwrap().unwrap();
+    }
+    let mut panels = Builtins::new(kernel.clone(), "synthetic", || {}).unwrap();
+    panels.update_facts(json!({"time":0,"playing":false,"stage":[640.,360.]}));
+    finish(panels.mount("color").unwrap());
+    let backend = panels
+        .broker
+        .entry("color")
+        .unwrap()
+        .lock()
+        .unwrap()
+        .backend
+        .clone();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let projection = loop {
+        let p = backend.lock().unwrap().projection().unwrap();
+        if p["range"] == json!([0, p["count"]]) && p["count"].as_f64() > Some(40.) {
+            break p;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the panel never asked for its rows: {p}"
+        );
+        thread::sleep(Duration::from_millis(5));
+    };
+    let rows = projection["rows"].as_array().unwrap();
+    let wheels: Vec<&Value> = rows
+        .iter()
+        .filter(|r| r["kind"] == "effect" && r["definition"] == "colorWheels")
+        .collect();
+    assert_eq!(wheels.len(), 2);
+    // Wait for the publication that draws every row the panel asked for.
+    let ids = |publication: &Publication| -> Vec<String> {
+        publication
+            .surface
+            .nodes()
+            .values()
+            .filter_map(|n| n.props.get("id").and_then(Value::as_str).map(str::to_owned))
+            .collect()
+    };
+    let mut shown = Vec::new();
+    while Instant::now() < deadline {
+        if let Some(publication) = panels.take_publications().pop() {
+            shown = ids(&publication);
+        }
+        if shown.iter().any(|id| id.starts_with("color:field:")) {
+            break;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    for header in &wheels {
+        let effect = header["id"].as_str().unwrap();
+        assert!(
+            shown.contains(&format!("color:reset:{effect}")),
+            "Color Wheels {effect} has no Reset: {shown:?}"
+        );
+        // A wheel's red, green and blue are its drawn wheel (one control
+        // over the three); Tone and each Master are fields.
+        assert!(
+            shown.contains(&format!("color:wheel:{effect}:gain")),
+            "the Gain wheel of Color Wheels {effect} is not drawn"
+        );
+        for key in ["exposure", "liftMaster", "gainMaster"] {
+            let row = rows
+                .iter()
+                .find(|r| {
+                    r["kind"] == "parameter"
+                        && r["parameter"]["effect"] == effect
+                        && r["parameter"]["key"] == key
+                })
+                .unwrap_or_else(|| panic!("{effect} has no {key} row"));
+            let field = format!("color:field:{}", row["id"].as_str().unwrap());
+            assert!(
+                shown.contains(&field),
+                "{key} of Color Wheels {effect} is not shown"
+            );
+        }
+    }
+}
+
 /// Settings › Shortcuts: the app's page reaches the publication with its
 /// preset row, and every action on it goes to the app, which owns the keymap.
 #[test]
@@ -4303,4 +4602,128 @@ fn the_shortcuts_page_publishes_the_apps_page_and_hands_its_actions_to_the_app()
             )
             .is_err()
     );
+}
+
+/// Round 7: an imported model's material slots are Properties sections with
+/// the file's own values; an edit becomes a keyframeable `mi.<slot>.<key>`.
+#[test]
+fn properties_list_an_imported_models_parts_with_their_own_values() {
+    let actor = actor();
+    let kernel = actor.handle();
+    let run = |args: Value| {
+        let call = pm_kernel::Call::Transact {
+            label: None,
+            expected_revision: None,
+            body: pm_kernel::WriteBody::Commands(vec![
+                pm_kernel::Scene3dCommand::Apply {
+                    comp: None,
+                    args: data::model(&args).unwrap(),
+                    selection: vec![],
+                    time: 0.,
+                    autokey: false,
+                }
+                .into(),
+            ]),
+        };
+        let ack = kernel
+            .call("synthetic", Request::new(Caller::native(), call))
+            .wait()
+            .unwrap()
+            .unwrap();
+        if let pm_kernel::Reply::Throw(e) = &ack.reply {
+            panic!("{args}: {e}");
+        }
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("Product.gltf");
+    std::fs::write(
+        &file,
+        r#"{"asset":{"version":"2.0"},"materials":[{"name":"Aluminium","pbrMetallicRoughness":{"metallicFactor":1,"roughnessFactor":0.4}},{"name":"Glass"}]}"#,
+    )
+    .unwrap();
+    run(json!({"operation":"add_object","id":"model","object":{"source":{"assetId":"a1"},"useSourceMaterials":true}}));
+    let mut presenter = properties::Properties::default();
+    presenter.originals.insert("a1".into(), file);
+    let publish = |presenter: &mut properties::Properties| {
+        select_layer(&kernel, "model");
+        let mut model = pm_panel_inspector::Inspector::new(
+            kernel.published("synthetic").unwrap(),
+            Default::default(),
+        );
+        presenter.snapshot(&mut model, 0., false).unwrap()
+    };
+    let row = |p: &Value, id: &str| {
+        p["sections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|s| s["rows"].as_array().unwrap())
+            .find(|r| r["id"] == id)
+            .cloned()
+    };
+    let p = publish(&mut presenter);
+    let titles: Vec<_> = p["sections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|s| s["id"].as_str().unwrap().starts_with("3d.part."))
+        .map(|s| s["title"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(titles, ["Aluminium", "Glass"]);
+    let rough = row(&p, "3d.part.0.roughness").expect("the file's roughness");
+    assert_eq!(rough["control"]["axes"][0]["value"], 0.4);
+    assert!(row(&p, "3d.part.1.map.color").is_some(), "a layer can be the part's colour");
+    run(json!({"operation":"set_material_properties","target":"model","materialIndex":0,"patch":{"roughness":0.1}}));
+    let p = publish(&mut presenter);
+    let rough = row(&p, "mi.0.roughness").expect("an override is a channel row");
+    assert_eq!(rough["control"]["axes"][0]["value"], 0.1);
+    assert_eq!(rough["animation"], "static");
+    assert!(row(&p, "3d.part.0.roughness").is_none());
+    // A viewer double-click on the glass part opens and marks its section;
+    // the same request doesn't reopen it after the user closes it.
+    let section = |p: &Value, id: &str| {
+        p["sections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["id"] == id)
+            .cloned()
+            .unwrap()
+    };
+    assert_eq!(section(&p, "3d.part.1")["collapsed"], true);
+    presenter.focus_part(&json!({"layer":"model","slot":1,"seq":1}));
+    let p = publish(&mut presenter);
+    assert_eq!(section(&p, "3d.part.1")["collapsed"], false);
+    assert_eq!(section(&p, "3d.part.1")["focused"], true);
+    assert_eq!(section(&p, "3d.part.0")["focused"], false);
+    presenter
+        .intent(
+            &mut pm_panel_inspector::Inspector::new(
+                kernel.published("synthetic").unwrap(),
+                Default::default(),
+            ),
+            Caller::native(),
+            &json!({"type":"collapse","section":"3d.part.1","collapsed":true}),
+            0.,
+        )
+        .unwrap();
+    presenter.focus_part(&json!({"layer":"model","slot":1,"seq":1}));
+    let p = publish(&mut presenter);
+    assert_eq!(section(&p, "3d.part.1")["collapsed"], true);
+    // Leaving the model leaves its part.
+    kernel
+        .call(
+            "synthetic",
+            Request::new(Caller::native(), pm_kernel::SelectionCall::Clear),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    let mut model = pm_panel_inspector::Inspector::new(
+        kernel.published("synthetic").unwrap(),
+        Default::default(),
+    );
+    presenter.snapshot(&mut model, 0., false).unwrap();
+    let p = publish(&mut presenter);
+    assert_eq!(section(&p, "3d.part.1")["focused"], false);
 }

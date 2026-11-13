@@ -45,6 +45,11 @@ pub struct FrameSpec {
     /// The exact picture is read (a capture): the final resampler, whatever
     /// the moment and scale.
     pub exact: bool,
+    /// The settled picture of a paused frame whose drawable is the
+    /// composition's own size: the final picture, drawn once the viewer
+    /// has rested, after the preview of the same time and size
+    /// ([`Self::final_picture`]).
+    pub settled: bool,
 }
 impl FrameSpec {
     pub fn exact(time: Ticks, output: Output) -> Self {
@@ -55,6 +60,7 @@ impl FrameSpec {
             scale: 1.,
             decode_deadline: None,
             exact: true,
+            settled: false,
         }
     }
     /// A paused frame at Full shows the composition as an export draws it:
@@ -98,21 +104,29 @@ impl FrameSpec {
         }
     }
     /// Whether this frame is the final picture of its time: a capture, or
-    /// a paused frame of the whole composition at its own size (the
-    /// refinement a paused viewer settles on, or a frame on a drawable of
-    /// exactly that size). It is drawn from the sources and with the effect
-    /// passes an export draws with, so it is the picture a rendered frame
-    /// on disk holds: a paused picture is the same before and after its
-    /// range is rendered. Every other viewer frame is a preview, and a
-    /// paused one is never replaced by the frame on disk.
+    /// the picture a paused viewer settles on, the whole composition at its
+    /// own size (the refinement above the drawable's size, or the settled
+    /// frame of a drawable of exactly that size). It is drawn from the
+    /// sources and with the effect passes an export draws with, so it is
+    /// the picture a rendered frame on disk holds: a paused picture is the
+    /// same before and after its range is rendered. Every other viewer
+    /// frame is a preview (the picture a paused viewer shows at once, kept
+    /// until the settled one is ready), and a paused one is never replaced
+    /// by the frame on disk.
     pub(crate) fn final_picture(&self, scene: &Scene) -> bool {
         self.exact
             || (self.moment == Moment::Paused
                 && (self.whole_composition(scene).is_some()
-                    || (self.scale == 1. && self.fills_composition(scene))))
+                    || (self.settled && self.scale == 1. && self.fills_composition(scene))))
+    }
+    /// Whether a paused frame of this output is followed by a settled one
+    /// ([`Self::final_picture`]): its refinement at the composition's size,
+    /// or the final picture on a drawable of that size.
+    pub(crate) fn settles(&self, scene: &Scene) -> bool {
+        Self::paused_full_scale(scene, &self.output) > 1. || self.fills_composition(scene)
     }
     /// Whether the drawable is the whole composition at its own size.
-    fn fills_composition(&self, scene: &Scene) -> bool {
+    pub(crate) fn fills_composition(&self, scene: &Scene) -> bool {
         self.output.crop.is_none()
             && composition_size(scene) == Some(Size::new(self.output.width, self.output.height))
     }
@@ -248,7 +262,7 @@ fn composition_size(scene: &Scene) -> Option<Size> {
 }
 /// A frame that could not be drawn yet: the picture stays and it is drawn again.
 #[derive(Debug)]
-struct FontsPending(String);
+pub(crate) struct FontsPending(pub(crate) String);
 impl std::fmt::Display for FontsPending {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "a frame waited for fonts ({})", self.0)
@@ -323,11 +337,23 @@ impl std::fmt::Display for DiskFramePending {
     }
 }
 impl std::error::Error for DiskFramePending {}
+/// A settled picture was asked of the worker's own renderer: it is drawn
+/// off the worker ([`Engine::settle`]) and shown once handed over. Nothing
+/// was drawn; the viewer shows its preview and asks for it again.
+#[derive(Debug)]
+pub(crate) struct SettledPending;
+impl std::fmt::Display for SettledPending {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the settled picture is not drawn yet")
+    }
+}
+impl std::error::Error for SettledPending {}
 pub(crate) fn transient(error: &anyhow::Error) -> bool {
     error.is::<FontsPending>()
         || error.is::<DefinitionsPending>()
         || error.is::<CompilerBusy>()
         || error.is::<DiskFramePending>()
+        || error.is::<SettledPending>()
         || matches!(
             error.downcast_ref::<RenderError>(),
             Some(
@@ -358,15 +384,60 @@ impl DiskUpload {
 /// A set of media files as the engine last looked at them.
 struct MediaSeen {
     media: Arc<pm_export::render::MediaPaths>,
-    /// Their stamps' digest ([`crate::render_cache::media_identity`]).
-    identity: u64,
+    /// Their versions as keys take them ([`crate::render_cache::Stamp`]):
+    /// a frame is kept under them only when it read these very versions.
+    stamps: Vec<crate::render_cache::Stamp>,
     looked: Instant,
+}
+impl MediaSeen {
+    fn identity(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        self.stamps.hash(&mut hash);
+        hash.finish()
+    }
+}
+/// What became of asking for a settled picture ([`Engine::settle`]).
+pub(crate) enum Asked {
+    /// Its picture is kept already: the frame presents it.
+    Ready,
+    Started,
+    /// Another settled picture is being drawn.
+    Busy,
+}
+/// How a settled picture ended ([`Engine::take_settled`]).
+pub(crate) enum Settled {
+    /// Kept for the frame of its key.
+    Kept,
+    /// Its viewer asked for something newer first.
+    GaveWay,
+    /// Drawn with a stand-in, or from files that changed meanwhile.
+    Unkept,
+    Pending(Vec<CompatNeed>),
+    Failed(anyhow::Error),
 }
 struct CachedFrame {
     key: crate::policy::CacheKey,
     composition: String,
     surface: Arc<ExportedSurface>,
     failures: Arc<[LayerFailure]>,
+}
+/// What a settled picture's renderer may keep of the cache remainder of the
+/// engine's grant (`cache`): an eighth, the worker's caches the rest.
+/// (Its working set while it draws one picture is that picture's: the
+/// originals and targets of one final frame, let go when it ends.)
+fn split_for_settling(cache: u64) -> (u64, u64) {
+    let settling = cache / 8;
+    (cache - settling, settling)
+}
+/// The grant assumed until the arbiter's first answer.
+const DEFAULT_GRANT: u64 = 512 << 20;
+/// A frame key's digest of an output tone ([`crate::policy::CacheKey::tone`]).
+fn tone_id(tone: Option<pm_render::OutputTone>) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    format!("{tone:?}").hash(&mut hash);
+    hash.finish()
 }
 pub fn metal_device(gpu: &Gpu) -> metal::Device {
     // HAL owns +1; to_owned retains a separate +1 for metal 0.33 and GPUI.
@@ -386,16 +457,27 @@ pub struct Engine {
     queue: metal::CommandQueue,
     pipeline: metal::RenderPipelineState,
     pool: Vec<Arc<ExportedSurface>>,
-    /// A refinement band's target ([`Engine::refine`]).
-    strip: Option<Arc<ExportedSurface>>,
-    /// The last refinement's band count (0: drawn whole by its frame), for
-    /// the diagnostic trace.
-    pub(crate) refine_bands: u32,
     pub(crate) fonts: Option<pm_render::text::host::RenderFonts>,
     font_generation: Option<u64>,
     cache: VecDeque<CachedFrame>,
+    /// Draws paused viewers' settled pictures off this thread
+    /// ([`Engine::settle`]); made with the first one.
+    settler: Option<crate::settle::Settler>,
+    settle_fonts: Option<pm_render::text::host::RenderFonts>,
+    /// A settled picture handed over and not shown yet: the frame of its
+    /// key presents it.
+    settled: Option<CachedFrame>,
+    /// The settled picture each viewer shows, by its layer: kept whatever
+    /// other viewers' frames take the cache's room, so a paused viewer
+    /// asked to draw again presents it again instead of being drawn and
+    /// settled a second time. Let go with the kept frames (a font or tone
+    /// change, the idle release).
+    showing: Vec<(usize, CachedFrame)>,
     /// The media of the scenes drawn lately ([`Engine::observed_inputs`]).
     media_seen: Vec<MediaSeen>,
+    /// How long a look at the media stands (a test holds it open).
+    #[cfg(test)]
+    pub(crate) media_look: Duration,
     offscreen: Option<metal::Texture>,
     /// A capture of an SDR view: the frame presented without the delivery clip.
     capture_target: Option<metal::Texture>,
@@ -433,8 +515,9 @@ pub struct Engine {
     pub(crate) compat: Option<Arc<crate::compat::CompatStores>>,
     /// The store of the document whose frame is rendering.
     compat_document: Option<Arc<crate::compat::CompatStore>>,
-    /// The peaks of the content on screen, and the output tone of its frames.
-    hdr: Option<((u64, u64, String), Option<crate::color::HdrView>)>,
+    /// The peaks of the content on screen as its media were observed, and
+    /// the output tone of its frames.
+    hdr: Option<(HdrOf, Option<crate::color::HdrView>)>,
     output_tone: Option<pm_render::OutputTone>,
     /// Where the viewer's analysis goes, while a Scopes panel is showing.
     pub scope_frames: Option<(
@@ -454,9 +537,14 @@ pub struct Engine {
     memory_client: crate::memory::Registration,
     memory_request: Arc<std::sync::atomic::AtomicU64>,
     budgeted_surfaces: u64,
+    /// The settling renderer's part of the grant ([`split_for_settling`]).
+    settle_budget: u64,
     /// PM_SCRUB_EXTRA_MIB: the borrowed scrub allowance in force (bytes).
     budgeted_extra: u64,
 }
+/// What an HDR view is of: content, revision, composition, and the observed
+/// inputs its media were looked at under.
+type HdrOf = (u64, u64, String, u64);
 type Waker = Arc<std::sync::Mutex<Option<std::sync::mpsc::SyncSender<()>>>>;
 fn lose(lost: &AtomicBool, waker: &Waker) {
     lost.store(true, std::sync::atomic::Ordering::Release);
@@ -503,15 +591,21 @@ pub struct Submission {
 impl Engine {
     pub fn memory_usage(&self) -> crate::memory::CacheUsage {
         let media = self.renderer.media_usage();
+        // With what the settling renderer holds between its pictures.
+        let settling = self
+            .settler
+            .as_ref()
+            .map(|settler| settler.held())
+            .unwrap_or_default();
         crate::memory::CacheUsage {
-            target_pool_bytes: self.renderer.target_pool_bytes(),
+            target_pool_bytes: self.renderer.target_pool_bytes() + settling.target_pool,
             target_pool_idle: self.renderer.target_pool_idle(),
             targets_created: self.renderer.target_pool_created(),
-            image_bytes: self.renderer.image_cache_bytes(),
+            image_bytes: self.renderer.image_cache_bytes() + settling.images,
             still_prefetch_bytes: self.renderer.still_prefetch_bytes(),
-            converted_frame_bytes: self.renderer.converted_frame_bytes(),
-            decoded_frame_bytes: media.frame_cache as u64,
-            decoder_bytes: media.decoders as u64,
+            converted_frame_bytes: self.renderer.converted_frame_bytes() + settling.converted,
+            decoded_frame_bytes: media.frame_cache as u64 + settling.frames,
+            decoder_bytes: media.decoders as u64 + settling.decoders,
             decoder_sessions: media.sessions,
             decoder_pool_free_bytes: media.pool.free_bytes as u64,
             disk_read_ahead_bytes: self.disk.as_ref().map_or(0, |disk| disk.ready_bytes()),
@@ -520,17 +614,25 @@ impl Engine {
                 .iter()
                 .map(|s| u64::from(s.size.width) * u64::from(s.size.height) * 8)
                 .sum(),
-            text_bytes: self.renderer.text_cache_bytes(),
-            vector_bytes: self.renderer.vector_cache_bytes(),
-            pyramid_bytes: self.renderer.pyramid_bytes(),
+            text_bytes: self.renderer.text_cache_bytes() + settling.text,
+            // (The settler's decode service and 3D residency are counted
+            // with the engine's below.)
+            vector_bytes: self.renderer.vector_cache_bytes() + settling.vector,
+            pyramid_bytes: self.renderer.pyramid_bytes() + settling.pyramids,
             geometry_bytes: self.renderer.scene3d_resident().mesh_bytes
-                + self.renderer.scene3d_resident().map_bytes,
+                + self.renderer.scene3d_resident().map_bytes
+                + settling.geometry,
             binding_bytes: self.renderer.binding_cache_bytes(),
             gpu_allocated_bytes: self.metal.current_allocated_size(),
             scrub_extra_bytes: self.budgeted_extra,
             // Counted by the service across engine rebuilds.
             project_releases: 0,
         }
+    }
+
+    /// What the settling renderer holds, and its peak and budget.
+    pub(crate) fn settler_held(&self) -> Option<crate::settle::Held> {
+        self.settler.as_ref().map(|settler| settler.held())
     }
 
     pub fn release_idle_memory(&mut self) {
@@ -543,7 +645,7 @@ impl Engine {
         self.renderer.release_idle_targets();
         self.renderer.release_idle_media();
         self.renderer.trim(0);
-        self.cache.clear();
+        self.clear_cache();
         self.disk_next = None;
         self.pool.retain(|surface| Arc::strong_count(surface) > 1);
         self.offscreen = None;
@@ -568,6 +670,9 @@ impl Engine {
     fn release_project_memory_inner(&mut self) {
         self.release_idle_memory_inner();
         self.renderer.release_project_memory();
+        if let Some(settler) = &self.settler {
+            settler.forget();
+        }
         self.media_seen.clear();
         self.compat_document = None;
         self.resources = Arc::default();
@@ -620,7 +725,8 @@ impl Engine {
         let surfaces = self.memory_usage().surface_bytes;
         let share = self.memory_client.grant();
         let extra = self.scrub_extra();
-        if request != u64::MAX || surfaces != self.budgeted_surfaces || extra != self.budgeted_extra {
+        if request != u64::MAX || surfaces != self.budgeted_surfaces || extra != self.budgeted_extra
+        {
             self.budgeted_extra = extra;
             // A traced viewer logs why its caches are trimmed (diagnostics).
             if crate::trace::enabled() {
@@ -644,6 +750,13 @@ impl Engine {
             } else {
                 share.saturating_sub(surfaces)
             };
+            // The settling renderer's kept caches have their part of the
+            // same grant ([`crate::settle`]); the worker's divide the rest.
+            let (cache, settling) = split_for_settling(cache);
+            self.settle_budget = settling;
+            if let Some(settler) = &self.settler {
+                settler.budget(settling);
+            }
             // PM_FIX_SHARES: the remainder after output frames favours
             // decoded frames (35 %) over stills (10 %); the parts still sum
             // to the grant.
@@ -657,7 +770,8 @@ impl Engine {
                     decoders: knob("PM_ABL_DECODERS_MIB")
                         .map_or((cache / 4) as usize, |m| (m << 20) as usize),
                 });
-            self.renderer.set_image_cache_budget(cache * image_part / 100);
+            self.renderer
+                .set_image_cache_budget(cache * image_part / 100);
             self.renderer.set_converted_frame_budget(
                 knob("PM_ABL_CONVERTED_MIB").map_or(cache / 10, |m| m << 20) + extra * 4 / 10,
             );
@@ -665,8 +779,19 @@ impl Engine {
             self.renderer.set_vector_cache_budget(cache / 20, 512);
             self.renderer.trim(cache / 20);
             if request != u64::MAX {
+                // The kept frames go; a settled picture handed over and
+                // about to be shown is not drawn a second time for a trim.
                 self.cache.clear();
                 self.pool.retain(|s| Arc::strong_count(s) > 1);
+            }
+            if request != u64::MAX || crate::memory::pressure() == crate::memory::Pressure::Critical
+            {
+                // The settled picture being drawn gives way (it is asked
+                // again once its viewer rests), and the settler lets go of
+                // what it keeps.
+                if let Some(settler) = &self.settler {
+                    settler.release();
+                }
             }
             if crate::memory::pressure() == crate::memory::Pressure::Critical {
                 self.release_idle_memory();
@@ -822,6 +947,20 @@ impl Engine {
         let memory_client = crate::memory::Registration::new(12, move |share, _| {
             pending.store(share, std::sync::atomic::Ordering::Release);
         });
+        // Tests share one translated-shader folder per process, as the app
+        // keeps one per profile: without one, every engine a test makes
+        // translates every built-in shader again (tens of seconds each in
+        // a debug build on a loaded machine).
+        #[cfg(test)]
+        let shader_cache = shader_cache.or_else(|| {
+            static SHARED: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+            Some(
+                SHARED
+                    .get_or_init(|| tempfile::tempdir().expect("a folder for translated shaders"))
+                    .path()
+                    .to_owned(),
+            )
+        });
         let mut renderer = Renderer::new(gpu.device.clone(), gpu.queue.clone());
         renderer.apply_media_lease(pm_media::decode::service::MediaLease {
             frame_cache: 24 << 20,
@@ -854,12 +993,16 @@ impl Engine {
             pipeline,
             pool: Vec::with_capacity(4),
             cache: VecDeque::with_capacity(4),
+            settler: None,
+            settle_fonts: None,
+            settled: None,
+            showing: Vec::new(),
             media_seen: Vec::new(),
+            #[cfg(test)]
+            media_look: crate::render_cache::MEDIA_RECHECK,
             offscreen: None,
             capture_target: None,
             cache_enabled: true,
-            strip: None,
-            refine_bands: 0,
             studio_content: None,
             studio_progress: None,
             studio_preview: crate::studio::Preview::debug_default().map_err(anyhow::Error::msg)?,
@@ -886,6 +1029,7 @@ impl Engine {
             memory_client,
             memory_request,
             budgeted_surfaces: u64::MAX,
+            settle_budget: split_for_settling(DEFAULT_GRANT).1,
             budgeted_extra: 0,
         })
     }
@@ -911,6 +1055,10 @@ impl Engine {
         self.compat_document.as_ref()
     }
     pub fn set_fonts(&mut self, fonts: pm_render::text::host::RenderFonts) {
+        // The settling renderer's fonts: the same broker with a health of
+        // its own, and a renderer made again to install them.
+        self.settle_fonts = Some(fonts.sibling());
+        self.settler = None;
         self.fonts = Some(fonts);
         self.font_generation = None;
         self.clear_cache();
@@ -926,19 +1074,14 @@ impl Engine {
         if let Some(fonts) = &self.fonts
             && fonts.sync(&mut self.renderer, &mut self.font_generation)
         {
-            self.cache.clear();
+            self.clear_cache();
         }
     }
+    /// Every kept picture goes, a settled one not shown yet with them.
     pub fn clear_cache(&mut self) {
         self.cache.clear();
-    }
-    /// A settled paused frame read its stills whole, as an export does. Its
-    /// picture is kept; the originals are not (a capture's stay within the
-    /// image budget, for the capture after it).
-    fn release_final_stills(&mut self, scene: &Scene, spec: &FrameSpec) {
-        if !spec.exact && spec.final_picture(scene) {
-            self.renderer.release_whole_stills();
-        }
+        self.settled = None;
+        self.showing.clear();
     }
     /// The key a frame of `spec` is kept in memory under.
     fn cache_key(
@@ -957,9 +1100,20 @@ impl Engine {
             moment: spec.moment,
             scale: spec.scale.to_bits(),
             sampling: spec.sampling(),
+            finished: spec.final_picture(scene),
             inputs: self.observed_inputs(scene),
+            tone: tone_id(self.output_tone),
+            fonts: self.font_generation,
+            resources: self.resources.generation,
             studio_preview: self.studio_preview,
             studio_view: self.studio_view.key(),
+        }
+    }
+    /// Whether `scene` draws a 3D scene (path traced on this thread).
+    pub(crate) fn draws_studio(&self, scene: &Scene) -> bool {
+        match &self.disk {
+            Some(disk) => disk.draws_studio(scene),
+            None => crate::frame_inputs::draws_studio(&scene.doc, &scene.comp),
         }
     }
     /// What a frame of `scene` reads besides its document, as observed: its
@@ -967,7 +1121,9 @@ impl Engine {
     /// and the override wrappers answering. A frame kept in memory is the
     /// picture of one such state, as a frame on disk is: a file saved again
     /// by another app is another state, whose frames are drawn. (Fonts and
-    /// the output tone retire every kept frame when they change.)
+    /// the output tone retire every kept frame when they change, and are in
+    /// the key too: a picture finished off this thread after they moved
+    /// is never found under the new state.)
     fn observed_inputs(&mut self, scene: &Scene) -> u64 {
         use std::hash::{Hash, Hasher};
         let media = self.observed_media(scene);
@@ -980,25 +1136,32 @@ impl Engine {
         (media, overrides).hash(&mut hash);
         hash.finish()
     }
-    /// The stamps of `scene`'s media files, as observed (looked at every
-    /// 2 s). The 3D source is attached for one such state too: it keeps
-    /// each model and environment file it has read.
+    /// The versions of `scene`'s media files, as observed (looked at every
+    /// 2 s), as a digest. The 3D source is attached for one such state too:
+    /// it keeps each model and environment file it has read.
     fn observed_media(&mut self, scene: &Scene) -> u64 {
-        let at = self
-            .media_seen
-            .iter()
-            .position(|seen| Arc::ptr_eq(&seen.media, &scene.media) || seen.media == scene.media);
-        let fresh = at.is_some_and(|at| {
-            self.media_seen[at].looked.elapsed() < crate::render_cache::MEDIA_RECHECK
-        });
+        let at = self.media_seen_at(scene);
+        #[cfg(test)]
+        let stands = self.media_look;
+        #[cfg(not(test))]
+        let stands = crate::render_cache::MEDIA_RECHECK;
+        let fresh = at.is_some_and(|at| self.media_seen[at].looked.elapsed() < stands);
         if let (Some(at), true) = (at, fresh) {
-            self.media_seen[at].identity
+            self.media_seen[at].identity()
         } else {
-            let identity = match &self.disk {
-                Some(disk) => disk.media_identity(&scene.media),
-                None => crate::render_cache::media_identity(&scene.media, None),
+            // With the media, the font files read: one rewritten in place
+            // counts as a change of the installed fonts.
+            pm_text::system_fonts::refresh();
+            let seen = MediaSeen {
+                media: scene.media.clone(),
+                stamps: match &self.disk {
+                    Some(disk) => disk.media_stamps(&scene.media),
+                    None => crate::render_cache::stamps(&scene.media, None),
+                },
+                looked: Instant::now(),
             };
-            let before = at.map(|at| self.media_seen.remove(at).identity);
+            let identity = seen.identity();
+            let before = at.map(|at| self.media_seen.remove(at).identity());
             if before.is_some_and(|before| before != identity) {
                 // Kept draws name their files, not what was in them.
                 self.renderer.clear_draw_reuse();
@@ -1007,13 +1170,44 @@ impl Engine {
             if self.media_seen.len() >= 4 {
                 self.media_seen.remove(0);
             }
-            self.media_seen.push(MediaSeen {
-                media: scene.media.clone(),
-                identity,
-                looked: Instant::now(),
-            });
+            self.media_seen.push(seen);
             identity
         }
+    }
+    fn media_seen_at(&self, scene: &Scene) -> Option<usize> {
+        self.media_seen
+            .iter()
+            .position(|seen| Arc::ptr_eq(&seen.media, &scene.media) || seen.media == scene.media)
+    }
+    /// Whether a frame of `scene` just rendered read its media as they
+    /// were last looked at (`reads`: `pm_render::media::take_reads`): only
+    /// then is it kept under the key taken from that look. A file saved
+    /// again within the two seconds between looks is drawn (the frame is
+    /// shown) but not kept as a frame of the file as it was, and the media
+    /// are looked at again for the next frame.
+    fn reads_observed(
+        &mut self,
+        scene: &Scene,
+        reads: &[(
+            std::path::PathBuf,
+            Option<pm_text::file_version::FileVersion>,
+        )],
+    ) -> bool {
+        let Some(at) = self.media_seen_at(scene) else {
+            return false;
+        };
+        let content_named = self.disk.as_ref().and_then(|disk| disk.content_named());
+        let observed = crate::render_cache::reads_are(
+            reads,
+            &self.media_seen[at].stamps,
+            content_named.as_deref(),
+        )
+        .is_ok();
+        if !observed {
+            self.media_seen.remove(at);
+            self.renderer.clear_draw_reuse();
+        }
+        observed
     }
     /// Changes when a frame a scrub or playback render missed has decoded.
     /// The frame about to be drawn stops waiting for a still being read
@@ -1106,8 +1300,6 @@ impl Engine {
             .map(|prepared| prepared.videos)
             .unwrap_or_default()
     }
-    /// The extension definitions the next frames render with (the viewer's
-    /// pinned resource snapshot). A new snapshot installs them again.
     /// The definitions this engine draws with (the render cache's fingerprint).
     pub(crate) fn definitions(&self) -> &[pm_protocol::definitions::DefinitionSnapshot] {
         &self.resources.definitions
@@ -1116,10 +1308,15 @@ impl Engine {
     pub(crate) fn definitions_pending(&self) -> bool {
         self.resources.pending
     }
+    /// The definitions the next frames draw with. The kept frames stay: a
+    /// frame's key carries its viewer's content identity, which is another
+    /// one whenever that viewer's resources change, and no other viewer's.
+    /// (Dropping them here dropped every kept frame each time the worker
+    /// turned from one project's viewer to another's: a paused window
+    /// beside a playing one was drawn again at every turn.)
     pub fn set_resources(&mut self, resources: Arc<crate::resources::ResourceSnapshot>) {
         if !crate::resources::ResourceSnapshot::same_pins(&self.resources, &resources) {
             self.studio_content = None;
-            self.cache.clear();
         }
         self.resources = resources;
     }
@@ -1133,12 +1330,12 @@ impl Engine {
     }
     #[cfg(feature = "kernel")]
     pub(crate) fn start_export_calibration(
-        &mut self, scene: &Scene, time: Ticks, size: Size, frames: u64, render_scale:f32,
+        &mut self, scene: &Scene, time: Ticks, size: Size, frames: u64, render_scale:f32,wake:std::sync::mpsc::SyncSender<()>,
     ) -> Result<crate::export_estimate::Calibration> {
         self.sync_studio(scene, time)?;
         crate::export_estimate::Calibration::new(
             self.gpu.device.clone(), self.gpu.queue.clone(), scene, time, size, frames,render_scale,
-            self.renderer.definitions(), self.fonts.as_ref(),
+            self.renderer.definitions(), self.fonts.as_ref(),wake,
         ).map_err(anyhow::Error::msg)
     }
     pub(crate) fn pick_surface(
@@ -1230,20 +1427,38 @@ impl Engine {
         }
         Ok(())
     }
+    /// The output tone of `scene`'s frames as its media are now observed:
+    /// what the disk render cache's identity takes
+    /// ([`Self::tone_identity`]), before the frame that draws with it.
+    pub(crate) fn sync_tone(&mut self, scene: &Scene) {
+        self.sync_hdr(scene);
+    }
     /// The HDR view of this content, and the frame cache kept to its tone.
+    /// The view reads the media's own peaks: it is of the media as observed
+    /// ([`Self::observed_inputs`]), so a clip replaced on disk by one with
+    /// another peak is tone-mapped with its own.
     fn sync_hdr(&mut self, scene: &Scene) -> Option<crate::color::HdrView> {
-        let key = (scene.content, scene.doc.revision(), scene.comp.clone());
+        let view = self.hdr_view(scene);
+        let tone = view.and_then(|v| v.tone(self.mastering));
+        if tone != self.output_tone {
+            self.output_tone = tone;
+            self.clear_cache();
+        }
+        view
+    }
+    /// The HDR view of this content (kept for its state).
+    fn hdr_view(&mut self, scene: &Scene) -> Option<crate::color::HdrView> {
+        let key = (
+            scene.content,
+            scene.doc.revision(),
+            scene.comp.clone(),
+            self.observed_inputs(scene),
+        );
         if self.hdr.as_ref().is_none_or(|(k, _)| *k != key) {
             let view = crate::color::HdrView::of(&scene.doc, &scene.comp, &scene.media);
             self.hdr = Some((key, view));
         }
-        let view = self.hdr.as_ref().and_then(|(_, view)| *view);
-        let tone = view.and_then(|v| v.tone(self.mastering));
-        if tone != self.output_tone {
-            self.output_tone = tone;
-            self.cache.clear();
-        }
-        view
+        self.hdr.as_ref().and_then(|(_, view)| *view)
     }
     /// A new tap analyzes the very next frame.
     pub fn scopes_changed(&mut self) {
@@ -1340,14 +1555,33 @@ impl Engine {
         // A revision, size or observed-input change retires all old cached
         // frames. Leases held by submitted consumers still protect their
         // storage until completion.
-        self.cache
-            .retain(|c| c.key.content != key.content || c.key.same_content(key));
-        let hit = (self.cache_enabled && !spec.exact)
-            .then(|| {
-                self.cache
-                    .iter()
-                    .position(|c| c.key == key && c.composition == scene.comp)
-            })
+        let current = |c: &CachedFrame| c.key.content != key.content || c.key.same_content(key);
+        // A frame is of its key and its composition.
+        let of = |c: &CachedFrame| c.key == key && c.composition == scene.comp;
+        self.cache.retain(current);
+        self.showing.retain(|(_, c)| current(c));
+        if self.settled.as_ref().is_some_and(|c| !current(c)) {
+            self.settled = None;
+        }
+        // A settled picture handed over is shown by the frame of its key,
+        // and stays its viewer's from then on.
+        let viewer = layer.map_or(0, |layer| layer.as_ptr() as usize);
+        if !spec.exact
+            && let Some(handed) = self.settled.take_if(|c| of(c))
+        {
+            self.showing.retain(|(of, _)| *of != viewer);
+            // A main viewer and a popout of each of two projects.
+            if self.showing.len() >= 4 {
+                self.showing.remove(0);
+            }
+            self.showing.push((viewer, handed));
+        }
+        let shown = (!spec.exact)
+            .then(|| self.showing.iter().find(|(_, c)| of(c)))
+            .flatten()
+            .map(|(_, c)| (c.surface.clone(), c.failures.clone()));
+        let hit = (self.cache_enabled && !spec.exact && shown.is_none())
+            .then(|| self.cache.iter().position(of))
             .flatten();
         let mut stand_ins = false;
         let mut compat_late = Vec::new();
@@ -1361,7 +1595,7 @@ impl Engine {
         let canvas = output.crop.map_or((output.width, output.height), |c| {
             (c.canvas_width, c.canvas_height)
         });
-        let looked = hit.is_none() && !spec.exact;
+        let looked = hit.is_none() && shown.is_none() && !spec.exact;
         // A playing or paused frame waits a moment for its frame on disk
         // rather than drawing what was rendered because it can't be drawn
         // in time (a dragged one never waits).
@@ -1439,6 +1673,9 @@ impl Engine {
         let (surface, failures) = if let Some(next) = uploaded {
             trace.lock().unwrap().cache_hit = true;
             (next.surface, Arc::from(Vec::new()))
+        } else if let Some(shown) = shown {
+            trace.lock().unwrap().cache_hit = true;
+            shown
         } else if let Some(index) = hit {
             let entry = self.cache.remove(index).unwrap();
             let found = (entry.surface.clone(), entry.failures.clone());
@@ -1459,6 +1696,14 @@ impl Engine {
                 drop(t);
                 (surface, Arc::from(Vec::new()))
             } else {
+                // A settled picture is never drawn on this thread: the
+                // viewer keeps its preview until one is handed over. A
+                // path-traced 3D scene's is: it is traced whole, with the
+                // viewer's tier, camera and progress, as the worker draws
+                // every 3D picture.
+                if !spec.exact && spec.final_picture(scene) && !self.draws_studio(scene) {
+                    return Err(SettledPending.into());
+                }
                 let target = Target::wrap(surface.texture.clone());
                 let mut request = spec.request(scene)?;
                 request.output_tone = self.output_tone;
@@ -1493,6 +1738,7 @@ impl Engine {
                 trace.lock().unwrap().render_start = now();
                 let cpu_start = crate::trace::thread_cpu_ms();
                 let work = trace.lock().unwrap().count_work.then(pm_perf::snapshot);
+                pm_render::media::note_reads();
                 let rendered = self.renderer.render_into(
                     &scene.doc,
                     &scene.comp,
@@ -1502,6 +1748,7 @@ impl Engine {
                     &target,
                     None,
                 );
+                let reads = pm_render::media::take_reads();
                 {
                     let mut t = trace.lock().unwrap();
                     t.render_submitted = now();
@@ -1521,7 +1768,6 @@ impl Engine {
                     .unwrap_or_default();
                 let rendered = rendered?;
                 self.renderer.trim_submitted_frame_caches();
-                self.release_final_stills(scene, &spec);
                 if let Some(error) = self.failed.lock().unwrap().take() {
                     bail!("The GPU refused this frame: {error}");
                 }
@@ -1530,8 +1776,14 @@ impl Engine {
                 }
                 let failures: Arc<[LayerFailure]> = rendered.failures.into();
                 stand_ins = !rendered.stand_ins.is_empty() || !compat_late.is_empty();
-                // A frame with stand-ins is not the exact picture of its time.
-                if self.cache_enabled && !spec.exact && !stand_ins {
+                // A frame with stand-ins is not the exact picture of its
+                // time, and one that read another version of a file than
+                // the one its key was taken from is not that key's.
+                if self.cache_enabled
+                    && !spec.exact
+                    && !stand_ins
+                    && self.reads_observed(scene, &reads)
+                {
                     self.cache.push_back(CachedFrame {
                         key,
                         composition: scene.comp.clone(),
@@ -1763,207 +2015,187 @@ impl Engine {
             }
         })
     }
-    /// Draws a paused picture's refinement (`spec`, at the composition's
-    /// size) into the frame cache in bands, as background fills submit
-    /// them ([`crate::jobs::Costs`]): each band is waited for, then `stop`
-    /// is asked, so a newer interaction waits behind at most one band
-    /// (Metal cannot preempt a submission). Where bands cost about a whole
-    /// frame (each band builds the frame's plan; a precomp renders whole for
-    /// any region), the rest draws whole, and so do later refinements with
-    /// the same `costs`. The
-    /// next [`Engine::frame`] of `spec` presents it from the cache.
-    /// `Ok(false)`: stopped; `Ok(true)`: the frame will find it, or draws
-    /// it itself (a cache that's off, a stand-in that isn't exact).
-    pub fn refine(
+    /// Asks for a paused viewer's settled picture (`spec`: the final
+    /// picture of its time, [`FrameSpec::final_picture`]): drawn off this
+    /// thread by [`crate::settle`], in slices `gate` admits, into a surface
+    /// of this engine. [`Engine::take_settled`] hands it over when it is
+    /// done; the [`Engine::frame`] of `spec` then presents it.
+    pub(crate) fn settle(
         &mut self,
         scene: &Scene,
         spec: FrameSpec,
-        costs: &mut crate::jobs::Costs,
-        stop: &dyn Fn() -> bool,
-    ) -> Result<bool> {
-        use pm_export::render::BAND_ROWS;
-        use pm_protocol::common::PixelRect;
-        self.refine_bands = 0;
-        if !self.cache_enabled {
-            return Ok(true);
-        }
-        self.sync_studio(scene, spec.time)?;
+        gate: pm_render::slices::Gate,
+    ) -> Result<Asked> {
         self.sync_fonts();
+        self.sync_hdr(scene);
         let size = spec.size_in(scene);
         let key = self.cache_key(scene, &spec, size);
-        if self
-            .cache
-            .iter()
-            .any(|c| c.key == key && c.composition == scene.comp)
+        let of = |c: &CachedFrame| c.key == key && c.composition == scene.comp;
+        if self.settled.as_ref().is_some_and(of)
+            || self.showing.iter().any(|(_, c)| of(c))
+            || (self.cache_enabled && self.cache.iter().any(of))
         {
-            return Ok(true);
+            return Ok(Asked::Ready);
+        }
+        if self.settler.is_none() {
+            self.settler = Some(crate::settle::Settler::spawn(
+                &self.gpu,
+                self.renderer.effects().sibling(),
+                self.waker.clone(),
+                self.settle_budget,
+            )?);
+        }
+        if self.settler.as_ref().is_some_and(|settler| settler.busy()) {
+            return Ok(Asked::Busy);
+        }
+        // One that panicked is made again ([`crate::settle::Settler::dead`]).
+        if self.settler.as_ref().is_some_and(|settler| settler.dead()) {
+            self.settler = Some(crate::settle::Settler::spawn(
+                &self.gpu,
+                self.renderer.effects().sibling(),
+                self.waker.clone(),
+                self.settle_budget,
+            )?);
         }
         let mut request = spec.request(scene)?;
         request.output_tone = self.output_tone;
-        let area = request.region.unwrap_or(PixelRect {
-            x: 0,
-            y: 0,
-            width: request.output_size.width,
-            height: request.output_size.height,
-        });
-        let total = area.height.div_ceil(BAND_ROWS).max(1);
-        costs.frame_units = costs.frame_units.max(total);
-        let whole_at_once = costs.indivisible
-            || costs
-                .whole_us
-                .is_some_and(|us| us <= crate::jobs::BAND_BUDGET_US);
-        if whole_at_once {
-            return Ok(true);
-        }
         let surface = self.cache_surface(size)?;
-        // Drawn as `frame` draws this spec: the cached picture stands for it.
-        self.renderer
-            .set_preview_media(spec.preview_stills(scene), spec.preview_video());
-        self.renderer.set_draw_reuse(!spec.exact);
-        self.renderer.set_scrub(false);
-        self.renderer.set_playback(None);
-        self.renderer.set_isolate_layers(true);
-        if let Some(store) = &self.compat_document {
-            store.begin_frame(Moment::Paused);
-        }
-        let drawn = self.refine_bands(
-            scene, spec.time, &request, area, &surface, costs, total, stop,
-        );
-        self.renderer.set_isolate_layers(false);
-        self.release_final_stills(scene, &spec);
-        let late = self
-            .compat_document
-            .as_ref()
-            .map(|store| store.end_frame())
-            .unwrap_or_default();
-        let Some(failures) = drawn? else {
-            return Ok(false);
+        let job = crate::settle::Job {
+            key,
+            scene: scene.clone(),
+            spec,
+            request,
+            surface,
+            resources: self.resources.clone(),
+            compat: self.compat_document.clone(),
+            fonts: self.settle_fonts.clone(),
+            gate,
         };
-        // As for any frame: a render that met a font failure is not kept,
-        // and fonts are installed afresh before the next.
-        if let Some(error) = self.fonts.as_ref().and_then(|f| f.after_render()) {
-            return Err(FontsPending(error).into());
-        }
-        // A stand-in is not the exact picture: the frame draws it itself.
-        if late.is_empty() {
-            self.cache.push_back(CachedFrame {
-                key,
-                composition: scene.comp.clone(),
-                surface,
-                failures: failures.into(),
-            });
-        }
-        Ok(true)
+        self.settler.as_ref().expect("made above").draw(job);
+        Ok(Asked::Started)
     }
-    /// A band's own target, kept for the next band of its size.
-    fn band_surface(&mut self, width: u32, height: u32) -> Result<Arc<ExportedSurface>> {
-        let size = Size::new(width, height);
-        if let Some(strip) = self.strip.as_ref().filter(|s| s.size == size) {
-            return Ok(strip.clone());
-        }
-        let strip = Arc::new(ExportedSurface::create(
-            &self.gpu.device,
-            &SurfaceRequest {
-                size,
-                format: SurfaceFormat::Rgba16Float,
-            },
-        )?);
-        self.strip = Some(strip.clone());
-        Ok(strip)
+    /// The settled picture that finished since the last call, if one did.
+    /// One that is the exact picture of the current state (the media as
+    /// they were last looked at, the view's tone, the fonts and the
+    /// contributed definitions now) is kept for the frame of its key; one
+    /// of a state that moved while it was drawn (after its last look, even
+    /// during its last GPU work) is not kept anywhere.
+    ///
+    /// `now`: the asking viewer's mastering view and resources as they are
+    /// now (`None`: it is gone). This engine's own are whichever viewer's it
+    /// drew last.
+    pub(crate) fn take_settled(
+        &mut self,
+        now: Option<(crate::color::Mastering, u64)>,
+    ) -> Option<(crate::settle::Timing, Settled)> {
+        use crate::settle::Outcome;
+        let done = self.settler.as_ref()?.take()?;
+        let current = matches!(done.outcome, Outcome::Drawn { .. })
+            && now.is_some_and(|now| self.is_current(&done, now));
+        let end = match done.outcome {
+            Outcome::Drawn { failures, exact } => {
+                if let Some(error) = self.failed.lock().unwrap().take() {
+                    Settled::Failed(anyhow!("The GPU refused this frame: {error}"))
+                } else if exact && current && self.reads_observed(&done.scene, &done.reads) {
+                    self.settled = Some(CachedFrame {
+                        key: done.key,
+                        composition: done.scene.comp.clone(),
+                        surface: done.surface,
+                        failures: failures.into(),
+                    });
+                    Settled::Kept
+                } else {
+                    Settled::Unkept
+                }
+            }
+            Outcome::GaveWay => Settled::GaveWay,
+            Outcome::Pending(needs) => Settled::Pending(needs),
+            Outcome::Failed(error) => Settled::Failed(error),
+        };
+        Some((done.timing, end))
     }
-    /// [`Engine::refine`]'s bands: `None` when `stop` said so.
-    #[allow(clippy::too_many_arguments)]
-    fn refine_bands(
+    /// Whether a finished settled picture is of the state now: the view's
+    /// tone as its mastering makes it now, the fonts the broker has now
+    /// (and the ones it was drawn with), the contributed definitions.
+    fn is_current(
+        &mut self,
+        done: &crate::settle::Settled,
+        (mastering, resources): (crate::color::Mastering, u64),
+    ) -> bool {
+        // A font activated while it was drawn is seen here, not only with
+        // the next frame: the picture never outlives the fonts it is of.
+        self.sync_fonts();
+        let tone = self
+            .hdr_view(&done.scene)
+            .and_then(|view| view.tone(mastering));
+        done.key.tone == tone_id(tone)
+            && done.key.fonts == self.font_generation
+            && done.fonts == done.key.fonts
+            && done.key.resources == resources
+    }
+    /// A settled picture handed over that is not its viewer's picture any
+    /// more: kept beside the drawn frames, for when the viewer is back at
+    /// its time.
+    pub(crate) fn shelve_settled(&mut self) {
+        if let Some(kept) = self.settled.take().filter(|_| self.cache_enabled) {
+            self.cache.retain(|c| c.key != kept.key);
+            self.cache.push_back(kept);
+        }
+    }
+    /// [`Engine::frame`] for a caller with no worker loop (the windowless
+    /// renderer, tests): a settled picture is asked for and waited for
+    /// here, then presented.
+    pub fn frame_settled(
         &mut self,
         scene: &Scene,
-        spec_time: Ticks,
-        request: &pm_render::RenderRequest,
-        area: pm_protocol::common::PixelRect,
-        surface: &ExportedSurface,
-        costs: &mut crate::jobs::Costs,
-        total: u32,
-        stop: &dyn Fn() -> bool,
-    ) -> Result<Option<Vec<LayerFailure>>> {
-        use pm_export::render::BAND_ROWS;
-        let mut failures = Vec::new();
-        let mut y = 0;
-        while y < area.height {
-            if y > 0 && stop() {
-                return Ok(None);
+        spec: FrameSpec,
+        layer: Option<&metal::MetalLayer>,
+        overlays: &crate::OverlayGeometry,
+        capture: bool,
+        trace: Arc<std::sync::Mutex<Trace>>,
+    ) -> Result<Option<Submission>> {
+        match self.frame(scene, spec, layer, overlays, capture, trace.clone()) {
+            Err(error) if error.is::<SettledPending>() => {
+                self.settle_now(scene, spec, || false)?;
+                self.frame(scene, spec, layer, overlays, capture, trace)
             }
-            let remaining = (area.height - y).div_ceil(BAND_ROWS);
-            let units = costs.bounded(remaining).clamp(1, remaining);
-            let rows = (units * BAND_ROWS).min(area.height - y);
-            let whole = y == 0 && rows == area.height;
-            let mut band = request.clone();
-            band.region = Some(pm_protocol::common::PixelRect {
-                y: area.y + y,
-                height: rows,
-                ..area
-            });
-            let started = std::time::Instant::now();
-            let rendered = if whole {
-                band.region = request.region;
-                self.renderer.render_into(
-                    &scene.doc,
-                    &scene.comp,
-                    spec_time,
-                    &band,
-                    scene.media.as_ref(),
-                    &Target::wrap(surface.texture.clone()),
-                    None,
-                )?
-            } else {
-                let strip = self.band_surface(area.width, rows)?;
-                let rendered = self.renderer.render_into(
-                    &scene.doc,
-                    &scene.comp,
-                    spec_time,
-                    &band,
-                    scene.media.as_ref(),
-                    &Target::wrap(strip.texture.clone()),
-                    None,
-                )?;
-                let mut encoder =
-                    self.gpu
-                        .device
-                        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                            label: Some("refine band"),
-                        });
-                encoder.copy_texture_to_texture(
-                    strip.texture.as_image_copy(),
-                    wgpu::TexelCopyTextureInfo {
-                        texture: &surface.texture,
-                        mip_level: 0,
-                        origin: wgpu::Origin3d { x: 0, y, z: 0 },
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    wgpu::Extent3d {
-                        width: area.width,
-                        height: rows,
-                        depth_or_array_layers: 1,
-                    },
-                );
-                self.gpu.queue.submit([encoder.finish()]);
-                rendered
-            };
-            self.renderer.wait_idle();
-            if let Some(error) = self.failed.lock().unwrap().take() {
-                bail!("The GPU refused this frame: {error}");
-            }
-            costs.record(
-                if whole {
-                    total
-                } else {
-                    rows.div_ceil(BAND_ROWS)
-                },
-                started.elapsed().as_secs_f64() * 1e6,
-            );
-            failures.extend(rendered.failures);
-            self.refine_bands += 1;
-            y += rows;
+            other => other,
         }
-        Ok(Some(failures))
+    }
+    /// The settled picture of `spec`, asked for and waited for. False: it
+    /// gave way (`stop`), or could not be kept.
+    pub(crate) fn settle_now(
+        &mut self,
+        scene: &Scene,
+        spec: FrameSpec,
+        stop: impl Fn() -> bool + Send + Sync + 'static,
+    ) -> Result<bool> {
+        let gate: pm_render::slices::Gate = Arc::new(move |_| stop());
+        loop {
+            let ours = match self.settle(scene, spec, gate.clone())? {
+                Asked::Ready => return Ok(true),
+                Asked::Started => true,
+                // Another picture is being drawn: its end is not this
+                // one's answer; this one is asked again after it.
+                Asked::Busy => false,
+            };
+            let (_, end) = loop {
+                let now = (self.mastering, self.resources.generation);
+                if let Some(done) = self.take_settled(Some(now)) {
+                    break done;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            };
+            if !ours {
+                continue;
+            }
+            match end {
+                Settled::Kept => return Ok(true),
+                Settled::GaveWay | Settled::Unkept => return Ok(false),
+                Settled::Pending(needs) => bail!("waiting for {} override layers", needs.len()),
+                Settled::Failed(error) => return Err(error),
+            }
+        }
     }
     /// The raster override answers a frame at `time` would need and that
     /// are not answered yet, from its plan alone (playback's look-ahead).
@@ -2187,11 +2419,10 @@ mod lifetime_tests {
         broker.set_generation(2);
         assert_eq!(engine.font_generation(), Some(2));
     }
-    /// A refinement whose render met a font failure is not cached: it
-    /// fails as a frame does (transient, fonts installed afresh) and the
-    /// next one is kept.
+    /// A settled picture whose render met a font failure is not kept
+    /// (fonts are installed afresh), and the next one is.
     #[test]
-    fn a_refinement_that_met_a_font_failure_is_not_cached() {
+    fn a_settled_picture_that_met_a_font_failure_is_not_kept() {
         let mut engine = Engine::new(Gpu::new("refine-fonts-test").unwrap()).unwrap();
         let broker = pm_text::host::FontBroker::new();
         engine.set_fonts(pm_render::text::host::RenderFonts::new(broker));
@@ -2208,6 +2439,7 @@ mod lifetime_tests {
         };
         let spec = FrameSpec {
             scale: 4.,
+            exact: false,
             ..FrameSpec::exact(
                 Ticks::from_whole_seconds(1),
                 Output {
@@ -2219,21 +2451,137 @@ mod lifetime_tests {
                 },
             )
         };
+        // The settling renderer's own fonts (the same broker).
         engine
-            .fonts
+            .settle_fonts
             .as_ref()
             .unwrap()
             .health
             .fail("the font host went away".into());
-        let mut costs = crate::jobs::Costs::default();
-        let error = engine
-            .refine(&scene, spec, &mut costs, &|| false)
-            .unwrap_err();
-        assert!(transient(&error), "{error}");
-        assert!(engine.cache.is_empty());
-        let mut costs = crate::jobs::Costs::default();
-        assert!(engine.refine(&scene, spec, &mut costs, &|| false).unwrap());
-        assert_eq!(engine.cache.len(), 1);
+        assert!(!engine.settle_now(&scene, spec, || false).unwrap());
+        assert!(engine.settled.is_none() && engine.cache.is_empty());
+        assert!(engine.settle_now(&scene, spec, || false).unwrap());
+        assert!(engine.settled.is_some());
+    }
+    /// The settling renderer's caches are held to its part of the engine's
+    /// grant and counted with the engine's (its own decode service too); a
+    /// trim request makes it let go of what it keeps between pictures.
+    #[test]
+    fn the_settling_renderer_is_held_to_its_part_of_the_grant() {
+        let mut engine = Engine::new(Gpu::new("settle-grant-test").unwrap()).unwrap();
+        let scene = Scene {
+            doc: Arc::new(pm_model::Document::new(
+                Some(pm_model::canonical::canonical_project(
+                    pm_model::json::parse(include_str!("../tests/fixtures/shapes.json")).unwrap(),
+                )),
+                1,
+            )),
+            comp: "Pshapes-primitives-root".into(),
+            media: Default::default(),
+            content: 1,
+        };
+        let spec = FrameSpec {
+            scale: 4.,
+            exact: false,
+            ..FrameSpec::exact(
+                Ticks::from_whole_seconds(1),
+                Output {
+                    width: 160,
+                    height: 90,
+                    display: 0,
+                    headroom: 1.,
+                    crop: None,
+                },
+            )
+        };
+        assert!(engine.settle_now(&scene, spec, || false).unwrap());
+        let held = |engine: &Engine| engine.settler_held().unwrap();
+        // The grant as governed now: an eighth of what the output surfaces
+        // leave goes to the settler, whose next turn takes it.
+        engine
+            .memory_request
+            .store(1, std::sync::atomic::Ordering::Release);
+        engine.govern_memory();
+        let share = engine.memory_client.grant();
+        let surfaces = engine.memory_usage().surface_bytes;
+        let expected = split_for_settling(share.saturating_sub(surfaces)).1;
+        assert_eq!(engine.settle_budget, expected);
+        let start = Instant::now();
+        while held(&engine).budget != expected {
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "{:?}",
+                held(&engine)
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(held(&engine).peak > 0, "its working set was measured");
+        // After the trim request it keeps nothing of the picture's work.
+        let start = Instant::now();
+        while held(&engine).target_pool + held(&engine).images + held(&engine).converted > 0 {
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "{:?}",
+                held(&engine)
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // And the engine's count includes what it keeps.
+        let usage = engine.memory_usage();
+        let h = held(&engine);
+        assert!(usage.text_bytes >= h.text && usage.decoder_bytes >= h.decoders);
+    }
+    /// A panic while a settled picture is drawn is caught: the picture
+    /// fails with why (its viewer keeps the preview and says so), nothing
+    /// waits for it forever, and the next settled picture is drawn by a
+    /// settler made again.
+    #[test]
+    fn a_panic_while_settling_fails_that_picture_and_settling_goes_on() {
+        let mut engine = Engine::new(Gpu::new("settle-panic-test").unwrap()).unwrap();
+        let scene = |content| Scene {
+            doc: Arc::new(pm_model::Document::new(
+                Some(pm_model::canonical::canonical_project(
+                    pm_model::json::parse(include_str!("../tests/fixtures/shapes.json")).unwrap(),
+                )),
+                1,
+            )),
+            comp: "Pshapes-primitives-root".into(),
+            media: Default::default(),
+            content,
+        };
+        let spec = FrameSpec {
+            scale: 4.,
+            exact: false,
+            ..FrameSpec::exact(
+                Ticks::from_whole_seconds(1),
+                Output {
+                    width: 160,
+                    height: 90,
+                    display: 0,
+                    headroom: 1.,
+                    crop: None,
+                },
+            )
+        };
+        // Nothing may wait for it forever.
+        let answered = Arc::new(AtomicBool::new(false));
+        let watch = answered.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(60));
+            if !watch.load(std::sync::atomic::Ordering::Acquire) {
+                eprintln!("waited a minute for a settled picture whose drawing panicked");
+                std::process::abort();
+            }
+        });
+        let why = engine
+            .settle_now(&scene(crate::settle::PANICS), spec, || false)
+            .expect_err("the picture fails")
+            .to_string();
+        answered.store(true, std::sync::atomic::Ordering::Release);
+        assert!(why.contains("a settled picture panicked"), "{why}");
+        assert!(engine.settled.is_none() && engine.cache.is_empty());
+        assert!(engine.settle_now(&scene(2), spec, || false).unwrap());
+        assert!(engine.settled.is_some());
     }
     #[test]
     fn delayed_metal_completion_retains_the_actual_source_texture() {
@@ -2304,11 +2652,12 @@ mod lifetime_tests {
         command.wait_until_completed();
         assert_eq!(command.status(), metal::MTLCommandBufferStatus::Completed);
     }
-    /// A refinement drawn in bands is the frame drawn whole, pixel for
-    /// pixel; a stop between bands leaves nothing in the cache.
+    /// A settled picture, drawn off this thread in slices, is the frame a
+    /// capture draws whole, pixel for pixel; one that gives way leaves
+    /// nothing behind.
     #[test]
-    fn a_banded_refinement_is_the_whole_frame_and_gives_way_between_bands() {
-        let mut engine = Engine::new(Gpu::new("refine-bands-test").unwrap()).unwrap();
+    fn a_settled_picture_is_the_whole_frame_and_gives_way() {
+        let mut engine = Engine::new(Gpu::new("settle-slices-test").unwrap()).unwrap();
         let doc = pm_model::Document::new(
             Some(pm_model::canonical::canonical_project(
                 pm_model::json::parse(include_str!("../tests/fixtures/shapes.json")).unwrap(),
@@ -2328,50 +2677,73 @@ mod lifetime_tests {
             headroom: 1.,
             crop: None,
         };
-        // Refinement refines the paused viewer's picture; exact reads
-        // (captures) never use the frame cache.
         let spec = FrameSpec {
             scale: 4.,
             exact: false,
             ..FrameSpec::exact(Ticks::from_whole_seconds(1), output)
         };
-        let cached = |engine: &Engine| {
-            let surface = engine.cache.back().unwrap().surface.clone();
+        let read = |engine: &Engine, surface: &ExportedSurface| {
             pm_gpu::readback::read_f32(&engine.gpu.device, &engine.gpu.queue, &surface.texture)
                 .unwrap()
         };
-        // Whole, as a frame draws it.
-        let trace = Arc::new(std::sync::Mutex::new(Trace::default()));
-        while engine
+        // Whole, as a capture draws it on this thread.
+        let capture = FrameSpec {
+            exact: true,
+            ..spec
+        };
+        let drawn = engine
+            .frame(
+                &scene,
+                capture,
+                None,
+                &Default::default(),
+                true,
+                Arc::default(),
+            )
+            .unwrap()
+            .unwrap();
+        drawn.commit();
+        drawn.complete().unwrap();
+        let whole = read(&engine, &drawn.surface);
+        // This thread never draws a settled picture itself.
+        let refused = engine
             .frame(
                 &scene,
                 spec,
                 None,
                 &Default::default(),
                 false,
-                trace.clone(),
+                Arc::default(),
             )
-            .unwrap()
-            .is_none()
-        {}
-        let whole = cached(&engine);
-        engine.cache.clear();
-        // Stopped after its first band: nothing is kept.
-        let mut costs = crate::jobs::Costs::default();
-        assert!(!engine.refine(&scene, spec, &mut costs, &|| true).unwrap());
-        assert!(engine.cache.is_empty());
-        // In bands: the same pixels.
-        let mut costs = crate::jobs::Costs::default();
-        assert!(engine.refine(&scene, spec, &mut costs, &|| false).unwrap());
-        assert_eq!(engine.cache.len(), 1);
-        let banded = cached(&engine);
-        assert_eq!(banded.len(), 640 * 360 * 4);
+            .err()
+            .expect("a settled picture is not drawn on the worker");
+        assert!(refused.is::<SettledPending>() && transient(&refused));
+        // Its viewer asked for something newer: nothing is kept.
+        assert!(!engine.settle_now(&scene, spec, || true).unwrap());
+        assert!(engine.settled.is_none() && engine.cache.is_empty());
+        // In slices: the same pixels, shown by the frame of its key.
+        assert!(engine.settle_now(&scene, spec, || false).unwrap());
+        let sliced = read(&engine, &engine.settled.as_ref().unwrap().surface.clone());
+        assert_eq!(sliced.len(), 640 * 360 * 4);
         let worst = whole
             .iter()
-            .zip(&banded)
+            .zip(&sliced)
             .map(|(a, b)| (a - b).abs())
             .fold(0f32, f32::max);
-        assert!(worst < 1e-3, "banded differs by {worst}");
+        assert!(worst == 0., "the settled picture differs by {worst}");
+        let shown = engine
+            .frame(
+                &scene,
+                spec,
+                None,
+                &Default::default(),
+                false,
+                Arc::default(),
+            )
+            .unwrap()
+            .unwrap();
+        assert!(engine.settled.is_none() && engine.showing.len() == 1);
+        assert!(Arc::ptr_eq(&shown.surface, &engine.showing[0].1.surface));
     }
 
     /// The frame cache holds viewer pictures only. A paused viewer frame at
@@ -2426,18 +2798,21 @@ mod lifetime_tests {
             {}
             trace.lock().unwrap().cache_hit
         };
-        assert!(
-            !draw(&mut engine, viewer),
-            "the first viewer frame is drawn"
-        );
-        assert_eq!(engine.cache.len(), 1, "and kept at its scale");
+        // The viewer's picture at that scale is a settled one: drawn off
+        // this thread, handed over and kept.
+        assert!(engine.settle_now(&scene, viewer, || false).unwrap());
+        assert!(draw(&mut engine, viewer), "the settled picture is shown");
+        assert_eq!(engine.showing.len(), 1, "and kept at its scale");
         assert!(draw(&mut engine, viewer), "the same viewer frame is served");
         for read in 1..=2 {
             assert!(
                 !draw(&mut engine, exact),
                 "exact read {read} took a cached picture"
             );
-            assert_eq!(engine.cache.len(), 1, "exact read {read} was kept");
+            assert!(
+                engine.cache.is_empty() && engine.showing.len() == 1,
+                "exact read {read} was kept"
+            );
         }
         assert!(
             draw(&mut engine, viewer),
@@ -2802,6 +3177,17 @@ mod viewer_output_tests {
     /// `n` white solids `w` px wide, every other `w` px from x = 0, one stop
     /// over white (2.0 encoded), on black, in a 64 × 36 composition.
     fn columns(n: usize, w: f64) -> Scene {
+        columns_in(n, w, "")
+    }
+    /// [`columns`] in an HDR project (1000-nit mastering peak).
+    fn hdr_columns() -> Scene {
+        columns_in(
+            1,
+            64.,
+            r#""color":{"mode":"hdr","masteringPeak":1000},"colorDepth":32,"#,
+        )
+    }
+    fn columns_in(n: usize, w: f64, color: &str) -> Scene {
         let ch = |v: f64| format!(r#"{{"v":{v},"kf":[],"expr":null}}"#);
         let layers = (0..n)
             .map(|i| {
@@ -2829,7 +3215,7 @@ mod viewer_output_tests {
             .collect::<Vec<_>>()
             .join(",");
         let project = format!(
-            r##"{{"id":"P","name":"P","compId":"C","compName":"C","w":64,"h":36,"fps":30,"dur":1,"bg":"#000000",
+            r##"{{"id":"P","name":"P",{color}"compId":"C","compName":"C","w":64,"h":36,"fps":30,"dur":1,"bg":"#000000",
             "layers":[{layers}],"comps":{{}},"assets":{{}},"markers":[],"work":[0,1],"params":{{}}}}"##
         );
         Scene {
@@ -3134,6 +3520,106 @@ mod viewer_output_tests {
             "half white, half black: {shown:?}"
         );
     }
+
+    /// A gate that holds a settled picture at its first submission until
+    /// told to go on: (gate, "it is submitting", "go on").
+    fn held_at_a_submission() -> (
+        pm_render::slices::Gate,
+        std::sync::mpsc::Receiver<()>,
+        std::sync::mpsc::Sender<()>,
+    ) {
+        let (at, submitting) = std::sync::mpsc::channel();
+        let (go, gone) = std::sync::mpsc::channel::<()>();
+        let held = std::sync::Mutex::new(Some((at, gone)));
+        let gate: pm_render::slices::Gate = Arc::new(move |expected: Duration| {
+            if !expected.is_zero()
+                && let Some((at, gone)) = held.lock().unwrap().take()
+            {
+                at.send(()).unwrap();
+                gone.recv().unwrap();
+            }
+            false
+        });
+        (gate, submitting, go)
+    }
+    fn settled_end(engine: &mut Engine) -> Settled {
+        loop {
+            let now = (engine.mastering, engine.resources.generation);
+            if let Some((_, end)) = engine.take_settled(Some(now)) {
+                return end;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+    /// A settled picture that finished under a state that is not current
+    /// any more (the view's tone changed, or a font was activated, while
+    /// its last GPU work ran) is neither shown nor kept: asked again, the
+    /// picture of the current state is drawn, never the old one served.
+    #[test]
+    fn a_settled_picture_of_an_old_tone_or_font_state_is_not_kept() {
+        let mut engine = Engine::new(Gpu::new("settle-stale-state-test").unwrap()).unwrap();
+        let broker = pm_text::host::FontBroker::new();
+        broker.set_generation(1);
+        engine.set_fonts(pm_render::text::host::RenderFonts::new(broker.clone()));
+        let scene = hdr_columns();
+        let spec = FrameSpec {
+            exact: false,
+            ..FrameSpec::exact(Ticks::ZERO, output(64, 36))
+        };
+        let quiet: pm_render::slices::Gate = Arc::new(|_| false);
+        // The view's tone changes during its last submission.
+        engine.mastering = Mastering::Edr;
+        let (gate, submitting, go) = held_at_a_submission();
+        assert!(matches!(
+            engine.settle(&scene, spec, gate).unwrap(),
+            Asked::Started
+        ));
+        let edr = engine.output_tone;
+        submitting.recv().unwrap();
+        engine.mastering = Mastering::LinearP3;
+        engine.sync_tone(&scene);
+        assert_ne!(engine.output_tone, edr, "the SDR view has another tone");
+        go.send(()).unwrap();
+        let end = settled_end(&mut engine);
+        assert!(
+            matches!(end, Settled::Unkept),
+            "kept a picture of the old tone"
+        );
+        engine.shelve_settled();
+        assert!(matches!(
+            engine.settle(&scene, spec, quiet.clone()).unwrap(),
+            Asked::Started
+        ));
+        assert!(matches!(settled_end(&mut engine), Settled::Kept));
+        assert!(matches!(
+            engine.settle(&scene, spec, quiet.clone()).unwrap(),
+            Asked::Ready
+        ));
+        // A font is activated during its last submission.
+        let later = FrameSpec {
+            time: Ticks::new(pm_time::Rate::FPS_30.frame_start(3).unwrap()).unwrap(),
+            ..spec
+        };
+        let (gate, submitting, go) = held_at_a_submission();
+        assert!(matches!(
+            engine.settle(&scene, later, gate).unwrap(),
+            Asked::Started
+        ));
+        submitting.recv().unwrap();
+        broker.set_generation(2);
+        go.send(()).unwrap();
+        let end = settled_end(&mut engine);
+        assert!(
+            matches!(end, Settled::Unkept),
+            "kept a picture of the old fonts"
+        );
+        engine.shelve_settled();
+        assert!(matches!(
+            engine.settle(&scene, later, quiet.clone()).unwrap(),
+            Asked::Started
+        ));
+        assert!(matches!(settled_end(&mut engine), Settled::Kept));
+    }
 }
 
 #[cfg(test)]
@@ -3218,33 +3704,60 @@ mod frame_cache_tests {
             std::thread::sleep(Duration::from_millis(5));
         }
     }
-    /// A playing frame draws a reduced still with the final resampler, as the
-    /// paused frame of the same time and density does: footage and
-    /// precomps don't sharpen when playback stops. (On a drawable half the
-    /// composition's size: the paused frame at the drawable's density is
-    /// the picture shown at once, a preview as the playing frame is. At the
-    /// composition's own size a paused frame is the final picture, drawn
-    /// from the original still.)
+    /// Stopping playback never changes the picture at the moment it stops:
+    /// a playing frame draws a reduced still with the final resampler and
+    /// from the same source as the paused frame shown at once, at the
+    /// composition's own drawable size and at half of it (footage and
+    /// precomps don't sharpen when playback stops). What the paused viewer
+    /// then settles on, once it has rested, is another picture by design:
+    /// the final one, drawn from the original still at the composition's
+    /// size, the picture a capture reads (and an export delivers).
     #[test]
     fn playing_and_paused_frames_resample_alike() {
         let dir = tempfile::tempdir().unwrap();
         let scene = scene(&stripes(dir.path()));
-        let output = Output {
-            width: 64,
-            height: 36,
-            display: 0,
-            headroom: 1.,
-            crop: None,
-        };
-        let spec = |moment| FrameSpec {
-            moment,
-            exact: false,
-            ..FrameSpec::exact(Ticks::ZERO, output)
-        };
-        let mut engine = Engine::new(Gpu::new("playing-resampler").unwrap()).unwrap();
-        let paused = drawn(&mut engine, &scene, spec(Moment::Paused));
-        let playing = drawn(&mut engine, &scene, spec(Moment::Playing));
-        assert_eq!(playing, paused);
+        for (width, height) in [(128, 72), (64, 36)] {
+            let output = Output {
+                width,
+                height,
+                display: 0,
+                headroom: 1.,
+                crop: None,
+            };
+            let spec = |moment| FrameSpec {
+                moment,
+                exact: false,
+                ..FrameSpec::exact(Ticks::ZERO, output)
+            };
+            let mut engine = Engine::new(Gpu::new("playing-resampler").unwrap()).unwrap();
+            let paused = drawn(&mut engine, &scene, spec(Moment::Paused));
+            let playing = drawn(&mut engine, &scene, spec(Moment::Playing));
+            assert_eq!(
+                playing, paused,
+                "{width}×{height}: the picture changes when playback stops"
+            );
+            // Drawn as the worker has it drawn: off its thread, then shown.
+            let settled = FrameSpec {
+                scale: FrameSpec::paused_full_scale(&scene, &output),
+                settled: true,
+                ..spec(Moment::Paused)
+            };
+            assert!(spec(Moment::Paused).settles(&scene) && settled.final_picture(&scene));
+            assert!(engine.settle_now(&scene, settled, || false).unwrap());
+            let settled_picture = drawn(&mut engine, &scene, settled);
+            let capture = drawn(
+                &mut engine,
+                &scene,
+                FrameSpec {
+                    exact: true,
+                    ..settled
+                },
+            );
+            assert_eq!(
+                settled_picture, capture,
+                "{width}×{height}: the settled picture is not the one a capture reads"
+            );
+        }
     }
     /// A rendered frame uploaded ahead of its turn is of one cache state.
     /// When a media file its composition draws from changes on disk, the

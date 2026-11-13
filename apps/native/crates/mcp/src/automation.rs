@@ -35,6 +35,12 @@ pub trait EngineHook: Send + Sync {
     ) -> Result<Value> {
         self.capture(request)
     }
+    fn scene3d_assets(
+        &self,
+        _snapshot: &crate::services::FrozenProject,
+    ) -> Result<Arc<dyn pm_scene3d::geometry::AssetGeometry>> {
+        Ok(Arc::new(pm_scene3d::geometry::NoAssets))
+    }
     fn resolve_media(
         &self,
         _: &crate::services::MediaRequest,
@@ -156,6 +162,7 @@ pub struct Automation {
     pub exports: PathBuf,
     pub active: Option<String>,
     sessions: HashMap<String, SessionHandle>,
+    pending_opens: crate::recovery::PendingOpens,
     subscribers: Vec<mpsc::Sender<AutomationEvent>>,
     pub engine: Option<Arc<dyn EngineHook>>,
     pub surfaces: Option<Arc<dyn SurfaceHook>>,
@@ -220,6 +227,7 @@ impl Automation {
             exports,
             active: None,
             sessions: HashMap::new(),
+            pending_opens: Default::default(),
             subscribers: Vec::new(),
             engine: None,
             surfaces: None,
@@ -298,6 +306,13 @@ impl Automation {
                     path: p.path.clone(),
                 })
             }
+        }
+    }
+    pub(crate) fn scene_geometry(&self, id: &str) -> Result<Arc<dyn pm_scene3d::geometry::AssetGeometry>> {
+        if let Some(assets) = &self.scene3d_assets { return Ok(assets.clone()); }
+        match &self.engine {
+            Some(engine) => engine.scene3d_assets(&self.freeze(id)?),
+            None => Ok(Arc::new(pm_scene3d::geometry::NoAssets)),
         }
     }
     fn shell(&mut self, call: ShellCall) -> Result<ShellReply> {
@@ -708,7 +723,15 @@ impl Automation {
             }
             other => return Err(Error::kernel(other)),
         };
-        Ok(json!({"currentProjectId":self.active_project(),"projects":rows}))
+        let mut result = json!({"currentProjectId":self.active_project(),"projects":rows});
+        let pending = match self.app() {
+            Some(host) => host.pending_recoveries(),
+            None => self.pending_opens.list(),
+        };
+        if !pending.as_array().unwrap().is_empty() {
+            result["pendingRecoveries"] = pending;
+        }
+        Ok(result)
     }
     pub fn create_project(&mut self, args: &Value) -> Result<Value> {
         let id = pm_kernel::new_id("P");
@@ -761,6 +784,9 @@ impl Automation {
         }
     }
     pub fn open_project(&mut self, id: &str) -> Result<Value> {
+        self.open_project_choice(id, None)
+    }
+    pub fn open_project_choice(&mut self, id: &str, choice: Option<&Value>) -> Result<Value> {
         if !id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
@@ -769,6 +795,9 @@ impl Automation {
             return Err(Error::invalid("Invalid projectId"));
         }
         if let Some(host) = self.app() {
+            if let Some(choice) = choice {
+                return host.decide_recovery(id, choice);
+            }
             if host.current().is_none_or(|session| session.project != id) {
                 return host.open(
                     id.into(),
@@ -780,6 +809,11 @@ impl Automation {
             }
             return self.project_identity(id);
         }
+        if let Some(choice) = choice {
+            let (ticket, decision) = self.pending_opens.take(id, choice)?;
+            let reply = self.shell(ShellCall::DecideRecovery { ticket, decision })?;
+            return self.finish_open(id, reply);
+        }
         if !self.sessions.contains_key(id) {
             let reply = self.shell(ShellCall::PrepareOpen {
                 id: id.into(),
@@ -789,10 +823,17 @@ impl Automation {
                 },
                 electron_profile: None,
             })?;
-            self.adopt(reply)?;
+            return self.finish_open(id, reply);
         }
         self.active = Some(id.into());
         self.project_identity(id)
+    }
+    fn finish_open(&mut self, id: &str, reply: ShellReply) -> Result<Value> {
+        if let ShellReply::RecoveryRequired { ticket, recovery } = reply {
+            return Ok(self.pending_opens.required(id, ticket, recovery));
+        }
+        let project = self.adopt(reply)?;
+        self.project_identity(&project)
     }
     /// Explicit host ingress for a caller-selected working file. This uses the
     /// same kernel session/locks, recovery decisions and resident media table
@@ -807,8 +848,32 @@ impl Automation {
             source: SessionSource::File(path),
             electron_profile: None,
         })?;
-        let project = self.adopt(reply)?;
-        self.project_identity(&project)
+        self.finish_open(id, reply)
+    }
+    /// Only the process owning a headless host calls this after all clients
+    /// disconnect. Library autosaves are closed; unsaved working files remain
+    /// recoverable and are never silently overwritten on EOF.
+    pub fn close_headless(&mut self) -> Result<()> {
+        if let Some(host) = self.app() {
+            return host.close_headless();
+        }
+        let sessions = self.sessions.values().cloned().collect::<Vec<_>>();
+        for session in sessions {
+            let store = self.store(&session.project)?;
+            let call = if store.path().is_some() && store.is_dirty() {
+                ShellCall::DeferClose(session.clone())
+            } else {
+                ShellCall::Close(session.clone())
+            };
+            match self.shell(call)? {
+                ShellReply::Closed { recovery_copy: None } => {},
+                other => return Err(Error::kernel(other)),
+            }
+            self.sessions.remove(&session.project);
+        }
+        self.active = None;
+        self.shell(ShellCall::ReleaseLibrary)?;
+        Ok(())
     }
     fn session(&self, id: &str) -> Result<SessionHandle> {
         match self.app() {

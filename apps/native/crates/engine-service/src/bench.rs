@@ -557,7 +557,6 @@ pub fn run() -> anyhow::Result<()> {
             collect(&mut out, &asked, &mut seen);
             std::thread::sleep(Duration::from_micros(200));
         }
-        drop(collect);
         skim_counts.push(json!({"requested_unique":asked.len(),"delivered_unique":delivered.len(),"missed_unique":asked.len().saturating_sub(delivered.len()),"stand_ins":skim_stand_ins,"delivered_frames":delivered_tally.json()}));
         out.sort_by(f64::total_cmp);
         Ok(out)

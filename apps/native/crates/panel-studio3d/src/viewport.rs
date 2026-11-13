@@ -257,29 +257,58 @@ fn has_roles(comp: &pm_model::Node) -> bool {
     })
 }
 /// Read on a worker from one publication at `time`.
-pub fn scene(p: &Published, time: f64) -> Result<Scene> {
-    let comp_id = p.snapshot.open_comp();
-    let root = p.snapshot.root().ok_or_else(|| invalid("No project"))?;
+/// The part of the imported model on layer `layer` the eye ray meets first
+/// (3d-studio.md: a double-click picks a model's part). `Ok(None)`: the ray
+/// misses the model, the layer isn't an imported model, or its format has no
+/// material slots.
+pub fn pick_part(
+    snapshot: &pm_kernel::Snapshot,
+    time: f64,
+    layer: &str,
+    ray: &Ray,
+    assets: &dyn AssetGeometry,
+) -> Result<Option<pm_scene3d::geometry::PartHit>> {
+    let comp_id = snapshot.open_comp();
+    let root = snapshot.root().ok_or_else(|| invalid("No project"))?;
     let comp = pm_kernel::model::comp_node(root, comp_id.as_deref())
         .ok_or_else(|| invalid("No composition"))?;
-    // Asked for every revision of every project: a composition with no 3D
-    // layer answers from its nodes, before anything is converted.
-    if !has_roles(comp) {
-        return Err(invalid("No 3D layers"));
-    }
     let comp = from_model(&comp.to_value())?;
-    let layers = comp["layers"].as_array().cloned().unwrap_or_default();
-    let r = pm_kernel::commands::scene3d::resolve_scene(&p.snapshot, comp_id.as_deref(), time)
+    let Some(l) = comp["layers"]
+        .as_array()
+        .and_then(|layers| layers.iter().find(|l| l["id"] == layer))
+    else {
+        return Ok(None);
+    };
+    let Some(asset) = l["d"]["data"]["object"]["source"]["assetId"].as_str() else {
+        return Ok(None);
+    };
+    let r = pm_kernel::commands::scene3d::resolve_scene(snapshot, comp_id.as_deref(), time)
         .map_err(|e| invalid(e.to_string()))?;
+    let Some(world) = r.model_worlds.get(layer) else {
+        return Ok(None);
+    };
     let records = from_model(
         &root
             .get("assets")
             .map(pm_model::Node::to_value)
             .unwrap_or(pm_model::Value::Null),
     )?;
+    assets
+        .part_at(
+            asset,
+            &records[asset],
+            *world,
+            time - l["from"].as_f64().unwrap_or(0.),
+            ray.origin,
+            ray.dir,
+        )
+        .map_err(|e| invalid(e.to_string()))
+}
+/// The composition camera's eye (the shot), as `scene` sees it.
+fn eye_of(r: &pm_scene3d::service::ResolvedScene, comp: &serde_json::Value) -> Eye {
     let cam = &r.scene["camera"];
     let n = |k: &str, d: f64| cam["p"][k]["v"].as_f64().unwrap_or(d);
-    let shot = Pose {
+    let pose = Pose {
         position: r
             .camera_position
             .unwrap_or([n("x", 3.), n("y", 2.), n("z", 6.)]),
@@ -303,6 +332,69 @@ pub fn scene(p: &Published, time: f64) -> Result<Scene> {
             far: n("far", 1000.).max(1.),
         }
     };
+    Eye {
+        pose,
+        lens,
+        width,
+        height,
+    }
+}
+/// The imported-model part under composition pixel `at` through the shot
+/// camera, nearest first across every model layer: `(layer, hit)`.
+pub fn pick_part_at(
+    snapshot: &pm_kernel::Snapshot,
+    time: f64,
+    at: [f64; 2],
+    assets: &dyn AssetGeometry,
+) -> Result<Option<(String, pm_scene3d::geometry::PartHit)>> {
+    let comp_id = snapshot.open_comp();
+    let root = snapshot.root().ok_or_else(|| invalid("No project"))?;
+    let comp = pm_kernel::model::comp_node(root, comp_id.as_deref())
+        .ok_or_else(|| invalid("No composition"))?;
+    let comp = from_model(&comp.to_value())?;
+    let r = pm_kernel::commands::scene3d::resolve_scene(snapshot, comp_id.as_deref(), time)
+        .map_err(|e| invalid(e.to_string()))?;
+    let ray = eye_of(&r, &comp).ray(at);
+    let mut best: Option<(String, pm_scene3d::geometry::PartHit)> = None;
+    for l in comp["layers"].as_array().into_iter().flatten() {
+        let id = l["id"].as_str().unwrap_or_default();
+        if l["on"] == false || !r.model_worlds.contains_key(id) {
+            continue;
+        }
+        if let Some(hit) = pick_part(snapshot, time, id, &ray, assets)?
+            && best.as_ref().is_none_or(|(_, b)| hit.distance < b.distance)
+        {
+            best = Some((id.to_owned(), hit));
+        }
+    }
+    Ok(best)
+}
+pub fn scene(p: &Published, time: f64) -> Result<Scene> {
+    let comp_id = p.snapshot.open_comp();
+    let root = p.snapshot.root().ok_or_else(|| invalid("No project"))?;
+    let comp = pm_kernel::model::comp_node(root, comp_id.as_deref())
+        .ok_or_else(|| invalid("No composition"))?;
+    // Asked for every revision of every project: a composition with no 3D
+    // layer answers from its nodes, before anything is converted.
+    if !has_roles(comp) {
+        return Err(invalid("No 3D layers"));
+    }
+    let comp = from_model(&comp.to_value())?;
+    let layers = comp["layers"].as_array().cloned().unwrap_or_default();
+    let r = pm_kernel::commands::scene3d::resolve_scene(&p.snapshot, comp_id.as_deref(), time)
+        .map_err(|e| invalid(e.to_string()))?;
+    let records = from_model(
+        &root
+            .get("assets")
+            .map(pm_model::Node::to_value)
+            .unwrap_or(pm_model::Value::Null),
+    )?;
+    let Eye {
+        pose: shot,
+        lens,
+        width,
+        height,
+    } = eye_of(&r, &comp);
     let mut mirror = pm_kernel::QueryMirror::new(p);
     let mut channels = |id: &str, keys: [&str; 3], d: f64| -> Vec3 {
         std::array::from_fn(|i| {

@@ -3565,11 +3565,11 @@
         "shape": "rect",
         "bounds": [
           531.845,
-          16.5,
+          22.0,
           1.0,
-          423.5
+          418.0
         ],
-        "color": 1908517,
+        "color": 15751180,
         "opacity": 1.0,
         "radius": 0.0,
         "stroke": 0.0,
@@ -3582,20 +3582,19 @@
         "id": "playhead-head",
         "shape": "ph-head",
         "bounds": [
-          527.845,
+          526.845,
           12.0,
-          9.0,
-          9.0
+          11.0,
+          11.0
         ],
-        "color": 1908517,
+        "color": 15751180,
         "opacity": 1.0,
         "radius": 0.0,
         "stroke": 0.0,
         "text": null,
         "fontSize": 0.0,
         "detail": {
-          "topRadius": 4.5,
-          "bottomRadius": 4.5
+          "pin": true
         },
         "clip": null
       }
@@ -7167,11 +7166,11 @@
         "shape": "rect",
         "bounds": [
           531.845,
-          16.5,
+          22.0,
           1.0,
-          423.5
+          418.0
         ],
-        "color": 1908517,
+        "color": 15751180,
         "opacity": 1.0,
         "radius": 0.0,
         "stroke": 0.0,
@@ -7184,20 +7183,19 @@
         "id": "playhead-head",
         "shape": "ph-head",
         "bounds": [
-          527.845,
+          526.845,
           12.0,
-          9.0,
-          9.0
+          11.0,
+          11.0
         ],
-        "color": 1908517,
+        "color": 15751180,
         "opacity": 1.0,
         "radius": 0.0,
         "stroke": 0.0,
         "text": null,
         "fontSize": 0.0,
         "detail": {
-          "topRadius": 4.5,
-          "bottomRadius": 4.5
+          "pin": true
         },
         "clip": null
       }
@@ -10753,11 +10751,11 @@
         "shape": "rect",
         "bounds": [
           531.345,
-          16.5,
+          22.0,
           2.0,
-          423.5
+          418.0
         ],
-        "color": 1908517,
+        "color": 15751180,
         "opacity": 1.0,
         "radius": 0.0,
         "stroke": 0.0,
@@ -10770,20 +10768,19 @@
         "id": "playhead-head",
         "shape": "ph-head",
         "bounds": [
-          527.845,
+          526.845,
           12.0,
-          9.0,
-          9.0
+          11.0,
+          11.0
         ],
-        "color": 1908517,
+        "color": 15751180,
         "opacity": 1.0,
         "radius": 0.0,
         "stroke": 0.0,
         "text": null,
         "fontSize": 0.0,
         "detail": {
-          "topRadius": 4.5,
-          "bottomRadius": 4.5
+          "pin": true
         },
         "clip": null
       }
@@ -14339,11 +14336,11 @@
         "shape": "rect",
         "bounds": [
           531.345,
-          16.5,
+          22.0,
           2.0,
-          423.5
+          418.0
         ],
-        "color": 1908517,
+        "color": 15751180,
         "opacity": 1.0,
         "radius": 0.0,
         "stroke": 0.0,
@@ -14356,20 +14353,19 @@
         "id": "playhead-head",
         "shape": "ph-head",
         "bounds": [
-          527.845,
+          526.845,
           12.0,
-          9.0,
-          9.0
+          11.0,
+          11.0
         ],
-        "color": 1908517,
+        "color": 15751180,
         "opacity": 1.0,
         "radius": 0.0,
         "stroke": 0.0,
         "text": null,
         "fontSize": 0.0,
         "detail": {
-          "topRadius": 4.5,
-          "bottomRadius": 4.5
+          "pin": true
         },
         "clip": null
       }
@@ -17941,11 +17937,11 @@
         "shape": "rect",
         "bounds": [
           531.845,
-          16.5,
+          22.0,
           1.0,
-          423.5
+          418.0
         ],
-        "color": 16119284,
+        "color": 16409360,
         "opacity": 1.0,
         "radius": 0.0,
         "stroke": 0.0,
@@ -17958,20 +17954,19 @@
         "id": "playhead-head",
         "shape": "ph-head",
         "bounds": [
-          527.845,
+          526.845,
           12.0,
-          9.0,
-          9.0
+          11.0,
+          11.0
         ],
-        "color": 16119284,
+        "color": 16409360,
         "opacity": 1.0,
         "radius": 0.0,
         "stroke": 0.0,
         "text": null,
         "fontSize": 0.0,
         "detail": {
-          "topRadius": 4.5,
-          "bottomRadius": 4.5
+          "pin": true
         },
         "clip": null
       }
@@ -21543,11 +21538,11 @@
         "shape": "rect",
         "bounds": [
           531.845,
-          16.5,
+          22.0,
           1.0,
-          423.5
+          418.0
         ],
-        "color": 16119284,
+        "color": 16409360,
         "opacity": 1.0,
         "radius": 0.0,
         "stroke": 0.0,
@@ -21560,20 +21555,19 @@
         "id": "playhead-head",
         "shape": "ph-head",
         "bounds": [
-          527.845,
+          526.845,
           12.0,
-          9.0,
-          9.0
+          11.0,
+          11.0
         ],
-        "color": 16119284,
+        "color": 16409360,
         "opacity": 1.0,
         "radius": 0.0,
         "stroke": 0.0,
         "text": null,
         "fontSize": 0.0,
         "detail": {
-          "topRadius": 4.5,
-          "bottomRadius": 4.5
+          "pin": true
         },
         "clip": null
       }
@@ -25129,11 +25123,11 @@
         "shape": "rect",
         "bounds": [
           531.345,
-          16.5,
+          22.0,
           2.0,
-          423.5
+          418.0
         ],
-        "color": 16119284,
+        "color": 16409360,
         "opacity": 1.0,
         "radius": 0.0,
         "stroke": 0.0,
@@ -25146,20 +25140,19 @@
         "id": "playhead-head",
         "shape": "ph-head",
         "bounds": [
-          527.845,
+          526.845,
           12.0,
-          9.0,
-          9.0
+          11.0,
+          11.0
         ],
-        "color": 16119284,
+        "color": 16409360,
         "opacity": 1.0,
         "radius": 0.0,
         "stroke": 0.0,
         "text": null,
         "fontSize": 0.0,
         "detail": {
-          "topRadius": 4.5,
-          "bottomRadius": 4.5
+          "pin": true
         },
         "clip": null
       }
@@ -28715,11 +28708,11 @@
         "shape": "rect",
         "bounds": [
           531.345,
-          16.5,
+          22.0,
           2.0,
-          423.5
+          418.0
         ],
-        "color": 16119284,
+        "color": 16409360,
         "opacity": 1.0,
         "radius": 0.0,
         "stroke": 0.0,
@@ -28732,20 +28725,19 @@
         "id": "playhead-head",
         "shape": "ph-head",
         "bounds": [
-          527.845,
+          526.845,
           12.0,
-          9.0,
-          9.0
+          11.0,
+          11.0
         ],
-        "color": 16119284,
+        "color": 16409360,
         "opacity": 1.0,
         "radius": 0.0,
         "stroke": 0.0,
         "text": null,
         "fontSize": 0.0,
         "detail": {
-          "topRadius": 4.5,
-          "bottomRadius": 4.5
+          "pin": true
         },
         "clip": null
       }

@@ -23,6 +23,9 @@ impl TextHost for RegistryText {
 }
 /// The registry viewer queries ask; set once with the kernel's host.
 static FONTS: OnceLock<RenderFonts> = OnceLock::new();
+pub(crate) fn render_fonts() -> Option<RenderFonts> {
+    FONTS.get().map(RenderFonts::sibling)
+}
 /// One query mirror per project: it follows publications incrementally and
 /// keeps the fonts it was given.
 static MIRRORS: Mutex<BTreeMap<String, QueryMirror>> = Mutex::new(BTreeMap::new());

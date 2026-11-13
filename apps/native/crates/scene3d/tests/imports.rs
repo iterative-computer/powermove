@@ -304,6 +304,33 @@ fn loaded_asset_bounds_refuse_stale_source_metadata() {
     );
     assert!(registry.bounds("missing", &record, 0.).is_err());
 }
+
+#[test]
+fn headless_bounds_use_the_render_resource_without_an_editor() {
+    let root = std::env::temp_dir().join(pm_scene3d_test_id());
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("approved-original.bin");
+    let bytes = triangle();
+    std::fs::write(&path, &bytes).unwrap();
+    let record = json!({"kind":"model","format":"glb","name":"model.glb","revision":"one",
+        "sourcePath":"/not-authorized/by-document.glb"});
+    let files = geometry::FileAssets::new([("model".into(), path.clone())].into());
+    let resource = pm_scene3d::render::Resource::load("resource.glb", &bytes).unwrap();
+    let mut editor = LoadedAssets::default();
+    editor.insert("model".into(), record.clone(), resource.model.clone());
+    for time in [0., 1., 2.] {
+        assert_eq!(files.bounds("model", &record, time).unwrap(), editor.bounds("model", &record, time).unwrap());
+    }
+    assert!(files.bounds("model", &json!({"revision":"changed"}), 0.).is_err());
+    assert!(files.bounds("missing", &record, 0.).is_err());
+    assert!(files.bounds("model", &record, f64::NAN).is_err());
+    std::fs::remove_dir_all(root).unwrap();
+}
+fn pm_scene3d_test_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    format!("pm-headless-bounds-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed))
+}
 #[test]
 fn archive_never_overwrites_conflicting_content_and_rejects_path_injection() {
     use pm_scene3d::import::archive::Archive;
@@ -373,8 +400,10 @@ fn splat_framing_uses_dense_core_without_changing_outlier_bytes() {
 fn a_live_model_resource_is_shared_and_a_dropped_one_reloads() {
     use pm_scene3d::render::Resource;
     use std::sync::Arc;
-    let bytes = triangle();
-    let other = import::triangle_glb(&[[0., 0., 0.], [2., 0., 0.], [0., 2., 0.]], &[0, 1, 2]);
+    // The process-wide cache hashes bytes, not paths. Dedicated geometry keeps
+    // parallel bounds/import tests from retaining this test's weak resource.
+    let bytes = import::triangle_glb(&[[0., 0., 0.], [13., 0., 0.], [0., 17., 0.]], &[0, 1, 2]);
+    let other = import::triangle_glb(&[[0., 0., 0.], [19., 0., 0.], [0., 23., 0.]], &[0, 1, 2]);
     let loads = [bytes.clone(), other.clone(), bytes.clone()]
         .map(|b| std::thread::spawn(move || Resource::load("model.glb", &b).unwrap()));
     let [a, b, c] = loads.map(|t| t.join().unwrap());

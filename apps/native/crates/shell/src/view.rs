@@ -2143,7 +2143,9 @@ impl Render for Editor {
             root = root.child(panel);
         }
         if let Some(integration) = &self.integration {
-            let shown: Vec<&str> = native_bodies.iter().map(|(id, _)| id.as_str()).collect();
+            // Every panel on screen, built-in or an extension's: the viewer
+            // and the timeline are not native bodies but are shown.
+            let shown: Vec<&str> = self.panel_order.iter().map(String::as_str).collect();
             integration.shown_panels(&shown, cx);
         }
         if let Some(h) = &self.host {
@@ -2807,6 +2809,77 @@ mod tests {
                 );
             })
             .unwrap();
+    }
+
+    /// What the window says is on screen each frame.
+    struct Shown(Rc<RefCell<Vec<Vec<String>>>>);
+    impl crate::integration::Integration for Shown {
+        fn observe(&self, _: &mut gpui::Context<Editor>) {}
+        fn command(&self, _: &crate::native::Command, _: &mut Window, _: &mut App) -> bool {
+            false
+        }
+        fn panel(
+            &self,
+            _: &str,
+            _: crate::layout::Rect,
+            _: &mut Window,
+            _: &mut App,
+        ) -> Option<AnyElement> {
+            None
+        }
+        fn shown_panels(&self, shown: &[&str], _: &mut App) {
+            let shown = shown.iter().map(|id| (*id).to_owned()).collect();
+            self.0.borrow_mut().push(shown);
+        }
+        fn project_id(&self, _: &App) -> Option<String> {
+            None
+        }
+        fn status(&self, _: &App) -> String {
+            String::new()
+        }
+        fn drop_paths(&self, _: Vec<std::path::PathBuf>, _: &mut App) {}
+    }
+
+    /// The viewer and the timeline are on screen even though no extension
+    /// draws them: the app keeps their picture place, playhead and timecode
+    /// only for panels the window names as shown (it named only extension
+    /// bodies, so the playhead never drew). A maximised panel shows alone.
+    #[gpui::test]
+    fn the_viewer_and_timeline_are_named_shown_until_another_panel_is_maximised(
+        cx: &mut TestAppContext,
+    ) {
+        let frames = Rc::new(RefCell::new(vec![]));
+        let tokens = Tokens::new(pm_design::Scheme::Dark, Default::default());
+        let record = frames.clone();
+        let window = cx.add_window(|_, cx| {
+            let mut e = Editor::new(tokens, None, cx);
+            e.integration = Some(Rc::new(Shown(record)));
+            e
+        });
+        cx.run_until_parked();
+        let last = || frames.borrow().last().cloned().expect("a frame");
+        let shown = last();
+        assert!(
+            shown.iter().any(|id| id == "viewer") && shown.iter().any(|id| id == "timeline"),
+            "{shown:?}"
+        );
+        let other = window
+            .update(cx, |v, _, _| {
+                v.layout
+                    .open_panels()
+                    .into_iter()
+                    .find(|id| !matches!(*id, "viewer" | "timeline"))
+                    .map(str::to_owned)
+            })
+            .unwrap()
+            .expect("a third panel");
+        window
+            .update(cx, |v, _, cx| {
+                assert!(v.run_shell_command(&format!("panel:maximize:{other}"), cx));
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(last(), [other]);
     }
 }
 

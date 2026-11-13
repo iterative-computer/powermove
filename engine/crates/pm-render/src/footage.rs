@@ -30,6 +30,10 @@ pub fn interpretation(record: &pm_model::Node) -> Option<Interpretation> {
             Some(Interpretation::from_json(&value).0)
         })
         .unwrap_or_default();
+    interp.electron_color = pm_eval::node::is_str(
+        pm_eval::node::member(Some(record), "videoColor"),
+        "electron",
+    );
     interp.clip = clip_timing(Some(record));
     (!interp.is_empty()).then_some(interp)
 }

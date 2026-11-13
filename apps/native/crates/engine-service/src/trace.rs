@@ -135,6 +135,56 @@ impl Drop for Recorder {
     }
 }
 
+/// One pass of the viewer worker, for the diagnostic trace: a pass that
+/// kept the worker for [`Pass::SLOW_MS`] or longer is recorded with where
+/// its time went (a command sent meanwhile waited that long). The wait for
+/// the next wake is not part of a pass.
+pub(crate) struct Pass<'a> {
+    recorder: Option<&'a Recorder>,
+    start: f64,
+    last: f64,
+    phases: Vec<(&'static str, f64)>,
+}
+impl<'a> Pass<'a> {
+    const SLOW_MS: f64 = 30.;
+    pub fn start(recorder: Option<&'a Recorder>) -> Self {
+        let start = now();
+        Self {
+            recorder,
+            start,
+            last: start,
+            phases: Vec::new(),
+        }
+    }
+    /// The time since the last mark went to `phase`.
+    pub fn mark(&mut self, phase: &'static str) {
+        if self.recorder.is_some() {
+            let at = now();
+            self.phases.push((phase, (at - self.last) * 1e3));
+            self.last = at;
+        }
+    }
+}
+impl Drop for Pass<'_> {
+    fn drop(&mut self) {
+        let Some(recorder) = self.recorder else {
+            return;
+        };
+        let total = (self.last - self.start) * 1e3;
+        if total >= Self::SLOW_MS {
+            let phases: serde_json::Map<String, serde_json::Value> = self
+                .phases
+                .iter()
+                .filter(|(_, ms)| *ms >= 1.)
+                .map(|(phase, ms)| ((*phase).to_owned(), ms.round().into()))
+                .collect();
+            recorder.record(serde_json::json!({
+                "pass_ms": total.round(), "at": self.start, "phases": phases,
+            }));
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct Pipeline {
     pub request: f64,
