@@ -1,7 +1,8 @@
 //! The timeline playhead's CALayers, driven by the display link (S3: no GPUI
-//! repaint while playing): pm-design's `playhead` (a hairline in `text` ink
-//! with a `panel` halo so it reads over strips of any hue, and a round head
-//! resting in the ruler), plus a motion trail whose width
+//! repaint while playing): pm-design's `playhead` (v1's accent hairline with
+//! a `panel` halo so it reads over strips of any hue, under a pin resting on
+//! the foot of the ruler, as the paused timeline draws it), plus a motion
+//! trail whose width
 //! follows the head's measured speed through a critically damped spring
 //! (v1's playhead). The spring runs only while the head moves.
 use objc2::{rc::Retained, runtime::AnyObject};
@@ -10,8 +11,6 @@ use objc2_foundation::{NSArray, NSPoint, NSRect, NSSize};
 use objc2_quartz_core::{CAGradientLayer, CAShapeLayer, CATransaction};
 use std::time::Instant;
 
-/// Head size, points (pm-design `Playhead::head`): a disc.
-pub const HEAD: (f64, f64) = (9., 9.);
 /// v1's trail: width per point/second of head speed, spring response (s),
 /// widest trail (pt) and its opacity at the head.
 const TRAIL_GAIN: f64 = 0.3;
@@ -76,16 +75,12 @@ impl Playhead {
         trail.setStartPoint(NSPoint::new(0., 0.5));
         trail.setEndPoint(NSPoint::new(1., 0.5));
         trail.setHidden(true);
-        let (w, h) = HEAD;
-        let path = CGMutablePath::new();
-        unsafe {
-            CGMutablePath::add_ellipse_in_rect(
-                Some(&*path),
-                std::ptr::null(),
-                NSRect::new(NSPoint::new(0., 0.), NSSize::new(w, h)),
-            );
-        }
-        head.setPath(Some(&path));
+        let path = pin_path(
+            pm_design::Tokens::new(pm_design::Scheme::Dark, pm_design::Accessibility::default())
+                .playhead()
+                .head as f64,
+        );
+        head.setPath(Some(&*path));
         head.setLineWidth(1.);
         Self {
             line,
@@ -107,7 +102,7 @@ impl Playhead {
             let _: () = objc2::msg_send![&*self.line, setShadowOffset: NSSize::new(0., 0.)];
         }
         self.head.setFillColor(Some(&accent));
-        self.head.setStrokeColor(Some(&panel));
+        self.head.setStrokeColor(None);
         self.head.setContentsScale(scale);
         let clear = colour(p.color, 0.);
         let glow = colour(p.color, TRAIL_ALPHA);
@@ -128,14 +123,19 @@ impl Playhead {
         moving: bool,
         t: &pm_design::Tokens,
     ) {
+        // As the paused timeline: the pin's point rests `head_foot` above
+        // the foot of the ruler and the line starts just inside the pin.
+        let p = t.playhead();
+        let (d, foot) = (p.head as f64, p.head_foot as f64);
+        let above = (ruler - foot - 1.).clamp(0., tall);
+        let line_tall = tall - above;
         unsafe {
             let _: () = objc2::msg_send![&*self.line, setFrame: NSRect::new(
-                NSPoint::new(x - line / 2., bottom), NSSize::new(line, tall))];
+                NSPoint::new(x - line / 2., bottom), NSSize::new(line, line_tall))];
         }
-        let (w, h) = HEAD;
         self.head.setFrame(NSRect::new(
-            NSPoint::new((line - w) / 2., tall - h),
-            NSSize::new(w, h),
+            NSPoint::new((line - d) / 2., line_tall - 1.),
+            NSSize::new(d, d),
         ));
         let width = if moving && !t.accessibility.reduce_motion {
             self.spring.step(x, Instant::now())
@@ -173,6 +173,21 @@ impl Drop for Playhead {
         self.trail.removeFromSuperlayer();
         self.head.removeFromSuperlayer();
     }
+}
+/// v1's playhead pin, `d` pt square in a y-up layer: a flat top, straight
+/// sides down to its shoulders, then a point at the bottom centre.
+fn pin_path(d: f64) -> impl std::ops::Deref<Target = CGMutablePath> {
+    let path = CGMutablePath::new();
+    let shoulder = d * (5. / 11.);
+    unsafe {
+        CGMutablePath::move_to_point(Some(&*path), std::ptr::null(), 0., d);
+        CGMutablePath::add_line_to_point(Some(&*path), std::ptr::null(), d, d);
+        CGMutablePath::add_line_to_point(Some(&*path), std::ptr::null(), d, shoulder);
+        CGMutablePath::add_line_to_point(Some(&*path), std::ptr::null(), d / 2., 0.);
+        CGMutablePath::add_line_to_point(Some(&*path), std::ptr::null(), 0., shoulder);
+    }
+    CGMutablePath::close_subpath(Some(&*path));
+    path
 }
 /// A CGColor as the Objective-C object it bridges to (for NSArray).
 fn cf_object(c: &CGColor) -> &AnyObject {
