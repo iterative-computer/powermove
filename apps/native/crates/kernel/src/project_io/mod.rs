@@ -485,6 +485,11 @@ pub fn open_project(path: &Path, options: OpenOptions) -> Result<OpenedProject, 
         ));
     }
     let before = durable::stat_of(&meta);
+    // The start of a copy (a sync client's, another computer's save) is
+    // not a damaged project: it is refused as one still arriving.
+    if durable::file_head_held_back(&file) {
+        return Err(ProjectIoError::StillCopying);
+    }
     // Index and document checksums are always verified by the reader; media
     // checksums are verified below, in the single hashing pass.
     let container = read_container(

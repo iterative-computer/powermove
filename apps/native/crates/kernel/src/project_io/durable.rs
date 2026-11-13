@@ -1337,9 +1337,15 @@ pub(super) fn begins(whole: &Path, part: &Path) -> bool {
 /// Whether `path`'s first bytes are still the zeros a copy in the making
 /// has there ([`HELD_BACK`]).
 pub(super) fn head_held_back(path: &Path) -> bool {
+    File::open(path).is_ok_and(|file| file_head_held_back(&file))
+}
+
+/// [`head_held_back`] for an open file. No project file of any format
+/// begins with a zero byte.
+pub(super) fn file_head_held_back(file: &File) -> bool {
+    use std::os::unix::fs::FileExt;
     let mut head = [0u8; HELD_BACK];
-    File::open(path)
-        .and_then(|mut file| file.read(&mut head))
+    read_retry(|| file.read_at(&mut head, 0))
         .is_ok_and(|n| n > 0 && head[..n].iter().all(|b| *b == 0))
 }
 

@@ -1721,6 +1721,73 @@ fn a_file_whose_fate_cannot_be_recorded_stays_where_the_record_finds_it() {
         "taken up again: {told:?}"
     );
 }
+/// Another computer's save is being copied into this one by a sync client
+/// and only the start of it has arrived (its first bytes are still the
+/// zeros a copy gets last). An earlier save on this Mac left a record that
+/// proves an older version. The open refuses the file as one still being
+/// copied, and no older version is offered or installed over it: nothing
+/// says that file is the earlier save's.
+#[test]
+fn a_file_still_being_copied_here_is_refused_and_never_recovered_over() {
+    let dir = common::TempDir::new("replica");
+    fs::create_dir_all(dir.path("job")).unwrap();
+    let file = dir.path("job/cut.pmv");
+    fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+    let native = dir.path("native");
+    // An earlier save here, cut short once its file was in place: its
+    // record proves the version it replaced and the one it wrote.
+    assert!(killed(&native, &file, "no-exclusive", "installed", "save"));
+    let mut k = kernel(&native);
+    k.set_publish_hooks(child_disk("no-exclusive"));
+    let ShellReply::Leftovers(before) = k.shell(ShellCall::Leftovers(file.clone())).unwrap() else {
+        panic!()
+    };
+    let proven = |rows: &[Value]| -> Vec<std::path::PathBuf> {
+        rows.iter()
+            .filter(|r| r.get("proven") == Some(&Value::Bool(true)))
+            .filter_map(|r| r.get("path").and_then(Value::as_str).map(Into::into))
+            .collect()
+    };
+    assert!(
+        !proven(&before).is_empty(),
+        "the earlier save proves versions: {before:?}"
+    );
+    // The start of another computer's later save: a different project's
+    // bytes, its first ones still zeros.
+    let mut later = fs::read(common::ts_fixture("fresh.pmv")).unwrap();
+    later.extend_from_slice(&vec![b' '; 4096]);
+    later.truncate(later.len() / 2);
+    later[..5].fill(0);
+    land(&file, &later);
+    let error = k
+        .shell(ShellCall::PrepareOpen {
+            id: "P".into(),
+            source: SessionSource::File(file.clone()),
+            electron_profile: None,
+        })
+        .expect_err("a file still being copied is not opened");
+    assert!(
+        error.to_string().contains(pm_kernel::error::STILL_COPYING),
+        "said plainly: {error}"
+    );
+    assert_eq!(fs::read(&file).unwrap(), later, "the file is not touched");
+    let ShellReply::Leftovers(rows) = k.shell(ShellCall::Leftovers(file.clone())).unwrap() else {
+        panic!()
+    };
+    assert_eq!(proven(&rows), Vec::<std::path::PathBuf>::new(), "{rows:?}");
+    for version in proven(&before) {
+        assert!(
+            k.shell(ShellCall::UseLeftover {
+                path: file.clone(),
+                leftover: version,
+                unproven: false,
+            })
+            .is_err(),
+            "never installed over the file being copied"
+        );
+    }
+    assert_eq!(fs::read(&file).unwrap(), later, "the file is not touched");
+}
 /// A save that only appends to the project file writes a file whose first
 /// bytes are the whole previous file. On a volume where the new file can
 /// only be copied to its name, the name must never hold those bytes alone

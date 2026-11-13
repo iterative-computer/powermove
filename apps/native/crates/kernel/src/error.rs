@@ -183,6 +183,10 @@ pub enum ProjectIoError {
         message: String,
         receipt: Option<Box<crate::SaveReceipt>>,
     },
+    /// The file under the project's name is still being copied there (its
+    /// first bytes, which a copy writes last, are not there yet): a sync
+    /// client or another computer's save is not done with it.
+    StillCopying,
     /// A save of this document is already running.
     SaveInProgress,
     /// No destination: use Save As.
@@ -190,6 +194,11 @@ pub enum ProjectIoError {
     /// The receipt belongs to another document session.
     WrongDocument,
 }
+
+/// [`ProjectIoError::StillCopying`]'s text, which the app finds in a
+/// failure's message.
+pub const STILL_COPYING: &str = "This project file is still being copied to this Mac. Wait \
+     until the copy or sync is done, then open it again.";
 
 /// Introduces the path in [`ProjectIoError::KeptBeside`]'s text.
 const KEPT_BESIDE: &str = "Your save is kept beside it at ";
@@ -238,6 +247,7 @@ impl fmt::Display for ProjectIoError {
                 "The project file was written, but save finalization failed. Your edits are \
                  still open. Try Save again to confirm, or Save As to keep a separate copy. {m}"
             ),
+            ProjectIoError::StillCopying => f.write_str(STILL_COPYING),
             ProjectIoError::SaveInProgress => {
                 f.write_str("A save to this project file is already in progress.")
             }

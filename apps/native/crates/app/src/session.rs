@@ -3239,6 +3239,9 @@ fn open_failure(error: &KernelFailure) -> crate::surfaces::documents::OpenFailur
         KernelFailure::Journal(_) => return OpenFailure::Journal,
         // An open never faults a project; a stopped one only refuses edits.
         KernelFailure::Faulted(_) => Unavailable,
+        KernelFailure::Storage(text) if text.contains(pm_kernel::error::STILL_COPYING) => {
+            return OpenFailure::StillCopying;
+        }
         KernelFailure::AlreadyOpen(_) | KernelFailure::Storage(_) => {
             let text = error.to_string().to_lowercase();
             if text.contains("permission") {
@@ -3484,6 +3487,11 @@ mod open_failure_tests {
             (
                 KernelFailure::Storage("unexpected end of input".into()),
                 "couldn’t be read",
+            ),
+            // The start of a copy still arriving is not called damaged.
+            (
+                KernelFailure::Storage(pm_kernel::error::STILL_COPYING.into()),
+                "still being copied",
             ),
         ] {
             let alert =

@@ -1299,6 +1299,21 @@ fn held_by_another(record: &Record) -> Option<Undecided> {
     }
 }
 
+/// Whether `record` is a save of this Mac that stopped while it was
+/// copying a file under the project's name (its last step there is the
+/// placement, never that it was done): a file whose first bytes are still
+/// zeros under that name may be that copy.
+fn copying_here(record: &Record) -> bool {
+    held_by_another(record).is_none()
+        && record.steps.iter().rev().find_map(|step| {
+            match step.get("step").and_then(Value::as_str) {
+                Some("install" | "restore") => Some(true),
+                Some("installed" | "exchanged" | "restored") => Some(false),
+                _ => None,
+            }
+        }) == Some(true)
+}
+
 /// A file recovery did not move, for the person to decide about.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Leftover {
@@ -1768,9 +1783,18 @@ fn take_back_copies(record: &Record, destination: &Path, tx: &mut Transaction) {
 /// `undecided`), without moving anything.
 pub(crate) fn leftovers(destination: &Path) -> Vec<Leftover> {
     let (records, unreadable) = records_of(destination);
-    let records: Vec<_> = records.into_iter().filter(|r| !r.only_retains()).collect();
+    // A file still being copied to the project's name is answered only by
+    // a save of this Mac that was copying there when it stopped: no other
+    // record says anything about that file.
+    let copying = head_held_back(destination);
+    let answers = |r: &Record| !copying || copying_here(r);
+    let records: Vec<_> = records
+        .into_iter()
+        .filter(|r| !r.only_retains() && answers(r))
+        .collect();
     let mut found: Vec<_> = unreadable
         .iter()
+        .filter(|_| !copying)
         .map(|path| leftover(path, "record", Undecided::Unreadable, None))
         .collect();
     let why = if records.len() > 1 {
@@ -1790,7 +1814,7 @@ pub(crate) fn leftovers(destination: &Path) -> Vec<Leftover> {
     // private name, retained, or kept beside the project), for when the file
     // under the project's name does not open.
     for record in records_of(destination).0 {
-        if held_by_another(&record) == Some(Undecided::Active) {
+        if held_by_another(&record) == Some(Undecided::Active) || !answers(&record) {
             continue;
         }
         for path in proven_candidates(&record) {
@@ -1891,6 +1915,11 @@ fn use_leftover_now(
         .ok_or_else(|| {
             ProjectIoError::Invalid("That file is not one a save of this project left.".into())
         })?;
+    // A file still arriving under the name is never replaced on the word
+    // of a save that was not copying it there ([`leftovers`]).
+    if head_held_back(destination) && !copying_here(record) {
+        return Err(ProjectIoError::StillCopying);
+    }
     // A save that is going on right now is not for anyone to choose from.
     if held_by_another(record) == Some(Undecided::Active) {
         return Err(ProjectIoError::Invalid(
