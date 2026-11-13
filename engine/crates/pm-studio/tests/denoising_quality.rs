@@ -383,3 +383,27 @@ fn a_front_facing_polygon_never_goes_black_when_its_smooth_normal_faces_away() {
         }
     }
 }
+
+
+#[test]
+fn adaptive_matte_caustic_receivers_preserve_reference_policy_and_sample_ceiling() {
+    let mut scene=glass_detail();
+    scene.lights.push(pm_studio::scene::Softbox::aimed(Vec3::ZERO,-30.,45.,6.,3.,3.,Vec3::splat(4.)));
+    let mut r=Renderer::new(64,48).unwrap();
+    for hardware in [false,true] {
+        r.hardware_rt=hardware;r.caustics_enabled=true;
+        r.set_scene(&scene,&scene.prepare());r.set_precomputed_caustics(true);
+        r.set_adaptive_sampling_with_floor(AdaptiveSampling{enabled:true,min_samples:8,relative_error:0.12,absolute_error:0.001},true);
+        r.sampling_policy=pm_studio::sampling::SamplingPolicy::PRODUCTION;
+        r.trace(128,8,true,64);
+        let counts=r.sample_counts();let ids=r.first_hit_ids();
+        let matte:Vec<_>=counts.iter().zip(ids).filter_map(|(&n,id)|(id==2).then_some(n)).collect();
+        assert!(matte.len()>100 && matte.iter().all(|&n|n>=24.),"undersampled finite caustic receiver: {matte:?}");
+        assert!(matte.iter().any(|&n|n<128.),"quiet receivers must still converge");
+        r.sampling_policy=Default::default();r.trace(128,8,true,64);
+        let counts=r.sample_counts();let ids=r.first_hit_ids();
+        assert!(counts.iter().zip(ids).any(|(&n,id)|id==2 && n<24.),"legacy/reference policy changed");
+        r.sampling_policy=pm_studio::sampling::SamplingPolicy::PRODUCTION;r.trace(16,8,true,64);
+        assert!(r.sample_counts().iter().all(|&n|n<=16.),"explicit sample ceiling must remain authoritative");
+    }
+}
