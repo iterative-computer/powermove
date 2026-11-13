@@ -190,10 +190,19 @@ pub fn headless(profile: PathBuf, exports: PathBuf, launch: Option<PathBuf>) -> 
         }
         let tools = Tools::new(host, exports);
         let jobs = connect_engine(&tools, Default::default(), Default::default())?;
+        // Start the opened project's extensions now, but answer the agent at
+        // once: a slow or failing load is each job's to wait for or report,
+        // never a reason for the tool server not to start.
         if let Some(session) = tools.host.current()
             && let Some(published) = tools.host.kernel.published(&session.project)
         {
-            jobs.resources(&published, true, &never)?;
+            std::thread::Builder::new()
+                .name("mcp-extensions-start".into())
+                .spawn(move || {
+                    if let Err(error) = jobs.resources(&published, true, &never) {
+                        eprintln!("Extensions of the opened project: {error}");
+                    }
+                })?;
         }
         let shared = tools.clone();
         let server =

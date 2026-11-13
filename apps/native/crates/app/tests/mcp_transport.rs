@@ -74,6 +74,11 @@ impl Client {
         assert_eq!(r["isError"], false, "{r}");
         serde_json::from_str(r["content"][0]["text"].as_str().unwrap()).unwrap()
     }
+    /// Ends the session as a client does: its input closes, the server exits.
+    fn finish(mut self) {
+        self.input.take();
+        assert!(self.child.wait().unwrap().success());
+    }
 }
 impl Drop for Client {
     fn drop(&mut self) {
@@ -315,6 +320,52 @@ fn a_raster_wrapper_draws_in_stills_and_exports_of_a_project_without_a_window() 
     assert!(status.success());
     let [r, g, b] = centre_of_png(&std::fs::read(frame).unwrap());
     assert!(r < 40 && g > 215 && b < 40, "the video: {r} {g} {b}");
+}
+
+/// A project opened at launch starts its extensions, but the tool server
+/// answers at once: it neither waits for them nor quits when they are slow.
+#[test]
+fn a_project_opened_at_launch_is_served_while_its_extensions_still_load() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = root.path().join("profile");
+    let extension = profile.join("extensions/synthetic-slow");
+    std::fs::create_dir_all(&extension).unwrap();
+    std::fs::write(
+        extension.join("manifest.json"),
+        json!({"id":"synthetic-slow","name":"Slow","version":"1.0.0","apiVersion":3}).to_string(),
+    )
+    .unwrap();
+    // Held and never released: the load settles only at the hold's limit.
+    std::fs::write(
+        extension.join("index.ts"),
+        "export default function(api: any){api.readiness.hold()}",
+    )
+    .unwrap();
+    let initialize = json!({"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1"}});
+    let saved = {
+        let mut client = Client::new(&profile, None);
+        client.rpc("initialize", initialize.clone());
+        client.tool(
+            "create_project",
+            json!({"name":"Slow load","width":320,"height":180,"fps":30,"duration":0.5}),
+        );
+        client.tool("start_session", json!({"prompt":"Slow load"}));
+        let saved = client.tool("save_project", json!({}))["path"]
+            .as_str()
+            .map(std::path::PathBuf::from)
+            .unwrap();
+        client.finish();
+        saved
+    };
+    let started = std::time::Instant::now();
+    let mut client = Client::new(&profile, Some(&saved));
+    client.rpc("initialize", initialize);
+    client.tool("start_session", json!({"prompt":"Slow load"}));
+    assert!(
+        started.elapsed() < Duration::from_secs(8),
+        "the tool server waited {:?} for the extensions",
+        started.elapsed()
+    );
 }
 
 /// One second of tone, then one of silence.
