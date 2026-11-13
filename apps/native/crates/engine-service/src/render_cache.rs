@@ -442,6 +442,8 @@ struct State {
     /// (a sequence's frames included): pictures cached above the renderer
     /// of the earlier files are not shown ([`DiskFrames::media_generation`]).
     media_generation: u64,
+    /// The sequence watch's version the media stamps were taken at.
+    sequences_seen: u64,
     indexed: Option<Instant>,
     fill: Fill,
     revision: u64,
@@ -812,18 +814,23 @@ impl DiskFrames {
                 && f.identity.overrides == overrides
                 && f.identity.fonts == fonts
         });
+        // The sequence watch published other member generations: looked at
+        // again now.
+        let sequences = crate::sequence_watch::global().snapshot();
         let recheck = state
             .media_checked
-            .is_none_or(|at| at.elapsed() >= MEDIA_RECHECK);
+            .is_none_or(|at| at.elapsed() >= MEDIA_RECHECK)
+            || state.sequences_seen != sequences.version;
         if unchanged && !recheck {
             return false;
         }
         drop(state);
         // A few stats, every 2 s at most, outside the lock.
         let content_named = self.with(|s| (s.content_named.clone(), false));
-        let media = stamps(&scene.media, content_named.as_deref());
+        let media = stamps(&scene.media, content_named.as_deref(), &sequences);
         let mut state = self.inner.state.lock().unwrap();
         state.media_checked = Some(Instant::now());
+        state.sequences_seen = sequences.version;
         let media_changed = state
             .frames
             .as_ref()
@@ -2495,41 +2502,24 @@ fn stamp(path: &Path, content_named: Option<&Path>) -> Stamp {
     )
 }
 
-/// Each media file's stamp; an image sequence read in place adds each of
-/// its numbered files' (a missing number stamped empty), since its frames
-/// draw from them and not from the manifest its asset retains.
-fn stamps(media: &pm_export::render::MediaPaths, content_named: Option<&Path>) -> Vec<Stamp> {
+/// Each media file's stamp; an image sequence read in place adds its
+/// member generation as the sequence watch last published it
+/// (`crate::sequence_watch`: its numbered files are looked at on the
+/// watch's thread, never here; one not looked at yet adds nothing, and is
+/// observed again when the watch publishes it).
+fn stamps(
+    media: &pm_export::render::MediaPaths,
+    content_named: Option<&Path>,
+    sequences: &crate::sequence_watch::Snapshot,
+) -> Vec<Stamp> {
     let mut out = Vec::with_capacity(media.paths.len());
     for path in media.paths.values() {
-        let own = stamp(path, content_named);
-        let sequence = sequence_of(&own);
-        out.push(own);
-        if let Some(sequence) = sequence {
-            out.extend((sequence.first..=sequence.last).map(|n| stamp(&sequence.file(n), None)));
+        out.push(stamp(path, content_named));
+        if let Some(generation) = sequences.generations.get(path) {
+            out.push((path.join("members"), 0, u128::from(*generation), 0));
         }
     }
     out
-}
-
-/// The image sequence a media file is the manifest of, read once per stamp.
-fn sequence_of(stamp: &Stamp) -> Option<Arc<pm_media::image::sequence::Manifest>> {
-    type Read = HashMap<Stamp, Option<Arc<pm_media::image::sequence::Manifest>>>;
-    static READ: OnceLock<Mutex<Read>> = OnceLock::new();
-    let read = READ.get_or_init(Mutex::default);
-    if let Some(known) = read.lock().unwrap().get(stamp) {
-        return known.clone();
-    }
-    let sequence = pm_media::image::sequence::Manifest::read(&stamp.0)
-        .ok()
-        .flatten()
-        .map(Arc::new);
-    let mut read = read.lock().unwrap();
-    // Media files of earlier states are not looked at again.
-    if read.len() > 4096 {
-        read.clear();
-    }
-    read.insert(stamp.clone(), sequence.clone());
-    sequence
 }
 
 /// The running renderer: a digest of this executable (any rebuild is
@@ -3000,6 +2990,10 @@ mod tests {
                 .unwrap();
             disk
         };
+        // The sequence watch looks at the files (never this thread).
+        let watched = scene.media.paths["clip"].clone();
+        let settle = || crate::sequence_watch::settle("render cache test", &watched);
+        settle();
         let disk = open();
         let first = fingerprint(&disk);
         assert_eq!(fingerprint(&open()), first, "reopened, nothing changed");
@@ -3007,7 +3001,7 @@ mod tests {
         let mut changed = |what: &str, change: &dyn Fn()| {
             change();
             // Same second, same length: only the bytes (and inode) differ.
-            disk.test_recheck_media();
+            settle();
             let now = fingerprint(&disk);
             assert!(!seen.contains(&now), "{what}: an earlier state's frames");
             assert_eq!(fingerprint(&open()), now, "{what}: reopened");

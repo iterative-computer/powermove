@@ -395,8 +395,9 @@ pub struct Engine {
     scopes: Option<crate::scopes::Tap>,
     /// The disk render cache playback reads (`crate::render_cache`).
     pub(crate) disk: Option<crate::render_cache::DiskFrames>,
-    /// The disk cache's media generation the cached pictures are of.
-    media_generation: u64,
+    /// The disk cache's media generation and the sequence watch's version
+    /// the cached pictures are of.
+    media_generation: (u64, u64),
     last_frame: Instant,
     idle_released: bool,
     /// Playing frames in a row that gave way to the disk reader.
@@ -804,7 +805,7 @@ impl Engine {
             scope_frames: None,
             scopes: None,
             disk: None,
-            media_generation: 0,
+            media_generation: (0, 0),
             last_frame: Instant::now(),
             idle_released: false,
             disk_late: 0,
@@ -1128,11 +1129,15 @@ impl Engine {
             scale: spec.scale.to_bits(),
             sampling: spec.sampling(),
         };
-        // A media file changed on disk (a sequence's frame rendered again)
-        // retires every cached picture: they are of the earlier files.
-        if let Some(generation) = self.disk.as_ref().map(|d| d.media_generation())
-            && generation != self.media_generation
-        {
+        // A media file changed on disk (seen by the render cache), or a
+        // sequence's frame rendered again (seen by the sequence watch,
+        // whether or not render storage is open, and whichever file the
+        // viewer shows): every cached picture is of the earlier files.
+        let generation = (
+            self.disk.as_ref().map_or(0, |d| d.media_generation()),
+            crate::sequence_watch::global().version(),
+        );
+        if generation != self.media_generation {
             self.media_generation = generation;
             self.cache.clear();
         }
@@ -3112,6 +3117,8 @@ mod frame_cache_tests {
             }),
             content: 1,
         };
+        let watched = scene.media.paths["clip"].clone();
+        crate::sequence_watch::settle("rendered again test", &watched);
         let disk = DiskFrames::default();
         disk.set_storage(Some((dir.path().join("frames"), u64::MAX)))
             .unwrap();
@@ -3146,7 +3153,7 @@ mod frame_cache_tests {
 
         render(1, 200);
         render(2, 220);
-        disk.test_recheck_media();
+        crate::sequence_watch::settle("rendered again test", &watched);
         assert!(disk.observe(&scene, &[], None, None, None, 1, at(0)));
         disk.test_ready();
         let again = grey(&mut engine, Moment::Paused, 0);
@@ -3163,7 +3170,7 @@ mod frame_cache_tests {
 
         let before = grey(&mut engine, Moment::Paused, 2);
         std::fs::remove_file(frame(3)).unwrap();
-        disk.test_recheck_media();
+        crate::sequence_watch::settle("rendered again test", &watched);
         assert!(disk.observe(&scene, &[], None, None, None, 1, at(2)));
         let sub = loop {
             let sub = engine
