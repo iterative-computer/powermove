@@ -870,3 +870,153 @@ fn an_untouched_clip_keeps_its_chroma_up_to_a_cut_to_a_touched_one() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---------------------------------------------------------------------------
+// The inverse only when delivery leaves the footage's colour as it is
+// ---------------------------------------------------------------------------
+
+/// The largest difference between two encoder inputs' samples, in the
+/// format's own codes, and whether every sample is equal.
+fn planes_differ(a: &EncoderInput, b: &EncoderInput) -> f64 {
+    let (a, b) = (planes(a), planes(b));
+    let luma = a
+        .luma
+        .iter()
+        .zip(&b.luma)
+        .map(|(p, q)| (p - q).abs() / a.code)
+        .fold(0.0, f64::max);
+    luma.max(chroma_step(&a, &b, 1.0, |_, _| true))
+}
+
+/// A 4:2:0 Rec.709 clip of fine coloured detail, alone and untouched.
+fn sdr_420_clip(dir: &std::path::Path) -> PathBuf {
+    let source = dir.join("clip.mov");
+    still_clip(
+        &source,
+        Codec::H264 {
+            bitrate_bps: 40_000_000,
+        },
+        busy_still,
+    );
+    source
+}
+
+fn hdr_project(doc: &mut Value) {
+    doc["color"] = json!({ "mode": "hdr", "masteringPeak": 1000 });
+}
+
+/// An untouched SDR clip in an HDR project, delivered with `color`: the
+/// delivery changes its colour, so its chroma is filtered like any
+/// rendered frame's.
+fn sdr_footage_is_filtered(name: &str, format: ExportFormat, color: OutputColor) {
+    let dir = scratch(name);
+    let source = sdr_420_clip(&dir);
+    let frames = 4;
+    let mut s = settings(format, frames);
+    s.color = color;
+    let (delivered, filtered) = deliver_and_filter(
+        vec![clip_layer("v", "clip", 0, frames)],
+        &[("clip", &source)],
+        s,
+        hdr_project,
+        None,
+    );
+    let worst = delivered
+        .iter()
+        .zip(&filtered)
+        .map(|(d, f)| planes_differ(d, f))
+        .fold(0.0, f64::max);
+    eprintln!(
+        "MEASURE untouched SDR 4:2:0 footage delivered as {name}: {worst:.1} codes from the band-limited decimation of the delivered colour"
+    );
+    assert_eq!(delivered.len(), frames as usize);
+    assert!(
+        delivered == filtered,
+        "{name}: {worst:.1} codes from the band-limited decimation"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn hevc10() -> ExportFormat {
+    ExportFormat::Hevc {
+        ten_bit: true,
+        container: pm_protocol::priority::Container::Mov,
+    }
+}
+
+#[test]
+fn sdr_footage_delivered_as_pq_is_filtered() {
+    sdr_footage_is_filtered("pq", hevc10(), OutputColor::Rec2100Pq);
+}
+
+#[test]
+fn sdr_footage_delivered_as_hlg_is_filtered() {
+    sdr_footage_is_filtered("hlg", hevc10(), OutputColor::Rec2100Hlg);
+}
+
+#[test]
+fn sdr_footage_tone_mapped_out_of_an_hdr_project_is_filtered() {
+    sdr_footage_is_filtered(
+        "tone",
+        ExportFormat::H264,
+        OutputColor::Rec709QuickTime {
+            candidate: QuickTimeTag::Cicp1_13_1,
+        },
+    );
+}
+
+/// Draws a one-pixel red column on every frame.
+struct Stroke(usize);
+
+impl FramePost for Stroke {
+    fn frame(
+        &self,
+        _: u64,
+        _: Ticks,
+        width: u32,
+        _: u32,
+        _: WorkingEncoding,
+        mut rgba: Vec<f32>,
+    ) -> Result<Vec<f32>, JobError> {
+        for row in rgba.chunks_exact_mut(width as usize * 4) {
+            row[self.0 * 4..self.0 * 4 + 4].copy_from_slice(&[1.0, 0.0, 0.0, 1.0]);
+        }
+        Ok(rgba)
+    }
+}
+
+#[test]
+fn a_postprocessed_frame_of_untouched_footage_is_filtered() {
+    let dir = scratch("post");
+    let source = dir.join("clip.mov");
+    // Grey footage: the stroke is the only colour in the frame.
+    still_clip(&source, Codec::ProRes(ProResProfile::Hq), |_, _| [0.4; 3]);
+    let frames = 4;
+    let (delivered, filtered) = deliver_and_filter(
+        vec![clip_layer("v", "clip", 0, frames)],
+        &[("clip", &source)],
+        settings(
+            ExportFormat::ProRes {
+                profile: WireProRes::Hq,
+            },
+            frames,
+        ),
+        |_| {},
+        // An odd column: point sampling at the even columns drops it.
+        Some(Arc::new(Stroke(41))),
+    );
+    let p = planes(&delivered[0]);
+    let carried: f64 = (0..p.cw).map(|cx| p.chroma[cx][1] / p.code).sum();
+    let red = rgb_to_ycbcr(RED)[2] / p.code;
+    eprintln!(
+        "MEASURE a red stroke drawn on untouched footage at an odd column: Cr carried {carried:.1} codes of {:.1} (half the stroke's own)",
+        red / 2.0
+    );
+    assert!(
+        (carried - red / 2.0).abs() <= 2.0,
+        "the stroke's colour is carried: {carried:.1} of {:.1}",
+        red / 2.0
+    );
+    assert!(delivered == filtered);
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -11,6 +11,10 @@
 //! opacity or transform, no effect or transition, nothing over it). A clip
 //! that fades, or that a title crosses, is filtered from its first frame to
 //! its last.
+//!
+//! The inverse returns a source's own chroma only while the delivery leaves
+//! its colour as it is ([`Delivery`]): an HDR output, a tone-mapped one, or
+//! a frame something drew on after rendering is filtered like any other.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -18,25 +22,38 @@ use std::path::{Path, PathBuf};
 use pm_render::{FrameFootage, Renderer};
 
 use crate::convert::Chroma;
-use crate::settings::InputFormat;
+use crate::settings::{ColorTags, InputFormat};
 
-/// What an export delivers.
+/// What the delivery does to a frame after it is rendered.
 #[derive(Clone, Copy, Debug)]
 pub struct Delivery {
     pub format: InputFormat,
+    pub tags: ColorTags,
+    /// The frame is tone-mapped for the output (`RenderRequest::output_tone`).
+    pub tone_mapped: bool,
+    /// Something draws on the frame after it is rendered
+    /// (`ExportPlan::frame_post`).
+    pub postprocessed: bool,
 }
 
 impl Delivery {
-    /// Whether the output is subsampled, so the inverse of a source's
-    /// upsampling returns its own chroma. `Some(rows)` then says whether
-    /// rows are subsampled too.
+    /// Whether untouched Rec.709 footage reaches the encoder input with its
+    /// own colour, so the inverse of its upsampling returns its own chroma:
+    /// a subsampled Rec.709 output (primaries, matrix and display encoding
+    /// as the source's; the transfer tag is a label), no tone transform, no
+    /// postprocessor. `Some(rows)` then says whether rows are subsampled too.
     fn inverse(self) -> Option<bool> {
         use InputFormat as F;
-        match self.format {
-            F::V216 => Some(false),
-            F::V420 | F::X420 | F::V0a8 | F::I420 | F::I420a => Some(true),
-            F::Y416 | F::Rgba8 | F::Rgba16 => None,
-        }
+        let rows = match self.format {
+            F::V216 => false,
+            F::V420 | F::X420 | F::V0a8 | F::I420 | F::I420a => true,
+            F::Y416 | F::Rgba8 | F::Rgba16 => return None,
+        };
+        let same_colour = matches!(
+            self.tags,
+            ColorTags::Rec709Broadcast | ColorTags::Rec709QuickTime
+        );
+        (same_colour && !self.tone_mapped && !self.postprocessed).then_some(rows)
     }
 }
 

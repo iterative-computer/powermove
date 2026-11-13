@@ -1510,6 +1510,9 @@ where
     // One chroma decimation for each continuous piece of picture.
     let mut policy = crate::chroma_policy::ChromaPolicy::new(crate::chroma_policy::Delivery {
         format: spec.input_format(),
+        tags: spec.tags,
+        tone_mapped: request.output_tone.is_some(),
+        postprocessed: frame_post.is_some(),
     });
     let pass = pass_key(job.seed, request.output_size);
     let mut pipeline = Pipeline::new(spec, sink)?;
