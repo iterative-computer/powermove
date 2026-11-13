@@ -127,12 +127,16 @@ fn malformed_cube_inputs_are_rejected() {
         assert!(CubeLut::parse(s).is_err(), "accepted {s}");
     }
 }
+/// An infinite input is outside the domain like any other and reads as the
+/// nearer end; one that is not a number reads as the domain's low end.
 #[test]
-fn nonfinite_apply_is_rejected() {
+fn a_nonfinite_input_has_a_stated_lookup() {
     let lut = CubeLut::parse(&identity()).unwrap();
-    for n in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-        assert!(lut.apply([n, 0., 0.]).is_err());
-    }
+    let low = lut.apply([0., 0., 0.]).unwrap();
+    let high = lut.apply([1., 0., 0.]).unwrap();
+    assert_eq!(lut.apply([f64::NAN, 0., 0.]).unwrap(), low);
+    assert_eq!(lut.apply([f64::NEG_INFINITY, 0., 0.]).unwrap(), low);
+    assert_eq!(lut.apply([f64::INFINITY, 0., 0.]).unwrap(), high);
 }
 fn cfg() -> ScopeConfig {
     ScopeConfig {

@@ -791,6 +791,106 @@ fn the_distribute_buttons_space_three_selected_layers_as_one_undo_step() {
     );
 }
 
+/// Properties ▸ Time (`RetimingSection.svelte`): Time Remap, Freeze Frame
+/// and Reverse on a video layer, then its remapping rows.
+#[test]
+fn the_time_section_remaps_freezes_and_reverses_a_video_layer() {
+    let actor = KernelActor::spawn(KernelConfig::default());
+    let project = json!({"id":"synthetic","name":"Synthetic","compId":"c","w":640,"h":360,"fps":30,"dur":10,
+        "bg":"#000000","assets":{"v1":{"id":"v1","kind":"video","name":"clip.mov","dur":20}},"comps":{},
+        "layers":[
+            {"id":"clip","type":"video","name":"Clip","from":2,"dur":3,"on":true,
+             "d":{"asset":"v1","fit":"cover","trim":5,"speed":1,"w":64,"h":36},"p":{"opacity":{"v":100,"kf":[]}},"fx":[]},
+            {"id":"box","type":"shape","name":"Box","from":0,"dur":10,"on":true,
+             "d":{"w":40,"h":40},"p":{"opacity":{"v":100,"kf":[]}},"fx":[]}]});
+    let kernel = actor.handle();
+    kernel
+        .open(
+            "synthetic",
+            OpenSource::Untitled(pm_model::json::parse(&project.to_string()).unwrap()),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    let select = |id: &str| {
+        kernel
+            .call(
+                "synthetic",
+                Request::new(
+                    Caller::native(),
+                    SelectionCall::Layers {
+                        ids: vec![id.to_owned()],
+                        add: false,
+                    },
+                ),
+            )
+            .wait()
+            .unwrap()
+            .unwrap();
+    };
+    let identity = pm_surface::host_api::Identity {
+        realm: "inspector".into(),
+        generation: 1,
+        project: "synthetic".into(),
+    };
+    let mut backend = data::Backend::new(kernel.clone(), identity, "inspector", false).unwrap();
+    let time_section = |backend: &mut data::Backend| {
+        let snapshot = backend.inspector_snapshot().unwrap();
+        snapshot["sections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["id"] == "time")
+            .cloned()
+    };
+    // A shape has no Time section.
+    select("box");
+    assert!(time_section(&mut backend).is_none());
+    select("clip");
+    let section = time_section(&mut backend).expect("a video layer has Time");
+    assert_eq!(section["title"], "Time");
+    assert_eq!(
+        section["actions"],
+        json!(["time-remap", "freeze-frame", "reverse"])
+    );
+    assert_eq!(
+        section["rows"],
+        json!([]),
+        "no remapping rows before remapping"
+    );
+    let Ok(models::NativeCommand::Kernel(request)) = backend.native_command(
+        "panel.inspector",
+        &json!({"type":"section-action","section":"time","action":"freeze-frame"}),
+    ) else {
+        panic!("Freeze Frame edits the project")
+    };
+    kernel.call("synthetic", request).wait().unwrap().unwrap();
+    let published = kernel.published("synthetic").unwrap();
+    assert_eq!(
+        published.history.undo_label.as_deref(),
+        Some("Freeze Frame")
+    );
+    let root = published.snapshot.root().unwrap();
+    let at = pm_kernel::model::find_layer(root, "clip").unwrap();
+    let clip = pm_kernel::model::layer_at(root, &at).unwrap().to_value();
+    let keys = clip
+        .get("d")
+        .and_then(|d| d.get("sourceTime"))
+        .and_then(|s| s.get("kf"));
+    assert_eq!(
+        keys.and_then(pm_model::Value::as_array).map(Vec::len),
+        Some(1)
+    );
+    let section = time_section(&mut backend).unwrap();
+    let rows: Vec<&str> = section["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|r| r["label"].as_str())
+        .collect();
+    assert_eq!(rows, ["Time Remap", "Source Time"]);
+}
+
 #[test]
 fn render_presets_use_the_legacy_actor_key_and_archive_same_name_records() {
     let actor = actor();

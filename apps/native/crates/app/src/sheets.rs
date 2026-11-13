@@ -9,8 +9,9 @@ use objc2::{
     sel,
 };
 use objc2_app_kit::{
-    NSColorWell, NSControl, NSControlTextEditingDelegate, NSPopUpButton, NSTextField,
-    NSTextFieldDelegate, NSUserInterfaceItemIdentification, NSWindow,
+    NSColorWell, NSControl, NSControlTextEditingDelegate, NSEventModifierFlags, NSPopUpButton,
+    NSTextDelegate, NSTextField, NSTextFieldDelegate, NSTextView, NSTextViewDelegate,
+    NSUserInterfaceItemIdentification, NSWindow,
 };
 use objc2_foundation::{NSNotification, NSRect, NSString};
 use std::collections::BTreeMap;
@@ -38,6 +39,19 @@ define_class!(
         }
     }
     unsafe impl NSTextFieldDelegate for Target {}
+    unsafe impl NSTextDelegate for Target {
+        #[unsafe(method(textDidChange:))]
+        fn text_changed(&self, notification: &NSNotification) {
+            let id = notification
+                .object()
+                .and_then(|o| o.downcast::<NSTextView>().ok())
+                .and_then(|v| v.identifier());
+            if let Some(id) = id {
+                let _ = self.ivars().tx.try_send(format!("changed:{id}"));
+            }
+        }
+    }
+    unsafe impl NSTextViewDelegate for Target {}
     impl Target {
         #[unsafe(method(control:))]
         fn control(&self, sender: &NSControl) {
@@ -66,6 +80,7 @@ impl OpenSheet {
     ) -> Self {
         let mtm = MainThreadMarker::new().unwrap();
         let (tx, actions) = async_channel::unbounded();
+        let cancelled = tx.clone();
         let target: Retained<Target> = unsafe {
             msg_send![
                 super(Target::alloc(mtm).set_ivars(TargetState { tx })),
@@ -78,7 +93,13 @@ impl OpenSheet {
         for field in sheet.fields.values() {
             unsafe { field.setDelegate(Some(ProtocolObject::from_ref(&*target))) };
         }
-        sheet.present(owner, first);
+        for editor in sheet.editors.values() {
+            editor.setDelegate(Some(ProtocolObject::from_ref(&*target)));
+        }
+        // Never begun (held, then dropped): the loop hears Cancel.
+        sheet.present(owner, first, move || {
+            let _ = cancelled.try_send("cancel".into());
+        });
         let seeded = sheet
             .controls
             .iter()
@@ -101,6 +122,9 @@ impl OpenSheet {
         }
     }
     pub fn text(&self, id: &str) -> String {
+        if let Some(editor) = self.sheet.editors.get(id) {
+            return editor.string().to_string();
+        }
         self.sheet
             .fields
             .get(id)
@@ -139,6 +163,7 @@ impl OpenSheet {
         (self.seeded.get(id) != Some(&colour)).then_some(colour)
     }
     pub fn close(&self) {
+        gpui_macos::child_window::forget_sheet(&self.sheet.window);
         self.owner.endSheet(&self.sheet.window);
         self.sheet.window.orderOut(None);
     }
@@ -160,6 +185,8 @@ pub fn hex_colour(hex: &str) -> Option<u32> {
         _ => None,
     }
 }
+/// The lines an expression's editor shows before it scrolls.
+const EXPRESSION_LINES: usize = 7;
 /// `Surface` forms: labelled controls in spec order and its footer buttons.
 /// A multi-value number field makes one well per value: `{id}.0`, `{id}.1`.
 /// Returns the sheet and its fields' description lines.
@@ -219,7 +246,9 @@ pub fn from_surface(
                 popup.setEnabled(field.enabled);
                 sheet.control(&field.id, &field.label, popup.into_super().into_super());
             }
-            _ if surface.expression_editor => sheet.source(&field.id, &field.label, value),
+            _ if surface.expression_editor => {
+                sheet.editor(&field.id, &field.label, value, EXPRESSION_LINES)
+            }
             _ => sheet.text(&field.id, &field.label, value, field.secure, field.enabled),
         }
         if let (Some(placeholder), Some(control)) = (field.placeholder, sheet.fields.get(&field.id))
@@ -238,14 +267,24 @@ pub fn from_surface(
             } else {
                 tokens.colors.muted
             };
-            // Under an expression, on the sheet's full width: the names it
-            // can use, then what the parser says about what is typed.
-            let label = if surface.expression_editor {
-                sheet.line_reserving(text, &reserve, tokens.typography.label.into(), rgb)
+            if surface.expression_editor {
+                // Under an expression, on the sheet's text column: what the
+                // parser makes of what is typed (two lines kept for it, so
+                // the sheet never changes height), then the names an
+                // expression can use.
+                let (status, bad) = crate::expression_sheet::status(value);
+                let label = sheet.line_reserving(
+                    &status,
+                    "\n",
+                    tokens.typography.label.into(),
+                    if bad { tokens.colors.danger } else { rgb },
+                );
+                descriptions.insert(field.id.clone(), label);
+                sheet.line(text, tokens.typography.minimum.into(), tokens.colors.muted);
             } else {
-                sheet.note(text, &reserve, rgb)
-            };
-            descriptions.insert(field.id.clone(), label);
+                let label = sheet.note(text, &reserve, rgb);
+                descriptions.insert(field.id.clone(), label);
+            }
         }
         if let Some(error) = field.error {
             sheet.note(error, error, tokens.colors.danger);
@@ -267,6 +306,13 @@ pub fn from_surface(
             button.default,
             button.label == "Cancel",
         );
+        // Return is a new line in an editor: its sheet applies on ⌘Return.
+        if surface.expression_editor
+            && button.default
+            && let Some(button) = sheet.buttons.get(button.id)
+        {
+            button.setKeyEquivalentModifierMask(NSEventModifierFlags::Command);
+        }
         order.push(button.id);
     }
     sheet.footer(&order, None);

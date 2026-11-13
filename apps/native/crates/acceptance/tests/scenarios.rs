@@ -162,12 +162,56 @@ const NATIVE_BINDINGS: &[(&str, &str, &str, &str)] = &[
         "projectSettings",
         "[]",
     ),
+    ("native.rippleTrimIn", "alt+shift+[", "rippleTrimIn", "[]"),
+    ("native.rippleTrimOut", "alt+shift+]", "rippleTrimOut", "[]"),
+    ("native.extendEdit", "shift+x", "extendEdit", "[]"),
+    (
+        "native.slipLayers.left",
+        "cmd+alt+left",
+        "slipLayers",
+        "[-1]",
+    ),
+    (
+        "native.slipLayers.right",
+        "cmd+alt+right",
+        "slipLayers",
+        "[1]",
+    ),
+    (
+        "native.slipLayers.left10",
+        "cmd+alt+shift+left",
+        "slipLayers",
+        "[-10]",
+    ),
+    (
+        "native.slipLayers.right10",
+        "cmd+alt+shift+right",
+        "slipLayers",
+        "[10]",
+    ),
+    ("native.slideLayer.left", "alt+,", "slideLayer", "[-1]"),
+    ("native.slideLayer.right", "alt+.", "slideLayer", "[1]"),
+    (
+        "native.slideLayer.left10",
+        "alt+shift+,",
+        "slideLayer",
+        "[-10]",
+    ),
+    (
+        "native.slideLayer.right10",
+        "alt+shift+.",
+        "slideLayer",
+        "[10]",
+    ),
+    ("native.timeRemap", "cmd+alt+t", "timeRemapLayers", "[]"),
+    ("native.timeReverse", "cmd+alt+r", "reverseLayers", "[]"),
+    ("native.freezeFrame", "alt+f", "freezeFrame", "[]"),
 ];
 #[test]
-fn all_228_real_bindings_under_seven_routing_contexts() {
+fn all_242_real_bindings_under_seven_routing_contexts() {
     let c = pm_acceptance::catalog::Catalog::embedded().unwrap();
     let shipped = keyboard::production::shipped();
-    assert_eq!(shipped.len(), 228);
+    assert_eq!(shipped.len(), 242);
     assert_eq!(c.bindings.len() + NATIVE_BINDINGS.len(), shipped.len());
     for real in &shipped {
         let binding = match c.bindings.iter().find(|b| b.id == real.id) {

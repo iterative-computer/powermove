@@ -131,7 +131,20 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                                 }
                             }).detach();
                         },
-                        "save" => v.save(None, cx),
+                        // `path`: Save As to it with no panel (the panel runs
+                        // out of process, so a background check can't drive it).
+                        "save" => {
+                            let path = match r["path"].as_str() {
+                                Some(path) => {
+                                    let path = std::path::PathBuf::from(path);
+                                    let folder = path.parent().and_then(|f| f.canonicalize().ok());
+                                    anyhow::ensure!(folder.as_deref().is_some_and(temporary), "temporary destination required");
+                                    Some(path)
+                                }
+                                None => None,
+                            };
+                            v.save(path, cx)
+                        },
                         // Diagnostics: the window's AppKit view tree (class, frame, hidden).
                         "views" => {
                             let w = v.host.borrow().window.clone();

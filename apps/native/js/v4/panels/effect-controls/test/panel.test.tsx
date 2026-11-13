@@ -139,9 +139,8 @@ test("§2/5/6 one list stop, stable value column, exact names and separate param
   const value = nodes(f.root).find(
     (n) => n.parentNode === row && n.props["data-pm-slot"] === "value",
   )!;
-  expect((value.props.style as Record<string, Json>).width).toEqual({
-    token: "metrics.value_column",
-  });
+  // The host sizes the columns of every row alike: the slot pins no width.
+  expect(value.props.style).toBeUndefined();
   expect(find(f.root, (p) => p.label === "Enable Glow").props.role).toBe(
     "checkbox",
   );

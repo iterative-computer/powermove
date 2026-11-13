@@ -9,9 +9,18 @@
 //! [`VERTICAL_420`] decimation is its exact inverse, so 4:2:0 sources export
 //! to 4:2:0 unchanged (section 2, invariant (1)). A luma pixel that lies exactly on a
 //! chroma sample position gets that sample unchanged (every filter's weight
-//! vector is a unit vector there). The encoder-input side decimates by point
-//! sampling at co-sited positions and averages two samples where the output
-//! siting is centered.
+//! vector is a unit vector there).
+//!
+//! The encoder-input side decimates rendered frames band-limited: the tent
+//! (bilinear) kernel of a 2:1 reduction, sited where the output's chroma
+//! sits ([`TENT_COSITED`] across, [`TENT_CENTERED`] between rows). Both tap
+//! sets weigh even and odd luma pixels equally, so thin detail keeps its
+//! colour at either parity and does not flicker as it moves, and no tap is
+//! negative, so edges get no complementary fringe. Only a frame that is
+//! untouched footage, whose chroma the renderer upsampled at the output's
+//! factors and siting, is decimated by the exact inverse instead (point
+//! sampling at co-sited columns, [`VERTICAL_420`] between rows), so it
+//! passes through unchanged.
 //!
 //! The functions here are the CPU reference; `pm-render`'s source pass
 //! evaluates the same weights in WGSL and its tests compare the two.
@@ -188,7 +197,17 @@ pub fn upsample(
 /// would blur it by `[1, 6, 1] / 8` on every round trip.
 pub const VERTICAL_420: [(i64, f64); 4] = [(-1, -0.25), (0, 0.75), (1, 0.75), (2, -0.25)];
 
-/// Decimates a luma-resolution channel to chroma resolution for an output
+/// The tent kernel across for a co-sited 2:1 output (4:2:2, and 4:2:0 with
+/// left or top-left siting): columns `2x − 1, 2x, 2x + 1`.
+pub const TENT_COSITED: [(i64, f64); 3] = [(-1, 0.25), (0, 0.5), (1, 0.25)];
+
+/// The tent kernel for a 2:1 output sample centred between luma rows `2y`
+/// and `2y + 1` (4:2:0 siting types 0 and 1): rows `2y − 1` to `2y + 2`.
+pub const TENT_CENTERED: [(i64, f64); 4] = [(-1, 0.125), (0, 0.375), (1, 0.375), (2, 0.125)];
+
+/// Decimates by the exact inverse of [`upsample`] (untouched footage's
+/// chroma; deliveries of rendered frames use the tent kernels above) a
+/// luma-resolution channel to chroma resolution for an output
 /// with `siting` (encoder input): point sampling at co-sited positions;
 /// where a 2× output sample is centered between two rows or columns, the
 /// declared inverse-linear filter ([`VERTICAL_420`]); other factors average
@@ -376,6 +395,20 @@ mod tests {
         }
         let weights: f64 = VERTICAL_420.iter().map(|t| t.1).sum();
         assert_eq!(weights, 1.0);
+    }
+
+    #[test]
+    fn tent_kernels_weigh_both_parities_equally_without_negative_taps() {
+        for taps in [&TENT_COSITED[..], &TENT_CENTERED[..]] {
+            let phase = |p: i64| -> f64 {
+                taps.iter()
+                    .filter(|t| t.0.rem_euclid(2) == p)
+                    .map(|t| t.1)
+                    .sum()
+            };
+            assert_eq!((phase(0), phase(1)), (0.5, 0.5));
+            assert!(taps.iter().all(|t| t.1 > 0.0));
+        }
     }
 
     #[test]

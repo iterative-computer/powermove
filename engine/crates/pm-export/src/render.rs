@@ -40,7 +40,7 @@ use pm_render::{OutputKind, RenderError, RenderRequest, Renderer};
 use pm_time::Rate;
 
 use crate::Error;
-use crate::convert::WorkingFrame;
+use crate::convert::{Chroma, WorkingFrame};
 use crate::pipeline::{Pipeline, Sink};
 use crate::settings::{
     AlphaOutput, AudioCodec, AudioSpec, Codec, ColorTags, Container, Dither, ExportSpec,
@@ -305,6 +305,8 @@ pub struct ReadFrame {
     pub height: u32,
     /// Layers that failed and drew nothing (section 8 isolation).
     pub failures: Vec<pm_render::LayerFailure>,
+    /// The footage in the picture, from the plan the frame was drawn with.
+    pub footage: pm_render::FrameFootage,
 }
 
 /// Waits for the frame's commands, the watchdog looking on
@@ -449,6 +451,8 @@ fn render_bands(
         rgba.clear();
     }
     let mut failures = Vec::new();
+    // Every band is drawn from the same plan of the whole frame.
+    let mut footage = None;
     let mut y = 0u32;
     while y < h {
         if cancel.load(Ordering::Relaxed) {
@@ -533,6 +537,7 @@ fn render_bands(
             }
         }
         failures.append(&mut frame.failures);
+        footage.get_or_insert_with(|| std::mem::take(&mut frame.footage));
         renderer.recycle(frame);
         y += band;
     }
@@ -541,6 +546,7 @@ fn render_bands(
         width: w,
         height: h,
         failures,
+        footage: footage.unwrap_or_default(),
     })
 }
 
@@ -581,6 +587,20 @@ impl Timeline {
     /// Composition time of export frame n, relative to the exact authored in point.
     pub fn tick(&self, n: u64) -> Ticks {
         Ticks::new(self.schedule().tick(n)).expect("schedule clamps document ticks")
+    }
+
+    /// Composition time of the grid's frame `n`, counted from the export's
+    /// first frame to either side of it.
+    pub fn tick_at(&self, n: i64) -> Ticks {
+        Ticks::new(self.schedule().tick_at(n)).expect("schedule clamps document ticks")
+    }
+
+    /// The frames of a composition `seconds` long on the export's grid,
+    /// numbered from the export's first frame (`None`: no such length).
+    pub fn composition_frames(&self, seconds: f64) -> Option<std::ops::Range<i64>> {
+        let end = seconds * TICKS_PER_SECOND as f64;
+        (end.is_finite() && end >= 0.0 && end <= crate::schedule::MAX_DOCUMENT_TICK as f64)
+            .then(|| self.schedule().grid(end.round() as i64))
     }
 
     /// Project samples `[first, end)` of export frame `n` at `rate` Hz.
@@ -827,21 +847,22 @@ pub struct AudioPlan {
     pub graph: Arc<pm_audio::MixGraph>,
     pub cache: Arc<pm_audio::SourceCache>,
     pub sample_rate: u32,
-    /// The export's samples: the range's mix length
-    /// ([`export_audio_samples`]), not the frames' span.
+    /// The export's samples: the frames' span ([`export_audio_samples`]),
+    /// so the sound ends with the picture.
     pub samples: i64,
-    /// The range in seconds as today's `renderOffline(t0, t1)` receives it:
-    /// its clips and envelopes start from `t0` (`pm_audio::today`).
+    /// The mixed span in seconds, from the range's start to the last frame's
+    /// end, as today's `renderOffline(t0, t1)` receives it: its clips and
+    /// envelopes start from `t0` (`pm_audio::today`).
     pub range: (f64, f64),
 }
 
-/// An export's mix length (X-K3, authored timing): `ceil((t1 − t0) × rate)`
-/// with the range in seconds. Range ends are ticks of seconds the sheet
-/// chose, so the division gives back the same double.
-pub fn export_audio_samples(start: Ticks, end: Ticks, sample_rate: u32) -> i64 {
-    let seconds = |t: Ticks| t.get() as f64 / TICKS_PER_SECOND as f64;
-    let span = (seconds(end) - seconds(start)).max(0.0);
-    (span * f64::from(sample_rate)).ceil() as i64
+/// An export's mix length: the samples its frames span, from the first
+/// frame's start to the last frame's end, so a file's sound lasts as long as
+/// its picture (frames ÷ rate) to the sample, at NTSC rates too.
+pub fn export_audio_samples(timeline: &Timeline, sample_rate: u32) -> i64 {
+    let first = pm_audio::offline::sample_of_ticks(timeline.tick(0).get(), sample_rate);
+    let (_, end) = timeline.samples(timeline.frames.saturating_sub(1), sample_rate);
+    (end - first).max(0)
 }
 
 /// Source blocks kept decoded for one export's mix.
@@ -1313,10 +1334,10 @@ fn plan_export_checked(
                 // Today's export OfflineAudioContext is always stereo 48 kHz,
                 // independently of the project's playback device/rate.
                 sample_rate: 48_000,
-                samples: export_audio_samples(s.range.start, s.range.end, 48_000),
+                samples: export_audio_samples(&timeline, 48_000),
                 range: (
                     s.range.start.get() as f64 / TICKS_PER_SECOND as f64,
-                    s.range.end.get() as f64 / TICKS_PER_SECOND as f64,
+                    timeline.tick(timeline.frames).get() as f64 / TICKS_PER_SECOND as f64,
                 ),
                 graph: Arc::new(graph),
                 cache,
@@ -1338,7 +1359,14 @@ fn plan_export_checked(
         tags,
         alpha,
         working: WorkingEncoding::Standard,
-        dither: if s.dither { Dither::On } else { Dither::Off },
+        // On is the engine's measured rule (`Dither::Default`): 8-bit PNG,
+        // and H.264 with bits to hold it, are dithered; other lossy codecs
+        // and 10-bit and deeper outputs are not.
+        dither: if s.dither {
+            Dither::Default
+        } else {
+            Dither::Off
+        },
         audio: audio.as_ref().map(|a| AudioSpec {
             sample_rate: a.sample_rate,
             channels: 2,
@@ -1433,6 +1461,11 @@ pub struct Progress {
     /// A preview of the frame just encoded (plans that ask for previews, at
     /// most every [`PREVIEW_EVERY`], and the last frame).
     pub preview: Option<Arc<PreviewFrame>>,
+    /// The mixed sound's levels so far (exports with sound).
+    pub mix: Option<crate::verify::MixLevels>,
+    /// Once every frame is encoded, the frames of the written file checked
+    /// so far (of `frames`): the check is its own phase.
+    pub checked: Option<u64>,
 }
 
 impl Progress {
@@ -1446,7 +1479,7 @@ impl Progress {
 }
 
 enum Rendered {
-    Frame(u64, Vec<f32>),
+    Frame(u64, Vec<f32>, Chroma),
     Failed(JobError),
 }
 
@@ -1499,7 +1532,21 @@ where
     } = plan;
     let working = spec.working;
     let frames = spec.frames;
+    // One chroma decimation for each continuous piece of the composition's
+    // picture, whatever range of it is exported.
+    let mut policy = crate::chroma_policy::ChromaPolicy::new(
+        crate::chroma_policy::Delivery {
+            format: spec.input_format(),
+            tags: spec.tags,
+            tone_mapped: request.output_tone.is_some(),
+            postprocessed: frame_post.is_some(),
+        },
+        pm_eval::Comp::resolve(&document, &job.composition)
+            .ok()
+            .and_then(|comp| timeline.composition_frames(comp.duration())),
+    );
     let pass = pass_key(job.seed, request.output_size);
+    let sound = spec.audio.map(|a| a.codec);
     let mut pipeline = Pipeline::new(spec, sink)?;
     let mut mixer = audio.map(|a| {
         let first = pm_audio::offline::sample_of_ticks(timeline.tick(0).get(), a.sample_rate);
@@ -1522,7 +1569,7 @@ where
         (
             mixer,
             a.sample_rate,
-            // Today's mix ends here, before or after the last frame's end.
+            // The mix ends with the last frame.
             first + a.samples,
         )
     });
@@ -1538,12 +1585,13 @@ where
             let _qos_refresh = crate::par::install_qos_refresh(encoder_gate.worker_qos_refresh());
             encoder_gate.sync_worker_qos();
             let mut last_preview: Option<Instant> = None;
+            let mut levels = sound.map(crate::verify::MixLevels::of).unwrap_or_default();
             let profiling = std::env::var("PM_EXPORT_PROFILE").as_deref() == Ok("1");
             let (mut video_ns, mut preview_ns, mut audio_ns, mut progress_ns) = (0, 0, 0, 0);
             for expected in 0..frames {
-                let (n, rgba) = loop {
+                let (n, rgba, chroma) = loop {
                     match rx.recv_timeout(ENCODER_IDLE) {
-                        Ok(Rendered::Frame(n, rgba)) => break (n, rgba),
+                        Ok(Rendered::Frame(n, rgba, chroma)) => break (n, rgba, chroma),
                         Ok(Rendered::Failed(e)) => return Err(e),
                         // The render waits (a playing viewer, an extension):
                         // the encoder must not hold frames that long.
@@ -1562,7 +1610,7 @@ where
                     rgba: &rgba,
                 };
                 let started = profiling.then(Instant::now);
-                pipeline.push_frame(&frame)?;
+                pipeline.push_frame_with(&frame, chroma)?;
                 video_ns += started.map_or(0, |t| t.elapsed().as_nanos());
                 let started = profiling.then(Instant::now);
                 let due = wants_preview
@@ -1602,6 +1650,7 @@ where
                         return Err(JobError::Audio(format!("{voice}: {why}")));
                     }
                     if !block.is_empty() {
+                        levels.add(&block);
                         pipeline.push_audio(&block)?;
                     }
                 }
@@ -1611,6 +1660,8 @@ where
                     frames_done: n + 1,
                     frames,
                     preview,
+                    mix: mixer.is_some().then_some(levels),
+                    checked: None,
                 });
                 progress_ns += started.map_or(0, |t| t.elapsed().as_nanos());
             }
@@ -1624,12 +1675,46 @@ where
                 );
             }
             encoder_gate.sync_worker_qos();
-            pipeline
-                .finish_with_cancel(cancel)
-                .map_err(|error| match error {
-                    crate::Error::Cancelled => JobError::Cancelled,
-                    error => JobError::Export(error),
-                })
+            // The file is written and checked on its own thread while this
+            // one tells how far the check is.
+            let checked = Arc::new(std::sync::atomic::AtomicU64::new(0));
+            pipeline.count_checked(checked.clone());
+            let mix = mixer.is_some().then_some(levels);
+            std::thread::scope(|finishing| {
+                let finished = finishing.spawn(|| pipeline.finish_with_cancel(cancel));
+                let mut told = None;
+                while !finished.is_finished() {
+                    let now = checked.load(Ordering::Acquire);
+                    if told != Some(now) {
+                        told = Some(now);
+                        progress(Progress {
+                            frames_done: frames,
+                            frames,
+                            preview: None,
+                            mix,
+                            checked: Some(now),
+                        });
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                let now = checked.load(Ordering::Acquire);
+                if told != Some(now) && now > 0 {
+                    progress(Progress {
+                        frames_done: frames,
+                        frames,
+                        preview: None,
+                        mix,
+                        checked: Some(now),
+                    });
+                }
+                finished
+                    .join()
+                    .unwrap_or_else(|_| Err(crate::Error::Verify("the file check panicked".into())))
+            })
+            .map_err(|error| match error {
+                crate::Error::Cancelled => JobError::Cancelled,
+                error => JobError::Export(error),
+            })
         });
         let mut render_error = None;
         let _qos_refresh = crate::par::install_qos_refresh(gate.worker_qos_refresh());
@@ -1661,7 +1746,10 @@ where
         };
         // A read frame, checked and finished as the exporting window leaves
         // it, to the encoder in order. False: the encoder is gone.
-        let deliver = |n: u64, read: Result<ReadFrame, JobError>| -> Result<bool, JobError> {
+        let mut deliver = |renderer: &mut Renderer,
+                           n: u64,
+                           read: Result<ReadFrame, JobError>|
+         -> Result<bool, JobError> {
             let mut f = read?;
             // A renderer that leaves failing layers out drew the rest.
             if isolated {
@@ -1692,7 +1780,23 @@ where
                 None => f.rgba,
                 Some(post) => post.frame(n, timeline.tick(n), w, h, working, f.rgba)?,
             };
-            Ok(tx.send(Rendered::Frame(n, rgba)).is_ok())
+            // Frames are delivered in order; a piece of untouched footage
+            // is looked along, by its plans alone, at its first frame.
+            let chroma = policy.frame(n, f.footage, renderer, &mut |renderer, m| {
+                if cancel.load(Ordering::Relaxed) {
+                    return None;
+                }
+                renderer
+                    .footage(
+                        &document,
+                        &job.composition,
+                        timeline.tick_at(m),
+                        &request,
+                        &*job.media,
+                    )
+                    .ok()
+            });
+            Ok(tx.send(Rendered::Frame(n, rgba, chroma)).is_ok())
         };
         for n in 0..frames {
             gate.sync_worker_qos();
@@ -1720,7 +1824,7 @@ where
                         pixels(sent),
                         None,
                     );
-                    return deliver(n, read).map(Some);
+                    return deliver(renderer, n, read).map(Some);
                 }
                 let units = gate
                     .admit(pass, total_units, cancel)
@@ -1744,7 +1848,7 @@ where
                     return match flight.replace((n, next)) {
                         Some((m, prev)) => {
                             let read = finish_whole(renderer, prev, &mut ring, pixels(sent), w, h);
-                            deliver(m, read).map(Some)
+                            deliver(renderer, m, read).map(Some)
                         }
                         None => Ok(None),
                     };
@@ -1752,7 +1856,7 @@ where
                 // Admitted in bands: the frame before goes first.
                 if let Some((m, prev)) = flight.take() {
                     let read = finish_whole(renderer, prev, &mut ring, pixels(sent), w, h);
-                    if !deliver(m, read)? {
+                    if !deliver(renderer, m, read)? {
                         return Ok(Some(false));
                     }
                     sent += 1;
@@ -1771,7 +1875,7 @@ where
                     pixels(sent),
                     Some(units),
                 );
-                deliver(n, read).map(Some)
+                deliver(renderer, n, read).map(Some)
             })();
             render_ns += frame_started.elapsed().as_nanos();
             match step {
@@ -1790,7 +1894,7 @@ where
             // Every frame is judged before the last one's pixels go.
             renderer.wait_idle();
             let read = finish_whole(renderer, prev, &mut ring, pixels(sent), w, h);
-            if let Err(e) = deliver(m, read) {
+            if let Err(e) = deliver(renderer, m, read) {
                 render_error = Some(e);
             }
         }
@@ -1930,12 +2034,14 @@ fn finish_whole(
     read.map_err(|e| JobError::Render(e.to_string()))?
         .map_err(|e| JobError::Render(e.to_string()))?;
     let failures = std::mem::take(&mut frame.failures);
+    let footage = std::mem::take(&mut frame.footage);
     renderer.recycle(frame);
     Ok(ReadFrame {
         rgba,
         width,
         height,
         failures,
+        footage,
     })
 }
 
@@ -1966,7 +2072,14 @@ pub fn run_export(
 ) -> Result<crate::Delivered, JobError> {
     let plan = plan_export(job)?;
     let sink = sink_for(&plan)?;
-    run_export_into(renderer, job, plan, sink, gate, cancel, progress)
+    // The mix's levels arrive with the progress; the last is the whole mix.
+    let mut mix = None;
+    let mut delivered = run_export_into(renderer, job, plan, sink, gate, cancel, &mut |p| {
+        mix = p.mix;
+        progress(p)
+    })?;
+    delivered.report.mix = mix;
+    Ok(delivered)
 }
 
 // ---------------------------------------------------------------------------

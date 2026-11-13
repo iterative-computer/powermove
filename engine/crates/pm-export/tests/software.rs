@@ -146,11 +146,24 @@ fn tone(n: usize, ch: u16, rate: u32) -> Vec<f32> {
         .collect()
 }
 fn decode(path: &Path, pix: &str) -> Vec<u8> {
+    decode_scaled(path, pix, "bicubic")
+}
+/// `flags`: swscale's, for the conversion to `pix`.
+fn decode_scaled(path: &Path, pix: &str, flags: &str) -> Vec<u8> {
     let out = Command::new("ffmpeg")
         .args(["-v", "error", "-i"])
         .arg(path)
         .args([
-            "-an", "-threads", "1", "-f", "rawvideo", "-pix_fmt", pix, "pipe:1",
+            "-an",
+            "-threads",
+            "1",
+            "-sws_flags",
+            flags,
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            pix,
+            "pipe:1",
         ])
         .output()
         .unwrap();
@@ -588,8 +601,13 @@ fn shipped_v120_mp4_and_prores_decode_comparison() {
             String::from_utf8_lossy(&out.stderr)
         );
         let native = write(s);
-        let a = decode(&legacy, "rgba");
-        let b = decode(&native.path, "rgba");
+        // Chroma is interpolated as players show it: swscale's default
+        // repeats each chroma sample over two pixels, which favours v1's
+        // pair-averaged chroma on these even-column edges over the
+        // band-limited decimation the engine delivers (tests/chroma_delivery.rs).
+        let rgba = |p: &Path| decode_scaled(p, "rgba", "bilinear+full_chroma_int+accurate_rnd");
+        let a = rgba(&legacy);
+        let b = rgba(&native.path);
         assert_eq!(a.len(), b.len());
         let rms = (a
             .iter()

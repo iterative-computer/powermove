@@ -58,7 +58,8 @@ pub use durable::{
 };
 pub(crate) use durable::{Host, folder_sync_now, remove_abandoned_temps};
 pub use durable::{
-    PublishHook, PublishHooks, SharedWriteCoordinator, StepHook, TrashHook, WriteCoordinator,
+    PublishHook, PublishHooks, SharedWriteCoordinator, StepHook, Stray, Strays, TrashHook,
+    WriteCoordinator,
 };
 pub use save::{SaveOptions, SavePlan, SaveReceipt, SaveTarget, VerifyLevel, WriteFault};
 pub use transaction::{LeftAside, Leftover, Owner, Settled, Undecided};

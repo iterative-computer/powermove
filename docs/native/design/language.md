@@ -233,7 +233,7 @@ keyboard-only focus ring (`Tokens::focus_ring`), one symbol size per context
 `symbol_action` 20 for a surface's one primary action glyph, a composer's
 Send). A value in a well starts on the same inset with or without a unit, in
 the text font, so it sits on its row label's baseline. A section heading in a
-panel is the Label role, a step under the panel's Title.
+panel is the Label role, a step under the panel's Title (see Properties).
 Lists are quiet text for recall by name: no glyph tiles, no dividers.
 
 ## Home
@@ -322,6 +322,52 @@ from the top it was first given), the actions ride the bottom edge, and
 nothing else moves. Hosted controls keep their distance from the window's
 top between a resize and the next paint.
 
+## Properties
+
+One grid for every panel of rows (Properties, Effect Controls, extension
+panels built from `InspectorRow`), from the kit, so a panel never sets it:
+
+- One text edge at the panel inset: the panel's title, the layer's name,
+  section headings, and the leading point of a row's keyframe mark, which
+  hangs in a gutter of its own. A row without a mark keeps the gutter, so
+  every label starts on one x. An effect's heading puts its disclosure in
+  the same gutter.
+- A label keeps `metrics.label_column` and gives way first in a narrow
+  panel; the value column takes the rest and is never under
+  `metrics.value_column`. A trailing control (a scale's link) stands
+  outside the value column.
+- A split value (Position, Scale, Anchor Point) is two wells with no X or
+  Y letters: the values first, as After Effects shows them; the row's
+  label names the property. A locked layer shows each value once, dimmed,
+  in the same wells.
+- Three ranks, one size apart at most: the panel's title (Title), then the
+  layer's name and section headings (Label: 12 medium, text ink; the kind
+  after the name in the muted ink), then row labels (Body, secondary ink)
+  and values (Body, tabular, text ink; units muted). Rows are 28 with 22
+  wells; sections stand a gap apart with no rule between them.
+- A section's own action (Refresh Fonts, Add Mask, Add Text Animator) is a
+  quiet text action at the trailing edge of its heading row.
+- One well for every value: the ink at the wash step (never an opaque
+  field colour, which vanishes on a translucent panel), the well corner, a
+  6 pt text inset, a step deeper under the pointer, and while edited a
+  hairline ring inside its edge in the neutral focus ink. A value keeps its
+  baseline when it is clicked into. A pop-up is the real `NSPopUpButton`
+  with no bezel on that well; a font or a fill that opens a menu is the
+  same well with the pop-up's chevrons; a colour is one well holding its
+  chip (a keyline inside its edge) and its hex; a multi-line text is as
+  tall as its lines, from two to six. Yes-or-no rows are checkboxes;
+  segmented rows are the small system control.
+- The keyframe mark is one glyph whose shape and ink say its state, as the
+  timeline's (outline muted, half accent, filled accent), with no lit
+  ground. A scale's link is one glyph whose ink says linked or not.
+- An expression stands under its row, from the label's x to the panel's
+  inset, in the fixed-width face, as many lines as it has; a problem with
+  it is one line under it in the danger ink, and a valid one says nothing.
+  The value it drives is in the accent ink. Its sheet is an editor that is
+  the card itself: seven lines, the fixed-width face, nothing that rewrites
+  what is typed, the parser's answer under it and the names an expression
+  can use under that; Return is a new line and ⌘Return applies.
+
 ## Timeline strips
 
 `Tokens::strip(layer colour, StripState)` (`crates/design/src/strip.rs`): a
@@ -347,8 +393,10 @@ below lives in pm-design, none in the timeline's code.
   step deeper and fuller. A neutral layer (null, camera) is light grey glass.
 - Both: disabled (hidden, muted, offline) drops chroma and opacity, so the
   strip fades toward the canvas; outside the work area the tracks are veiled
-  with the canvas's own second step, so strips there fade toward the ground
-  in either appearance; dragging lifts the strip on a shadow. Corners are
+  with the canvas's own second step (`Tokens::work_area_veil`), so strips
+  there fade toward the ground in either appearance, and names are painted
+  over the veil, so a name reads there as it does inside; dragging lifts
+  the strip on a shadow. Corners are
   continuous and about a quarter of the strip's height (`strip_radius`); an
   even `strip_gap` parts neighbours; the ruler's grid reads through the body
   as a line strongest at the strip's top edge and gone by the middle of its
@@ -395,6 +443,14 @@ ruler 24, layer rows 30 (strip 26), property rows 22, bottom bar 24.
   press beside it bringing the thumb there. Rows scroll with a thumb of the
   same recipe at the tracks' trailing edge. Thumbs are ink at 22 %, 38 %
   under the pointer or held, and are absent when there is nothing to scroll.
+- A property row's value ends at the row's trailing edge in every row; a
+  scale's aspect link stands before its value, one glyph whose ink says
+  linked or not.
+- The graph is the same piece: the tracks' ground, the ruler's time lines
+  and the markers' lines running on through it, curves and keys in the ink,
+  value labels in the muted ink. Beside the dope sheet it takes the lower
+  half from the first row edge there, so it never cuts a strip or a row of
+  keys in two. With no curve to show it says how to get one, in its middle.
 - A strip too short for three letters of its name shows its colour alone.
 - Playing changes the playhead layer and the timecode only: the canvas, the
   bar and the rows are not repainted.

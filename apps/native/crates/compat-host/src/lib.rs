@@ -13,6 +13,6 @@ pub use transport::*;
 #[cfg(target_os = "macos")]
 mod mac;
 #[cfg(target_os = "macos")]
-pub use mac::{MacDomHost, StoreDataStores};
+pub use mac::{MacDomHost, SheetCall, SheetGate, StoreDataStores, set_sheet_gate};
 #[cfg(target_os = "macos")]
 pub mod visual;

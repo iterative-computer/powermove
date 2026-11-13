@@ -1631,9 +1631,20 @@ impl DocumentStore {
                 record.warm();
             }
             if let Some(stored) = stored {
+                // Judged once per member and open composition: a save that
+                // runs this again (every save does, on its worker) finds
+                // the answer and inflates nothing.
+                let known = |judged: &Option<ArchiveJudgment>| {
+                    judged
+                        .as_ref()
+                        .is_some_and(|(member, comp, _)| *member == stored && *comp == open)
+                };
+                if known(&judged.lock().unwrap()) {
+                    return;
+                }
                 let needs = project_io::history_needs_archive(&stored.value(), open.as_deref());
                 let mut judged = judged.lock().unwrap();
-                if judged.is_none() {
+                if !known(&judged) {
                     *judged = Some((stored, open, needs));
                 }
             }

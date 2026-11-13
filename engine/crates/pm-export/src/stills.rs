@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::Error;
-use crate::convert::{ConvertParams, WorkingFrame, convert};
+use crate::convert::{Chroma, ConvertParams, WorkingFrame, convert_tagged};
 use crate::pipeline::Sink;
 use crate::settings::{
     AlphaOutput, Codec, ColorTags, Container, Dither, ExportSpec, Overwrite, WorkingEncoding,
@@ -145,7 +145,10 @@ pub fn encode_still_sequence(
             dither: false,
             frame: i as u32,
         };
-        sink.video_owned(i as u64, convert(&frame, format, &params)?)?;
+        sink.video_owned(
+            i as u64,
+            convert_tagged(&frame, format, &params, spec.tags, Chroma::Filtered)?,
+        )?;
         progress(Stage::Creating {
             done: i as u64 + 1,
             total,

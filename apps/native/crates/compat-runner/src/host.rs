@@ -234,6 +234,9 @@ struct Published {
     /// published yet, so nothing has settled.
     starting: Vec<(String, String)>,
     activations: usize,
+    /// Why no realm will finish the load (a restart that could not start,
+    /// repeated failures): what a job waiting for it is told.
+    failed: Option<String>,
     /// The realm generation drawing now, 0 with none. Its page is keyed by this.
     view: u64,
     revision: u64,
@@ -296,8 +299,52 @@ struct Shared {
     exports: Mutex<export::Exports>,
     /// The window's effect clipboard, for every realm generation.
     effects: crate::EffectsSlot,
+    /// Every value handed to an extension in this run (see [`Self::hide`]).
+    handed: Mutex<BTreeSet<String>>,
 }
+/// What stands for a value in text the host records.
+const HIDDEN: &str = "[hidden value]";
 impl Shared {
+    /// Values now in extensions' hands: `staged` is `{id: {key: value}}`.
+    /// Shorter than four characters they are not told apart from prose.
+    fn handed(&self, staged: &Value) {
+        let mut handed = self.handed.lock().unwrap();
+        for values in staged.as_object().into_iter().flat_map(|all| all.values()) {
+            let values = values.as_object().into_iter().flat_map(|v| v.values());
+            handed.extend(
+                values
+                    .filter_map(Value::as_str)
+                    .filter(|value| value.chars().count() >= 4)
+                    .map(str::to_owned),
+            );
+        }
+    }
+    /// `text` an extension supplied (an error, a notice) as the host records
+    /// it: any value handed to an extension is hidden, so an extension that
+    /// throws or says its own key does not publish it to Settings, other
+    /// extensions, the saved state or a trace.
+    fn hide(&self, text: &str) -> String {
+        let handed = self.handed.lock().unwrap();
+        // Longest first: a value that contains another is hidden whole.
+        let mut values: Vec<&String> = handed.iter().filter(|v| text.contains(*v)).collect();
+        values.sort_by_key(|value| std::cmp::Reverse(value.len()));
+        values
+            .into_iter()
+            .fold(text.to_owned(), |text, value| text.replace(value, HIDDEN))
+    }
+    /// [`Self::hide`] for every string of a health entry.
+    fn hide_health(&self, mut health: Value) -> Value {
+        for value in health
+            .as_object_mut()
+            .into_iter()
+            .flat_map(|h| h.values_mut())
+        {
+            if let Some(text) = value.as_str() {
+                *value = Value::String(self.hide(text));
+            }
+        }
+        health
+    }
     fn update(&self, change: impl FnOnce(&mut Published)) {
         {
             let mut published = self.published.lock().unwrap();
@@ -402,7 +449,7 @@ impl RealmEvents for Arc<Events> {
             .send(Input::Health(id.to_owned(), health.clone()));
     }
     fn toast(&self, text: &str, _: &Value) {
-        let text = text.to_owned();
+        let text = self.shared.hide(text);
         self.shared.update(|p| p.toasts.push(text));
     }
     fn request(&self, request: Value) {
@@ -443,7 +490,7 @@ impl RealmEvents for Arc<Events> {
     }
     /// The owner routes the page's answer here (`Owner::page`) while the
     /// realm waits; the main thread never waits for it.
-    fn measure_sync(&self, request: u64) -> SyncLayout {
+    fn measure_sync(&self, request: u64, _answering: bool) -> SyncLayout {
         let rx = match self.measuring.lock().unwrap().wait(request) {
             Ok(answer) => return SyncLayout::Answer(answer),
             Err(rx) => rx,
@@ -682,6 +729,9 @@ impl RasterInbox {
     }
 }
 
+/// What [`ExtensionHost::wait_contributions`] answers when its caller stopped it.
+pub const WAIT_STOPPED: &str = "The wait for extensions was stopped";
+
 /// Opt-in load timings on stderr (`PM_NATIVE_MAIN_TRACE=1`), seconds since
 /// this process's first trace line.
 fn trace(value: Value) {
@@ -715,6 +765,7 @@ impl ExtensionHost {
             wake: config.wake.clone(),
             exports: Mutex::default(),
             effects: Arc::default(),
+            handed: Mutex::default(),
         });
         let transport = Arc::new(Mutex::new(None));
         let moved = Arc::new(AtomicU8::new(0));
@@ -775,8 +826,24 @@ impl ExtensionHost {
     }
     /// A worker's definition pin after activation, including confined Store
     /// helpers. No DOM page or AppKit is needed. Never deliver a partial boot.
-    pub fn wait_contributions(&self, timeout: Duration) -> Result<(u64, Arc<Value>)> {
-        let started = std::time::Instant::now();
+    /// `stop` (a cancelled export, a stopped capture) ends the wait at once;
+    /// a load no realm will finish ends it with that failure, by name.
+    pub fn wait_contributions(
+        &self,
+        timeout: Duration,
+        stop: &dyn Fn() -> bool,
+    ) -> Result<(u64, Arc<Value>)> {
+        const POLL: Duration = Duration::from_millis(50);
+        let deadline = std::time::Instant::now() + timeout;
+        let unfinished = |what: &str| -> Result<()> {
+            if stop() {
+                return Err(Error::Host(WAIT_STOPPED.into()));
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(Error::Host(what.into()));
+            }
+            Ok(())
+        };
         // Fence saved enable changes and disk reloads on the owner before
         // reading its publication. A request immediately after Disable must
         // not pin the definitions from before that change.
@@ -784,20 +851,32 @@ impl ExtensionHost {
         self.inbox
             .send(Input::Sync(tx))
             .map_err(|_| Error::Host("The extension host stopped".into()))?;
-        rx.recv_timeout(timeout)
-            .map_err(|_| Error::Host("Extensions did not finish starting".into()))?;
-        let (published, _) = self
-            .shared
-            .changed
-            .wait_timeout_while(
-                self.shared.published.lock().unwrap(),
-                timeout.saturating_sub(started.elapsed()),
-                // Ready, and nothing still loading (a Store helper, a reload).
-                |p| !p.ready || !p.publication().settled,
-            )
-            .unwrap();
-        if !published.ready || !published.publication().settled {
-            return Err(Error::Host("Extensions did not finish starting".into()));
+        loop {
+            match rx.recv_timeout(POLL) {
+                Ok(()) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    unfinished("Extensions did not finish starting")?
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(Error::Host("The extension host stopped".into()));
+                }
+            }
+        }
+        let mut published = self.shared.published.lock().unwrap();
+        loop {
+            if let Some(failure) = &published.failed {
+                return Err(Error::Host(failure.clone()));
+            }
+            // Ready, and nothing still loading (a Store helper, a reload).
+            if published.ready && published.publication().settled {
+                break;
+            }
+            unfinished("Extensions did not finish starting")?;
+            published = self.shared.changed.wait_timeout(published, POLL).unwrap().0;
+        }
+        // The cancel may have come as the load settled.
+        if stop() {
+            return Err(Error::Host(WAIT_STOPPED.into()));
         }
         Ok((
             published.revision,
@@ -1339,6 +1418,7 @@ impl Owner {
                     kernel: self.config.kernel.clone(),
                     shared: self.shared.clone(),
                     closing: self.closing.clone(),
+                    pageless: self.config.owner.is_none(),
                 };
                 let spawned = thread::Builder::new()
                     .name("pm-compat-export".into())
@@ -1700,6 +1780,7 @@ impl Owner {
     }
     fn set_health(&mut self, id: &str, health: Value) {
         trace(json!({"extension": id, "health": health["state"]}));
+        let health = self.shared.hide_health(health);
         for record in &mut self.records {
             if record["id"] == id {
                 record["health"] = health.clone();
@@ -2032,6 +2113,8 @@ impl Owner {
             .as_ref()
             .map(declared_keys)
             .unwrap_or_default();
+        let values = vars_of(self.config.vars.as_ref(), id, &keys);
+        self.shared.handed(&json!({ id: values.clone() }));
         let started = StoreExtension::start(
             Arc::new(self.config.kernel.clone()),
             &self.config.project,
@@ -2040,7 +2123,7 @@ impl Owner {
             &graph,
             owner,
             views.clone(),
-            vars_of(self.config.vars.as_ref(), id, &keys),
+            values,
         );
         match started {
             Ok(extension) => {
@@ -2058,10 +2141,10 @@ impl Owner {
                 self.reopen_panels(Some(owner));
             }
             Err(error) => {
+                let error = self.shared.hide(&error.to_string());
                 for record in &mut self.records {
                     if record["id"] == id {
-                        record["health"] =
-                            json!({"state":"activation-error","error":error.to_string()});
+                        record["health"] = json!({"state":"activation-error","error":error});
                     }
                 }
             }
@@ -2172,6 +2255,7 @@ impl Owner {
             p.view = view;
             p.activations = 1;
             p.ready = false;
+            p.failed = None;
         });
         Ok(())
     }
@@ -2226,9 +2310,9 @@ impl Owner {
     /// staged for that pass alone.
     fn load(&mut self, records: &Value, entry: &str, arguments: &str) {
         let Some(live) = &self.realm else { return };
-        let token = live
-            .host
-            .stage_vars(staged_vars(self.config.vars.as_ref(), records));
+        let staged = staged_vars(self.config.vars.as_ref(), records);
+        self.shared.handed(&staged);
+        let token = live.host.stage_vars(staged);
         self.eval(&format!(
             "__compatHost.{entry}({records}{arguments},\"{token}\")"
         ));
@@ -2370,7 +2454,7 @@ impl Owner {
         self.retire_realm();
         // What the retired realm contributed went with it: nothing of it is
         // settled until the realm that replaces it has loaded.
-        self.publish_without_realm(false);
+        self.publish_without_realm(None);
         // Repeated failures nobody can name stop the realm; a Stop that turns
         // its culprit off is not a loop.
         if culprit.is_none() {
@@ -2396,13 +2480,9 @@ impl Owner {
             });
         }
         if self.restarts > MAX_RESTARTS {
-            self.publish_without_realm(true);
-            self.shared.update(|p| {
-                p.toasts.push(
-                    "Extensions stopped after repeated failures. Reopen the project to retry."
-                        .into(),
-                )
-            });
+            self.publish_without_realm(Some(
+                "Extensions stopped after repeated failures. Reopen the project to retry.".into(),
+            ));
             self.publish_records();
             return;
         }
@@ -2416,23 +2496,29 @@ impl Owner {
             // No realm will finish this load: it has failed, by name, and
             // nothing waits for it (held frames, exports, stills).
             Err(error) => {
-                self.publish_without_realm(true);
-                self.shared.update(|p| {
-                    p.toasts
-                        .push(format!("Extensions could not start: {error}"))
-                });
+                self.publish_without_realm(Some(format!("Extensions could not start: {error}")));
                 self.publish_records();
             }
         }
     }
     /// The contributions with no trusted realm behind them: the helpers'
-    /// stay. `settled` is false while a realm that will load is starting.
-    fn publish_without_realm(&self, settled: bool) {
-        let mut value = json!({"settled": settled, "commands": [], "panels": [], "effects": [],
-            "transitions": [], "layers": [], "definitions": []});
+    /// stay. Without a `failure` a realm that will load is starting and
+    /// nothing has settled. With one, no realm will finish the load: it is
+    /// settled and ready as it stands, in one publication, the person is
+    /// told, and a job waiting for it is answered with the failure.
+    fn publish_without_realm(&self, failure: Option<String>) {
+        let mut value = json!({"settled": failure.is_some(), "commands": [], "panels": [],
+            "effects": [], "transitions": [], "layers": [], "definitions": []});
         merge_store(&mut value, &self.shared.store.lock().unwrap());
-        self.shared
-            .update(|p| p.contributions = Some(Arc::new(value)));
+        self.shared.update(|p| {
+            p.contributions = Some(Arc::new(value));
+            if let Some(failure) = failure {
+                p.ready = true;
+                p.activations = 0;
+                p.toasts.push(failure.clone());
+                p.failed = Some(failure);
+            }
+        });
     }
 }
 
@@ -3112,6 +3198,118 @@ mod tests {
             assert!(fixture.host.publication().loading.is_empty());
         }
     }
+    /// An effect registered after its extension's activation returned (from a
+    /// timer, or a promise the activation did not return) is still part of
+    /// the load: the contributions are not settled, and the extension is
+    /// named as loading, until the work its activation started has finished.
+    /// An extension that says so itself (`api.readiness.hold`) is loading
+    /// until it releases, however its work is driven. Work that never
+    /// finishes holds the load for a bounded time only.
+    #[test]
+    fn an_effect_registered_after_activation_returned_is_still_loading() {
+        let root = tempfile::tempdir().unwrap();
+        let effect = |id: &str| {
+            format!(
+                "api.effects.register({{id:'{id}',label:'{id}',group:'Stylize',params:[],frag:'o = src(v_uv);'}})"
+            )
+        };
+        let extensions = root.path().join("extensions");
+        let sleep = "const sleep=(ms)=>new Promise(r=>setTimeout(r,ms));";
+        extension(
+            &extensions,
+            "a-timer",
+            &[(
+                "index.ts",
+                &format!(
+                    "export default function(api){{setTimeout(()=>setTimeout(()=>{{{}}},400),400)}}",
+                    effect("timer.tint")
+                ),
+            )],
+        );
+        extension(
+            &extensions,
+            "b-promise",
+            &[(
+                "index.ts",
+                &format!(
+                    "{sleep}export default function(api){{(async()=>{{await sleep(300);await 0;await sleep(600);{}}})()}}",
+                    effect("promise.tint")
+                ),
+            )],
+        );
+        // Released by a command the host runs: no timer of its own is out.
+        extension(
+            &extensions,
+            "c-lease",
+            &[(
+                "index.ts",
+                &format!(
+                    "export default function(api){{const ready=api.readiness.hold();
+                       api.commands.register({{id:'c-lease.finish',label:'Finish',run(){{{};ready.release()}}}})}}",
+                    effect("lease.tint")
+                ),
+            )],
+        );
+        // Re-arms for ever and registers nothing.
+        extension(
+            &extensions,
+            "d-poll",
+            &[(
+                "index.ts",
+                "export default function(api){const again=()=>setTimeout(again,20);again()}",
+            )],
+        );
+        let fixture = Fixture::start(root);
+        let has = |now: &Publication, id: &str| {
+            now.contributions.as_ref().is_some_and(|c| {
+                c["definitions"]
+                    .as_array()
+                    .is_some_and(|d| d.iter().any(|d| d["id"] == id))
+            })
+        };
+        let loading = |now: &Publication, id: &str| now.loading.iter().any(|(l, _)| l == id);
+        // Until both late effects are there, the load is never called
+        // settled, and each owner is named while its effect is missing.
+        let started = Instant::now();
+        loop {
+            let now = fixture.host.publication();
+            let (timer, promise) = (has(&now, "timer.tint"), has(&now, "promise.tint"));
+            if timer && promise {
+                break;
+            }
+            assert!(
+                !now.settled,
+                "settled without timer {timer} promise {promise}"
+            );
+            if now.contributions.is_some() && fixture.host.is_ready() {
+                assert!(timer || loading(&now, "a-timer"), "a-timer not named");
+                assert!(promise || loading(&now, "b-promise"), "b-promise not named");
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(20),
+                "never registered"
+            );
+            thread::sleep(Duration::from_millis(2));
+        }
+        // The lease holds the load on its own, past the bound on unfinished
+        // work (the polling extension's), and is named.
+        let bound = Instant::now() + Duration::from_secs(7);
+        fixture.until("only the lease is left", |host| {
+            let now = host.publication();
+            assert!(!now.settled && !has(&now, "lease.tint"));
+            assert!(
+                Instant::now() < bound,
+                "the polling extension held the load"
+            );
+            now.loading.len() == 1 && loading(&now, "c-lease")
+        });
+        fixture.host.run_command("c-lease.finish", json!([]));
+        fixture.until("released", |host| {
+            let now = host.publication();
+            assert!(!now.settled || has(&now, "lease.tint"));
+            now.settled && now.loading.is_empty()
+        });
+    }
     /// A Store helper's activation is part of the load: until it has
     /// registered its effect (at boot, or when it is installed later) the
     /// contributions are not settled.
@@ -3416,6 +3614,157 @@ mod tests {
             "the other extension's value: {loot}"
         );
         assert_eq!(loot["own"], json!([]));
+        drop(host);
+        drop(actor);
+    }
+    /// A value that has been taken away (its entry removed, its declaration
+    /// gone) is gone from the extension's next load: each load replaces what
+    /// the realm holds with what the host chose for it, nothing is kept.
+    #[test]
+    fn a_value_removed_since_the_last_load_is_not_handed_out_again() {
+        const SECRET: &str = "sk-removed-later";
+        let root = tempfile::tempdir().unwrap();
+        let extensions = root.path().join("extensions");
+        needs_key(
+            &extensions,
+            "export default function(api){
+               const seen=api.storage.get('seen')||[];
+               seen.push(api.vars.keys());
+               api.storage.set('seen',seen);
+             }",
+        );
+        let actor = KernelActor::spawn(KernelConfig::default());
+        let kernel = actor.handle();
+        let document = pm_model::json::parse(&crate::initial()["document"].to_string()).unwrap();
+        kernel
+            .open("window", OpenSource::Untitled(document))
+            .wait()
+            .unwrap()
+            .unwrap();
+        let entered = Arc::new(AtomicBool::new(true));
+        let source = entered.clone();
+        let host = ExtensionHost::start(HostConfig {
+            kernel: kernel.clone(),
+            project: "window".into(),
+            roots: vec![extensions],
+            cache: root.path().join("cache"),
+            owner: None,
+            text: None,
+            frames: None,
+            rasters: None,
+            vars: Some(Arc::new(move |_: &str, keys: &[String]| {
+                keys.iter()
+                    .filter(|_| source.load(Ordering::Acquire))
+                    .map(|key| (key.clone(), SECRET.to_owned()))
+                    .collect()
+            })),
+            wake: Arc::new(|| ()),
+        });
+        let seen = |rounds: usize| {
+            let deadline = Instant::now() + Duration::from_secs(20);
+            loop {
+                let seen = stored(&kernel, "seen").unwrap_or(json!([]));
+                if seen.as_array().is_some_and(|s| s.len() == rounds) && host.publication().settled
+                {
+                    return seen;
+                }
+                assert!(Instant::now() < deadline, "{seen} {:?}", host.records());
+                thread::sleep(Duration::from_millis(5));
+            }
+        };
+        assert_eq!(seen(1), json!([["API_KEY"]]));
+        // The person removes the value; the extension is turned off and on.
+        entered.store(false, Ordering::Release);
+        for enabled in [false, true] {
+            let entry = kernel.state().extensions["needs-key"].clone();
+            kernel
+                .state_transaction(pm_kernel::state::StateTransaction {
+                    expected_revision: None,
+                    ops: vec![StateOp::Extension(pm_kernel::state::ExtensionEntry {
+                        enabled,
+                        ..entry
+                    })],
+                })
+                .wait()
+                .unwrap()
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while host.records().iter().any(|r| r["enabled"] != enabled) {
+                assert!(Instant::now() < deadline, "{:?}", host.records());
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+        assert_eq!(seen(2), json!([["API_KEY"], []]), "the removed value");
+        drop(host);
+        drop(actor);
+    }
+    /// An extension that puts its own value into an error or a notice does
+    /// not thereby publish it: what the host records of that text (health
+    /// in Settings and for other extensions, the saved extension entry,
+    /// toasts) has the value hidden.
+    #[test]
+    fn a_value_in_an_extensions_error_or_notice_is_hidden_in_what_the_host_records() {
+        const SECRET: &str = "sk-thrown-by-its-owner";
+        let root = tempfile::tempdir().unwrap();
+        let extensions = root.path().join("extensions");
+        needs_key(
+            &extensions,
+            "export default function(api){
+               const value = api.vars.get('API_KEY');
+               api.ui.toast('Signed in with ' + value);
+               throw new Error('The service refused key ' + value + ' (401)');
+             }",
+        );
+        let actor = KernelActor::spawn(KernelConfig::default());
+        let kernel = actor.handle();
+        let document = pm_model::json::parse(&crate::initial()["document"].to_string()).unwrap();
+        kernel
+            .open("window", OpenSource::Untitled(document))
+            .wait()
+            .unwrap()
+            .unwrap();
+        let host = ExtensionHost::start(HostConfig {
+            kernel: kernel.clone(),
+            project: "window".into(),
+            roots: vec![extensions],
+            cache: root.path().join("cache"),
+            owner: None,
+            text: None,
+            frames: None,
+            rasters: None,
+            vars: Some(every_value(SECRET)),
+            wake: Arc::new(|| ()),
+        });
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let error = loop {
+            let error = host
+                .records()
+                .iter()
+                .find(|r| r["id"] == "needs-key")
+                .and_then(|r| r["health"]["error"].as_str().map(str::to_owned));
+            if let Some(error) = error.filter(|_| host.publication().settled) {
+                break error;
+            }
+            assert!(Instant::now() < deadline, "{:?}", host.records());
+            thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!(error, "The service refused key [hidden value] (401)");
+        thread::sleep(Duration::from_millis(100));
+        let toasts = host.take_toasts();
+        assert!(
+            toasts.contains(&"Signed in with [hidden value]".to_owned()),
+            "{toasts:?}"
+        );
+        let state = kernel.state();
+        for (what, seen) in [
+            ("records", format!("{:?}", host.records())),
+            ("toasts", format!("{toasts:?}")),
+            ("publication", format!("{:?}", host.publication())),
+            ("saved entries", format!("{:?}", state.extensions)),
+            ("registries", format!("{:?}", state.registries)),
+        ] {
+            assert!(!seen.contains(SECRET), "the value is in the {what}");
+        }
         drop(host);
         drop(actor);
     }
@@ -3856,6 +4205,19 @@ mod tests {
         };
         *FAIL_START.lock().unwrap() = None;
         assert!(settled.loading.is_empty());
+        // A job without a window hears the failure by name, at once: no
+        // realm will ever finish this load.
+        assert!(fixture.host.is_ready(), "nothing is still starting");
+        let asked = Instant::now();
+        let answer = fixture
+            .host
+            .wait_contributions(Duration::from_secs(30), &|| false);
+        let failure = answer.err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(
+            failure.contains("Extensions could not start: "),
+            "the failure by name: {failure}"
+        );
+        assert!(asked.elapsed() < Duration::from_secs(2));
         let definitions = settled
             .contributions
             .as_ref()
@@ -4521,6 +4883,27 @@ mod tests {
         );
         cancel.store(true, Ordering::Release);
     }
+    /// A panel or an overlay that reads its layout (at activation, on a
+    /// timer) places no pixel of the export: its unanswered read does not
+    /// fail it, as no read does in a window's realm either.
+    #[test]
+    fn a_layout_read_outside_a_raster_answer_leaves_the_export_drawing() {
+        let panel = "export default function activate(api: any){
+            const read = () => { const d=document.createElement('div'); d.textContent='panel';
+              document.body.append(d); d.getBoundingClientRect(); getComputedStyle(d).color; d.remove() };
+            read(); setTimeout(read, 0);
+            api.services.register('raster',()=>{
+              const c=document.createElement('canvas'); c.width=5; c.height=1;
+              return {cv:c,w:5,h:1,anchorX:0,anchorY:0} }) }";
+        let (fixture, answered) = export_window(&[("panel", panel)], "text", None);
+        let inbox = fixture.host.raster_inbox();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let frozen = fixture.kernel.published("window").unwrap();
+        inbox.export("job-6", frozen, cancel.clone()).unwrap();
+        inbox.ask(1, needs(&fixture), json!({"job":"job-6"}));
+        assert_eq!(answer_of(&answered, 1, Duration::from_secs(40)), json!(5));
+        cancel.store(true, Ordering::Release);
+    }
     #[test]
     fn the_projects_text_faces_and_pm_fonts_reach_the_window() {
         let root = tempfile::tempdir().unwrap();
@@ -4778,12 +5161,25 @@ mod tests {
                      made:{type:made.type,on:made.on,amount:made.p.amount.v,id:typeof made.id},
                      def:PM.effectDef({type:'helpers.tint'}).label,
                      noDef:PM.effectDef({type:'nothing.provides'})===undefined,
-                     fx:Object.keys(PM.FX),fxLabel:PM.FX['helpers.tint'].label,
-                     transitions:Object.keys(PM.TRANSITIONS),noTransition:PM.transitionDef('nothing.provides')===undefined,
+                     fx:Object.keys(PM.FX).filter(id=>['helpers.tint','blur','nothing.provides'].includes(id)).sort(),
+                     fxLabel:PM.FX['helpers.tint'].label,
+                     // The legacy table holds the complete shader, as the shipped app assembled it.
+                     fxLegacy:(f=>({passes:f.passes,keepOrig:f.keepOrig,backdrop:f.backdrop,
+                       head:f.frag.startsWith('#version 300 es'),main:f.frag.includes('void main(){\\no = src(v_uv);\\n}'),
+                       param:f.frag.includes('uniform float u_amount;')}))(PM.FX['helpers.tint']),
+                     // Built-in effects and transitions are in the tables too.
+                     builtin:{has:'blur' in PM.FX,label:PM.effectDef({type:'blur'})?.label,group:PM.FX.blur?.group,
+                       params:(PM.FX.blur?.params??[]).map(p=>p.k).includes('amount'),
+                       made:(e=>e&&{type:e.type,on:e.on,amount:typeof e.p.amount?.v})(PM.mkEffect('blur')),
+                       transitions:['crossfade','wipe','slide','zoom'].every(id=>id in PM.TRANSITIONS&&Object.keys(PM.TRANSITIONS).includes(id)),
+                       crossfade:PM.transitionDef('crossfade')?.label,
+                       crossfadeMain:String(PM.TRANSITIONS.crossfade?.frag).includes('uniform sampler2D u_from, u_to;')&&String(PM.TRANSITIONS.crossfade?.frag).includes('void main(){'),
+                       madeTransition:PM.mkTransition('crossfade')},
+                     noTransition:PM.transitionDef('nothing.provides')===undefined,
+                     // As the shipped app: nothing made of a type nobody provides.
+                     none:[PM.mkEffect('nothing.provides'),PM.mkTransition('nothing.provides')],
                      uniforms,
                      said:{
-                       mkEffect:said(()=>PM.mkEffect('nothing.provides')),
-                       mkTransition:said(()=>PM.mkTransition('nothing.provides')),
                        precompose:said(()=>PM.precompose(['a'],'Name')),
                        comps:said(()=>PM.Comps.precompose(['a'],{})),
                        assetKind:said(()=>PM.assetKind({name:'a.png',type:'image/png'})),
@@ -4814,10 +5210,21 @@ mod tests {
         );
         assert_eq!(got["def"], "Tint");
         assert_eq!(got["noDef"], true);
-        assert_eq!(got["fx"], json!(["helpers.tint"]));
+        assert_eq!(got["fx"], json!(["blur", "helpers.tint"]));
         assert_eq!(got["fxLabel"], "Tint");
-        assert_eq!(got["transitions"], json!([]));
+        assert_eq!(
+            got["fxLegacy"],
+            json!({"passes":1,"keepOrig":false,"backdrop":false,"head":true,"main":true,"param":true})
+        );
+        assert_eq!(
+            got["builtin"],
+            json!({"has":true,"label":"Gaussian Blur","group":"Blur & Sharpen","params":true,
+                "made":{"type":"blur","on":true,"amount":"number"},
+                "transitions":true,"crossfade":"Crossfade","crossfadeMain":true,
+                "madeTransition":{"type":"crossfade","dur":0.5,"p":{}}})
+        );
         assert_eq!(got["noTransition"], true);
+        assert_eq!(got["none"], json!([null, null]));
         assert_eq!(
             got["uniforms"],
             json!([
@@ -4826,8 +5233,6 @@ mod tests {
             ])
         );
         for (tried, member) in [
-            ("mkEffect", "PM.mkEffect"),
-            ("mkTransition", "PM.mkTransition"),
             ("precompose", "PM.precompose"),
             ("comps", "PM.Comps.precompose"),
             ("assetKind", "PM.assetKind"),
@@ -5018,6 +5423,77 @@ mod tests {
         fixture.until("one Undo for the whole edit", |_| {
             first(&fixture).as_deref() == Some("alone") && fixture.name() == name
         });
+    }
+    /// An edit made inside another edit that throws takes back what it wrote
+    /// and nothing else: the outer edit keeps its earlier layer, carries on,
+    /// reports success, and is one step of the history.
+    #[test]
+    fn a_failed_edit_inside_an_edit_takes_back_only_its_own_writes() {
+        let root = tempfile::tempdir().unwrap();
+        extension(
+            &root.path().join("extensions"),
+            "nested",
+            &[(
+                "index.ts",
+                "export default function(api){const PM=api.host.pm;
+                   const layer=(id)=>Object.assign(PM.mkLayer('shape',{name:id}),{id});
+                   api.commands.register({id:'nested.run',label:'Run',run(){
+                     let inner;
+                     const outer=PM.Edit.mutate('Outer',()=>{
+                       PM.addLayer(layer('a'));
+                       inner=PM.Edit.mutate('Inner',()=>{
+                         PM.addLayer(layer('b'));PM.addLayer(layer('b2'));
+                         throw new Error('preparation failed')});
+                       if(!inner.ok)PM.addLayer(layer('c'));
+                     });
+                     api.storage.set('report',{outer:outer.ok,inner:inner.ok,message:inner.message,
+                       layers:PM.proj.layers.map(l=>l.id),busy:PM.hist.busy()})}});
+                 }",
+            )],
+        );
+        let fixture = Fixture::start(root);
+        fixture.until("activation", |host| {
+            host.publication().settled && host.is_ready()
+        });
+        let ids = |fixture: &Fixture| -> Vec<String> {
+            let published = fixture.kernel.published("window").unwrap();
+            published
+                .snapshot
+                .layers(None)
+                .iter()
+                .map(|l| l.id.clone())
+                .collect()
+        };
+        let history = |call: HistoryCall| {
+            let ack = fixture
+                .kernel
+                .call_blocking(
+                    "window",
+                    Request::new(pm_kernel::Caller::native(), call.clone()),
+                )
+                .unwrap();
+            assert!(matches!(ack.reply, Reply::Bool(true)), "{call:?} refused");
+        };
+        let before = ids(&fixture);
+        let after: Vec<String> = ["c", "a"]
+            .into_iter()
+            .map(str::to_owned)
+            .chain(before.clone())
+            .collect();
+        fixture.host.run_command("nested.run", json!([]));
+        fixture.until("the command reported", |_| {
+            stored(&fixture.kernel, "report").is_some()
+        });
+        assert_eq!(
+            stored(&fixture.kernel, "report").unwrap(),
+            json!({"outer":true,"inner":false,"message":"preparation failed","layers":after,"busy":false}),
+            "what the extension was told and sees"
+        );
+        assert_eq!(ids(&fixture), after, "the project");
+        history(HistoryCall::Undo);
+        assert_eq!(ids(&fixture), before, "one Undo takes the whole edit out");
+        history(HistoryCall::Redo);
+        assert_eq!(ids(&fixture), after, "Redo puts it back");
     }
     /// The raw members a real extension used to cut a layer out of a clip:
     /// `PM.MediaStore.get` reads the asset's file (the app answers with it, held
