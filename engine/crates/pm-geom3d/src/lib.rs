@@ -18,6 +18,7 @@
 //! the importer reports (Phase 3b). Recipe parts are another lane's.
 
 pub mod earcut;
+pub mod extrusion;
 pub mod gltf;
 #[cfg(feature = "import")]
 mod js;

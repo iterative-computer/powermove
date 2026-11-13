@@ -12,7 +12,7 @@
 //! test checks the bytes equal `to_canonical_string(realize_project(..))`.
 
 use crate::asset_order;
-use pm_model::canonical::COMP_FIELDS;
+use pm_model::canonical::COMPOSITION_FIELDS as COMP_FIELDS;
 use pm_model::json::ObjectMap;
 use pm_model::json::write::{Sink, push_quoted, write_canonical};
 use pm_model::{JsString, Map, Node, NodeKind, Value};

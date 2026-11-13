@@ -8,6 +8,8 @@ export type Target = "NoProject" | "NoSelection" | "Layer" | "Unsupported";
 export interface Parameter {
   id: string;
   effect: string;
+  /** The definition's parameter key. */
+  key?: string;
   label: string;
   binding: string;
   value: Json;
@@ -28,6 +30,10 @@ export interface Parameter {
 export interface EffectHeader {
   kind: "effect";
   id: string;
+  /** The effect's definition id (`type`). */
+  definition?: string;
+  /** Its definition says `grade: true`: a grading tool the Color panel lists. */
+  grade?: boolean;
   label: string;
   enabled: boolean;
   expanded: boolean;

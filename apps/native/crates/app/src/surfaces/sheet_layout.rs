@@ -614,7 +614,9 @@ pub mod native {
                             top += note_height;
                         }
                         let middle = |size: NSSize| y + ((height - size.height) / 2.).round();
-                        for (view, x, size) in trailing {
+                        // In reading order (Width, ×, Height): VoiceOver and
+                        // the key view loop follow the subviews' order.
+                        for (view, x, size) in trailing.into_iter().rev() {
                             frames.push((view, NSRect::new(NSPoint::new(x, middle(size)), size)));
                         }
                         if let Some(view) = &row.unit {

@@ -3229,6 +3229,16 @@ impl Window {
         self.last_input_modality == InputModality::Keyboard
     }
 
+    /// Marks the last input as keyboard, for a host that handles a key (Tab
+    /// focus traversal) before the window sees it, so focus-visible styles
+    /// still follow keyboard navigation.
+    pub fn note_keyboard_input(&mut self) {
+        if self.last_input_modality != InputModality::Keyboard {
+            self.last_input_modality = InputModality::Keyboard;
+            self.refresh();
+        }
+    }
+
     pub(crate) fn last_input_was_touch(&self) -> bool {
         self.last_input_modality == InputModality::Touch
     }

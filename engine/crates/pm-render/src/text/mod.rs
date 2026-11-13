@@ -714,6 +714,35 @@ fn level1_animated(layer: &Node) -> bool {
 }
 
 impl TextContext {
+    /// Filled glyph contours in anchored layer pixels, from the same full-face
+    /// layout, style ranges and character animators used by the flat renderer.
+    /// Color bitmap glyphs fail explicitly: their rectangular image is not an
+    /// outline. Native hosts supply their existing render-thread font broker.
+    pub fn extrusion_outlines<'d>(&mut self,scope:&mut Scope<'_, 'd>,layer:&'d Node,time:f64,tolerance:f64)->Result<Vec<pm_geom3d::extrusion::Outline>,String>{
+        if !self.has_fonts(){return Err("Text extrusion needs the native font service".into());}
+        let quad=self.text_layer(scope,layer,time,1.).map_err(|e|e.message)?;
+        let failures=self.take_unsupported();
+        if !failures.is_empty(){return Err(failures.join("; "));}
+        let Some(quad)=quad else{return Ok(vec![])};
+        let crop=quad.plan.crop;
+        let sx=quad.w/f64::from(crop[2]-crop[0]);let sy=quad.h/f64::from(crop[3]-crop[1]);
+        let transform=Affine::translate((-quad.ax-f64::from(crop[0])*sx,-quad.ay-f64::from(crop[1])*sy))*Affine::scale_non_uniform(sx,sy);
+        let mut outlines=vec![];
+        for item in &quad.plan.scene.items {
+            if item.opacity<=0. || item.color[3]<=0. {continue;}
+            let ItemContent::Coverage{paths}=&item.content else{return Err("Bitmap/color image glyphs have no extrusion outline".into())};
+            // The geometry has no raster shadow/blur surface.
+            if item.blur>0. {continue;}
+            let mut color=item.color.map(|x|x as f32);color[3]*=item.opacity as f32;
+            for path in paths {
+                for mut shape in pm_text::render::scene::filled_contours(path,transform,tolerance) {
+                    if shape.is_empty(){continue;}
+                    outlines.push(pm_geom3d::extrusion::Outline{outer:shape.remove(0),holes:shape,color});
+                }
+            }
+        }
+        Ok(outlines)
+    }
     fn painter(&mut self) -> (Painter<'_>, &mut dyn TextFonts, &mut Vec<String>) {
         let fonts = self.fonts.as_deref_mut().expect("checked by the caller");
         (

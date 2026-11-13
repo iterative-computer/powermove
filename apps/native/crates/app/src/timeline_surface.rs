@@ -235,6 +235,9 @@ pub struct TimelineSurface {
     /// time column of the frame last prepared.
     shown: (f64, f64, f64),
     fitted: bool,
+    /// The composition length last shown: when it changes while the view
+    /// shows all of it from 0, the view refits to the new length.
+    fit_duration: f64,
     gesture: Gesture,
     cursor: CursorStyle,
     /// A badge's tooltip shown after `motion.tooltip_delay` (text, local point).
@@ -304,6 +307,7 @@ impl TimelineSurface {
             view,
             shown: (view.pps, view.scroll_time, view.layer_column),
             fitted: false,
+            fit_duration: 0.,
             gesture: Gesture::Idle,
             cursor: CursorStyle::Arrow,
             tip: None,
@@ -813,10 +817,27 @@ impl TimelineSurface {
         self.outline.set_scene(Some(built.scene));
         self.frame = None;
         self.clamp_scroll();
-        if !self.fitted && self.model.index.duration > 0. && self.bounds.size.width > px(0.) {
-            self.fitted = true;
+        let duration = self.model.index.duration;
+        if duration > 0. && self.bounds.size.width > px(0.) {
             let width = (f32::from(self.bounds.size.width) as f64 - self.view.layer_column).max(1.);
-            self.view.pps = (width / self.model.index.duration).clamp(PPS.0, PPS.1);
+            let fit = (width / duration).clamp(PPS.0, PPS.1);
+            // The view started at 0 and showed all of the old length.
+            let whole = |d: f64| {
+                d > 0. && self.view.scroll_time.abs() < 1e-9 && width / self.view.pps >= d * 0.99
+            };
+            if !self.fitted {
+                self.fitted = true;
+                self.view.pps = fit;
+            } else if self.fit_duration > 0.
+                && (self.fit_duration - duration).abs() > 1e-9
+                && whole(self.fit_duration)
+            {
+                // A shorter or longer composition: a view that showed the
+                // whole old length shows the whole new one (the ruler and bars
+                // refit); a view the user zoomed into or scrolled stays.
+                self.view.pps = fit;
+            }
+            self.fit_duration = duration;
         }
         self.changed(false, cx);
     }
@@ -2302,7 +2323,7 @@ impl ModelPresenter for Presenter {
         }
     }
     fn layer_label(&self, layer: &pm_panel_timeline::Layer) -> Label {
-        Label::for_kind(&layer.kind)
+        Label::for_layer(&layer.kind, layer.definition.as_deref())
     }
     fn media(&self, layer: &pm_panel_timeline::Layer) -> Media {
         if layer

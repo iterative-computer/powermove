@@ -40,7 +40,7 @@ pub fn batch(
     Ok(Batch {
         commands: vec![command.into()],
         results: vec![],
-        descriptions: vec!["Edit 3D Layers".into()],
+        descriptions: vec![label(args)],
         selection: selection.to_vec(),
     })
 }
@@ -147,5 +147,58 @@ pub fn properties(l: &Value) -> Vec<(String, Value)> {
             }
         }
     }
+    let node = if schema::role(l) == Some(schema::Role::Light) {
+        &l["d"]["data"]["light"]
+    } else {
+        &l["d"]["data"]["object"]
+    };
+    out.extend(
+        pm_scene3d::contract::channels(node)
+            .into_iter()
+            .map(|(path, prop)| (path, prop.clone())),
+    );
+    out.extend(pm_scene3d::extrusion::channels(l).into_iter().map(|(path,prop)|(path,prop.clone())));
     out
+}
+
+/// The Undo name for an agent's `edit_3d` when it gives none: what the
+/// operation does, in the words the 3D Studio's own controls use.
+pub fn label(args: &Value) -> String {
+    let op = args["operation"].as_str().unwrap_or("");
+    let light = |t: &Value| match t.as_str() {
+        Some("area") => "Softbox",
+        Some("spot") => "Spotlight",
+        Some("point") => "Bulb",
+        _ => "Sun",
+    };
+    match op {
+        "add_object" | "create" => "Add 3D Model".into(),
+        "add_light" => format!("Add {}", light(&args["light"]["type"])),
+        "add_camera" => "Add Camera".into(),
+        "update_object" => "Edit 3D Model".into(),
+        "update_light" => "Edit Light".into(),
+        "set_camera" => "Edit Camera".into(),
+        "set_environment" => "Environment".into(),
+        "set_world" => "Sky".into(),
+        "add_fog" => "Add Fog Volume".into(),
+        "update_fog" => "Edit Fog Volume".into(),
+        "add_terrain" => "Add Terrain".into(),
+        "update_terrain" => "Edit Terrain".into(),
+        "add_scatter" => "Add Scatter".into(),
+        "update_scatter" => "Edit Scatter".into(),
+        "set_material_options" => "Material Options".into(),
+        "set_render_quality" => "3D Quality".into(),
+        "apply_material" => "Finish".into(),
+        "light_highlight" => "Aim Light".into(),
+        "shot" => "Add Shot".into(),
+        "set_studio" => "Studio Set".into(),
+        "auto_studio" => "Set Up Studio".into(),
+        "drop_to_floor" => "Drop to Floor".into(),
+        "place_on" => "Place on Surface".into(),
+        "explode" => "Explode".into(),
+        "soften" => "Soften Light".into(),
+        "remove" => "Delete 3D Layers".into(),
+        "duplicate" => "Duplicate 3D Layers".into(),
+        _ => "Edit 3D Layers".into(),
+    }
 }

@@ -329,13 +329,26 @@ fn per_stamp<T: Clone>(
     Some(v)
 }
 
-/// Whether `path`'s video is stored as R′G′B′ (`CodecInfo::is_rgb`); `None`
-/// when the file is offline or has no video. Read once per file stamp.
-pub(crate) fn stores_rgb(path: &Path) -> Option<bool> {
-    static CACHE: StampCache<Option<bool>> = OnceLock::new();
+/// How `path`'s video stores its codes: R′G′B′ (`CodecInfo::is_rgb`), or
+/// Y′CbCr in the range the file says (its reading before any override).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StoredCodes {
+    Rgb,
+    YCbCr(pm_protocol::color::Range),
+}
+
+/// [`StoredCodes`] of `path`; `None` when the file is offline or has no
+/// video. Read once per file stamp.
+pub(crate) fn stored_codes(path: &Path) -> Option<StoredCodes> {
+    static CACHE: StampCache<Option<StoredCodes>> = OnceLock::new();
     per_stamp(&CACHE, path, || {
         let source = MediaSource::open(path).ok()?;
-        Some(source.probe.video.as_ref()?.codec.is_rgb())
+        let video = source.probe.video.as_ref()?;
+        Some(if video.codec.is_rgb() {
+            StoredCodes::Rgb
+        } else {
+            StoredCodes::YCbCr(video.color.interpreted.range)
+        })
     })
     .flatten()
 }
@@ -1972,6 +1985,15 @@ impl MediaCache {
     /// Bytes of converted textures held (images and decoded frames).
     pub fn texture_bytes(&self) -> u64 {
         self.bytes
+    }
+
+    /// Drops the stills read whole (not at a view's size). A viewer's
+    /// settled paused frame reads them as an export does and keeps none of
+    /// them after it: held, large originals cost gigabytes.
+    pub fn release_whole_images(&mut self) {
+        self.images.retain(|key, _| key.edge.is_some());
+        self.image_seen.retain(|key, _| key.edge.is_some());
+        self.recount();
     }
 
     pub fn trim_images(&mut self, budget: u64) {
