@@ -128,6 +128,11 @@ enum Job {
         layer: String,
         keys: Vec<String>,
     },
+    ShowGraph {
+        layer: String,
+        channel: String,
+        keys: Vec<String>,
+    },
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Viewed {
@@ -726,6 +731,21 @@ impl TimelineSurface {
     /// `TimelineService.reveal`: open `layer` and show `keys` too.
     pub fn reveal(&mut self, layer: String, keys: Vec<String>, cx: &mut Context<Self>) {
         self.queue.push_back(Job::Reveal { layer, keys });
+        self.pump(cx);
+    }
+    /// Properties' Show in Graph Editor: the graph view, on `channel`.
+    pub fn show_graph(
+        &mut self,
+        layer: String,
+        channel: String,
+        keys: Vec<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.queue.push_back(Job::ShowGraph {
+            layer,
+            channel,
+            keys,
+        });
         self.pump(cx);
     }
     pub fn time_mapping(&self) -> (f64, f64, f64) {
@@ -1762,6 +1782,19 @@ async fn run(client: &mut TimelineClient, job: Job) -> Result<Vec<HostEffect>, S
                 .map_err(|e| e.to_string())?;
             client.publish_view().await.map_err(text)?;
             Ok(vec![])
+        }
+        Job::ShowGraph {
+            layer,
+            channel,
+            keys,
+        } => {
+            let plan = client
+                .model
+                .show_graph(&layer, &channel, &keys)
+                .map_err(|e| e.to_string())?;
+            let effects = client.dispatch(plan).await.map_err(text)?;
+            client.publish_view().await.map_err(text)?;
+            Ok(effects)
         }
         Job::Persist(view) => {
             use pm_kernel::state::{StateOp, StateTransaction};

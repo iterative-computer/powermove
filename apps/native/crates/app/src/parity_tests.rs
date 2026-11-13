@@ -242,3 +242,95 @@ fn null_object_is_in_the_layer_menu_the_add_menu_and_the_palette_with_its_shortc
         );
     }
 }
+
+/// Properties ▸ Add Expression…: the sheet opens on the shipped starting
+/// text, and Apply writes it to every channel of the row as one Undo step.
+#[test]
+fn add_expression_applies_the_sheets_text_to_the_rows_channels() {
+    use crate::dialogs::{DialogId, WindowId};
+    use crate::expression_sheet::Target;
+    let desk = Desk::new(project(vec![shape("a")]));
+    desk.select(&["a"]);
+    let before = desk.document();
+    let expression = |published: &Published, channel: &str| {
+        layer_of(published, "a")
+            .get("p")
+            .and_then(|p| p.get(channel))
+            .and_then(|c| c.get("expr"))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    };
+    // What the Properties row's menu action sends (builtins `expressions` tests).
+    let target = Target::read(&json!({
+        "document": desk.published().snapshot.doc_id, "layer": "a", "layers": 1,
+        "property": "Position", "source": null,
+        "targets": [["a", "position.x"], ["a", "position.y"]],
+    }))
+    .unwrap();
+    let sheet = target.surface(DialogId("d".into()), WindowId("w".into()));
+    let typed = sheet.fields[0].values[0].clone();
+    assert_eq!(typed, "value + wiggle(2, 20)");
+    let call = target
+        .apply(&typed, Some(desk.published().revision()))
+        .unwrap()
+        .expect("an edit");
+    desk.call(call);
+    let published = desk.published();
+    for channel in ["position.x", "position.y"] {
+        assert_eq!(
+            expression(&published, channel).as_deref(),
+            Some(typed.as_str())
+        );
+    }
+    assert_eq!(expression(&published, "opacity"), None);
+    assert_eq!(
+        published.history.undo_label.as_deref(),
+        Some("Set Expression")
+    );
+    let made = desk.document();
+
+    let again = desk.reopened();
+    assert_eq!(layer_of(&again.published, "a"), layer_of(&published, "a"));
+
+    desk.undo();
+    assert_eq!(desk.document(), before, "one Undo removes both");
+    desk.redo();
+    assert_eq!(desk.document(), made);
+}
+
+/// Properties ▸ Show in Graph Editor, as the command the row sends: the
+/// timeline shows its graph on that property and the layer's row opens.
+#[gpui::test]
+fn show_in_graph_editor_opens_the_timelines_graph_on_the_property(cx: &mut gpui::TestAppContext) {
+    use pm_panel_timeline::{GraphDisplay, RowId};
+    let mut s = crate::timeline_tests::stage(cx, 2);
+    let model = |s: &crate::timeline_tests::Stage| s.surface.read_with(&s.vcx, |t, _| t.model());
+    assert_eq!(model(&s).graph_display, GraphDisplay::DopeSheet);
+    s.surface.update(&mut s.vcx, |t, cx| {
+        t.show_graph("l1".into(), "opacity".into(), vec!["opacity".into()], cx)
+    });
+    s.idle(cx);
+    let shown = model(&s);
+    assert_eq!(shown.graph_display, GraphDisplay::Graph);
+    assert_eq!(
+        shown.graph_focus,
+        Some(("l1".to_owned(), "opacity".to_owned()))
+    );
+    assert!(shown.rows().iter().any(|row| row.id
+        == RowId::Property {
+            layer_id: "l1".into(),
+            channel: "opacity".into()
+        }));
+    let published = s
+        .rig
+        .kernel
+        .published(crate::v4_view_tests::PROJECT)
+        .unwrap();
+    assert_eq!(published.selection.channel(), Some("opacity"));
+    // Asked again, the graph stays up (it is not a toggle).
+    s.surface.update(&mut s.vcx, |t, cx| {
+        t.show_graph("l1".into(), "opacity".into(), vec!["opacity".into()], cx)
+    });
+    s.idle(cx);
+    assert_eq!(model(&s).graph_display, GraphDisplay::Graph);
+}
