@@ -95,8 +95,9 @@ function refusal(value: Announcement): boolean {
 /** The graph view the switch returns to: the last one shown (v1 keeps "Show
  * Layer Bars with Graph" apart from the switch itself). */
 let lastGraphView: "Graph" | "Combined" = "Graph";
-/** v1's tab row: one tab per open composition (the active one named in the
- * text ink over an accent rule), and the Layers / Tracks switch at its end. */
+/** v1's tab row: one tab per open composition (the active one in the text
+ * ink on the kit's selected ground, a raised neutral cell: the accent marks
+ * the playhead alone), and the Layers / Tracks switch at its end. */
 function Header({ frame: f, send }: { frame: TimelineFrame; send: Send }) {
   return (
     <div
@@ -108,8 +109,6 @@ function Header({ frame: f, send }: { frame: TimelineFrame; send: Send }) {
         height: t("metrics.header"),
         paddingLeft: t("metrics.gap"),
         paddingRight: t("metrics.gap"),
-        borderBottom: t("metrics.border"),
-        borderColor: t("colors.separator"),
       }}
     >
       <div
@@ -120,23 +119,7 @@ function Header({ frame: f, send }: { frame: TimelineFrame; send: Send }) {
       >
         {f.hasComposition &&
           f.tabs.map((tab) => (
-            <div
-              key={tab.id}
-              style={{
-                ...line,
-                paddingLeft: t("metrics.gap"),
-                paddingRight: t("metrics.gap"),
-                // The active tab stands on v1's 2 pt accent rule (the
-                // hairline step, as a pill's inset); the others keep the
-                // same height without one.
-                ...(tab.active
-                  ? {
-                      borderBottom: t("metrics.pill_inset"),
-                      borderColor: t("colors.accent"),
-                    }
-                  : { paddingBottom: t("metrics.pill_inset") }),
-              }}
-            >
+            <div key={tab.id} style={line}>
               <UI.ToolbarItem
                 id={`timeline:tab:${tab.id}`}
                 label={tab.name}
@@ -144,7 +127,6 @@ function Header({ frame: f, send }: { frame: TimelineFrame; send: Send }) {
                 role="tab"
                 tabIndex={tab.active ? 0 : -1}
                 aria-selected={tab.active}
-                metadata={{ selectionMark: "rule" }}
                 onClick={action(send, {
                   type: "tab",
                   id: tab.id,
@@ -216,7 +198,7 @@ function Head({ frame: f, send }: { frame: TimelineFrame; send: Send }) {
           id="timeline:play"
           label={f.playing ? "Pause" : "Play"}
           title="Play / Pause (Space)"
-          symbol={f.playing ? "pause" : "play"}
+          symbol={f.playing ? "pause.fill" : "play.fill"}
           send={send}
           intent={{ type: "play" }}
         />
@@ -231,7 +213,7 @@ function Head({ frame: f, send }: { frame: TimelineFrame; send: Send }) {
               send({ type: "editDone", value: String(e.value ?? "") })
             }
             style={{
-              color: t("colors.accent_text"),
+              color: t("colors.text"),
               fontSize: t("typography.timecode"),
               fontWeight: t("typography.medium_weight"),
               fontVariantNumeric: "tabular-nums",
@@ -246,7 +228,7 @@ function Head({ frame: f, send }: { frame: TimelineFrame; send: Send }) {
             onClick={action(send, { type: "timeEdit" })}
             metadata={{ fixedWidthSample: "00:00:00:00" }}
             style={{
-              color: t("colors.accent_text"),
+              color: t("colors.text"),
               fontSize: t("typography.timecode"),
               fontWeight: t("typography.medium_weight"),
               fontVariantNumeric: "tabular-nums",
@@ -275,7 +257,6 @@ function Head({ frame: f, send }: { frame: TimelineFrame; send: Send }) {
           title="Graph Editor"
           symbol="point.topleft.down.to.point.bottomright.curvepath"
           active={graph}
-          tint={graph ? "colors.accent_text" : undefined}
           send={send}
           intent={{ type: "view", view: graph ? "DopeSheet" : lastGraphView }}
         />
@@ -296,7 +277,6 @@ function Head({ frame: f, send }: { frame: TimelineFrame; send: Send }) {
             label="Snapping"
             symbol="arrow.right.and.line.vertical.and.arrow.left"
             active={f.snapping}
-            tint={f.snapping ? "colors.accent_text" : undefined}
             title="Snap Clips to Edges, Markers and the Playhead"
             send={send}
             intent={{ type: "snap" }}
