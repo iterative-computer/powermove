@@ -1078,6 +1078,8 @@ impl EngineService {
         let layer_rasters = compat::LayerRasters::start(Some(fonts.clone()))?;
         // Built-in definitions load first thing on the service thread
         // (`run`): the app's window doesn't wait for a cold shader cache.
+        // Its jobs (exports, cache fills) read the same translated shaders.
+        jobs::set_shader_cache(shader_cache.clone());
         let mut engine = render::Engine::without_definitions(gpu, shader_cache)?;
         engine.set_fonts(fonts);
         engine.builtins_pending = true;

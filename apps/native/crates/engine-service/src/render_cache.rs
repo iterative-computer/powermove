@@ -157,6 +157,12 @@ pub struct FrameReport {
     /// It can't be drawn exactly (a layer failed): not stored, not asked
     /// for again in this state.
     pub refused: bool,
+    /// Stored, and where its bytes came from is established: every media
+    /// file it read is one its key names, at the version named
+    /// ([`reads_listed`]), and every font file read is among the fonts
+    /// asked for, at its version (`pm_text::system_fonts::Fence`).
+    #[serde(default)]
+    pub proved: bool,
 }
 
 /// A fill child's failure when the volume is nearly full.
@@ -486,6 +492,12 @@ struct Inner {
     running: Mutex<Option<Running>>,
     reader: Reader,
     indexer: Indexer,
+    /// What each media file's bytes are, by the version they were read at.
+    media_ids: Arc<MediaIds>,
+    /// Test hook: the next fills name no media file to their child, as a
+    /// fill whose frames read a file their keys do not name.
+    #[cfg(test)]
+    unnamed_media: std::sync::atomic::AtomicBool,
     /// The background delay in milliseconds, read live by fill children.
     delay_ms: Arc<AtomicU64>,
     scheduling: std::sync::Once,
@@ -517,6 +529,9 @@ impl Default for DiskFrames {
                 running: Mutex::default(),
                 reader: Reader::start(),
                 indexer,
+                media_ids: Arc::default(),
+                #[cfg(test)]
+                unnamed_media: Default::default(),
                 delay_ms: Arc::new(AtomicU64::new(
                     Background::default().delay.as_millis() as u64
                 )),
@@ -729,7 +744,30 @@ impl DiskFrames {
         // A fill writing into the old folder stops first.
         self.cancel_fill();
         let cache = match &root {
-            Some((dir, quota)) => Some(Arc::new(RenderCache::open(dir, *quota)?)),
+            Some((dir, quota)) => {
+                let cache = RenderCache::open(dir, *quota)?;
+                // Frames keyed by another version of the keys, the format
+                // or the renderer can never be found again, and the kept
+                // ones among them were never evicted: they go now, before
+                // anything is written under this one.
+                match cache.retire_other_schemas(&schema()) {
+                    Ok((0, _)) => {}
+                    Ok((entries, bytes)) => {
+                        eprintln!(
+                            "Removed {entries} rendered frames of an earlier version ({bytes} bytes)."
+                        );
+                        diagnostic(serde_json::json!({
+                            "retired_entries": entries, "retired_bytes": bytes,
+                        }));
+                    }
+                    Err(error) => {
+                        eprintln!("Rendered frames of earlier versions were not removed: {error}")
+                    }
+                }
+                // What its frames' media were, known across launches.
+                self.inner.media_ids.open(dir);
+                Some(Arc::new(cache))
+            }
             None => None,
         };
         let generation = self.with(|s| {
@@ -898,6 +936,8 @@ impl DiskFrames {
         // waiting, and the one being worked on stops at its next stage.
         self.inner.indexer.submit(Indexing {
             inner: Arc::downgrade(&self.inner),
+            media_ids: self.inner.media_ids.clone(),
+            content_named: self.content_named(),
             generation,
             source,
             identity,
@@ -1131,10 +1171,19 @@ impl DiskFrames {
             budget_us,
             frame_ticks: rate.frame_start(1).unwrap_or(0),
             probe_scale,
-            media: media.clone(),
+            media,
             content_named,
         };
-        let unbound = (media, answering);
+        #[cfg(test)]
+        let fill = CacheFill {
+            media: if self.inner.unnamed_media.load(Ordering::Acquire) {
+                Vec::new()
+            } else {
+                fill.media
+            },
+            ..fill
+        };
+        let unbound = answering;
         let delay = self.inner.delay_ms.clone();
         let started = fill_request(&source, rate, fill, reserve)
             .and_then(|request| {
@@ -1817,6 +1866,7 @@ fn fill_request(
         originals: source.scene.media.paths.clone(),
         proxies: Default::default(),
         destination: dir,
+        shader_cache: crate::jobs::shader_cache(),
         saving_app_version: None,
         resources: crate::resources::ResourceSnapshot {
             definitions: source.definitions.clone(),
@@ -1848,21 +1898,23 @@ fn pm_kernel_free_id() -> pm_protocol::common::JobId {
 /// key is the frame's, progress while the fill is the current one.
 ///
 /// A stored frame whose report is not taken (the state has moved on) stays
-/// on disk only where the child itself held the frame to its key: the
-/// document and definitions it was sent, the fonts its fence held, the
-/// media files it read. What the child cannot hold is `unbound`, the
-/// state's media as a whole and the override wrappers answering it (their
-/// answers come from the app as it is now): when either is another in the
-/// state the cache has moved on to, or that state is gone, the frame is
-/// removed from `cache`, the store it was written to. (A frame rendered
-/// while an edit or a font change was in the way stays: it is its key's
-/// picture, found again when that state comes back.)
+/// on disk only when where it came from is established: the child proved
+/// that every media file it read is one its key names, at the version
+/// named, and that every font file it read is among the fonts asked for,
+/// at its version (`FrameReport::proved`), and the override wrappers
+/// answering are still the ones the fill began with (`unbound`: their
+/// answers come from the app as it is now, nothing the child can hold).
+/// Otherwise, or when that state is gone, it is removed from `cache`, the
+/// store it was written to: an entry of unknown provenance, found again
+/// when its key comes back after an undo, would be shown as the key's
+/// picture. (A proved frame rendered while an edit, a font change or a
+/// media change was in the way stays: it is its key's picture.)
 fn run_fill(
     inner: Weak<Inner>,
     serial: u64,
     storage: u64,
     cache: Option<Arc<RenderCache>>,
-    unbound: (Vec<Stamp>, Option<u64>),
+    unbound: Option<u64>,
     order: Vec<(i64, RenderKey)>,
     started: Result<crate::jobs::ExportHandle, String>,
 ) {
@@ -1897,9 +1949,18 @@ fn run_fill(
                         taken = true;
                     }
                 }
-                let held = state.frames.as_ref().is_some_and(|f| {
-                    f.identity.media == unbound.0 && f.identity.overrides == unbound.1
-                });
+                // Kept only when where it came from is established: the
+                // child proved the media and fonts it read are its key's
+                // (an entry of unknown provenance found again when the key
+                // comes back, after an undo, would be shown as that key's
+                // picture), and the override wrappers answering, which the
+                // child cannot hold itself, are the ones the fill began
+                // with.
+                let held = report.proved
+                    && state
+                        .frames
+                        .as_ref()
+                        .is_some_and(|f| f.identity.overrides == unbound);
                 if report.stored && !taken && !held {
                     not_taken.push(key);
                 }
@@ -2366,6 +2427,8 @@ fn index_until(
 /// One observation to fingerprint and find on disk.
 struct Indexing {
     inner: Weak<Inner>,
+    media_ids: Arc<MediaIds>,
+    content_named: Option<PathBuf>,
     generation: u64,
     source: Source,
     identity: Identity,
@@ -2444,6 +2507,8 @@ impl IndexerShared {
         drop(self.gate.lock().unwrap());
         let Indexing {
             inner,
+            media_ids,
+            content_named,
             generation,
             source,
             identity,
@@ -2462,7 +2527,12 @@ impl IndexerShared {
         // moves and the state is observed again).
         pm_text::system_fonts::refresh();
         let fonts = pm_text::system_fonts::Inventory::current();
-        let fingerprint = fingerprint(&source, &identity, &fonts);
+        // Reads the media files it has not read at their versions yet:
+        // given up between files once something newer is observed.
+        let media = (&*media_ids, content_named.as_deref());
+        let Some(fingerprint) = fingerprint(&source, &identity, &fonts, media, &stale) else {
+            return;
+        };
         let source = Source {
             fonts: Some(Arc::new(fonts)),
             ..source
@@ -2580,6 +2650,16 @@ pub(crate) fn keyed(
     }
 }
 
+/// Whether every file a frame read is one its key names (`expected`), so
+/// that [`reads_are`] compared each of them with a version: a frame that
+/// read a file the key does not name was drawn from something the key says
+/// nothing about.
+pub(crate) fn reads_listed(reads: &[(PathBuf, Option<FileVersion>)], expected: &[Stamp]) -> bool {
+    reads
+        .iter()
+        .all(|(path, _)| expected.iter().any(|(named, _)| named == path))
+}
+
 /// Whether what a frame read is what its key says. `reads` are the file
 /// versions its render looked at (`pm_render::media::take_reads`, every
 /// band of it): each file among `expected` was the version named there,
@@ -2646,23 +2726,124 @@ fn renderer_identity() -> &'static str {
     })
 }
 
-/// A media file's content, sampled: its length and up to four 64 KiB
-/// pieces (start, thirds, end), with its stamp.
-fn media_content(path: &Path, hash: &mut blake3::Hasher) {
+/// What a media file's bytes are: the BLAKE3 of the whole file up to
+/// [`WHOLE`] (every still, most clips), of its length and a 64 KiB piece
+/// every 2 MiB above (a long clip: saving it again moves bytes all along
+/// it). `None`: it cannot be read.
+fn content_of(path: &Path) -> Option<[u8; 32]> {
     use std::io::{Read, Seek, SeekFrom};
     const PIECE: u64 = 64 << 10;
-    let Ok(mut file) = std::fs::File::open(path) else {
-        hash.update(b"offline");
-        return;
-    };
-    let len = file.metadata().map_or(0, |m| m.len());
+    const EVERY: u64 = 2 << 20;
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let mut hash = blake3::Hasher::new_derive_key("powermove media content v1");
     hash.update(&len.to_le_bytes());
-    let mut buf = vec![0u8; PIECE as usize];
-    for at in [0, len / 3, len * 2 / 3, len.saturating_sub(PIECE)] {
-        if file.seek(SeekFrom::Start(at)).is_ok()
-            && let Ok(n) = file.read(&mut buf)
-        {
+    if len <= WHOLE {
+        std::io::copy(&mut file, &mut hash).ok()?;
+    } else {
+        let mut buf = vec![0u8; PIECE as usize];
+        let mut at = 0;
+        while at < len {
+            file.seek(SeekFrom::Start(at)).ok()?;
+            let n = file.read(&mut buf).ok()?;
             hash.update(&buf[..n]);
+            at += EVERY;
+        }
+        file.seek(SeekFrom::Start(len - PIECE)).ok()?;
+        let n = file.read(&mut buf).ok()?;
+        hash.update(&buf[..n]);
+    }
+    Some(*hash.finalize().as_bytes())
+}
+/// Files up to this size are identified by all of their bytes.
+const WHOLE: u64 = 512 << 20;
+
+/// What each media file's bytes are ([`content_of`]), remembered by the
+/// version of the file they were read at ([`Stamp`]), across launches (in
+/// the folder of rendered frames).
+///
+/// A frame's key names its media by their bytes; the version of a file
+/// (length, times, device, inode) only says when to read them again. So a
+/// file that is another version with the same bytes (its permissions or
+/// times touched, replaced by an identical copy, the same bytes under
+/// another path: an embedded clip's cache object is named again when its
+/// project is first saved in the current format) keeps its rendered
+/// frames, and a file whose bytes changed never does, whatever its
+/// length and modification time say.
+#[derive(Default)]
+struct MediaIds {
+    known: Mutex<(Option<PathBuf>, HashMap<Stamp, [u8; 32]>)>,
+    /// Files read (tests: a known version is not read again).
+    read: AtomicU64,
+}
+impl MediaIds {
+    const FILE: &'static str = ".pm-media-content";
+    /// At most this many versions are remembered (a version is ~200 bytes).
+    const AT_MOST: usize = 20_000;
+
+    /// Remembers in (and from) `folder` from now on.
+    fn open(&self, folder: &Path) {
+        let record = folder.join(Self::FILE);
+        let found: Vec<(Stamp, String)> = std::fs::read(&record)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default();
+        let mut known = self.known.lock().unwrap();
+        known.0 = Some(record);
+        for (stamp, content) in found.into_iter().take(Self::AT_MOST) {
+            if let Ok(content) = blake3::Hash::from_hex(&content) {
+                known.1.entry(stamp).or_insert(*content.as_bytes());
+            }
+        }
+    }
+
+    /// The bytes of the file `stamp` names, at that version. `None`: the
+    /// file is not that version (it is changing: its state is observed
+    /// again) or cannot be read.
+    fn of(&self, stamp: &Stamp, content_named: Option<&Path>) -> Option<[u8; 32]> {
+        if let Some(known) = self.known.lock().unwrap().1.get(stamp) {
+            return Some(*known);
+        }
+        let (path, version) = stamp;
+        let now = || keyed(FileVersion::of(path), path, content_named);
+        if now() != *version {
+            return None;
+        }
+        self.read.fetch_add(1, Ordering::Relaxed);
+        let content = content_of(path)?;
+        // Read while it was that version throughout.
+        if now() != *version {
+            return None;
+        }
+        let mut known = self.known.lock().unwrap();
+        if known.1.len() >= Self::AT_MOST {
+            known.1.clear();
+        }
+        known.1.insert(stamp.clone(), content);
+        Some(content)
+    }
+
+    /// Writes what is known next to the rendered frames.
+    fn save(&self) {
+        let known = self.known.lock().unwrap();
+        let Some(record) = &known.0 else {
+            return;
+        };
+        let rows: Vec<(&Stamp, String)> = known
+            .1
+            .iter()
+            .map(|(stamp, content)| {
+                (
+                    stamp,
+                    blake3::Hash::from_bytes(*content).to_hex().to_string(),
+                )
+            })
+            .collect();
+        let partial = record.with_extension(format!("{}", std::process::id()));
+        if let Ok(bytes) = serde_json::to_vec(&rows)
+            && std::fs::write(&partial, bytes).is_ok()
+        {
+            let _ = std::fs::rename(&partial, record);
         }
     }
 }
@@ -2687,6 +2868,33 @@ fn fonts_identity(fonts: &pm_text::system_fonts::Inventory, hash: &mut blake3::H
     }
 }
 
+/// The version of the keys' layout: what a fingerprint is derived under.
+const KEYS: &str = "powermove render cache v8";
+
+/// How this build keys and stores its frames: the keys' layout, the stored
+/// format and the renderer. A folder's entries are of one schema
+/// (`RenderCache::retire_other_schemas`).
+fn schema() -> String {
+    format!("{KEYS}\n{FORMAT}\n{}", renderer_identity())
+}
+
+/// A row in `$PM_ENGINE_TRACE.cache.jsonl` (diagnostics only).
+fn diagnostic(row: serde_json::Value) {
+    let Some(trace) = std::env::var_os("PM_ENGINE_TRACE") else {
+        return;
+    };
+    let mut path = PathBuf::from(trace).into_os_string();
+    path.push(".cache.jsonl");
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        use std::io::Write;
+        let _ = writeln!(file, "{row}");
+    }
+}
+
 /// The fingerprint of everything that draws the composition's frames
 /// besides the document, whose parts each frame draws from are in its key
 /// (`crate::frame_inputs`).
@@ -2694,18 +2902,37 @@ fn fingerprint(
     source: &Source,
     identity: &Identity,
     fonts: &pm_text::system_fonts::Inventory,
-) -> [u8; 32] {
-    let parts = fingerprint_parts(source, identity, fonts);
-    let mut hash = blake3::Hasher::new_derive_key("powermove render cache v7");
+    (media_ids, content_named): (&MediaIds, Option<&Path>),
+    stale: &dyn Fn() -> bool,
+) -> Option<[u8; 32]> {
+    // Each media file by its bytes, as the version the identity names.
+    let before = media_ids.read.load(Ordering::Relaxed);
+    let mut media = Vec::with_capacity(source.scene.media.paths.len());
+    for (asset, path) in &source.scene.media.paths {
+        if stale() {
+            return None;
+        }
+        let content = identity
+            .media
+            .iter()
+            .find(|(named, _)| named == path)
+            .and_then(|stamp| media_ids.of(stamp, content_named));
+        media.push((asset.as_str(), path.as_path(), content));
+    }
+    if media_ids.read.load(Ordering::Relaxed) != before {
+        media_ids.save();
+    }
+    let parts = fingerprint_parts(source, identity, fonts, &media);
+    let mut hash = blake3::Hasher::new_derive_key(KEYS);
     for (_, part) in &parts {
         hash.update(part);
     }
     let fingerprint = *hash.finalize().as_bytes();
     // Which part of a state's identity changed (diagnostics only).
-    if let Some(trace) = std::env::var_os("PM_ENGINE_TRACE") {
-        let mut path = PathBuf::from(trace).into_os_string();
-        path.push(".cache.jsonl");
-        let short = |digest: &[u8; 32]| digest[..6].iter().map(|b| format!("{b:02x}")).collect();
+    if std::env::var_os("PM_ENGINE_TRACE").is_some() {
+        let short = |digest: &[u8; 32]| -> String {
+            digest[..6].iter().map(|b| format!("{b:02x}")).collect()
+        };
         let mut row: serde_json::Map<String, serde_json::Value> = parts
             .iter()
             .map(|(name, part)| ((*name).to_owned(), serde_json::Value::String(short(part))))
@@ -2715,16 +2942,41 @@ fn fingerprint(
             serde_json::Value::String(short(&fingerprint)),
         );
         row.insert("revision".into(), identity.revision.into());
-        if let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-        {
-            use std::io::Write;
-            let _ = writeln!(file, "{}", serde_json::Value::Object(row));
-        }
+        // Each media file as the key took it: which of them moved between
+        // two rows (its path, a field of its version, or its bytes).
+        row.insert(
+            "media_files".into(),
+            media
+                .iter()
+                .map(|(asset, path, content)| {
+                    let version = identity
+                        .media
+                        .iter()
+                        .find(|(named, _)| named == path)
+                        .map(|(_, version)| *version)
+                        .unwrap_or_default();
+                    serde_json::json!([
+                        asset,
+                        path.to_string_lossy(),
+                        version.len,
+                        version.modified,
+                        version.device,
+                        version.inode,
+                        version.changed.0,
+                        version.changed.1,
+                        content.as_ref().map(short),
+                    ])
+                })
+                .collect::<Vec<_>>()
+                .into(),
+        );
+        row.insert(
+            "media_read".into(),
+            (media_ids.read.load(Ordering::Relaxed) - before).into(),
+        );
+        diagnostic(serde_json::Value::Object(row));
     }
-    fingerprint
+    Some(fingerprint)
 }
 
 /// What a composition state's frames depend on beyond its document, each
@@ -2733,6 +2985,7 @@ fn fingerprint_parts(
     source: &Source,
     identity: &Identity,
     fonts: &pm_text::system_fonts::Inventory,
+    media: &[(&str, &Path, Option<[u8; 32]>)],
 ) -> Vec<(&'static str, [u8; 32])> {
     let part = |fill: &dyn Fn(&mut blake3::Hasher)| {
         let mut hash = blake3::Hasher::new();
@@ -2752,27 +3005,36 @@ fn fingerprint_parts(
                 hash.update(&serde_json::to_vec(&source.definitions).unwrap_or_default());
             }),
         ),
+        // Each asset's bytes ([`MediaIds`]): not its path, and not the
+        // version of its file. One that cannot be read (offline, or
+        // changing under the look) is its path and version instead, which
+        // no other state shares.
         (
             "media",
             part(&|hash| {
-                for (asset, path) in &source.scene.media.paths {
+                for (asset, path, content) in media {
                     hash.update(asset.as_bytes());
-                    hash.update(path.as_os_str().as_encoded_bytes());
-                    media_content(path, hash);
-                }
-            }),
-        ),
-        (
-            "media_stamps",
-            part(&|hash| {
-                for (path, version) in &identity.media {
-                    hash.update(path.as_os_str().as_encoded_bytes());
-                    hash.update(&version.len.to_le_bytes());
-                    hash.update(&version.modified.to_le_bytes());
-                    hash.update(&version.device.to_le_bytes());
-                    hash.update(&version.inode.to_le_bytes());
-                    hash.update(&version.changed.0.to_le_bytes());
-                    hash.update(&version.changed.1.to_le_bytes());
+                    hash.update(&[0]);
+                    match content {
+                        Some(content) => {
+                            hash.update(content);
+                        }
+                        None => {
+                            hash.update(b"unread");
+                            hash.update(path.as_os_str().as_encoded_bytes());
+                            let version = identity
+                                .media
+                                .iter()
+                                .find(|(named, _)| named == path)
+                                .map(|(_, version)| *version)
+                                .unwrap_or_default();
+                            hash.update(&version.len.to_le_bytes());
+                            hash.update(&version.modified.to_le_bytes());
+                            hash.update(&version.inode.to_le_bytes());
+                            hash.update(&version.changed.0.to_le_bytes());
+                            hash.update(&version.changed.1.to_le_bytes());
+                        }
+                    }
                 }
             }),
         ),
@@ -3021,49 +3283,133 @@ mod tests {
     /// The app's media cache names a file by its bytes and marks its
     /// recency in its modification time at every open: the frames rendered
     /// from it stay the state's frames (every launch orphaned the last
-    /// one's). Any other file's modification time is still its identity.
+    /// one's), and its bytes are not read again for it.
     #[test]
     fn a_touched_media_cache_object_keeps_its_frames() {
         let objects = tempfile::tempdir().unwrap();
-        let linked = tempfile::tempdir().unwrap();
-        let fingerprint_after_touch = |file: &Path, content_named: Option<&Path>| {
-            std::fs::write(file, b"media bytes").unwrap();
-            let dir = tempfile::tempdir().unwrap();
-            let disk = DiskFrames::default();
-            disk.set_content_named(content_named.map(Path::to_owned));
-            disk.set_storage(Some((dir.path().join("frames"), 1 << 30)))
-                .unwrap();
-            let scene = Scene {
-                media: Arc::new(pm_export::render::MediaPaths {
-                    paths: [("clip".to_owned(), file.to_owned())].into(),
-                    ..Default::default()
-                }),
-                ..scene()
-            };
-            let at = Ticks::new(0).unwrap();
-            let fingerprint = |disk: &DiskFrames| {
-                disk.observe(&scene, &[], None, None, None, 1, at);
-                ready(disk);
-                let state = disk.inner.state.lock().unwrap();
-                state.frames.as_ref().unwrap().fingerprint.unwrap()
-            };
-            let before = fingerprint(&disk);
-            // The next open: the recency mark moves, the bytes don't.
-            std::fs::File::options()
-                .append(true)
-                .open(file)
-                .unwrap()
-                .set_modified(std::time::SystemTime::now() + Duration::from_secs(60))
-                .unwrap();
-            disk.inner.state.lock().unwrap().media_checked = None;
-            (before, fingerprint(&disk))
-        };
         let object = objects.path().join("0a1b2c.mp4");
-        let (before, after) = fingerprint_after_touch(&object, Some(objects.path()));
-        assert_eq!(before, after, "a media cache object");
-        let file = linked.path().join("clip.mp4");
-        let (before, after) = fingerprint_after_touch(&file, Some(objects.path()));
-        assert_ne!(before, after, "a linked file");
+        std::fs::write(&object, b"media bytes").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let disk = DiskFrames::default();
+        disk.set_content_named(Some(objects.path().to_owned()));
+        disk.set_storage(Some((dir.path().join("frames"), 1 << 30)))
+            .unwrap();
+        let scene = media_scene(&object);
+        let before = fingerprint_of(&disk, &scene);
+        let read = disk.inner.media_ids.read.load(Ordering::Relaxed);
+        // The next open: the recency mark moves, the bytes don't.
+        std::fs::File::options()
+            .append(true)
+            .open(&object)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() + Duration::from_secs(60))
+            .unwrap();
+        assert_eq!(fingerprint_of(&disk, &scene), before);
+        assert_eq!(disk.inner.media_ids.read.load(Ordering::Relaxed), read);
+    }
+
+    /// A scene drawing from one media file.
+    fn media_scene(file: &Path) -> Scene {
+        Scene {
+            media: Arc::new(pm_export::render::MediaPaths {
+                paths: [("clip".to_owned(), file.to_owned())].into(),
+                ..Default::default()
+            }),
+            ..scene()
+        }
+    }
+
+    /// The fingerprint of `scene`'s frames with its media looked at now.
+    fn fingerprint_of(disk: &DiskFrames, scene: &Scene) -> [u8; 32] {
+        disk.inner.state.lock().unwrap().media_checked = None;
+        disk.observe(scene, &[], None, None, None, 1, Ticks::ZERO);
+        ready(disk);
+        let state = disk.inner.state.lock().unwrap();
+        state.frames.as_ref().unwrap().fingerprint.unwrap()
+    }
+
+    /// Rendered frames are of a media file's bytes, not of the file. A
+    /// linked file whose metadata alone changed (its permissions, its
+    /// modification time), one replaced by an identical copy, and the same
+    /// bytes under another path (an embedded clip's cache object is named
+    /// again when its project is first saved in the current format) keep
+    /// the frames rendered from them: a person does not lose a rendered
+    /// cache by saving, or to a backup tool. Other bytes of the same length
+    /// with the modification time put back are another picture. A file
+    /// read at a version is not read again, in this launch or the next.
+    #[test]
+    fn rendered_frames_follow_a_media_files_bytes_not_its_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let media = tempfile::tempdir().unwrap();
+        let still = media.path().join("still.bmp");
+        grey_still(&still, 40);
+        let dir = tempfile::tempdir().unwrap();
+        let frames = dir.path().join("frames");
+        let disk = DiskFrames::default();
+        disk.set_storage(Some((frames.clone(), 1 << 30))).unwrap();
+        let scene = media_scene(&still);
+        let reads = |disk: &DiskFrames| disk.inner.media_ids.read.load(Ordering::Relaxed);
+        let first = fingerprint_of(&disk, &scene);
+        assert_eq!(reads(&disk), 1);
+        assert_eq!(fingerprint_of(&disk, &scene), first);
+        assert_eq!(reads(&disk), 1, "the same version is not read again");
+        // The status-change time has the file system's resolution.
+        let tick = || std::thread::sleep(Duration::from_millis(20));
+        let version = || FileVersion::of(&still).unwrap();
+        // Its permissions change and change back.
+        let was = version();
+        tick();
+        std::fs::set_permissions(&still, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::set_permissions(&still, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_ne!(version(), was, "another version of the file");
+        assert_eq!(fingerprint_of(&disk, &scene), first, "permissions");
+        // Its modification time moves.
+        let was = version();
+        std::fs::File::options()
+            .append(true)
+            .open(&still)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() + Duration::from_secs(60))
+            .unwrap();
+        assert_ne!(version(), was);
+        assert_eq!(fingerprint_of(&disk, &scene), first, "a touched file");
+        // An identical copy takes its place (another inode).
+        let was = version();
+        let copy = media.path().join("copy.bmp");
+        std::fs::copy(&still, &copy).unwrap();
+        std::fs::rename(&copy, &still).unwrap();
+        assert_ne!(version().inode, was.inode);
+        assert_eq!(fingerprint_of(&disk, &scene), first, "an identical copy");
+        // The same bytes under another path.
+        let renamed = media.path().join("renamed.bmp");
+        std::fs::copy(&still, &renamed).unwrap();
+        assert_eq!(
+            fingerprint_of(&disk, &media_scene(&renamed)),
+            first,
+            "the same bytes under another path"
+        );
+        // The next launch reads none of them again.
+        let known = reads(&disk);
+        assert_eq!(known, 5, "once per version met");
+        let relaunched = DiskFrames::default();
+        relaunched.set_storage(Some((frames, 1 << 30))).unwrap();
+        assert_eq!(fingerprint_of(&relaunched, &scene), first);
+        assert_eq!(reads(&relaunched), 0, "known from the launch before");
+        // Other bytes of the same length, the modification time put back.
+        let modified = std::fs::metadata(&still).unwrap().modified().unwrap();
+        tick();
+        grey_still(&still, 220);
+        std::fs::File::options()
+            .write(true)
+            .open(&still)
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
+        assert_ne!(
+            fingerprint_of(&relaunched, &scene),
+            first,
+            "other bytes of the same length"
+        );
     }
 
     /// A playing frame gets its frame from disk on the first ask, waiting
@@ -3598,31 +3944,45 @@ mod tests {
     }
 
     /// A frame a fill stored for a state the cache has moved on from (its
-    /// report is not taken): it stays on disk when the child itself held it
-    /// to its key (an edit meanwhile: the frame is the old state's picture,
-    /// found again on undo), and is removed when what moved is something
-    /// the child cannot hold, here the override wrappers answering it.
+    /// report is not taken) stays on disk only when where it came from is
+    /// established. After an edit it stays (the frame is the old state's
+    /// picture, found again on undo) when the child proved that the media
+    /// it read are the ones its key names; a frame that read a file its
+    /// key does not name is removed, and so is every frame when the
+    /// override wrappers answering are others (the child cannot hold them).
     #[test]
-    fn a_frame_whose_report_is_not_taken_stays_only_where_the_child_held_it() {
+    fn a_frame_whose_report_is_not_taken_stays_only_with_its_provenance() {
         let ch = |v: f64| serde_json::json!({"v": v, "kf": [], "expr": null});
-        let edited = scene_with(
-            serde_json::json!({
-                "id":"added","type":"solid","name":"Added","from":0,"dur":3,"on":true,
-                "solo":false,"mblur":false,"fx":[],"masks":[],
-                "p":{"position.x":ch(10.),"position.y":ch(10.),"anchor.x":ch(0.),"anchor.y":ch(0.),
-                     "scale.x":ch(100.),"scale.y":ch(100.),"rotation":ch(0.),"opacity":ch(100.)},
-                "d":{"w":40,"h":40,"color":"#ff0000"}
-            }),
-            None,
-        );
-        // The state the cache moves on to while the child waits, and how
-        // many of the frames stored for the state before stay.
-        for (moved_on, overrides, stay) in [(edited, None, true), (scene(), Some(7), false)] {
+        let dir = tempfile::tempdir().unwrap();
+        let still = dir.path().join("still.bmp");
+        grey_still(&still, 40);
+        // The still at `x`: another `x` is the same picture after an edit.
+        let picture = |x: f64| {
+            scene_with(
+                serde_json::json!({
+                    "id":"still","type":"image","name":"Still","from":0,"dur":3,"on":true,
+                    "solo":false,"mblur":false,"fx":[],"masks":[],
+                    "p":{"position.x":ch(x),"position.y":ch(30.),"anchor.x":ch(0.),"anchor.y":ch(0.),
+                         "scale.x":ch(100.),"scale.y":ch(100.),"rotation":ch(0.),"opacity":ch(100.)},
+                    "d":{"asset":"pic","fit":"stretch","w":64,"h":64}
+                }),
+                Some(&still),
+            )
+        };
+        // The state the cache moves on to while the child waits, whether
+        // the fill names its media to the child, and how many of the
+        // frames stored for the state before stay.
+        for (moved_on, overrides, named, stay) in [
+            (picture(180.), None, true, true),
+            (picture(180.), None, false, false),
+            (picture(170.), Some(7), true, false),
+        ] {
             let dir = tempfile::tempdir().unwrap();
             let disk = DiskFrames::default();
+            disk.inner.unnamed_media.store(!named, Ordering::Release);
             disk.set_storage(Some((dir.path().join("frames"), 1 << 30)))
                 .unwrap();
-            disk.observe(&scene(), &[], None, None, None, 1, Ticks::ZERO);
+            disk.observe(&picture(170.), &[], None, None, None, 1, Ticks::ZERO);
             ready(&disk);
             let (cache, keys) = keys_of(&disk, 1., 1.1);
             // The viewer is busy: the child waits at its first submission.
@@ -3639,10 +3999,10 @@ mod tests {
                 stored(&cache, &keys),
                 if stay { keys.len() } else { 0 },
                 "after {}",
-                if stay {
-                    "an edit"
-                } else {
-                    "other override wrappers"
+                match (overrides, named) {
+                    (Some(_), _) => "other override wrappers",
+                    (None, true) => "an edit, its media proved",
+                    (None, false) => "an edit, a media file read that its keys do not name",
                 }
             );
         }

@@ -62,6 +62,25 @@ pub struct ExportRequest {
     /// the cache is stored under a key taken from these fonts.
     #[serde(default)]
     pub fonts: Option<pm_text::system_fonts::Inventory>,
+    /// The asking app's folder of translated shaders ([`set_shader_cache`]):
+    /// the job reads them instead of translating every built-in program
+    /// again before its first frame.
+    #[serde(default)]
+    pub shader_cache: Option<PathBuf>,
+}
+/// The folder of translated shaders this process's jobs are given: the
+/// viewer engine's own (`EngineService::start_with_fonts`). Entries are
+/// named by their source and written whole, so the app and its jobs share
+/// the folder.
+static SHADER_CACHE: Mutex<Option<PathBuf>> = Mutex::new(None);
+pub fn set_shader_cache(dir: Option<PathBuf>) {
+    *SHADER_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = dir;
+}
+pub(crate) fn shader_cache() -> Option<PathBuf> {
+    SHADER_CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
 }
 /// A job whose process cannot draw with the fonts it was asked to
 /// ([`ExportRequest::fonts`]), or whose fonts changed while it rendered.
@@ -470,6 +489,7 @@ impl ExportRequest {
                 pm_text::system_fonts::refresh();
                 pm_text::system_fonts::Inventory::current()
             }),
+            shader_cache: shader_cache(),
         })
     }
 }
@@ -1010,7 +1030,16 @@ pub fn run_child() -> Result<()> {
         if cancel.load(Ordering::Acquire) {
             anyhow::bail!("cancelled");
         }
+        let starting = std::time::Instant::now();
         let mut renderer = pm_render::Renderer::headless()?;
+        // The app's translated shaders. `PM_JOB_SHADER_CACHE=0` leaves the
+        // folder unused (to measure what it saves; never set otherwise).
+        let shaders = request
+            .shader_cache
+            .clone()
+            .filter(|_| std::env::var("PM_JOB_SHADER_CACHE").as_deref() != Ok("0"));
+        renderer.set_program_cache_dir(shaders.clone());
+        let made = starting.elapsed();
         // Previews isolate failing layers, as the viewer: the card draws.
         renderer.set_isolate_layers(request.preview);
         if overriding {
@@ -1020,6 +1049,29 @@ pub fn run_child() -> Result<()> {
         let failures = renderer
             .set_document_effects(&doc, &request.resources.definitions)
             .map_err(anyhow::Error::msg)?;
+        // What a job's start cost (diagnostics only).
+        if let Some(trace) = std::env::var_os("PM_ENGINE_TRACE") {
+            let mut path = PathBuf::from(trace).into_os_string();
+            path.push(".jobs.jsonl");
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+            {
+                use std::io::Write;
+                let _ = writeln!(
+                    file,
+                    "{}",
+                    serde_json::json!({
+                        "job_start": if fill.is_some() { "fill" } else { "export" },
+                        "renderer_ms": made.as_secs_f64() * 1e3,
+                        "effects_ms": (starting.elapsed() - made).as_secs_f64() * 1e3,
+                        "shader_cache": shaders.is_some(),
+                        "definitions": request.resources.definitions.len(),
+                    })
+                );
+            }
+        }
         // Only what this export draws: enabled effects in its composition.
         let uninstalled = renderer.missing_effects_in(&doc, composition.as_str());
         if request.bypass_missing_effects {
@@ -1697,6 +1749,7 @@ fn fill_cache(
                 cost_us: cost,
                 stored: false,
                 refused: cost.is_none(),
+                proved: false,
             });
         }
         if !heavy {
@@ -1734,6 +1787,10 @@ fn fill_cache(
                 cost_us: None,
                 stored: drawn.is_some(),
                 refused: drawn.is_none(),
+                // Stored past both checks: the font files read were the
+                // ones asked for (`store`: the fence). Its media are proved
+                // when every file read is one the key names.
+                proved: drawn.is_some() && crate::render_cache::reads_listed(&reads, &fill.media),
             });
             if i >= at {
                 at = i + 1;
