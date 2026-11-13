@@ -138,7 +138,7 @@ impl Vault for Keychain {
 }
 
 #[cfg(target_os = "macos")]
-mod keychain {
+pub(crate) mod keychain {
     use std::{ffi::c_void, ptr};
     type Item = *mut c_void;
     #[link(name = "Security", kind = "framework")]

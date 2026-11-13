@@ -93,6 +93,8 @@ pub struct MenuState {
     pub tool: String,
     /// Commands that cannot run now: menu rows dim, the palette omits them.
     pub disabled: std::collections::BTreeSet<String>,
+    /// Toggles that are on: their menu rows carry a checkmark.
+    pub checked: std::collections::BTreeSet<String>,
 }
 /// The editor window commands should go to: the key window, else the main window
 /// (a key palette/field-menu child panel is not an editor window), else the
@@ -579,7 +581,8 @@ define_class!(
                         if state.inspector { "Hide Inspector" } else { "Show Inspector" })),
                     n if n.starts_with("tool") => item.setState(if *n == state.tool {
                         NSControlStateValueOn } else { NSControlStateValueOff }),
-                    _ => {}
+                    n => item.setState(if state.checked.contains(n) {
+                        NSControlStateValueOn } else { NSControlStateValueOff }),
                 }
                 !state.disabled.contains(name)
             } else {
@@ -1883,6 +1886,10 @@ pub struct Host {
     monitor: Option<Retained<AnyObject>>,
     resolver: Resolver,
     events: HashMap<u64, Retained<NSEvent>>,
+    /// Commands owed when a held key comes up, by key code ([`Host::on_release`]).
+    releases: Rc<RefCell<HashMap<u16, Command>>>,
+    /// Pending keys that came up before their command was answered.
+    up_early: std::collections::HashSet<u64>,
     next_token: u64,
     sender: async_channel::Sender<Command>,
     pub tokens: Tokens,
@@ -1920,42 +1927,34 @@ pub struct Host {
     /// Home's sidebar material, under the GPUI view while Home shows.
     sidebar: RefCell<Option<Retained<NSView>>>,
 }
-/// Static palette rows: every menu command (including display-only menus and
-/// tools) plus workspace presets. Dynamic rows are added when it opens.
+/// Static palette rows: every menu command (including display-only menus,
+/// tools, rows with arguments and the commands that have no menu row here)
+/// plus workspace presets. Dynamic rows are added when it opens.
 fn base_choices() -> Vec<Choice> {
-    let mut seen = std::collections::HashSet::new();
-    menu::menus()
+    menu::palette_rows()
         .into_iter()
-        .flat_map(|(title, items)| items.into_iter().map(move |i| (title, i)))
-        .chain(menu::tools().into_iter().map(|i| ("Tools", i)))
-        .filter(|(_, i)| {
-            !i.command.is_empty()
-                && i.role.is_none()
-                && i.args.is_empty()
-                && !menu::SUBMENUS.contains(&i.command.as_str())
-        })
-        .filter(|(_, i)| seen.insert(i.command.clone()))
         // A row is listed under the menu it lives in.
-        .map(|(title, i)| Choice::new(i.label, i.command).within(title))
+        .map(|(title, command, label)| Choice::new(label, command).within(title))
         .collect()
 }
-/// command → shortcut glyphs, preferring menu accelerators, then the first
-/// non-Control W1 chord (the Control aliases are the same command).
+/// Palette command → shortcut glyphs, preferring menu accelerators, then the
+/// first non-Control W1 chord (the Control aliases are the same command).
 fn shortcut_glyphs() -> HashMap<String, String> {
     let mut map = HashMap::new();
     for i in menu::menus()
         .into_iter()
         .flat_map(|(_, i)| i)
         .chain(menu::tools())
+        .chain(menu::extras().into_iter().map(|(_, i)| i))
     {
-        if !i.chord.is_empty() && i.args.is_empty() {
-            map.entry(i.command.clone())
+        if !i.chord.is_empty() {
+            map.entry(menu::palette_command(&i.command, &i.args))
                 .or_insert_with(|| menu::glyphs(&i.chord));
         }
     }
     for b in crate::keyboard::shipped() {
-        if b.args.is_empty() && !b.chord.starts_with("ctrl+") {
-            map.entry(b.command.clone())
+        if !b.chord.starts_with("ctrl+") {
+            map.entry(menu::palette_command(&b.command, &b.args))
                 .or_insert_with(|| menu::glyphs(&b.chord));
         }
     }
@@ -2075,6 +2074,8 @@ impl Host {
             monitor: None,
             resolver: Resolver::new(),
             events: HashMap::new(),
+            releases: Default::default(),
+            up_early: Default::default(),
             next_token: 0,
             sender: tx,
             tokens: t,
@@ -2117,6 +2118,16 @@ impl Host {
                     .any(|(_, r)| r.contains(p.x as f32, p.y as f32))
             }),
         );
+        let weak = Rc::downgrade(&host);
+        gpui_macos::composition::set_pending(
+            &gpui,
+            // A host that is being changed (borrowed) is asked again by the
+            // frame that presents it.
+            Rc::new(move || {
+                weak.upgrade()
+                    .is_some_and(|h| h.try_borrow().is_ok_and(|h| h.pending()))
+            }),
+        );
         host.borrow_mut().registration = Some(reg);
         let weak = Rc::downgrade(&host);
         let handler =
@@ -2146,6 +2157,21 @@ impl Host {
                             }
                         }
                         return event.as_ptr();
+                    }
+                    if e.r#type() == NSEventType::KeyUp {
+                        let mut h = host.borrow_mut();
+                        let owed = h.releases.borrow_mut().remove(&e.keyCode());
+                        if let Some(command) = owed {
+                            let _ = h.sender.try_send(command);
+                        }
+                        // A tap can be over before its command is answered.
+                        let pending: Vec<u64> = h
+                            .events
+                            .iter()
+                            .filter(|(_, down)| down.keyCode() == e.keyCode())
+                            .map(|(token, _)| *token)
+                            .collect();
+                        h.up_early.extend(pending);
                     }
                     if e.r#type() == NSEventType::KeyDown {
                         let key = chord(e);
@@ -2383,6 +2409,30 @@ impl Host {
                     Some(&host.borrow().window),
                     None,
                     &shown,
+                )
+        };
+        host.borrow_mut().window_observers.push(observer);
+        // A key held while the window stops being key never comes up here.
+        let released = {
+            let (releases, sender) = {
+                let host = host.borrow();
+                (host.releases.clone(), host.sender.clone())
+            };
+            block2::RcBlock::new(
+                move |_: std::ptr::NonNull<objc2_foundation::NSNotification>| {
+                    for (_, command) in releases.borrow_mut().drain() {
+                        let _ = sender.try_send(command);
+                    }
+                },
+            )
+        };
+        let observer = unsafe {
+            objc2_foundation::NSNotificationCenter::defaultCenter()
+                .addObserverForName_object_queue_usingBlock(
+                    Some(NSWindowDidResignKeyNotification),
+                    Some(&host.borrow().window),
+                    None,
+                    &released,
                 )
         };
         host.borrow_mut().window_observers.push(observer);
@@ -2903,11 +2953,34 @@ impl Host {
     /// Development builds: resizes the window by (`dw`, `dh`) in twelve
     /// steps, two frames apart, its top-left corner kept, and writes
     /// `resize.txt` to `--save-dir`: for every hosted AppKit control, how far
-    /// it stood right after a step from where the following frames put it.
-    /// All zeros means the controls stay attached while the window resizes.
+    /// it stood, at the end of the run-loop turn that set a step's frame,
+    /// from where the following frames put it. A line names a step AppKit
+    /// displayed a turn later (the content and the controls then move
+    /// together in that turn); what the screen showed is read from captures
+    /// taken during the run.
     #[cfg(debug_assertions)]
     pub fn review_resize(&self, dw: f64, dh: f64) {
         use objc2_foundation::{NSRunLoop, NSRunLoopCommonModes, NSTimer};
+        use std::ffi::c_void;
+        #[link(name = "CoreFoundation", kind = "framework")]
+        unsafe extern "C" {
+            static kCFRunLoopCommonModes: *const c_void;
+            fn CFRunLoopGetMain() -> *mut c_void;
+            fn CFRunLoopObserverCreateWithHandler(
+                allocator: *const c_void,
+                activities: usize,
+                repeats: u8,
+                order: isize,
+                block: &block2::Block<dyn Fn(*mut c_void, usize)>,
+            ) -> *mut c_void;
+            fn CFRunLoopAddObserver(
+                run_loop: *mut c_void,
+                observer: *mut c_void,
+                mode: *const c_void,
+            );
+            fn CFRelease(object: *mut c_void);
+        }
+        const BEFORE_WAITING: usize = 1 << 5;
         const STEPS: usize = 12;
         fn controls(view: &NSView, skip: &NSView, out: &mut Vec<(String, NSRect)>) {
             if std::ptr::eq(view, skip) || view.isHidden() {
@@ -2990,7 +3063,24 @@ impl Host {
             frame.origin.y -= dh / STEPS as f64;
             drop(s);
             window.setFrame_display(frame, true);
-            state.borrow_mut().1 = read();
+            // Read once Core Animation has committed this turn of the run
+            // loop (its observer runs at order 2,000,000): what the screen
+            // gets together with the window's new size.
+            let (state, read) = (state.clone(), read.clone());
+            let committed = block2::RcBlock::new(move |_: *mut c_void, _: usize| {
+                state.borrow_mut().1 = read();
+            });
+            unsafe {
+                let observer = CFRunLoopObserverCreateWithHandler(
+                    std::ptr::null(),
+                    BEFORE_WAITING,
+                    0,
+                    2_000_001,
+                    &committed,
+                );
+                CFRunLoopAddObserver(CFRunLoopGetMain(), observer, kCFRunLoopCommonModes);
+                CFRelease(observer);
+            }
         });
         let timer = unsafe { NSTimer::timerWithTimeInterval_repeats_block(1. / 30., true, &step) };
         unsafe { NSRunLoop::mainRunLoop().addTimer_forMode(&timer, NSRunLoopCommonModes) };
@@ -3222,9 +3312,10 @@ impl Host {
     /// P-120: returns `Moved` only when the viewer slot's frame, layer frame,
     /// drawable size or visibility changed, so GPUI blocks on the composition
     /// transaction only on those frames.
-    fn present(&mut self) -> gpui_macos::composition::SlotChange {
+    /// Where the viewer slot stands for what GPUI last laid out.
+    fn viewer_geometry(&self) -> Option<SlotGeometry> {
         let h = self.content.bounds().size.height;
-        let geometry = self.viewer_rect.get().map(|r| {
+        self.viewer_rect.get().map(|r| {
             let scale = self.window.backingScaleFactor();
             let (canvas, pan) = if let Some((dimensions, zoom, pan)) = self.viewer_transform {
                 let fit = (r.w as f64 / dimensions[0]).min(r.h as f64 / dimensions[1]);
@@ -3240,7 +3331,15 @@ impl Host {
                 scale,
                 crop,
             }
-        });
+        })
+    }
+    /// Whether `present` would move the viewer slot now (the window asks
+    /// before it moves anything; native panel bodies cannot say beforehand).
+    fn pending(&self) -> bool {
+        self.last_geometry != Some(self.viewer_geometry())
+    }
+    fn present(&mut self) -> gpui_macos::composition::SlotChange {
+        let geometry = self.viewer_geometry();
         let moved = self.last_geometry != Some(geometry);
         if moved {
             if let Some(g) = geometry {
@@ -3456,7 +3555,11 @@ impl Host {
     /// Opens the command palette with this window's dynamic rows.
     pub fn open_palette(&mut self, state: &MenuState) {
         let mut choices = self.base_choices.clone();
-        choices.retain(|c| !state.disabled.contains(&c.command));
+        choices.retain(|c| {
+            !state
+                .disabled
+                .contains(menu::split_palette_command(&c.command).0)
+        });
         for (id, title) in &state.panels {
             let open = state.open.contains(id);
             if open && !crate::layout::closable(id) {
@@ -3586,6 +3689,25 @@ impl Host {
             .beginSheet_completionHandler(&window, Some(&handler));
         window.makeFirstResponder(Some(&target.ivars().text));
         *self.definition.borrow_mut() = Some(target);
+    }
+    /// Sends `name` once when the key that sent the pending `token` comes up
+    /// (or the window stops being key). False: the token has no key event.
+    pub fn on_release(&self, token: u64, name: &str, args: Vec<serde_json::Value>) -> bool {
+        let Some(event) = self.events.get(&token) else {
+            return false;
+        };
+        if self.up_early.contains(&token) {
+            return false;
+        }
+        self.releases.borrow_mut().insert(
+            event.keyCode(),
+            Command {
+                name: name.into(),
+                args,
+                token: None,
+            },
+        );
+        true
     }
     /// Queues a command for this window's editor, as a menu item would.
     pub fn send_command(&self, name: &str, args: Vec<serde_json::Value>) {
@@ -3813,7 +3935,8 @@ define_class!(
                 let mut p = p.borrow_mut();
                 let index = sender.tag() as usize;
                 if let Some(c) = p.model.choices.get(index) {
-                    let _ = p.sender.try_send(Command { name: c.command.clone(), args: vec![], token: None });
+                    let (name, args) = menu::split_palette_command(&c.command);
+                    let _ = p.sender.try_send(Command { name: name.to_owned(), args, token: None });
                 }
                 p.hide();
             }
@@ -5101,6 +5224,7 @@ pub fn install_menus() {
         submenu.setAutoenablesItems(
             title == "Edit"
                 || title == "Composition"
+                || title == "Playback"
                 || menu::DISPLAY_ONLY.contains(&title)
                 || title == "View",
         );

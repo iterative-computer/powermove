@@ -421,6 +421,9 @@ struct View {
     phase: Option<(f64, f64)>,
     input: Option<f64>,
     pending_input: Option<f64>,
+    /// The status line is a wait for extensions still loading
+    /// (`render::DefinitionsPending`): new pins end it.
+    waiting_definitions: bool,
     pipeline: trace::Pipeline,
     mastering: color::Mastering,
     resources: Arc<resources::ResourceSnapshot>,
@@ -456,13 +459,20 @@ struct View {
 static BUMPS: Mutex<BTreeMap<String, u64>> = Mutex::new(BTreeMap::new());
 fn bump_site(line: u32, kind: &str) {
     if trace::enabled() {
-        *BUMPS.lock().unwrap().entry(format!("{line}{kind}")).or_default() += 1;
+        *BUMPS
+            .lock()
+            .unwrap()
+            .entry(format!("{line}{kind}"))
+            .or_default() += 1;
     }
 }
 fn command_kind(cmd: Option<&TransportCommand>) -> &'static str {
     match cmd {
         Some(TransportCommand::Pause) => ":pause",
-        Some(TransportCommand::Seek { mode: pm_protocol::clock::SeekMode::Scrub, .. }) => ":seek-scrub",
+        Some(TransportCommand::Seek {
+            mode: pm_protocol::clock::SeekMode::Scrub,
+            ..
+        }) => ":seek-scrub",
         Some(TransportCommand::Seek { .. }) => ":seek-other",
         Some(TransportCommand::Play { .. }) => ":play",
         Some(_) => ":other",
@@ -905,6 +915,16 @@ impl Viewer {
             Ok(())
         })
     }
+    /// Whether a run is asked for or in progress, including the moment a
+    /// new run waits for the audio clock (when the clock itself reads
+    /// stopped).
+    pub fn running(&self) -> bool {
+        let state = self.shared.state.lock().unwrap();
+        state
+            .views
+            .get(&self.id)
+            .is_some_and(|v| v.desired_rate.num != 0)
+    }
     pub fn shuttle(&self, key: transport::ShuttleKey, from_pause: bool) -> Result<bool> {
         let mut consumed = false;
         self.edit(|v| {
@@ -927,12 +947,23 @@ impl Viewer {
             Ok(())
         })
     }
+    /// The engine still holds this view (it is not retired).
+    pub fn live(&self) -> bool {
+        self.shared
+            .state
+            .lock()
+            .unwrap()
+            .views
+            .contains_key(&self.id)
+    }
     /// Generation pin seam. Nonempty runtime requirements fail until P2 exists.
+    /// A snapshot that pins what the last one pinned (only who is still
+    /// loading changed) is taken for its names alone: no frame, installed
+    /// effect or cached picture is of other content because of it.
     pub fn resources(&self, snapshot: Arc<resources::ResourceSnapshot>) -> Result<()> {
         snapshot.validate()?;
         let mut state = self.shared.state.lock().unwrap();
-        state.content += 1;
-        let content = state.content;
+        let content = state.content + 1;
         let v = state
             .views
             .get_mut(&self.id)
@@ -941,16 +972,33 @@ impl Viewer {
             snapshot.generation >= v.resources.generation,
             "stale resource generation"
         );
-        if v.resources.generation != snapshot.generation {
-            v.resources = snapshot;
-            v.content = content;
-            v.stamp.generation += 1;
-            v.stamp.sequence += 1;
-            bump_site(line!(), "");
-            v.dirty = true;
-            self.shared.interactive.set(true);
-            self.shared.wake.try_send(()).ok();
+        if v.resources.generation == snapshot.generation {
+            return Ok(());
         }
+        if resources::ResourceSnapshot::same_pins(&v.resources, &snapshot) {
+            // A frame still held names who it waits for on its next try.
+            v.resources = snapshot;
+            return Ok(());
+        }
+        v.resources = snapshot;
+        v.content = content;
+        v.stamp.generation += 1;
+        v.stamp.sequence += 1;
+        bump_site(line!(), "");
+        v.dirty = true;
+        // What a held frame said it was waiting for may be over: its line
+        // goes now, not when the next frame finally lands (a frame still
+        // waiting says for what on its next try).
+        let waited = std::mem::take(&mut v.waiting_definitions);
+        if waited {
+            v.status.error = None;
+        }
+        state.content = content;
+        if waited {
+            state.notify();
+        }
+        self.shared.interactive.set(true);
+        self.shared.wake.try_send(()).ok();
         Ok(())
     }
 
@@ -1267,6 +1315,7 @@ impl EngineService {
                 phase: None,
                 input: None,
                 pending_input: None,
+                waiting_definitions: false,
                 pipeline: Default::default(),
                 mastering: Default::default(),
                 resources: Arc::default(),
@@ -2510,15 +2559,19 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 media: rendered_media,
                 ..scene.clone()
             };
-            if shared.disk.observe(
-                &rendered,
-                engine.definitions(),
-                overrides,
-                engine.tone_identity(),
-                fonts,
-                stamp.doc_id,
-                spec.time,
-            ) {
+            // Partial definitions while extensions load are never a fill's
+            // source: its frames would be drawn without their effects.
+            if !engine.definitions_pending()
+                && shared.disk.observe(
+                    &rendered,
+                    engine.definitions(),
+                    overrides,
+                    engine.tone_identity(),
+                    fonts,
+                    stamp.doc_id,
+                    spec.time,
+                )
+            {
                 // A frame uploaded ahead is of the state before.
                 engine.drop_upload_ahead();
                 if let Some(recorder) = &recorder {
@@ -2808,6 +2861,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                             let since = *r.waiting_since.get_or_insert(now);
                             if now - since >= WAITING_SHOWN_SECONDS {
                                 v.status.error = Some(format!("Still waiting: {e}"));
+                                v.waiting_definitions = e.is::<render::DefinitionsPending>();
                             }
                             // A capture waits for its exact frame, but not
                             // forever: past its bound it fails, saying why.
@@ -4643,6 +4697,7 @@ fn refusal_kind(error: &anyhow::Error) -> &'static str {
         Some(pm_render::RenderError::ShaderFallbackPending(_)) => "shader-fallback",
         _ if error.is::<render::CompilerBusy>() => "shader-compiler",
         _ if error.is::<render::DiskFramePending>() => "disk-frame",
+        _ if error.is::<render::DefinitionsPending>() => "definitions",
         _ => "fonts",
     }
 }

@@ -442,6 +442,11 @@ impl Editor {
                 .as_ref()
                 .map(|i| i.disabled(cx))
                 .unwrap_or_default(),
+            checked: self
+                .integration
+                .as_ref()
+                .map(|i| i.checked(cx))
+                .unwrap_or_default(),
         }
     }
     fn dock_visible(&self, id: &str) -> bool {
@@ -643,6 +648,20 @@ impl Editor {
             if let (Some(host), Ok(index)) = (&self.host, index.parse()) {
                 host.borrow().review_tab(action, index);
             }
+            return;
+        }
+        // `pointer:x:y`, `click:x:y`, `dblclick:x:y`, `drag:x:y:x:y`: pointer
+        // input without the pointer, for a review of the running app. It is
+        // dispatched after this update: input re-enters the window.
+        #[cfg(debug_assertions)]
+        if matches!(
+            cmd.name.split(':').next(),
+            Some("pointer" | "click" | "dblclick" | "drag")
+        ) {
+            let name = cmd.name.clone();
+            window.defer(cx, move |window, cx| {
+                crate::macos::review_pointer(&name, window, cx);
+            });
             return;
         }
         // `reviewResize:-240:-140`: a stepped resize that measures whether

@@ -4,6 +4,7 @@
 
 mod behaviour;
 mod client;
+pub mod footer;
 pub mod graph_render;
 mod interaction;
 mod marquee;

@@ -928,6 +928,65 @@ impl DiskFrames {
         }
     }
 
+    /// The viewer has not yet given this cache a composition to render (no
+    /// settled frame observed): a Render Selection asked now waits for one.
+    pub fn reading(&self) -> bool {
+        let state = self.inner.state.lock().unwrap();
+        state
+            .frames
+            .as_ref()
+            .is_none_or(|frames| frames.fingerprint.is_none() || frames.ids.is_empty())
+    }
+    /// The viewer has drawn a settled frame of exactly this: document
+    /// `doc_id` at `revision`, composition `comp`, with `definitions`. An
+    /// observation of anything else (another project open in the window
+    /// before, an earlier revision, another composition, an effect's code
+    /// before its extension reloaded) is not it, so a Render Selection of
+    /// this does not start from that.
+    pub fn observed(
+        &self,
+        doc_id: u64,
+        revision: u64,
+        comp: &str,
+        definitions: &[DefinitionSnapshot],
+    ) -> bool {
+        let state = self.inner.state.lock().unwrap();
+        state.frames.as_ref().is_some_and(|frames| {
+            frames.fingerprint.is_some()
+                && !frames.ids.is_empty()
+                && frames.source.doc_id == doc_id
+                && frames.identity.revision == revision
+                && frames.identity.comp == comp
+                && frames.source.definitions == definitions
+        })
+    }
+    /// [`Self::start_fill`] for the composition `comp` of document `doc_id`:
+    /// refused when the cache is on another one (the window moved on while
+    /// the Render Selection waited).
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_fill_of(
+        &self,
+        doc_id: u64,
+        comp: &str,
+        from: f64,
+        to: f64,
+        executable: &Path,
+        activity: crate::jobs::Activity,
+        overrides: impl FnOnce(&mut crate::jobs::JobSession),
+    ) -> Result<u64, String> {
+        let frames = {
+            let state = self.inner.state.lock().unwrap();
+            let frames = ready(&state)?;
+            if frames.source.doc_id != doc_id || frames.identity.comp != comp {
+                return Err("The composition changed before rendering started.".into());
+            }
+            frame_range(frames, from, to)
+                .filter(|n| !frames.present.contains(n))
+                .filter_map(|n| Some((n, cache_frame(frames, n, 0, false)?)))
+                .collect::<Vec<_>>()
+        };
+        self.launch(frames, None, executable, activity, overrides)
+    }
     /// Render Selection: the composition's frames in `[from, to)` seconds that
     /// are not on disk render in an `--engine-job` child (`executable`),
     /// admitted around viewer `activity` as exports are, its raster overrides
@@ -3012,6 +3071,51 @@ mod tests {
         assert!(read_eventually(&relaunched, &scene, time).is_none());
     }
 
+    /// A Render Selection is of one project's composition as the viewer
+    /// drew it: what the cache observed for another project, another
+    /// composition, an earlier revision or other effect code is not it, and
+    /// a fill asked for one never starts from another's frames.
+    #[test]
+    fn an_observation_is_of_one_project_composition_revision_and_definitions() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = DiskFrames::default();
+        disk.set_storage(Some((dir.path().join("frames"), 1 << 30)))
+            .unwrap();
+        let scene = scene();
+        let revision = scene.doc.revision();
+        assert!(!disk.observed(1, revision, &scene.comp, &[]), "nothing yet");
+        disk.observe(&scene, &[], None, None, None, 1, Ticks::new(0).unwrap());
+        ready(&disk);
+        assert!(disk.observed(1, revision, &scene.comp, &[]));
+        assert!(
+            !disk.observed(2, revision, &scene.comp, &[]),
+            "another project"
+        );
+        assert!(
+            !disk.observed(1, revision, "another", &[]),
+            "another composition"
+        );
+        assert!(
+            !disk.observed(1, revision + 1, &scene.comp, &[]),
+            "a later revision"
+        );
+        let definition = pm_render::all_builtin_definitions()
+            .definitions
+            .into_iter()
+            .next()
+            .unwrap();
+        assert!(
+            !disk.observed(1, revision, &scene.comp, &[definition]),
+            "other definitions"
+        );
+        let nowhere = Path::new("/nonexistent/engine-job");
+        let fill = |doc, comp: &str| {
+            disk.start_fill_of(doc, comp, 1., 1.2, nowhere, Default::default(), |_| {})
+        };
+        let changed = Err("The composition changed before rendering started.".to_owned());
+        assert_eq!(fill(2, &scene.comp), changed);
+        assert_eq!(fill(1, "another"), changed);
+    }
     /// Render Selection through the real `--engine-job` child: the frames
     /// land on disk as the paused viewer draws them, the render bar and the
     /// fill's progress follow, and playback reads them back.

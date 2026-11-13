@@ -103,7 +103,15 @@ pub struct Controller {
     pub safe_areas: bool,
     pub guides: bool,
     pub skimming: crate::skimming::Skimming,
+    pub shuttle: crate::shuttle::Shuttle,
+    pub playback: crate::play_range::Playback,
     pub popout: Option<crate::viewer2::Popout>,
+    /// The Render Selection waiting to start, by count: asking again
+    /// replaces the one that waits.
+    pub(crate) render_wait: u64,
+    /// This window's extension resources as they change: every viewer of the
+    /// window (the editor's, the popout's) is attached and follows them.
+    pub resource_feed: pm_engine_service::resources::ResourceFeed,
     /// The editor viewer's last configured output (size, display, headroom).
     pub main_output: Rc<std::cell::Cell<Option<pm_engine_service::Output>>>,
     pub selected: Option<String>,
@@ -307,6 +315,23 @@ impl pm_shell::integration::Integration for Bridge {
     }
     fn command(&self, cmd: &ShellCommand, w: &mut Window, cx: &mut App) -> bool {
         self.0.update(cx, |v, cx| v.command(cmd, w, cx))
+    }
+    fn checked(&self, cx: &App) -> std::collections::BTreeSet<String> {
+        let v = self.0.read(cx);
+        let mut on = std::collections::BTreeSet::new();
+        if v.playback.looping {
+            on.insert("toggleLoop".to_owned());
+        }
+        if let Some(timeline) = &v.builtins.timeline {
+            let (tracks, snapping) = timeline.read(cx).toggles();
+            if tracks {
+                on.insert("timeline.toggleMode".to_owned());
+            }
+            if snapping {
+                on.insert("timeline.toggleSnapping".to_owned());
+            }
+        }
+        on
     }
     fn disabled(&self, cx: &App) -> std::collections::BTreeSet<String> {
         let v = self.0.read(cx);
@@ -574,24 +599,6 @@ impl Controller {
             }
         })
         .detach();
-        for (chord, command) in [
-            ("j", "shuttleJ"),
-            ("k", "shuttleK"),
-            ("l", "shuttleL"),
-            ("ctrl+j", "shuttleReverse"),
-        ] {
-            host.borrow_mut()
-                .add_bindings([pm_shell::keyboard::Binding {
-                    id: format!("app.{command}"),
-                    chord: chord.into(),
-                    command: command.into(),
-                    args: vec![],
-                    priority: 200,
-                    in_fields: false,
-                    repeat: false,
-                    loose: false,
-                }]);
-        }
         let layer = host.borrow().viewer_layer();
         pm_engine_service::layers::configure_layer(
             objc2::MainThreadMarker::new().unwrap(),
@@ -602,9 +609,14 @@ impl Controller {
         host.borrow().set_viewer_label("Composition viewer");
         let mut builtins = crate::builtins::Host::default();
         builtins.export_tasks = crate::export_coordinator::tasks();
+        // A viewer made before the window's extensions start draws their
+        // first state (still loading), not an empty settled one.
+        let extensions = crate::extensions::Extensions::default();
+        let resource_feed =
+            pm_engine_service::resources::ResourceFeed::new(extensions.resources.clone());
         Self {
             builtins,
-            extensions: Default::default(),
+            extensions,
             font_broker: None,
             composition_views: Default::default(),
             kernel,
@@ -651,7 +663,11 @@ impl Controller {
             safe_areas: false,
             guides: false,
             skimming: Default::default(),
+            shuttle: Default::default(),
+            playback: Default::default(),
             popout: None,
+            render_wait: 0,
+            resource_feed,
             main_output: Default::default(),
             selected: None,
             // The status bar holds facts, not instructions (review shell 2 #11).
@@ -2039,6 +2055,9 @@ impl Controller {
                 let _ = viewer.adapt_drags(true);
                 let _ = viewer.skim_audio(self.skimming.on && self.skimming.audio);
                 self.skimming.at = None;
+                if let Err(error) = self.resource_feed.attach(&viewer) {
+                    self.message = error.to_string();
+                }
                 self.viewer = Some(viewer)
             }
             Err(e) => {
@@ -2046,7 +2065,6 @@ impl Controller {
                 self.message = format!("Viewer failed: {e}")
             }
         }
-        self.apply_extension_resources();
     }
     /// MCP placed a project in this window (open_project, create_project): an
     /// empty window shows it; a window that shows a project keeps it and the
@@ -2438,6 +2456,27 @@ impl Controller {
                 let Some(timeline) = self.builtins.timeline.clone() else {
                     return false;
                 };
+                // A property's keyframe key with no layer selected has
+                // nothing to key: the chord goes on to its next meaning.
+                if cmd.name.starts_with("timeline.keyProperty:")
+                    && self
+                        .published
+                        .as_ref()
+                        .is_none_or(|p| p.selection.layers().is_empty())
+                {
+                    return false;
+                }
+                // Option-Command-H holds keyframes when some are selected;
+                // otherwise it is the system's Hide Others.
+                if cmd.name == "timeline.toggleHold"
+                    && cmd.token.is_some()
+                    && self
+                        .published
+                        .as_ref()
+                        .is_none_or(|p| p.selection.keys().is_empty())
+                {
+                    return false;
+                }
                 let time = self.time();
                 timeline.update(cx, |t, cx| t.command(&cmd.name, time, frames, shift, cx));
                 return true;
@@ -2451,6 +2490,23 @@ impl Controller {
                     return false;
                 };
                 return gizmos.update(cx, |g, cx| g.edit_selected_text(window, cx));
+            }
+            // The viewer's View-menu actions, for the palette and for keys.
+            "viewer.safeAreas"
+            | "viewer.guides"
+            | "viewer.popout"
+            | "viewer.toggleProxies"
+            | "viewer.renderSelection"
+            | "viewer.keepRendered"
+            | "viewer.deleteRendered"
+            | "viewer.applyLut" => {
+                let Some(action) = crate::viewer2::command_action(&cmd.name) else {
+                    return false;
+                };
+                if self.viewer.is_none() {
+                    return false;
+                }
+                self.viewer_action(action, cx);
             }
             "toggleSkimming" => self.toggle_skimming(cx),
             "toggleAudioSkimming" => self.toggle_audio_skimming(cx),
@@ -2682,9 +2738,55 @@ impl Controller {
             }
             "zoomIn" => self.step_zoom(1.25, cx),
             "zoomOut" => self.step_zoom(0.8, cx),
-            "play" | "prevFrame" | "nextFrame" | "stepFrames" | "gotoStart" | "gotoEnd"
-            | "shuttleJ" | "shuttleK" | "shuttleL" | "shuttleReverse" | "prevVisibleEvent"
-            | "nextVisibleEvent" => {
+            "shuttleBackward" | "shuttleStop" | "shuttleForward" | "shuttleRelease" => {
+                use crate::shuttle::Press;
+                use pm_engine_service::transport::ShuttleKey;
+                let Some(key) = crate::shuttle::key(&cmd.name, &cmd.args) else {
+                    return false;
+                };
+                if cmd.name == "shuttleRelease" {
+                    if let Some(command) = self.shuttle.release(key) {
+                        self.transport(command);
+                    }
+                    return true;
+                }
+                // A menu row or the palette starts from a stop; a key does
+                // when its binding says so, and otherwise leaves a stopped
+                // J, K or L to its other meaning.
+                let from_pause =
+                    cmd.token.is_none() || cmd.args.first().and_then(|a| a.as_bool()) == Some(true);
+                let handled = match self.shuttle.press(key) {
+                    Press::Speeds => {
+                        let stopped = !self.running();
+                        if stopped && from_pause && key != ShuttleKey::K {
+                            self.shape_run();
+                        }
+                        let acted = self
+                            .viewer
+                            .as_ref()
+                            .is_some_and(|v| v.shuttle(key, from_pause).unwrap_or(false));
+                        if key == ShuttleKey::K && acted {
+                            self.end_run();
+                        }
+                        acted || (from_pause && key == ShuttleKey::K)
+                    }
+                    Press::Send(command) => self.transport(command),
+                    Press::Held => true,
+                };
+                if handled
+                    && let Some(token) = cmd.token
+                    && self.host.borrow().on_release(
+                        token,
+                        "shuttleRelease",
+                        vec![cmd.name.clone().into()],
+                    )
+                {
+                    self.shuttle.hold(key);
+                }
+                return handled;
+            }
+            "toggleLoop" => self.toggle_loop(cx),
+            "play" | "prevFrame" | "nextFrame" | "stepFrames" | "gotoStart" | "gotoEnd" => {
                 // Final Cut: Space plays from the skimmer, only while the
                 // pointer is over the timeline now; otherwise from the playhead.
                 let over = self
@@ -2710,13 +2812,12 @@ impl Controller {
                 {
                     self.seek(at);
                 }
-                let Some(v) = &self.viewer else { return false };
+                if self.viewer.is_none() {
+                    return false;
+                }
                 let command = match cmd.name.as_str() {
                     "play" => {
-                        if v.status()
-                            .clock
-                            .is_some_and(|c| c.state != TransportState::Stopped)
-                        {
+                        if self.running() {
                             TransportCommand::Pause
                         } else {
                             TransportCommand::Play {
@@ -2737,39 +2838,21 @@ impl Controller {
                         self.seek((self.duration - 1. / self.rate.to_f64()).max(0.));
                         return true;
                     }
-                    "prevVisibleEvent" | "nextVisibleEvent" => {
-                        let time = self.time();
-                        let mut times: Vec<_> = self
-                            .layers()
-                            .iter()
-                            .flat_map(|l| [l.in_time, l.out_time])
-                            .collect();
-                        times.sort_by(f64::total_cmp);
-                        let t = if cmd.name == "prevVisibleEvent" {
-                            times.into_iter().rev().find(|t| *t < time - 0.00001)
-                        } else {
-                            times.into_iter().find(|t| *t > time + 0.00001)
-                        };
-                        if let Some(t) = t {
-                            self.seek(t);
-                        }
+                    _ => return false,
+                };
+                // A step never leaves the composition: past its first or
+                // last frame it lands on that frame.
+                if let TransportCommand::Step { frames } = command {
+                    let frame = 1. / self.rate.to_f64();
+                    let last = (self.duration - frame).max(0.);
+                    let target = self.time() + f64::from(frames) * frame;
+                    if target < -frame / 2. || target > last + frame / 2. {
+                        self.end_run();
+                        self.seek(target.clamp(0., last));
                         return true;
                     }
-                    name => {
-                        use pm_engine_service::transport::ShuttleKey::*;
-                        let key = if name == "shuttleK" {
-                            K
-                        } else if name == "shuttleL" {
-                            L
-                        } else {
-                            J
-                        };
-                        return v.shuttle(key, name == "shuttleReverse").unwrap_or(false);
-                    }
-                };
-                if let Err(e) = v.command(command) {
-                    self.message = e.to_string();
                 }
+                self.transport(command);
             }
             name => return self.surface_command(name, cx),
         }

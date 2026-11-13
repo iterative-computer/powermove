@@ -47,7 +47,13 @@ function Icon(props: {
   disabled?: boolean;
   active?: boolean;
   primary?: boolean;
+  /** A row's small mark (its disclosure): the inline glyph in the muted ink. */
+  quiet?: boolean;
+  /** The glyph's own ink (a token name), for a mark that carries state in
+   * its colour instead of a lit ground. */
+  tint?: string;
   tabIndex?: number;
+  key?: string;
   children?: ComponentChildren;
 }) {
   // DESIGN-TODO(opus) T1: kit has no symbol slot. This is a neutral, labelled
@@ -62,8 +68,12 @@ function Icon(props: {
       active={props.active}
       tabIndex={props.tabIndex}
       style={{
-        symbolSize: t("metrics.symbol_panel"),
+        symbolSize: t(
+          props.quiet ? "metrics.symbol_inline" : "metrics.symbol_panel",
+        ),
         ...(props.primary ? { color: t("colors.text") } : {}),
+        ...(props.quiet ? { color: t("colors.muted") } : {}),
+        ...(props.tint ? { color: t(props.tint) } : {}),
       }}
       onClick={(event) => {
         event.stopPropagation();
@@ -274,7 +284,7 @@ function Header({ frame: f, send }: { frame: TimelineFrame; send: Send }) {
           <Icon
             id="timeline:snap"
             label="Snapping"
-            symbol="magnet"
+            symbol="arrow.right.and.line.vertical.and.arrow.left"
             active={f.snapping}
             title="Snap Clips to Edges, Markers and the Playhead"
             send={send}
@@ -321,6 +331,41 @@ function Layer({
   // Unset switches appear under the pointer, keyboard focus or a single
   // selected layer, so a multi-selection never squeezes every name.
   const show = row.hovered || row.focused || (row.selected && single);
+  // In column order, the last at the row's trailing edge.
+  const switches = [
+    ...(row.transformable
+      ? [
+          {
+            name: "parent" as const,
+            on: row.parent.set,
+            label: `Parent: ${row.parent.name} · Drag to a layer`,
+            symbol: "link",
+            active: undefined as boolean | undefined,
+          },
+        ]
+      : []),
+    {
+      name: "solo" as const,
+      on: row.solo,
+      label: "Toggle Solo",
+      symbol: row.solo ? "s.circle.fill" : "s.circle",
+      active: row.solo,
+    },
+    {
+      name: "lock" as const,
+      on: row.locked,
+      label: "Toggle Lock",
+      symbol: row.locked ? "lock" : "lock.open",
+      active: undefined,
+    },
+    {
+      name: "visibility" as const,
+      on: !row.visible,
+      label: "Toggle Visibility",
+      symbol: row.visible ? "eye" : "eye.slash",
+      active: undefined,
+    },
+  ];
   return (
     <>
       <div
@@ -349,6 +394,7 @@ function Layer({
             id={`timeline:disclosure:${row.id}`}
             label={`${row.expanded ? "Collapse" : "Expand"} ${row.label}`}
             symbol={row.expanded ? "chevron.down" : "chevron.right"}
+            quiet
             tabIndex={-1}
             send={send}
             intent={{ type: "disclosure", id: row.id, open: !row.expanded }}
@@ -418,71 +464,76 @@ function Layer({
         )}
       </div>
       <div style={line}>
-        {row.transformable && (row.parent.set || show) && (
-          <Icon
-            id={`timeline:parent:${row.id}`}
-            label={`Parent: ${row.parent.name} · Drag to a layer`}
-            symbol="link"
-            tabIndex={-1}
-            send={send}
-            intent={{ type: "switch", id: row.id, name: "parent" }}
-          />
-        )}
-        {(row.solo || show) && (
-          <Icon
-            id={`timeline:solo:${row.id}`}
-            label="Toggle Solo"
-            symbol={row.solo ? "s.circle.fill" : "s.circle"}
-            active={row.solo}
-            tabIndex={-1}
-            send={send}
-            intent={{ type: "switch", id: row.id, name: "solo" }}
-          />
-        )}
-        {(row.locked || show) && (
-          <Icon
-            id={`timeline:lock:${row.id}`}
-            label="Toggle Lock"
-            symbol={row.locked ? "lock" : "lock.open"}
-            tabIndex={-1}
-            send={send}
-            intent={{ type: "switch", id: row.id, name: "lock" }}
-          />
-        )}
-        {(!row.visible || show) && (
-          <Icon
-            id={`timeline:visibility:${row.id}`}
-            label="Toggle Visibility"
-            symbol={row.visible ? "eye" : "eye.slash"}
-            tabIndex={-1}
-            send={send}
-            intent={{ type: "switch", id: row.id, name: "visibility" }}
-          />
+        {switches.map((item, i) =>
+          item.on || show ? (
+            <Icon
+              key={item.name}
+              id={`timeline:${item.name}:${row.id}`}
+              label={item.label}
+              symbol={item.symbol}
+              active={item.active}
+              tabIndex={-1}
+              send={send}
+              intent={{ type: "switch", id: row.id, name: item.name }}
+            />
+          ) : switches.slice(0, i).some((before) => before.on) ? (
+            // Each switch keeps its own column: a set one further from the
+            // edge leaves the columns after it open.
+            <div
+              key={item.name}
+              role="presentation"
+              style={{
+                width: t("metrics.hit"),
+                minWidth: t("metrics.hit"),
+                flexShrink: 0,
+                height: t("metrics.hit"),
+              }}
+            />
+          ) : null,
         )}
       </div>
     </>
   );
 }
 function Property({ row, send }: { row: PropertyRow; send: Send }) {
+  // The key navigator stands in the columns a layer's number, disclosure
+  // and badge take, so a property's name starts where its layer's does.
+  const step = (direction: "previous" | "next") =>
+    row.animated ? (
+      <Icon
+        id={`timeline:${direction}:${row.id}`}
+        label={
+          direction === "previous"
+            ? "Previous Keyframe (⇧J)"
+            : "Next Keyframe (⇧K)"
+        }
+        symbol={direction === "previous" ? "chevron.left" : "chevron.right"}
+        quiet
+        disabled={!row[direction]}
+        tabIndex={-1}
+        send={send}
+        intent={{
+          type: "adjacentKey",
+          layer: row.layer,
+          path: row.path,
+          direction,
+        }}
+      />
+    ) : (
+      <div
+        role="presentation"
+        style={{
+          width: t("metrics.hit"),
+          minWidth: t("metrics.hit"),
+          flexShrink: 0,
+          height: t("metrics.hit"),
+        }}
+      />
+    );
   return (
     <>
-      <div style={line}>
-        {row.animated && (
-          <Icon
-            id={`timeline:previous:${row.id}`}
-            label="Previous Keyframe (⇧J)"
-            symbol="chevron.left"
-            disabled={!row.previous}
-            tabIndex={-1}
-            send={send}
-            intent={{
-              type: "adjacentKey",
-              layer: row.layer,
-              path: row.path,
-              direction: "previous",
-            }}
-          />
-        )}
+      <div style={{ ...line, paddingLeft: t("metrics.gap") }}>
+        {step("previous")}
         <Icon
           id={`timeline:diamond:${row.id}`}
           label={row.keyAtPlayhead ? "Remove Keyframe" : "Add Keyframe"}
@@ -493,28 +544,14 @@ function Property({ row, send }: { row: PropertyRow; send: Send }) {
                 ? "diamond.lefthalf.filled"
                 : "diamond"
           }
-          active={row.animated}
+          quiet
+          tint={row.animated ? "colors.accent" : "colors.muted"}
           disabled={row.locked}
           tabIndex={-1}
           send={send}
           intent={{ type: "keyToggle", layer: row.layer, path: row.path }}
         />
-        {row.animated && (
-          <Icon
-            id={`timeline:next:${row.id}`}
-            label="Next Keyframe (⇧K)"
-            symbol="chevron.right"
-            disabled={!row.next}
-            tabIndex={-1}
-            send={send}
-            intent={{
-              type: "adjacentKey",
-              layer: row.layer,
-              path: row.path,
-              direction: "next",
-            }}
-          />
-        )}
+        {step("next")}
         <text
           title={row.path}
           style={{
@@ -764,7 +801,9 @@ export function TimelinePanel({
               id="timeline:outline"
               metadata={{ nativeColumn: true }}
               style={{
+                // The ruler's band above the rows, the bottom bar's below.
                 paddingTop: t("metrics.ruler"),
+                paddingBottom: t("metrics.ruler"),
                 width: t("metrics.layer_column"),
                 flexGrow: 1,
               }}

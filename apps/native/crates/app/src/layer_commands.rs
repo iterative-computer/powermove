@@ -9,7 +9,8 @@ use pm_kernel::commands::layers::{AddLayer, LayerPatch, ParentChange, Restack};
 use pm_kernel::commands::precompose::{can_leave_attributes, next_name};
 use pm_kernel::commands::properties::SetProperty;
 use pm_kernel::commands::text::{SplitMode, TextCommand};
-use pm_kernel::commands::transform::TransformCommand;
+use pm_kernel::commands::timing::TimingCommand;
+use pm_kernel::commands::transform::{AlignMode, Spread, TransformCommand};
 use pm_kernel::model::{LayerInfo, list_layers};
 use pm_kernel::{Command, CompCommand, LayerCommand, PropertyCommand, Published, new_id};
 use pm_model::{Map, Value};
@@ -220,8 +221,22 @@ fn timeline_owned(name: &str) -> bool {
             | "graph"
             | "timeline.adjacentKeyframe:prev"
             | "timeline.adjacentKeyframe:next"
+            | "prevVisibleEvent"
+            | "nextVisibleEvent"
+            | "timeline.addKeyframe"
+            | "timeline.addMarker"
+            | "timeline.toggleHold"
+            | "timeline.toggleSnapping"
+            | "timeline.toggleMode"
+            | "timeline.zoomIn"
+            | "timeline.zoomOut"
+            | "timeline.fit"
+            | "resetWorkArea"
+            | "graph.value"
+            | "graph.speed"
             | "timeline.revealAll"
     ) || name.starts_with("timeline.revealProperty:")
+        || name.starts_with("timeline.keyProperty:")
 }
 /// What a layer of the open composition is to the layer menu.
 struct Facts {
@@ -523,7 +538,11 @@ pub fn layer_menu_choice(
     ))
 }
 /// Commands [`command_plan`] answers.
-pub const PLANNED: [&str; 36] = [
+pub const PLANNED: [&str; 40] = [
+    "rippleDelete",
+    "nudgeLayerTime",
+    "alignLayers",
+    "distributeLayers",
     "newSolid",
     "newShape",
     "newAdjustment",
@@ -730,6 +749,80 @@ fn nudge(
     }
     (!commands.is_empty()).then(|| plain("Nudge Selection", commands))
 }
+/// Shift-Delete: the selected layers go, and every later layer closes up by
+/// the time they took. A layer moves by the removed spans that end at or
+/// before its start; one that overlaps a removed span stays where it is, and
+/// so does a locked one. A group that moves carries its members.
+fn ripple_delete(layers: &[LayerInfo], selected: &[String]) -> Option<Plan> {
+    let chosen: HashSet<&str> = selected.iter().map(String::as_str).collect();
+    let info: HashMap<&str, &LayerInfo> = layers.iter().map(|l| (l.id.as_str(), l)).collect();
+    let picked: Vec<&LayerInfo> = layers
+        .iter()
+        .filter(|l| chosen.contains(l.id.as_str()))
+        .collect();
+    if picked.is_empty() || picked.iter().any(|l| l.effectively_locked) {
+        return None;
+    }
+    let mut spans: Vec<(f64, f64)> = picked
+        .iter()
+        .map(|l| (l.in_time, l.out_time))
+        .filter(|(start, end)| end > start)
+        .collect();
+    spans.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut removed: Vec<(f64, f64)> = vec![];
+    for (start, end) in spans {
+        match removed.last_mut() {
+            Some(last) if start <= last.1 + 1e-6 => last.1 = last.1.max(end),
+            _ => removed.push((start, end)),
+        }
+    }
+    let shift = |from: f64| -> f64 {
+        removed
+            .iter()
+            .filter(|(_, end)| from >= end - 1e-6)
+            .map(|(start, end)| end - start)
+            .sum()
+    };
+    // Whether a group above the layer is `wanted` (selected, or moving).
+    let above = |layer: &LayerInfo, wanted: &dyn Fn(&LayerInfo) -> bool| {
+        let mut at = layer.group.as_deref();
+        for _ in 0..256 {
+            let Some(group) = at.and_then(|id| info.get(id)) else {
+                return false;
+            };
+            if wanted(group) {
+                return true;
+            }
+            at = group.group.as_deref();
+        }
+        false
+    };
+    let gone = |l: &LayerInfo| chosen.contains(l.id.as_str());
+    let moves = |l: &LayerInfo| !gone(l) && !l.effectively_locked && shift(l.in_time) > 0.;
+    let mut by_delta: Vec<(f64, Vec<String>)> = vec![];
+    for layer in layers {
+        if gone(layer) || above(layer, &gone) || !moves(layer) || above(layer, &moves) {
+            continue;
+        }
+        let delta = -shift(layer.in_time);
+        match by_delta.iter_mut().find(|(d, _)| (*d - delta).abs() < 1e-9) {
+            Some((_, ids)) => ids.push(layer.id.clone()),
+            None => by_delta.push((delta, vec![layer.id.clone()])),
+        }
+    }
+    let mut commands: Vec<Command> = vec![
+        LayerCommand::Delete {
+            layer_ids: picked.iter().map(|l| l.id.clone()).collect(),
+        }
+        .into(),
+    ];
+    commands.extend(
+        by_delta
+            .into_iter()
+            .map(|(delta, layer_ids)| TimingCommand::Move { layer_ids, delta }.into()),
+    );
+    Some(plain("Ripple Delete", commands))
+}
 /// Cmd+V layers: the block keeps its timing and starts at the playhead.
 pub fn paste_plan(layers: Vec<Value>, time: f64) -> Plan {
     let new_ids: Vec<String> = layers.iter().map(|_| new_id("L")).collect();
@@ -892,6 +985,77 @@ pub fn command_plan(
         | "toggleSolo"
         | "unlockSelectedLayers"
         | "unlockGroup" => layer_menu_plan(name, args, published, time),
+        "rippleDelete" => ripple_delete(&layers, &selected),
+        // The Properties alignment strip, for the palette and agents: the
+        // selection's box meets the composition's edge or centre.
+        "alignLayers" => {
+            let mode = match args.first().and_then(serde_json::Value::as_str)? {
+                "left" => AlignMode::Left,
+                "hcenter" => AlignMode::HorizontalCenter,
+                "right" => AlignMode::Right,
+                "top" => AlignMode::Top,
+                "vcenter" => AlignMode::VerticalCenter,
+                "bottom" => AlignMode::Bottom,
+                _ => return None,
+            };
+            any.then(|| {
+                plain(
+                    "Align Layers",
+                    vec![
+                        TransformCommand::Align {
+                            layer_ids: selected,
+                            mode,
+                            time,
+                        }
+                        .into(),
+                    ],
+                )
+            })
+        }
+        // Equal gaps between three or more layers; the outermost stay.
+        "distributeLayers" => {
+            let spread = match args.first().and_then(serde_json::Value::as_str)? {
+                "horizontal" => Spread::HorizontalSpace,
+                "vertical" => Spread::VerticalSpace,
+                _ => return None,
+            };
+            (selected.len() >= 3).then(|| {
+                plain(
+                    "Distribute Layers",
+                    vec![
+                        TransformCommand::Distribute {
+                            layer_ids: selected,
+                            spread,
+                            time,
+                        }
+                        .into(),
+                    ],
+                )
+            })
+        }
+        // Option-Page Up / Page Down (After Effects): the selected layers
+        // move in time by whole frames.
+        "nudgeLayerTime" => {
+            let frames = args.first().and_then(serde_json::Value::as_f64)?;
+            let fps = comp_number(published, "fps").filter(|fps| *fps > 0.)?;
+            let layer_ids: Vec<String> = layers
+                .iter()
+                .filter(|l| selected.contains(&l.id) && !l.effectively_locked)
+                .map(|l| l.id.clone())
+                .collect();
+            (!layer_ids.is_empty() && frames != 0.).then(|| {
+                plain(
+                    "Move Layers",
+                    vec![
+                        TimingCommand::Move {
+                            layer_ids,
+                            delta: frames / fps,
+                        }
+                        .into(),
+                    ],
+                )
+            })
+        }
         "nudgeSelection" => {
             let step = |i: usize| args.get(i).and_then(serde_json::Value::as_f64);
             let delta = [step(0)?, step(1)?];
@@ -1241,6 +1405,17 @@ pub fn disabled(
     for name in ["simplifyKeyframes", "toggleVisibility", "toggleSolo"] {
         set(name, editable);
     }
+    set("rippleDelete", editable);
+    set("alignLayers", editable);
+    set("distributeLayers", editable && selected.len() >= 3);
+    set(
+        "nudgeLayerTime",
+        selected.iter().any(|l| !l.effectively_locked),
+    );
+    set("timeline.toggleHold", keys);
+    for name in ["timeline.addKeyframe", "timeline.keyProperty:p"] {
+        set(name, selected.iter().any(|l| !l.effectively_locked));
+    }
     set("fitToComposition", editable && !has("group"));
     // One video layer that still carries its soundtrack.
     let soundtrack = matches!(selected.as_slice(), [l] if l.kind == "video"
@@ -1255,7 +1430,11 @@ pub fn disabled(
     off
 }
 /// Rows that act on the selected layers.
-const SELECTION: [&str; 16] = [
+const SELECTION: [&str; 20] = [
+    "rippleDelete",
+    "nudgeLayerTime",
+    "alignLayers",
+    "distributeLayers",
     "split",
     "trimIn",
     "trimOut",
@@ -1274,7 +1453,17 @@ const SELECTION: [&str; 16] = [
     "centerAnchor",
 ];
 /// Rows that need a document, on top of the selection-based ones.
-const DOCUMENT: [&str; 20] = [
+const DOCUMENT: [&str; 30] = [
+    "timeline.addMarker",
+    "timeline.toggleHold",
+    "timeline.toggleSnapping",
+    "timeline.toggleMode",
+    "timeline.zoomIn",
+    "timeline.zoomOut",
+    "timeline.fit",
+    "resetWorkArea",
+    "graph.value",
+    "graph.speed",
     "importSequence",
     "delete",
     "copyLayers",

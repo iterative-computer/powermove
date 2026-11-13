@@ -161,16 +161,32 @@ fn a_strip_keeps_its_layer_hue_and_its_states_differ_by_the_rim() {
     );
     assert!(hover.rim.1 > m.rim.1 && hover.rim_top.1 > m.rim_top.1);
     assert!(dark.strip(green, StripState::Dragging).shadow.1 > 0.);
-    // Selection is a white ring: at the edge on a dark canvas, inside a band
-    // of the strip's own colour on a light one, where white at the edge
-    // would vanish.
+    // Selection is a 2 px ring at the edge: white on the dark canvas, the
+    // hue's deepest shade on the light one.
     let light = Tokens::new(Scheme::Light, Accessibility::default());
-    for (tokens, inset) in [(&dark, 0.), (&light, 2.)] {
-        let selected = tokens.strip(green, StripState::Selected);
-        assert_eq!((selected.rim.0, selected.rim_width), (0xffffff, 2.));
-        assert_eq!(selected.rim_inset, inset);
-        assert_eq!(tokens.strip(green, StripState::Rest).rim_inset, 0.);
-    }
+    let selected = dark.strip(green, StripState::Selected);
+    assert_eq!((selected.rim.0, selected.rim_width), (0xffffff, 2.));
+    let pale = light.strip(light.colors.labels.green, StripState::Rest);
+    let ringed = light.strip(light.colors.labels.green, StripState::Selected);
+    assert_eq!((ringed.rim_width, ringed.rim_inset), (2., 0.));
+    assert!(lightness(ringed.rim.0) < 0.5 && ringed.rim.1 == 1.);
+    // The light canvas's strip is a pale tint of the hue under a dark name,
+    // never the dark canvas's slab.
+    assert!(lightness(pale.top) > 0.8 && lightness(pale.bottom) > lightness(pale.top));
+    assert!(lightness(pale.foreground) < 0.45);
+    assert!(lightness(m.top) < 0.45 && lightness(m.foreground) > 0.8);
+    assert!(
+        lightness(ringed.top) < lightness(pale.top),
+        "selected is a step deeper"
+    );
+    let [r, g, b] = [16, 8, 0].map(|s| (pale.top >> s) & 255);
+    assert!(g > r && g > b, "green stays green: {:06x}", pale.top);
+    let none = light.strip(light.colors.labels.gray, StripState::Rest);
+    assert!(
+        lightness(none.top) > 0.8,
+        "a neutral strip is light grey glass"
+    );
+    assert!(light.trim_grip().color != dark.trim_grip().color);
     assert_eq!(m.shadow.1, 0., "a resting strip has no shadow");
     let gray = dark.strip(dark.colors.labels.gray, StripState::Rest);
     assert!(

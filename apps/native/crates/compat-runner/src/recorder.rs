@@ -96,6 +96,9 @@ pub struct NativeHost {
     effects: Mutex<Option<crate::EffectsSlot>>,
     /// [`crate::code_identity`] of the records this realm runs (0: unknown).
     code: std::sync::atomic::AtomicU64,
+    /// Values for extensions' declared `vars`, staged by the owner for a
+    /// load it is about to ask of the realm, by single-use token.
+    vars: Mutex<Vec<(String, Value)>>,
     /// The capture (`renderFrameTo`, `PM.Export.snapshot`) the realm waits for.
     capture: Mutex<Option<Capture>>,
     /// While a capture runs, override asks for this realm come here: the
@@ -214,6 +217,7 @@ impl NativeHost {
             rasters: Mutex::new(None),
             effects: Mutex::new(None),
             code: std::sync::atomic::AtomicU64::new(0),
+            vars: Mutex::default(),
             capture: Mutex::new(None),
             nested: Mutex::new(None),
         }
@@ -246,6 +250,23 @@ impl NativeHost {
     }
     pub fn set_rasters(&self, hooks: Option<crate::RasterHooks>) {
         *self.rasters.lock().unwrap() = hooks;
+    }
+    /// Stages `values` (`{extension id: {key: value}}`, chosen by the owner
+    /// from the manifests it read) for the load the owner asks for next, and
+    /// returns the token that load takes them with, once. The realm has no
+    /// other way to values: it cannot name an extension or a key, and a
+    /// token it has not been handed by the owner's own call answers nothing.
+    pub fn stage_vars(&self, values: Value) -> String {
+        use std::hash::BuildHasher;
+        let half = || std::collections::hash_map::RandomState::new().hash_one(0u8);
+        let token = format!("{:016x}{:016x}", half(), half());
+        let mut staged = self.vars.lock().unwrap();
+        // Loads the realm never ran (it was stopped first) leave theirs.
+        if staged.len() >= 8 {
+            staged.remove(0);
+        }
+        staged.push((token.clone(), values));
+        token
     }
     /// The records this realm boots with or updates to, before it evaluates
     /// them: what its `producing` calls report as the wrappers' code.
@@ -1659,6 +1680,15 @@ impl EngineProxy for NativeHost {
                     Error::Host("The effect clipboard belongs to the window's panels".into())
                 })?;
                 return hook(input["op"].as_str().unwrap_or_default()).map_err(Error::Host);
+            }
+            // The staged values, to whoever holds their token, once. Nothing
+            // the caller says selects an extension or a key.
+            "extension.vars" => {
+                let mut staged = self.vars.lock().unwrap();
+                let held = input["token"]
+                    .as_str()
+                    .and_then(|token| staged.iter().position(|(t, _)| t == token));
+                return Ok(held.map_or_else(|| json!({}), |index| staged.remove(index).1));
             }
             "extension.health" => {
                 self.events
