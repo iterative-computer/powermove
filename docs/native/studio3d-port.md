@@ -2505,3 +2505,36 @@ with fog is 0.356825 in Live and 0.493285 in Refine. These correspond to the
 current native pane's Fast and Quality labels. The combined app builds in
 31.86 s. These checks were completed before the travel pause on the identical
 fog source; they do not substitute for the remaining full scene regressions.
+
+### Owner visual review: backdrop, teapot and chrome horizon
+
+The opaque backdrop band was an invalid-surface read after a finite camera
+far-clip miss. The analytic catcher could lie beyond the clip plane, so a miss
+fell through to `surface(-1)`. Commit 039ef4e22 compares the floor distance to
+the actual hit limit. The GPU reproduction failed with minimum background
+code value 0 before the fix and passes with 230 after it, on both BVH and
+Metal RT at far distances 600 and 10000. Real-export visual verification is
+recorded separately; this unit reproduction does not stand in for it.
+
+The teapot QA fixture had a coarse conical body profile and inherited sloping
+shoulder normals on its flat lid. Its independent MC4096 reference showed the
+same radial lid artifact. The fixture now uses a monotone curved meridian,
+with derivative normals and flat cap normals. Its reference is regenerated
+only for that corrected physical mesh, using the identical independent
+MC4096, rotated-light, seed-7, no-denoise method. Other scene references and
+all existing numeric limits stay fixed. The flat-lid regression failed before
+the correction and passes afterward. The small fixture suite passes all six
+tests (26.89 s); full-HD signoff remains a separate acceptance step.
+
+The apparently white teapot output and black reference both contain identical
+transparent black corner pixels (RGBA 0,0,0,0); the difference was the image
+viewer's background. Existing smooth-noise metrics mask nonopaque pixels.
+Acceptance now additionally checks every pixel over black, over white, and
+in alpha, with RMS below the existing 0.02 limit. It saves both opaque display
+proofs as evidence. No noise, bias or flicker threshold is relaxed.
+
+The chrome equator lip is physical: a mirror sphere reflects the finite grey
+floor below it and the black environment above it. An analytic sphere-ray /
+reflected-floor diagnostic predicts 998 boundary pixels; all are within one
+pixel of the rendered edge in both Production and MC4096 (p95 distance 0 px).
+The renderer, floor, material and chrome reference are unchanged.

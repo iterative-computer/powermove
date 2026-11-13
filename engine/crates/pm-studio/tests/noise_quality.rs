@@ -12,6 +12,38 @@ use std::time::Instant;
 fn metrics(actual: &[u8], reference: &[u8], w: usize, h: usize) -> (f64, f64, f64, usize) {
     metrics_with_guide(actual, reference, reference, w, h)
 }
+// Transport returns premultiplied display RGB. Check every pixel on both
+// opaque display backgrounds as well as alpha: the opaque-surface noise mask
+// alone cannot detect a changed void or broken silhouette coverage.
+fn display_coverage(actual: &[u8], reference: &[u8]) -> [f64; 3] {
+    assert_eq!(actual.len(), reference.len());
+    let mut error = [0.; 3];
+    for (a, r) in actual.chunks_exact(4).zip(reference.chunks_exact(4)) {
+        let luma = |p: &[u8]| (0.2126 * p[0] as f64 + 0.7152 * p[1] as f64 + 0.0722 * p[2] as f64) / 255.;
+        let black = luma(a) - luma(r);
+        let alpha = (a[3] as f64 - r[3] as f64) / 255.;
+        error[0] += black * black;
+        error[1] += (black - alpha).powi(2);
+        error[2] += alpha * alpha;
+    }
+    error.map(|e| (e / (actual.len() / 4) as f64).sqrt())
+}
+
+#[test]
+fn whole_frame_checks_include_transparent_background_and_edge_coverage() {
+    let (w, h) = (32, 32);
+    let mut reference = vec![0u8; w * h * 4];
+    for y in 8..24 { for x in 8..24 {
+        reference[(y*w+x)*4..(y*w+x)*4+4].copy_from_slice(&[128,128,128,255]);
+    }}
+    assert_eq!(display_coverage(&reference, &reference), [0.; 3]);
+    for color in [0,255] {
+        let mut actual = reference.clone();
+        for p in actual.chunks_exact_mut(4) { if p[3] == 0 { p.copy_from_slice(&[color,color,color,255]); } }
+        assert_eq!(metrics(&actual, &reference, w, h).0, 0.);
+        assert!(display_coverage(&actual, &reference).iter().any(|e| *e > 0.02));
+    }
+}
 fn metrics_with_guide(actual: &[u8], reference: &[u8], guide: &[u8], w: usize, h: usize) -> (f64,f64,f64,usize) {
     let luma =
         |p: &[u8]| (0.2126 * p[0] as f64 + 0.7152 * p[1] as f64 + 0.0722 * p[2] as f64) / 255.;
@@ -109,6 +141,18 @@ fn save(name: &str, w: u32, h: u32, pixels: &[u8]) {
         .write_image_data(pixels)
         .unwrap();
 }
+fn save_display_proofs(name: &str, w: u32, h: u32, pixels: &[u8]) {
+    if std::env::var_os("PM_STUDIO_NOISE_OUT").is_none() { return; }
+    for (label, background) in [("over-black",0u16),("over-white",255u16)] {
+        let mut opaque = pixels.to_vec();
+        for p in opaque.chunks_exact_mut(4) {
+            let empty = 255 - u16::from(p[3]);
+            for c in &mut p[..3] { *c = (u16::from(*c) + (background*empty+127)/255).min(255) as u8; }
+            p[3] = 255;
+        }
+        save(&format!("{name}-{label}"),w,h,&opaque);
+    }
+}
 fn check_noise_at(names: &[&str], w:u32, h:u32) {
     let mut renderer = Renderer::new(w, h).unwrap();
     let denoiser = Denoiser::new().unwrap();
@@ -148,6 +192,7 @@ fn check_noise_at(names: &[&str], w:u32, h:u32) {
         renderer.set_time_seed(7);
         let reference = reference(&mut renderer, &reference_scene, name, w, h);
         save(&format!("{name}-reference4096"), w, h, &reference);
+        save_display_proofs(&format!("{name}-reference4096"),w,h,&reference);
         renderer.set_scene(&scene, &scene.prepare());
         renderer.set_void(backdrop);
         for (quality, max_samples, min_samples, threshold) in
@@ -239,11 +284,17 @@ fn check_noise_at(names: &[&str], w:u32, h:u32) {
                 Some(metrics(&actual,&masked,w as usize,h as usize))
             }else{None};
             let (rms, noise, bias, pixels) = metrics(&actual, &reference, w as usize, h as usize);
+            let coverage=display_coverage(&actual,&reference);
+            println!("DISPLAY_COVERAGE_GATE {}",serde_json::json!({"scene":name,"policy":quality,"over_black_rms":coverage[0],"over_white_rms":coverage[1],"alpha_rms":coverage[2],"limit":0.02,"transparent_reference_pixels":reference.chunks_exact(4).filter(|p|p[3]==0).count()}));
+            if coverage.iter().any(|v|!v.is_finite() || *v>=0.02) {
+                failures.push(format!("{name}/{quality} whole-display RGB/alpha mismatch {coverage:?}"));
+            }
             println!(
                 "NOISE_GATE {}",
                 serde_json::json!({"scene":name,"policy":quality,"width":w,"height":h,"reference_spp":4096,"sample_ceiling":max_samples,"denoise_quality":denoise_quality,"sampling":renderer.sampling_policy,"requested_floor":min_samples,"relative_error":threshold,"mean_spp":counts.iter().map(|&n|n as f64).sum::<f64>()/counts.len() as f64,"pipeline":pipeline,"object_metrics":object_metrics.map(|(rms,noise,bias,n)|serde_json::json!({"luma_rms":rms,"smooth_noise_rms":noise,"block_bias_p95":bias,"smooth_pixels":n})),"sample_min":counts.iter().copied().fold(f32::INFINITY,f32::min),"sample_max":counts.iter().copied().fold(0.,f32::max),"luma_rms":rms,"smooth_noise_rms":noise,"block_bias_p95":bias,"smooth_pixels":pixels,"frame_ms":frame_ms})
             );
             save(&format!("{name}-{quality}"), w, h, &actual);
+            save_display_proofs(&format!("{name}-{quality}"),w,h,&actual);
             // Normalized sRGB code-value limits catch speckle and low-frequency
             // OIDN blotches in both policies. Neither has a wall-clock deadline.
             if !(rms < 0.02 && noise < 0.006 && bias < 0.012 && pixels > 100) || object_metrics.is_some_and(|(r,n,b,p)|!(r<0.02 && n<0.006 && b<0.012 && p>100))
@@ -275,6 +326,18 @@ fn matte_enamel_uses_authored_perceptual_roughness_without_a_mirror_coat() {
     assert_eq!(scene.materials[0].roughness, 0.7);
     assert_eq!(prepared.materials[0].spec[0], 0.7);
     assert_eq!(prepared.materials[0].spec[1], 0.);
+}
+
+#[test]
+fn teapot_flat_lid_has_flat_shading_normals_and_a_smooth_body_profile() {
+    let scene=scenes::product("teapot");
+    let body=&scene.objects[0].mesh;
+    let lid:Vec<_>=body.positions.iter().zip(&body.normals).filter(|(p,_)|
+        (p.y-0.7).abs()<1e-6 && p.x*p.x+p.z*p.z>0.16*0.16).collect();
+    assert!(lid.len()>=96);
+    assert!(lid.iter().all(|(_,n)|n.y>0.9999),"flat lid inherited the shoulder's sloping normals");
+    let rows=body.positions.len()/97;
+    assert!(rows>32,"a handful of straight profile segments leaves a polygonal silhouette");
 }
 
 // Expensive, explicit acceptance gate. Keep the exact small-fixture thresholds;
