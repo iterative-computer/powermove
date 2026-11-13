@@ -471,4 +471,42 @@ mod tests {
         // Shift-= stays "+" (Command-Shift-+ zooms in).
         assert_eq!(physical_fallback("+".into(), 24, true), "+");
     }
+
+    /// The viewer's keys (channels, Zoom to 200%, rulers, grid) are the same
+    /// in every preset (Premiere Pro, Final Cut Pro and Resolve have none of
+    /// their own for these), no preset key lands on them, and Keyboard
+    /// Shortcuts (Option-Command-' or -K) never meets the grid's Command-'.
+    #[test]
+    fn the_viewer_keys_hold_in_every_preset() {
+        let viewer = [
+            ("viewer.showRed", "alt+1"),
+            ("viewer.showGreen", "alt+2"),
+            ("viewer.showBlue", "alt+3"),
+            ("viewer.showAlpha", "alt+4"),
+            ("viewer.showAlphaOverlay", "alt+5"),
+            ("viewer.zoom200", "cmd+2"),
+            ("viewer.rulers", "cmd+r"),
+            ("viewer.grid", "cmd+'"),
+        ];
+        for (id, _) in PRESETS {
+            let table = effective(&Keymap {
+                preset: id.into(),
+                bindings: vec![],
+            });
+            for (command, chord) in viewer {
+                assert_eq!(keys(&table, command, json!([])), [chord], "{id}: {command}");
+                let on: Vec<&str> = table
+                    .iter()
+                    .filter(|b| b.chord == chord)
+                    .map(|b| b.command.as_str())
+                    .collect();
+                assert_eq!(on, [command], "{id}: {chord} is {command}'s alone");
+            }
+            let shortcuts = keys(&table, "keyboardShortcuts", json!([]));
+            assert!(
+                shortcuts.len() == 1 && shortcuts[0] != "cmd+'",
+                "{id}: {shortcuts:?}"
+            );
+        }
+    }
 }

@@ -32,7 +32,7 @@ use crate::pipeline::Sink;
 use crate::settings::{
     AlphaOutput, AudioCodec, Codec, Container, ExportSpec, InputFormat, Overwrite,
 };
-use crate::verify::{self, AudioReport, BlockSample, PixelCheck, VerifyReport};
+use crate::verify::{self, AudioReport, BlockSample, FrameSignature, PixelCheck, VerifyReport};
 
 /// Matroska's timestamp unit.
 const MS: ff::AVRational = ff::AVRational { num: 1, den: 1000 };
@@ -173,6 +173,8 @@ pub struct WebmSink {
     spec: ExportSpec,
     sampled: Vec<u64>,
     blocks: Vec<BlockSample>,
+    /// The sampled frames' signatures.
+    signatures: Vec<(u64, FrameSignature)>,
     capture: Option<InputCapture>,
     /// Lossless libvpx with a short keyframe interval (Import Image Sequence)
     /// instead of the export's realtime rate control.
@@ -252,6 +254,7 @@ impl WebmSink {
             spec: spec.clone(),
             sampled: verify::sampled_frames(spec.frames),
             blocks: vec![],
+            signatures: vec![],
             capture: None,
             lossless,
         };
@@ -651,6 +654,8 @@ impl Sink for WebmSink {
         }
         if self.sampled.contains(&index) {
             self.blocks.extend(verify::block_means(input, index));
+            self.signatures
+                .push((index, verify::frame_signature(input)));
         }
         if let Some(capture) = self.capture.as_mut() {
             capture.write_i420(input)?;
@@ -682,7 +687,13 @@ impl Sink for WebmSink {
         self.trailer_written = true;
         self.close_file();
         let temp = self.temp_path();
-        let mut report = verify_webm(&temp, &self.spec, &self.blocks, self.audio_pushed)?;
+        let mut report = verify_webm(
+            &temp,
+            &self.spec,
+            &self.blocks,
+            &self.signatures,
+            self.audio_pushed,
+        )?;
         report.bytes = std::fs::metadata(&temp).map(|m| m.len()).unwrap_or(0);
         let path = self
             .output
@@ -925,6 +936,7 @@ pub fn verify_webm(
     path: &Path,
     spec: &ExportSpec,
     blocks: &[BlockSample],
+    signatures: &[(u64, FrameSignature)],
     audio_pushed: u64,
 ) -> Result<VerifyReport, Error> {
     let profiling = std::env::var("PM_EXPORT_PROFILE").as_deref() == Ok("1");
@@ -1136,7 +1148,7 @@ pub fn verify_webm(
     // Sampled pixels: native VP9 for opaque I420; libvpx retains alpha decoding.
     let mut sampled_pixels = SampledPixelTimes::default();
     let decode_started = profiling.then(Instant::now);
-    let decoded = decode_sampled(
+    let (decoded, decoded_signatures) = decode_sampled(
         fmt,
         vst,
         spec,
@@ -1149,8 +1161,25 @@ pub fn verify_webm(
         .as_secs_f64()
         * 1e3;
     let pixel_check_started = profiling.then(Instant::now);
-    let pixels: Vec<PixelCheck> =
-        verify::check_pixel_blocks(spec.codec, blocks, decoded, &mut problems);
+    let mut picture = verify::PictureReport::default();
+    // The sampled frames whole: their levels and their own picture.
+    verify::check_frames(
+        spec.codec,
+        &|n| signatures.iter().find(|(m, _)| *m == n).map(|(_, s)| s),
+        None,
+        &decoded_signatures,
+        &mut picture,
+        &mut problems,
+    );
+    let mut notes = vec![];
+    let pixels: Vec<PixelCheck> = verify::check_pixel_blocks(
+        spec.codec,
+        blocks,
+        decoded,
+        &mut picture,
+        &mut problems,
+        &mut notes,
+    );
     let pixel_check_ms =
         pixel_check_started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1e3);
     if let Some(started) = verify_started {
@@ -1180,10 +1209,16 @@ pub fn verify_webm(
         audio,
         timecode: None,
         pixels,
+        picture,
+        notes,
         hardware_encoder: Some(false),
         bytes: 0,
+        mix: None,
     })
 }
+
+/// The sampled frames' blocks, and their signatures by frame.
+type Sampled = (Vec<BlockSample>, Vec<(u64, FrameSignature)>);
 
 /// Decodes the sampled frames. Nearby samples share the decoder cursor; distant
 /// samples seek to a keyframe so verification stays bounded for long exports.
@@ -1193,7 +1228,7 @@ fn decode_sampled(
     spec: &ExportSpec,
     alpha: bool,
     mut times: Option<&mut SampledPixelTimes>,
-) -> Result<Vec<BlockSample>, Error> {
+) -> Result<Sampled, Error> {
     let key_interval = (2.0 * spec.rate.to_f64()).round().max(1.0) as u64;
     // The opaque native VP9 decoder reproduces libvpx's complete planes and
     // sampled frame IDs and is faster in the sampled-verifier benchmark.
@@ -1203,9 +1238,15 @@ fn decode_sampled(
         _ => None,
     };
     let sampled = decode_sampled_with_gap_map(fmt, vst, spec, key_interval, decoder, |f, n| {
-        frame_blocks(f, alpha, n, (spec.width, spec.height), times.as_deref_mut())
+        let blocks = frame_blocks(f, alpha, n, (spec.width, spec.height), times.as_deref_mut())?;
+        Ok((blocks, verify::frame_signature(&frame_input(f, alpha)?)))
     })?;
-    Ok(sampled.into_iter().flat_map(|(_, blocks)| blocks).collect())
+    let (mut blocks, mut signatures) = (vec![], vec![]);
+    for (n, (frame_blocks, signature)) in sampled {
+        blocks.extend(frame_blocks);
+        signatures.push((n, signature));
+    }
+    Ok((blocks, signatures))
 }
 
 fn decode_sampled_with_gap_map<T>(
@@ -1536,7 +1577,11 @@ mod sampled_decode_tests {
                 .iter()
                 .flat_map(|(n, input)| verify::block_means(input, *n))
                 .collect();
-            assert_eq!(expected.len(), verify::sampled_frames(frames).len() * 9);
+            assert_eq!(
+                expected.len(),
+                verify::sampled_frames(frames).len()
+                    * verify::block_regions(spec.width, spec.height).len()
+            );
             for decode_gap in [gap, 0] {
                 let cropped: Vec<_> =
                     decoded_samples_with(&delivered.path, &spec, decode_gap, None, |f, n| {

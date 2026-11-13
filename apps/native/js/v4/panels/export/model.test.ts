@@ -1,8 +1,16 @@
 import { describe, expect, test } from "bun:test";
 import { HostClient, json } from "../../src";
 import { fixture, initial } from "./fixtures";
-import { ExportModel, progress, snapshot } from "./model";
-import { fields, formats, rates, shows, sizeError } from "./spec";
+import { ExportModel, isProgress, progress, snapshot } from "./model";
+import {
+  fields,
+  formats,
+  listedRate,
+  rateOptions,
+  rates,
+  shows,
+  sizeError,
+} from "./spec";
 const commands = (f: ReturnType<typeof fixture>) =>
   f.requests.flatMap((r) =>
     r.operation.type === "command" ? [r.operation.command] : [],
@@ -22,12 +30,35 @@ test("format support matches tagged contract and no web export is offered", () =
     "scale",
     "fps",
     "range",
+    "colorTag",
+    "timecode",
     "mblur",
     "audio",
+    "audioCoding",
     "alpha",
     "useProxies",
   ]);
-  expect(fields.mp4).toEqual(["codec", ...fields.webm]);
+  // MP4 carries the color tag; a timecode track and PCM are QuickTime's.
+  expect(fields.mp4).toEqual([
+    "codec",
+    "scale",
+    "fps",
+    "range",
+    "quality",
+    "colorTag",
+    "mblur",
+    "audio",
+    "useProxies",
+  ]);
+  expect(fields.webm).toEqual([
+    "scale",
+    "fps",
+    "range",
+    "quality",
+    "mblur",
+    "audio",
+    "useProxies",
+  ]);
   expect(fields.still).toEqual(["depth", "scale", "mblur", "alpha"]);
   expect(fields.json).toEqual([]);
   expect(rates[0].v).toBe(24000 / 1001);
@@ -272,10 +303,24 @@ test("progress uses actual frames and measured ETA thresholds", () => {
       .eta,
   ).toBe("About 89 s left");
 });
+test("checking the written file is its own phase, with its own progress", () => {
+  expect(
+    progress({ phase: "checking", frame: 75, total: 300, elapsed: 30 }),
+  ).toEqual({
+    leading: "Checking the file · frame 75 of 300",
+    value: 0.25,
+    ax: "Checking the file, 25 percent, frame 75 of 300",
+  });
+  expect(
+    isProgress({ phase: "checking", frame: 0, total: 300, elapsed: 1 }),
+  ).toBe(true);
+});
 test("malformed model facts fail visibly, without normalizing or mutating their source", () => {
   for (const mutate of [
     (s: any) =>
       (s.run = { phase: "rendering", frame: 301, total: 300, elapsed: 1 }),
+    (s: any) =>
+      (s.run = { phase: "checking", frame: 301, total: 300, elapsed: 1 }),
     (s: any) => (s.options.format = "web"),
     (s: any) => (s.bindings = {}),
     (s: any) => (s.sequence = -1),
@@ -433,10 +478,63 @@ test("ProRes 422 has no alpha; settings saved before profiles keep ProRes 4444",
   await f.model.refreshPlan();
   await f.model.start();
   const begin = f.requests.find(
-    (r) => r.operation.type === "command" && r.operation.command === "export.begin",
+    (r) =>
+      r.operation.type === "command" && r.operation.command === "export.begin",
   )!;
-  const options = (begin.operation as { args: { options: Record<string, unknown> } })
-    .args.options;
+  const options = (
+    begin.operation as { args: { options: Record<string, unknown> } }
+  ).args.options;
   expect(options.codec).toBe("hevc");
   expect(options.profile).toBe("422hq");
+});
+
+test("color tag, start timecode and audio format are options of the export, and old options keep today's file", async () => {
+  const f = fixture();
+  // Options saved before the fields existed read as today's output.
+  expect(f.model.options.colorTag).toBe("rec709QuickTime");
+  expect(f.model.options.timecode).toBe("");
+  expect(f.model.options.audioCoding).toBe("pcm24");
+  f.model.set("format", "prores");
+  f.model.set("profile", "422hq");
+  f.model.set("colorTag", "rec709");
+  f.model.set("timecode", "01:00:00:00");
+  f.model.set("audioCoding", "pcm16");
+  expect(() => f.model.set("colorTag", "p3" as "rec709")).toThrow();
+  expect(() => f.model.set("audioCoding", "aac" as "pcm16")).toThrow();
+  for (const field of ["colorTag", "timecode", "audioCoding"] as const)
+    expect(shows(f.model.options, field)).toBe(true);
+  // The planner (the host) checks the timecode against the frame rate.
+  await f.model.refreshPlan();
+  await f.model.start();
+  const sent = (command: string) =>
+    (
+      f.requests.find(
+        (r) =>
+          r.operation.type === "command" && r.operation.command === command,
+      )!.operation as unknown as { args: { options: Record<string, unknown> } }
+    ).args.options;
+  for (const command of ["export.plan", "export.begin"]) {
+    expect(sent(command).colorTag).toBe("rec709");
+    expect(sent(command).timecode).toBe("01:00:00:00");
+    expect(sent(command).audioCoding).toBe("pcm16");
+  }
+  // MP4 keeps the label and has no timecode track or PCM; WebM has none.
+  expect(shows({ format: "mp4" }, "colorTag")).toBe(true);
+  expect(shows({ format: "mp4" }, "timecode")).toBe(false);
+  expect(shows({ format: "mp4" }, "audioCoding")).toBe(false);
+  expect(shows({ format: "webm" }, "colorTag")).toBe(false);
+});
+
+test("the Frame Rate row shows the rate the export uses", () => {
+  // A project stores 29.97 as that float; the engine exports it as
+  // 30000/1001, and the pop-up must not fall back to its first item.
+  expect(listedRate(29.97)).toBe(30000 / 1001);
+  expect(listedRate(23.976)).toBe(24000 / 1001);
+  expect(listedRate(59.94)).toBe(60000 / 1001);
+  expect(listedRate(30)).toBe(30);
+  expect(rateOptions(29.97)).toEqual(rates);
+  // A rate that is none of the listed ones is offered as itself.
+  expect(listedRate(12)).toBe(12);
+  expect(rateOptions(12)[0]).toEqual({ v: 12, label: "12 fps" });
+  expect(rateOptions(12).slice(1)).toEqual(rates);
 });

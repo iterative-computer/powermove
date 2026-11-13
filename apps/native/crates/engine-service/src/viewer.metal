@@ -1,7 +1,7 @@
 #include <metal_stdlib>
 using namespace metal;
 struct Line { float4 ends; float4 color; };
-struct Params { uint count; uint reduced; uint whole; uint pad2; float4 output; float4 canvas; float2 drawable; float2 pad3; Line lines[120]; };
+struct Params { uint count; uint reduced; uint whole; uint channels; float4 output; float4 canvas; float2 drawable; float2 pad3; Line lines[120]; };
 vertex float4 vs(uint i [[vertex_id]]) {
     float2 q=float2(float((i<<1)&2),float(i&2));
     return float4(q*2-1,0,1);
@@ -74,6 +74,12 @@ fragment half4 fs(float4 p [[position]], texture2d<half> src [[texture(0)]], con
     float4 c=u.whole!=0 ? scaled(src,u.canvas.xy+p.xy,u.canvas.zw,u.output)
         : u.reduced!=0 ? scaled(src,p.xy,u.drawable,u.output) : deliver(float4(src.read(uint2(p.xy))),u.output);
     float3 v=c.a>0 ? c.rgb/c.a : float3(0);
+    // The channel view (display only): one channel, or alpha, as grey in the
+    // source's own encoding, opaque; or the picture with what is transparent
+    // tinted, over black.
+    if(u.channels>=1&&u.channels<=3) { v=float3(v[u.channels-1]); c.a=1; }
+    else if(u.channels==4) { v=float3(c.a); c.a=1; }
+    else if(u.channels==5) { v=mix(v*c.a,float3(1.0,0.0,0.0),0.5*(1.0-c.a)); c.a=1; }
     v=float3(dec(v.r),dec(v.g),dec(v.b));
     v=float3(0.8224621*v.r+0.1775380*v.g,0.0331941*v.r+0.9668058*v.g,0.0170827*v.r+0.0723974*v.g+0.9105199*v.b);
     // Preserve signed, extended linear engine output. Clipping to a transient

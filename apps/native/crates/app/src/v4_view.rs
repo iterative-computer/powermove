@@ -958,6 +958,17 @@ impl SurfaceView {
     pub fn has_header(&self) -> bool {
         self.prepared.header.is_some()
     }
+    /// Development builds: every scroll region of the view moved down by
+    /// `by` points (`review/scroll`).
+    #[cfg(debug_assertions)]
+    pub fn review_scroll_by(&mut self, by: f32, cx: &mut Context<Self>) {
+        for scroll in self.scrolls.values() {
+            let offset = scroll.offset();
+            let most = scroll.max_offset().y;
+            scroll.set_offset(point(offset.x, (offset.y - px(by)).clamp(-most, px(0.))));
+        }
+        cx.notify();
+    }
     pub fn scroll_semantic(&mut self, semantic: &str, cx: &mut Context<Self>) {
         if let Some(id) = self.prepared.semantics.get(semantic)
             && let Some(node) = self.prepared.node(*id)
@@ -2287,9 +2298,14 @@ impl SurfaceView {
             .parent
             .and_then(|p| self.prepared.node(p))
             .is_some_and(|p| p.style.flex_direction == Some(FlexDirection::Row));
+        // A field given a width keeps it: it has no title to be sized by,
+        // so in a row as wide as its content (a form row's control) it would
+        // otherwise be its padding wide.
+        let own = node.style.size.width.filter(|_| in_row);
         let mut wrapper = div()
             .id(("field", id))
-            .when(in_row, |d| d.flex_1())
+            .when_some(own, |d, width| d.flex_none().w(width))
+            .when(in_row && own.is_none(), |d| d.flex_1())
             .when(!in_row, |d| d.flex_none().w_full())
             .min_w(px(0.))
             .child(field.clone())

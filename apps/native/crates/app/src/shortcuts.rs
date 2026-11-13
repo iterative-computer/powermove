@@ -437,6 +437,17 @@ mod tests {
         assert!(unnamed.is_empty(), "no names for {unnamed:?}");
         assert_eq!(row(&page, "rippleTrimIn")["keys"], json!(["⌥⇧["]));
         assert_eq!(row(&page, "fitView")["keys"], json!(["⇧\\"]));
+        // The viewer's keys are listed too, under View.
+        for (id, glyph) in [
+            ("viewer.grid", "⌘'"),
+            ("viewer.rulers", "⌘R"),
+            ("viewer.zoom200", "⌘2"),
+            ("viewer.showRed", "⌥1"),
+            ("viewer.showAlphaOverlay", "⌥5"),
+        ] {
+            assert_eq!(row(&page, id)["keys"], json!([glyph]), "{id}");
+            assert_eq!(row(&page, id)["menu"], "View", "{id}");
+        }
         // One shortcut per key: the Control twin of Command-S is not listed.
         assert_eq!(row(&page, "save")["chords"], json!(["cmd+s"]));
         assert_eq!(row(&page, "save")["fixed"], json!(true));

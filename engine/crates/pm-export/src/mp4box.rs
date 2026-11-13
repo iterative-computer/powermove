@@ -70,6 +70,19 @@ pub struct Colr {
     pub full_range: Option<bool>,
 }
 
+/// What a stream's own parameter sets say about its picture (H.264 SPS VUI,
+/// HEVC SPS VUI): range, colour description and chroma sample location.
+/// `None` where the stream leaves a field out (a decoder then assumes the
+/// codec's default, or what the container says).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Vui {
+    pub full_range: Option<bool>,
+    /// (colour primaries, transfer characteristics, matrix coefficients).
+    pub colour_description: Option<(u8, u8, u8)>,
+    /// `chroma_sample_loc_type` of the top and bottom fields (0 left, 2 top-left).
+    pub chroma_location: Option<(u32, u32)>,
+}
+
 /// H.264 SPS facts.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Sps {
@@ -79,6 +92,8 @@ pub struct Sps {
     pub bit_depth_luma: u32,
     pub full_range: Option<bool>,
     pub colour_description: Option<(u8, u8, u8)>,
+    /// `chroma_sample_loc_type` of the top and bottom fields, when signalled.
+    pub chroma_location: Option<(u32, u32)>,
 }
 
 /// HEVC decoder configuration (`hvcC`) facts.
@@ -90,6 +105,12 @@ pub struct Hevc {
     pub chroma_format_idc: u8,
     pub bit_depth_luma: u8,
     pub bit_depth_chroma: u8,
+    /// Parameter sets by NAL unit type the configuration carries (32 VPS,
+    /// 33 SPS, 34 PPS).
+    pub parameter_sets: Vec<u8>,
+    /// The base layer's SPS VUI (`None`: no SPS in the configuration, or
+    /// one this reader cannot follow).
+    pub vui: Option<Vui>,
 }
 
 /// A video sample entry.
@@ -503,13 +524,33 @@ fn parse_visual(d: &[u8], e: BoxRef) -> Option<Visual> {
             b"clli" => v.clli = d.get(k.start..k.end)?.try_into().ok(),
             b"hvcC" => {
                 let b = |o: usize| d.get(k.start + o).copied();
-                v.hevc = Some(Hevc {
+                let mut hevc = Hevc {
                     profile_idc: b(1)? & 0x1f,
                     level_idc: b(12)?,
                     chroma_format_idc: b(16)? & 0x03,
                     bit_depth_luma: (b(17)? & 0x07) + 8,
                     bit_depth_chroma: (b(18)? & 0x07) + 8,
-                });
+                    ..Hevc::default()
+                };
+                // Parameter set arrays: type, count, then length-prefixed NALs.
+                let mut at = k.start + 23;
+                for _ in 0..b(22)? {
+                    let kind = *d.get(at)? & 0x3f;
+                    let count = be16(d, at + 1)?;
+                    at += 3;
+                    for _ in 0..count {
+                        let len = be16(d, at)? as usize;
+                        let nal = d.get(at + 2..at + 2 + len)?;
+                        at += 2 + len;
+                        hevc.parameter_sets.push(kind);
+                        // The base layer's SPS (`nuh_layer_id` 0).
+                        let base = nal.len() > 2 && nal[0] & 1 == 0 && nal[1] >> 3 == 0;
+                        if kind == 33 && base && hevc.vui.is_none() {
+                            hevc.vui = parse_hevc_sps(nal);
+                        }
+                    }
+                }
+                v.hevc = Some(hevc);
             }
             b"lhvC" => v.layered_hevc = true,
             b"almo" => v.alpha_mode = d.get(k.start..k.end).map(<[u8]>::to_vec),
@@ -699,6 +740,17 @@ pub fn parse_sps(nal: &[u8]) -> Option<Sps> {
     if !b.flag()? {
         return Some(v);
     }
+    let vui = parse_vui(&mut b)?;
+    v.full_range = vui.full_range;
+    v.colour_description = vui.colour_description;
+    v.chroma_location = vui.chroma_location;
+    Some(v)
+}
+
+/// VUI fields common to H.264 (E.1.1) and HEVC (E.2.1), from
+/// `aspect_ratio_info_present_flag` through `chroma_loc_info`.
+fn parse_vui(b: &mut Bits) -> Option<Vui> {
+    let mut v = Vui::default();
     if b.flag()? && b.u(8)? == 255 {
         b.u(32)?;
     }
@@ -712,7 +764,154 @@ pub fn parse_sps(nal: &[u8]) -> Option<Sps> {
             v.colour_description = Some((b.u(8)? as u8, b.u(8)? as u8, b.u(8)? as u8));
         }
     }
+    if b.flag()? {
+        v.chroma_location = Some((b.ue()?, b.ue()?));
+    }
     Some(v)
+}
+
+/// HEVC `profile_tier_level(1, max_sub_layers_minus1)` (7.3.3).
+fn skip_profile_tier_level(b: &mut Bits, max_sub_layers_minus1: u32) -> Option<()> {
+    b.u(8)?;
+    b.u(32)?;
+    b.u(32)?;
+    b.u(16)?;
+    b.u(8)?;
+    let mut present = Vec::new();
+    for _ in 0..max_sub_layers_minus1 {
+        present.push((b.flag()?, b.flag()?));
+    }
+    if max_sub_layers_minus1 > 0 {
+        for _ in max_sub_layers_minus1..8 {
+            b.u(2)?;
+        }
+    }
+    for (profile, level) in present {
+        if profile {
+            b.u(32)?;
+            b.u(32)?;
+            b.u(24)?;
+        }
+        if level {
+            b.u(8)?;
+        }
+    }
+    Some(())
+}
+
+/// HEVC `scaling_list_data()` (7.3.4).
+fn skip_scaling_list_data(b: &mut Bits) -> Option<()> {
+    for size_id in 0..4 {
+        let matrices = if size_id == 3 { 2 } else { 6 };
+        for _ in 0..matrices {
+            if !b.flag()? {
+                b.ue()?;
+            } else {
+                let coefficients = 64.min(1 << (4 + (size_id << 1)));
+                if size_id > 1 {
+                    b.se()?;
+                }
+                for _ in 0..coefficients {
+                    b.se()?;
+                }
+            }
+        }
+    }
+    Some(())
+}
+
+/// HEVC `st_ref_pic_set(index)` (7.3.7); returns its number of delta POCs.
+fn skip_st_ref_pic_set(b: &mut Bits, index: u32, deltas: &[u32]) -> Option<u32> {
+    if index != 0 && b.flag()? {
+        // Predicted from the set before (the SPS never signals delta_idx).
+        b.flag()?;
+        b.ue()?;
+        let reference = *deltas.get(index as usize - 1)?;
+        let mut count = 0;
+        for _ in 0..=reference {
+            let used = b.flag()?;
+            let kept = if used { true } else { b.flag()? };
+            if kept {
+                count += 1;
+            }
+        }
+        return Some(count);
+    }
+    let (negative, positive) = (b.ue()?, b.ue()?);
+    if negative > 16 || positive > 16 {
+        return None;
+    }
+    for _ in 0..negative + positive {
+        b.ue()?;
+        b.flag()?;
+    }
+    Some(negative + positive)
+}
+
+/// Parses an HEVC SPS of the base layer (with its two-byte NAL header)
+/// through the VUI's chroma location.
+pub fn parse_hevc_sps(nal: &[u8]) -> Option<Vui> {
+    let mut b = Bits::new(nal.get(2..)?);
+    b.u(4)?;
+    let max_sub_layers_minus1 = b.u(3)?;
+    b.flag()?;
+    skip_profile_tier_level(&mut b, max_sub_layers_minus1)?;
+    b.ue()?;
+    let chroma_format_idc = b.ue()?;
+    if chroma_format_idc == 3 {
+        b.flag()?;
+    }
+    b.ue()?;
+    b.ue()?;
+    if b.flag()? {
+        for _ in 0..4 {
+            b.ue()?;
+        }
+    }
+    b.ue()?;
+    b.ue()?;
+    let log2_max_poc_lsb = b.ue()? + 4;
+    let first = if b.flag()? { 0 } else { max_sub_layers_minus1 };
+    for _ in first..=max_sub_layers_minus1 {
+        b.ue()?;
+        b.ue()?;
+        b.ue()?;
+    }
+    for _ in 0..6 {
+        b.ue()?;
+    }
+    if b.flag()? && b.flag()? {
+        skip_scaling_list_data(&mut b)?;
+    }
+    b.flag()?;
+    b.flag()?;
+    if b.flag()? {
+        b.u(8)?;
+        b.ue()?;
+        b.ue()?;
+        b.flag()?;
+    }
+    let sets = b.ue()?;
+    if sets > 64 {
+        return None;
+    }
+    let mut deltas = Vec::new();
+    for i in 0..sets {
+        let n = skip_st_ref_pic_set(&mut b, i, &deltas)?;
+        deltas.push(n);
+    }
+    if b.flag()? {
+        for _ in 0..b.ue()? {
+            b.u(log2_max_poc_lsb)?;
+            b.flag()?;
+        }
+    }
+    b.flag()?;
+    b.flag()?;
+    if !b.flag()? {
+        return Some(Vui::default());
+    }
+    parse_vui(&mut b)
 }
 
 #[cfg(test)]

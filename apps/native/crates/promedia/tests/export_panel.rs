@@ -505,3 +505,118 @@ fn export_defaults_normalize_exactly_as_main() {
     );
     assert_eq!(n(&json!({"scale":0.001}), 30.)["scale"], 0.01);
 }
+
+fn prores(extra: serde_json::Value) -> Options {
+    let mut v = json!({"format":"prores","profile":"422hq","scale":1,"width":1920,"height":1080,
+        "fps":25,"range":"all","quality":"high","mblur":true,"audio":true,
+        "alpha":false,"captionsBurn":false,"captionsSidecar":"none"});
+    for (k, value) in extra.as_object().unwrap() {
+        v[k] = value.clone();
+    }
+    serde_json::from_value(v).unwrap()
+}
+
+#[test]
+fn colour_label_start_timecode_and_sound_coding_reach_the_engine() {
+    use pm_protocol::color::{OutputColor, QuickTimeTag};
+    use pm_protocol::priority::{AudioCoding as Wire, ExportTimecode};
+    let mut base = planned();
+    base.color = OutputColor::Rec709QuickTime {
+        candidate: QuickTimeTag::Cicp1_13_1,
+    };
+    let settings = |o: &Options| {
+        o.intent(true, 0)
+            .unwrap()
+            .engine_settings(base.clone())
+            .unwrap()
+            .unwrap()
+    };
+    // Settings saved before these fields existed mean today's file.
+    let old = settings(&prores(json!({})));
+    assert_eq!(old.color, base.color);
+    assert_eq!(old.delivery.timecode, None);
+    assert_eq!(old.delivery.audio_coding, None);
+    // What a post house asks for.
+    let asked = prores(json!({"colorTag":"rec709","timecode":"01:00:00:00","audioCoding":"pcm16"}));
+    let s = settings(&asked);
+    assert_eq!(s.color, OutputColor::Rec709Broadcast);
+    assert_eq!(
+        s.delivery.timecode,
+        Some(ExportTimecode {
+            start: "01:00:00:00".into(),
+            drop_frame: false,
+            reel: None
+        })
+    );
+    assert_eq!(s.delivery.audio_coding, Some(Wire::Pcm16));
+    assert_eq!(
+        settings(&prores(json!({"audioCoding":"pcmFloat"})))
+            .delivery
+            .audio_coding,
+        Some(Wire::PcmFloat)
+    );
+    // Drop-frame is written with a semicolon, at the rates that have it.
+    let ntsc = prores(json!({"fps":30000./1001.,"timecode":"01:00:00;00"}));
+    assert!(settings(&ntsc).delivery.timecode.unwrap().drop_frame);
+    // Sound coding is the sound's: nothing without it.
+    let silent = prores(json!({"audio":false,"audioCoding":"pcm16"}));
+    assert_eq!(settings(&silent).delivery.audio_coding, None);
+    // The fields stay stored and dormant where a format does not read them:
+    // MP4 has the label but no timecode track or PCM; WebM and PNG have none.
+    let mut mp4 = asked.clone();
+    mp4.format = Format::Mp4;
+    let s = settings(&mp4);
+    assert_eq!(s.color, OutputColor::Rec709Broadcast);
+    assert_eq!((s.delivery.timecode, s.delivery.audio_coding), (None, None));
+    for format in [Format::Webm, Format::Png, Format::Still] {
+        let mut other = asked.clone();
+        other.format = format;
+        // The planner gives images an image tag; the label is not theirs.
+        let mut planned = base.clone();
+        if format != Format::Webm {
+            planned.color = OutputColor::SrgbImage;
+        }
+        let s = other
+            .intent(true, 0)
+            .unwrap()
+            .engine_settings(planned.clone())
+            .unwrap()
+            .unwrap();
+        assert_eq!(s.color, planned.color, "{format:?}");
+        assert_eq!((s.delivery.timecode, s.delivery.audio_coding), (None, None));
+    }
+    // HDR delivery carries its own label.
+    let hdr = prores(json!({"colorTag":"rec709","dynamicRange":"pq"}));
+    assert_eq!(settings(&hdr).color, OutputColor::Rec2100Pq);
+    // Round trip: absent stays absent, chosen stays chosen.
+    let wire = serde_json::to_value(prores(json!({}))).unwrap();
+    for key in ["colorTag", "timecode", "audioCoding"] {
+        assert!(wire.get(key).is_none(), "{key} written for old settings");
+    }
+    let wire = serde_json::to_value(&asked).unwrap();
+    assert_eq!(
+        (&wire["colorTag"], &wire["timecode"], &wire["audioCoding"]),
+        (&json!("rec709"), &json!("01:00:00:00"), &json!("pcm16"))
+    );
+}
+
+#[test]
+fn a_start_timecode_the_rate_cannot_count_is_refused_in_the_sheet() {
+    for (extra, why) in [
+        (json!({"timecode":"1:00:00:00"}), "HH:MM:SS:FF"),
+        (json!({"timecode":"01:00:00:25"}), "HH:MM:SS:FF"),
+        (json!({"timecode":"01:61:00:00"}), "HH:MM:SS:FF"),
+        (json!({"timecode":"01:00:00;00"}), "29.97 or 59.94"),
+        (
+            json!({"fps":30000./1001.,"timecode":"01:01:00;00"}),
+            "HH:MM:SS:FF",
+        ),
+    ] {
+        let error = prores(extra.clone()).intent(true, 0).unwrap_err();
+        assert!(error.contains(why), "{extra}: {error}");
+    }
+    // The same text in a format without a timecode track is dormant, not an error.
+    let mut mp4 = prores(json!({"timecode":"nonsense"}));
+    mp4.format = Format::Mp4;
+    assert!(mp4.intent(true, 0).is_ok());
+}

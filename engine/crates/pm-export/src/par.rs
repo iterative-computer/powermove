@@ -107,6 +107,79 @@ pub(crate) fn rows_limited<T: Send>(
     });
 }
 
+/// Like [`rows`], with a state each worker makes once (`init`) and keeps
+/// across its rows: scratch that would otherwise be allocated per row.
+pub(crate) fn rows_with<T: Send, S>(
+    out: &mut [T],
+    row_len: usize,
+    init: impl Fn() -> S + Sync,
+    f: impl Fn(&mut S, usize, &mut [T]) + Sync,
+) {
+    planes_with(
+        (out, row_len),
+        (&mut [] as &mut [u8], 0),
+        (&mut [] as &mut [u8], 0),
+        init,
+        |state, y, row, _, _| f(state, y, row),
+    );
+}
+
+/// Calls `f(state, row_index, a_row, b_row, c_row)` for every row of up to
+/// three planes cut in step (each a slice and its items per row; a plane
+/// with no items per row is absent and its rows are empty), splitting
+/// contiguous runs of rows across threads. Each worker makes its state once
+/// (`init`) and keeps it across its rows. The first plane sets the row count.
+pub(crate) fn planes_with<A: Send, B: Send, C: Send, S>(
+    a: (&mut [A], usize),
+    b: (&mut [B], usize),
+    c: (&mut [C], usize),
+    init: impl Fn() -> S + Sync,
+    f: impl Fn(&mut S, usize, &mut [A], &mut [B], &mut [C]) + Sync,
+) {
+    let ((a, a_len), (b, b_len), (c, c_len)) = (a, b, c);
+    if a_len == 0 || a.is_empty() {
+        return;
+    }
+    let total = a.len() / a_len;
+    let threads = threads_for(total, MAX_THREADS);
+    let per = total.div_ceil(threads);
+    let refresh = QOS_REFRESH.with(|slot| slot.borrow().clone());
+    let (init, f) = (&init, &f);
+    let band = |first: usize, a: &mut [A], b: &mut [B], c: &mut [C], refresh: Option<&Refresh>| {
+        let mut state = init();
+        for (i, a_row) in a.chunks_mut(a_len).enumerate() {
+            refresh_rows(refresh, i);
+            f(
+                &mut state,
+                first + i,
+                a_row,
+                &mut b[i * b_len..(i + 1) * b_len],
+                &mut c[i * c_len..(i + 1) * c_len],
+            );
+        }
+    };
+    if threads <= 1 {
+        band(0, a, b, c, refresh.as_ref());
+        return;
+    }
+    let qos = current_qos();
+    let band = &band;
+    std::thread::scope(|scope| {
+        let (mut b, mut c) = (b, c);
+        for (n, a) in a.chunks_mut(per * a_len).enumerate() {
+            let rows = a.len() / a_len;
+            let (b_here, b_rest) = std::mem::take(&mut b).split_at_mut(rows * b_len);
+            let (c_here, c_rest) = std::mem::take(&mut c).split_at_mut(rows * c_len);
+            (b, c) = (b_rest, c_rest);
+            let refresh = refresh.clone();
+            scope.spawn(move || {
+                apply_qos(qos);
+                band(n * per, a, b_here, c_here, refresh.as_ref());
+            });
+        }
+    });
+}
+
 #[cfg(target_vendor = "apple")]
 pub(crate) type Qos = Option<libc::qos_class_t>;
 #[cfg(not(target_vendor = "apple"))]

@@ -67,6 +67,11 @@ const ROLES: &[(&str, &str)] = &[
         "Opaque accent tint: drop targets, active guide bed",
     ),
     ("colors.danger", "Destructive and error text, offline media"),
+    (
+        "colors.viewer_guide",
+        "Ruler guides over the viewer's picture",
+    ),
+    ("colors.viewer_grid", "The viewer's grid over the picture"),
     ("colors.warning", "Warnings, missing-but-recoverable states"),
     ("colors.success", "Completed, online, rendered"),
     (
@@ -185,6 +190,7 @@ const ROLES: &[(&str, &str)] = &[
     ("metrics.track_row", "Timeline layer row"),
     ("metrics.property_row", "Timeline property sub-row"),
     ("metrics.ruler", "Timeline ruler height"),
+    ("metrics.viewer_ruler", "The viewer's ruler bands"),
     ("metrics.layer_column", "Timeline layer list column width"),
     ("metrics.clip_radius", "Timeline clip bar corner radius"),
     ("metrics.playhead", "Playhead line width"),

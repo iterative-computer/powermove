@@ -39,19 +39,38 @@ impl FrameSchedule {
         }
         Ok(out)
     }
-    fn offset(self, n: u64) -> i128 {
+    fn offset(self, n: impl Into<i128>) -> i128 {
         round_half_even_div(
-            i128::from(n)
+            n.into()
                 .saturating_mul(i128::from(self.rate.den()))
                 .saturating_mul(i128::from(TICKS_PER_SECOND)),
             i128::from(self.rate.num()),
         )
     }
     pub fn tick(self, n: u64) -> i64 {
-        i128::from(self.start).saturating_add(self.offset(n)).clamp(
+        self.tick_of(self.offset(n))
+    }
+    /// The grid's tick `n` frames from the start, to either side of it.
+    pub fn tick_at(self, n: i64) -> i64 {
+        self.tick_of(self.offset(n))
+    }
+    fn tick_of(self, offset: i128) -> i64 {
+        i128::from(self.start).saturating_add(offset).clamp(
             -i128::from(MAX_DOCUMENT_TICK),
             i128::from(MAX_DOCUMENT_TICK),
         ) as i64
+    }
+    /// The frames of `0..end` ticks on this grid, numbered from the
+    /// schedule's first frame (frames before it are negative), with the
+    /// schedule's own frames.
+    pub fn grid(self, end: i64) -> std::ops::Range<i64> {
+        let unit = i128::from(self.rate.den()) * i128::from(TICKS_PER_SECOND);
+        let num = i128::from(self.rate.num());
+        // The first frame at or after tick 0; the first at or after `end`.
+        let first = -(i128::from(self.start) * num).div_euclid(unit);
+        let last = -((i128::from(self.start) - i128::from(end)) * num).div_euclid(unit);
+        let frames = i128::from(self.frames);
+        (first.min(0) as i64)..(last.max(frames) as i64)
     }
     /// Absolute project sample bounds, contiguous even with a nonzero in point.
     pub fn samples(self, n: u64, sample_rate: u32) -> (i64, i64) {
@@ -69,6 +88,31 @@ impl FrameSchedule {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_range_starting_on_the_grid_shares_the_whole_ranges_frames() {
+        for rate in pm_time::SUPPORTED_RATES {
+            let end = TICKS_PER_SECOND * 4;
+            let whole = FrameSchedule::new(0, end, rate).unwrap();
+            let start = whole.tick(37);
+            let part = FrameSchedule::new(start, whole.tick(61), rate).unwrap();
+            assert_eq!(part.frames, 24);
+            // The composition's frames are the same ones, numbered from
+            // either range's first (a last frame that starts inside the
+            // composition counts, though the whole export rounds it away).
+            let (all, grid) = (whole.grid(end), part.grid(end));
+            assert_eq!(all.start, 0, "{rate:?}");
+            assert!(all.end >= whole.frames as i64 && all.end <= whole.frames as i64 + 1);
+            assert_eq!(grid, all.start - 37..all.end - 37, "{rate:?}");
+            for n in grid {
+                assert_eq!(part.tick_at(n), whole.tick_at(n + 37), "{rate:?} {n}");
+                assert!((0..end).contains(&part.tick_at(n)), "{rate:?} {n}");
+            }
+        }
+        // A range that leaves the composition keeps its own frames.
+        let out =
+            FrameSchedule::new(-TICKS_PER_SECOND, TICKS_PER_SECOND * 3, Rate::FPS_24).unwrap();
+        assert_eq!(out.grid(TICKS_PER_SECOND * 2), 0..96);
+    }
     #[test]
     fn all_rates_keep_nonzero_in_point_and_contiguous_audio() {
         for rate in pm_time::SUPPORTED_RATES {
