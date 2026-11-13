@@ -3065,19 +3065,12 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
                 window.paint_path(path, color);
             }
         }
-        // The playhead pin: a rounded top and a rounder point (the owner's demo).
+        // The playhead pin (v1's): a flat top, straight sides and a point
+        // resting on the foot of the ruler.
         "ph-head" => {
-            let r = |key: &str| px(op.detail[key].as_f64().unwrap_or(0.) as f32);
-            window.paint_quad(
-                PaintQuad::new(area)
-                    .background(color)
-                    .corner_radii(Corners {
-                        top_left: r("topRadius"),
-                        top_right: r("topRadius"),
-                        bottom_right: r("bottomRadius"),
-                        bottom_left: r("bottomRadius"),
-                    }),
-            );
+            if let Ok(path) = playhead_pin(area).build() {
+                window.paint_path(path, color);
+            }
         }
         "line" => {
             if let (Some(from), Some(to)) =
@@ -3338,4 +3331,20 @@ mod cull_tests {
         // Partly on the canvas draws.
         assert!(!cull.skip(&op("clip:z", 395., 10., false)));
     }
+}
+
+/// The playhead pin in `area` (v1's 11 pt pentagon: the shoulders sit at
+/// six elevenths of its height, then the sides meet in a point).
+fn playhead_pin(area: Bounds<Pixels>) -> PathBuilder {
+    let (l, r) = (area.origin.x, area.origin.x + area.size.width);
+    let (top, bottom) = (area.origin.y, area.origin.y + area.size.height);
+    let shoulder = top + area.size.height * (6. / 11.);
+    let mut path = PathBuilder::fill();
+    path.move_to(point(l, top));
+    path.line_to(point(r, top));
+    path.line_to(point(r, shoulder));
+    path.line_to(point(area.center().x, bottom));
+    path.line_to(point(l, shoulder));
+    path.close();
+    path
 }

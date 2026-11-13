@@ -6337,6 +6337,41 @@ fn an_empty_or_torn_lock_record_on_a_local_volume_does_not_refuse_the_open() {
     }
 }
 #[test]
+fn torn_record_lock_recovers_without_stealing_a_live_flock() {
+    // FileLock::acquire explicitly exercises record mode; lock_project's
+    // local-user flock has no owner JSON and is covered independently below.
+    let dir = common::TempDir::new("bad-record-lock");
+    let path = dir.path("lock");
+    for bytes in [b"broken".as_slice(), b"", b"{\"pid\":", b"\xff"] {
+        fs::write(&path, bytes).unwrap();
+        fs::write(owner_record_path(&path), bytes).unwrap();
+        let lock = FileLock::acquire(&path).unwrap();
+        assert!(FileLock::acquire(&path).is_err(), "live flock must win over torn metadata");
+        let owner = parse(&fs::read_to_string(owner_record_path(&path)).unwrap()).unwrap();
+        assert_eq!(owner.get("pid"), Some(&Value::Number(std::process::id() as f64)));
+        drop(lock);
+        drop(FileLock::acquire(&path).unwrap());
+    }
+}
+#[test]
+fn fresh_legacy_owner_is_protected_when_heartbeats_share_a_millisecond() {
+    let dir = common::TempDir::new("legacy-owner-tie");
+    let path = dir.path("library.lock");
+    let heartbeat = now_ms();
+    fs::write(&path, format!("{{\"pid\":{},\"heartbeat\":{heartbeat}}}", std::process::id())).unwrap();
+    fs::write(owner_record_path(&path), format!("{{\"pid\":0,\"heartbeat\":{heartbeat}}}")).unwrap();
+    assert_eq!(FileLock::acquire(&path).err().map(|e| e.kind()), Some(std::io::ErrorKind::WouldBlock));
+}
+#[test]
+fn a_fresh_atomic_owner_is_protected_from_a_same_millisecond_legacy_release() {
+    let dir = common::TempDir::new("atomic-owner-tie");
+    let path = dir.path("library.lock");
+    let heartbeat = now_ms();
+    fs::write(&path, format!("{{\"pid\":0,\"heartbeat\":{heartbeat}}}")).unwrap();
+    fs::write(owner_record_path(&path), format!("{{\"pid\":{},\"heartbeat\":{heartbeat}}}", std::process::id())).unwrap();
+    assert_eq!(FileLock::acquire(&path).err().map(|e| e.kind()), Some(std::io::ErrorKind::WouldBlock));
+}
+#[test]
 fn lock_child_process() {
     let Some(path) = std::env::var_os("PM_KERNEL_TEST_LOCK") else {
         return;

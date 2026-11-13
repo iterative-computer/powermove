@@ -127,6 +127,9 @@ pub struct SurfaceView {
     focus: BTreeMap<Id, FocusHandle>,
     /// Hover washes (pm-design springs), stepped once per render.
     motion: pm_shell::motion::Motion<Id>,
+    /// Floating surfaces marked `pmKit.presence` (the Light panel): how far
+    /// in they are this frame, 0–1. Set before the motion frame steps.
+    presence: HashMap<Id, f32>,
     subscriptions: BTreeMap<Id, Vec<Subscription>>,
     origin: Rc<Cell<Point<Pixels>>>,
     anchors: Rc<RefCell<HashMap<Id, Bounds<Pixels>>>>,
@@ -161,6 +164,8 @@ pub struct SurfaceView {
     /// A text layer whose Properties text to focus once its row shows
     /// (`inspector.focusText`), until the moment passes.
     focus_text: Option<(String, std::time::Instant)>,
+    /// A semantic id to scroll into view once a publication has it.
+    reveal: Option<(String, std::time::Instant)>,
     #[cfg(test)]
     pub renders: usize,
     #[cfg(test)]
@@ -194,6 +199,7 @@ impl SurfaceView {
             option_sets: BTreeMap::new(),
             focus: BTreeMap::new(),
             motion: Default::default(),
+            presence: HashMap::new(),
             subscriptions: BTreeMap::new(),
             origin: Rc::new(Cell::new(Point::default())),
             anchors: Default::default(),
@@ -216,6 +222,7 @@ impl SurfaceView {
             parked: None,
             requested: None,
             focus_text: None,
+            reveal: None,
             #[cfg(test)]
             renders: 0,
             #[cfg(test)]
@@ -309,6 +316,7 @@ impl SurfaceView {
         self.prepared = Rc::new(compiled.prepared);
         self.reconcile(window, cx);
         self.try_focus_text(cx);
+        self.try_reveal(cx);
         cx.notify();
     }
     /// A new generation (an extension reloaded, a fork swapped in) reuses node
@@ -980,6 +988,23 @@ impl SurfaceView {
         }
         cx.notify();
     }
+    /// Scroll `semantic` into view now, or when a publication within two
+    /// seconds first has it (a section the panel is about to add or open).
+    pub fn reveal_semantic(&mut self, semantic: String, cx: &mut Context<Self>) {
+        self.reveal = Some((semantic, std::time::Instant::now()));
+        self.try_reveal(cx);
+    }
+    fn try_reveal(&mut self, cx: &mut Context<Self>) {
+        let Some((semantic, asked)) = self.reveal.clone() else {
+            return;
+        };
+        if asked.elapsed() > std::time::Duration::from_secs(2) {
+            self.reveal = None;
+        } else if self.prepared.semantics.contains_key(&semantic) {
+            self.reveal = None;
+            self.scroll_semantic(&semantic, cx);
+        }
+    }
     pub fn scroll_semantic(&mut self, semantic: &str, cx: &mut Context<Self>) {
         if let Some(id) = self.prepared.semantics.get(semantic)
             && let Some(node) = self.prepared.node(*id)
@@ -1646,6 +1671,16 @@ impl SurfaceView {
                     }
                 });
             }));
+        }
+        // A floating surface springs in when it appears and out while its
+        // panel keeps it for the exit (`pmKit.closing`): opacity, and a
+        // short rise from `motion.start_scale` worth of its height.
+        if let Some(amount) = self.presence.get(&id).copied()
+            && amount < 1.
+        {
+            let t = &self.table.tokens;
+            let rise = (1. - amount) * (1. - t.motion.start_scale as f32) * 160.;
+            element = element.opacity(amount).mt(px(rise));
         }
         element = self.accessible(element, node);
         if let Some(focus) = self.focus.get(&id) {
@@ -2486,6 +2521,25 @@ impl Render for SurfaceView {
         {
             self.renders += 1;
         }
+        // Presences take their targets before the frame steps, so a surface
+        // that just appeared or was marked closing starts moving now.
+        let surface = self.publication.surface.clone();
+        let mut presence = HashMap::new();
+        for id in self.prepared.nodes.keys() {
+            let Some(kit) = surface
+                .node(*id)
+                .and_then(|n| n.props.get("metadata"))
+                .and_then(|m| m.get("pmKit"))
+            else {
+                continue;
+            };
+            if kit.get("presence") == Some(&Value::Bool(true)) {
+                let shown = kit.get("closing") != Some(&Value::Bool(true));
+                let amount = self.motion.presence(*id, shown, &self.table.tokens);
+                presence.insert(*id, amount);
+            }
+        }
+        self.presence = presence;
         self.motion.frame(window);
         let t = &self.table.tokens;
         div()

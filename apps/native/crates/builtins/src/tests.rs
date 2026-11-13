@@ -3780,6 +3780,67 @@ fn powermove_account_rows_and_actions_reach_the_app_through_settings() {
         assert!(backend.native.platform.is_empty());
     }
 }
+/// Settings › General › Timeline › Hover to Scrub: the app's skimming choice
+/// (View ▸ Skimming), on until turned off, shown with or without a project,
+/// written through the app, and republished when the menu changes it.
+#[test]
+fn hover_to_scrub_is_a_settings_switch_that_follows_and_drives_skimming() {
+    let actor = actor();
+    let identity = pm_surface::host_api::Identity {
+        realm: "settings".into(),
+        generation: 1,
+        project: "synthetic".into(),
+    };
+    let mut backend = data::Backend::new(actor.handle(), identity, "settings", false).unwrap();
+    let skim = |p: &Value| {
+        p["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["id"] == "timeline.skimming")
+            .cloned()
+            .unwrap()
+    };
+    // Never chosen: on, as hovering has always scrubbed.
+    let first = backend.settings_snapshot().unwrap();
+    let row = skim(&first);
+    assert_eq!(row["control"], "switch");
+    assert_eq!(row["section"], "general");
+    assert_eq!(row["label"], "Hover to Scrub");
+    assert_eq!(row["value"], true);
+    assert!(row["binding"].as_str().is_some_and(|b| !b.is_empty()));
+    // Turned off in Settings: the app is told, and the row shows it at once.
+    backend.native.platform.clear();
+    let models::NativeCommand::Value(after) = backend
+        .native_command(
+            "panel.settings",
+            &json!({"revision":first["revision"],"action":{"type":"write","id":"timeline.skimming","value":false}}),
+        )
+        .unwrap()
+    else {
+        panic!("the new publication")
+    };
+    assert_eq!(
+        backend.native.platform,
+        [("command".to_owned(), json!({ "name": "skimmingOff" }))]
+    );
+    assert_eq!(skim(&after)["value"], false);
+    // Only on or off.
+    let latest = backend.settings_snapshot().unwrap();
+    assert!(
+        backend
+            .native_command(
+                "panel.settings",
+                &json!({"revision":latest["revision"],"action":{"type":"write","id":"timeline.skimming","value":"yes"}}),
+            )
+            .is_err()
+    );
+    // View ▸ Skimming turned it back on: a new publication shows it.
+    backend.native.facts["skimming"] = json!(true);
+    let menu = backend.settings_snapshot().unwrap();
+    assert_ne!(menu["revision"], latest["revision"]);
+    assert_eq!(skim(&menu)["value"], true);
+}
 /// A press from an older Settings publication acts only on the account or
 /// provider that publication showed: provider B replacing A, or another
 /// account signing in, refuses a stale Disconnect / Sign Out / Delete.
@@ -4303,4 +4364,128 @@ fn the_shortcuts_page_publishes_the_apps_page_and_hands_its_actions_to_the_app()
             )
             .is_err()
     );
+}
+
+/// Round 7: an imported model's material slots are Properties sections with
+/// the file's own values; an edit becomes a keyframeable `mi.<slot>.<key>`.
+#[test]
+fn properties_list_an_imported_models_parts_with_their_own_values() {
+    let actor = actor();
+    let kernel = actor.handle();
+    let run = |args: Value| {
+        let call = pm_kernel::Call::Transact {
+            label: None,
+            expected_revision: None,
+            body: pm_kernel::WriteBody::Commands(vec![
+                pm_kernel::Scene3dCommand::Apply {
+                    comp: None,
+                    args: data::model(&args).unwrap(),
+                    selection: vec![],
+                    time: 0.,
+                    autokey: false,
+                }
+                .into(),
+            ]),
+        };
+        let ack = kernel
+            .call("synthetic", Request::new(Caller::native(), call))
+            .wait()
+            .unwrap()
+            .unwrap();
+        if let pm_kernel::Reply::Throw(e) = &ack.reply {
+            panic!("{args}: {e}");
+        }
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("Product.gltf");
+    std::fs::write(
+        &file,
+        r#"{"asset":{"version":"2.0"},"materials":[{"name":"Aluminium","pbrMetallicRoughness":{"metallicFactor":1,"roughnessFactor":0.4}},{"name":"Glass"}]}"#,
+    )
+    .unwrap();
+    run(json!({"operation":"add_object","id":"model","object":{"source":{"assetId":"a1"},"useSourceMaterials":true}}));
+    let mut presenter = properties::Properties::default();
+    presenter.originals.insert("a1".into(), file);
+    let publish = |presenter: &mut properties::Properties| {
+        select_layer(&kernel, "model");
+        let mut model = pm_panel_inspector::Inspector::new(
+            kernel.published("synthetic").unwrap(),
+            Default::default(),
+        );
+        presenter.snapshot(&mut model, 0., false).unwrap()
+    };
+    let row = |p: &Value, id: &str| {
+        p["sections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|s| s["rows"].as_array().unwrap())
+            .find(|r| r["id"] == id)
+            .cloned()
+    };
+    let p = publish(&mut presenter);
+    let titles: Vec<_> = p["sections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|s| s["id"].as_str().unwrap().starts_with("3d.part."))
+        .map(|s| s["title"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(titles, ["Aluminium", "Glass"]);
+    let rough = row(&p, "3d.part.0.roughness").expect("the file's roughness");
+    assert_eq!(rough["control"]["axes"][0]["value"], 0.4);
+    assert!(row(&p, "3d.part.1.map.color").is_some(), "a layer can be the part's colour");
+    run(json!({"operation":"set_material_properties","target":"model","materialIndex":0,"patch":{"roughness":0.1}}));
+    let p = publish(&mut presenter);
+    let rough = row(&p, "mi.0.roughness").expect("an override is a channel row");
+    assert_eq!(rough["control"]["axes"][0]["value"], 0.1);
+    assert_eq!(rough["animation"], "static");
+    assert!(row(&p, "3d.part.0.roughness").is_none());
+    // A viewer double-click on the glass part opens and marks its section;
+    // the same request doesn't reopen it after the user closes it.
+    let section = |p: &Value, id: &str| {
+        p["sections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["id"] == id)
+            .cloned()
+            .unwrap()
+    };
+    assert_eq!(section(&p, "3d.part.1")["collapsed"], true);
+    presenter.focus_part(&json!({"layer":"model","slot":1,"seq":1}));
+    let p = publish(&mut presenter);
+    assert_eq!(section(&p, "3d.part.1")["collapsed"], false);
+    assert_eq!(section(&p, "3d.part.1")["focused"], true);
+    assert_eq!(section(&p, "3d.part.0")["focused"], false);
+    presenter
+        .intent(
+            &mut pm_panel_inspector::Inspector::new(
+                kernel.published("synthetic").unwrap(),
+                Default::default(),
+            ),
+            Caller::native(),
+            &json!({"type":"collapse","section":"3d.part.1","collapsed":true}),
+            0.,
+        )
+        .unwrap();
+    presenter.focus_part(&json!({"layer":"model","slot":1,"seq":1}));
+    let p = publish(&mut presenter);
+    assert_eq!(section(&p, "3d.part.1")["collapsed"], true);
+    // Leaving the model leaves its part.
+    kernel
+        .call(
+            "synthetic",
+            Request::new(Caller::native(), pm_kernel::SelectionCall::Clear),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    let mut model = pm_panel_inspector::Inspector::new(
+        kernel.published("synthetic").unwrap(),
+        Default::default(),
+    );
+    presenter.snapshot(&mut model, 0., false).unwrap();
+    let p = publish(&mut presenter);
+    assert_eq!(section(&p, "3d.part.1")["focused"], false);
 }

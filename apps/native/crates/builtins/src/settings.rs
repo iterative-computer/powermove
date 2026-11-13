@@ -105,6 +105,18 @@ impl Backend {
         rows.extend(agent_client_rows(&self.native.facts["agentClients"]));
         rows
     }
+    /// Settings › General › Timeline: hover-to-scrub (View ▸ Skimming), this
+    /// Mac's choice, shown with or without a project. On until turned off.
+    pub(crate) fn timeline_rows(&mut self) -> Vec<Value> {
+        let on = self.native.facts["skimming"].as_bool().unwrap_or(true);
+        let mut row = json!({"id":"timeline.skimming","section":"general","group":"Timeline",
+            "label":"Hover to Scrub","control":"switch","value":on,
+            "detail":"Show the frame under the pointer as it moves over the timeline. The playhead stays put until you click."});
+        if let Ok(fields) = self.fields(&json!(["timeline.skimming"])) {
+            row["binding"] = fields["timeline.skimming"].clone();
+        }
+        vec![row]
+    }
     fn subscription_rows(&self) -> Vec<Value> {
         let Some(accounts) = self.native.agent_link.accounts() else {
             return vec![notification_row()];
@@ -621,6 +633,18 @@ impl Backend {
                 if !client.bytes().all(|b| b.is_ascii_lowercase() || b == b'-') {
                     return Err("Unknown agent app".into());
                 }
+                self.native
+                    .platform
+                    .push(("command".into(), json!({ "name": name })));
+                Ok(NativeCommand::Value(self.settings_snapshot()?))
+            }
+            Some("write") if action["id"] == "timeline.skimming" => {
+                let on = action["value"]
+                    .as_bool()
+                    .ok_or("Hover to Scrub must be on or off")?;
+                // The row shows the choice at once; the app saves it.
+                self.native.facts["skimming"] = json!(on);
+                let name = if on { "skimmingOn" } else { "skimmingOff" };
                 self.native
                     .platform
                     .push(("command".into(), json!({ "name": name })));

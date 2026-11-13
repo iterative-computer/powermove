@@ -281,9 +281,57 @@ Evidence (outside Git): `~/Developer/pm-shots/na-studio3d-ui/round5/` with
 |---|---|
 | Per-surface Emission and Opacity | ✅ the data model and the engine already had `opacity` (percent), `emissionColor` and `emissionIntensity` per surface, and the commands accepted them; Properties now shows Opacity, Emission and Emission Strength on Front, Bevel, Side and Back, plus an Emission Map beside the Color Map (a live layer, group or composition can make a surface glow) |
 
+## Round 6 (Light panel motion, posters, showcase) · 2026-11-13
+
+Evidence (outside Git): `~/Developer/pm-shots/na-studio3d-ui/round6/` and
+`~/Developer/pm-shots/showcase/` (both with `captions.md`). The Mac sat at the
+lock screen the whole round, so nothing could be activated or read through
+accessibility. Items 1–2 are covered by unit tests, and the showcase was
+built and rendered entirely through MCP.
+
+| Item | Result |
+|---|---|
+| Light panel enter/exit (§6) | ✅ springs in (Enter: opacity and a short rise) and out (Exit) while it stays mounted for the exit. Any v4 node can opt in with `pmKit.presence` |
+| Deleting a project deletes its poster | ✅ Move to Trash (Home or an agent) removes the Home poster; Put Back renders a new one at the next save or close. Delete Forever is still unsupported in the kernel |
+| Showcase | ✅ `opus-showcase.mp4`, iPhone 18 Pro, dark studio, macro-to-hero camera move, Production at 1080p, plus 3 stills. The band is avoided by keeping the camera pitched down more than half the field of view (noted in its captions). Sol's far-clip catcher fix (039ef4e22) is merged but wasn't used for this render |
+
+Found while making the showcase (for the engine/MCP lanes): `auto_studio`
+needs loaded geometry, so it can't run headless; `light_highlight` can place
+a light below the floor for a vertical surface seen from above; and
+Production ran at about 13–22 s a frame for this glass-and-titanium phone.
+
+## Round 7 (lights you can place and aim, per-part materials) · 2026-11-13
+
+Evidence (outside Git): `~/Developer/pm-shots/na-studio3d-ui/round7/`
+(`captions.md`, before/after renders of the iPad mini S6 macro). Rendered
+headless through MCP; no shader or render-kernel changes.
+
+### Lighting you can see, place and aim
+
+| Item | Result |
+|---|---|
+| Softbox (light card) and strip lights with size, intensity, colour, softness | ✅ area lights (Softbox) already had width, height, intensity and colour; a strip light is a thin area light. Softness is Size (bigger = softer) |
+| Colour temperature | ✅ Light panel Temperature slider (1800–12000 K) and `temperature` on `light_preset`; stored as the light's colour, read back as the nearest temperature |
+| Visible, selectable, movable in the viewport | ✅ existing Light tool gizmos and handles |
+| Aim at an object or point | ✅ `edit_3d aim_light` (`at`: model ID or `[x,y,z]`); Light panel **Aim At** pop-up lists the imported models |
+| Orbit around the product | ✅ the Light panel's Orbit aim circles the light around its target; Aim At makes the product the target |
+| Presets | ✅ **Presets** pop-up and `edit_3d light_preset`: Rim Strip Left/Right, Top Softbox, Edge Highlight Card, Strip Light, placed for the selected model as the current camera sees it, sized by the model's bounds (unit size until geometry loads) |
+| Visible to camera | ⏭ post-v1: Studio area lights are only seen by secondary rays; showing them to the camera needs shader work |
+
+### Per-part materials on imported models
+
+| Item | Result |
+|---|---|
+| List parts / material slots | ✅ import records `native3dMaterials` (glTF material index and name); `get_3d_scene` returns `materialSlots`; Properties shows one collapsed section per part, read from the original file for older imports |
+| Edit colour, metal, roughness, clearcoat, transmission/IOR, emission, iridescence | ✅ `set_material_properties` with `materialIndex` stores sparse overrides in `sourceMaterialProperties[i]` (`mi.<i>.<key>`, keyframeable, one Undo per edit; `null` puts the file's value back). The engine now applies colour, clearcoat, clearcoat roughness, transmission, IOR and iridescence overrides as well as the earlier ones |
+| Use a layer as the material | ✅ `set_material_map` with `materialIndex` and a live source (`{layerId}`/`{compositionId}`) for colour and emissive; Properties: Color Map per part |
+| Source file untouched | ✅ overrides live in the project only |
+| Native slot adapter | ✅ implemented on the existing per-source-material path (glTF material index), not the separate `slots` shape |
+| Click a part in the viewport to select it | ⏭ post-v1 (needs a part ID from the picker) |
+| OBJ parts | ⏭ post-v1: OBJ meshes carry no source material index; FBX converts to GLB and works |
+
 ## Open items
 
-1. Light panel: its enter/exit motion.
 2. Export: wire Render at 75% Size once the engine takes a 3D render size.
 3. Fog in a studio scene (no terrain) still uses the schema's 10,000-unit
    shape, which goes dark at any density; the landscape migration covers

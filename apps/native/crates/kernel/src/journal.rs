@@ -914,7 +914,7 @@ fn open_segment(
     (&file).write_all(buf.as_bytes())?;
     full_sync(&file)?;
     sync_dir(dir)?;
-    let target = durability.register(&file, &project)?;
+    let target = durability.register(&file, project)?;
     Ok((file, target))
 }
 

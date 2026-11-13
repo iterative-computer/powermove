@@ -1,10 +1,10 @@
 //! Text and captions (plan sections 10 and 12, amendments 10 and 19).
 //! Design notes: `docs/engine/text-render.md`.
 //!
-//! Production text and captions paint exact glyph outlines in device space.
-//! Level 1 keeps its Blink-compatible layout; level 2 keeps its Parley
-//! layout. Both use exact float area coverage, float paint, and working-domain image
-//! filtering. The ordered scene retains only its ink crop. A 2.5D layer
+//! Level 1 text and captions retain their Blink-compatible layout, Canvas
+//! glyph masks and local source pixel grid. Level 2 keeps its Parley layout
+//! and exact device-space coverage. Both retain ordered paint and working-domain
+//! image filtering. The ordered scene retains only its ink crop. A 2.5D layer
 //! instead paints at its plane density and projects through that plane.
 //! The explicit raster API still paints into its requested canvas.
 //!
@@ -819,9 +819,9 @@ impl TextContext {
         };
         let density = js_min(js_min(scale, 8192.0 / raster.w), 8192.0 / raster.h);
         let target = (canvas_px(raster.w, density), canvas_px(raster.h, density));
-        let scene = self.text_scene_level1(scope, layer, time, Affine::scale(density), target)?;
+        let world = Affine::scale(density) * Affine::translate((raster.anchor_x, raster.anchor_y));
         Ok(self
-            .finish(scene)
+            .text_layer_level1_device(scope, layer, time, world, target)?
             .map(|p| Self::quad(p, raster.w, raster.h, raster.anchor_x, raster.anchor_y)))
     }
 
@@ -917,10 +917,11 @@ impl TextContext {
                     if g.opacity.is_nan() || g.opacity <= 0.0 {
                         continue;
                     }
-                    let glyph_m = m
-                        * Affine::translate((-a.x0, -a.y0))
-                        * Affine::translate((g.unit.x, *baseline))
-                        * Affine::new(g.matrix);
+                    let glyph_m = animated_canvas_matrix(
+                        m * Affine::translate((-a.x0, -a.y0)),
+                        (g.unit.x, *baseline),
+                        Affine::new(g.matrix),
+                    );
                     let fill = match &g.color {
                         Some(c) => JsValue::String(c.clone()),
                         None => get(&g.style, "color").clone(),
@@ -1324,9 +1325,54 @@ fn run_refs<'a>(
         .collect()
 }
 
+/// `rasterAnimatedText` calls Canvas `setTransform`, `translate`, then
+/// `transform`. Blink clamps each API's arguments to float and SkCanvas
+/// concatenates float matrices. Keeping the whole chain in f64 until glyph
+/// snapping can put a half-pixel baseline on the other side of its pixel.
+fn animated_canvas_matrix(canvas: Affine, origin: (f64, f64), pose: Affine) -> Affine {
+    fn scalar(v: f64) -> f32 {
+        v.clamp(-f64::from(f32::MAX), f64::from(f32::MAX)) as f32
+    }
+    fn concat(lhs: Affine, rhs: Affine) -> Affine {
+        let [a, b, c, d, e, f] = lhs.as_coeffs().map(scalar);
+        let [g, h, i, j, k, l] = rhs.as_coeffs().map(scalar);
+        Affine::new(
+            [
+                a * g + c * h,
+                b * g + d * h,
+                a * i + c * j,
+                b * i + d * j,
+                (a * k + c * l) + e,
+                (b * k + d * l) + f,
+            ]
+            .map(f64::from),
+        )
+    }
+    let canvas = Affine::new(canvas.as_coeffs().map(|v| f64::from(scalar(v))));
+    concat(concat(canvas, Affine::translate(origin)), pose)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn animated_canvas_calls_keep_float_rounding_before_glyph_snapping() {
+        // Synthetic 42px text with a fractional animator displacement.
+        // Canvas's float translate/concat produces the float immediately
+        // below 34.5; collapsing the calls in double produces exactly 34.5.
+        // Those snap to different rows even though the layout is identical.
+        let baseline = 42.0 * 0.82;
+        let shift = 1.0 / 137.0;
+        let top = baseline - 42.0 + shift - 4.0;
+        let canvas = Affine::new([0.75, 0.0, 0.0, 0.75, 0.0, -top * 0.75]);
+        let pose = Affine::translate((0.0, shift));
+        let actual = animated_canvas_matrix(canvas, (0.0, baseline), pose);
+        let double = canvas * Affine::translate((0.0, baseline)) * pose;
+        assert_eq!(actual.as_coeffs()[5], 34.499_996_185_302_734);
+        assert_eq!((actual.as_coeffs()[5] + 0.5).floor(), 34.0);
+        assert_eq!((double.as_coeffs()[5] + 0.5).floor(), 35.0);
+    }
 
     /// The faces a document's text lays out with are asked for once per
     /// edition, in one round trip: every family of each text layer's canvas

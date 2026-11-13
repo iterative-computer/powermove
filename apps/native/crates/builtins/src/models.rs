@@ -231,6 +231,12 @@ impl Backend {
         let time = self.time();
         let playing = self.native.facts["playing"].as_bool().unwrap_or(false);
         self.native.properties.failures = self.native.facts["layerFailures"].clone();
+        self.native
+            .properties
+            .focus_part(&self.native.facts["focusPart"]);
+        if self.native.properties.originals != self.native.originals {
+            self.native.properties.originals = self.native.originals.clone();
+        }
         self.native.properties.snapshot(
             self.model.as_mut().ok_or("No open project")?,
             time,
@@ -744,8 +750,10 @@ impl Backend {
             publication["memory"] =
                 json!({"enabled":pm_model::memory::enabled(&root),"entries":entries});
         }
-        // Settings › Shortcuts shows with or without a project.
+        // Settings › Shortcuts and General › Timeline show with or without a project.
+        let timeline_rows = self.timeline_rows();
         if let Some(rows) = publication["rows"].as_array_mut() {
+            rows.extend(timeline_rows);
             rows.extend(shortcut_rows);
         }
         // Targets stay here: recorded for this revision, not published.

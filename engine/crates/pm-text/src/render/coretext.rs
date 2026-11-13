@@ -39,6 +39,7 @@ enum Source {
     /// A caller's buffer by address (the reference renderer: the caller
     /// keeps its fonts alive and unchanged while this renderer lives).
     Address(usize),
+    Identity(u64),
 }
 
 /// Font identity: source, face index, size bits, variation coordinates.
@@ -58,6 +59,10 @@ impl CoreTextReference {
 
     pub(crate) fn font(&mut self, run: &RefRun<'_>) -> Option<CFRetained<CTFont>> {
         self.font_from(Source::Address(run.data.as_ptr() as usize), run)
+    }
+
+    pub(crate) fn font_of(&mut self, id: u64, run: &RefRun<'_>) -> Option<CFRetained<CTFont>> {
+        self.font_from(Source::Identity(id), run)
     }
 
     fn font_from(&mut self, id: Source, run: &RefRun<'_>) -> Option<CFRetained<CTFont>> {

@@ -43,6 +43,9 @@ pub fn encode_disk_value(value: &Value, format: DiskFormat) -> io::Result<Vec<u8
 /// Same sibling temp / exclusive create / write / fsync / rename as storage.ts;
 /// also sync the directory so a successful barrier survives a power failure.
 pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    atomic_write_with(path, |file| file.write_all(bytes))
+}
+fn atomic_write_with(path: &Path, write: impl FnOnce(&mut File) -> io::Result<()>) -> io::Result<()> {
     let temp = path.with_file_name(format!(
         "{}.tmp-{}",
         path.file_name().unwrap().to_string_lossy(),
@@ -53,7 +56,7 @@ pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
             .write(true)
             .create_new(true)
             .open(&temp)?;
-        f.write_all(bytes)?;
+        write(&mut f)?;
         f.sync_all()?;
         drop(f);
         fs::rename(&temp, path)?;
@@ -511,4 +514,27 @@ fn replay_bundle(dir: &Path, format: DiskFormat) -> io::Result<()> {
     }
     fs::remove_file(path)?;
     File::open(dir)?.sync_all()
+}
+
+#[cfg(test)]
+mod atomic_lock_tests {
+    use super::*;
+
+    #[test]
+    fn enospc_during_lock_record_write_preserves_the_previous_record() {
+        let root = std::env::temp_dir().join(crate::new_id("atomic-lock"));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("library.lock.owner");
+        let previous = br#"{"pid":0,"heartbeat":1}"#;
+        atomic_write(&path, previous).unwrap();
+        let error = atomic_write_with(&path, |file| {
+            file.write_all(br#"{"pid":"#)?;
+            Err(io::Error::from_raw_os_error(libc::ENOSPC))
+        }).unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(libc::ENOSPC));
+        assert_eq!(fs::read(&path).unwrap(), previous);
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 1, "failed temp is removed");
+        atomic_write(&path, br#"{"pid":0,"heartbeat":2}"#).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
 }

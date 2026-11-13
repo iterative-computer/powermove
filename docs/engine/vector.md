@@ -11,16 +11,16 @@ pixels.
 - Authored intent is exact: outlines, joins, caps, miter limits, fill rules, corner radii,
   smoothing, feather amounts, colours (Canvas2D colour-string semantics, invalid strings
   keep the default style).
-- Shapes and paths are drawn at output resolution with exact or analytic area coverage,
-  painted in float at the project's working precision. Their cache has no quantized
-  density or vector-content resample.
+- Native level 2 shapes and paths use output-space analytic area coverage,
+  painted in float at the project's working precision. Legacy level 1 retains
+  its authored source pixel grid and texture resampling (see below).
 - The preview and the export draw the same pixels.
 
 ## Shapes and editable paths
 
 A shape layer's content becomes a `CoverageScene` (`pm_vector::render::scene`): ordered fill
-and stroke items in device pixels, each with one solid paint, under the layer's world
-transform (with the size anchor). Strokes are expanded in local space by kurbo (Canvas2D
+and stroke items, each with one solid paint. Level 2 applies the world transform
+(with the size anchor) before coverage; level 1 paints a local source texture. Strokes are expanded in local space by kurbo (Canvas2D
 strokes under the current transform).
 
 - **Outline.** Each item's outline is flattened within the device-space tolerance and its fill rule resolved
@@ -65,8 +65,8 @@ plane; interior pixels take 1 at once. No texture, no cache.
 ## Text ownership
 
 Text shares the exact area coverage (`pm_render::coverage`) with shapes, masks and
-SVG; its raster and blur are described in [text-render.md](text-render.md). The
-Canvas2D/Skia emulation (`pm-vector` `canvas2d`) is gone.
+SVG; its raster and blur are described in [text-render.md](text-render.md).
+Legacy text additionally retains the macOS Canvas2D glyph mask preblend.
 
 ## Gates
 
@@ -201,3 +201,17 @@ against f64, and proves the window's RGBA8 endpoint is the same frame after roun
 Each SVG image resolves before layer compositing; paint, filter, clip and mask within
 one image share their subpixel grid. CLI and job-engine tests require an SVG project
 to render with no Chromium helper or editor window attached.
+
+## Legacy source sampling
+
+Compatibility level 1 shapes and editable paths retain the Canvas source
+raster: quarter-step density, transparent padding, ceil-rounded dimensions,
+and the original anchor. Coverage is painted on that local grid and the
+compositor samples its retained ink crop through the layer transform.
+The crop retains the transparent texels read by bilinear filtering, so
+subpixel rules preserve the original canvas footprint and remain visible.
+This also applies to 3D planes: the plane projects the same local source
+with bilinear sampling. Enabling 3D without perspective does not change
+its raster grid or edge coverage.
+Level 2 retains device-space analytic coverage. A fractional output move
+reuses the level 1 source, while level 2 recomputes coverage at that position.

@@ -20,8 +20,8 @@ import {
 
 /** A projection of pm-promedia + engine facts, never a writable project mirror.
  * The native KernelData adapter must implement this channel; see README API gaps. */
-export interface Options {
-  [key: string]: Json;
+export type Options = {
+  [key: string]: Json | undefined;
   format: Format;
   scale: number | "custom";
   width: number;
@@ -56,7 +56,7 @@ export interface Options {
   /** Sound coding of a QuickTime export. Absent from older options: read as
    * 24-bit PCM. */
   audioCoding: AudioCoding;
-}
+};
 export type StudioQuality =
   | "composition"
   | "draft"

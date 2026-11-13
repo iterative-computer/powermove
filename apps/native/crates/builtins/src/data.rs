@@ -915,6 +915,8 @@ fn media_stamp(facts: &Value) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hash = std::collections::hash_map::DefaultHasher::new();
     facts["mediaSettings"].to_string().hash(&mut hash);
+    // Settings › General › Timeline › Hover to Scrub follows View ▸ Skimming.
+    facts["skimming"].as_bool().hash(&mut hash);
     // Settings › Shortcuts: its page is rebuilt with a new stamp.
     facts["shortcuts"]["stamp"].as_u64().hash(&mut hash);
     hash.finish()

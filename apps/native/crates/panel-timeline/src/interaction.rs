@@ -2010,7 +2010,7 @@ pub fn menu_label(id: &str) -> &'static str {
         "graph.speed" => "Speed Graph",
         "graph.fit" => "Fit Selected Curves",
         "graph.merge" => "Merge Selected Curves",
-        "graph.combined" => "Show Dope Sheet",
+        "graph.combined" => "Show Layer Bars with Graph",
         _ => "",
     }
 }

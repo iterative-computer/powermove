@@ -1042,10 +1042,15 @@ pub fn run_child() -> Result<()> {
                 ),
             }
         }
-        if let Some(failure) = failures.iter().find(|failure| {
-            matches!(&failure.scope, pm_protocol::error::ErrorScope::Definition { definition }
-                if request.document.contains(&format!("\"{}\"", definition.as_str())))
-        }) {
+        // A viewer still already isolates failing layers below. Definition
+        // validation must not reject the whole project before that isolation
+        // can draw its healthy layers. Deliveries continue to refuse it.
+        if !request.preview
+            && let Some(failure) = failures.iter().find(|failure| {
+                matches!(&failure.scope, pm_protocol::error::ErrorScope::Definition { definition }
+                    if request.document.contains(&format!("\"{}\"", definition.as_str())))
+            })
+        {
             anyhow::bail!("{}", failure.message);
         }
         #[cfg(feature = "kernel")]

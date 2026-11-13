@@ -158,6 +158,9 @@ impl Controller {
                 let id = command["extensionArchive.".len()..].to_owned();
                 self.archive_extension(id, cx)
             }
+            // Settings › General › Timeline › Hover to Scrub.
+            "skimmingOn" => self.set_skimming(true, cx),
+            "skimmingOff" => self.set_skimming(false, cx),
             "cloudRememberOn" => crate::cloud::set_remember(true, cx),
             "cloudRememberOff" => crate::cloud::set_remember(false, cx),
             "cloudDeleteAccount" => {

@@ -436,7 +436,7 @@ fn benchmark_fixture_frames_draw_the_unbatched_pixels() {
     alone.set_vector_batching(false);
     for frame in [0i64, 37, 150] {
         let ticks = Ticks::new(frame * (TICKS_PER_SECOND / 30)).unwrap();
-        let mut read = |r: &mut Renderer| {
+        let read = |r: &mut Renderer| {
             let before = pm_perf::snapshot();
             let mut q = RenderRequest::sized(Size::new(1920, 1080), Precision::Unorm8);
             q.output_kind = OutputKind::Final;

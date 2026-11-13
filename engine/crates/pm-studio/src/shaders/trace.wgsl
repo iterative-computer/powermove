@@ -495,12 +495,14 @@ fn medium_direct(p:vec3f,rd:vec3f,g:f32)->vec3f {
   return e;
 }
 fn medium_direct_live(p:vec3f,rd:vec3f,g:f32)->vec3f {
-  // Keep the inexpensive two-direction ambient approximation, but external
-  // light must traverse the same finite atmosphere as practical lights.
-  // Omitting that extinction lit the interior of an opaque 10 km fog sphere.
+  // Legacy hemisphere ambient approximates the local diffuse radiation
+  // field, including unresolved multiple scattering. Attenuating that field
+  // a second time turns a conservative white volume black in Live. Actual
+  // HDRI/sky illumination and practical lights retain their external paths.
   let up=vec3f(0.,1.,0.);
-  var e=(environment(rd)*medium_transmittance(p,rd,BIG)
-    +environment(up)*medium_transmittance(p,up,BIG))*0.5;
+  var e=(environment(rd)+environment(up))*0.5;
+  if(map_count()>0u){e=(environment(rd)*medium_transmittance(p,rd,BIG)
+    +environment(up)*medium_transmittance(p,up,BIG))*0.5;}
   if(P.counts.x>0u){let li=choose_light(p);let l=sample_light(light_at(li),p);
     if(l.pdf>0.){e+=l.radiance*transmittance(p,l.dir,l.dist)*phase_hg(dot(rd,l.dir),g)/(l.pdf*light_selection_pdf(li,p));}}
   return e;
@@ -1453,6 +1455,13 @@ fn surface(ro: vec3f, rd: vec3f, h: Hit) -> Surface {
   }
   if (m.layers.w > 0.0) { n = droplets(n, uv, m.layers.w);coat_normal=droplets(coat_normal,uv,m.layers.w); }
   if(imported.physical3.w<0.5){coat_normal=n;}
+  // Interpolated or mapped normals may face behind this ray on an otherwise
+  // visible polygon (notably coarse terrain ridges). Such a shading frame
+  // makes every reflective BSDF return zero. Fall back to the real face normal
+  // only for that invalid frame; retain authored smooth/bump normals elsewhere.
+  let facing = select(-1.,1.,dot(ng,-rd)>=0.);
+  if(dot(n,-rd)*facing<=0.){n=ng;}
+  if(dot(coat_normal,-rd)*facing<=0.){coat_normal=ng;}
   m.spec.x = max(m.spec.x, 0.002);
   let volume=select(vec4f(1.,1.,1.,0.),imported.volume,imported.physical3.w>0.5 && imported.physical.x>0.);
   if(imported.physical3.w<0.5){imported.specular_color.w=m.spec.x;}
@@ -1623,11 +1632,13 @@ fn path(px: vec2f)->Sample {
     if(any(volume_absorption>vec3f(0.))){tp*=exp(-volume_absorption*min(max(segment,0.),1e6));}
     if(medium_majorant()>0.){
       if(P.opts.x!=0u){
-        let end=tracking_segment(ro,rd,segment).y;let dt=end/2.;
-        if(primary){
+        let occupied=tracking_segment(ro,rd,segment);let end=occupied.y;
+        let begin=occupied.x;let dt=max(0.,end-begin)/2.;
+        if(primary && dt>0.){
           for(var step=0u;step<2u;step++){
-            let point=ro+rd*((f32(step)+rnd())*dt);let med=medium_at(point);
-            let tr=exp(-live_optical_depth(ro+rd*(f32(step)*dt),rd,dt));
+            let start=begin+f32(step)*dt;
+            let point=ro+rd*(start+rnd()*dt);let med=medium_at(point);
+            let tr=exp(-live_optical_depth(ro+rd*start,rd,dt));
             s.radiance+=limit_indirect(tp*med.albedo*(1.-tr)*medium_direct_live(point,rd,med.g),b);tp*=tr;
           }
         }else{tp*=exp(-live_optical_depth(ro,rd,end));}
@@ -1650,7 +1661,9 @@ fn path(px: vec2f)->Sample {
       if(last_pdf>0.){let pl=light_pdf(light,ro,rd,light_distance)*light_selection_pdf(seen_light,ro);mis=last_pdf*last_pdf/(last_pdf*last_pdf+pl*pl);}
       s.radiance+=limit_indirect(tp*light_emit(light,ro+rd*light_distance,rd)*mis,b);return s;
     }
-    if (h.tri < 0 && tf >= BIG) {
+    // A clipped miss carries the camera's finite far distance. The analytic
+    // floor may exist beyond it; that is still a miss, never surface(-1).
+    if (h.tri < 0 && tf >= h.t) {
       if (primary) {
         if(map_count()>0u && world_row(1u).z>0.5){s.radiance+=tp*(environment(rd)+sun_seen(rd));}
         else{let transmission=clamp(max(tp.x,max(tp.y,tp.z)),0.,1.);s.bg = P.backdrop.xyz*transmission;s.void_hit = transmission;}
@@ -1706,6 +1719,9 @@ fn path(px: vec2f)->Sample {
       s.object=hit_object(h)+1u;s.normal=n;
       // A quiet first batch cannot rule out rare light paths through glass.
       specular_observation=select(0.,16.,m.spec.y>.5 && m.spec.z<.05);
+      // Finite matte receivers behind glass need enough independent shadow
+      // observations. This does not change analytic catchers or MC policy.
+      if(photons_on && (u32(m.policy.y)&8u)==0u && m.base.w<.5 && m.spec.w<.5 && m.spec.y<.5){specular_observation=max(specular_observation,24.);}
       if(m.base.w>.5 && m.spec.x<.1){specular_observation=32.;}
       if(m.spec.w*(1.-m.base.w)>.5 && m.spec.x<.2 && !thin_leaf(m)){specular_observation=128.;}
       s.depth=select(distance(sf.p,P.cam_pos.xyz),dot(sf.p-P.cam_pos.xyz,P.cam_fwd.xyz),(P.opts.w&1u)!=0u);

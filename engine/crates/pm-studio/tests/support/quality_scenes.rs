@@ -37,6 +37,53 @@ fn lathe(profile: &[[f32; 2]], segments: usize) -> Mesh {
     }
     mesh
 }
+// A smooth manufactured body needs a curved meridian, not a few conical
+// frusta with interpolated normals. Monotone Hermite tangents preserve every
+// authored control point and keep flat caps flat (including their normals).
+fn smooth_lathe(profile: &[[f32; 2]], segments: usize) -> Mesh {
+    let tangent = |i: usize, axis: usize| {
+        if i == 0 { return profile[1][axis] - profile[0][axis]; }
+        if i + 1 == profile.len() { return profile[i][axis] - profile[i-1][axis]; }
+        let a=profile[i][axis]-profile[i-1][axis];
+        let b=profile[i+1][axis]-profile[i][axis];
+        if a*b<=0. {0.} else {2.*a*b/(a+b)}
+    };
+    let steps=16;
+    let mut rows=vec![];
+    for i in 0..profile.len()-1 {
+        for step in 0..steps {
+            let t=step as f32/steps as f32;let t2=t*t;let t3=t2*t;
+            let mut p=[0.;2];let mut d=[0.;2];
+            for axis in 0..2 {
+                let a=profile[i][axis];let b=profile[i+1][axis];
+                let ma=tangent(i,axis);let mb=tangent(i+1,axis);
+                p[axis]=(2.*t3-3.*t2+1.)*a+(t3-2.*t2+t)*ma+(-2.*t3+3.*t2)*b+(t3-t2)*mb;
+                d[axis]=(6.*t2-6.*t)*a+(3.*t2-4.*t+1.)*ma+(-6.*t2+6.*t)*b+(3.*t2-2.*t)*mb;
+            }
+            rows.push((p,d));
+        }
+    }
+    let last=profile.len()-1;
+    rows.push((profile[last],[tangent(last,0),tangent(last,1)]));
+    let mut mesh=Mesh::default();
+    for (row,(p,d)) in rows.iter().enumerate() {
+        for i in 0..=segments {
+            let a=std::f32::consts::TAU*i as f32/segments as f32;
+            mesh.positions.push(v3(p[0]*a.cos(),p[1],p[0]*a.sin()));
+            mesh.normals.push(v3(d[1]*a.cos(),-d[0],d[1]*a.sin()).normalize());
+            mesh.uvs.push([i as f32/segments as f32,row as f32/(rows.len()-1) as f32]);
+        }
+    }
+    for row in 0..rows.len()-1 {for i in 0..segments {
+        let a=(row*(segments+1)+i) as u32;let b=a+segments as u32+1;
+        for tri in [[a,b,a+1],[a+1,b,b+1]] {
+            let p=tri.map(|i|mesh.positions[i as usize]);
+            let cross=(p[1]-p[0]).cross(p[2]-p[0]);
+            if cross.dot(cross)>1e-18 {mesh.indices.push(tri);}
+        }
+    }}
+    mesh
+}
 fn tube(curve: impl Fn(f32) -> Vec3, radius: impl Fn(f32) -> f32) -> Mesh {
     let mut mesh = Mesh::default();
     let (rings, sides) = (48, 16);
@@ -91,7 +138,7 @@ pub fn product(name: &str) -> Scene {
                 .materials
                 .push(Material::dielectric(v3(0.32, 0.055, 0.018), 0.7));
             vec![
-                lathe(
+                smooth_lathe(
                     &[
                         [0., -0.85],
                         [0.4, -0.85],

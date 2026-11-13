@@ -205,6 +205,8 @@ impl Pass {
                     service.blas_builds(),
                     rendered.timings.pipeline,
                 );
+                #[cfg(feature="oidn")]
+                eprintln!("STUDIO_OIDN_TIMING ticks={} filter={:?} init_ms={:.3} reused={}",request.ticks,rendered.timings.oidn,rendered.timings.oidn_init_ms,rendered.timings.oidn_reused);
             }
             self.cached = Some((tier, rendered));
             self.traces += 1;

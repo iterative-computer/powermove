@@ -104,6 +104,9 @@ pub struct Controller {
     pub guides: bool,
     /// What the viewer shows of the picture (display only).
     pub channels: pm_engine_service::Channels,
+    /// The imported-model part a viewer double-click focused, `(layer,
+    /// material slot, request number)`; Properties reveals that slot.
+    pub part_focus: Option<(String, u64, u64)>,
     /// View ▸ Show Rulers and Show Grid.
     pub rulers: bool,
     pub grid: bool,
@@ -732,6 +735,7 @@ impl Controller {
             safe_areas: false,
             guides: false,
             channels: Default::default(),
+            part_focus: None,
             rulers: false,
             grid: false,
             skimming: Default::default(),

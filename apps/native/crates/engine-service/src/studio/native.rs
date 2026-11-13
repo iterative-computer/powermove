@@ -87,6 +87,10 @@ impl DocumentSource {
     }
     pub fn new(document: Arc<pm_model::Document>, media: pm_export::render::MediaPaths) -> Self {
         static NEXT_CAPTURE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        // This context supplies extrusion geometry. Canvas2D's smoothed
+        // bitmap masks cannot provide the glyph contours it needs.
+        let mut text = pm_render::text::TextContext::default();
+        text.set_weight(pm_render::text::TextWeight::Exact);
         Self {
             refine_observer: None,
             capture_id: NEXT_CAPTURE.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
@@ -96,7 +100,7 @@ impl DocumentSource {
             capture_bindings: Mutex::default(),
             capture_plans: Mutex::default(),
             material_references: Mutex::default(),
-            text: Mutex::default(),
+            text: Mutex::new(text),
             extruded: Mutex::default(),
             snapshot: pm_kernel::Snapshot {
                 doc_id: 0,

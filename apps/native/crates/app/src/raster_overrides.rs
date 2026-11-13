@@ -95,8 +95,10 @@ impl OverrideWindows {
     pub(crate) fn painters(&self) -> Painters {
         self.1
             .get_or_init(|| {
-                let fonts = pm_text::host::FontBroker::new();
-                let render = pm_render::text::host::RenderFonts::new(fonts.clone());
+                let render = crate::text_host::render_fonts().unwrap_or_else(|| {
+                    pm_render::text::host::RenderFonts::new(pm_text::host::FontBroker::new())
+                });
+                let fonts = render.broker.clone();
                 Painters {
                     layers: pm_engine_service::compat::LayerRasters::start(Some(render)).ok(),
                     fonts,
