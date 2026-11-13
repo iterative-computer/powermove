@@ -735,10 +735,24 @@ pub(crate) fn owner<'d>(
     time: f64,
     scale: (f64, f64),
 ) -> JsResult<Result<Owner, Feature>> {
-    let Some(bounds) = scope.size_bounds(layer, time)? else {
-        return Ok(Err(Feature::Definition(
-            "effect owner bounds unavailable".into(),
-        )));
+    let bounds = match scope.size_bounds(layer, time)? {
+        Some(bounds) => bounds,
+        // An adjustment layer has no content of its own: its effects work on
+        // the composition it covers, so that is the rectangle they read.
+        None if node::is_str(node::member(Some(layer), "type"), "adjustment") => {
+            let (w, h) = scope.comp_size();
+            pm_eval::space3d::Rect {
+                x0: 0.,
+                y0: 0.,
+                x1: w,
+                y1: h,
+            }
+        }
+        None => {
+            return Ok(Err(Feature::Definition(
+                "effect owner bounds unavailable".into(),
+            )));
+        }
     };
     let offset = scope.size_anchor_offset(layer, time)?;
     let world = scope.world_matrix(layer, time)?;

@@ -230,3 +230,40 @@ fn colour_effects_grade_the_straight_colour_of_a_transparent_pixel() {
         }
     }
 }
+
+/// A grade belongs on an adjustment layer. An effect that reads its layer's
+/// rectangle (Levels does) sees the composition there, and gives what it
+/// gives on the layer below.
+#[test]
+fn an_effect_that_reads_its_layers_rectangle_grades_on_an_adjustment_layer() {
+    let mut renderer = Renderer::headless().unwrap();
+    let colour = [0.6, 0.3, 0.15, 1.0];
+    for (id, overrides) in [
+        (
+            "levels",
+            json!({"gamma":1.25,"outBlack":0.04,"outWhite":0.93}),
+        ),
+        ("levelsIndividual", json!({"redGamma":1.3})),
+        ("invert", json!({})),
+    ] {
+        let direct = graded(id, None, overrides.clone(), colour);
+        let expected = pixel(&mut renderer, &direct);
+        let mut over = direct.clone();
+        let fx = over["layers"][0]["fx"].take();
+        over["layers"][0]["fx"] = json!([]);
+        let mut adjustment = layer("grade", "adjustment", json!({}), 0., 0., 1.);
+        adjustment["fx"] = fx;
+        over["layers"].as_array_mut().unwrap().insert(0, adjustment);
+        let out = pixel(&mut renderer, &over);
+        for c in 0..4 {
+            assert!(
+                (out[c] - expected[c]).abs() < 1e-6,
+                "{id} on an adjustment layer: {out:?}, on the layer {expected:?}"
+            );
+        }
+        assert!(
+            (0..3).any(|c| (out[c] - colour[c]).abs() > 1e-3),
+            "{id}: the grade changes the colour"
+        );
+    }
+}
