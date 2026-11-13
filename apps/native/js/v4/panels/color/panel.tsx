@@ -4,6 +4,7 @@ import type { SurfaceEvent } from "../../src/protocol";
 import { ColorModel, type Intent, type ParameterRow } from "./model";
 import {
   CURVES,
+  CURVE_CHANNELS,
   LOAD_LUT,
   LUT,
   PANEL_ID,
@@ -136,7 +137,34 @@ export function ColorPanel({ controller: c, command }: ColorProps) {
               title="Curves"
               send={send}
               editable={editable}
-              action={add(CURVES, "Add Curve")}
+              action={
+                <SectionAction
+                  id={`${PANEL_ID}:add:${CURVES}`}
+                  label="Add Curve"
+                  short="Add"
+                  symbol="plus"
+                  disabled={!editable}
+                  onActivate={() => {
+                    // A curve is made on the channel chosen, in one Undo step.
+                    void c.platform
+                      .contextMenu(
+                        CURVE_CHANNELS.map((label, v) => ({
+                          id: String(v),
+                          label: `${label} Curve`,
+                        })),
+                      )
+                      .then((choice) => {
+                        if (choice !== null)
+                          send({
+                            type: "add",
+                            definition: CURVES,
+                            parameters: { channel: Number(choice) },
+                          });
+                      })
+                      .catch((error) => c.platform.report(error));
+                  }}
+                />
+              }
             >
               {curves.map((g) => (
                 <Tool
