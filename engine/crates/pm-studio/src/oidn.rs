@@ -7,7 +7,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 type Device = *mut c_void;
 type Filter = *mut c_void;
-const DEVICE_TYPE_DEFAULT: i32 = 0;
+// This binding shares ordinary host Vec pointers. OIDN 2.5 can select Metal
+// as its default device, which requires OIDN-owned/imported device buffers.
+const DEVICE_TYPE_CPU: i32 = 1;
 const FORMAT_FLOAT3: i32 = 3;
 const QUALITY_HIGH: i32 = 6;
 
@@ -16,6 +18,8 @@ unsafe extern "C" {
     fn oidnCommitDevice(device: Device);
     fn oidnReleaseDevice(device: Device);
     fn oidnGetDeviceError(device: Device, message: *mut *const c_char) -> i32;
+    #[cfg(test)]
+    fn oidnGetDeviceInt(device: Device, name: *const c_char) -> i32;
     fn oidnNewFilter(device: Device, kind: *const c_char) -> Filter;
     fn oidnSetSharedFilterImage(
         filter: Filter,
@@ -86,7 +90,7 @@ fn name(s: &str) -> CString {
 
 impl Denoiser {
     pub fn new() -> Result<Denoiser, String> {
-        let device = unsafe { oidnNewDevice(DEVICE_TYPE_DEFAULT) };
+        let device = unsafe { oidnNewDevice(DEVICE_TYPE_CPU) };
         if device.is_null() {
             return Err("Open Image Denoise has no device".into());
         }
@@ -371,6 +375,14 @@ impl Drop for Denoiser {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_pointer_binding_explicitly_uses_a_cpu_device() {
+        // Also run with OIDN_DEFAULT_DEVICE=metal against a Metal-enabled
+        // install: a host Vec is never a legal Metal device allocation.
+        let denoiser=Denoiser::new().unwrap();
+        assert_eq!(unsafe{oidnGetDeviceInt(denoiser.device,name("type").as_ptr())},1);
+    }
 
     #[test]
     fn half_resolution_guides_keep_full_size_beauty_and_survive_rebinding() {
