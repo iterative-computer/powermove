@@ -64,15 +64,6 @@ export function parameter(
   return g.parameters.find((r) => r.parameter.key === key);
 }
 
-/** Color Curves' rows that show: its channel, point count, and the points in use. */
-export function curveRows(g: GradeEffect): ParameterRow[] {
-  const count = Number(parameter(g, "count")?.parameter.value ?? 2);
-  return g.parameters.filter((r) => {
-    const m = /^[xy](\d+)$/.exec(r.parameter.key ?? "");
-    return !m || Number(m[1]) < count;
-  });
-}
-
 /** The four wheels, in the order a colourist reads them: each pushes red,
  * green and blue together around its neutral value (gain is a multiplier,
  * so neutral at 1), within its channels' limits. */

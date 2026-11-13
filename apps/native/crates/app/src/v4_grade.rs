@@ -203,6 +203,9 @@ impl SurfaceView {
                         let mut c = original.clone();
                         c.points.push((x.clamp(0., 1.), y.clamp(0., 1.)));
                         let i = c.points.len() - 1;
+                        // Never on another point's input (the effect would
+                        // keep only the one written last).
+                        c.points[i].0 = place(&c, i, x);
                         (c, i, true)
                     }
                     None => return,
@@ -315,29 +318,7 @@ impl SurfaceView {
                     let pressed = graph.to_value(*at);
                     let x = from.0 + (here.0 - pressed.0) * fine;
                     let y = from.1 + (here.1 - pressed.1) * fine;
-                    // A point keeps its place among its neighbours.
-                    let mine = original.points[*point].0;
-                    let others = original
-                        .points
-                        .iter()
-                        .enumerate()
-                        .filter(|(i, _)| i != point)
-                        .map(|(_, p)| p.0);
-                    let lo = others.clone().filter(|o| *o <= mine).fold(0f64, f64::max);
-                    let hi = others.filter(|o| *o > mine).fold(1f64, f64::min);
-                    let gap = 0.002;
-                    let lo = if original.points.iter().any(|p| p.0 < mine) {
-                        lo + gap
-                    } else {
-                        0.
-                    };
-                    let hi = if original.points.iter().any(|p| p.0 > mine) {
-                        hi - gap
-                    } else {
-                        1.
-                    };
-                    next.points[*point] =
-                        (precise(x.clamp(lo, hi.max(lo))), precise(y.clamp(0., 1.)));
+                    next.points[*point] = (place(original, *point, x), precise(y.clamp(0., 1.)));
                 }
                 *live = next;
                 json!(live.values(rest))
@@ -354,9 +335,67 @@ fn precise(v: f64) -> f64 {
     (v * 1000.).round() / 1000.
 }
 
+/// The least distance between two points' inputs the editor leaves: the
+/// effect reads inputs within 1e-6 as one point, and values keep three places.
+const ROOM: f64 = 0.002;
+
+/// Where point `i` of `curve` may stand on the input axis, nearest `x`:
+/// between its neighbours in input order (ties by index, as the effect
+/// orders them), at least `ROOM` from each, within 0 to 1. With no room
+/// between them it keeps its input.
+fn place(curve: &Curve, i: usize, x: f64) -> f64 {
+    let mut order: Vec<usize> = (0..curve.points.len()).collect();
+    order.sort_by(|a, b| {
+        curve.points[*a]
+            .0
+            .total_cmp(&curve.points[*b].0)
+            .then(a.cmp(b))
+    });
+    let at = order.iter().position(|k| *k == i).unwrap_or(0);
+    let lo = at
+        .checked_sub(1)
+        .map_or(0., |k| curve.points[order[k]].0 + ROOM);
+    let hi = order.get(at + 1).map_or(1., |k| curve.points[*k].0 - ROOM);
+    if hi < lo {
+        return curve.points[i].0;
+    }
+    precise(x.clamp(lo.max(0.), hi.min(1.)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// No drag leaves two points on one input: a point stops short of its
+    /// neighbours, the ends stay within 0 to 1, and an added point never
+    /// lands on an existing input.
+    #[::core::prelude::v1::test]
+    fn a_point_keeps_its_own_input() {
+        let curve = Curve {
+            points: vec![(0., 0.), (0.5, 0.6), (1., 1.)],
+        };
+        assert_eq!(place(&curve, 1, 0.9999), 1. - ROOM);
+        assert_eq!(place(&curve, 1, -3.), ROOM);
+        assert_eq!(place(&curve, 0, 0.7), 0.5 - ROOM);
+        assert_eq!(place(&curve, 0, -1.), 0.);
+        assert_eq!(place(&curve, 2, 2.), 1.);
+        assert_eq!(place(&curve, 2, 0.1), 0.5 + ROOM);
+        // A point added on an existing input moves off it.
+        let mut added = curve.clone();
+        added.points.push((0.5, 0.2));
+        let x = place(&added, 3, 0.5);
+        assert!((x - 0.5).abs() >= ROOM - 1e-12, "{x}");
+        // Whatever a drag asks, every input stays apart.
+        for target in [-1., 0., 0.25, 0.5, 0.75, 1., 2.] {
+            for i in 0..3 {
+                let mut c = curve.clone();
+                c.points[i].0 = place(&curve, i, target);
+                let mut xs: Vec<f64> = c.points.iter().map(|p| p.0).collect();
+                xs.sort_by(f64::total_cmp);
+                assert!(xs.windows(2).all(|w| w[1] - w[0] > 1e-6), "{xs:?}");
+            }
+        }
+    }
 
     #[::core::prelude::v1::test]
     fn the_graph_is_inset_by_half_a_point() {

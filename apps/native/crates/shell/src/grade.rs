@@ -88,16 +88,20 @@ impl Curve {
         let mut indexed: Vec<(usize, (f64, f64))> =
             self.points.iter().copied().enumerate().collect();
         indexed.sort_by(|a, b| a.1.0.total_cmp(&b.1.0));
+        // As the effect reads them: each input against the one just before it
+        // (not against the point kept), so a run of near inputs is one point.
         let mut out: Vec<(usize, (f64, f64))> = vec![];
+        let mut prev = f64::NEG_INFINITY;
         for (i, p) in indexed {
             match out.last_mut() {
-                Some(last) if p.0 - last.1.0 < 1e-6 => {
+                Some(last) if p.0 - prev < 1e-6 => {
                     if i > last.0 {
                         *last = (i, p);
                     }
                 }
                 _ => out.push((i, p)),
             }
+            prev = p.0;
         }
         out.into_iter().map(|(_, p)| p).collect()
     }
@@ -482,6 +486,11 @@ mod tests {
         // are the one written last.
         let shuffled = Curve::from_values(&[4., 1., 1., 0., 0., 0.5, 0.2, 0.5, 0.8]);
         assert_eq!(shuffled.ordered(), [(0., 0.), (0.5, 0.8), (1., 1.)]);
+        // A run of near inputs is one point, as the effect chains them.
+        let run =
+            Curve::from_values(&[5., 0., 0., 0.5, 0.1, 0.5000009, 0.2, 0.5000018, 0.3, 1., 1.]);
+        assert_eq!(run.ordered().len(), 3);
+        assert_eq!(run.ordered()[1].1, 0.3);
         // The values written back keep the slots past the points.
         let rest = [2., 0., 0., 1., 1., 0.3, 0.3];
         let v = Curve {
