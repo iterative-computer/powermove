@@ -42,6 +42,38 @@ pub enum GraphMode {
     Value,
     Speed,
 }
+/// What a drag on a clip does (Premiere's B N Y U, Final Cut's T): a trim
+/// or move with Selection; the pro edits otherwise, in both timeline modes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum EditTool {
+    #[default]
+    Selection,
+    /// An edge drag ripples: what follows on the track moves with it.
+    Ripple,
+    /// An edge drag rolls the edit between two clips.
+    Roll,
+    /// A drag changes which source frames the clip shows.
+    Slip,
+    /// A drag moves the clip between its neighbours.
+    Slide,
+}
+impl EditTool {
+    pub const ALL: [(Self, &'static str); 5] = [
+        (Self::Selection, "selection"),
+        (Self::Ripple, "ripple"),
+        (Self::Roll, "roll"),
+        (Self::Slip, "slip"),
+        (Self::Slide, "slide"),
+    ];
+    /// The tool's command (`timeline.tool:ripple`).
+    pub fn command(self) -> String {
+        let name = Self::ALL
+            .iter()
+            .find(|(t, _)| *t == self)
+            .map_or("", |(_, n)| n);
+        format!("timeline.tool:{name}")
+    }
+}
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum GraphDisplay {
     #[default]
@@ -65,6 +97,8 @@ pub struct TimelineModel {
     pub reveal: RevealState,
     pub key_selection_active: bool,
     pub track_snap_disabled: bool,
+    /// The timeline's edit tool; a session choice, not saved.
+    pub edit_tool: EditTool,
     /// Hide Shy Layers: shy layers (and what a shy group holds) have no row.
     /// They still draw, play and export.
     pub hide_shy: bool,

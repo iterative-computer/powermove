@@ -149,6 +149,8 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
                 // Its key (Shift-Delete) is shown in the Layer menu: here
                 // AppKit would take it from a text field.
                 k("Ripple Delete", "rippleDelete", ""),
+                k("Lift Work Area", "liftWorkArea", ""),
+                k("Extract Work Area", "extractWorkArea", ""),
                 m("contextSelectAll"),
                 r("Deselect All", "deselect"),
                 sep(),
@@ -233,10 +235,21 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
                 r("Move Out Point to Playhead", "moveLayerOut"),
                 r("Move to Composition Start", "moveLayerInToStart"),
                 r("Move to Composition End", "moveLayerOutToEnd"),
+                r("Ripple Trim In Point to Playhead", "rippleTrimIn"),
+                r("Ripple Trim Out Point to Playhead", "rippleTrimOut"),
+                r("Extend Edit to Playhead", "extendEdit"),
+                r_args("Slip One Frame Left", "slipLayers", json!([-1])),
+                r_args("Slip One Frame Right", "slipLayers", json!([1])),
+                r_args("Slide One Frame Left", "slideLayer", json!([-1])),
+                r_args("Slide One Frame Right", "slideLayer", json!([1])),
                 r_args("Move One Frame Earlier", "nudgeLayerTime", json!([-1])),
                 r_args("Move One Frame Later", "nudgeLayerTime", json!([1])),
                 r_args("Move Ten Frames Earlier", "nudgeLayerTime", json!([-10])),
                 r_args("Move Ten Frames Later", "nudgeLayerTime", json!([10])),
+                sep(),
+                r("Enable Time Remapping", "timeRemapLayers"),
+                r("Time-Reverse Layer", "reverseLayers"),
+                r("Freeze Frame", "freezeFrame"),
                 sep(),
                 r("Center Anchor Point", "centerAnchor"),
                 r("Edit Text", "text.editSelected"),
@@ -320,6 +333,11 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
                 Item::command("Composition Flowchart", "composition.flowchart", ""),
                 sep(),
                 k("Timeline in Tracks", "timeline.toggleMode", ""),
+                k("Timeline Selection Tool", "timeline.tool:selection", ""),
+                k("Ripple Edit Tool", "timeline.tool:ripple", ""),
+                k("Rolling Edit Tool", "timeline.tool:roll", ""),
+                k("Slip Tool", "timeline.tool:slip", ""),
+                k("Slide Tool", "timeline.tool:slide", ""),
                 k("Snapping", "timeline.toggleSnapping", ""),
                 k("Hide Shy Layers", "timeline.toggleShy", ""),
                 k("Value Graph", "graph.value", ""),
@@ -386,6 +404,12 @@ pub fn extras() -> Vec<(&'static str, Item)> {
             Item::registered(&keymap, label, command, json!([how])),
         )
     };
+    let frames = |label: &str, command: &str, count: i32| {
+        (
+            "Layer",
+            Item::registered(&keymap, label, command, json!([count])),
+        )
+    };
     vec![
         view("Show Safe Areas", "viewer.safeAreas"),
         view("Show Guides", "viewer.guides"),
@@ -405,6 +429,10 @@ pub fn extras() -> Vec<(&'static str, Item)> {
         layer("Align Bottom", "alignLayers", "bottom"),
         layer("Distribute Horizontally", "distributeLayers", "horizontal"),
         layer("Distribute Vertically", "distributeLayers", "vertical"),
+        frames("Slip Ten Frames Left", "slipLayers", -10),
+        frames("Slip Ten Frames Right", "slipLayers", 10),
+        frames("Slide Ten Frames Left", "slideLayer", -10),
+        frames("Slide Ten Frames Right", "slideLayer", 10),
     ]
 }
 /// The palette's static rows: menu name, command (`palette_command`), label.

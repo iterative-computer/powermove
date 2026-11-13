@@ -446,6 +446,15 @@ impl TimelineModel {
                     .into(),
                 )
             }
+            tool if tool.starts_with("timeline.tool:") => {
+                let name = &tool["timeline.tool:".len()..];
+                self.edit_tool = crate::EditTool::ALL
+                    .iter()
+                    .find(|(_, n)| *n == name)
+                    .map(|(t, _)| *t)
+                    .ok_or(ModelError::MissingHost("unknown edit tool"))?;
+                Plan::default()
+            }
             "timeline.toggleSnapping" => {
                 self.track_snap_disabled = !self.track_snap_disabled;
                 Plan::default()
@@ -1272,10 +1281,13 @@ impl Drag {
                 match &mut command {
                     Pro::Move { delta, .. }
                     | Pro::Trim { delta, .. }
-                    | Pro::Slip { delta, .. }
                     | Pro::RippleTrim { delta, .. }
                     | Pro::Roll { delta, .. }
                     | Pro::Slide { delta, .. } => *delta = sample.time_delta,
+                    // The content follows the pointer, as in Premiere, Final
+                    // Cut and After Effects: dragging right shows earlier
+                    // source frames (the kernel's delta is the source's).
+                    Pro::Slip { delta, .. } => *delta = -sample.time_delta,
                     _ => return Err(ModelError::InvalidGesture),
                 }
                 out.push(command.into());

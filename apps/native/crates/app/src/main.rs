@@ -73,6 +73,8 @@ mod platform;
 mod play_range;
 mod playback;
 mod playhead;
+#[cfg(test)]
+mod pro_edit_tests;
 mod pro_media;
 mod project_library;
 mod providers;

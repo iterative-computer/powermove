@@ -645,6 +645,83 @@ fn tracks_mode_ripple_roll_and_slide_edit_through_the_kernel(cx: &mut TestAppCon
     s.undo(cx);
     assert_eq!(s.start_of("b"), b_in);
 }
+/// The named edit tools (View menu) make a plain drag ripple, roll, slip or
+/// slide, with no modifier held.
+#[gpui::test]
+fn the_edit_tools_make_a_plain_drag_ripple_roll_slip_and_slide(cx: &mut TestAppContext) {
+    let mut s = stage_project(cx, crate::v4_view_tests::strips_json());
+    s.surface.update(&mut s.vcx, |t, cx| {
+        t.command("timeline.mode:tracks", 0., None, false, cx)
+    });
+    let tool = |s: &mut Stage, cx: &mut TestAppContext, name: &str| {
+        s.surface.update(&mut s.vcx, |t, cx| {
+            t.command(&format!("timeline.tool:{name}"), 0., None, false, cx)
+        });
+        s.idle(cx);
+    };
+    let plain = Modifiers::none();
+    let clean = |s: &Stage| {
+        assert!(
+            s.recorder.reports.borrow().is_empty(),
+            "{:?}",
+            s.recorder.reports.borrow()
+        )
+    };
+    tool(&mut s, cx, "ripple");
+    assert_eq!(
+        s.surface.read_with(&s.vcx, |t, _| t.edit_tool()),
+        pm_panel_timeline::EditTool::Ripple
+    );
+    let (a_out, b_in) = (s.out_of("a"), s.start_of("b"));
+    let from = s.at(0, a_out) - point(px(2.), px(0.));
+    s.drag(cx, from, from - point(px(30.), px(0.)), plain);
+    clean(&s);
+    let shifted = b_in - s.start_of("b");
+    assert!(shifted > 0., "ripple moves what follows");
+    assert!((a_out - s.out_of("a") - shifted).abs() < 1e-9);
+    s.undo(cx);
+    tool(&mut s, cx, "roll");
+    let b_out = s.out_of("b");
+    s.drag(cx, from, from - point(px(30.), px(0.)), plain);
+    clean(&s);
+    assert!(s.start_of("b") < b_in);
+    assert_eq!(s.out_of("a"), s.start_of("b"));
+    assert_eq!(s.out_of("b"), b_out, "a roll moves nothing after");
+    s.undo(cx);
+    tool(&mut s, cx, "slide");
+    let (length, c_out) = (s.out_of("b") - s.start_of("b"), s.out_of("c"));
+    let body = s.at(0, s.start_of("b") + length / 2.);
+    s.drag(cx, body, body + point(px(30.), px(0.)), plain);
+    clean(&s);
+    assert!(s.start_of("b") > b_in);
+    assert!((s.out_of("b") - s.start_of("b") - length).abs() < 1e-9);
+    assert_eq!(s.out_of("c"), c_out);
+    s.undo(cx);
+    // Slip: the content follows the pointer, so a drag right shows earlier
+    // source frames; the clip stays.
+    tool(&mut s, cx, "slip");
+    let trim = |s: &Stage| {
+        let p = s.rig.kernel.published(PROJECT).unwrap();
+        let b = crate::parity_tests::layer_of(&p, "b");
+        b.get("d")
+            .and_then(|d| d.get("trim"))
+            .and_then(|t| t.get("v"))
+            .and_then(pm_model::Value::as_f64)
+            .unwrap()
+    };
+    let before = trim(&s);
+    s.drag(cx, body, body + point(px(30.), px(0.)), plain);
+    clean(&s);
+    assert!(trim(&s) < before, "{} -> {}", before, trim(&s));
+    assert_eq!(s.start_of("b"), b_in);
+    s.undo(cx);
+    // Back to Selection: the same drag moves the clip.
+    tool(&mut s, cx, "selection");
+    s.drag(cx, body, body + point(px(30.), px(0.)), plain);
+    clean(&s);
+    assert!(s.start_of("b") > b_in);
+    assert_eq!(s.out_of("a"), b_in, "a plain move leaves the neighbours");
+}
 #[gpui::test]
 fn a_marquee_dragged_past_the_panel_selects_the_rows_it_covers_off_screen(cx: &mut TestAppContext) {
     // Eighty layers starting together, each with a key at 0.5 s.
