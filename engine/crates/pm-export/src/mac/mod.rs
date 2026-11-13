@@ -257,3 +257,82 @@ impl Sink for VideoToolboxSink {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::convert::{ConvertParams, WorkingFrame, convert};
+    use crate::settings::{
+        AlphaOutput, Codec, ColorTags, Container, Dither, ProResProfile, WorkingEncoding,
+    };
+
+    /// A file that fails its check is not kept, the person is told in one
+    /// sentence what was found first, and nothing is tried again.
+    #[test]
+    fn a_file_that_fails_its_check_is_removed_and_told_in_one_sentence() {
+        let dir = std::env::temp_dir().join(format!("pm-export-refused-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (w, h) = (160u32, 96u32);
+        let spec = ExportSpec {
+            width: w,
+            height: h,
+            rate: pm_time::Rate::new(25, 1).unwrap(),
+            frames: 4,
+            codec: Codec::ProRes(ProResProfile::Hq),
+            container: Container::Mov,
+            tags: ColorTags::Rec709QuickTime,
+            alpha: AlphaOutput::None,
+            working: WorkingEncoding::Standard,
+            dither: Dither::Off,
+            audio: None,
+            timecode: None,
+            destination: dir.join("refused.mov"),
+            overwrite: Overwrite::Replace,
+            mode: None,
+        };
+        let mut sink = VideoToolboxSink::new(&spec).unwrap();
+        for n in 0..4u32 {
+            let rgba: Vec<f32> = (0..w * h)
+                .flat_map(|i| {
+                    let v = 0.2 + 0.6 * (i % w) as f32 / w as f32;
+                    [v, v * 0.8 + 0.05 * n as f32, 0.5, 1.0]
+                })
+                .collect();
+            let input = convert(
+                &WorkingFrame {
+                    width: w,
+                    height: h,
+                    rgba: &rgba,
+                },
+                spec.input_format(),
+                &ConvertParams {
+                    working: spec.working,
+                    alpha: spec.alpha,
+                    tags: spec.tags,
+                    dither: false,
+                    frame: n,
+                },
+            )
+            .unwrap();
+            sink.video(u64::from(n), &input).unwrap();
+        }
+        // The encoder was handed a frame 2 with colour the file does not
+        // carry (as a broken encoder or reader would deliver it).
+        sink.evidence.frames[2].cells[1] = [0.2; 64];
+        let error = sink.finish().unwrap_err();
+        assert!(matches!(error, Error::Verify(_)), "{error:?}");
+        let said = error.to_string();
+        assert!(
+            said.starts_with("The exported file failed its check and was removed: frame 2 ")
+                && said.ends_with('.')
+                && !said.contains("; "),
+            "{said}"
+        );
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            0,
+            "no destination, temporary or work file"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}

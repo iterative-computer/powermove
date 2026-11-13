@@ -174,6 +174,15 @@ impl Sink for OutputSink {
         }
     }
 
+    fn count_checked(&mut self, checked: std::sync::Arc<std::sync::atomic::AtomicU64>) {
+        match self {
+            #[cfg(all(feature = "engine", target_os = "macos"))]
+            OutputSink::VideoToolbox(s) => s.count_checked(checked),
+            OutputSink::Software(s) => s.count_checked(checked),
+            _ => {}
+        }
+    }
+
     fn finish_with_cancel(self, cancel: &AtomicBool) -> Result<Delivered, Error> {
         match self {
             #[cfg(all(feature = "engine", target_os = "macos"))]
@@ -213,6 +222,16 @@ pub enum Error {
     Encode(String),
     #[error("muxer: {0}")]
     Mux(String),
-    #[error("verification failed: {0}")]
+    /// The written file failed its check (section 17): what was found,
+    /// every problem joined by "; ". It is shown as one sentence naming
+    /// the first; the file is removed and nothing is retried.
+    #[error("{}", checked_sentence(.0))]
     Verify(String),
+}
+
+/// What the person is told when the written file fails its check: one
+/// sentence, the first thing found, and that the file is gone.
+fn checked_sentence(problems: &str) -> String {
+    let first = problems.split("; ").next().unwrap_or(problems).trim();
+    format!("The exported file failed its check and was removed: {first}.")
 }
