@@ -1944,16 +1944,22 @@ impl Engine {
     ) -> Result<bool> {
         let gate: pm_render::slices::Gate = Arc::new(move |_| stop());
         loop {
-            match self.settle(scene, spec, gate.clone())? {
+            let ours = match self.settle(scene, spec, gate.clone())? {
                 Asked::Ready => return Ok(true),
-                Asked::Started | Asked::Busy => {}
-            }
+                Asked::Started => true,
+                // Another picture is being drawn: its end is not this
+                // one's answer; this one is asked again after it.
+                Asked::Busy => false,
+            };
             let (_, end) = loop {
                 if let Some(done) = self.take_settled() {
                     break done;
                 }
                 std::thread::sleep(Duration::from_millis(1));
             };
+            if !ours {
+                continue;
+            }
             match end {
                 Settled::Kept => return Ok(true),
                 Settled::GaveWay | Settled::Unkept => return Ok(false),

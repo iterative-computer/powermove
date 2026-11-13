@@ -2834,6 +2834,9 @@ fn content_of(path: &Path) -> Option<[u8; 32]> {
 /// Files up to this size are identified by all of their bytes.
 const WHOLE: u64 = 512 << 20;
 
+/// The folder the content ids are kept in, and each file version's id.
+type ContentIds = (Option<PathBuf>, HashMap<Stamp, [u8; 32]>);
+
 /// What each media file's bytes are ([`content_of`]), remembered by the
 /// version of the file they were read at ([`Stamp`]), across launches (in
 /// the folder of rendered frames).
@@ -2848,7 +2851,7 @@ const WHOLE: u64 = 512 << 20;
 /// length and modification time say.
 #[derive(Default)]
 struct MediaIds {
-    known: Mutex<(Option<PathBuf>, HashMap<Stamp, [u8; 32]>)>,
+    known: Mutex<ContentIds>,
     /// Files read (tests: a known version is not read again).
     read: AtomicU64,
 }
