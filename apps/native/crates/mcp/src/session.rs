@@ -799,7 +799,7 @@ impl McpSession {
                 } else {
                     None
                 };
-                let scene_assets = if name == "edit_3d" && pm_scene3d::geometry::needs_geometry(args) {
+                let scene_assets = if name == "edit_3d" && (pm_scene3d::geometry::needs_geometry(args) || args["keepRealWorldScale"] == true) {
                     Some(host.scene_geometry(&id)?)
                 } else { None };
                 let batch = if name == "edit_3d" {
