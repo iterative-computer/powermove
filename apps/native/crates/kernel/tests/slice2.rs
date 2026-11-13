@@ -1788,6 +1788,91 @@ fn a_file_still_being_copied_here_is_refused_and_never_recovered_over() {
     }
     assert_eq!(fs::read(&file).unwrap(), later, "the file is not touched");
 }
+/// The version the person chose after a failed open was proven, and then,
+/// before it was put under the project's name, a sync client replaced the
+/// file under the chosen name with another complete project. The name must
+/// never end up holding that other file as if it were the version chosen:
+/// the choice is refused, and the file that arrived is not lost.
+#[test]
+fn a_chosen_version_replaced_before_it_is_placed_is_never_installed_as_the_choice() {
+    for route in ["exclusive rename", "links only"] {
+        let dir = common::TempDir::new("chosen-replaced");
+        fs::create_dir_all(dir.path("job")).unwrap();
+        let file = dir.path("job/cut.pmv");
+        fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+        let native = dir.path("native");
+        assert!(killed(&native, &file, "no-exclusive", "mid-copy", "save"));
+        let mut stray = fs::read(&file).unwrap();
+        stray[10] ^= 0xff;
+        land(&file, &stray);
+        let mut k = kernel(&native);
+        k.set_publish_hooks(child_disk("no-exclusive"));
+        k.shell(ShellCall::PrepareOpen {
+            id: "P".into(),
+            source: SessionSource::File(file.clone()),
+            electron_profile: None,
+        })
+        .expect_err("the file at the name is not a project");
+        let ShellReply::Leftovers(rows) = k.shell(ShellCall::Leftovers(file.clone())).unwrap()
+        else {
+            panic!()
+        };
+        let chosen = rows
+            .iter()
+            .find(|r| {
+                r.get("proven") == Some(&Value::Bool(true))
+                    && r.get("role").and_then(Value::as_str) == Some("saving")
+            })
+            .and_then(|r| r.get("path").and_then(Value::as_str))
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| panic!("{route}: {rows:?}"));
+        // Another complete project, landing under the chosen name once the
+        // choice is recorded.
+        let other = fs::read(common::ts_fixture("save-as.pmv")).unwrap();
+        assert_ne!(other, fs::read(&chosen).unwrap());
+        let (target, arriving) = (chosen.clone(), other.clone());
+        k.set_publish_hooks(pm_kernel::project_io::PublishHooks {
+            links_only: route == "links only",
+            step: Some(std::sync::Arc::new(move |step: &str, _: &Path| {
+                if step == "chosen" {
+                    land(&target, &arriving);
+                }
+            })),
+            ..Default::default()
+        });
+        let used = k.shell(ShellCall::UseLeftover {
+            path: file.clone(),
+            leftover: chosen.clone(),
+            unproven: false,
+        });
+        assert!(
+            fs::read(&file).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound),
+            "{route}: the other file was installed as the choice"
+        );
+        let refused = used.expect_err(&format!("{route}: the choice is refused"));
+        assert!(
+            refused
+                .to_string()
+                .contains(pm_kernel::error::CHOICE_REPLACED),
+            "{route}: {refused}"
+        );
+        let held = fs::read_dir(dir.path("job"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| fs::read(p).is_ok_and(|b| b == other))
+            .collect::<Vec<_>>();
+        assert!(
+            held.iter().any(|p| *p != file),
+            "{route}: the file that arrived is kept beside the project: {held:?}"
+        );
+        assert!(
+            fs::read_dir(dir.path("job"))
+                .unwrap()
+                .any(|e| fs::read(e.unwrap().path()).is_ok_and(|b| b == stray)),
+            "{route}: the unreadable file is not lost"
+        );
+    }
+}
 /// A save that only appends to the project file writes a file whose first
 /// bytes are the whole previous file. On a volume where the new file can
 /// only be copied to its name, the name must never hold those bytes alone

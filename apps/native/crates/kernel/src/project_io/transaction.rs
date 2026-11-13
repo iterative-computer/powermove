@@ -1834,12 +1834,12 @@ pub(crate) fn leftovers(destination: &Path) -> Vec<Leftover> {
 /// version offered to the person is what it holds, and a file a share is
 /// still settling the times of right after it was written is that too.
 fn proves(path: &Path, record: &Record) -> Holds {
-    let Ok(Some(stat)) = lstat_file(path) else {
+    let Ok(Some(_)) = lstat_file(path) else {
         return Holds::Nothing;
     };
-    match super::durable::hash_file(path) {
-        Ok(hash) if hash == record.new && stat.size == record.size => Holds::New,
-        Ok(hash) if Some(&hash) == record.old.as_ref() => Holds::Old,
+    match super::durable::hash_held(path) {
+        Some((hash, size)) if hash == record.new && size == record.size => Holds::New,
+        Some((hash, _)) if Some(&hash) == record.old.as_ref() => Holds::Old,
         _ => Holds::Other,
     }
 }
@@ -1981,7 +1981,42 @@ fn use_leftover_now(
         return Err(unidentified());
     }
     tx.step("chosen")?;
-    if tx.place(chosen, destination, expected.as_deref())? == Placed::Copied {
+    let placed = tx.place(chosen, destination, expected.as_deref())?;
+    // A rename or a link places whatever the chosen name led to at that
+    // instant, which a sync client may have replaced since it was proven:
+    // what the project's name holds now must be the version proven, or it
+    // is taken back off the name and kept beside the project.
+    if let Some(expected) = &expected
+        && super::durable::hash_held(destination)
+            .map(|(hash, _)| hash)
+            .as_ref()
+            != Some(expected)
+    {
+        let kept = tx.capture(destination, None).map(|arrived| {
+            tx.keep(arrived.clone(), "other version")
+                .inspect_err(|_| tx.retain(&arrived, None))
+                .is_ok()
+        });
+        let what = match kept {
+            Some(true) => {
+                "so it was not opened. That file is kept beside the project; nothing \
+                           else was changed."
+            }
+            Some(false) => {
+                "so it was not opened. That file is kept hidden in the project's \
+                            folder; nothing else was changed."
+            }
+            None => {
+                "and that file is now under the project's name. It was not opened; check \
+                     it before you open it."
+            }
+        };
+        return Err(ProjectIoError::Invalid(format!(
+            "{}, {what}",
+            crate::error::CHOICE_REPLACED
+        )));
+    }
+    if placed == Placed::Copied {
         // The name holds a verified copy: the file itself stays, for a
         // later save to read again and prune.
         tx.retain(chosen, None);

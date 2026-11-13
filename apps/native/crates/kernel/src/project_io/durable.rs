@@ -1465,6 +1465,20 @@ pub(super) fn holds_hash<'a>(
     }
 }
 
+/// The hash of `path`'s bytes and their length, read through one
+/// descriptor whose size and modification time did not move across the
+/// read: what that one file held, not what one name led to at two moments.
+pub(super) fn hash_held(path: &Path) -> Option<(String, u64)> {
+    let file = File::open(path).ok()?;
+    let before = stat_of(&file.metadata().ok()?);
+    if !fs::symlink_metadata(path).ok()?.is_file() {
+        return None;
+    }
+    let hash = hex(&hash_reader(&file, path).ok()?.finalize());
+    let after = stat_of(&file.metadata().ok()?);
+    (after.size == before.size && after.mtime_ns == before.mtime_ns).then_some((hash, before.size))
+}
+
 /// A file [`dispose`] found changed, that could not be kept beside the
 /// project: it goes to the person's Trash, or stays where it is where there
 /// is none. Returns where it is now, for the person to be told.

@@ -200,6 +200,11 @@ pub enum ProjectIoError {
 pub const STILL_COPYING: &str = "This project file is still being copied to this Mac. Wait \
      until the copy or sync is done, then open it again.";
 
+/// How a recovery choice refused because the chosen version was replaced
+/// as it was placed begins, which the app finds in a failure's message.
+pub const CHOICE_REPLACED: &str =
+    "The version you chose was replaced by another file while it was being opened";
+
 /// Introduces the path in [`ProjectIoError::KeptBeside`]'s text.
 const KEPT_BESIDE: &str = "Your save is kept beside it at ";
 
