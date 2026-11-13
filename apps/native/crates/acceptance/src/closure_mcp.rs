@@ -25,7 +25,9 @@ fn restore(f: &mut Fixture, mut document: Value) -> Check {
 }
 fn seed_video(f: &mut Fixture, kind: &str) -> Check {
     let mut document = f.document()?;
-    document["assets"] = json!({"source":{"id":"source","kind":"video","name":"Synthetic source","dur":12,"hasAudio":true,"persisted":true,"unknown":{"keep":7}}});
+    // A video asset without `timing` is a v1 one: opening it adds the Electron
+    // video reading marker (`videoColor`), so the document is shaped as loaded.
+    document["assets"] = json!({"source":{"id":"source","kind":"video","name":"Synthetic source","dur":12,"hasAudio":true,"persisted":true,"unknown":{"keep":7},"videoColor":"electron"}});
     restore(f, document)?;
     f.edit(json!([
         {"type":"add_layer","id":"clip","layerType":kind,"from":2,"duration":3,"content":if kind=="audio" {json!({"asset":"source","trim":1,"gain":1,"fadeIn":0,"fadeOut":0})} else {json!({"asset":"source","trim":1,"speed":2,"embeddedAudio":false})}}

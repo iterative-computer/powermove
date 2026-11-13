@@ -212,13 +212,30 @@ fn color_wheels_match_their_stated_definition() {
     assert!(d < 2e-5, "{d:e}");
 }
 
-/// Monotone cubic Hermite through sorted points (Fritsch-Carlson tangents,
-/// end tangents the end secants), straight beyond the ends.
+/// Monotone cubic Hermite through the points sorted by In (Fritsch-Carlson
+/// tangents, end tangents the end secants), straight beyond the ends. Points
+/// whose In lie within 1e-6 of the one before are one point: the one written
+/// last survives. A single point left is the line of slope 1 through it.
 fn monotone(points: &[(f64, f64)], v: f64) -> f64 {
-    let mut p = points.to_vec();
-    p.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut sorted: Vec<(usize, (f64, f64))> = points.iter().copied().enumerate().collect();
+    sorted.sort_by(|a, b| a.1.0.total_cmp(&b.1.0));
+    let mut p: Vec<(usize, (f64, f64))> = Vec::new();
+    for (i, point) in sorted.iter().enumerate() {
+        match p.last_mut() {
+            Some(last) if i > 0 && point.1.0 - sorted[i - 1].1.0 < 1e-6 => {
+                if point.0 > last.0 {
+                    *last = *point;
+                }
+            }
+            _ => p.push(*point),
+        }
+    }
+    let p: Vec<(f64, f64)> = p.into_iter().map(|(_, point)| point).collect();
     let n = p.len();
-    let secant = |i: usize| (p[i + 1].1 - p[i].1) / (p[i + 1].0 - p[i].0).max(1e-6);
+    if n == 1 {
+        return p[0].1 + (v - p[0].0);
+    }
+    let secant = |i: usize| (p[i + 1].1 - p[i].1) / (p[i + 1].0 - p[i].0);
     let tangent = |i: usize| {
         if i == 0 {
             return secant(0);
@@ -240,7 +257,7 @@ fn monotone(points: &[(f64, f64)], v: f64) -> f64 {
         return p[n - 1].1 + tangent(n - 1) * (v - p[n - 1].0);
     }
     let i = (0..n - 1).rev().find(|&i| v >= p[i].0).unwrap();
-    let h = (p[i + 1].0 - p[i].0).max(1e-6);
+    let h = p[i + 1].0 - p[i].0;
     let t = (v - p[i].0) / h;
     let (t2, t3) = (t * t, t * t * t);
     (2.0 * t3 - 3.0 * t2 + 1.0) * p[i].1
@@ -296,5 +313,69 @@ fn color_curves_are_monotone_cubics_through_their_points() {
         ]
     });
     eprintln!("curves: {d:e} from the reference");
+    assert!(d < 2e-5, "{d:e}");
+}
+
+/// Adding a point leaves it at white, on the end point already there: the
+/// picture must not change (it bent a straight curve and clipped superwhites).
+#[test]
+fn an_unused_point_at_white_changes_nothing() {
+    let mut renderer = Renderer::headless().unwrap();
+    let input = draw(&mut renderer, None);
+    for count in [3, 15] {
+        let output = draw(
+            &mut renderer,
+            Some(effect("colorCurves", &json!({"count": count}))),
+        );
+        let changed = input
+            .iter()
+            .zip(&output)
+            .filter(|(a, b)| a.to_bits() != b.to_bits())
+            .count();
+        assert_eq!(changed, 0, "{count} points changed {changed} values");
+    }
+}
+
+/// Points with the same In are one point, the one written last; at either
+/// end and in the middle the curve stays finite and follows that point.
+#[test]
+fn coincident_points_are_one_point_the_last_written() {
+    let mut renderer = Renderer::headless().unwrap();
+    let input = draw(&mut renderer, None);
+    let cases: [&[(f64, f64)]; 5] = [
+        // The new point's Out edited while its In stays at white.
+        &[(0.0, 0.0), (1.0, 1.0), (1.0, 0.9)],
+        // Moved onto black.
+        &[(0.0, 0.0), (1.0, 1.0), (0.0, 0.1)],
+        // Two points disagreeing in the middle.
+        &[(0.0, 0.0), (0.5, 0.6), (1.0, 1.0), (0.5, 0.4)],
+        // Every point on one In: the line of slope 1 through the survivor.
+        &[(0.3, 0.2), (0.3, 0.5)],
+        // Within a millionth: still one point.
+        &[(0.0, 0.0), (0.6, 0.7), (0.6000004, 0.3), (1.0, 1.0)],
+    ];
+    for points in cases {
+        let output = draw(&mut renderer, Some(curve(0, points)));
+        let d = worst(&input, &output, |x| x.map(|v| monotone(points, v)));
+        eprintln!("{points:?}: {d:e} from the reference");
+        assert!(d < 2e-5, "{points:?}: {d:e}");
+    }
+    // The stated survivor, read off the reference: a straight line to 0.9.
+    let end = [(0.0, 0.0), (1.0, 1.0), (1.0, 0.9)];
+    assert!((monotone(&end, 1.1) - 0.99).abs() < 1e-12);
+    assert!((monotone(&end, 0.5) - 0.45).abs() < 1e-12);
+}
+
+/// A keyed point that lands on another at a key is the same coincidence.
+#[test]
+fn a_keyed_point_landing_on_another_is_one_point() {
+    let mut renderer = Renderer::headless().unwrap();
+    let input = draw(&mut renderer, None);
+    let mut fx = curve(0, &[(0.0, 0.0), (0.5, 0.6), (1.0, 1.0), (0.2, 0.3)]);
+    fx["p"]["x3"] = keys(json!(0.5), &[(0.0, json!(0.5)), (1.0, json!(0.9))]);
+    let output = draw(&mut renderer, Some(fx));
+    let at_key = [(0.0, 0.0), (0.5, 0.6), (1.0, 1.0), (0.5, 0.3)];
+    let d = worst(&input, &output, |x| x.map(|v| monotone(&at_key, v)));
+    eprintln!("keyed: {d:e} from the reference");
     assert!(d < 2e-5, "{d:e}");
 }

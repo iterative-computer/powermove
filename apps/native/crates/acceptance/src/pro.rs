@@ -49,7 +49,9 @@ impl Project {
         if audio {
             layers.push(clip("sound", 4., 1, "audio"));
         }
-        let doc = json!({"id":"P-pro","name":"Synthetic pro acceptance","compId":"C1","fps":30,"dur":40,"w":320,"h":180,"assets":{"src":{"id":"src","kind":"video","dur":100,"hasAudio":true}},"layers":layers});
+        // A video asset without `timing` is a v1 one: opening it adds the Electron
+        // video reading marker (`videoColor`), so the document is shaped as loaded.
+        let doc = json!({"id":"P-pro","name":"Synthetic pro acceptance","compId":"C1","fps":30,"dur":40,"w":320,"h":180,"assets":{"src":{"id":"src","kind":"video","dur":100,"hasAudio":true,"videoColor":"electron"}},"layers":layers});
         let opened = handle
             .shell(ShellCall::Open {
                 id: "P-pro".into(),
