@@ -90,6 +90,8 @@ mod v4_view;
 #[cfg(test)]
 mod v4_view_tests;
 mod studio_panes;
+#[cfg(debug_assertions)]
+mod studio_estimate_probe;
 mod viewer2;
 mod viewer_overlays;
 mod waveforms;
@@ -127,9 +129,16 @@ fn main() -> Result<()> {
     let headless = args
         .first()
         .is_some_and(|a| a == "--engine-job" || a == "--smoke" || a == "--gate-p1-smoke")
-        || args.iter().any(|a| a == "--powermove-mcp");
+        || args.iter().any(|a| a == "--powermove-mcp")
+        || args.first().is_some_and(|a| a == "--studio3d-estimate-probe");
     if !headless {
         platform::route_sigterm();
+    }
+    if args.first().is_some_and(|a| a == "--studio3d-estimate-probe") {
+        #[cfg(debug_assertions)]
+        return studio_estimate_probe::run(&args[1..]);
+        #[cfg(not(debug_assertions))]
+        anyhow::bail!("Studio estimate probe requires a development build");
     }
     if args.first().is_some_and(|a| a == "--engine-job") {
         return pm_engine_service::jobs::run_child();

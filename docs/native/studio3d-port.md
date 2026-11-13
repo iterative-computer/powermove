@@ -2606,3 +2606,34 @@ The quiet-performance and fixed-project memory drivers now accept the
 persistent evidence directory and its `/tmp/pm-shots` symlink equivalently.
 Their canonical-path guard still refuses the public checkout. The focused
 Python path checks pass; on-screen measurement remains a separate run.
+
+### Invalid ridge normals and explicit CPU runtime selection
+
+Some visible terrain polygons interpolated a shading normal that faced behind
+the camera ray. The reflection BSDF rejected that frame and returned black.
+Commit 8e434e203 falls back to the geometric face normal only for an invalid
+shading frame, including the independent coat normal. The isolated GPU
+reproduction changed from RGB 0 to RGB 214, identical to the valid-normal
+case, on BVH and Metal RT. All 11 denoising/guide regressions pass (17.25 s).
+The current full-HD environment frame was inspected: both reviewed hilltop
+wedges are absent. In the first reviewed rectangle all 578 formerly black
+pixels now show lit snow. This is a visual check, not a 30-frame speed gate;
+its one-frame export took 40.26 s, with 33.60 s in tracing.
+
+The interim host-pointer OIDN binding now requests CPU device type 1 explicitly
+(80c745393). OIDN's default may select Metal, where an ordinary Rust Vec pointer
+is not a valid image allocation. The device-selection unit passes with
+`OIDN_DEFAULT_DEVICE=metal` against the Metal-enabled runtime. Native executable
+linking also retains an explicit development OIDN runtime path; bundle packaging
+must replace that path with its Frameworks runtime before shipping.
+
+A development-only, headless `--studio3d-estimate-probe` command reads a saved
+project, extracts its embedded media into a fresh evidence directory and
+queries the same viewer estimate state used by the export sheet. It edits no
+document and opens no window. Arguments after the flag are the project path,
+fresh evidence directory, optional frame count (30), render scale (1) and
+sample time in seconds (0). It accepts only the persistent evidence directory.
+The combined native build passes (4 min 57 s, including pruned dependencies),
+and a real saved product project returns all four preset estimates without
+layer warnings. Estimate accuracy remains under measurement; a broad bound
+must not be reported as an accurate point estimate.
