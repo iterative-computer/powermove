@@ -23,6 +23,7 @@ pub struct Host {
     operations: Arc<AtomicBool>,
     /// The project whose open waits on a person's recovery choice.
     deciding: Mutex<Option<String>>,
+    pending_opens: Mutex<crate::recovery::PendingOpens>,
     pub closing: AtomicBool,
 }
 /// Slot 0 is a windowless host's (the headless MCP server): its only project.
@@ -97,6 +98,7 @@ impl Host {
             windows: Mutex::new(windows),
             operations: Arc::new(AtomicBool::new(false)),
             deciding: Mutex::new(None),
+            pending_opens: Mutex::default(),
             closing: AtomicBool::new(false),
         })
     }
@@ -244,11 +246,24 @@ impl Host {
             return Ok(identity(&p));
         }
         let reply = self.shell(ShellCall::PrepareOpen {
-            id,
+            id: id.clone(),
             source,
             electron_profile: None,
         })?;
-        // Windowless clients never choose a recovery policy on the user's behalf.
+        self.finish_open(&id, reply)
+    }
+    pub fn pending_recoveries(&self) -> Value {
+        self.pending_opens.lock().unwrap().list()
+    }
+    pub fn decide_recovery(&self, id: &str, choice: &Value) -> Result<Value> {
+        let (ticket, decision) = self.pending_opens.lock().unwrap().take(id, choice)?;
+        let reply = self.shell(ShellCall::DecideRecovery { ticket, decision })?;
+        self.finish_open(id, reply)
+    }
+    fn finish_open(&self, id: &str, reply: ShellReply) -> Result<Value> {
+        if let ShellReply::RecoveryRequired { ticket, recovery } = reply {
+            return Ok(self.pending_opens.lock().unwrap().required(id, ticket, recovery));
+        }
         let ShellReply::Opened {
             session,
             decision: pm_kernel::locks::OpenDecision::Writable,
@@ -285,6 +300,32 @@ impl Host {
             .published(&session.project)
             .ok_or_else(stopped)?;
         Ok(identity(&p))
+    }
+    /// EOF from a headless owner closes library projects durably. Unsaved
+    /// named files keep their journal, like a deferred close in the app.
+    /// A proxy disconnect must never call this on a windowed host.
+    pub fn close_headless(&self) -> Result<()> {
+        let current = {
+            let windows = self.windows.lock().unwrap();
+            if windows.slots.keys().any(|w| *w != WINDOWLESS) {
+                return Err(Error::invalid("Cannot close a headless host with editor windows"));
+            }
+            windows.slots.get(&WINDOWLESS).and_then(|s| s.session()).cloned()
+        };
+        if let Some(session) = current {
+            let p = self.kernel.published(&session.project).ok_or_else(stopped)?;
+            let call = if p.path.is_some() && p.dirty {
+                ShellCall::DeferClose(session)
+            } else {
+                ShellCall::Close(session)
+            };
+            match self.shell(call)? {
+                ShellReply::Closed { recovery_copy: None } => self.bind_window(WINDOWLESS, None),
+                other => return Err(Error::kernel(other)),
+            }
+        }
+        self.shell(ShellCall::ReleaseLibrary)?;
+        Ok(())
     }
     /// Save a project whose document has a named working file, in place.
     pub(crate) fn save_document(&self, session: SessionHandle, document: u64) -> Result<()> {

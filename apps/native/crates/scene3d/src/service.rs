@@ -264,7 +264,14 @@ pub fn composition(comp: &Value, time: f64, ev: &mut impl Evaluator) -> Result<V
             o["parent"] = Value::Null;
         }
     }
-    if lights.is_empty() {
+    // Keep legacy unlit scenes' studio sun, but an authored World already
+    // defines the lighting (including an intentionally dark/zero-intensity
+    // World). Its background visibility does not disable its illumination.
+    let world_lighting = objects.iter().any(|o| {
+        o["p"]["visible"] != false
+            && matches!(o["world"]["mode"].as_str(), Some("sky" | "hdri"))
+    });
+    if lights.is_empty() && !world_lighting {
         let mut id = "default_sun".to_string();
         while ids.contains(&id) {
             id.push('x');
@@ -437,8 +444,12 @@ pub(crate) fn studio_plan(
             let normal = vec3(&args["normal"])?;
             let eye = camera.map(pos).unwrap_or([3., 2., 6.]);
             let distance = scalar(args, "distance", (length(sub(eye, point)) * 0.9).max(2.))?;
-            let at = crate::light_tool::highlight_placement(point, normal, eye, distance)?;
-            let size = scalar(args, "size", distance * 0.6)?;
+            let size = args.get("size").map(|_| scalar(args, "size", 0.)).transpose()?;
+            let (at, size) = if camera.is_some_and(|c| c["d"]["data"]["environment"]["shadowCatcher"] == true) {
+                crate::light_tool::highlight_above_floor(point, normal, eye, distance, size, 0.)?
+            } else {
+                (crate::light_tool::highlight_placement(point, normal, eye, distance)?, size.unwrap_or(distance * 0.6))
+            };
             edit(
                 json!({"operation":"add_light","name":args["name"].as_str().unwrap_or("Softbox"),"light":{"type":"area","p":{"x":at[0],"y":at[1],"z":at[2],"targetX":point[0],"targetY":point[1],"targetZ":point[2],"width":size,"height":size*0.62,"intensity":scalar(args,"intensity",6.)?,"color":args["color"].as_str().unwrap_or("#FFFFFF")}}}),
             )

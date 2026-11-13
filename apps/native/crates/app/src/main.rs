@@ -202,7 +202,7 @@ fn main() -> Result<()> {
     thumbnails::install(&profile);
     let exports = export_folder(&profile, std::env::var_os("HOME"));
     if mcp_mode {
-        if profile.join("mcp/connection.json").exists() {
+        if pm_mcp::transport::has_running_host(&profile)? {
             anyhow::ensure!(
                 launch.is_none(),
                 "Open projects in the running app before attaching MCP"

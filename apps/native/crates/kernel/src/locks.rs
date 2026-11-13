@@ -1,6 +1,6 @@
 //! Local exclusion and conservative open-as-copy policy (plan §6).
 //! Lock files remain at stable inodes: unlinking a locked inode allows two writers.
-use pm_model::json::{Value, parse};
+use pm_model::json::parse;
 use std::os::{
     fd::AsRawFd,
     unix::{
@@ -55,6 +55,7 @@ pub enum OpenDecision {
 struct LockedFile {
     file: File,
     owns_record: bool,
+    record: PathBuf,
 }
 impl std::ops::Deref for LockedFile {
     type Target = File;
@@ -70,7 +71,7 @@ impl std::ops::DerefMut for LockedFile {
 impl Drop for LockedFile {
     fn drop(&mut self) {
         if self.owns_record {
-            let _ = write_record(&mut self.file, 0);
+            let _ = write_record(&mut self.file, &self.record, 0);
         }
         // Release only after the last heartbeat/record write, including failed
         // initialization and failed thread spawn. Never unlink the stable inode.
@@ -104,9 +105,7 @@ impl FileLock {
                     .read(true)
                     .write(true)
                     .custom_flags(libc::O_NOFOLLOW)
-                    .open(path)?,
-                false,
-            ),
+                    .open(path)?, false),
             Err(e) => return Err(e),
         };
         // SAFETY: live file descriptor, non-blocking advisory exclusive lock.
@@ -116,25 +115,23 @@ impl FileLock {
         let mut file = LockedFile {
             file,
             owns_record: false,
+            record: owner_record_path(path),
         };
-        let mut text = String::new();
-        file.read_to_string(&mut text)?;
-        if !created && text.is_empty() {
-            return Err(io::Error::other("empty lock has unknown ownership"));
-        }
-        if !text.is_empty() {
-            let v = parse(&text).map_err(|_| io::Error::other("unreadable lock record"))?;
-            let pid = v
-                .get("pid")
-                .and_then(Value::as_f64)
-                .filter(|n| n.fract() == 0.0 && *n >= 0.0 && *n <= i32::MAX as f64)
-                .ok_or_else(|| io::Error::other("invalid lock pid"))? as u32;
-            let heartbeat = v
-                .get("heartbeat")
-                .and_then(Value::as_f64)
-                .filter(|n| n.is_finite() && *n >= 0.0)
-                .ok_or_else(|| io::Error::other("invalid lock heartbeat"))?
-                as u64;
+        let mut bytes = vec![];
+        file.read_to_end(&mut bytes)?;
+        let legacy = read_record(&bytes);
+        let atomic = match fs::read(&file.record) {
+            Ok(bytes) => read_record(&bytes),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e),
+        };
+        // Older apps update the stable inode. Prefer whichever valid record is
+        // newer, so an unflocked legacy writer's fresh heartbeat stays protected.
+        let owner = match (legacy, atomic) {
+            (Some(a), Some(b)) => Some(if a.1 >= b.1 { a } else { b }),
+            (a, b) => a.or(b),
+        };
+        if let Some((pid, heartbeat)) = owner {
             // We hold the flock, so no process on this Mac holds it (the
             // native app and the transition release both flock). A record
             // younger than 30 s still names a live owner when its pid runs,
@@ -146,9 +143,14 @@ impl FileLock {
                     "lock is live or younger than 30 seconds",
                 ));
             }
+        } else if !created && !is_local_volume(path) {
+            // A local flock is authoritative for a torn/empty record. On a
+            // shared volume, another Mac's ownership is still uncertain.
+            return Err(io::Error::other("unreadable lock has unknown remote ownership"));
         }
         file.owns_record = true;
-        write_record(&mut file, std::process::id())?;
+        let record = file.record.clone();
+        write_record(&mut file, &record, std::process::id())?;
         let (stop, rx) = mpsc::channel();
         let worker = thread::Builder::new()
             .name("pm-lock-heartbeat".into())
@@ -156,7 +158,7 @@ impl FileLock {
                 while let Err(mpsc::RecvTimeoutError::Timeout) =
                     rx.recv_timeout(Duration::from_secs(5))
                 {
-                    let _ = write_record(&mut file, std::process::id());
+                    let _ = write_record(&mut file, &record, std::process::id());
                 }
                 // LockedFile writes PID 0 and explicitly unlocks before close.
             })?;
@@ -170,12 +172,33 @@ impl FileLock {
         &self.path
     }
 }
-fn write_record(file: &mut File, pid: u32) -> io::Result<()> {
-    file.seek(SeekFrom::Start(0))?;
+/// The flock carrier must keep its inode. Ownership is published atomically in
+/// a sibling record instead; replacing the flock carrier would admit two writers.
+pub fn owner_record_path(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(".owner");
+    PathBuf::from(name)
+}
+fn read_record(bytes: &[u8]) -> Option<(u32, u64)> {
+    let v = parse(std::str::from_utf8(bytes).ok()?).ok()?;
+    let pid = v.get("pid")?.as_f64()
+        .filter(|n| n.fract() == 0. && *n >= 0. && *n <= i32::MAX as f64)? as u32;
+    let heartbeat = v.get("heartbeat")?.as_f64()
+        .filter(|n| n.is_finite() && *n >= 0.)? as u64;
+    Some((pid, heartbeat))
+}
+fn write_record(file: &mut File, record: &Path, pid: u32) -> io::Result<()> {
     let text = format!("{{\"pid\":{pid},\"heartbeat\":{}}}", now_ms());
-    file.write_all(text.as_bytes())?;
-    file.set_len(text.len() as u64)?;
-    file.sync_all()
+    crate::persistence::atomic_write(record, text.as_bytes())?;
+    // Compatibility mirror for older apps. This inode cannot be renamed, and
+    // a failed mirror must not invalidate the already durable owner record.
+    let _ = (|| -> io::Result<()> {
+        file.seek(SeekFrom::Start(0))?;
+        file.write_all(text.as_bytes())?;
+        file.set_len(text.len() as u64)?;
+        file.sync_all()
+    })();
+    Ok(())
 }
 impl Drop for FileLock {
     fn drop(&mut self) {
