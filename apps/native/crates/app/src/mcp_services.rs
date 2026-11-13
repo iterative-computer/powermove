@@ -52,20 +52,37 @@ pub(crate) fn set_resources(doc_id: u64, resources: Option<Resources>) {
     };
     SETTLED.notify_all();
 }
+/// The wait for a document's extensions was stopped by who asked (a
+/// cancelled export, a stopped capture).
+#[derive(Debug, PartialEq)]
+struct Stopped;
+/// How often a waiting capture or export looks at its stop.
+const STOP_POLL: Duration = Duration::from_millis(50);
 /// Document `doc_id`'s definitions once its extensions have loaded: an
 /// effect still loading is never exported or captured as not installed.
 /// `wait: false` (an extension's own capture, which its realm may be loading
-/// for) takes them as they are.
-fn resources_of(doc_id: u64, wait: bool) -> Option<Resources> {
+/// for) takes them as they are. A wait ends as soon as `stop` says so (the
+/// person cancelled the export, the capture's task was stopped), not when
+/// the extensions settle or the wait runs out.
+fn resources_of(
+    doc_id: u64,
+    wait: bool,
+    stop: &(dyn Fn() -> bool + Sync),
+) -> std::result::Result<Option<Resources>, Stopped> {
     let deadline = Instant::now() + EXTENSIONS_WAIT;
     let mut all = RESOURCES.lock().unwrap();
     loop {
-        let resources = all.as_ref()?.get(&doc_id).cloned()?;
+        let Some(resources) = all.as_ref().and_then(|all| all.get(&doc_id).cloned()) else {
+            return Ok(None);
+        };
         let left = deadline.saturating_duration_since(Instant::now());
         if !wait || !resources.pending || left.is_zero() {
-            return Some(resources);
+            return Ok(Some(resources));
         }
-        all = SETTLED.wait_timeout(all, left).unwrap().0;
+        if stop() {
+            return Err(Stopped);
+        }
+        all = SETTLED.wait_timeout(all, left.min(STOP_POLL)).unwrap().0;
     }
 }
 /// A capture draws a missing effect bypassed, as the viewer does, but never
@@ -352,7 +369,13 @@ impl ExportChild for EngineJobs {
         let task =
             crate::export_coordinator::AgentExport::start(&name, &frozen.project_id, plan.frames)
                 .map_err(failed)?;
-        let resources = resources_of(published.snapshot.doc_id, true);
+        let cancelled = || failed("The person cancelled this export in Background Tasks.");
+        // Cancel in Background Tasks ends the wait for extensions too.
+        let Ok(resources) = resources_of(published.snapshot.doc_id, true, &|| task.cancelled())
+        else {
+            task.finish(Err("cancelled".into()));
+            return Err(cancelled());
+        };
         let handle = match self.start(&published, settings, destination, false, false, resources) {
             Ok(handle) => handle,
             Err(error) => {
@@ -386,9 +409,7 @@ impl ExportChild for EngineJobs {
         if task.cancelled() {
             let _ = handle.wait();
             task.finish(Err("cancelled".into()));
-            return Err(failed(
-                "The person cancelled this export in Background Tasks.",
-            ));
+            return Err(cancelled());
         }
         let result = finish(handle);
         task.finish(result.as_ref().map(|_| ()).map_err(|e| e.message.clone()));
@@ -486,7 +507,8 @@ fn cached_frames(
             None => kernel.published(&project).ok_or("No open project")?,
         };
         let doc_id = published.snapshot.doc_id;
-        let resources = resources_of(doc_id, capture != Capture::ExtensionSnapshot);
+        let resources = resources_of(doc_id, capture != Capture::ExtensionSnapshot, request.stop)
+            .map_err(|Stopped| CAPTURE_STOPPED.to_owned())?;
         let key = resources.as_ref().is_none_or(|r| !r.pending).then(|| {
             format!(
                 "{doc_id}:{}:{:?}:{:?}:{}:{}x{}:{}",
@@ -531,6 +553,7 @@ const MCP_LOOK: Look = Look {
 fn never() -> bool {
     false
 }
+const CAPTURE_STOPPED: &str = "The frame capture was stopped";
 /// Renders one frame; `stop` cancels the export (a stopped task, a deadline).
 /// Who asked for a frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -606,7 +629,7 @@ fn frame(
         if stop() {
             handle.cancel();
             let _ = handle.wait();
-            anyhow::bail!("The frame capture was stopped");
+            anyhow::bail!(CAPTURE_STOPPED);
         }
         std::thread::sleep(Duration::from_millis(4));
     }
@@ -1007,7 +1030,7 @@ impl EngineHook for EngineJobs {
                     MCP_LOOK,
                     &never,
                     Capture::AgentStill,
-                    resources_of(published.snapshot.doc_id, true),
+                    resources_of(published.snapshot.doc_id, true, &never).unwrap_or(None),
                 )
                 .map_err(failed)?;
             images.push(format!("data:image/png;base64,{}", base64(&bytes)));
@@ -1113,7 +1136,7 @@ impl EngineHook for EngineJobs {
                 MCP_LOOK,
                 &never,
                 Capture::Sheet,
-                resources_of(published.snapshot.doc_id, true),
+                resources_of(published.snapshot.doc_id, true, &never).unwrap_or(None),
             )
             .map_err(failed)?;
             cells.push(decode_png(&bytes).map_err(failed)?);
@@ -1406,8 +1429,13 @@ mod tests {
     fn captures_wait_for_their_window_extensions_to_load() {
         let doc = 0x5e77_1ed0;
         set_resources(doc, snapshot(1, true));
-        assert_eq!(resources_of(doc, false).map(|r| r.pending), Some(true));
-        let waiter = std::thread::spawn(move || resources_of(doc, true).map(|r| r.generation));
+        let of = |wait| resources_of(doc, wait, &never).unwrap();
+        assert_eq!(of(false).map(|r| r.pending), Some(true));
+        let waiter = std::thread::spawn(move || {
+            resources_of(doc, true, &never)
+                .unwrap()
+                .map(|r| r.generation)
+        });
         std::thread::sleep(Duration::from_millis(150));
         assert!(!waiter.is_finished(), "a capture went ahead while loading");
         set_resources(doc, snapshot(2, true));
@@ -1416,7 +1444,73 @@ mod tests {
         set_resources(doc, snapshot(3, false));
         assert_eq!(waiter.join().unwrap(), Some(3));
         set_resources(doc, None);
-        assert!(resources_of(doc, true).is_none());
+        assert!(of(true).is_none());
+    }
+    /// Cancelling an agent's export in Background Tasks while it waits for
+    /// extensions that are still loading ends the wait at once (it used to
+    /// last until they settled, or two minutes); so does stopping a still.
+    #[test]
+    fn a_cancelled_export_or_stopped_still_stops_waiting_for_extensions_at_once() {
+        let doc = 0x5e77_1ed1;
+        set_resources(doc, snapshot(1, true));
+        // The export, as `export_video` waits: its Background Tasks row's
+        // Cancel is the stop.
+        let task = crate::export_coordinator::AgentExport::start("Film", "p-wait", 10).unwrap();
+        let id = task.id();
+        let waiting = std::thread::spawn(move || {
+            let stopped = resources_of(doc, true, &|| task.cancelled());
+            task.finish(Err("cancelled".into()));
+            stopped.map(|_| ())
+        });
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!waiting.is_finished(), "it waits while extensions load");
+        assert!(crate::export_coordinator::cancel_export(id));
+        let cancelled = Instant::now();
+        assert_eq!(waiting.join().unwrap(), Err(Stopped));
+        assert!(cancelled.elapsed() < Duration::from_secs(2));
+        // A still whose task is stopped: no render is started for it.
+        let actor = pm_kernel::KernelActor::spawn(pm_kernel::KernelConfig::default());
+        let kernel = actor.handle();
+        let project = json!({"id":"p","name":"Film","compId":"c","w":64,"h":36,"fps":25,"dur":1,
+            "bg":"#000000","comps":{},"layers":[],"assets":{}});
+        kernel
+            .open(
+                "still-wait",
+                pm_kernel::OpenSource::Untitled(
+                    pm_model::json::parse(&project.to_string()).unwrap(),
+                ),
+            )
+            .wait()
+            .unwrap()
+            .unwrap();
+        let open = kernel.published("still-wait").unwrap().snapshot.doc_id;
+        set_resources(open, snapshot(1, true));
+        let still = cached_frames(
+            kernel.clone(),
+            "still-wait".into(),
+            Capture::Poster,
+            |_| None,
+            |_, _, _| panic!("a stopped still was rendered"),
+        );
+        let started = Instant::now();
+        let stop = move || started.elapsed() > Duration::from_millis(150);
+        let answer = still(&pm_compat_runner::FrameRequest {
+            time: 0.,
+            width: 64,
+            height: 36,
+            motion_blur: false,
+            stop: &stop,
+            published: None,
+        });
+        assert_eq!(answer, Err(CAPTURE_STOPPED.to_owned()));
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the stop was honoured after {:?}",
+            started.elapsed()
+        );
+        set_resources(doc, None);
+        set_resources(open, None);
+        actor.shutdown();
     }
 }
 

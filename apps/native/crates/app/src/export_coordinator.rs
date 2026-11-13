@@ -111,6 +111,11 @@ impl AgentExport {
     pub fn cancelled(&self) -> bool {
         self.cancel.load(Ordering::Acquire)
     }
+    /// The row's task, as Background Tasks ▸ Cancel names it (`cancel_export`).
+    #[cfg(test)]
+    pub fn id(&self) -> pm_promedia::tasks::TaskId {
+        self.ticket.id
+    }
     /// Settles the row: completed, failed with its reason, or cancelled.
     pub fn finish(self, result: Result<(), String>) {
         cancellers().lock().unwrap().remove(&self.ticket.id.0);
