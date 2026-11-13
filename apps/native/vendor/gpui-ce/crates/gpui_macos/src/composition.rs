@@ -172,7 +172,10 @@ pub(crate) fn accessibility(view: usize) -> Option<Vec<AccessibilityItem>> {
 /// Opens the explicit CATransaction for this frame's slot publication and runs the
 /// host. When geometry moved, GPUI's drawable must be presented with the
 /// transaction ([`Transaction::moved`]); otherwise it presents asynchronously.
-pub(crate) fn present(view: usize) -> Option<Transaction> {
+/// `painted` is false for a scene shown again with no paint since the last
+/// one: text and control slots, placed from what a paint staged, are left
+/// as they are.
+pub(crate) fn present(view: usize, painted: bool) -> Option<Transaction> {
     let hook = HOSTS.with(|h| {
         h.borrow_mut()
             .get_mut(&view)
@@ -192,8 +195,13 @@ pub(crate) fn present(view: usize) -> Option<Transaction> {
         let change = gpui_util::measure("native composition", || present());
         transaction.change = change.or(fresh.into());
     }
-    let text = crate::native_text::present(view);
-    transaction.change = transaction.change.or(text).or(crate::native_control::present(view));
+    if painted {
+        let text = crate::native_text::present(view);
+        transaction.change = transaction
+            .change
+            .or(text)
+            .or(crate::native_control::present(view));
+    }
     Some(transaction)
 }
 /// A frame drawn within this long after the previous one is "continuous".
@@ -290,7 +298,7 @@ pub mod probe {
     }
     /// `continuous`: the previous frame was within [`super::CONTINUOUS_FRAME`].
     pub fn frame_after(key: usize, forced: bool, continuous: bool) -> Option<bool> {
-        let transaction = present(key);
+        let transaction = present(key, true);
         transaction.as_ref()?;
         Some(presents_with_transaction(
             forced,
@@ -301,7 +309,7 @@ pub mod probe {
     }
     /// Compositor-paced frames can use async even during continuous animation.
     pub fn paced_frame(key: usize, forced: bool) -> Option<bool> {
-        let transaction = present(key);
+        let transaction = present(key, true);
         transaction.as_ref()?;
         Some(presents_with_transaction(
             forced,
