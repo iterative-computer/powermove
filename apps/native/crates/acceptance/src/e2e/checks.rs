@@ -334,7 +334,9 @@ fn video() -> Result<Fixture, String> {
     p["dur"] = json!(30);
     let source = f.scratch.0.join("synthetic-source.bin");
     std::fs::write(&source, b"synthetic immutable media").map_err(|e| e.to_string())?;
-    p["assets"] = json!({"footage":{"id":"footage","kind":"video","name":"Synthetic numbered frames","dur":30,"sourcePath":source,"unknown":{"retain":true}}});
+    // A video asset without `timing` is a v1 one: opening it adds the Electron
+    // video reading marker (`videoColor`), so the document is shaped as loaded.
+    p["assets"] = json!({"footage":{"id":"footage","kind":"video","name":"Synthetic numbered frames","dur":30,"sourcePath":source,"unknown":{"retain":true},"videoColor":"electron"}});
     let rev = f.revision();
     f.host
         .lock()

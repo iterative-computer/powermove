@@ -267,8 +267,8 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                         let colors=&host.tokens.colors;
                         let _:()=msg_send![&*layers.timecode,setContentsScale:scale];
                         let _:()=msg_send![&*layers.timecode,setFontSize:host.tokens.typography.timecode as f64];
-                        // v1's timecode: the accent ink, as the paused readout.
-                        let _:()=msg_send![&*layers.timecode,setForegroundColor:&*cg!(colors.accent_text)];
+                        // The text ink, as the paused readout (the accent marks the playhead alone).
+                        let _:()=msg_send![&*layers.timecode,setForegroundColor:&*cg!(colors.text)];
                         if let Some(p)=&playhead { p.style(&host.tokens, scale); }
                         let geometry=v.builtins.timeline_place;
                         let (pps,scroll_time,column)=v.builtins.timeline.as_ref().map_or((100.,0.,0.),|t|t.read(cx).time_mapping());

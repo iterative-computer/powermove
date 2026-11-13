@@ -21,6 +21,44 @@ use std::{
 pub(crate) fn wire(value: &pm_model::Value) -> Value {
     serde_json::from_str(&pm_model::json::to_canonical_string(value)).expect("model JSON")
 }
+/// The effect parameter rows a binding writes, or `None` if it may not. A
+/// row's own binding writes that row. A group writes several rows of one
+/// effect at once (a colour wheel's red, green and blue, a curve's count and
+/// points): its channels are those rows' ids, every row editable, and its
+/// handle is their own bindings joined by `+`, so the projection alone says
+/// which groups exist.
+pub(crate) fn effect_binding_rows<'a>(
+    projection: &'a Value,
+    handle: &str,
+    channels: &[String],
+) -> Option<Vec<&'a Value>> {
+    let rows = projection["rows"].as_array()?;
+    let row = |id: &str| {
+        rows.iter().find(|r| {
+            r["kind"] == "parameter"
+                && r["parameter"]["id"] == id
+                && r["parameter"]["readonly"] == false
+        })
+    };
+    let found = channels
+        .iter()
+        .map(|id| row(id))
+        .collect::<Option<Vec<_>>>()?;
+    let handles = found
+        .iter()
+        .map(|r| r["parameter"]["binding"].as_str())
+        .collect::<Option<Vec<_>>>()?;
+    let effect = &found.first()?["parameter"]["effect"];
+    let distinct = channels
+        .iter()
+        .collect::<std::collections::BTreeSet<_>>()
+        .len()
+        == channels.len();
+    (distinct
+        && handles.join("+") == handle
+        && found.iter().all(|r| r["parameter"]["effect"] == *effect))
+    .then_some(found)
+}
 pub(crate) fn model(value: &Value) -> Result<pm_model::Value, String> {
     pm_model::json::parse(&value.to_string()).map_err(|e| format!("{e:?}"))
 }
@@ -396,7 +434,7 @@ impl Backend {
     pub(crate) fn parameter_write(
         &mut self,
         handle: &str,
-        value: pm_model::Value,
+        value: &Value,
         time: f64,
     ) -> Result<Request, String> {
         self.validate_binding_owner(handle)?;
@@ -406,32 +444,35 @@ impl Backend {
             .ok_or("Disposed effect binding")?
             .clone();
         let projection = self.projection()?;
-        let row = projection["rows"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .find(|r| {
-                r["kind"] == "parameter"
-                    && r["parameter"]["binding"] == handle
-                    && r["parameter"]["readonly"] == false
-                    && channels == [r["parameter"]["id"].as_str().unwrap_or("").to_owned()]
-            })
+        let rows = effect_binding_rows(&projection, handle, &channels)
             .ok_or("Effect binding no longer editable")?;
-        let address = model(&row["parameter"]["id"])?;
-        let property = pm_panel_inspector::PropertyId::from_value(
-            &pm_model::json::parse(address.as_str().ok_or("Effect property id")?)
-                .map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
+        // One row takes the value; a group (a wheel's red, green and blue,
+        // a curve's points) takes one value per row, in one batch.
+        let values = if rows.len() == 1 {
+            vec![model(value)?]
+        } else {
+            let values = value.as_array().ok_or("A grouped binding takes a list")?;
+            if values.len() != rows.len() {
+                return Err("A grouped binding takes one value per row".into());
+            }
+            values.iter().map(model).collect::<Result<Vec<_>, _>>()?
+        };
+        let bindings = rows
+            .iter()
+            .map(|row| {
+                let address = model(&row["parameter"]["id"])?;
+                pm_panel_inspector::PropertyId::from_value(
+                    &pm_model::json::parse(address.as_str().ok_or("Effect property id")?)
+                        .map_err(|e| e.to_string())?,
+                )
+                .map(pm_panel_inspector::Binding::Property)
+                .map_err(|e| e.to_string())
+            })
+            .collect::<Result<Vec<_>, String>>()?;
         self.model
             .as_mut()
             .ok_or("No open project")?
-            .set(
-                self.caller,
-                pm_panel_inspector::Binding::Property(property),
-                value,
-                time,
-            )
+            .set_many(self.caller, &bindings, &values, time)
             .map_err(|e| e.to_string())
     }
     pub fn local_fields(&mut self) {
@@ -616,17 +657,8 @@ impl KernelData for Data {
             match &request.operation {
                 HostOperation::RegisterBinding { handle, channels } => {
                     let projection = b.projection()?;
-                    let valid = projection["rows"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .any(|r| {
-                            r["kind"] == "parameter"
-                                && r["parameter"]["binding"] == *handle
-                                && channels
-                                    == &vec![r["parameter"]["id"].as_str().unwrap_or("").to_owned()]
-                        });
-                    let valid = valid || b.native.properties.valid(handle, channels);
+                    let valid = effect_binding_rows(&projection, handle, channels).is_some()
+                        || b.native.properties.valid(handle, channels);
                     if !valid {
                         return Err("unknown model binding".into());
                     }
