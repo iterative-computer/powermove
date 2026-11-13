@@ -281,9 +281,27 @@ Evidence (outside Git): `~/Developer/pm-shots/na-studio3d-ui/round5/` with
 |---|---|
 | Per-surface Emission and Opacity | ✅ the data model and the engine already had `opacity` (percent), `emissionColor` and `emissionIntensity` per surface, and the commands accepted them; Properties now shows Opacity, Emission and Emission Strength on Front, Bevel, Side and Back, plus an Emission Map beside the Color Map (a live layer, group or composition can make a surface glow) |
 
+## Round 6 (Light panel motion, posters, showcase) · 2026-11-13
+
+Evidence (outside Git): `~/Developer/pm-shots/na-studio3d-ui/round6/` and
+`~/Developer/pm-shots/showcase/` (both with `captions.md`). The Mac sat at the
+lock screen the whole round, so nothing could be activated or read through
+accessibility. Items 1–2 are covered by unit tests, and the showcase was
+built and rendered entirely through MCP.
+
+| Item | Result |
+|---|---|
+| Light panel enter/exit (§6) | ✅ springs in (Enter: opacity and a short rise) and out (Exit) while it stays mounted for the exit. Any v4 node can opt in with `pmKit.presence` |
+| Deleting a project deletes its poster | ✅ Move to Trash (Home or an agent) removes the Home poster; Put Back renders a new one at the next save or close. Delete Forever is still unsupported in the kernel |
+| Showcase | ✅ `opus-showcase.mp4`, iPhone 18 Pro, dark studio, macro-to-hero camera move, Production at 1080p, plus 3 stills. The band is avoided by keeping the camera pitched down more than half the field of view (noted in its captions). Sol's far-clip catcher fix (039ef4e22) is merged but wasn't used for this render |
+
+Found while making the showcase (for the engine/MCP lanes): `auto_studio`
+needs loaded geometry, so it can't run headless; `light_highlight` can place
+a light below the floor for a vertical surface seen from above; and
+Production ran at about 13–22 s a frame for this glass-and-titanium phone.
+
 ## Open items
 
-1. Light panel: its enter/exit motion.
 2. Export: wire Render at 75% Size once the engine takes a 3D render size.
 3. Fog in a studio scene (no terrain) still uses the schema's 10,000-unit
    shape, which goes dark at any density; the landscape migration covers

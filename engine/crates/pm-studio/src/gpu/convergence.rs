@@ -7,6 +7,8 @@ pub(super) struct Probe {
     result:wgpu::Buffer,
 }
 impl Renderer {
+    /// Idle calibration uses the identical stopping probe between sample chunks.
+    pub fn current_max_samples(&mut self)->u32 { self.max_sample_count() }
     pub(super) fn max_sample_count(&mut self)->u32 {
         let probe=self.convergence_probe.get_or_insert_with(|| {
             let layout=self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor{label:Some("Studio sample maximum"),entries:&[uniform(0),storage(1,true),storage(2,false)]});

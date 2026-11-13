@@ -1453,6 +1453,13 @@ fn surface(ro: vec3f, rd: vec3f, h: Hit) -> Surface {
   }
   if (m.layers.w > 0.0) { n = droplets(n, uv, m.layers.w);coat_normal=droplets(coat_normal,uv,m.layers.w); }
   if(imported.physical3.w<0.5){coat_normal=n;}
+  // Interpolated or mapped normals may face behind this ray on an otherwise
+  // visible polygon (notably coarse terrain ridges). Such a shading frame
+  // makes every reflective BSDF return zero. Fall back to the real face normal
+  // only for that invalid frame; retain authored smooth/bump normals elsewhere.
+  let facing = select(-1.,1.,dot(ng,-rd)>=0.);
+  if(dot(n,-rd)*facing<=0.){n=ng;}
+  if(dot(coat_normal,-rd)*facing<=0.){coat_normal=ng;}
   m.spec.x = max(m.spec.x, 0.002);
   let volume=select(vec4f(1.,1.,1.,0.),imported.volume,imported.physical3.w>0.5 && imported.physical.x>0.);
   if(imported.physical3.w<0.5){imported.specular_color.w=m.spec.x;}
@@ -1650,7 +1657,9 @@ fn path(px: vec2f)->Sample {
       if(last_pdf>0.){let pl=light_pdf(light,ro,rd,light_distance)*light_selection_pdf(seen_light,ro);mis=last_pdf*last_pdf/(last_pdf*last_pdf+pl*pl);}
       s.radiance+=limit_indirect(tp*light_emit(light,ro+rd*light_distance,rd)*mis,b);return s;
     }
-    if (h.tri < 0 && tf >= BIG) {
+    // A clipped miss carries the camera's finite far distance. The analytic
+    // floor may exist beyond it; that is still a miss, never surface(-1).
+    if (h.tri < 0 && tf >= h.t) {
       if (primary) {
         if(map_count()>0u && world_row(1u).z>0.5){s.radiance+=tp*(environment(rd)+sun_seen(rd));}
         else{let transmission=clamp(max(tp.x,max(tp.y,tp.z)),0.,1.);s.bg = P.backdrop.xyz*transmission;s.void_hit = transmission;}
@@ -1666,7 +1675,11 @@ fn path(px: vec2f)->Sample {
     if (tf < h.t) {
       let p = ro + rd * tf;
       if (primary) {
-        specular_observation=16.;
+        // Ratio-estimated soft shadows and caustics can look quiet after the
+        // first batches, yet boil on the broad smooth receiver after OIDN.
+        // This observation floor applies only to the guarded offline policy;
+        // legacy MC references and the requested ceiling remain unchanged.
+        specular_observation=24.;
         let transmission=clamp(max(tp.x,max(tp.y,tp.z)),0.,1.);
         s.bg = P.backdrop.xyz * catcher_ratio(p)*transmission;
         s.void_hit = transmission;
@@ -1706,6 +1719,10 @@ fn path(px: vec2f)->Sample {
       s.object=hit_object(h)+1u;s.normal=n;
       // A quiet first batch cannot rule out rare light paths through glass.
       specular_observation=select(0.,16.,m.spec.y>.5 && m.spec.z<.05);
+      // Matte mesh receivers need the same observation safety as the analytic
+      // catcher when a fixed caustic estimate is present. An early quiet batch
+      // otherwise freezes shadow/caustic bias into broad smooth floor regions.
+      if(photons_on && (u32(m.policy.y)&8u)==0u && m.base.w<.5 && m.spec.w<.5 && m.spec.y<.5){specular_observation=max(specular_observation,24.);}
       if(m.base.w>.5 && m.spec.x<.1){specular_observation=32.;}
       if(m.spec.w*(1.-m.base.w)>.5 && m.spec.x<.2 && !thin_leaf(m)){specular_observation=128.;}
       s.depth=select(distance(sf.p,P.cam_pos.xyz),dot(sf.p-P.cam_pos.xyz,P.cam_fwd.xyz),(P.opts.w&1u)!=0u);
@@ -2097,8 +2114,31 @@ fn photons(@builtin(global_invocation_id) gid: vec3u) {
   let u = rnd2();
   if (kind == 0u) {
     ro = l.pos.xyz + l.u.xyz * (u.x * 2.0 - 1.0) + l.v.xyz * (u.y * 2.0 - 1.0);
-    rd = cosine_dir(rect_normal(l), rnd2());
-    flux = light_emit(l, ro, -rd) * abs(l.u.w) * PI;
+    let direction_sample = rnd2();
+    let emitter_normal = rect_normal(l);
+    rd = cosine_dir(emitter_normal, direction_sample);
+    var direction_weight = PI;
+    // Every retained caustic must first reach scene geometry. Uniformly aim
+    // into its conservative bounding sphere instead of spending most area-
+    // light photons outside it. Le*cos/pdf preserves emitted energy; rays
+    // outside this cone cannot reach a focusing surface. Keep the legacy MC
+    // proposal for independent references and near/ill-conditioned emitters.
+    // The analytic catcher is outside the geometry bound. A finite receiver
+    // mesh is already inside that bound and keeps the original proposal.
+    if ((u32(P.ambient.w) & (1u << 22u)) != 0u && P.backdrop.w > 0.5) {
+      let delta = P.bounds.xyz - ro;
+      let distance2 = dot(delta, delta);
+      let radius = P.bounds.w * 1.0001 + 4. * ray_epsilon();
+      let radius2 = radius * radius;
+      if (distance2 > radius2 && distance2 < 1e30 && radius2 > 1e-12) {
+        let omc = one_minus_cos(radius2 / distance2);
+        if (omc > 1e-5) {
+          rd = cone_dir(delta / sqrt(distance2), omc, direction_sample);
+          direction_weight = max(dot(emitter_normal, rd), 0.) * 2. * PI * omc;
+        }
+      }
+    }
+    flux = light_emit(l, ro, -rd) * abs(l.u.w) * direction_weight;
   } else if (kind == 3u) {
     let dir = safe_normalize(l.pos.xyz);
     let tb = basis(dir);

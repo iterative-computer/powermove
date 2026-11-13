@@ -31,6 +31,12 @@ pub(crate) fn files(dir: &Path, id: &str) -> (PathBuf, PathBuf) {
         dir.join(format!("{stem}.stamp")),
     )
 }
+/// A trashed project's poster is removed; Put Back draws it again when needed.
+pub(crate) fn forget(dir: &Path, id: &str) {
+    let (image, stamp) = files(dir, id);
+    let _ = std::fs::remove_file(image);
+    let _ = std::fs::remove_file(stamp);
+}
 pub(crate) fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -269,5 +275,9 @@ mod tests {
         let failing: FrameRenderer = Arc::new(|_| Err("offline".into()));
         assert!(write(&failing, None, dir.path(), "c", 1, (1920, 1080), Some(60.)).is_none());
         assert!(!files(dir.path(), "c").0.exists());
+        forget(dir.path(), "b");
+        assert!(!files(dir.path(), "b").0.exists());
+        assert!(!files(dir.path(), "b").1.exists());
+        assert!(files(dir.path(), "file-1/a").0.exists());
     }
 }

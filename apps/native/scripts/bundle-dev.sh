@@ -55,6 +55,12 @@ for pair in ${PM_DEV_BUNDLE_ENV:-}; do
   /usr/libexec/PlistBuddy -c "Add :LSEnvironment dict" "$app/Contents/Info.plist" 2>/dev/null || true
   /usr/libexec/PlistBuddy -c "Add :LSEnvironment:${pair%%=*} string ${pair#*=}" "$app/Contents/Info.plist"
 done
+# A linked OIDN runtime is required at launch, including in export children.
+# Bundle both device backends and refuse incompatible deployment targets.
+if otool -L "$binary" | grep -Fq libOpenImageDenoise; then
+  : "${OIDN_DIR:?Set OIDN_DIR to a Metal-enabled OIDN install with CPU fallback}"
+  python3 "$(dirname "$0")/bundle-oidn.py" "$app" --oidn-dir "$OIDN_DIR"
+fi
 xcrun actool "$here/Assets.xcassets" --compile "$app/Contents/Resources" \
   --platform macosx --minimum-deployment-target 14.0 --accent-color AccentColor \
   --output-partial-info-plist "$out/assets-info.plist" >/dev/null

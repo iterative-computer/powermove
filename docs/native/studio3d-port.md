@@ -2491,3 +2491,364 @@ checks pass for scale arithmetic and estimate invalidation. A headless Metal
 integration test observes actual transport requests changing from 64×64 to
 48×48 at 75%, while delivery remains 64×64 and the document stays identical.
 Full-HD real-export timings of the option are recorded separately when available.
+
+### Studio fog without terrain
+
+Enabling an untouched, inactive legacy World no longer retains a uniform
+10 km fog volume merely because the composition has no terrain. A positive
+`world.fogDensity` property edit or `set_world` activation adopts the existing
+bounded defaults: height falloff 0.06 and distance 400. Creating a World with
+positive density and no authored shape uses the same defaults.
+
+The kernel owns this change in the original action and journal entry. Undo,
+Redo and save/reopen retain it exactly. Active, keyed, expression-driven,
+hand-shaped and explicitly patched fog stays authored; opening a project does
+not rewrite it. No panel or control is added.
+
+Verification: all 38 native scene kernel regressions pass (0.33 s), including
+studio activation, creation, explicit-shape preservation and Undo/reopen.
+The headless GPU checks for scale and fog pass (10.38 s); foreground mean RGB
+with fog is 0.356825 in Live and 0.493285 in Refine. These correspond to the
+current native pane's Fast and Quality labels. The combined app builds in
+31.86 s. These checks were completed before the travel pause on the identical
+fog source; they do not substitute for the remaining full scene regressions.
+
+### Owner visual review: backdrop, teapot and chrome horizon
+
+The opaque backdrop band was an invalid-surface read after a finite camera
+far-clip miss. The analytic catcher could lie beyond the clip plane, so a miss
+fell through to `surface(-1)`. Commit 039ef4e22 compares the floor distance to
+the actual hit limit. The GPU reproduction failed with minimum background
+code value 0 before the fix and passes with 230 after it, on both BVH and
+Metal RT at far distances 600 and 10000. Real-export visual verification is
+recorded separately; this unit reproduction does not stand in for it.
+
+The teapot QA fixture had a coarse conical body profile and inherited sloping
+shoulder normals on its flat lid. Its independent MC4096 reference showed the
+same radial lid artifact. The fixture now uses a monotone curved meridian,
+with derivative normals and flat cap normals. Its reference is regenerated
+only for that corrected physical mesh, using the identical independent
+MC4096, rotated-light, seed-7, no-denoise method. Other scene references and
+all existing numeric limits stay fixed. The flat-lid regression failed before
+the correction and passes afterward. The small fixture suite passes all six
+tests (26.89 s); full-HD signoff remains a separate acceptance step.
+
+The apparently white teapot output and black reference both contain identical
+transparent black corner pixels (RGBA 0,0,0,0); the difference was the image
+viewer's background. Existing smooth-noise metrics mask nonopaque pixels.
+Acceptance now additionally checks every pixel over black, over white, and
+in alpha, with RMS below the existing 0.02 limit. It saves both opaque display
+proofs as evidence. No noise, bias or flicker threshold is relaxed.
+
+The chrome equator lip is physical: a mirror sphere reflects the finite grey
+floor below it and the black environment above it. An analytic sphere-ray /
+reflected-floor diagnostic predicts 998 boundary pixels; all are within one
+pixel of the rendered edge in both Production and MC4096 (p95 distance 0 px).
+The renderer, floor, material and chrome reference are unchanged.
+
+### Completion gates and round-2 decision (13 November owner update)
+
+The owner re-accepted GPU OIDN despite its matched 10.2% gain: denoise fell
+from 851 to 532 ms and the product export needs that saving. This supersedes
+the earlier “R2 reverted / closed” decision above. Integration must first
+replace the macOS-27 TBB dependency with a macOS-14 build, verify library
+minimum versions, bundle both device backends, and retain explicit CPU fallback.
+The old install stays intact until the replacement verifies.
+
+Full-size rendering remains the default. The 75% option is explicit and never
+automatically enabled. Post-denoise acceptance remains whole/ROI RMS <0.02,
+smooth noise <0.006, bias p95 <0.012, plus the two-seed flicker limit <0.006.
+References remain independent MC4096; speed work cannot relax these limits.
+
+The 1080p real-export gates use at least 30 frames: Draft ≤1 s/frame for every
+scene; Production ≤3 s for standard products and ≤8 s for glass, polished
+chrome and caustics; Final has no time limit. The environment gate is set
+from a new measurement. Its earlier 72.524 s/frame result is a clear outlier:
+70.897 s (97.8%) was tracing, with dense foliage visibility and about 144 mean
+samples per pixel, rather than denoise or encoding, dominating the work.
+The displayed estimate must be within −20%/+30% of actual export time.
+Native Live requires ≥60 presented fps with no stall ≥100 ms; input-to-pixel
+p95 ≤50 ms; Refine ≤2 s. Memory acceptance uses a flat trend over two fixed
+projects, with per-scene editing/export peak RSS and physical footprint also
+reported.
+
+R3 targets a smaller per-scene tracer, background compilation and removal of
+unnecessary per-step waits, with cold and warm export timings. R4 may reduce
+the glass observation floor only if chrome's measured steps 17–32 cost at
+least 1.5 s. Its noise and flicker gates remain unchanged, and floor fireflies
+must be resolved first. The ≥15% speed rule is judged on the targeted scene;
+product and hero may not regress beyond measurement drift. R2's explicit
+exception remains approved. There are at most four speed rounds. Speed work
+stops at 13:00; unfinished or unsuccessful changes are reverted. Remaining
+speed misses are recorded as known, post-v1 work rather than hidden passes.
+
+Real-content evidence also includes the designer's iPhone studio film:
+180 Production frames at 1080p took approximately 40 minutes (about 13 s/frame,
+with shared-GPU contention during part of the run). It uses imported glass and
+titanium materials. This is an owner-reported, contended result, not a quiet
+benchmark or an accepted gate measurement. Estimate and peak-memory checks
+should include the saved project where feasible.
+
+Corrected-backdrop verification uses the real export path, 30 animated-camera
+Production frames at 1920×1080, CPU OIDN, development build, with diagnostic
+sample-count readbacks disabled:
+
+| Current CPU export | Result |
+| --- | ---: |
+| Total export | 96.428 s |
+| Seconds/frame | 3.214 |
+| Trace/frame | 1971.8 ms |
+| OIDN/frame | 775.9 ms |
+| Guide pass + readback/frame | 115.0 ms |
+| Scene preparation/frame | 8.5 ms |
+| Frame-0 upper-left backdrop dark pixels, before → after | 19000 → 0 |
+| Frame-29 upper-left backdrop dark pixels, before → after | 16000 → 0 |
+
+The corrected first and last frames were inspected. Original showcase images
+and video are preserved separately as before evidence; no evidence is stored
+in this repository. This fixes the visible band but does not claim the full
+Production speed gate: 3.214 remains above 3 s/frame.
+
+The quiet-performance and fixed-project memory drivers now accept the
+persistent evidence directory and its `/tmp/pm-shots` symlink equivalently.
+Their canonical-path guard still refuses the public checkout. The focused
+Python path checks pass; on-screen measurement remains a separate run.
+
+### Invalid ridge normals and explicit CPU runtime selection
+
+Some visible terrain polygons interpolated a shading normal that faced behind
+the camera ray. The reflection BSDF rejected that frame and returned black.
+Commit 8e434e203 falls back to the geometric face normal only for an invalid
+shading frame, including the independent coat normal. The isolated GPU
+reproduction changed from RGB 0 to RGB 214, identical to the valid-normal
+case, on BVH and Metal RT. All 11 denoising/guide regressions pass (17.25 s).
+The current full-HD environment frame was inspected: both reviewed hilltop
+wedges are absent. In the first reviewed rectangle all 578 formerly black
+pixels now show lit snow. This is a visual check, not a 30-frame speed gate;
+its one-frame export took 40.26 s, with 33.60 s in tracing.
+
+The interim host-pointer OIDN binding now requests CPU device type 1 explicitly
+(80c745393). OIDN's default may select Metal, where an ordinary Rust Vec pointer
+is not a valid image allocation. The device-selection unit passes with
+`OIDN_DEFAULT_DEVICE=metal` against the Metal-enabled runtime. Native executable
+linking also retains an explicit development OIDN runtime path; bundle packaging
+must replace that path with its Frameworks runtime before shipping.
+
+A development-only, headless `--studio3d-estimate-probe` command reads a saved
+project, extracts its embedded media into a fresh evidence directory and
+queries the same viewer estimate state used by the export sheet. It edits no
+document and opens no window. Arguments after the flag are the project path,
+fresh evidence directory, optional frame count (30), render scale (1) and
+sample time in seconds (0). It accepts only the persistent evidence directory.
+The combined native build passes (4 min 57 s, including pruned dependencies),
+and a real saved product project returns all four preset estimates without
+layer warnings. Estimate accuracy remains under measurement; a broad bound
+must not be reported as an accurate point estimate.
+
+### Matched CPU full-size and explicit 75% export, November 13
+
+The same native development executable and unchanged saved product project
+were exported for 30 frames through the real exporter. Diagnostic sample-count
+and per-step readbacks were disabled. The selected CPU device remained type 1
+even with `OIDN_DEFAULT_DEVICE=metal` in the environment.
+
+| Production render size → delivery size | Total | Seconds/frame | Trace/frame | OIDN/frame |
+| --- | ---: | ---: | ---: | ---: |
+| 1920×1080 → 1920×1080 | 89.871 s | 2.996 s | 1980.0 ms | 782.6 ms |
+| Explicit 1440×810 → 1920×1080 | 53.817 s | 1.794 s | 1130.4 ms | 480.0 ms |
+
+All 30 transport frames had the requested render dimensions; delivery remained
+1920×1080. Full size is still the default. The warm full-size result is a thin
+pass, while the earlier cold result was 3.214 s/frame. Trace and denoise times
+are essentially unchanged between those full-size runs; the difference is
+startup/cache overhead, not a claimed renderer speed improvement. The smaller
+render is an explicit option and does not count toward the full-size gate.
+
+The existing estimator returned a Production range of 2.420–9.272 s/frame.
+Its 5.846 s midpoint is 95.2% above the matched actual time and is not an
+accepted accurate point estimate. In particular, scaling the 320×180 OIDN
+measurement by area projected 1.635 s of denoising versus 0.783 s measured.
+The approved correction is a two-size affine denoise model, actual adaptive
+trace calibration at first/middle/last frames, and explicit fixed per-frame
+costs. The UI contract remains `frameMs`/`totalMs` with `min`/`max`; the planned
+band is 0.85–1.20 times the point estimate. Accuracy is judged by actual time
+falling within −20%/+30% of that point, with any miss recorded honestly.
+Calibration changes are still under validation at this checkpoint.
+
+The designer's round-6 branch is merged for the next combined native build.
+Its additional real-content findings are assigned to the separate command-fix
+lane: headless Auto Studio requires loaded model geometry, and a requested
+highlight can reflect toward a point below the floor. These engine changes
+do not claim to fix those commands; the green command-fix branch is scheduled
+to merge for final regression.
+
+The Production trace projection uses a fixed resolution correction of
+**0.695**, fitted once by least squares through the origin on trace cost
+alone. Denoising, encoding and sample-statistics readbacks are not fitted into
+that coefficient. Chrome is held out of the fit.
+
+| Fit scene | Actual adaptive low-res mean spp | Pixels at cap | Raw full-size trace projection | Measured real-30 trace |
+| --- | ---: | ---: | ---: | ---: |
+| Product | 19.683 | 0.318% | 2479.752 ms | 1979.977 ms |
+| Hero | 17.207 | 0.577% | 1938.610 ms | 1019.655 ms |
+
+The unrounded coefficient is 0.6950945054. The hero trace sample comes from
+the earlier profiled 30-frame export; its sample-count readback happens after
+the trace timer and is excluded from this trace-only fit. New gate exports
+must still disable that diagnostic readback. Other presets retain correction
+1 and are explicitly labelled as extrapolations. The fitted combined build
+passes (40.7 s), and the first held-out check passes without changing the
+coefficient:
+
+
+| Production estimate check | Point estimate | Measured real-30 export | Actual relative to estimate | Point gate / displayed band |
+| --- | ---: | ---: | ---: | --- |
+| Product | 2.636 s/frame | 2.996 s/frame | +13.6% | PASS / inside |
+| Hero | 2.324 s/frame | 2.182 s/frame | −6.1% | PASS / inside |
+| Chrome, held out | 9.394 s/frame | 11.043 s/frame | +17.5% | PASS / inside |
+
+The hero and chrome comparisons use the earlier CPU 30-frame exports, which
+included separate diagnostic sample-statistics readbacks. Their overall times
+are conservative comparisons, not new unprofiled speed gates. The trace-only
+fit excludes that readback. Fresh CPU/Metal real exports will repeat the
+accuracy check after runtime integration. No coefficient was adjusted using
+chrome. The estimator predicts guide work and beauty work separately, with
+the existing 64-pixel beauty context halo projected at the full requested
+render size. It does not multiply that halo by the image-area ratio.
+
+The calibration uses the actual preset convergence rule on first/middle/last
+frames at up to 480×270, yields between four-sample passes, and checks input
+cancellation during OIDN. One background pipeline initialization is permitted
+per worker; completion and failure both wake the worker, without an idle spin.
+A cache hit supersedes queued/in-flight estimates and is keyed conservatively
+by document stamp, content generation, time range, preset set and render size.
+The four-preset state/command contract is unchanged; no panel or control was
+added by the engine lane. The focused queue, model, crop and sample-parity
+regressions pass; cancellation of a late reply is also checked before landing.
+
+### GPU OIDN re-acceptance: deployment compatibility and calibration
+
+The OIDN 2.5.1 / oneTBB 2023.2 runtime has been rebuilt for the native
+application's macOS 14 deployment target. All five dylib load-command minima
+are compatible: the four OIDN libraries declare macOS 11.0 and TBB declares
+14.0. Both explicit CPU type 1 and Metal type 5 passed RT-plus-guide smoke
+execution on the M5. This verifies the load commands and execution on this
+machine; it does not claim testing on an actual macOS 14 installation.
+
+Rebuild provenance: OIDN 2.5.1 source archive SHA-256
+`e71fd043a70f1cc80e301d1b90df6c1f536098c4dd94baa612742f6db3369c36`,
+oneTBB v2023.2.0 archive
+`80cb62e62defeee67ea1885a6f72d97ac81404f8fde9cded62fb51524808a30c`,
+and ISPC 1.30.0 macOS arm64 archive
+`01b05547ee3bed3a428c1ba2e72ec98743c8ad848c7db11c725bcd1e77889626`.
+Both CMake configurations use arm64, Release and
+`CMAKE_OSX_DEPLOYMENT_TARGET=14.0`, with `MACOSX_DEPLOYMENT_TARGET=14.0`
+in the environment. TBB disables tests, allocator/proxy, HWLOC auto-search
+and TCM. OIDN enables CPU, BNNS and Metal, disables SYCL/CUDA/HIP and
+RTLightmap, and enables `OIDN_INSTALL_DEPENDENCIES` / `OIDN_ZIP_MODE`.
+Its `TBB_ROOT` / `TBB_DIR` point at that rebuilt TBB install, and
+`ISPC_EXECUTABLE` points at the pinned compiler. Build/install each component
+under the shared build lock. Audit every installed dylib with `otool -l`
+and `otool -L`; bundle with `OIDN_DIR` set to the verified install:
+`apps/native/scripts/bundle-dev.sh <native-binary> <output-directory>`.
+The helper rejects incompatible minima instead of silently shipping the old
+macOS-27 TBB.
+
+The integration prefers Metal with OIDN-owned device buffers. An allocation,
+filter or readback error retries the untouched input on explicit CPU type 1;
+cancellation returns without publishing partial GPU output. Beauty RGB is
+published only after all contribution layers succeed, preserving alpha and
+extra channels. The bundle helper includes the frontend, core, CPU device,
+Metal device and TBB libraries, their aliases and notices, relocates their
+install names, and rejects a library whose minimum exceeds the app target.
+
+The affine denoise calibration is cached separately for CPU and Metal, and
+for full- and half-resolution guides. Backend changes during calibration
+restart the two-size fit; mixed-device frame measurements cannot produce an
+estimate. The UI contract remains `frameMs` / `totalMs` min/max, with the
+actual denoiser backend available in calibration metadata.
+
+The real-export timing tool now records actual backend, fallback, per-filter
+and transfer timings, geometry/texture uploads, scene updates and BLAS builds.
+Gate runs omit sample-count and per-step diagnostic readbacks. Immutable mesh
+and attribute identities avoid per-frame geometry-byte comparisons; a new
+identity still receives an exact-byte comparison so copy-on-write mesh edits
+and material changes cannot reuse stale geometry or pixels.
+
+The focused integration run passes 21 tests: five engine-service lifetime /
+estimate tests, nine OIDN unit tests, two explicit Metal/CPU tolerance and
+cancellation tests, three calibration tests and two geometry-reuse pixel
+tests. The CPU/Metal display-space comparison across three image / guide /
+quality configurations measures RMS 0.000232–0.000276 and p99
+0.000663–0.000832, below the respective 0.003 and 0.01 tolerances. The
+unchanged full-HD image gates remain separate requirements. The native
+application builds in 5m43s. A moved app bundle passes both CPU and Metal
+estimate probes after all development OIDN paths are removed; every
+non-Draft preset reports the requested backend. This verifies the five-library
+bundle's relocation and execution, not execution on an actual macOS 14 host.
+
+The first current-build Metal product export renders 30 full-size 1080p
+frames at **3.532 s/frame**, above the 3 s budget. Trace averages 2452 ms,
+OIDN 676 ms, guides/readback 165 ms and scene preparation 11 ms; worker total
+is 3317 ms. Geometry uploads remain 1 and BLAS builds 2 for every frame,
+confirming camera-only reuse. No sample-count or per-step diagnostic readbacks
+are enabled. Kernel footprint sampling ran alongside this export. Its
+simultaneously observed process-tree peak is **3.114 GiB physical footprint**
+and **0.580 GiB RSS**; these overlap and must not be added. Editing, chrome,
+environment and two-project memory trends remain unmeasured in this build.
+
+The same scene's Metal pre-export point estimate is **2.531 s/frame**;
+actual time is 39.5% higher, outside the approved +30% point gate and the
+current displayed upper bound. This is an accuracy miss, not a pass based on
+the earlier CPU fit. CPU controls and hero/chrome Metal real-30 measurements
+remain pending. Per-layer beauty-filter reuse and limiting extra catcher
+observations to caustic transport are follow-up candidates, not changes in
+this tested baseline. GPU OIDN is retained under the owner's explicit
+re-acceptance; completion of this performance round is not claimed here.
+
+### iPad walkthrough: motion blur follow-up
+
+Fast 3D moves visibly strobe in the iPad reconstruction. This finding is
+known, post-v1 until a moving-object/camera image regression verifies the
+actual exported shutter coverage. Passing `motionBlur: true` to export is
+not sufficient evidence: the generic compositor also requires each layer's
+`mblur` switch (`LayerPatch.motionBlur` through native commands/MCP). That
+path already creates time-offset Studio requests and divides the ray budget
+among the shutter samples. The preset's separate `motionBlurSamples` control
+is still documented as pending. The engine's more efficient shared
+`begin_shutter` / `accumulate_shutter_guides` / `end_shutter` accumulation is
+used by the Electron host and is not called by native Studio. No defaults or
+UI controls are changed in this lane.
+
+The command-fix lane owns the walkthrough's sun, recovery, connection/library
+lock, headless geometry, highlight and import-scale issues. Its green changes
+are scheduled to merge for final regression.
+
+### Chrome floor grain: receiver convergence and photon targeting
+
+The new fixed lower-left floor ROI reproduced a failure that the whole-frame
+average had hidden. At 192×128, the original Production Metal render had
+floor noise 0.006068, bias p95 0.013539 and two-seed difference 0.006768,
+against the unchanged 0.006 / 0.012 / 0.006 limits. Most catcher pixels stopped
+near 16 samples. Raising that minimum alone to 24 improved flicker but still
+failed noise and bias, so that change alone was not accepted.
+
+Production now gives both the analytic catcher and matte mesh receivers of
+caustic light at least 24 observations, subject to the requested ceiling.
+The independent MC reference policy remains unchanged. Area-light photons in
+analytic-catcher scenes sample the conservative scene-bound cone when the
+emitter is outside it, with `Le × area × cos(theta) × solid_angle` weight.
+Every retained caustic first hits real scene geometry; paths outside that
+cone cannot contribute. Inside/near emitters, ill-conditioned cones, finite
+mesh receiver scenes and the reference policy retain the original proposal.
+This increases useful photon density without clamping bright paths or
+changing the photon budget, grid storage, image targets or reference bytes.
+
+The revised small Metal floor check passes: noise 0.005907, bias 0.009778,
+flicker 0.005508. Current-source CPU checks pass all four Production fixtures;
+its chrome floor measures 0.005936 / 0.009320 / 0.005586 respectively. The
+finite-floor glass bias also improves from 0.012001 to 0.011024 after the
+matte-receiver observation safeguard. The observation regression covers BVH
+and hardware RT, both analytic and mesh receivers, and continued adaptive
+stopping in quiet regions. Full-HD and exported-frame verification remain
+pending; these small results do not certify the full-size finding.

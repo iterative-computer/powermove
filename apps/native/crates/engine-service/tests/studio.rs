@@ -3870,7 +3870,6 @@ fn orthographic_live_text_keeps_bright_bevel_edges_free_of_dark_outliers() {
     assert!(rms < 0.05, "orthographic text RMS {rms}");
 }
 
-
 #[test]
 fn native_studio_export_scale_reduces_only_transport_and_preserves_document_and_output() {
     use pm_studio3d_engine::{compositor,extract};
@@ -3898,6 +3897,30 @@ fn native_studio_export_scale_reduces_only_transport_and_preserves_document_and_
         assert!(!seen.lock().unwrap().is_empty());
         let actual=seen.lock().unwrap().clone();
         assert!(actual.iter().all(|dims|*dims==expected),"{actual:?}");
+        assert_eq!(doc.to_value(),before);
+    }
+}
+
+#[test]
+fn native_studio_fog_activation_keeps_foreground_visible_in_fast_and_quality() {
+    let mut store=pm_kernel::DocumentStore::new_untitled(document(false,100.).to_value().unwrap());
+    store.execute(pm_kernel::Scene3dCommand::Apply {
+        comp:Some("test".into()),args:pm_scene3d::to_model(&json!({"operation":"set_world","id":"world","world":{"p":{"sunIntensity":0}}})),
+        selection:vec![],time:0.,autokey:false,
+    }.into(),pm_kernel::Origin::Interface).unwrap();
+    store.execute(pm_kernel::PropertyCommand::Set(pm_kernel::commands::properties::SetProperty::new("world","world.fogDensity",0.004,0.)).into(),pm_kernel::Origin::Interface).unwrap();
+    let doc=store.snapshot().document;
+    let before=doc.to_value();let mut renderer=Renderer::headless().unwrap();
+    let req=studio::SceneRequest{composition:"test".into(),revision:doc.revision(),ticks:0,width:64,height:64};
+    for tier in [studio::Preview::Live,studio::Preview::Refine] {
+        studio::attach_with_preview(&mut renderer,doc.clone(),&Default::default(),&req,tier).unwrap();
+        let mut r=request();r.export=false;r.output_kind=OutputKind::Preview;
+        let frame=renderer.render(&doc,"test",Ticks::ZERO,&r,&pm_render::MapResolver::default()).unwrap();
+        assert!(frame.failures.is_empty(),"{:?}",frame.failures);
+        let pixels=renderer.read_rgba(&frame).unwrap();
+        let rgb=(20..44).flat_map(|y|(20..44).map(move|x|(y*64+x)*4)).map(|i|pixels[i]+pixels[i+1]+pixels[i+2]).sum::<f32>()/(24.*24.*3.);
+        eprintln!("STUDIO_FOG tier={tier:?} center_mean_rgb={rgb:.6}");
+        assert!(rgb>0.02,"studio fog must retain lit foreground in {tier:?}: {rgb}");
         assert_eq!(doc.to_value(),before);
     }
 }

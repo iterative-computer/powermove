@@ -88,6 +88,8 @@ pub struct PipelineTimings {
     pub sample_p95: Option<u32>,
     pub sample_statistics_ms: f64,
     pub trace_ms:f64,
+    /// Cold photon-map bootstrap, included in trace_ms, independent of pixels.
+    pub photon_setup_ms:f64,
     /// Queued Live: trace_ms is submission time; guides_ms includes trace completion.
     pub trace_deferred:bool,
     /// Time spent checking global convergence, included in trace_ms.
@@ -852,6 +854,7 @@ impl Renderer {
         let (w, h) = (self.width, self.height);
         // Several dispatches of at most 4 samples keep each submission short.
         let start = Instant::now();
+        let step_timings=std::env::var_os("STUDIO_TRACE_STEPS").is_some();
         // Seeds follow the sample index, so a scene and view render the same every time.
         if reset {
             if !self.live { self.frame = self.seed_salt.wrapping_mul(4099); }
@@ -862,6 +865,7 @@ impl Renderer {
         let mut left = spp;
         let mut first = true;
         while left > 0 {
+            let step_start=step_timings.then(Instant::now);
             if cancelled() || progress.is_some_and(|p|!p(spp-left,spp)){break;}
             if !first && budget_ms > 0 && start.elapsed().as_millis() >= budget_ms as u128 { break; }
             let n = left.min(if budget_ms>0 {self.budget_batch_samples.clamp(1,4)} else {4});
@@ -874,6 +878,7 @@ impl Renderer {
             let group = self.trace_group().clone();
             let mut enc = self.device.create_command_encoder(&Default::default());
             if photons && (!self.precompute_caustics || self.photons_emitted == 0.) {
+                let photon_start=Instant::now();
                 // Photons first, so this batch's camera paths see them.
                 if reset && first || self.photons_emitted == 0. {
                     enc.clear_buffer(&self.grid, 0, None);
@@ -900,6 +905,10 @@ impl Renderer {
                     pass.dispatch_workgroups(photon_count.div_ceil(64).min(4096), photon_count.div_ceil(64 * 4096), 1);
                 }
                 self.queue.submit([enc.finish()]);
+                if self.precompute_caustics {
+                    self.wait();
+                    self.timings.photon_setup_ms+=photon_start.elapsed().as_secs_f64()*1000.;
+                }
                 enc = self.device.create_command_encoder(&Default::default());
                 self.photons_emitted += photon_count as f32;
                 p.caustic[1] = self.photons_emitted;
@@ -922,7 +931,10 @@ impl Renderer {
                 pass.dispatch_workgroups(w.div_ceil(8), h.div_ceil(8), 1);
             }
             self.queue.submit([enc.finish()]);
-            if wait { self.wait(); }
+            if wait || step_timings { self.wait(); }
+            if let Some(start)=step_start {
+                eprintln!("STUDIO_TRACE_STEP {}",serde_json::json!({"first_sample":spp-left,"end_sample":spp-left+n,"target":spp,"ms":start.elapsed().as_secs_f64()*1000.}));
+            }
             if use_reservoirs {let r=self.resampling.as_mut().unwrap();r.index=1-r.index;}
             if reset && first {
                 self.samples = 0;
@@ -955,7 +967,16 @@ impl Renderer {
             self.timings.sample_p95=Some(p95);
             self.timings.sample_statistics_ms=start.elapsed().as_secs_f64()*1000.;
         }
-        self.timings.trace_deferred=!wait;
+        self.timings.trace_deferred=!wait && !step_timings;
+        if !self.live && self.samples>0 && std::env::var_os("STUDIO_TRACE_OBJECTS").is_some() {
+            let start=Instant::now();let counts=self.sample_counts();let ids=self.first_hit_ids();
+            let mut objects=std::collections::BTreeMap::<u32,(usize,f64,usize)>::new();
+            for (&count,id) in counts.iter().zip(ids) {
+                let row=objects.entry(id).or_default();row.0+=1;row.1+=f64::from(count);row.2+=usize::from(count>=spp as f32);
+            }
+            let objects:Vec<_>=objects.into_iter().map(|(id,(pixels,sum,ceiling_pixels))|serde_json::json!({"id":id,"pixels":pixels,"mean_samples":sum/pixels as f64,"at_ceiling":ceiling_pixels})).collect();
+            eprintln!("STUDIO_TRACE_OBJECTS {}",serde_json::json!({"objects":objects,"profile_ms":start.elapsed().as_secs_f64()*1000.,"target":spp}));
+        }
         elapsed
     }
 
@@ -1209,7 +1230,7 @@ impl Renderer {
     #[allow(clippy::type_complexity)]
     fn post(&mut self, passes: u32, readback: bool, denoise: Option<&dyn Fn(&mut [f32], &mut [f32], &[f32], &[f32]) -> Result<(), String>>, present: Option<PresentTarget<'_>>) -> (Vec<u8>, f64) {
         let start = Instant::now();
-        let mut timings=PipelineTimings {sample_mean:self.timings.sample_mean,sample_p95:self.timings.sample_p95,sample_statistics_ms:self.timings.sample_statistics_ms,trace_ms:self.timings.trace_ms,trace_deferred:self.timings.trace_deferred,convergence_check_ms:self.timings.convergence_check_ms,..Default::default()};
+        let mut timings=PipelineTimings {sample_mean:self.timings.sample_mean,sample_p95:self.timings.sample_p95,sample_statistics_ms:self.timings.sample_statistics_ms,trace_ms:self.timings.trace_ms,photon_setup_ms:self.timings.photon_setup_ms,trace_deferred:self.timings.trace_deferred,convergence_check_ms:self.timings.convergence_check_ms,..Default::default()};
         let (w, h) = (self.width, self.height);
         if (self.live || self.quality_temporal) && self.history[0].size()<u64::from(w)*u64::from(h)*32 {
             self.history=std::array::from_fn(|_|self.device.create_buffer(&wgpu::BufferDescriptor{label:Some("live history"),size:u64::from(w)*u64::from(h)*32,usage:wgpu::BufferUsages::STORAGE|wgpu::BufferUsages::COPY_DST,mapped_at_creation:false}));self.history_valid=false;
