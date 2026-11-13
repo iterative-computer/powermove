@@ -75,8 +75,11 @@ pub fn frame_reading(color: &ColorInfo, sequence: bool) -> ColorDescription {
 /// Electron's legacy video path. Software Canvas frames with an invalid/
 /// partial colour space fall back to Rec.601, independently of dimensions
 /// (crbug.com/41380578). On macOS H.264/HEVC instead go through VideoToolbox:
-/// CoreVideo supplies the missing matrix (HD Rec.709, SD Rec.601). Keep that
-/// decoder distinction even when FFmpeg reports identical partial tags.
+/// CoreVideo supplies the missing matrix (HD Rec.709, SD Rec.601). Opaque
+/// 4:2:0 VP9 profiles 0/2 also use VideoToolbox on macOS: Chromium's
+/// SetVp9CodecConfigurationBox defaults unspecified fields to Rec.709. VP9
+/// alpha uses the software decoder instead. Keep that distinction even when
+/// FFmpeg reports identical partial colour tags.
 /// This is opt-in per imported asset; the native video table is unchanged.
 ///
 /// Electron's `proxyColorArgs` preserves non-HDR BT.2020 camera R′G′B′ code
@@ -84,8 +87,23 @@ pub fn frame_reading(color: &ColorInfo, sequence: bool) -> ColorDescription {
 /// (decode those values first); suppress only the gamut/transfer conversion.
 pub fn electron_frame_reading(color: &ColorInfo, codec: &str, sequence: bool) -> ColorDescription {
     let mut desc = frame_reading(color, sequence);
+    let opaque_vp9 = cfg!(target_os = "macos")
+        && codec == "vp9"
+        && !sequence
+        && color.interpreted.alpha == AlphaMode::Opaque
+        && color.interpreted.subsampling == Subsampling::S420
+        && matches!(color.interpreted.bit_depth, 8 | 10);
     let core_video = cfg!(target_os = "macos") && matches!(codec, "h264" | "hevc");
-    if !core_video && color.tagged.matrix.is_none() && desc.matrix != MatrixCoefficients::Identity {
+    if opaque_vp9 && color.tagged.matrix.is_none() {
+        // vt_config_util's synthesized vpcC uses 709 even for SD VP9.
+        desc.matrix = MatrixCoefficients::Bt709;
+        if color.tagged.primaries.is_none() {
+            desc.primaries = Primaries::Bt709;
+        }
+    } else if !core_video
+        && color.tagged.matrix.is_none()
+        && desc.matrix != MatrixCoefficients::Identity
+    {
         desc.matrix = MatrixCoefficients::Bt601;
     }
     if !matches!(desc.transfer, Transfer::Pq | Transfer::Hlg)
@@ -664,11 +682,15 @@ mod electron_tests {
     use super::*;
 
     fn color(tags: [i32; 3]) -> ColorInfo {
+        color_at(tags, 1280, 720)
+    }
+
+    fn color_at(tags: [i32; 3], width: i32, height: i32) -> ColorInfo {
         let path =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/h264-aac.mp4");
         let input = crate::ff::Input::open(&path).unwrap();
         let mut info = input.codec_info(input.best_video().unwrap());
-        (info.width, info.height) = (1280, 720);
+        (info.width, info.height) = (width, height);
         info.color_primaries = tags[0] as _;
         info.color_trc = tags[1] as _;
         info.color_space = tags[2] as _;
@@ -677,7 +699,8 @@ mod electron_tests {
 
     #[test]
     fn partial_legacy_video_uses_canvas_601_without_changing_native_hd() {
-        let c = color([1, 13, 2]);
+        let mut c = color([1, 13, 2]);
+        c.interpreted.alpha = AlphaMode::Straight;
         assert_eq!(frame_reading(&c, false).matrix, MatrixCoefficients::Bt709);
         assert_eq!(
             electron_frame_reading(&c, "vp9", false).matrix,
@@ -691,9 +714,62 @@ mod electron_tests {
     }
 
     #[test]
+    fn opaque_vp9_uses_videotoolbox_defaults_but_alpha_keeps_canvas_defaults() {
+        for tags in [[2, 2, 2], [1, 13, 2]] {
+            for size in [(640, 480), (1404, 1080)] {
+                let opaque = color_at(tags, size.0, size.1);
+                let native = frame_reading(&opaque, false);
+                assert_eq!(
+                    electron_frame_reading(&opaque, "vp9", false).matrix,
+                    if cfg!(target_os = "macos") {
+                        MatrixCoefficients::Bt709
+                    } else {
+                        MatrixCoefficients::Bt601
+                    }
+                );
+                let mut alpha = opaque.clone();
+                alpha.interpreted.alpha = AlphaMode::Straight;
+                assert_eq!(
+                    electron_frame_reading(&alpha, "vp9", false).matrix,
+                    MatrixCoefficients::Bt601
+                );
+                assert_eq!(
+                    electron_frame_reading(&opaque, "vp9", true).matrix,
+                    MatrixCoefficients::Bt601
+                );
+                assert_eq!(frame_reading(&opaque, false), native);
+                for depth in [8, 10] {
+                    let mut ten_bit = opaque.clone();
+                    ten_bit.interpreted.bit_depth = depth;
+                    assert_eq!(
+                        electron_frame_reading(&ten_bit, "vp9", false).matrix,
+                        if cfg!(target_os = "macos") {
+                            MatrixCoefficients::Bt709
+                        } else {
+                            MatrixCoefficients::Bt601
+                        }
+                    );
+                }
+                let mut unsupported = opaque.clone();
+                unsupported.interpreted.subsampling = Subsampling::S444;
+                assert_eq!(
+                    electron_frame_reading(&unsupported, "vp9", false).matrix,
+                    MatrixCoefficients::Bt601
+                );
+            }
+        }
+        let explicit = color([1, 13, 6]);
+        assert_eq!(
+            electron_frame_reading(&explicit, "vp9", false).matrix,
+            MatrixCoefficients::Bt601
+        );
+    }
+
+    #[test]
     fn legacy_matrix_defaults_follow_the_codec_decoder_path() {
         for tags in [[2, 2, 2], [1, 13, 2]] {
-            let c = color(tags);
+            let mut c = color(tags);
+            c.interpreted.alpha = AlphaMode::Straight;
             assert_eq!(frame_reading(&c, false).matrix, MatrixCoefficients::Bt709);
             assert_eq!(
                 electron_frame_reading(&c, "vp9", false).matrix,
