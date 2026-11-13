@@ -3016,3 +3016,36 @@ The ignored saved-project transport probe remains available for reproducible
 headless diagnostics; it extracts media into an owned canonical temporary
 directory and asserts that the source document is unchanged. It does not
 encode video and therefore does not replace the real-export speed gate.
+
+
+### Final image follow-up: finite matte receivers only
+
+The complete restored-source small suite reproduced one additional failure:
+the glass fixture's Production bias p95 was 0.012052 against the unchanged
+0.012 limit. Its finite matte backdrop could stop after a quiet first batch.
+Only the finite matte receiver's guarded 24-observation minimum is retained
+to fix that bias. The analytic catcher stays at 16; the cone proposal, larger
+photon maps and query-cache experiments remain reverted. The original MC
+reference policy and explicit sample ceilings are unchanged.
+
+The new regression covers BVH and Metal RT, early stopping in quiet regions,
+unchanged legacy/reference policy, and the authority of a 16-sample explicit
+ceiling. It passes. All three small teapot/glass/chrome Production and Final
+checks pass: glass Production RMS is 0.011318, noise 0.003206, bias 0.010968,
+and object flicker 0.004617, under the unchanged limits. This does not close
+the combined chrome-set analytic-floor finding.
+
+The matched four-frame native Chrome trace is 8.9246 / 9.0471 / 9.2299 /
+9.4223 s (warm mean 9.2331), versus 9.1673 after the complete rollback:
++0.72%, within run variation and the restoration limit. This remains a
+transport diagnostic, not a new 30-frame video-export budget measurement.
+
+The broad pinned regression run reports 102 engine-service library passes
+(1 ignored), 55 native Studio passes with one stale default-quality assertion
+(1 ignored), 58 renderer library passes and 11 denoiser passes. Small image
+acceptance initially reported four passes and two failures: the known
+chrome-set floor and the glass bias above. The focused finite-receiver fix
+passes both its behavior regression and the full three-product image check.
+The default-quality assertion is updated from the old 32–256 / 3% policy to
+the approved 8–128 / 12% policy, including the Production sampling contract;
+that is a test correction, not an image-threshold or runtime-policy change.

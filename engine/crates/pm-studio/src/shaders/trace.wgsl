@@ -1719,6 +1719,9 @@ fn path(px: vec2f)->Sample {
       s.object=hit_object(h)+1u;s.normal=n;
       // A quiet first batch cannot rule out rare light paths through glass.
       specular_observation=select(0.,16.,m.spec.y>.5 && m.spec.z<.05);
+      // Finite matte receivers behind glass need enough independent shadow
+      // observations. This does not change analytic catchers or MC policy.
+      if(photons_on && (u32(m.policy.y)&8u)==0u && m.base.w<.5 && m.spec.w<.5 && m.spec.y<.5){specular_observation=max(specular_observation,24.);}
       if(m.base.w>.5 && m.spec.x<.1){specular_observation=32.;}
       if(m.spec.w*(1.-m.base.w)>.5 && m.spec.x<.2 && !thin_leaf(m)){specular_observation=128.;}
       s.depth=select(distance(sf.p,P.cam_pos.xyz),dot(sf.p-P.cam_pos.xyz,P.cam_fwd.xyz),(P.opts.w&1u)!=0u);
