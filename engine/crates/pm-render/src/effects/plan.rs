@@ -953,7 +953,7 @@ mod tests {
         ] {
             let layer = scope
                 .layers()
-                .into_iter()
+                .iter()
                 .find(|l| crate::js::layer_id(l) == id)
                 .unwrap();
             let steps = effect_steps_raster(
