@@ -2407,6 +2407,9 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             // Fonts sync before the cache observes: a font change is seen
             // before this frame looks for a disk frame.
             let fonts = engine.font_generation();
+            // And the output tone of this frame's media as they are now,
+            // before the cache's identity takes it.
+            engine.sync_tone(&scene);
             // Rendered frames are a paused frame's picture: observed (and
             // so fingerprinted and filled) with its media even while a
             // playing frame reads an HD proxy, or they would be drawn from

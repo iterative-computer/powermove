@@ -394,8 +394,9 @@ pub struct Engine {
     pub(crate) compat: Option<Arc<crate::compat::CompatStores>>,
     /// The store of the document whose frame is rendering.
     compat_document: Option<Arc<crate::compat::CompatStore>>,
-    /// The peaks of the content on screen, and the output tone of its frames.
-    hdr: Option<((u64, u64, String), Option<crate::color::HdrView>)>,
+    /// The peaks of the content on screen as its media were observed, and
+    /// the output tone of its frames.
+    hdr: Option<((u64, u64, String, u64), Option<crate::color::HdrView>)>,
     output_tone: Option<pm_render::OutputTone>,
     /// Where the viewer's analysis goes, while a Scopes panel is showing.
     pub scope_frames: Option<(
@@ -1058,9 +1059,23 @@ impl Engine {
         }
         Ok(())
     }
+    /// The output tone of `scene`'s frames as its media are now observed:
+    /// what the disk render cache's identity takes
+    /// ([`Self::tone_identity`]), before the frame that draws with it.
+    pub(crate) fn sync_tone(&mut self, scene: &Scene) {
+        self.sync_hdr(scene);
+    }
     /// The HDR view of this content, and the frame cache kept to its tone.
+    /// The view reads the media's own peaks: it is of the media as observed
+    /// ([`Self::observed_inputs`]), so a clip replaced on disk by one with
+    /// another peak is tone-mapped with its own.
     fn sync_hdr(&mut self, scene: &Scene) -> Option<crate::color::HdrView> {
-        let key = (scene.content, scene.doc.revision(), scene.comp.clone());
+        let key = (
+            scene.content,
+            scene.doc.revision(),
+            scene.comp.clone(),
+            self.observed_inputs(scene),
+        );
         if self.hdr.as_ref().is_none_or(|(k, _)| *k != key) {
             let view = crate::color::HdrView::of(&scene.doc, &scene.comp, &scene.media);
             self.hdr = Some((key, view));
