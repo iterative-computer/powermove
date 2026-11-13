@@ -99,7 +99,9 @@ globalThis.__compat = {
           session: { panel: "compat", generation: 1 },
           realmGlobal: globalThis,
           send: (batch) => call("dom.batch", { batch }),
-          measureSync: (request) => call("dom.measureSync", { request }),
+          // Whether the read is part of a raster answer: only those place pixels.
+          measureSync: (request) =>
+            call("dom.measureSync", { request, answering: this.answering > 0 }),
           requestAnimationFrame: globalThis.__extcheckClock
             ? requestAnimationFrame
             : (fn) =>
@@ -292,7 +294,17 @@ globalThis.__compat = {
     /** `ask`: `{revision}` for the viewer; `{revision, exact}` for a one-frame
      * look (an agent's still), which only this exact revision answers; nothing
      * for an export, whose own realm holds its frozen project (`export.rs`). */
+    /** Raster answers running now (a layout read in one places pixels). */
+    this.answering = 0;
     this.answerRasters = (batch, needs, ask = {}) => {
+      this.answering += 1;
+      try {
+        answerRasters(batch, needs, ask);
+      } finally {
+        this.answering -= 1;
+      }
+    };
+    const answerRasters = (batch, needs, ask) => {
       const realm = this.realm;
       const layerIn = layerIndex();
       const answers = needs.map((need) => {

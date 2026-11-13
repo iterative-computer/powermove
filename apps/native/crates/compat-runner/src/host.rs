@@ -490,7 +490,7 @@ impl RealmEvents for Arc<Events> {
     }
     /// The owner routes the page's answer here (`Owner::page`) while the
     /// realm waits; the main thread never waits for it.
-    fn measure_sync(&self, request: u64) -> SyncLayout {
+    fn measure_sync(&self, request: u64, _answering: bool) -> SyncLayout {
         let rx = match self.measuring.lock().unwrap().wait(request) {
             Ok(answer) => return SyncLayout::Answer(answer),
             Err(rx) => rx,
@@ -4881,6 +4881,27 @@ mod tests {
             answer.as_str().unwrap().contains("stopped answering"),
             "{answer}"
         );
+        cancel.store(true, Ordering::Release);
+    }
+    /// A panel or an overlay that reads its layout (at activation, on a
+    /// timer) places no pixel of the export: its unanswered read does not
+    /// fail it, as no read does in a window's realm either.
+    #[test]
+    fn a_layout_read_outside_a_raster_answer_leaves_the_export_drawing() {
+        let panel = "export default function activate(api: any){
+            const read = () => { const d=document.createElement('div'); d.textContent='panel';
+              document.body.append(d); d.getBoundingClientRect(); getComputedStyle(d).color; d.remove() };
+            read(); setTimeout(read, 0);
+            api.services.register('raster',()=>{
+              const c=document.createElement('canvas'); c.width=5; c.height=1;
+              return {cv:c,w:5,h:1,anchorX:0,anchorY:0} }) }";
+        let (fixture, answered) = export_window(&[("panel", panel)], "text", None);
+        let inbox = fixture.host.raster_inbox();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let frozen = fixture.kernel.published("window").unwrap();
+        inbox.export("job-6", frozen, cancel.clone()).unwrap();
+        inbox.ask(1, needs(&fixture), json!({"job":"job-6"}));
+        assert_eq!(answer_of(&answered, 1, Duration::from_secs(40)), json!(5));
         cancel.store(true, Ordering::Release);
     }
     #[test]

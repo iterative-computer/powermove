@@ -157,7 +157,7 @@ Plan v6 was written around one person's machine and workload. Where a rule only 
 - Quit while an extension isn't responding stops that window's realm without a restart and quits; a cancelled quit restores extensions after the cancelling update. The app handles the Quit Apple Event itself (AppKit drops it under a sheet), suspends it, and answers -128 when the quit is cancelled.
 - Realm layout reads are synchronous: the realm's worker waits (bounded) for the page's measurement of the current document; the trusted page exists whenever the trusted realm runs, not only when a panel shows.
 - A delivery's raster overrides are answered by its own export realm, started at the job's start (code, storage and publication pinned then, own hidden page kept running), never the window's; edits during an export never reach or fail it. One-frame looks of the current publication use the window's realm at their exact revision first (plan 3.2.2).
-- Delivery realms only read the outside world: non-GET/HEAD fetch is refused, storage writes stay in the realm, UI requests are answered with an error; an unanswerable layout read fails the export.
+- Delivery realms only read the outside world: non-GET/HEAD fetch is refused, storage writes stay in the realm, UI requests are answered with an error; an unanswerable layout read made by a raster answer fails the export (a panel's or an overlay's read outside an answer places none of its pixels: it gets nothing and the export goes on).
 - The compat page gets the engine's resolved face for each project text family under the family's name (`pmcompat://…/font`); `PM.Fonts` is main's object over CoreText families.
 - Sync layout reads keep page answers that arrive before their read waits (`Measures`).
 

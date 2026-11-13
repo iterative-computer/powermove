@@ -156,7 +156,8 @@ struct Events {
     settled: AtomicBool,
     /// Extensions that did not start here, by id.
     failed: Mutex<BTreeSet<String>>,
-    /// A layout read the page did not answer: the export cannot be drawn right.
+    /// A raster answer's layout read the page did not answer: the export
+    /// cannot be drawn right.
     layout_failed: AtomicBool,
 }
 impl RealmEvents for Arc<Events> {
@@ -194,7 +195,11 @@ impl RealmEvents for Arc<Events> {
     fn unresponsive(&self, execution: u64) {
         let _ = self.inbox.send(RunInput::Unresponsive(execution));
     }
-    fn measure_sync(&self, request: u64) -> SyncLayout {
+    /// A read a raster answer makes and the page cannot answer fails the
+    /// export: its pixels would be laid out at a guessed place. A panel's or
+    /// an overlay's read outside an answer places none of them; it gets the
+    /// same nothing, and the export goes on.
+    fn measure_sync(&self, request: u64, answering: bool) -> SyncLayout {
         let rx = match self.measuring.lock().unwrap().wait(request) {
             Ok(answer) => return SyncLayout::Answer(answer),
             Err(rx) => rx,
@@ -210,7 +215,9 @@ impl RealmEvents for Arc<Events> {
         let answer = rx.recv_timeout(wait);
         self.measuring.lock().unwrap().waiting = None;
         let Ok(answer) = answer else {
-            self.layout_failed.store(true, Ordering::Release);
+            if answering {
+                self.layout_failed.store(true, Ordering::Release);
+            }
             return if reading {
                 SyncLayout::TimedOut
             } else {
