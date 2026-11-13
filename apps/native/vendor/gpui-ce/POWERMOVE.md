@@ -216,14 +216,48 @@ has been made. No measurements from a locked or occluded session certify pacing.
 - **Development review frames:** debug builds with `PM_NATIVE_DRAW_OCCLUDED`
   set keep an occluded window's display link running, so background lane checks
   see live frames without raising a window. Release builds always pause it.
-- **Hosted views and the frame that carries them:** `draw` moves AppKit slots
-  only in a frame that reaches the screen with them. A frame with no drawable
-  of the layer's size (`MetalRenderer::drawable_ready`: a link drawable of
-  the size before a resize, at most three updates in a row; a draw outside
-  the link's update) moves nothing and is painted again. A frame that moved
-  slots takes its drawable from the layer and presents with the transaction
-  (the link is released and started again), because a `CAMetalDisplayLink`
-  drawable is shown at the link's own time, after the transaction.
+- **Hosted views and the frame that carries them:** `MacWindow::draw` moves
+  AppKit slots only in a frame that reaches the screen with them, and decides
+  what the frame does before it touches one (`composition::step`):
+  - Nothing would move (`composition::pending`: the text and control slots
+    compare what the last paint staged with where they stand; a registered
+    host answers through `composition::set_pending`): the scene goes into the
+    `CAMetalDisplayLink`'s drawable and the main thread waits for nothing.
+  - Something would move: a link's drawable is shown at the link's own time,
+    after the slot transaction, so the window changes pace
+    (`composition::Pace::Direct`). The link is invalidated once, a plain
+    `CADisplayLink` keeps the frame callback, and drawables come from the
+    layer through `metal_renderer::DrawableSource`: a thread calls
+    `nextDrawable` (it may wait there) and the main thread takes one that
+    has arrived and has the layer's size, or none. A frame with none in
+    hand draws nothing and moves nothing; the next tick tries again. Frames
+    present with the slot transaction. The window stays direct for the
+    whole scroll or drag and goes back to the link when nothing has moved
+    for `composition::DIRECT_LINGER` (0.5 s), no frame is waiting and no
+    drawable is on its way (the layer must not be asked while a link owns
+    it).
+  - A link drawable of the size before a resize is passed over; after three
+    in a row the window goes direct, where the layer hands out the current
+    size. No path draws a scene into a drawable of another size
+    (`MetalRenderer::draw` refuses one too). This guard is in every Metal
+    window, with or without hosted views.
+  Where the main thread still asks the layer itself: AppKit's synchronous
+  paints (`displayLayer:` in a live resize, a tab coming forward), and one
+  frame after a host with no `set_pending` (native extension panel bodies)
+  has already moved its views under a link. `allowsNextDrawableTimeout` is
+  on, so those waits end after a second at worst. Frame cost: in the direct
+  pace every frame waits for its command buffer to be scheduled
+  (`presentsWithTransaction`), which the link pace does not; stable windows
+  never enter it. `PM_GPUI_PRESENT_TRACE=1` prints one line per draw (path,
+  moved, milliseconds on the main thread including the transaction commit,
+  milliseconds waiting for a drawable). Contract tests:
+  `crates/shell/tests/hosted_present.rs`.
+- **A slot belongs to the paint that staged it:** `composition::painted`
+  counts a view's paints; a slot's staged geometry carries the number of the
+  paint that staged it and a present places only what the last complete
+  paint staged. A control staged by a paint that never reached the screen
+  (no drawable, or a draw nobody presented) is not placed over a later scene
+  that left it out.
 - **A scene shown again moves no hosted view:** `PlatformWindow::painted`
   (called at the end of `Window::draw`) tells the platform a new scene
   follows. GPUI keeps presenting the last scene for a second after fast

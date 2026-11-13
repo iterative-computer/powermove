@@ -174,7 +174,10 @@ A view creates them once (an entity
 each), places them like any element, and subscribes to their values. Each
 sits in its own clipping wrapper above the GPUI view and is staged with the
 element's bounds and the content mask of its scroll region, so it scrolls and
-clips with the panel. Focus, disabled state, Reduce Transparency and both
+clips with the panel. A pop-up's rows follow its panel: rows that stand for
+the same values keep their menu items and take new titles, even while the
+menu is open; any other change waits until an open menu has closed and sent
+its action. Focus, disabled state, Reduce Transparency and both
 appearances are the system's own. Extension panels get the same controls from
 the surface host (`PopUpButton`, `PushButton`, `Checkbox`, `Toggle`, `Switch`,
 `SegmentedControl`, and a `TextField` with `metadata.search`). A borderless

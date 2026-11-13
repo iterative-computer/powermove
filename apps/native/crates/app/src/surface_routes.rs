@@ -47,6 +47,18 @@ impl Controller {
                     view.update(cx, |v, cx| v.review_send(semantic, event, cx));
                 }
             }
+            // Development builds: a panel's scroller swept for some seconds
+            // (`reviewScroll:<panel>:<seconds>`).
+            #[cfg(debug_assertions)]
+            command if command.starts_with("reviewScroll:") => {
+                let mut parts = command.splitn(3, ':').skip(1);
+                if let (Some(panel), Some(Ok(seconds))) =
+                    (parts.next(), parts.next().map(str::parse::<f32>))
+                    && let Some(view) = self.builtins.views.get(panel).cloned()
+                {
+                    view.update(cx, |v, cx| v.review_scroll(seconds, cx));
+                }
+            }
             // Development builds: a panel's own command with its intent, as
             // its controls send it, for actions that sit behind a context
             // menu (`reviewIntent:<panel>:<command>:<the JSON intent in hex>`).
