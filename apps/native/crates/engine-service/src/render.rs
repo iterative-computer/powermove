@@ -350,7 +350,15 @@ pub struct Engine {
     /// A capture of an SDR view: the frame presented without the delivery clip.
     capture_target: Option<metal::Texture>,
     pub cache_enabled: bool,
-    studio_content: Option<(usize, u64, String, crate::studio::Preview, u64, Option<u64>)>,
+    studio_content: Option<(
+        usize,
+        u64,
+        String,
+        crate::studio::Preview,
+        u64,
+        Option<u64>,
+        u64,
+    )>,
     pub(crate) studio_progress: Option<crate::studio::RefineObserver>,
     studio_preview: crate::studio::Preview,
     studio_view: crate::studio::ViewCamera,
@@ -892,6 +900,20 @@ impl Engine {
     /// the output tone retire every kept frame when they change.)
     fn observed_inputs(&mut self, scene: &Scene) -> u64 {
         use std::hash::{Hash, Hasher};
+        let media = self.observed_media(scene);
+        let overrides = self
+            .compat_document
+            .as_ref()
+            .filter(|store| store.producing_now())
+            .map(|store| store.cache_identity());
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        (media, overrides).hash(&mut hash);
+        hash.finish()
+    }
+    /// The stamps of `scene`'s media files, as observed (looked at every
+    /// 2 s). The 3D source is attached for one such state too: it keeps
+    /// each model and environment file it has read.
+    fn observed_media(&mut self, scene: &Scene) -> u64 {
         let at = self
             .media_seen
             .iter()
@@ -899,7 +921,7 @@ impl Engine {
         let fresh = at.is_some_and(|at| {
             self.media_seen[at].looked.elapsed() < crate::render_cache::MEDIA_RECHECK
         });
-        let media = if let (Some(at), true) = (at, fresh) {
+        if let (Some(at), true) = (at, fresh) {
             self.media_seen[at].identity
         } else {
             let identity = match &self.disk {
@@ -921,15 +943,7 @@ impl Engine {
                 looked: Instant::now(),
             });
             identity
-        };
-        let overrides = self
-            .compat_document
-            .as_ref()
-            .filter(|store| store.producing_now())
-            .map(|store| store.cache_identity());
-        let mut hash = std::collections::hash_map::DefaultHasher::new();
-        (media, overrides).hash(&mut hash);
-        hash.finish()
+        }
     }
     /// Changes when a frame a scrub or playback render missed has decoded.
     pub fn media_landed(&self) -> u64 {
@@ -1069,7 +1083,9 @@ impl Engine {
             scene.comp.clone(),
             self.studio_preview,
             self.studio_view.key(),
-            self.fonts.as_ref().map(|f|f.generation()),
+            self.fonts.as_ref().map(|f| f.generation()),
+            // A model or environment file saved again is read again.
+            self.observed_media(scene),
         );
         if self.studio_content.as_ref() != Some(&key) {
             // A bad contribution draws nothing and is reported; frames carry on.
@@ -3123,5 +3139,171 @@ mod frame_cache_tests {
         let mut engine = Engine::new(Gpu::new("cache-identity").unwrap()).unwrap();
         drawn(&mut engine, &scene, reduced);
         assert_eq!(drawn(&mut engine, &scene, full), want);
+    }
+    /// A model file saved again by another app (the document untouched):
+    /// the frame drawn after the stamps are looked at again is of the new
+    /// file, not the geometry the 3D renderer had read before.
+    #[cfg(feature = "kernel")]
+    #[test]
+    fn a_model_saved_again_is_read_again() {
+        use serde_json::json;
+        // One sphere of radius 1, `squash` as tall as it is wide (an import
+        // is framed to its bounds, so a uniform scale would show nothing).
+        fn glb(squash: f64) -> Vec<u8> {
+            let pm_model::Value::Object(source) = pm_scene3d::to_model(
+                &json!({"primitive":"sphere","parameters":{"radius":1,"segments":24}}),
+            ) else {
+                unreachable!()
+            };
+            let g = pm_render::scene3d::model::source_of(&source)
+                .unwrap()
+                .geometry();
+            let mut bin = vec![];
+            for value in &g.positions {
+                bin.extend(value.to_le_bytes());
+            }
+            let normals = bin.len();
+            for value in &g.normals {
+                bin.extend(value.to_le_bytes());
+            }
+            let indices = bin.len();
+            for value in &g.indices {
+                bin.extend(value.to_le_bytes());
+            }
+            let end = bin.len();
+            while !bin.len().is_multiple_of(4) {
+                bin.push(0);
+            }
+            let mut header = serde_json::to_vec(&json!({
+                "asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],
+                "nodes":[{"name":"Ball","mesh":0,"scale":[1,squash,1]}],
+                "buffers":[{"byteLength":bin.len()}],
+                "bufferViews":[
+                    {"buffer":0,"byteOffset":0,"byteLength":normals},
+                    {"buffer":0,"byteOffset":normals,"byteLength":indices-normals},
+                    {"buffer":0,"byteOffset":indices,"byteLength":end-indices}],
+                "accessors":[
+                    {"bufferView":0,"componentType":5126,"count":g.positions.len()/3,"type":"VEC3","min":[-1,-1,-1],"max":[1,1,1]},
+                    {"bufferView":1,"componentType":5126,"count":g.normals.len()/3,"type":"VEC3"},
+                    {"bufferView":2,"componentType":5125,"count":g.indices.len(),"type":"SCALAR"}],
+                "materials":[{"name":"Matte","pbrMetallicRoughness":{"baseColorFactor":[0.9,0.9,0.9,1],"metallicFactor":0,"roughnessFactor":0.9}}],
+                "meshes":[{"primitives":[{"attributes":{"POSITION":0,"NORMAL":1},"indices":2,"material":0}]}]
+            }))
+            .unwrap();
+            while !header.len().is_multiple_of(4) {
+                header.push(b' ');
+            }
+            let mut out = vec![];
+            for word in [
+                0x46546c67u32,
+                2,
+                (12 + 8 + header.len() + 8 + bin.len()) as u32,
+                header.len() as u32,
+                0x4e4f534a,
+            ] {
+                out.extend(word.to_le_bytes());
+            }
+            out.extend(header);
+            out.extend((bin.len() as u32).to_le_bytes());
+            out.extend(0x004e4942u32.to_le_bytes());
+            out.extend(bin);
+            out
+        }
+        use pm_scene3d::{schema::Role, service::new_layer};
+        let mut comp = json!({"id":"test","w":64,"h":64,"fps":30,"dur":1,"backgroundFill":{"type":"none"},"layers":[]});
+        let layer = |id, role, data, props| {
+            new_layer(&comp, id, id, role, data, props, true, None, 0.).unwrap()
+        };
+        let layers = vec![
+            layer(
+                "camera",
+                Role::Camera,
+                json!({"camera":{"p":{"fov":41.1120904,"targetX":0,"targetY":0,"targetZ":0}},"environment":{"p":{"ambient":1}}}),
+                json!({"position.x":0,"position.y":0,"position.z":5}),
+            ),
+            layer(
+                "light",
+                Role::Light,
+                json!({"light":{"type":"sun","p":{"intensity":3}}}),
+                json!({}),
+            ),
+            layer(
+                "ball",
+                Role::Object,
+                json!({"object":{"source":{"assetId":"model"},"useSourceMaterials":true}}),
+                json!({"position.x":0,"position.y":0,"position.z":0}),
+            ),
+        ];
+        comp["layers"] = json!(layers);
+        let project = json!({"id":"project","compId":"test","comps":{"test":comp},
+            "assets":{"model":{"id":"model","kind":"model","format":"glb","name":"Ball"}}});
+        let doc = pm_kernel::DocumentStore::new_untitled(
+            pm_model::json::parse(&project.to_string()).unwrap(),
+        )
+        .snapshot()
+        .document;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("model.glb");
+        std::fs::write(&path, glb(1.)).unwrap();
+        let mut media = pm_export::render::MediaPaths::default();
+        media.paths.insert("model".into(), path.clone());
+        let scene = Scene {
+            doc,
+            comp: "test".into(),
+            media: Arc::new(media),
+            content: 1,
+        };
+        let mut engine = Engine::new(Gpu::new("model-saved-again").unwrap()).unwrap();
+        // How much of the 64×64 frame the ball covers.
+        let covered = |engine: &mut Engine| {
+            let spec = FrameSpec::exact(
+                Ticks::ZERO,
+                Output {
+                    width: 64,
+                    height: 64,
+                    display: 0,
+                    headroom: 1.,
+                    crop: None,
+                },
+            );
+            let deadline = Instant::now() + Duration::from_secs(60);
+            loop {
+                let trace = Arc::new(std::sync::Mutex::new(Trace::default()));
+                match engine.frame(&scene, spec, None, &Default::default(), true, trace) {
+                    Ok(Some(sub)) => {
+                        sub.commit();
+                        sub.complete().unwrap();
+                        if !sub.stand_ins {
+                            assert!(sub.failures.is_empty(), "{:?}", sub.failures);
+                            return sub
+                                .pixels()
+                                .iter()
+                                .filter(|p| p.iter().sum::<f64>() > 0.05)
+                                .count();
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => assert!(e.is::<CompilerBusy>(), "{e:#}"),
+                }
+                assert!(Instant::now() < deadline, "the frame never settled");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        let whole = covered(&mut engine);
+        assert!(whole > 200, "the ball is in the picture: {whole} pixels");
+        // Another app saves a much flatter ball over it.
+        std::fs::write(&path, glb(0.2)).unwrap();
+        // Stamps are looked at again after `MEDIA_RECHECK`.
+        for seen in &mut engine.media_seen {
+            seen.looked = seen
+                .looked
+                .checked_sub(crate::render_cache::MEDIA_RECHECK * 2)
+                .unwrap();
+        }
+        let flat = covered(&mut engine);
+        assert!(
+            flat * 2 < whole,
+            "the saved file is drawn: {flat} pixels, {whole} before"
+        );
     }
 }
