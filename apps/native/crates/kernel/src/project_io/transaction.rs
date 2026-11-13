@@ -28,9 +28,9 @@ use std::path::{Path, PathBuf};
 use pm_model::json::{Map, Value, parse, to_canonical_string};
 
 use super::durable::{
-    FileVersion, Folder, Host, Placed, PublishHooks, begins, copy_of, dispose, folder_sync,
-    holds_hash, is_backup_name, is_uuid_v4, keep_beside, lstat_file, place_new, probing,
-    rename_private, sync_file, trash_or_leave, withdraw,
+    FileVersion, Folder, Host, Placed, PublishHooks, begins, copy_of, dispose, dispose_captured,
+    folder_sync, holds_hash, is_backup_name, is_uuid_v4, keep_beside, lstat_file, place_new,
+    probing, rename_private, sync_file, trash_or_leave, withdraw,
 };
 use crate::error::{ProjectIoError, io_err};
 
@@ -39,6 +39,8 @@ use crate::error::{ProjectIoError, io_err};
 pub(super) const STAGED: &str = "tmp";
 pub(super) const ASIDE: &str = "aside";
 pub(super) const PARTIAL: &str = "partial";
+/// The name a version is captured under while it is disposed of.
+const GONE: &str = "gone";
 const RECORD: &str = "save";
 
 /// Who wrote a record.
@@ -297,11 +299,12 @@ fn private_parts<'a>(entry: &'a str, destination: &Path) -> Option<(&'a str, &'a
 fn known_step(step: &Value, destination: &Path, staged: &Path, aside: &Path) -> bool {
     let text = |key: &str| step.get(key).and_then(Value::as_str);
     // The name an unreadable file at the project's name is moved to before
-    // a version the person chose takes the name ([`use_leftover`]).
-    let partial = staged.with_extension(PARTIAL);
+    // a version the person chose takes the name ([`use_leftover`]), and the
+    // name a version is captured under while it is disposed of.
+    let (partial, gone) = (staged.with_extension(PARTIAL), staged.with_extension(GONE));
     let own = |key: &str| {
         text(key).is_some_and(|n| {
-            [staged, aside, &partial]
+            [staged, aside, &partial, &gone]
                 .iter()
                 .any(|p| p.file_name() == Some(OsStr::new(n)))
         })
@@ -316,6 +319,7 @@ fn known_step(step: &Value, destination: &Path, staged: &Path, aside: &Path) -> 
         Some("keep") => (own("from") || text("from").is_some_and(is_backup_name)) && kept("to"),
         Some("kept") => kept("to"),
         Some("retained") => own("name"),
+        Some("dispose") => own("name") && text("hash").is_some(),
         Some("settled") => step.get("holds").is_none() || text("holds").is_some(),
         Some("seen") => step.get("to").is_none() || kept("to"),
         _ => false,
@@ -377,19 +381,24 @@ impl Record {
             new: text("new")?.to_owned(),
             size: text("size")?.parse().ok()?,
             // The last line about a file says what it was retained with.
-            retained: [&staged, &aside]
-                .into_iter()
-                .filter_map(|path| {
-                    let hash = steps.iter().rev().find_map(|s| {
-                        let text = |key: &str| s.get(key).and_then(Value::as_str);
-                        (text("step") == Some("retained")
-                            && text("name").map(OsStr::new) == path.file_name())
-                        .then(|| text("hash"))
-                        .flatten()
-                    })?;
-                    Some((path.clone(), hash.to_owned()))
-                })
-                .collect(),
+            retained: [
+                &staged,
+                &aside,
+                &staged.with_extension(PARTIAL),
+                &staged.with_extension(GONE),
+            ]
+            .into_iter()
+            .filter_map(|path| {
+                let hash = steps.iter().rev().find_map(|s| {
+                    let text = |key: &str| s.get(key).and_then(Value::as_str);
+                    (text("step") == Some("retained")
+                        && text("name").map(OsStr::new) == path.file_name())
+                    .then(|| text("hash"))
+                    .flatten()
+                })?;
+                Some((path.clone(), hash.to_owned()))
+            })
+            .collect(),
             staged,
             aside,
             steps,
@@ -399,13 +408,43 @@ impl Record {
     fn retains(&self, path: &Path) -> bool {
         self.retained.iter().any(|(retained, _)| retained == path)
     }
+    /// The private names this record may name a file by: the staged file,
+    /// the file moved aside, a file taken back from under a public name, and
+    /// a version captured to be disposed of.
+    fn names(&self) -> [PathBuf; 4] {
+        [
+            self.staged.clone(),
+            self.aside.clone(),
+            self.path.with_extension(PARTIAL),
+            self.gone(),
+        ]
+    }
+    fn gone(&self) -> PathBuf {
+        self.path.with_extension(GONE)
+    }
     /// Whether everything this record still names is a retained file:
     /// nothing to settle, only to prune later.
     fn only_retains(&self) -> bool {
         (!self.retained.is_empty() || !self.notices().is_empty())
-            && [&self.staged, &self.aside]
-                .into_iter()
+            && self
+                .names()
+                .iter()
                 .all(|p| self.retains(p) || matches!(lstat_file(p), Ok(None)))
+    }
+    /// What the version captured under [`Self::gone`] was to hold: the last
+    /// disposal this record began.
+    fn disposing(&self) -> Option<(String, Option<u64>)> {
+        let step = self
+            .steps
+            .iter()
+            .rev()
+            .find(|s| s.get("step").and_then(Value::as_str) == Some("dispose"))?;
+        Some((
+            step.get("hash")?.as_str()?.to_owned(),
+            step.get("size")
+                .and_then(Value::as_str)
+                .and_then(|size| size.parse().ok()),
+        ))
     }
     /// What this record has to tell the person and has not been seen yet:
     /// each file a save or a recovery kept beside the project (why, and
@@ -503,6 +542,18 @@ pub(super) struct Transaction {
     folder: Folder,
     /// The folder failed to sync after the install: why.
     pub unsynced: Option<String>,
+    /// The hash and size of the file this save staged.
+    new: (String, u64),
+}
+
+/// What became of a file [`Transaction::dispose`] did not remove.
+#[derive(Debug, Default)]
+pub(super) struct Kept {
+    /// Kept beside the project under a plain name; the record tells.
+    pub beside: Vec<PathBuf>,
+    /// Could not be kept there: where each is now (the Trash, or the
+    /// private name the record still names it by).
+    pub elsewhere: Vec<PathBuf>,
 }
 
 impl Transaction {
@@ -577,6 +628,7 @@ impl Transaction {
             live: true,
             folder,
             unsynced: None,
+            new: (new.to_owned(), size),
         };
         tx.reached("begin");
         Ok(tx)
@@ -584,7 +636,7 @@ impl Transaction {
 
     /// Continues the record of a save that was cut short.
     fn resume(record: &Record, destination: &Path, hooks: &PublishHooks) -> io::Result<Self> {
-        Ok(Transaction {
+        let mut tx = Transaction {
             file: append_to(&record.path)?,
             record: record.path.clone(),
             destination: destination.to_owned(),
@@ -595,7 +647,20 @@ impl Transaction {
             unsynced: None,
             folder: folder_sync(destination.parent().unwrap_or(Path::new(".")), hooks)
                 .map_err(|_| io::Error::other("the folder cannot be synced"))?,
-        })
+            new: (record.new.clone(), record.size),
+        };
+        // A disposal cut short after the version was captured: judged now
+        // as it would have been then.
+        let gone = record.gone();
+        if !record.retains(&gone) && !matches!(lstat_file(&gone), Ok(None)) {
+            let judged = record.disposing().is_some_and(|(hash, size)| {
+                dispose_captured(&gone, &gone, &holds_hash(&hash, size), hooks)
+            });
+            if !judged {
+                tx.keep_changed(vec![gone], None);
+            }
+        }
+        Ok(tx)
     }
 
     /// How far the project's folder could be synced when the save began.
@@ -712,12 +777,93 @@ impl Transaction {
             .inspect_err(|_| self.strand())?;
         if placed == Placed::Copied {
             if label == "recovered" {
-                let _ = fs::remove_file(&held);
+                // The save's own finished file, whose bytes the new name
+                // holds: it goes only if it still holds exactly those.
+                let (new, size) = self.new.clone();
+                self.dispose(&held, &new, Some(size));
             } else {
                 self.retain(&held, None);
             }
         }
         Ok(to)
+    }
+
+    /// Disposes of `path`, a file this record names that should hold
+    /// exactly `hash` (and be `size` long), recording it before the file is
+    /// captured ([`dispose`]). Whatever is not removed (the file, changed or
+    /// unreadable, or one that landed under its name) is never unlinked: it
+    /// is kept beside the project as "other version" and told, else it goes
+    /// to the Trash, else it stays under a private name this record names.
+    /// The result is empty when the file is gone.
+    pub fn dispose(&mut self, path: &Path, hash: &str, size: Option<u64>) -> Kept {
+        let gone = self.record.with_extension(GONE);
+        let unchanged = holds_hash(hash, size);
+        // A file retained under the capture name itself (it could only be
+        // copied to its kept name) is read where it is.
+        if path == gone {
+            let hooks = self.hooks.clone();
+            return match dispose_captured(&gone, &gone, &unchanged, &hooks) {
+                true => Kept::default(),
+                false => self.keep_changed(vec![gone], None),
+            };
+        }
+        let mut members = Map::new();
+        members.insert(
+            "name",
+            Value::from(
+                path.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+        );
+        members.insert("hash", Value::from(hash));
+        if let Some(size) = size {
+            members.insert("size", Value::from(size.to_string()));
+        }
+        if self.step_with("dispose", members).is_err() {
+            // Not recorded, so not begun: the file stays as it is.
+            self.strand();
+            return Kept {
+                elsewhere: vec![path.to_owned()],
+                ..Default::default()
+            };
+        }
+        let hooks = self.hooks.clone();
+        let left = dispose(path, &gone, &unchanged, &hooks);
+        self.keep_changed(left, Some(path))
+    }
+
+    /// Keeps the files a disposal did not remove (see [`Self::dispose`]).
+    /// One captured under the record's capture name whose kept name holds a
+    /// copy goes back under `own`, the private name it had, where that is
+    /// free, and stays retained there.
+    fn keep_changed(&mut self, left: Vec<PathBuf>, own: Option<&Path>) -> Kept {
+        let mut kept = Kept::default();
+        let gone = self.record.with_extension(GONE);
+        for file in left {
+            match self.keep_file(file.clone(), "other version") {
+                Ok((beside, placed)) => {
+                    kept.beside.push(beside);
+                    if placed == Placed::Copied {
+                        let back = own.filter(|own| {
+                            file == gone
+                                && matches!(lstat_file(own), Ok(None))
+                                && rename_private(&file, own, &self.hooks).is_ok()
+                        });
+                        self.retain(back.unwrap_or(&file), None);
+                    }
+                }
+                Err(file) => {
+                    let now = trash_or_leave(file.clone(), &self.hooks);
+                    if now == file {
+                        self.strand();
+                    }
+                    kept.elsewhere.push(now);
+                }
+            }
+        }
+        kept
     }
 
     /// [`Self::keep`] without deciding what becomes of the file under its
@@ -834,7 +980,7 @@ pub(super) fn is_private_name(path: &Path) -> bool {
                 return false;
             };
             name.starts_with('.')
-                && [STAGED, ASIDE, PARTIAL, RECORD].contains(&extension)
+                && [STAGED, ASIDE, PARTIAL, GONE, RECORD].contains(&extension)
                 && rest
                     .len()
                     .checked_sub(36)
@@ -976,11 +1122,8 @@ pub(crate) fn settle(destination: &Path, host: &Host) -> Settled {
             .push(leftover(&path, "record", Undecided::Unreadable, None));
     }
     for record in &records {
-        named.extend([
-            record.path.clone(),
-            record.staged.clone(),
-            record.aside.clone(),
-        ]);
+        named.push(record.path.clone());
+        named.extend(record.names());
     }
     // A record that only keeps a replaced version is not a cut-short save.
     let records: Vec<_> = records.into_iter().filter(|r| !r.only_retains()).collect();
@@ -1120,18 +1263,8 @@ fn settle_one(
         // path holds. Removed if it still holds exactly those when it goes;
         // otherwise kept beside the project and told.
         (Holds::New, Holds::New) => {
-            if !dispose(
-                &record.staged,
-                &holds_hash(&record.new, Some(record.size)),
-                hooks,
-            ) {
-                match tx.keep(record.staged.clone(), "other version") {
-                    Ok(kept) => left.push(LeftAside::Kept(kept)),
-                    Err(staged) => {
-                        trash_or_leave(staged, hooks);
-                    }
-                }
-            }
+            let kept = tx.dispose(&record.staged, &record.new, Some(record.size));
+            left.extend(kept.beside.into_iter().map(LeftAside::Kept));
             true
         }
         // The exchange displaced the version the save replaced: retained,
@@ -1250,8 +1383,9 @@ pub(crate) fn kept_seen(destination: &Path, paths: &[PathBuf], restored: bool) {
             let _ = file.write_all(line(&Value::Object(members)).as_bytes());
         }
         let _ = sync_file(&file);
-        let left = [&record.staged, &record.aside]
-            .into_iter()
+        let left = record
+            .names()
+            .iter()
             .any(|p| !matches!(lstat_file(p), Ok(None)));
         if seen.len() == told.len() && !left {
             let _ = fs::remove_file(&record.path);
@@ -1283,39 +1417,23 @@ pub(super) fn prune_retained(
         let Ok(mut tx) = Transaction::resume(&record, destination, hooks) else {
             continue;
         };
-        let mut gone = true;
         for (path, hash) in &record.retained {
             if matches!(lstat_file(path), Ok(None)) {
                 continue;
             }
-            // Read again as it goes, and removed only if unchanged.
-            if dispose(path, &holds_hash(hash, None), hooks) {
-                continue;
-            }
-            // Something wrote into it since it was retained: work nobody
-            // read, kept beside the project and told.
-            match tx.keep_file(path.clone(), "other version") {
-                Ok((kept, placed)) => {
-                    changed.push(kept);
-                    // Its name holds a copy: the file itself stays
-                    // retained, with what it holds now.
-                    if placed == Placed::Copied {
-                        tx.retain(path, None);
-                        gone = false;
-                    }
-                }
-                Err(path) => {
-                    let now = trash_or_leave(path.clone(), hooks);
-                    gone &= now != path;
-                    untrashed.push(now);
-                }
-            }
+            // Read again as it goes, and removed only if unchanged. One
+            // that something wrote into since it was retained holds work
+            // nobody read: kept beside the project and told.
+            let kept = tx.dispose(path, hash, None);
+            changed.extend(kept.beside);
+            untrashed.extend(kept.elsewhere);
         }
         // The record goes with its last file, unless it has something to
         // tell that was not seen yet (a file just kept is one).
-        let tells =
-            Record::read(&record.path, destination).is_some_and(|r| !r.notices().is_empty());
-        if gone && !tells {
+        let rest = Record::read(&record.path, destination).is_none_or(|r| {
+            !r.notices().is_empty() || r.names().iter().any(|p| !matches!(lstat_file(p), Ok(None)))
+        });
+        if !rest {
             let _ = fs::remove_file(&record.path);
         }
     }
@@ -1589,7 +1707,7 @@ mod tests {
     #[test]
     fn only_a_saves_own_private_names_are_private_names() {
         let uuid = "0f8fad5b-d9cb-469f-a165-70867728950e";
-        for extension in [STAGED, ASIDE, PARTIAL, RECORD] {
+        for extension in [STAGED, ASIDE, PARTIAL, GONE, RECORD] {
             assert!(is_private_name(Path::new(&format!(
                 "/job/.cut.pmv.{uuid}.{extension}"
             ))));

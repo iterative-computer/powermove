@@ -1038,7 +1038,7 @@ fn private_leftovers(file: &Path) -> Vec<String> {
         .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
         .filter(|n| {
             n.starts_with(&private_prefix(file))
-                && [".tmp", ".aside", ".partial", ".save"]
+                && [".tmp", ".aside", ".partial", ".gone", ".save"]
                     .iter()
                     .any(|e| n.ends_with(e))
         })
@@ -1379,6 +1379,152 @@ fn files_recovery_finds_changed_when_they_go_are_kept() {
             "{case}: in the project's folder, under a name the person finds"
         );
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0, "{case}");
+    }
+}
+/// Recovery gives the finished file of a save that was cut short a name the
+/// person finds; on a volume where that can only be done by copying it, the
+/// file itself is still under its private name afterwards. Work written
+/// into that file after the copy read it (a sync client, a program that had
+/// it open) is not in the copy: the file is read again as it goes, and a
+/// changed one is never unlinked. It is kept beside the project and told.
+#[test]
+fn a_recovered_files_original_changed_after_it_was_copied_is_never_removed_unread() {
+    let dir = common::TempDir::new("recovered-source");
+    fs::create_dir_all(dir.path("job")).unwrap();
+    let file = dir.path("job/cut.pmv");
+    fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+    let native = dir.path("native");
+    assert!(killed(&native, &file, "no-exclusive", "between", "save"));
+    let staged = private_file(&file, ".tmp");
+    let mut k = kernel(&native);
+    let source = staged.clone();
+    k.set_publish_hooks(pm_kernel::project_io::PublishHooks {
+        // Half way through writing the copy that gets the "(recovered …)"
+        // name: every byte of the staged file was read by then.
+        mid_copy: Some(std::sync::Arc::new(move |to: &Path| {
+            if to.to_string_lossy().contains("(recovered") {
+                write_through(&source, b"work written after the copy read the file");
+            }
+        })),
+        ..child_disk("no-exclusive")
+    });
+    let (session, _) = open_file(&mut k, &file);
+    let everything: Vec<_> = fs::read_dir(dir.path("job"))
+        .unwrap()
+        .map(|e| fs::read(e.unwrap().path()).unwrap())
+        .collect();
+    assert!(
+        everything
+            .iter()
+            .any(|bytes| bytes == b"work written after the copy read the file"),
+        "what was written into the staged file is still in the project's folder"
+    );
+    let told = kept_beside(&mut k, &session);
+    assert!(
+        told.iter().any(|(_, path)| path.as_ref().is_some_and(|p| {
+            fs::read(p).is_ok_and(|b| b == b"work written after the copy read the file")
+        })),
+        "and the person is told where: {told:?}"
+    );
+    assert!(
+        visible_siblings(&file)
+            .iter()
+            .filter(|p| p.to_string_lossy().contains("(recovered"))
+            .any(|p| saved_name(p).as_deref() == Some("One")),
+        "the recovered save is there too"
+    );
+}
+/// A version a save no longer needs is read and found unchanged, and at
+/// that instant another writer puts a file of its own under the private
+/// name the version had (a sync client replacing it). What is unlinked is
+/// the file that was read, never whatever the name holds by then: the file
+/// that landed is kept beside the project and told.
+#[test]
+fn a_file_that_lands_under_a_versions_name_as_it_goes_is_never_removed() {
+    let mut disks = vec![("an atomic exchange", Default::default())];
+    disks.extend(disks_without_an_exchange());
+    for (disk, hooks) in disks {
+        let dir = common::TempDir::new("disposal-landing");
+        fs::create_dir_all(dir.path("job")).unwrap();
+        let file = dir.path("job/cut.pmv");
+        fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+        let mut k = kernel(&dir.path("native"));
+        let (trash, calls) = counted_trash();
+        let once = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        k.set_publish_hooks(pm_kernel::project_io::PublishHooks {
+            trash: Some(trash),
+            before_unlink: Some(std::sync::Arc::new(move |name: &Path| {
+                if !once.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    land(name, b"a file that landed under the private name");
+                }
+            })),
+            ..hooks.clone()
+        });
+        let (session, _) = open_file(&mut k, &file);
+        save_times(&mut k, &session, 3, disk);
+        let kept: Vec<_> = visible_siblings(&file)
+            .iter()
+            .map(|p| fs::read(p).unwrap())
+            .collect();
+        assert!(
+            kept.iter()
+                .any(|b| b == b"a file that landed under the private name"),
+            "{disk}: kept beside the project"
+        );
+        let told = kept_beside(&mut k, &session);
+        assert!(
+            told.iter().any(|(_, path)| path.as_ref().is_some_and(|p| {
+                fs::read(p).is_ok_and(|b| b == b"a file that landed under the private name")
+            })),
+            "{disk}: and told: {told:?}"
+        );
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0, "{disk}");
+    }
+}
+/// The app is killed between capturing a version it is disposing of and
+/// unlinking it: the version sits under the capture name the save's record
+/// names. The next open judges it as it would have been judged then:
+/// unchanged, it goes; written into since, it is kept beside the project
+/// and told. Nothing stays hidden.
+#[test]
+fn a_disposal_cut_short_is_finished_by_the_next_open() {
+    for changed in [false, true] {
+        let dir = common::TempDir::new("disposal-cut-short");
+        fs::create_dir_all(dir.path("job")).unwrap();
+        let file = dir.path("job/cut.pmv");
+        fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+        let native = dir.path("native");
+        assert!(killed(&native, &file, "no-exclusive", "installed", "save"));
+        // Cut short before the staged file went: the path holds a copy.
+        let record = private_file(&file, ".save");
+        fs::copy(&file, record.with_extension("tmp")).unwrap();
+        assert!(killed(&native, &file, "no-exclusive", "unlink", "open"));
+        let captured = private_file(&file, ".gone");
+        if changed {
+            write_through(&captured, b"work written into the captured file");
+        }
+        let mut k = kernel(&native);
+        k.set_publish_hooks(child_disk("no-exclusive"));
+        let (session, _) = open_file(&mut k, &file);
+        assert_eq!(saved_name(&file).as_deref(), Some("One"), "{changed}");
+        let kept: Vec<_> = visible_siblings(&file)
+            .iter()
+            .map(|p| fs::read(p).unwrap())
+            .collect();
+        let told = kept_beside(&mut k, &session);
+        if changed {
+            assert_eq!(kept, [b"work written into the captured file".to_vec()]);
+            assert!(
+                told.iter().any(|(_, path)| path
+                    .as_ref()
+                    .is_some_and(|p| visible_siblings(&file).contains(p))),
+                "{told:?}"
+            );
+        } else {
+            assert_eq!(kept, [[0u8; 0]; 0], "nothing to keep");
+            assert!(told.iter().all(|(_, path)| path.is_none()), "{told:?}");
+        }
+        assert_eq!(private_leftovers(&file), [""; 0], "{changed}");
     }
 }
 /// Every private file beside `file` (staged, moved aside, retained): what
@@ -3051,7 +3197,8 @@ fn child_disk(disk: &str) -> pm_kernel::project_io::PublishHooks {
 /// A child process that opens a project and saves it (or only opens it:
 /// `PM_KERNEL_TEST_SAVE_ACTION=open`) and is killed at a point of the save
 /// or of the recovery at open: `between` (between the two renames),
-/// `mid-copy`, or the name of a step of the save's record, optionally
+/// `mid-copy`, `unlink` (a version was captured and read, and is about to
+/// be unlinked), or the name of a step of the save's record, optionally
 /// `step#n` for its n-th occurrence. Killed: nothing after that instant
 /// runs, not even a destructor. Exits 3 when the point was never reached.
 #[test]
@@ -3083,6 +3230,7 @@ fn save_child_process() {
     let hooks = pm_kernel::project_io::PublishHooks {
         between_renames: (kill == "between").then(|| die.clone()),
         mid_copy: (kill == "mid-copy").then(|| die.clone()),
+        before_unlink: (kill == "unlink").then(|| die.clone()),
         step: Some(std::sync::Arc::new(move |reached, _| {
             if reached == step && seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1 == nth
             {

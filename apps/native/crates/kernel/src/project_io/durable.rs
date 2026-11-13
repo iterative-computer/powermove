@@ -799,6 +799,9 @@ pub struct PublishHooks {
     /// Called with a file right before it is disposed of ([`dispose`]):
     /// after it was last read, immediately before it goes to the Trash.
     pub before_disposal: Option<PublishHook>,
+    /// Called with the name a file had when it was read to be disposed of,
+    /// after that read and right before the file is unlinked.
+    pub before_unlink: Option<PublishHook>,
     /// The person's Trash, where a version of the project goes once a save
     /// no longer needs it (the kernel's host sets it; `None`: such files
     /// stay where they are).
@@ -824,6 +827,7 @@ impl std::fmt::Debug for PublishHooks {
             .field("mid_copy", &self.mid_copy.is_some())
             .field("copy_fails", &self.copy_fails.is_some())
             .field("before_disposal", &self.before_disposal.is_some())
+            .field("before_unlink", &self.before_unlink.is_some())
             .field("trash", &self.trash.is_some())
             .finish()
     }
@@ -1196,7 +1200,13 @@ pub(super) fn withdraw(destination: &Path, whole: &Path, hooks: &PublishHooks) {
     // The incomplete copy, still exactly a beginning of the whole file when
     // it goes; anything else (it landed there, or was written into since)
     // goes back under the name, or beside it if the name was taken again.
-    let ours = begins(whole, &taken) && dispose(&taken, &|part, _| begins_file(whole, part), hooks);
+    let ours = begins(whole, &taken)
+        && dispose_captured(
+            &taken,
+            destination,
+            &|part, _| begins_file(whole, part),
+            hooks,
+        );
     if !ours
         && place_new(&taken, destination, None, hooks).is_err()
         && let Err(left) = keep_beside(taken, destination, "other version", hooks, &mut |_, _| {
@@ -1233,31 +1243,65 @@ fn begins_file(whole: &Path, part: &File) -> bool {
 }
 
 /// Disposes of `path`, a file that was a version of the project (a
-/// replaced version, a copy that was under the project's name, a staged
-/// file recovery found duplicated) under a private name, if it is still
-/// exactly what its record says. It is read again at this moment, through
-/// a freshly opened descriptor (`unchanged` judges what it holds), and the
-/// descriptor's stat must be the same before and after that read and the
-/// same as the name's: then it is unlinked at once, in this call, and
-/// `true` is returned. Anything else (changed, unreadable, replaced) is
-/// never unlinked: `false`, and the caller keeps it beside the project
-/// ([`keep_or_trash`]).
+/// replaced version, a staged file recovery found duplicated) under a
+/// private name, if it is still exactly what its record says.
+///
+/// The file is first moved to `fresh`, a private name that holds nothing
+/// and that nothing else can know (taken exclusively where the volume can):
+/// that captures whatever the name holds at that instant. The captured file
+/// is then read through a newly opened descriptor (`unchanged` judges what
+/// it holds), the descriptor's stat must be the same before and after that
+/// read and the same as the fresh name's, and then the captured file is
+/// unlinked at once, in this call. A file another writer puts under the old
+/// name at any moment is therefore never what is unlinked.
+///
+/// Returns the files that were not removed and are the caller's to keep: the
+/// captured file when it is changed or unreadable (under `fresh`), the file
+/// itself when it could not be captured (under `path`), and a file that
+/// landed under `path` since. Empty when the version is gone.
 ///
 /// What remains (docs/native/p0-decisions.md): a program still holding a
 /// descriptor to the file, which writes into it in the instant between
 /// this check and the unlink, loses that write.
 pub(super) fn dispose(
     path: &Path,
+    fresh: &Path,
     unchanged: &dyn Fn(&File, &FileStat) -> bool,
     hooks: &PublishHooks,
-) -> bool {
+) -> Vec<PathBuf> {
     if let Some(hook) = &hooks.before_disposal {
         hook(path);
     }
-    let Ok(Some(named)) = lstat_file(path) else {
+    if !matches!(lstat_file(fresh), Ok(None)) || rename_private(path, fresh, hooks).is_err() {
+        return match lstat_file(path) {
+            Ok(None) => Vec::new(),
+            _ => vec![path.to_owned()],
+        };
+    }
+    let mut left = Vec::new();
+    if !dispose_captured(fresh, path, unchanged, hooks) {
+        left.push(fresh.to_owned());
+    }
+    if !matches!(lstat_file(path), Ok(None)) {
+        left.push(path.to_owned());
+    }
+    left
+}
+
+/// [`dispose`] for a file already captured under the fresh private name
+/// `captured` (`name` is the name it was known by): read now, and unlinked
+/// in this call if `unchanged` says it holds what it should and its stat
+/// did not move across the read. `false`: it is still there.
+pub(super) fn dispose_captured(
+    captured: &Path,
+    name: &Path,
+    unchanged: &dyn Fn(&File, &FileStat) -> bool,
+    hooks: &PublishHooks,
+) -> bool {
+    let Ok(Some(named)) = lstat_file(captured) else {
         return false;
     };
-    let Ok(file) = File::open(path) else {
+    let Ok(file) = File::open(captured) else {
         return false;
     };
     let Ok(before) = file.metadata().map(|m| stat_of(&m)) else {
@@ -1267,7 +1311,10 @@ pub(super) fn dispose(
         return false;
     }
     let after = file.metadata().map(|m| stat_of(&m)).ok();
-    after.as_ref() == Some(&before) && fs::remove_file(path).is_ok()
+    if let Some(hook) = &hooks.before_unlink {
+        hook(name);
+    }
+    after.as_ref() == Some(&before) && fs::remove_file(captured).is_ok()
 }
 
 /// For [`dispose`]: the file holds exactly the bytes with `hash` (and is
@@ -2871,6 +2918,22 @@ pub(crate) fn backup(policy: &BackupPolicy, destination: &Path) -> Result<PathBu
     }
 }
 
+/// The fresh private name a version in the backups is captured under while
+/// it is disposed of: `.<its name>.<uuid>.gone`, in the same folder.
+fn captured_backup(path: &Path) -> PathBuf {
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    path.with_file_name(format!(".{name}.{}.gone", random_uuid()))
+}
+
+/// The backup a name made by [`captured_backup`] belongs to.
+fn backup_of_captured(captured: &Path) -> Option<PathBuf> {
+    let name = captured.file_name()?.to_str()?;
+    let rest = name.strip_prefix('.')?.strip_suffix(".gone")?;
+    let (own, uuid) = rest.split_at(rest.len().checked_sub(37)?);
+    (is_backup_name(own) && is_uuid_v4(uuid.strip_prefix('.')?))
+        .then(|| captured.with_file_name(own))
+}
+
 /// Keep the newest versions within the budgets (always the newest
 /// `min_versions` in save order, and always `just_written`) and delete older
 /// ones, as the old app pruned its backups after each save (v1.2.0 kept 5).
@@ -2895,6 +2958,20 @@ pub(crate) fn retain(
     let keep = just_written.and_then(Path::file_name);
     let mut bytes = 0u64;
     let mut removed = false;
+    // A version captured to be disposed of when the app was cut short goes
+    // back under its own name, and is read again when its turn comes.
+    for entry in fs::read_dir(&policy.directory)
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        let captured = entry.path();
+        if let Some(own) = backup_of_captured(&captured)
+            && matches!(lstat_file(&captured), Ok(Some(_)))
+        {
+            let _ = place_new(&captured, &own, None, hooks);
+        }
+    }
     for (index, (_, name, size)) in generations(&dir)
         .map_err(folder_err)?
         .into_iter()
@@ -2912,11 +2989,15 @@ pub(crate) fn retain(
             // it since it was replaced.
             let path = policy.directory.join(&name);
             if let Some(hash) = retained_hash(&path) {
-                if dispose(&path, &holds_hash(&hash, None), hooks) {
-                    removed = true;
-                } else {
-                    changed.push(path);
-                }
+                let fresh = captured_backup(&path);
+                let left = dispose(&path, &fresh, &holds_hash(&hash, None), hooks);
+                removed |= left.is_empty();
+                // Changed: back under its own name, for the caller to keep.
+                changed.extend(
+                    left.into_iter()
+                        .filter(|left| *left == path || place_new(left, &path, None, hooks).is_ok())
+                        .map(|_| path.clone()),
+                );
                 continue;
             }
             // The app's own copy, made here and never under the project's
