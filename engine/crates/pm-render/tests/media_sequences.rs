@@ -729,3 +729,62 @@ fn an_older_transcoded_sequence_asset_shows_the_same_frames() {
         vec![1, 2, 4, 10, 10]
     );
 }
+
+/// While playing, a sequence's next files are decoded ahead on workers: the
+/// frame that meets one draws it without decoding (each file is decoded
+/// once). Paused frames read nothing ahead.
+#[test]
+fn a_playing_sequence_reads_its_next_files_ahead() {
+    use pm_render::sampling::Sampling;
+    let sequence = coded_sequence();
+    let mut source = layer(
+        "seq",
+        "video",
+        json!({"asset":"clip","w":16,"h":16,"fit":"stretch"}),
+        8.0,
+        8.0,
+        10.0,
+    );
+    source["from"] = json!(0);
+    let mut doc = project(16, 16, 10.0, no_fill(), vec![source]);
+    asset(&mut doc, "clip", "video", "png", 16, 16, 1.0);
+    doc["assets"]["clip"]["imageSequence"] = json!({"fps":10,"frames":10,"first":1,"last":10});
+    let mut resolver = MapResolver::default();
+    resolver
+        .paths
+        .insert("clip".into(), sequence.retained.clone());
+    let document = load(&doc);
+    for (sampling, ahead) in [(Sampling::Final, false), (Sampling::Playback, true)] {
+        let mut renderer = Renderer::headless().unwrap();
+        let mut request = RenderRequest::at_scale(Size::new(16, 16), 1.0, Precision::Float16);
+        request.sampling = sampling;
+        // Files 1, 2 and 3 show at 0, 0.1 and 0.2 s (10 fps in 30).
+        let mut decodes = vec![];
+        for t in [0.0, 0.1, 0.2] {
+            let before = pm_perf::snapshot();
+            let frame = renderer
+                .render(
+                    &document,
+                    "Ptest-root",
+                    support::ticks(t),
+                    &request,
+                    &resolver,
+                )
+                .unwrap();
+            assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+            decodes.push(
+                pm_perf::snapshot()
+                    .since(&before)
+                    .get(pm_perf::Counter::StillDecodes),
+            );
+            // Workers finish between frames, as they do while a frame is shown.
+            assert!(renderer.finish_media_preparation().is_empty());
+        }
+        if ahead {
+            assert!(decodes[0] >= 1, "{decodes:?}");
+            assert_eq!(&decodes[1..], [0, 0], "{sampling:?}: decoded ahead");
+        } else {
+            assert!(decodes.iter().all(|&d| d >= 1), "{sampling:?}: {decodes:?}");
+        }
+    }
+}

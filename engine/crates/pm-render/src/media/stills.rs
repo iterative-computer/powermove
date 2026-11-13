@@ -32,11 +32,17 @@ pub(crate) struct StillAsk {
 }
 
 /// Stills queued or waiting for their frame at once.
-const MAX_READY: usize = 8;
-/// The decoded bytes held at most, counted from the moment the worker
-/// decodes a still, so stills on their way to the frame count too (a UHD
-/// 16-bit RGBA still is 66 MB).
+const MAX_READY: usize = 12;
+/// The decoded bytes held at most until the engine leases more, counted
+/// from the moment a worker decodes a still, so stills on their way to the
+/// frame count too (a UHD 16-bit RGBA still is 66 MB). The engine's media
+/// lease raises it to the decoded frame cache's share ([`StillPrefetch::set_limit`]).
 const MAX_READY_BYTES: usize = 24 << 20;
+/// Decode workers: a playing image sequence needs several stills decoded
+/// at once to keep up (one UHD 16-bit PNG takes longer than a frame).
+fn workers() -> usize {
+    std::thread::available_parallelism().map_or(2, |n| (n.get() / 2).clamp(1, 6))
+}
 /// A decoded still no frame took, or asked for again, within this long is
 /// dropped: the playhead went elsewhere.
 const READY_TTL: Duration = Duration::from_secs(4);
@@ -49,7 +55,7 @@ type Decoded = (StillImage, Option<u32>);
 struct Worker {
     ask: Sender<StillKey>,
     answers: Receiver<(StillKey, Option<Decoded>)>,
-    _thread: JoinHandle<()>,
+    _threads: Vec<JoinHandle<()>>,
 }
 
 pub(crate) struct StillPrefetch {
@@ -59,7 +65,7 @@ pub(crate) struct StillPrefetch {
     ready: HashMap<StillKey, (Decoded, Instant)>,
     /// Bytes of decoded stills, ready or still in the channel.
     held: Arc<AtomicUsize>,
-    limit: usize,
+    limit: Arc<AtomicUsize>,
     ttl: Duration,
 }
 
@@ -73,6 +79,45 @@ fn bytes(still: &StillImage) -> usize {
     still.frame.format.visible_bytes()
 }
 
+/// What a worker answers for `key`: the still decoded as its frame will
+/// read it, when it fits beside the held ones (the frame decodes the others
+/// itself).
+fn decode(key: &StillKey, pool: &FramePool, held: &AtomicUsize, limit: usize) -> Option<Decoded> {
+    let path = &key.0;
+    // The frame's probe reads the file's facts first, once per stamp. Read
+    // whole here, the still gives them, and is not decoded twice for them.
+    let (facts, whole) = match super::known_still_facts(path) {
+        Some(facts) => (facts, None),
+        None => {
+            let whole = pm_media::image::read(path, pool).ok();
+            (super::still_facts_from(path, whole.as_ref()), whole)
+        }
+    };
+    // The facts say whether the frame reads a preview of this still or the
+    // whole of it.
+    let edge = key
+        .3
+        .edge
+        .filter(|_| facts.is_ok_and(|f| f.previewed(key.3.interpreted)));
+    let decoded = match (edge, whole) {
+        (Some(edge), whole) => pm_media::image::imageio::read_preview(path, pool, edge)
+            .map(|still| (still, Some(edge)))
+            .or_else(|_| match whole {
+                Some(whole) => Ok((whole, None)),
+                None => pm_media::image::read(path, pool).map(|s| (s, None)),
+            }),
+        (None, Some(whole)) => Ok((whole, None)),
+        (None, None) => pm_media::image::read(path, pool).map(|s| (s, None)),
+    };
+    decoded.ok().filter(|(still, _)| {
+        let size = bytes(still);
+        held.fetch_update(Ordering::AcqRel, Ordering::Acquire, |h| {
+            (h + size <= limit).then_some(h + size)
+        })
+        .is_ok()
+    })
+}
+
 impl StillPrefetch {
     fn with_limits(limit: usize, ttl: Duration) -> Self {
         Self {
@@ -80,9 +125,15 @@ impl StillPrefetch {
             pending: HashSet::new(),
             ready: HashMap::new(),
             held: Arc::new(AtomicUsize::new(0)),
-            limit,
+            limit: Arc::new(AtomicUsize::new(limit)),
             ttl,
         }
+    }
+
+    /// Holds up to `bytes` of decoded stills (never less than the default).
+    pub(crate) fn set_limit(&self, bytes: usize) {
+        self.limit
+            .store(bytes.max(MAX_READY_BYTES), Ordering::Release);
     }
 
     /// Queues `path` at `stamp` for decoding as `ask` reads it, unless it is
@@ -105,53 +156,42 @@ impl StillPrefetch {
         }
         if self.worker.is_none() {
             let (ask, asks) = channel::<StillKey>();
+            let asks = Arc::new(std::sync::Mutex::new(asks));
             let (done, answers) = channel();
-            let pool = pool.clone();
-            let (held, limit) = (self.held.clone(), self.limit);
-            let Ok(handle) = std::thread::Builder::new()
-                .name("pm-still-prefetch".into())
-                .spawn(move || {
-                    for key in asks {
-                        // The frame's probe reads the file's facts first,
-                        // once per stamp (a whole decode): warm that cache
-                        // here too. They also say whether the frame reads a
-                        // preview of this still or the whole of it.
-                        let facts = super::still_facts(&key.0);
-                        let edge = key
-                            .3
-                            .edge
-                            .filter(|_| facts.is_ok_and(|f| f.previewed(key.3.interpreted)));
-                        let decoded = match edge {
-                            Some(edge) => {
-                                pm_media::image::imageio::read_preview(&key.0, &pool, edge)
-                                    .map(|still| (still, Some(edge)))
-                                    .or_else(|_| {
-                                        pm_media::image::read(&key.0, &pool).map(|s| (s, None))
-                                    })
+            let mut threads = Vec::new();
+            for _ in 0..workers() {
+                let (asks, done) = (asks.clone(), done.clone());
+                let pool = pool.clone();
+                let (held, limit) = (self.held.clone(), self.limit.clone());
+                let Ok(handle) = std::thread::Builder::new()
+                    .name("pm-still-prefetch".into())
+                    .spawn(move || {
+                        loop {
+                            let Ok(key) = asks
+                                .lock()
+                                .map_err(drop)
+                                .and_then(|a| a.recv().map_err(drop))
+                            else {
+                                break;
+                            };
+                            let still = decode(&key, &pool, &held, limit.load(Ordering::Acquire));
+                            if done.send((key, still)).is_err() {
+                                break;
                             }
-                            None => pm_media::image::read(&key.0, &pool).map(|s| (s, None)),
-                        };
-                        // Only a still that fits beside the held ones is
-                        // kept; the frame decodes the others itself.
-                        let still = decoded.ok().filter(|(still, _)| {
-                            let size = bytes(still);
-                            held.fetch_update(Ordering::AcqRel, Ordering::Acquire, |h| {
-                                (h + size <= limit).then_some(h + size)
-                            })
-                            .is_ok()
-                        });
-                        if done.send((key, still)).is_err() {
-                            break;
                         }
-                    }
-                })
-            else {
+                    })
+                else {
+                    continue;
+                };
+                threads.push(handle);
+            }
+            if threads.is_empty() {
                 return;
-            };
+            }
             self.worker = Some(Worker {
                 ask,
                 answers,
-                _thread: handle,
+                _threads: threads,
             });
         }
         if let Some(worker) = &self.worker
@@ -179,6 +219,19 @@ impl StillPrefetch {
         let ((still, _), _) = self.ready.remove(&key)?;
         self.held.fetch_sub(bytes(&still), Ordering::AcqRel);
         Some(still)
+    }
+
+    /// Waits for the still a worker is decoding for `path` at `stamp` and
+    /// `ask` (up to two seconds), so the frame about to draw it does not
+    /// decode it a second time beside the worker.
+    pub(crate) fn finish_pending(&mut self, path: &Path, stamp: (u64, u128), ask: StillAsk) {
+        self.drain();
+        let key = (path.to_path_buf(), stamp.0, stamp.1, ask);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while self.pending.contains(&key) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+            self.drain();
+        }
     }
 
     /// Waits until the worker has answered every request (headless tests

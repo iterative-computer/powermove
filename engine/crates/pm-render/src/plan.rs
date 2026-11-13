@@ -16,6 +16,7 @@
 //! same plan.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use pm_eval::groups::ActiveTransition;
 use pm_eval::node;
@@ -210,6 +211,10 @@ pub enum Source {
         path: PathBuf,
         /// The asset's Interpret Footage overrides (section 9).
         interpret: Option<pm_media::interpret::Interpretation>,
+        /// The files the next frames of a playing image sequence show, read
+        /// ahead on workers as a video's decoder runs ahead (empty for a
+        /// still, and for a sequence while paused or exporting).
+        ahead: Arc<[PathBuf]>,
     },
     Video {
         level2: bool,
@@ -1699,6 +1704,7 @@ fn native_content_quad<'d>(
                     asset: asset_id,
                     path,
                     interpret,
+                    ahead: Arc::from([]),
                 }
             };
             Ok(Some(Quad::Texture {
@@ -2173,6 +2179,9 @@ fn shader_quad(
     }
 }
 
+/// Composition frames a playing image sequence reads ahead of the playhead.
+const SEQUENCE_AHEAD: usize = 6;
+
 /// The frame number an image sequence shows at `seconds` of its source:
 /// frame `n` of the clip is number `first + n`, `n` counted at `fps` from
 /// source time 0, the ends held.
@@ -2229,6 +2238,21 @@ fn sequence_frame<'d>(
     let seconds = scope.source_time(layer, at, Some(&mut b.retime))?;
     let number = sequence_number(manifest, fps, seconds);
     let path = manifest.file(number);
+    // While playing, the files of the next frames are read ahead: each is a
+    // whole still to decode, and one frame's time is too short for that.
+    let mut ahead = Vec::new();
+    if b.sampling == crate::sampling::Sampling::Playback {
+        let step = 1.0 / scope.comp.rate().map_or(30.0, |r| r.rate.to_f64());
+        let mut last = number;
+        for i in 1..=SEQUENCE_AHEAD {
+            let s = scope.source_time(layer, at + i as f64 * step, Some(&mut b.retime))?;
+            let next = sequence_number(manifest, fps, s);
+            if next != last && next != number {
+                ahead.push(manifest.file(next));
+                last = next;
+            }
+        }
+    }
     let bw = js::or_number(js::get(d, "w"), wf);
     let bh = js::or_number(js::get(d, "h"), hf);
     if crate::media::stamp(&path).is_none() {
@@ -2256,6 +2280,7 @@ fn sequence_frame<'d>(
             asset,
             path,
             interpret,
+            ahead: ahead.into(),
         },
         w: bw,
         h: bh,

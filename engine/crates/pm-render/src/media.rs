@@ -338,22 +338,49 @@ fn offline(path: &Path) -> String {
 /// classes ([`crate::stills::check`]). Decoded once per size and
 /// modification time; each interpretation is then resolved from its facts.
 fn still_facts(path: &Path) -> Result<StillFacts, ProbeIssue> {
-    static CACHE: StampCache<Result<StillFacts, ProbeIssue>> = OnceLock::new();
-    per_stamp(&CACHE, path, || {
+    still_facts_from(path, None)
+}
+
+static STILL_FACTS: StampCache<Result<StillFacts, ProbeIssue>> = OnceLock::new();
+
+/// [`still_facts`] taken from `decoded`, the whole still a worker just read
+/// at this stamp, so that it is not decoded a second time for its facts.
+fn still_facts_from(
+    path: &Path,
+    decoded: Option<&pm_media::image::StillImage>,
+) -> Result<StillFacts, ProbeIssue> {
+    per_stamp(&STILL_FACTS, path, || {
         if let Ok(Some(a)) = pm_media::image::animation(path)
             && a.frames > 1
         {
             return Err(ProbeIssue::Unsupported(Feature::ImageSequence));
         }
         crate::stills::rejected(path).map_err(ProbeIssue::Unreadable)?;
-        let pool = FramePool::new(0);
-        pm_perf::bump(pm_perf::Counter::StillDecodes);
-        let still = pm_media::image::read(path, &pool)
-            .map_err(|e| ProbeIssue::Unreadable(format!("{}: {e}", path.display())))?;
-        crate::stills::check(path, &still).map_err(ProbeIssue::Unsupported)?;
-        Ok(StillFacts::of(&still))
+        let read;
+        let still = match decoded {
+            Some(still) => still,
+            None => {
+                pm_perf::bump(pm_perf::Counter::StillDecodes);
+                read = pm_media::image::read(path, &FramePool::new(0))
+                    .map_err(|e| ProbeIssue::Unreadable(format!("{}: {e}", path.display())))?;
+                &read
+            }
+        };
+        crate::stills::check(path, still).map_err(ProbeIssue::Unsupported)?;
+        Ok(StillFacts::of(still))
     })
     .unwrap_or_else(|| Err(ProbeIssue::Unreadable(offline(path))))
+}
+
+/// The facts of `path` at its stamp when they were read already.
+fn known_still_facts(path: &Path) -> Option<Result<StillFacts, ProbeIssue>> {
+    let (len, modified) = stamp(path)?;
+    STILL_FACTS
+        .get()?
+        .lock()
+        .unwrap()
+        .get(&(path.to_path_buf(), len, modified))
+        .cloned()
 }
 
 /// Whether an image file can be drawn: readable, not animated, in a tested
@@ -1323,6 +1350,13 @@ impl MediaCache {
             return Ok(t.clone());
         }
         pm_perf::bump(pm_perf::Counter::MediaCacheMisses);
+        let ask = stills::StillAsk {
+            edge,
+            interpreted: interpret.is_some(),
+        };
+        // A worker decoding this still now (a playing sequence's next file)
+        // finishes sooner than a second decode started beside it.
+        self.stills.finish_pending(path, (len, modified), ask);
         let issue = |i: ProbeIssue| match i {
             ProbeIssue::Unsupported(f) => MediaFailure::Unsupported(f),
             ProbeIssue::Unreadable(m) => MediaFailure::Failed(m),
@@ -1333,10 +1367,6 @@ impl MediaCache {
         let interp = interpret.unwrap_or(&none);
         probe_interpreted_image(path, interp).map_err(issue)?;
         let facts = still_facts(path).map_err(issue)?;
-        let ask = stills::StillAsk {
-            edge,
-            interpreted: interpret.is_some(),
-        };
         let preview = edge.filter(|_| facts.previewed(ask.interpreted));
         // Decoded ahead by the worker as this frame reads it, or here.
         let mut still = match self.stills.take(path, (len, modified), ask, preview) {
@@ -2073,6 +2103,9 @@ impl MediaCache {
     /// service holds afterwards.
     pub fn apply_lease(&self, lease: MediaLease) -> MediaUsage {
         *self.lease.lock().unwrap() = lease;
+        // Stills decoded ahead are decoded frames as well: they share the
+        // decoded frame cache's allowance.
+        self.stills.set_limit(lease.frame_cache);
         self.service.apply_lease(lease)
     }
 
