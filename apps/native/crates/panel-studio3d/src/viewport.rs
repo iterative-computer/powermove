@@ -9,7 +9,7 @@
 use crate::{Result, invalid};
 use pm_kernel::Published;
 use pm_scene3d::{
-    from_model,
+    from_model, to_model,
     geometry::{AssetGeometry, NoAssets, RetainedAssets},
     navigation::{Bounds, Lens, Pose, Vec3, add, cross, dot, length, mul, normalize, sub},
     schema::{self, Role},
@@ -413,7 +413,7 @@ pub fn scene(p: &Published, time: f64) -> Result<Scene> {
         })
     };
     let mut items = vec![];
-    for l in &layers {
+    for (index, l) in layers.iter().enumerate() {
         let Some(role) = schema::role(l) else {
             continue;
         };
@@ -487,16 +487,9 @@ pub fn scene(p: &Published, time: f64) -> Result<Scene> {
                     },
                     pivot,
                     target: r.targets.get(&id).copied(),
-                    aim: Some(channels(
-                        &id,
-                        ["light.targetX", "light.targetY", "light.targetZ"],
-                        0.,
-                    )),
+                    aim: Some(light_values(p, index, &data["light"]["p"], time, ["targetX", "targetY", "targetZ"])),
                     light: data["light"]["type"].as_str().map(str::to_owned),
-                    shape: {
-                        let w = channels(&id, ["light.width", "light.height", "light.angle"], 0.);
-                        [w[0], w[1], w[2]]
-                    },
+                    shape: light_values(p, index, &data["light"]["p"], time, ["width", "height", "angle"]),
                 });
             }
             Role::Camera => {}
@@ -510,6 +503,23 @@ pub fn scene(p: &Published, time: f64) -> Result<Scene> {
         items,
         revision: p.revision(),
         time,
+    })
+}
+/// A light's own channels (`light.<key>`) at the time, through the kernel's
+/// property evaluation as the light tool reads them; 0 where unset.
+fn light_values(p: &Published, index: usize, props: &serde_json::Value, time: f64, keys: [&str; 3]) -> Vec3 {
+    let mut mirror = pm_kernel::QueryMirror::new(p);
+    let open = p.snapshot.open_comp();
+    std::array::from_fn(|i| {
+        let q = serde_json::json!({"op":"evP","comp":open,"open":open,"layer":index,"t":time,
+            "key":format!("light.{}", keys[i]),"prop":props[keys[i]]});
+        mirror
+            .queries()
+            .query(&to_model(&q))
+            .ok()
+            .and_then(|v| from_model(&v).ok())
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.)
     })
 }
 /// The pose Frame moves Free View to: the selection, or everything.

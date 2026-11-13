@@ -686,7 +686,15 @@ impl GizmoSurface {
                     s.studio.light_add = add.as_deref() == Some("on");
                     s.poses = Arc::new(poses);
                     let had = s.studio.scene.is_some();
-                    let free_look = look.as_deref() == Some("free");
+                    let published = look.as_deref() == Some("free");
+                    // A look this viewer wrote holds until it is published.
+                    let free_look = match s.studio.look_pending {
+                        Some(mine) if mine != published => mine,
+                        _ => {
+                            s.studio.look_pending = None;
+                            published
+                        }
+                    };
                     let changed_look = free_look != s.studio.free_look;
                     s.studio.scene = scene.map(Arc::new);
                     s.studio.selected = selected;

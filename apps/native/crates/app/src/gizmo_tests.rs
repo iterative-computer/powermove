@@ -1967,7 +1967,7 @@ fn studio_stage(cx: &mut TestAppContext) -> Stage {
     for args in [
         serde_json::json!({"operation":"add_camera","id":"cam","patch":{"p":{"x":0,"y":1,"z":6,"targetX":0,"targetY":0,"targetZ":0}}}),
         serde_json::json!({"operation":"add_object","id":"box","object":{"source":{"primitive":"box"}}}),
-        serde_json::json!({"operation":"add_light","id":"key","light":{"type":"area","p":{"x":1.2,"y":1,"z":1.5,"targetX":0,"targetY":0,"targetZ":0,"width":1,"height":0.6}}}),
+        serde_json::json!({"operation":"add_light","id":"key","light":{"type":"area","p":{"x":1.2,"y":1,"z":1.5,"targetX":0.2,"targetY":0.5,"targetZ":0,"width":1,"height":0.6}}}),
     ] {
         let ack = s
             .rig
@@ -2208,9 +2208,127 @@ fn dragging_a_lights_target_aims_it_and_undo_restores_it(cx: &mut TestAppContext
         after["d"]["data"]["light"]["p"]["targetY"], before["d"]["data"]["light"]["p"]["targetY"],
         "{after}"
     );
+    // The drag nudges the target from where it was, never from the origin.
+    let y = |l: &serde_json::Value| {
+        let v = &l["d"]["data"]["light"]["p"]["targetY"];
+        v.as_f64().or(v["v"].as_f64()).unwrap()
+    };
+    assert!((y(&after) - y(&before)).abs() < 1.0, "{} -> {}", y(&before), y(&after));
+    assert!(y(&before) > 0.4, "the fixture's target is off the origin");
     undo_3d(&mut s, cx);
     assert_eq!(
         stored(&s, "key")["d"]["data"]["light"]["p"]["targetY"],
         before["d"]["data"]["light"]["p"]["targetY"]
     );
+}
+/// Writes the overlay strokes the viewer would draw for a selected light, at
+/// the shot and while looking around, for offscreen review (no screen needed).
+/// `PM_PANEL_CAPTURE=… cargo test … dump_light_overlays -- --ignored`
+#[gpui::test]
+#[ignore = "writes JSON; set PM_PANEL_CAPTURE"]
+fn dump_light_overlays(cx: &mut TestAppContext) {
+    let dir = std::env::var("PM_PANEL_CAPTURE").unwrap_or_else(|_| "/tmp/pm-shots/panels".into());
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut s = studio_stage(cx);
+    let dump = |s: &mut Stage, cx: &mut TestAppContext, name: &str| {
+        s.surface.update(&mut s.vcx, |g, cx| g.redraw(cx));
+        cx.run_until_parked();
+        let lines: Vec<_> = s
+            .recorder
+            .lines
+            .borrow()
+            .iter()
+            .map(|l| serde_json::json!({"ends": l.ends, "color": l.color}))
+            .collect();
+        std::fs::write(
+            format!("{dir}/{name}.json"),
+            serde_json::to_string(&serde_json::json!({"size":[640,360],"lines":lines})).unwrap(),
+        )
+        .unwrap();
+    };
+    let (marker, _) = s
+        .surface
+        .read_with(&s.vcx, |g, _| g.studio_light_points("key"))
+        .unwrap();
+    click(&mut s, cx, marker, Modifiers::none(), 1);
+    let kernel = s.rig.kernel.clone();
+    settle(cx, move |_| {
+        kernel.published(PROJECT).unwrap().selection.layers() == ["key".to_string()]
+    });
+    refresh_3d(&mut s, cx);
+    dump(&mut s, cx, "overlay-shot-light-selected");
+    let at = s.point_of([320., 180.]);
+    s.vcx.simulate_event(gpui::ScrollWheelEvent {
+        position: at,
+        delta: gpui::ScrollDelta::Pixels(point(px(140.), px(-40.))),
+        modifiers: Modifiers::none(),
+        touch_phase: gpui::TouchPhase::Moved,
+    });
+    s.vcx.simulate_event(gpui::ScrollWheelEvent {
+        position: at,
+        delta: gpui::ScrollDelta::Lines(point(0., 4.)),
+        modifiers: Modifiers::none(),
+        touch_phase: gpui::TouchPhase::Moved,
+    });
+    cx.run_until_parked();
+    refresh_3d(&mut s, cx);
+    dump(&mut s, cx, "overlay-editor-view-light-selected");
+}
+/// The overlay has a fixed budget (`OverlayGeometry::MAX_LINES`): with three
+/// lights, one selected, while looking around, everything still fits, so no
+/// marker or handle is cut off.
+#[gpui::test]
+fn lights_handles_and_the_camera_fit_the_overlay_budget(cx: &mut TestAppContext) {
+    let mut s = studio_stage(cx);
+    for (id, x) in [("fill", -1.5), ("rim", 0.4)] {
+        s.rig
+            .kernel
+            .call(
+                PROJECT,
+                Request::new(
+                    Caller::native(),
+                    Call::Transact {
+                        label: None,
+                        expected_revision: None,
+                        body: pm_kernel::WriteBody::Commands(vec![
+                            pm_kernel::Scene3dCommand::Apply {
+                                comp: None,
+                                args: pm_scene3d::to_model(&serde_json::json!({"operation":"add_light","id":id,
+                                    "light":{"type":"spot","p":{"x":x,"y":1.4,"z":1.,"targetX":0,"targetY":0,"targetZ":0}}})),
+                                selection: vec![],
+                                time: 0.,
+                                autokey: false,
+                            }
+                            .into(),
+                        ]),
+                    },
+                ),
+            )
+            .wait()
+            .unwrap()
+            .unwrap();
+    }
+    refresh_3d(&mut s, cx);
+    let (marker, _) = s
+        .surface
+        .read_with(&s.vcx, |g, _| g.studio_light_points("key"))
+        .unwrap();
+    click(&mut s, cx, marker, Modifiers::none(), 1);
+    let kernel = s.rig.kernel.clone();
+    settle(cx, move |_| {
+        kernel.published(PROJECT).unwrap().selection.layers() == ["key".to_string()]
+    });
+    let at = s.point_of([320., 180.]);
+    s.vcx.simulate_event(gpui::ScrollWheelEvent {
+        position: at,
+        delta: gpui::ScrollDelta::Pixels(point(px(40.), px(-10.))),
+        modifiers: Modifiers::none(),
+        touch_phase: gpui::TouchPhase::Moved,
+    });
+    cx.run_until_parked();
+    refresh_3d(&mut s, cx);
+    s.surface.update(&mut s.vcx, |g, cx| g.redraw(cx));
+    cx.run_until_parked();
+    let n = s.recorder.lines.borrow().len();
+    assert!(n > 40 && n < pm_engine_service::OverlayGeometry::MAX_LINES, "{n} lines");
 }

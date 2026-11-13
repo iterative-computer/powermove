@@ -99,39 +99,6 @@ fn marker_place(
     let t = (hw / d[0].abs().max(1e-9)).min(hh / d[1].abs().max(1e-9));
     Some(([c[0] + d[0] * t, c[1] + d[1] * t], Some(d)))
 }
-fn circle(
-    c: [f64; 2],
-    r: f64,
-    color: [f32; 4],
-    push: &mut dyn FnMut([f64; 2], [f64; 2], [f32; 4]),
-) {
-    const N: usize = 24;
-    let at = |k: usize| {
-        let a = k as f64 / N as f64 * std::f64::consts::TAU;
-        [c[0] + r * a.cos(), c[1] + r * a.sin()]
-    };
-    for k in 0..N {
-        push(at(k), at(k + 1), color);
-    }
-}
-fn dashed(
-    a: [f64; 2],
-    b: [f64; 2],
-    dash: f64,
-    color: [f32; 4],
-    push: &mut dyn FnMut([f64; 2], [f64; 2], [f32; 4]),
-) {
-    let l = (b[0] - a[0]).hypot(b[1] - a[1]);
-    let n = (l / dash.max(1e-6)).floor().max(1.) as usize;
-    for k in (0..n).step_by(2) {
-        let (s, e) = (k as f64 / n as f64, ((k + 1) as f64 / n as f64).min(1.));
-        push(
-            [a[0] + (b[0] - a[0]) * s, a[1] + (b[1] - a[1]) * s],
-            [a[0] + (b[0] - a[0]) * e, a[1] + (b[1] - a[1]) * e],
-            color,
-        );
-    }
-}
 /// A light's emitter frame, as the renderer builds it: `dir` toward the
 /// target, `side` level with the floor, `up` across both.
 fn emitter_basis(pivot: Vec3, target: Vec3) -> (Vec3, Vec3, Vec3) {
@@ -194,6 +161,9 @@ pub struct State {
     pub tool: Tool,
     /// Looking through Free View rather than the shot (UI state `studioLook`).
     pub free_look: bool,
+    /// A look this viewer chose and wrote, until a publication carries it:
+    /// an older publication must not snap the view back meanwhile.
+    pub look_pending: Option<bool>,
     pub free: Option<View>,
     /// Handles follow the object's own axes (UI state `studioAxes`).
     pub object_axes: bool,
@@ -361,6 +331,7 @@ impl GizmoSurface {
     fn studio_go_free(&mut self, cx: &mut Context<Self>) {
         if !self.studio.free_look {
             self.studio.free_look = true;
+            self.studio.look_pending = Some(true);
             if self.studio.free.is_none() {
                 self.studio.free = self.studio.scene.as_ref().map(|s| s.shot);
             }
@@ -389,6 +360,13 @@ impl GizmoSurface {
                 self.studio_go_free(cx);
                 self.studio_push_view(cx);
                 return;
+            }
+            if key == "studioLook" && *v == "camera" && self.studio.free_look {
+                // View camera: back to the shot at once, not when the write lands.
+                self.studio.free_look = false;
+                self.studio.look_pending = Some(false);
+                self.studio_push_view(cx);
+                self.draw(cx);
             }
             self.studio_ui(key, v, cx);
         }
@@ -437,7 +415,171 @@ impl GizmoSurface {
         }
     }
     /// Lines for the 3D selection and its handles, in normalized frame space.
+    /// Lines for the 3D layers, in normalized frame space, within the
+    /// overlay's fixed budget (`OverlayGeometry::MAX_LINES`, truncated from the
+    /// end): handles first, then the selected lights' emitter and aim, the
+    /// light markers, and last the shot camera's frustum.
     pub(super) fn studio_lines(&self, frame: ViewFrame) -> Vec<OverlayLine> {
+        let mut lines = self.studio_handle_lines(frame);
+        let (selected, markers, camera) = self.studio_light_lines(frame);
+        lines.extend(selected);
+        lines.extend(markers);
+        lines.extend(camera);
+        lines
+    }
+    /// The shot camera while looking around, and every light: the selected
+    /// lights' emitter, aim line and ◆ target; markers for all of them.
+    fn studio_light_lines(
+        &self,
+        frame: ViewFrame,
+    ) -> (Vec<OverlayLine>, Vec<OverlayLine>, Vec<OverlayLine>) {
+        let (mut selected, mut markers, mut camera) = (vec![], vec![], vec![]);
+        let (Some(scene), Some(eye)) = (&self.studio.scene, self.studio.eye()) else {
+            return (selected, markers, camera);
+        };
+        let [w, h] = frame.size;
+        let line = |a: [f64; 2], b: [f64; 2], color: [f32; 4]| OverlayLine {
+            ends: [a[0] / w, a[1] / h, b[0] / w, b[1] / h].map(|v| v as f32),
+            color,
+        };
+        let t = &self.tokens;
+        let accent = rgb(t.colors.accent);
+        let ink = rgb(t.colors.secondary);
+        let pt = 1. / frame.scale;
+        if self.studio.free_look
+            && let Lens::Perspective { fov, aspect, .. } = scene.lens
+        {
+            let shot = scene.shot;
+            let mut c = ink;
+            c[3] = 0.8;
+            let (_, r, down) = emitter_basis(shot.position, shot.target);
+            let d = length(sub(shot.target, shot.position)).max(0.5);
+            let hh = d * (fov.to_radians() / 2.).tan() / shot.zoom.max(1e-6);
+            let hw = hh * aspect;
+            let corner = |x: f64, y: f64| add(shot.target, add(mul(r, x * hw), mul(down, y * hh)));
+            let shown: Vec<_> = [corner(-1., -1.), corner(1., -1.), corner(1., 1.), corner(-1., 1.)]
+                .iter()
+                .map(|q| eye.project(*q).map(|p| p.0))
+                .collect();
+            let at = eye.project(shot.position).map(|p| p.0);
+            for k in 0..4 {
+                if let (Some(a), Some(b)) = (shown[k], shown[(k + 1) % 4]) {
+                    camera.push(line(a, b, c));
+                }
+                if let (Some(a), Some(b)) = (at, shown[k]) {
+                    camera.push(line(a, b, c));
+                }
+            }
+            if let Some(a) = at {
+                let s = 6. * pt;
+                for (p, q) in [([-s, -s], [s, -s]), ([s, -s], [s, s]), ([s, s], [-s, s]), ([-s, s], [-s, -s])] {
+                    camera.push(line([a[0] + p[0], a[1] + p[1]], [a[0] + q[0], a[1] + q[1]], c));
+                }
+            }
+        }
+        let ring = |c: [f64; 2], r: f64, n: usize, color: [f32; 4], out: &mut Vec<OverlayLine>| {
+            let at = |k: usize| {
+                let a = k as f64 / n as f64 * std::f64::consts::TAU;
+                [c[0] + r * a.cos(), c[1] + r * a.sin()]
+            };
+            for k in 0..n {
+                out.push(line(at(k), at(k + 1), color));
+            }
+        };
+        let vis = self.studio_visible(frame);
+        for (index, item) in scene.items.iter().enumerate() {
+            if item.role != Role::Light {
+                continue;
+            }
+            let sel = self.studio.selected.contains(&item.id);
+            let kind = item.light.as_deref().unwrap_or("area");
+            if sel
+                && kind != "point"
+                && let Some(target) = item.target
+            {
+                let (_, side, up) = emitter_basis(item.pivot, target);
+                if kind == "area" && item.shape[0] > 0. {
+                    let (hw, hh) = (item.shape[0] / 2., item.shape[1] / 2.);
+                    let q: Vec<_> = [(-1., -1.), (1., -1.), (1., 1.), (-1., 1.)]
+                        .iter()
+                        .map(|(x, y)| {
+                            eye.project(add(item.pivot, add(mul(side, x * hw), mul(up, y * hh))))
+                                .map(|p| p.0)
+                        })
+                        .collect();
+                    for k in 0..4 {
+                        if let (Some(a), Some(b)) = (q[k], q[(k + 1) % 4]) {
+                            selected.push(line(a, b, accent));
+                        }
+                    }
+                }
+                if kind == "spot" && item.shape[2] > 0. {
+                    let d = length(sub(target, item.pivot));
+                    let rad = d * item.shape[2].clamp(1., 89.).to_radians().tan();
+                    let rim = |k: usize| {
+                        let a = k as f64 / 12. * std::f64::consts::TAU;
+                        add(target, add(mul(side, rad * a.cos()), mul(up, rad * a.sin())))
+                    };
+                    for k in 0..12 {
+                        if let (Some((a, _)), Some((b, _))) = (eye.project(rim(k)), eye.project(rim(k + 1))) {
+                            selected.push(line(a, b, accent));
+                        }
+                    }
+                    for k in [0, 6] {
+                        if let (Some((a, _)), Some((b, _))) = (eye.project(item.pivot), eye.project(rim(k))) {
+                            selected.push(line(a, b, accent));
+                        }
+                    }
+                }
+                if let (Some((a, _)), Some((b, _))) = (eye.project(item.pivot), eye.project(target)) {
+                    // Three dashes along the aim, then the ◆.
+                    for k in [1., 3., 5.] {
+                        let p = |f: f64| [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f];
+                        selected.push(line(p(k / 7.), p((k + 1.) / 7.), accent));
+                    }
+                    let color = if self.studio.hover == Some(Handle::Target(index)) {
+                        rgb(t.colors.text)
+                    } else {
+                        accent
+                    };
+                    let s = 6. * pt;
+                    let dm = [[b[0], b[1] - s], [b[0] + s, b[1]], [b[0], b[1] + s], [b[0] - s, b[1]]];
+                    for k in 0..4 {
+                        selected.push(line(dm[k], dm[(k + 1) % 4], color));
+                    }
+                }
+            }
+            let Some((m, edge)) = marker_place(&eye, item.pivot, vis, (MARKER + 6.) * pt) else {
+                continue;
+            };
+            let r = MARKER * pt;
+            let out = if sel { &mut selected } else { &mut markers };
+            ring(m, r, 8, ink, out);
+            if sel {
+                ring(m, r + 3.5 * pt, 10, accent, out);
+            }
+            let g = |x: f64, y: f64| [m[0] + x * pt, m[1] + y * pt];
+            let strokes: &[((f64, f64), (f64, f64))] = match kind {
+                "spot" => &[((-2., -5.), (2., -5.)), ((2., -5.), (5., 4.)), ((5., 4.), (-5., 4.)), ((-5., 4.), (-2., -5.))],
+                "point" => &[((-3., 0.), (0., -3.)), ((0., -3.), (3., 0.)), ((3., 0.), (0., 3.)), ((0., 3.), (-3., 0.))],
+                "sun" => &[((-6., 0.), (6., 0.)), ((0., -6.), (0., 6.)), ((-4., -4.), (4., 4.)), ((-4., 4.), (4., -4.))],
+                _ => &[((-5., -3.5), (5., -3.5)), ((5., -3.5), (5., 3.5)), ((5., 3.5), (-5., 3.5)), ((-5., 3.5), (-5., -3.5))],
+            };
+            for (a, b) in strokes {
+                out.push(line(g(a.0, a.1), g(b.0, b.1), ink));
+            }
+            if let Some(d) = edge {
+                // Pinned: a chevron points the way to the light.
+                let tip = [m[0] + d[0] * (r + 6. * pt), m[1] + d[1] * (r + 6. * pt)];
+                let back = [tip[0] - d[0] * 4. * pt, tip[1] - d[1] * 4. * pt];
+                let n = [-d[1] * 4. * pt, d[0] * 4. * pt];
+                out.push(line(tip, [back[0] + n[0], back[1] + n[1]], ink));
+                out.push(line(tip, [back[0] - n[0], back[1] - n[1]], ink));
+            }
+        }
+        (selected, markers, camera)
+    }
+    fn studio_handle_lines(&self, frame: ViewFrame) -> Vec<OverlayLine> {
         let mut lines = vec![];
         let (Some(scene), Some(eye)) = (&self.studio.scene, self.studio.eye()) else {
             return lines;
@@ -489,189 +631,6 @@ impl GizmoSurface {
                     (eye.project(corner(a)), eye.project(corner(c)))
                 {
                     push(pa, pb, accent);
-                }
-            }
-        }
-        // The shot camera, while looking around: its frustum and the frame it
-        // renders, so the editor view shows where the shot is.
-        if self.studio.free_look
-            && let Lens::Perspective { fov, aspect, .. } = scene.lens
-        {
-            let shot = scene.shot;
-            let mut ink = rgb(t.colors.secondary);
-            ink[3] = 0.8;
-            let (_, r, down) = emitter_basis(shot.position, shot.target);
-            let d = length(sub(shot.target, shot.position)).max(0.5);
-            let hh = d * (fov.to_radians() / 2.).tan() / shot.zoom.max(1e-6);
-            let hw = hh * aspect;
-            let corner = |x: f64, y: f64| add(shot.target, add(mul(r, x * hw), mul(down, y * hh)));
-            let corners = [
-                corner(-1., -1.),
-                corner(1., -1.),
-                corner(1., 1.),
-                corner(-1., 1.),
-            ];
-            let at = eye.project(shot.position).map(|p| p.0);
-            let shown: Vec<_> = corners
-                .iter()
-                .map(|c| eye.project(*c).map(|p| p.0))
-                .collect();
-            for k in 0..4 {
-                if let (Some(a), Some(b)) = (shown[k], shown[(k + 1) % 4]) {
-                    dashed(a, b, 6. / frame.scale, ink, &mut push);
-                }
-                if let (Some(a), Some(b)) = (at, shown[k]) {
-                    push(a, b, ink);
-                }
-            }
-            if let Some(a) = at {
-                let s = 7. / frame.scale;
-                for (p, q) in [
-                    ([-s, -s], [s, -s]),
-                    ([s, -s], [s, s]),
-                    ([s, s], [-s, s]),
-                    ([-s, s], [-s, -s]),
-                ] {
-                    push([a[0] + p[0], a[1] + p[1]], [a[0] + q[0], a[1] + q[1]], ink);
-                }
-            }
-        }
-        // Lights, always (as Electron's markers): a marker at each light,
-        // pinned to the visible edge when it is outside or behind; a selected
-        // light adds its emitter or cone, its aim line and its ◆ target.
-        {
-            let ink = rgb(t.colors.text);
-            let shade = [0., 0., 0., 0.5];
-            let pt = 1. / frame.scale;
-            let vis = self.studio_visible(frame);
-            for (index, item) in scene.items.iter().enumerate() {
-                if item.role != Role::Light {
-                    continue;
-                }
-                let sel = self.studio.selected.contains(&item.id);
-                let kind = item.light.as_deref().unwrap_or("area");
-                if sel
-                    && kind != "point"
-                    && let Some(target) = item.target
-                {
-                    let (_, side, up) = emitter_basis(item.pivot, target);
-                    if kind == "area" && item.shape[0] > 0. {
-                        let (w, h) = (item.shape[0] / 2., item.shape[1] / 2.);
-                        let q: Vec<_> = [(-1., -1.), (1., -1.), (1., 1.), (-1., 1.)]
-                            .iter()
-                            .map(|(x, y)| {
-                                eye.project(add(item.pivot, add(mul(side, x * w), mul(up, y * h))))
-                                    .map(|p| p.0)
-                            })
-                            .collect();
-                        for k in 0..4 {
-                            if let (Some(a), Some(b)) = (q[k], q[(k + 1) % 4]) {
-                                push(a, b, accent);
-                            }
-                        }
-                    }
-                    if kind == "spot" && item.shape[2] > 0. {
-                        let d = length(sub(target, item.pivot));
-                        let rad = d * item.shape[2].clamp(1., 89.).to_radians().tan();
-                        let rim = |k: usize| {
-                            let a = k as f64 / 24. * std::f64::consts::TAU;
-                            add(
-                                target,
-                                add(mul(side, rad * a.cos()), mul(up, rad * a.sin())),
-                            )
-                        };
-                        for k in 0..24 {
-                            if let (Some((a, _)), Some((b, _))) =
-                                (eye.project(rim(k)), eye.project(rim(k + 1)))
-                            {
-                                push(a, b, accent);
-                            }
-                        }
-                        for k in [0, 6, 12, 18] {
-                            if let (Some((a, _)), Some((b, _))) =
-                                (eye.project(item.pivot), eye.project(rim(k)))
-                            {
-                                push(a, b, accent);
-                            }
-                        }
-                    }
-                    if let (Some((a, _)), Some((b, _))) =
-                        (eye.project(item.pivot), eye.project(target))
-                    {
-                        dashed(a, b, 5. * pt, accent, &mut push);
-                        let color = if self.studio.hover == Some(Handle::Target(index)) {
-                            ink
-                        } else {
-                            accent
-                        };
-                        let s = 6. * pt;
-                        let dm = [
-                            [b[0], b[1] - s],
-                            [b[0] + s, b[1]],
-                            [b[0], b[1] + s],
-                            [b[0] - s, b[1]],
-                        ];
-                        for k in 0..4 {
-                            push(dm[k], dm[(k + 1) % 4], color);
-                        }
-                        let s = 2. * pt;
-                        push([b[0] - s, b[1]], [b[0] + s, b[1]], color);
-                    }
-                }
-                let Some((m, edge)) = marker_place(&eye, item.pivot, vis, (MARKER + 6.) * pt)
-                else {
-                    continue;
-                };
-                let r = MARKER * pt;
-                circle(m, r + pt, shade, &mut push);
-                circle(m, r, ink, &mut push);
-                if sel {
-                    circle(m, r + 3.5 * pt, accent, &mut push);
-                    circle(m, r + 4.5 * pt, accent, &mut push);
-                }
-                let g = |x: f64, y: f64| [m[0] + x * pt, m[1] + y * pt];
-                let strokes: &[((f64, f64), (f64, f64))] = match kind {
-                    "spot" => &[
-                        ((-2., -5.), (2., -5.)),
-                        ((2., -5.), (5., 4.)),
-                        ((5., 4.), (-5., 4.)),
-                        ((-5., 4.), (-2., -5.)),
-                    ],
-                    "point" => {
-                        circle(m, 3.5 * pt, ink, &mut push);
-                        &[]
-                    }
-                    "sun" => {
-                        circle(m, 3. * pt, ink, &mut push);
-                        for k in 0..8 {
-                            let a = k as f64 / 8. * std::f64::consts::TAU;
-                            push(
-                                g(5. * a.cos(), 5. * a.sin()),
-                                g(7. * a.cos(), 7. * a.sin()),
-                                ink,
-                            );
-                        }
-                        &[]
-                    }
-                    _ => &[
-                        ((-5., -3.8), (5., -3.8)),
-                        ((5., -3.8), (5., 3.8)),
-                        ((5., 3.8), (-5., 3.8)),
-                        ((-5., 3.8), (-5., -3.8)),
-                        ((-1.7, -3.8), (-1.7, 3.8)),
-                        ((1.7, -3.8), (1.7, 3.8)),
-                    ],
-                };
-                for (a, b) in strokes {
-                    push(g(a.0, a.1), g(b.0, b.1), ink);
-                }
-                if let Some(d) = edge {
-                    // Pinned: a chevron points the way to the light.
-                    let tip = [m[0] + d[0] * (r + 7. * pt), m[1] + d[1] * (r + 7. * pt)];
-                    let back = [tip[0] - d[0] * 4. * pt, tip[1] - d[1] * 4. * pt];
-                    let n = [-d[1] * 4. * pt, d[0] * 4. * pt];
-                    push(tip, [back[0] + n[0], back[1] + n[1]], ink);
-                    push(tip, [back[0] - n[0], back[1] - n[1]], ink);
                 }
             }
         }
