@@ -25,3 +25,17 @@ guessed box. Hosts can still inject `Automation::scene3d_assets` explicitly.
 
 `light_highlight` accepts a world-space point and surface normal directly;
 that form does not require an editor view or a geometry pick.
+
+## Library and project lock durability
+
+Lock ownership is written to a sibling `.owner` record with exclusive temp
+creation, write, file sync, rename, and directory sync. A failed write leaves
+the last complete record intact. The advisory lock keeps its stable inode:
+renaming that inode could allow two processes to hold different locks for
+the same library. The original file retains a best-effort compatibility
+mirror for earlier native builds.
+
+After acquiring the advisory lock on a local volume, an unreadable or empty
+legacy lock record can be recovered. Another process's live advisory lock
+still prevents recovery; valid fresh owner records remain protected. An
+unreadable record on a shared volume is still treated conservatively.
