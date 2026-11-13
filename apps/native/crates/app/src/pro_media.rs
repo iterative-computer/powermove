@@ -2309,6 +2309,89 @@ mod tests {
     }
 
     /// Attach refuses a file that is not the same picture and sound.
+    /// An image sequence read in place larger than HD gets its automatic
+    /// HD preview, made from its own files, which Automatic mode plays.
+    #[test]
+    fn a_large_image_sequence_gets_its_hd_preview_from_its_files() {
+        let Some((ffmpeg, _)) = ffmpeg() else {
+            eprintln!("NOT RUN: no FFmpeg pair (PM_FFMPEG_DIR/bin)");
+            return;
+        };
+        // A shared build machine's free space is not this test's subject.
+        pm_proxy::set_test_disk_reserve(Some(1 << 30));
+        let (dir, media) = service();
+        let frames = dir.path().join("renders");
+        std::fs::create_dir(&frames).unwrap();
+        let made = std::process::Command::new(ffmpeg)
+            .args([
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=2048x1152:rate=24",
+            ])
+            .args([
+                "-frames:v",
+                "4",
+                "-start_number",
+                "1",
+                "-pix_fmt",
+                "rgb48be",
+            ])
+            .arg(frames.join("shot.%04d.png"))
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let sequence = pm_media::image::sequence::Manifest {
+            powermove_image_sequence: 1,
+            dir: frames,
+            prefix: "shot.".into(),
+            suffix: ".png".into(),
+            padding: 4,
+            first: 1,
+            last: 4,
+            rate: [24, 1],
+        };
+        // Retained as the media cache keeps an asset's original.
+        let original = media.inner.objects.join("retained.png");
+        std::fs::write(&original, sequence.to_bytes()).unwrap();
+        identify(&media, "p", &[("a", &original)]);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let tasks = loop {
+            let tasks = media.inner.tasks.lock().unwrap().snapshot(WINDOW);
+            if !tasks.is_empty() && tasks.iter().all(|t| t.state.terminal()) {
+                break tasks;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the HD preview never finished: {:?}, large {:?}",
+                tasks
+                    .iter()
+                    .map(|t| (&t.title, t.state, t.completed, t.total))
+                    .collect::<Vec<_>>(),
+                media.inner.state.lock().unwrap().preview_large
+            );
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        };
+        assert!(
+            tasks.iter().all(|t| t.state == TaskState::Completed),
+            "{:?}",
+            tasks
+                .iter()
+                .map(|t| (&t.title, t.state, t.diagnostic_for_log()))
+                .collect::<Vec<_>>()
+        );
+        settle(&media);
+        let mut catalog = MediaCatalog::default();
+        catalog.originals.insert("a".into(), original);
+        media.decorate("p", &mut catalog, &["a".into()]);
+        assert!(catalog.automatic_proxies.contains("a"));
+        let proxy = pm_media::probe::probe(&catalog.proxies["a"]).unwrap();
+        let video = proxy.probe.video.unwrap();
+        assert_eq!((video.frames, video.height), (4, 1080));
+    }
+
     #[test]
     fn a_sequence_takes_a_proxy_of_its_frames_at_its_rate() {
         if ffmpeg().is_none() {
