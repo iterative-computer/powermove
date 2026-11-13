@@ -1594,6 +1594,133 @@ fn a_changed_file_that_cannot_be_kept_beside_the_project_is_still_told() {
         assert_eq!(kept_beside(&mut k, &session), [], "{why}: seen");
     }
 }
+/// The files beside `file` under its private names, as they are now.
+fn private_files(file: &Path) -> Vec<(std::path::PathBuf, Vec<u8>)> {
+    fs::read_dir(file.parent().unwrap())
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| {
+            p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with(&private_prefix(file))
+        })
+        .map(|p| (p.clone(), fs::read(&p).unwrap()))
+        .collect()
+}
+/// A changed file that could not be kept beside the project went to the
+/// Trash, and the process died before anything after that move reached the
+/// disk. The next open still tells the person it is in the Trash: what the
+/// save's record holds at the moment of the move already says so.
+#[test]
+fn a_file_moved_to_the_trash_is_told_after_a_crash_right_after_the_move() {
+    let dir = common::TempDir::new("stray-crash");
+    fs::create_dir_all(dir.path("job")).unwrap();
+    let file = dir.path("job/cut.pmv");
+    fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+    let native = dir.path("native");
+    assert!(killed(&native, &file, "no-exclusive", "installed", "save"));
+    let record = private_file(&file, ".save");
+    fs::copy(&file, record.with_extension("tmp")).unwrap();
+    let mut k = kernel(&native);
+    let (hook, written) = work_before_disposal();
+    // What is on disk beside the project the moment the Trash move returns.
+    let at_move = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let moved = at_move.clone();
+    let (trash, project) = (common::trash(&native.join("Trash")), file.clone());
+    k.set_publish_hooks(pm_kernel::project_io::PublishHooks {
+        before_disposal: Some(hook),
+        before_install: Some(std::sync::Arc::new(|to: &Path| {
+            if to.to_string_lossy().contains("(other version") {
+                land(to, b"in the way");
+            }
+        })),
+        trash: Some(pm_kernel::project_io::TrashHook(std::sync::Arc::new(
+            move |path: &Path| {
+                let now = (trash.0)(path);
+                *moved.lock().unwrap() = Some(private_files(&project));
+                now
+            },
+        ))),
+        ..child_disk("no-exclusive")
+    });
+    let (_session, _) = open_file(&mut k, &file);
+    let work = written.lock().unwrap()[0].clone();
+    assert!(common::trashed(&native.join("Trash")).contains(&work));
+    // The crash: nothing written after the move is on disk.
+    drop(k);
+    let at_move = at_move.lock().unwrap().take().expect("moved to the Trash");
+    for (path, _) in private_files(&file) {
+        fs::remove_file(path).unwrap();
+    }
+    for (path, bytes) in &at_move {
+        fs::write(path, bytes).unwrap();
+    }
+    let mut k = kernel(&native);
+    k.set_publish_hooks(child_disk("no-exclusive"));
+    let (session, _) = open_file(&mut k, &file);
+    let told = kept_beside(&mut k, &session);
+    assert!(
+        told.iter().any(|(why, _)| why == "trashed"),
+        "told after the crash: {told:?}"
+    );
+    seen(&mut k, &session, &told);
+    assert_eq!(kept_beside(&mut k, &session), [], "seen");
+}
+/// A changed file that could not be kept beside the project, where the
+/// save's record cannot be written to say what becomes of it: it is not
+/// moved anywhere the record would not lead (the Trash). It stays under the
+/// record's own name, the person is told where, and the next open takes it
+/// up again.
+#[test]
+fn a_file_whose_fate_cannot_be_recorded_stays_where_the_record_finds_it() {
+    let dir = common::TempDir::new("stray-unrecorded");
+    fs::create_dir_all(dir.path("job")).unwrap();
+    let file = dir.path("job/cut.pmv");
+    fs::copy(common::ts_fixture("fresh.pmv"), &file).unwrap();
+    let native = dir.path("native");
+    assert!(killed(&native, &file, "no-exclusive", "installed", "save"));
+    let record = private_file(&file, ".save");
+    fs::copy(&file, record.with_extension("tmp")).unwrap();
+    let mut k = kernel(&native);
+    let (hook, written) = work_before_disposal();
+    k.set_publish_hooks(pm_kernel::project_io::PublishHooks {
+        before_disposal: Some(hook),
+        before_install: Some(std::sync::Arc::new(|to: &Path| {
+            if to.to_string_lossy().contains("(other version") {
+                land(to, b"in the way");
+            }
+        })),
+        record_fails: Some(std::sync::Arc::new(|step: &str| step == "left")),
+        ..child_disk("no-exclusive")
+    });
+    let (session, _) = open_file(&mut k, &file);
+    let work = written.lock().unwrap()[0].clone();
+    assert!(
+        !common::trashed(&native.join("Trash")).contains(&work),
+        "moved where no record leads"
+    );
+    let told = kept_beside(&mut k, &session);
+    assert!(
+        told.iter().any(|(why, path)| why == "hidden"
+            && path
+                .as_ref()
+                .is_some_and(|p| fs::read(p).is_ok_and(|b| b == work))),
+        "told where it is: {told:?}"
+    );
+    k.shell(ShellCall::Close(session)).unwrap();
+    drop(k);
+    let mut k = kernel(&native);
+    k.set_publish_hooks(child_disk("no-exclusive"));
+    let (session, _) = open_file(&mut k, &file);
+    let told = kept_beside(&mut k, &session);
+    assert!(
+        told.iter().any(|(_, path)| path
+            .as_ref()
+            .is_some_and(|p| fs::read(p).is_ok_and(|b| b == work))),
+        "taken up again: {told:?}"
+    );
+}
 /// A save that only appends to the project file writes a file whose first
 /// bytes are the whole previous file. On a volume where the new file can
 /// only be copied to its name, the name must never hold those bytes alone

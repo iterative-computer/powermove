@@ -496,15 +496,27 @@ impl Record {
                 push("restored".into(), None);
             } else if is(step, "left") {
                 // Could not be kept beside the project: in the Trash, or
-                // still under its private name.
-                if let (Some(name), Some(place)) = (text(step, "name"), text(step, "where")) {
-                    let why = if place == "trash" {
-                        "trashed"
-                    } else {
-                        "hidden"
-                    };
-                    push(why.into(), Some(dir.join(name)));
+                // still under its private name. The line is written before
+                // the move to the Trash; a file still under its name never
+                // got there. A later attempt to keep it, or a later word on
+                // where it is, is what counts.
+                let (Some(name), Some(place)) = (text(step, "name"), text(step, "where")) else {
+                    continue;
+                };
+                let superseded = self.steps[at + 1..].iter().any(|later| {
+                    (is(later, "keep") || is(later, "left"))
+                        && [text(later, "from"), text(later, "name")].contains(&Some(name.clone()))
+                });
+                if superseded {
+                    continue;
                 }
+                let still_there = !matches!(lstat_file(&dir.join(&name)), Ok(None));
+                let why = if place == "trash" && !still_there {
+                    "trashed"
+                } else {
+                    "hidden"
+                };
+                push(why.into(), Some(dir.join(name)));
             } else if is(step, "keep") {
                 let (Some(from), Some(to), Some(why)) =
                     (text(step, "from"), text(step, "to"), text(step, "why"))
@@ -818,6 +830,17 @@ impl Transaction {
     }
 
     fn step_with(&mut self, step: &str, mut members: Map) -> Result<(), ProjectIoError> {
+        if self
+            .hooks
+            .record_fails
+            .as_ref()
+            .is_some_and(|fails| fails(step))
+        {
+            return Err(io_err(
+                &self.record,
+                io::Error::other("the record cannot be written"),
+            ));
+        }
         members.insert("step", Value::from(step));
         self.file
             .write_all(line(&Value::Object(members)).as_bytes())
@@ -992,28 +1015,43 @@ impl Transaction {
                     }
                 }
                 Err(file) => {
-                    let now = trash_or_leave(file.clone(), &self.hooks);
-                    let trashed = now != file;
-                    if !trashed {
-                        self.strand();
-                    }
-                    // The record tells the person until they have seen it;
-                    // where even that cannot be written, the host does.
-                    let mut members = Map::new();
-                    members.insert(
-                        "name",
+                    // Where it goes is recorded before it goes, so a crash
+                    // right after the move still tells it. A file whose
+                    // fate cannot be recorded stays under the private name
+                    // the record already gives it, where the next open
+                    // takes it up again.
+                    let name = |file: &Path| {
                         Value::from(
                             file.file_name()
                                 .unwrap_or_default()
                                 .to_string_lossy()
                                 .into_owned(),
-                        ),
-                    );
-                    members.insert(
-                        "where",
-                        Value::from(if trashed { "trash" } else { "hidden" }),
-                    );
-                    let recorded = self.step_with("left", members).is_ok();
+                        )
+                    };
+                    let left = |place: &str| {
+                        let mut members = Map::new();
+                        members.insert("name", name(&file));
+                        members.insert("where", Value::from(place));
+                        members
+                    };
+                    let to_trash = self.hooks.trash.is_some();
+                    let recorded = self
+                        .step_with("left", left(if to_trash { "trash" } else { "hidden" }))
+                        .is_ok();
+                    let now = if recorded {
+                        trash_or_leave(file.clone(), &self.hooks)
+                    } else {
+                        file.clone()
+                    };
+                    let trashed = now != file;
+                    if !trashed {
+                        self.strand();
+                        if recorded && to_trash {
+                            // Told as hidden even where this line is lost:
+                            // the file is still under its name.
+                            let _ = self.step_with("left", left("hidden"));
+                        }
+                    }
                     self.tells |= recorded;
                     if let Ok(mut strays) = self.hooks.strays.lock() {
                         strays.push(Stray {

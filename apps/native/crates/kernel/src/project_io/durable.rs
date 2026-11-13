@@ -824,6 +824,9 @@ pub struct PublishHooks {
     /// Called with a public name right after the file under it was moved
     /// to a private name of the save's record, before that file is judged.
     pub after_withdrawn: Option<PublishHook>,
+    /// While it answers true for a step's name, that step's line cannot be
+    /// written to the save's record (a full or failing disk).
+    pub record_fails: Option<Arc<dyn Fn(&str) -> bool + Send + Sync>>,
     /// The person's Trash, where a version of the project goes once a save
     /// no longer needs it (the kernel's host sets it; `None`: such files
     /// stay where they are).

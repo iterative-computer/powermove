@@ -160,6 +160,9 @@ pub struct Kernel {
     /// is settling for a save: one at a time each.
     pub(crate) opening: Vec<PathBuf>,
     pub(crate) preparing: Vec<String>,
+    /// Files no record tells about ([`crate::project_io::Stray`]) whose
+    /// project has no open session yet: told once one opens.
+    pub(crate) unseen_strays: Vec<crate::project_io::Stray>,
 }
 
 impl Kernel {
@@ -192,6 +195,7 @@ impl Kernel {
             save_prelude: None,
             opening: Vec::new(),
             preparing: Vec::new(),
+            unseen_strays: Vec::new(),
         }
     }
 

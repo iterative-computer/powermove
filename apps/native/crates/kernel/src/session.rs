@@ -3117,13 +3117,14 @@ impl Kernel {
     /// Error Log says where each is (the Trash, or hidden where it was).
     /// The save's record tells the person until they have seen it; one
     /// whose record could not be written is told by the open session's own
-    /// rows instead.
+    /// rows instead, and waits for a session of its project when none is
+    /// open (an Open that failed after its recovery ran).
     fn tell_strays(&mut self) {
         let strays = match self.publish_hooks.strays.lock() {
             Ok(mut strays) => std::mem::take(&mut *strays),
             Err(_) => return,
         };
-        for stray in strays {
+        for stray in &strays {
             self.log(format!(
                 "A file from an earlier save of {} was changed after it was saved and could \
                  not be kept next to the project; it is {}: {}",
@@ -3135,13 +3136,19 @@ impl Kernel {
                 },
                 stray.path.display()
             ));
-            if stray.recorded {
-                continue;
+        }
+        let mut waiting = std::mem::take(&mut self.unseen_strays);
+        for stray in strays.into_iter().filter(|stray| !stray.recorded) {
+            if !waiting.contains(&stray) {
+                waiting.push(stray);
             }
+        }
+        for stray in waiting {
             let Some(id) = self.sessions.iter().find_map(|(id, s)| {
                 matches!(&s.destination, Destination::File(p) if *p == stray.project)
                     .then(|| id.clone())
             }) else {
+                self.unseen_strays.push(stray);
                 continue;
             };
             let why = if stray.trashed { "trashed" } else { "hidden" };
