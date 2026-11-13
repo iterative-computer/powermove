@@ -361,6 +361,7 @@ impl Sink for PngSink {
                             expected: b.mean,
                             decoded: b.mean,
                             error_cv: 0.0,
+                            spread_cv: 0.0,
                         }),
                 );
             }
