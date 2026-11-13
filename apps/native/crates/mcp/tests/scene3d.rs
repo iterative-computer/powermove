@@ -207,6 +207,37 @@ fn unloaded_imported_geometry_is_a_visible_failure() {
     assert_eq!(f.read(), before);
 }
 
+struct GeometryEngine { path: PathBuf }
+impl pm_mcp::EngineHook for GeometryEngine {
+    fn capture(&self, _: &pm_mcp::CaptureRequest) -> pm_mcp::Result<Value> {
+        Err(pm_mcp::Error::unavailable("no renderer needed for geometry commands"))
+    }
+    fn scene3d_assets(&self, _: &pm_mcp::services::FrozenProject) -> pm_mcp::Result<Arc<dyn pm_scene3d::geometry::AssetGeometry>> {
+        Ok(Arc::new(pm_scene3d::geometry::FileAssets::new([("asset".into(), self.path.clone())].into())))
+    }
+}
+#[test]
+fn headless_auto_studio_and_floor_tools_load_imported_geometry() {
+    let f = Fixture::new();
+    let path = f.root.join("original.bin");
+    std::fs::write(&path, pm_scene3d::import::triangle_glb(&[[0.,0.,0.],[2.,0.,0.],[0.,4.,0.]], &[0,1,2])).unwrap();
+    {
+        let mut host = f.host.lock().unwrap();
+        let revision = host.revision(&f.id).unwrap();
+        host.apply_commands(&f.id, vec![pm_kernel::MediaCommand::AddAsset {
+            asset_id:"asset".into(), asset:pm_scene3d::to_model(&json!({"id":"asset","kind":"model","name":"triangle.glb","format":"glb"})),
+        }.into()], "Synthetic model", pm_kernel::Origin::Mcp, revision, 1).unwrap();
+        host.engine = Some(Arc::new(GeometryEngine { path }));
+    }
+    let mut session = f.session();
+    ok(session.call("edit_3d", json!({"operation":"add_object","id":"model","object":{"source":{"assetId":"asset"}}})));
+    ok(session.call("edit_3d", json!({"operation":"auto_studio","target":"model"})));
+    ok(session.call("edit_3d", json!({"operation":"drop_to_floor","target":"model"})));
+    let scene = ok(session.call("get_3d_scene", json!({})));
+    assert!(scene["scene"]["objects"][0]["p"]["y"]["v"].as_f64().unwrap() > 0.);
+    assert_eq!(scene["scene"]["lights"].as_array().unwrap().len(), 3);
+}
+
 #[test]
 fn environment_and_quality_ops_reach_the_kernel_and_readback() {
     let fixture = Fixture::new();

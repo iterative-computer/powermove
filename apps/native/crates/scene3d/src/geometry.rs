@@ -86,41 +86,105 @@ impl AssetGeometry for LoadedAssets {
         if loaded != record {
             return fail("3D model source changed; reload geometry");
         }
-        let b = match model.as_ref() {
-            crate::import::Model::Gltf(m) => {
-                let pose = gltf::pose::Pose::at(m, time);
-                let (min, max) = gltf::pose::scene_box(m, &pose)
-                    .ok_or_else(|| Error("Model has no geometry".into()))?;
-                Bounds {
-                    min: std::array::from_fn(|i| (min[i] - m.fit.center[i]) / m.fit.radius),
-                    max: std::array::from_fn(|i| (max[i] - m.fit.center[i]) / m.fit.radius),
-                }
-            }
-            crate::import::Model::Obj(m) => points(
-                m.positions
-                    .chunks_exact(3)
-                    .map(|p| [p[0] as f64, p[1] as f64, p[2] as f64]),
-            )?,
-            crate::import::Model::Splats(d) => {
-                let (center, r) = d.normalization()?;
-                let core = d.dense_core()?;
-                Bounds {
-                    min: [
-                        (core.min[0] - center[0]) / r,
-                        -(core.max[1] - center[1]) / r,
-                        -(core.max[2] - center[2]) / r,
-                    ],
-                    max: [
-                        (core.max[0] - center[0]) / r,
-                        -(core.min[1] - center[1]) / r,
-                        -(core.min[2] - center[2]) / r,
-                    ],
-                }
-            }
-        };
-        b.validate()?;
-        Ok(b)
+        model_bounds(model, time)
     }
+}
+/// Snapshot-approved originals, resolved by the same media host as exports.
+/// Decode with Studio's shared Resource loader, independent of editor views.
+/// Retained boxes cannot stand in for the current pose or missing originals.
+pub struct FileAssets {
+    paths: HashMap<String, std::path::PathBuf>,
+    loaded: std::sync::Mutex<HashMap<String, (Value, std::sync::Arc<crate::render::Resource>)>>,
+}
+impl FileAssets {
+    pub fn new(paths: HashMap<String, std::path::PathBuf>) -> Self {
+        Self {
+            paths,
+            loaded: Default::default(),
+        }
+    }
+    fn resource(
+        &self,
+        id: &str,
+        record: &Value,
+    ) -> Result<std::sync::Arc<crate::render::Resource>> {
+        let mut loaded = self
+            .loaded
+            .lock()
+            .map_err(|_| Error("Model geometry cache poisoned".into()))?;
+        if let Some((saved, resource)) = loaded.get(id) {
+            if saved != record {
+                return fail("3D model source changed; reload geometry");
+            }
+            return Ok(resource.clone());
+        }
+        let path = self
+            .paths
+            .get(id)
+            .ok_or_else(|| Error(format!("3D model original is offline: {id}")))?;
+        use std::io::Read;
+        let mut bytes = vec![];
+        std::fs::File::open(path)
+            .map_err(|e| Error(format!("3D model resource: {e}")))?
+            .take(crate::import::MAX_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|e| Error(e.to_string()))?;
+        // Owned media caches need not have an extension. As in the renderer,
+        // saved format/name selects only the decoder, never the byte source.
+        let name = record["format"]
+            .as_str()
+            .map(|format| format!("resource.{format}"))
+            .or_else(|| record["name"].as_str().map(str::to_owned))
+            .or_else(|| path.to_str().map(str::to_owned))
+            .ok_or_else(|| Error("Invalid model resource path".into()))?;
+        let resource = crate::render::Resource::load(&name, &bytes)?;
+        loaded.insert(id.into(), (record.clone(), resource.clone()));
+        Ok(resource)
+    }
+}
+impl AssetGeometry for FileAssets {
+    fn bounds(&self, id: &str, record: &Value, time: f64) -> Result<Bounds> {
+        model_bounds(&self.resource(id, record)?.model, time)
+    }
+}
+fn model_bounds(model: &crate::import::Model, time: f64) -> Result<Bounds> {
+    if !time.is_finite() {
+        return fail("Invalid model sample time");
+    }
+    let b = match model {
+        crate::import::Model::Gltf(m) => {
+            let pose = gltf::pose::Pose::at(m, time);
+            let (min, max) = gltf::pose::scene_box(m, &pose)
+                .ok_or_else(|| Error("Model has no geometry".into()))?;
+            Bounds {
+                min: std::array::from_fn(|i| (min[i] - m.fit.center[i]) / m.fit.radius),
+                max: std::array::from_fn(|i| (max[i] - m.fit.center[i]) / m.fit.radius),
+            }
+        }
+        crate::import::Model::Obj(m) => points(
+            m.positions
+                .chunks_exact(3)
+                .map(|p| [p[0] as f64, p[1] as f64, p[2] as f64]),
+        )?,
+        crate::import::Model::Splats(d) => {
+            let (center, r) = d.normalization()?;
+            let core = d.dense_core()?;
+            Bounds {
+                min: [
+                    (core.min[0] - center[0]) / r,
+                    -(core.max[1] - center[1]) / r,
+                    -(core.max[2] - center[2]) / r,
+                ],
+                max: [
+                    (core.max[0] - center[0]) / r,
+                    -(core.min[1] - center[1]) / r,
+                    -(core.min[2] - center[2]) / r,
+                ],
+            }
+        }
+    };
+    b.validate()?;
+    Ok(b)
 }
 fn points(points: impl Iterator<Item = Vec3>) -> Result<Bounds> {
     let mut b = Bounds {

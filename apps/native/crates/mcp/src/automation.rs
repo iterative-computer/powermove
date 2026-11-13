@@ -35,6 +35,12 @@ pub trait EngineHook: Send + Sync {
     ) -> Result<Value> {
         self.capture(request)
     }
+    fn scene3d_assets(
+        &self,
+        _snapshot: &crate::services::FrozenProject,
+    ) -> Result<Arc<dyn pm_scene3d::geometry::AssetGeometry>> {
+        Ok(Arc::new(pm_scene3d::geometry::NoAssets))
+    }
     fn resolve_media(
         &self,
         _: &crate::services::MediaRequest,
@@ -298,6 +304,13 @@ impl Automation {
                     path: p.path.clone(),
                 })
             }
+        }
+    }
+    pub(crate) fn scene_geometry(&self, id: &str) -> Result<Arc<dyn pm_scene3d::geometry::AssetGeometry>> {
+        if let Some(assets) = &self.scene3d_assets { return Ok(assets.clone()); }
+        match &self.engine {
+            Some(engine) => engine.scene3d_assets(&self.freeze(id)?),
+            None => Ok(Arc::new(pm_scene3d::geometry::NoAssets)),
         }
     }
     fn shell(&mut self, call: ShellCall) -> Result<ShellReply> {
