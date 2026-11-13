@@ -495,6 +495,8 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
                         binding={s.bindings.timecode}
                         value={o.timecode ?? ""}
                         disabled={busy}
+                        // A field has no width of its own while it is empty.
+                        style={{ width: token("metrics.value_column") }}
                         metadata={{ export: { placeholder: "00:00:00:00" } }}
                         onInput={(e) =>
                           edit("timecode", String(e.value ?? "").trim())
@@ -546,6 +548,7 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
                       binding={s.bindings.presetName}
                       value={model.presetName}
                       disabled={busy}
+                      style={{ width: token("metrics.value_column") }}
                       metadata={{ export: { placeholder: "Preset name" } }}
                       onInput={(e) => model.namePreset(String(e.value ?? ""))}
                       onKeyDown={(e) => {

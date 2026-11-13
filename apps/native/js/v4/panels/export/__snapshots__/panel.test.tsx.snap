@@ -2801,6 +2801,9 @@ exports[`wire snapshot: selected video 1`] = `
                                       "minWidth": {
                                         "token": "metrics.hit",
                                       },
+                                      "width": {
+                                        "token": "metrics.value_column",
+                                      },
                                     },
                                     "title": "Name these settings to reuse them in any project.",
                                     "value": "",
@@ -5998,6 +6001,9 @@ exports[`wire snapshot: known capabilities (loading N/A) 1`] = `
                                       "minWidth": {
                                         "token": "metrics.hit",
                                       },
+                                      "width": {
+                                        "token": "metrics.value_column",
+                                      },
                                     },
                                     "title": "Name these settings to reuse them in any project.",
                                     "value": "",
@@ -9194,6 +9200,9 @@ exports[`wire snapshot: disabled audio and unset work area 1`] = `
                                       "minWidth": {
                                         "token": "metrics.hit",
                                       },
+                                      "width": {
+                                        "token": "metrics.value_column",
+                                      },
                                     },
                                     "title": "Name these settings to reuse them in any project.",
                                     "value": "",
@@ -11160,6 +11169,9 @@ exports[`wire snapshot: ProRes alpha 1`] = `
                                       "minWidth": {
                                         "token": "metrics.hit",
                                       },
+                                      "width": {
+                                        "token": "metrics.value_column",
+                                      },
                                     },
                                     "title": "Timecode of the first frame, as HH:MM:SS:FF, or ;FF for drop-frame. Leave empty to use the composition's time.",
                                     "value": "",
@@ -12716,6 +12728,9 @@ exports[`wire snapshot: ProRes alpha 1`] = `
                                       },
                                       "minWidth": {
                                         "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.value_column",
                                       },
                                     },
                                     "title": "Name these settings to reuse them in any project.",
@@ -15367,6 +15382,9 @@ exports[`wire snapshot: PNG sequence 1`] = `
                                       "minWidth": {
                                         "token": "metrics.hit",
                                       },
+                                      "width": {
+                                        "token": "metrics.value_column",
+                                      },
                                     },
                                     "title": "Name these settings to reuse them in any project.",
                                     "value": "",
@@ -17481,6 +17499,9 @@ exports[`wire snapshot: still 1`] = `
                                       },
                                       "minWidth": {
                                         "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.value_column",
                                       },
                                     },
                                     "title": "Name these settings to reuse them in any project.",
@@ -20929,6 +20950,9 @@ exports[`wire snapshot: no captions 1`] = `
                                       "minWidth": {
                                         "token": "metrics.hit",
                                       },
+                                      "width": {
+                                        "token": "metrics.value_column",
+                                      },
                                     },
                                     "title": "Name these settings to reuse them in any project.",
                                     "value": "",
@@ -24123,6 +24147,9 @@ exports[`wire snapshot: multiple captions 1`] = `
                                       },
                                       "minWidth": {
                                         "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.value_column",
                                       },
                                     },
                                     "title": "Name these settings to reuse them in any project.",
@@ -27581,6 +27608,9 @@ exports[`wire snapshot: custom size 1`] = `
                                       },
                                       "minWidth": {
                                         "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.value_column",
                                       },
                                     },
                                     "title": "Name these settings to reuse them in any project.",
@@ -31062,6 +31092,9 @@ exports[`wire snapshot: inline invalid size 1`] = `
                                       "minWidth": {
                                         "token": "metrics.hit",
                                       },
+                                      "width": {
+                                        "token": "metrics.value_column",
+                                      },
                                     },
                                     "title": "Name these settings to reuse them in any project.",
                                     "value": "",
@@ -34259,6 +34292,9 @@ exports[`wire snapshot: choosing destination (no progress) 1`] = `
                                       },
                                       "minWidth": {
                                         "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.value_column",
                                       },
                                     },
                                     "title": "Name these settings to reuse them in any project.",
@@ -38706,6 +38742,9 @@ exports[`hover/focus use system controls; op tree stays stable, with one selecte
                                       },
                                       "minWidth": {
                                         "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.value_column",
                                       },
                                     },
                                     "title": "Name these settings to reuse them in any project.",
