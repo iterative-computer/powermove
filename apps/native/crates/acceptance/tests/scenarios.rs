@@ -38,27 +38,142 @@ fn corpus_pmv4() {
     fixture::corpus_fixture("pmv4").unwrap();
 }
 /// Shipped bindings with no v1.2.0 registry row in w1-keymap.md: native
-/// additions, pinned here (id, chord, command) so none goes unchecked.
-const NATIVE_BINDINGS: &[(&str, &str, &str)] = &[
-    ("K196", "`", "maximizePanel"),
-    ("K197", "m", "toggleLayerStrips"),
-    ("main.viewer.tab", "tab", "composition.flowchart"),
-    ("native.skimming", "alt+s", "toggleSkimming"),
-    ("native.audioSkimming", "alt+shift+s", "toggleAudioSkimming"),
-    ("native.newNull", "cmd+alt+shift+y", "newNull"),
-    ("native.newNull.ctrl", "ctrl+alt+shift+y", "newNull"),
+/// additions, pinned here (id, chord, command, arguments as JSON) so none
+/// goes unchecked.
+const NATIVE_BINDINGS: &[(&str, &str, &str, &str)] = &[
+    ("K196", "`", "maximizePanel", "[]"),
+    ("K197", "m", "toggleLayerStrips", "[]"),
+    ("main.viewer.tab", "tab", "composition.flowchart", "[]"),
+    ("native.skimming", "alt+s", "toggleSkimming", "[]"),
+    (
+        "native.audioSkimming",
+        "alt+shift+s",
+        "toggleAudioSkimming",
+        "[]",
+    ),
+    ("native.newNull", "cmd+alt+shift+y", "newNull", "[]"),
+    ("native.newNull.ctrl", "ctrl+alt+shift+y", "newNull", "[]"),
+    // Transport: the shuttle is tried before the keys' shipped meanings.
+    ("native.shuttleBackward", "j", "shuttleBackward", "[]"),
+    ("native.shuttleStop", "k", "shuttleStop", "[]"),
+    ("native.shuttleForward", "l", "shuttleForward", "[]"),
+    (
+        "native.shuttleBackward.start",
+        "ctrl+j",
+        "shuttleBackward",
+        "[true]",
+    ),
+    // Editing from the keyboard.
+    (
+        "native.rippleDelete",
+        "shift+backspace",
+        "rippleDelete",
+        "[]",
+    ),
+    (
+        "native.rippleDelete.forward",
+        "shift+delete",
+        "rippleDelete",
+        "[]",
+    ),
+    (
+        "native.nudgeLayerTime.earlier",
+        "alt+pageup",
+        "nudgeLayerTime",
+        "[-1]",
+    ),
+    (
+        "native.nudgeLayerTime.later",
+        "alt+pagedown",
+        "nudgeLayerTime",
+        "[1]",
+    ),
+    (
+        "native.nudgeLayerTime.earlier10",
+        "alt+shift+pageup",
+        "nudgeLayerTime",
+        "[-10]",
+    ),
+    (
+        "native.nudgeLayerTime.later10",
+        "alt+shift+pagedown",
+        "nudgeLayerTime",
+        "[10]",
+    ),
+    ("native.addKeyframe", "alt+k", "timeline.addKeyframe", "[]"),
+    (
+        "native.keyProperty.p",
+        "alt+shift+p",
+        "timeline.keyProperty:p",
+        "[]",
+    ),
+    (
+        "native.keyProperty.s",
+        "alt+shift+s",
+        "timeline.keyProperty:s",
+        "[]",
+    ),
+    (
+        "native.keyProperty.r",
+        "alt+shift+r",
+        "timeline.keyProperty:r",
+        "[]",
+    ),
+    (
+        "native.keyProperty.t",
+        "alt+shift+t",
+        "timeline.keyProperty:t",
+        "[]",
+    ),
+    (
+        "native.keyProperty.a",
+        "alt+shift+a",
+        "timeline.keyProperty:a",
+        "[]",
+    ),
+    // The timeline's and the viewer's own keys.
+    ("native.addMarker", "*", "timeline.addMarker", "[]"),
+    (
+        "native.addMarker.shift",
+        "shift+8",
+        "timeline.addMarker",
+        "[]",
+    ),
+    (
+        "native.addMarker.ctrl",
+        "ctrl+8",
+        "timeline.addMarker",
+        "[]",
+    ),
+    ("native.timelineZoomIn", "=", "timeline.zoomIn", "[]"),
+    ("native.timelineZoomOut", "-", "timeline.zoomOut", "[]"),
+    ("native.timelineFit", "\\", "timeline.fit", "[]"),
+    (
+        "native.toggleHold",
+        "cmd+alt+h",
+        "timeline.toggleHold",
+        "[]",
+    ),
+    ("native.safeAreas", "'", "viewer.safeAreas", "[]"),
+    ("native.guides", "cmd+;", "viewer.guides", "[]"),
+    (
+        "native.projectSettings",
+        "cmd+shift+,",
+        "projectSettings",
+        "[]",
+    ),
 ];
 #[test]
-fn all_202_real_bindings_under_seven_routing_contexts() {
+fn all_228_real_bindings_under_seven_routing_contexts() {
     let c = pm_acceptance::catalog::Catalog::embedded().unwrap();
     let shipped = keyboard::production::shipped();
-    assert_eq!(shipped.len(), 202);
+    assert_eq!(shipped.len(), 228);
     assert_eq!(c.bindings.len() + NATIVE_BINDINGS.len(), shipped.len());
     for real in &shipped {
         let binding = match c.bindings.iter().find(|b| b.id == real.id) {
             Some(b) => b.clone(),
             None => {
-                let (id, chord, command) = *NATIVE_BINDINGS
+                let (id, chord, command, args) = *NATIVE_BINDINGS
                     .iter()
                     .find(|n| n.0 == real.id)
                     .unwrap_or_else(|| panic!("{} is neither in the catalog nor pinned", real.id));
@@ -66,7 +181,7 @@ fn all_202_real_bindings_under_seven_routing_contexts() {
                     id: id.into(),
                     chord: chord.into(),
                     command: command.into(),
-                    args: serde_json::json!([]),
+                    args: serde_json::from_str(args).unwrap(),
                     priority: i64::from(real.priority),
                     in_fields: real.in_fields,
                     repeat: real.repeat,
@@ -79,6 +194,11 @@ fn all_202_real_bindings_under_seven_routing_contexts() {
         for context in keyboard::CONTEXTS {
             keyboard::check(&binding, context).unwrap();
         }
+    }
+    // Every pinned row is a shipped one: a row removed from the keymap
+    // leaves the list too.
+    for (id, ..) in NATIVE_BINDINGS {
+        assert!(shipped.iter().any(|b| b.id == *id), "{id} is not shipped");
     }
 }
 #[test]

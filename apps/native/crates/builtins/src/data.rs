@@ -523,6 +523,31 @@ impl Backend {
         Ok(())
     }
 }
+/// A mark of what the timeline's own chrome shows of its saved view: the
+/// mode, the graph, snapping, hidden shy layers and which rows are open. A
+/// menu, key or palette command changes these from outside the panel and
+/// moves no document revision; the panel reads its rows again when this does.
+fn timeline_view(p: &Published) -> String {
+    use std::hash::{Hash, Hasher};
+    let view = &p.ui_state.timeline;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let shown = [
+        "mode",
+        "graph",
+        "graphCombined",
+        "graphMode",
+        "trackSnap",
+        "hideShy",
+    ]
+    .iter()
+    .map(|key| view.get(key))
+    .chain([view.get("nativeModel").and_then(|n| n.get("disclosure"))]);
+    for part in shown {
+        part.map(pm_model::json::to_canonical_string)
+            .hash(&mut hasher);
+    }
+    format!("{:x}", hasher.finish())
+}
 pub(crate) struct Data(pub Arc<Mutex<Backend>>);
 impl KernelData for Data {
     fn query(
@@ -550,7 +575,7 @@ impl KernelData for Data {
                     let p = p.as_ref().ok_or("No open project")?;
                     // The timeline's workspace facts too: a chrome change
                     // alone moves no document revision.
-                    json!({"project":p.project,"document":p.snapshot.doc_id.to_string(),"revision":p.revision(),"layerNumbers":crate::models::layer_numbers(p)})
+                    json!({"project":p.project,"document":p.snapshot.doc_id.to_string(),"revision":p.revision(),"layerNumbers":crate::models::layer_numbers(p),"timelineView":timeline_view(p)})
                 }
                 Query::Selection => {
                     let p = p.as_ref().ok_or("No open project")?;
