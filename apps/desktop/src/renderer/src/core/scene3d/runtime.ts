@@ -1,5 +1,6 @@
 import { defaultEnvironmentTexture } from './environment-map';
 import { EnvironmentShadows } from './environment-shadows';
+import { SceneReflections } from './scene-reflections';
 import { buildExtrusionGeometry } from './extrusion-geometry';
 import { EXTRUSION_SURFACES } from './extrusion-data';
 import type { ExtrusionMeshSample } from './extrusion-render';
@@ -66,6 +67,7 @@ function disposeTree(object: THREE.Object3D): void {
 export class SceneRuntime {
   readonly scene = new THREE.Scene();
   private environmentShadows = new EnvironmentShadows(this.scene);
+  private reflections = new SceneReflections();
   camera: THREE.PerspectiveCamera|THREE.OrthographicCamera = new THREE.PerspectiveCamera();
   readonly objects = new Map<string,THREE.Object3D>();
   private renderer: THREE.WebGLRenderer|null = null;
@@ -473,6 +475,7 @@ export class SceneRuntime {
     this.renderer.toneMappingExposure=e?this.evaluation(e.p.exposure,'environment.exposure'):1;
     this.renderer.shadowMap.enabled=e?.shadows!==false;
     this.environmentShadows.preparePass(depthIds?[...depthIds].sort().join(','):'all');
+    this.reflections.update(this.renderer,this.scene,this.objects,camera,this.revision,width,height,depthIds);
     this.renderer.setClearColor(0,0);
     if(!objectId){outputDepth=null;this.renderer.render(this.scene,camera);}
     else {
@@ -590,6 +593,7 @@ export class SceneRuntime {
     const mixer=this.mixers.get(id)?.mixer;if(mixer){mixer.stopAllAction();mixer.uncacheRoot(object);}this.mixers.delete(id);
   }
   dispose():void {
+    this.reflections.dispose();
     this.environmentShadows.dispose();
     this.scene.environment=null;this.defaultEnvironment?.dispose();this.defaultEnvironment=null;
     for(const [id,object] of this.objects)this.remove(id,object);
