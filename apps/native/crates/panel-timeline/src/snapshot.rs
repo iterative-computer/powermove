@@ -57,6 +57,8 @@ pub struct Layer {
     pub effectively_locked: bool,
     pub visible: bool,
     pub solo: bool,
+    /// Shy: left out of the timeline's rows while Hide Shy Layers is on.
+    pub shy: bool,
     pub three_d: bool,
     pub audio_muted: bool,
     pub collapsed: bool,
@@ -453,6 +455,7 @@ impl TimelineIndex {
                 ),
             },
             solo: boolean(layer.get("solo")),
+            shy: boolean(layer.get("shy")),
             three_d: boolean(layer.get("threeD")),
             audio_muted: boolean(layer.get("d").and_then(|n| n.get("audioMuted"))),
             collapsed: string(layer.get("type")).as_deref() == Some("group")

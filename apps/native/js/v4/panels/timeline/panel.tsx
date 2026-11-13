@@ -281,6 +281,17 @@ function Header({ frame: f, send }: { frame: TimelineFrame; send: Send }) {
               intent={{ type: "graphOptions" }}
             />
           )}
+          {(f.shyLayers || f.hideShy) && (
+            <Icon
+              id="timeline:hide-shy"
+              label="Hide Shy Layers"
+              symbol={f.hideShy ? "face.dashed.fill" : "face.dashed"}
+              active={f.hideShy === true}
+              title="Hide Shy Layers"
+              send={send}
+              intent={{ type: "hideShy" }}
+            />
+          )}
           <Icon
             id="timeline:snap"
             label="Snapping"
@@ -344,6 +355,13 @@ function Layer({
           },
         ]
       : []),
+    {
+      name: "shy" as const,
+      on: row.shy === true,
+      label: "Toggle Shy",
+      symbol: row.shy ? "face.dashed.fill" : "face.dashed",
+      active: row.shy === true,
+    },
     {
       name: "solo" as const,
       on: row.solo,

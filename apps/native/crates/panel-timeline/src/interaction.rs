@@ -49,8 +49,8 @@ impl std::error::Error for ModelError {}
 pub enum HostEffect {
     Seek(f64),
     TogglePlayback,
-    FitCurves(Vec<String>),
-    MergeCurves,
+    /// Fit Selected Curves: show this span of composition time.
+    FitCurves(f64, f64),
     FrameComposition,
     OpenComposition(String),
     ShowLayerMenu(String),
@@ -264,10 +264,20 @@ impl TimelineModel {
                 .map_or_else(Plan::default, Plan::seek),
             // The stops After Effects counts as visible: the composition's
             // ends, the work area's, markers, layer ends and keyframes.
-            "prevVisibleEvent" | "nextVisibleEvent" => {
-                let mut events = vec![0., duration, self.index.work[0], self.index.work[1]];
-                events.extend(self.index.markers.iter().map(|m| m.time));
+            // Edges are the composition's ends, layer ends and keyframes;
+            // selected events are the selected layers' ends and keyframes.
+            "prevVisibleEvent" | "nextVisibleEvent" | "prevEdge" | "nextEdge"
+            | "prevSelectedEvent" | "nextSelectedEvent" => {
+                let selected = id.ends_with("SelectedEvent");
+                let mut events = if selected { vec![] } else { vec![0., duration] };
+                if id.ends_with("VisibleEvent") {
+                    events.extend(self.index.work);
+                    events.extend(self.index.markers.iter().map(|m| m.time));
+                }
                 for l in &self.index.layers {
+                    if selected && !layers.contains(&l.id) {
+                        continue;
+                    }
                     events.extend([l.from, l.from + l.duration]);
                     for c in &l.channels {
                         events.extend(c.keys.iter().map(|k| l.from + k.time));
@@ -460,6 +470,41 @@ impl TimelineModel {
                 )?;
                 Plan::default()
             }
+            // Hide Shy Layers (After Effects' master shy switch).
+            "timeline.toggleShy" => {
+                self.hide_shy = !self.hide_shy;
+                self.rebuild_rows();
+                Plan::default()
+            }
+            // The Shy switch of the selected layers: all on unless all are.
+            "toggleShy" => {
+                let selected: Vec<_> = layers
+                    .iter()
+                    .filter_map(|id| self.index.layer(id))
+                    .filter(|l| !l.effectively_locked)
+                    .collect();
+                let shy = !selected.iter().all(|l| l.shy);
+                if selected.is_empty() {
+                    Plan::default()
+                } else {
+                    Plan::edit(
+                        selected
+                            .iter()
+                            .map(|l| {
+                                LayerCommand::Set {
+                                    layer_id: l.id.clone(),
+                                    patch: LayerPatch {
+                                        shy: Some(shy),
+                                        ..Default::default()
+                                    },
+                                }
+                                .into()
+                            })
+                            .collect(),
+                        self.index.revision,
+                    )
+                }
+            }
             "timeline.mode:layers" => {
                 self.mode = TimelineMode::Layers;
                 Plan::default()
@@ -500,14 +545,19 @@ impl TimelineModel {
                 };
                 Plan::default()
             }
+            // The timeline zooms to the keys of the curves in the graph.
             "graph.fit" => Plan {
-                effects: vec![HostEffect::FitCurves(keys)],
+                effects: self
+                    .graph_span()
+                    .map(|(first, last)| HostEffect::FitCurves(first, last))
+                    .into_iter()
+                    .collect(),
                 ..Plan::default()
             },
-            "graph.merge" => Plan {
-                effects: vec![HostEffect::MergeCurves],
-                ..Plan::default()
-            },
+            "graph.merge" => {
+                self.graph_merge = !self.graph_merge;
+                Plan::default()
+            }
             "frameView" => Plan {
                 effects: vec![HostEffect::FrameComposition],
                 ..Plan::default()
@@ -766,6 +816,10 @@ impl TimelineModel {
                 three_d: Some(!l.three_d),
                 ..Default::default()
             },
+            LayerSwitch::Shy => LayerPatch {
+                shy: Some(!l.shy),
+                ..Default::default()
+            },
         };
         Ok(Plan::edit(
             vec![
@@ -805,6 +859,7 @@ pub enum LayerSwitch {
     Locked,
     Solo,
     ThreeD,
+    Shy,
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct ClipboardTrack {
@@ -1690,7 +1745,7 @@ impl TimelineModel {
                 add("graph.value", true, self.graph_mode == GraphMode::Value);
                 add("graph.speed", true, self.graph_mode == GraphMode::Speed);
                 add("graph.fit", *series > 0, false);
-                add("graph.merge", *series >= 2, false);
+                add("graph.merge", *series >= 2, self.graph_merge);
                 add(
                     "graph.combined",
                     true,
@@ -1911,8 +1966,8 @@ pub fn menu_label(id: &str) -> &'static str {
         "layer.shared-menu" => "Layer Options…",
         "graph.value" => "Value Graph",
         "graph.speed" => "Speed Graph",
-        "graph.fit" => "Fit Curves",
-        "graph.merge" => "Merge Curves",
+        "graph.fit" => "Fit Selected Curves",
+        "graph.merge" => "Merge Selected Curves",
         "graph.combined" => "Show Dope Sheet",
         _ => "",
     }

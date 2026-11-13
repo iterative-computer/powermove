@@ -720,6 +720,13 @@ impl Backend {
                     .push(("command".into(), json!({ "name": name })));
                 Ok(NativeCommand::Value(self.settings_snapshot()?))
             }
+            // The After Effects workspace comes over with the agent, in its panel.
+            Some("row") if action["action"] == "workspace.import" => {
+                self.native
+                    .platform
+                    .push(("command".into(), json!({"name": "bringWorkspace"})));
+                Ok(NativeCommand::Value(self.settings_snapshot()?))
+            }
             // Keychain consent belongs to the app: it asks before anything is read.
             Some("row") if action["action"] == "account.bring-sign-ins" => {
                 self.native
