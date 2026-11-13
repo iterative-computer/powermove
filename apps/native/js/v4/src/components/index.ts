@@ -674,6 +674,66 @@ export function Slider(props: SliderProps) {
     { ...target, width: token("metrics.value_column") },
   );
 }
+export interface ColorWheelProps extends SurfaceProps {
+  label: string;
+  /** A grouped binding over the wheel's red, green and blue rows. */
+  binding: string;
+  /** Red, green and blue as the parameters hold them. */
+  value: [number, number, number];
+  /** Where the channels are neutral: 0 (lift, gamma, offset) or 1 (gain). */
+  neutral: number;
+  min: number;
+  max: number;
+}
+/** A colour wheel (drawn by the host): dragging the puck pushes red, green
+ * and blue together, keeping their brightness, in one Undo step; Option
+ * drags finely; a double-click returns the wheel to neutral. */
+export function ColorWheel(props: ColorWheelProps) {
+  const { neutral, min, max, ...rest } = props;
+  return kit(
+    "color-wheel",
+    "div",
+    {
+      ...rest,
+      control: "color-wheel",
+      metadata: kitMetadata(props, { neutral, min, max }),
+    },
+    {
+      width: token("metrics.grade_wheel"),
+      height: token("metrics.grade_wheel"),
+      minWidth: token("metrics.grade_wheel"),
+      minHeight: token("metrics.grade_wheel"),
+    },
+  );
+}
+export interface CurveEditorProps extends SurfaceProps {
+  label: string;
+  /** A grouped binding over the curve's point count and every point. */
+  binding: string;
+  /** `[count, x0, y0, x1, y1, …]` as the parameters hold them. */
+  value: number[];
+  /** 0 Master, 1 Red, 2 Green, 3 Blue: the curve's ink. */
+  channel: number;
+}
+/** A curve editor (drawn by the host): a press adds a point, a drag moves
+ * one, dragging one well off the graph removes it, a double-click returns
+ * the curve to a straight line; each gesture is one Undo step. */
+export function CurveEditor(props: CurveEditorProps) {
+  const { channel, ...rest } = props;
+  return kit(
+    "curve-editor",
+    "div",
+    {
+      ...rest,
+      control: "curve-editor",
+      metadata: kitMetadata(props, { channel }),
+    },
+    {
+      height: token("metrics.curve_editor"),
+      minHeight: token("metrics.curve_editor"),
+    },
+  );
+}
 export function Switch(props: Bound<boolean>) {
   return field(
     "switch",

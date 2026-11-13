@@ -4261,6 +4261,137 @@ fn the_color_panel_lists_the_grade_and_writes_through_its_controls() {
     assert_eq!(state.value.as_f64(), Some(1.4));
 }
 
+/// A colour wheel, as a person drags it: the Color panel draws the wheel with
+/// one binding over its red, green and blue, and a drag writes all three in
+/// one gesture: the grade changes as one Undo step, the luma kept by the
+/// wheel's own values (the binding refuses a wrong length or a foreign row).
+#[test]
+fn a_color_wheel_drag_writes_red_green_and_blue_as_one_undo_step() {
+    let actor = actor();
+    let kernel = actor.handle();
+    select_layer(&kernel, "a");
+    let mut setup = data::Backend::new(
+        kernel.clone(),
+        pm_surface::host_api::Identity {
+            realm: "wheel-setup".into(),
+            generation: 1,
+            project: "synthetic".into(),
+        },
+        "layer-effects",
+        false,
+    )
+    .unwrap();
+    setup.sync().unwrap();
+    let request = setup
+        .model
+        .as_mut()
+        .unwrap()
+        .add_effect_at(Caller::native(), "a", "colorWheels", 0.)
+        .unwrap();
+    kernel.call("synthetic", request).wait().unwrap().unwrap();
+    let mut panels = Builtins::new(kernel.clone(), "synthetic", || {}).unwrap();
+    panels.update_facts(json!({"time":0,"playing":false,"stage":[640.,360.]}));
+    finish(panels.mount("color").unwrap());
+    // The Lift wheel the panel draws, and the binding it drags through.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let binding = loop {
+        let found = panels.take_publications().into_iter().rev().find_map(|p| {
+            p.surface.nodes().values().find_map(|n| {
+                (n.props.get("data-pm-component") == Some(&json!("color-wheel"))
+                    && n.props.get("label") == Some(&json!("Lift colour")))
+                .then(|| n.props["binding"].as_str().unwrap().to_owned())
+            })
+        });
+        if let Some(b) = found {
+            break b;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the panel never drew the Lift wheel"
+        );
+        thread::sleep(Duration::from_millis(5));
+    };
+    assert_eq!(
+        binding.matches('+').count(),
+        2,
+        "red, green and blue: {binding}"
+    );
+    let before = kernel.published("synthetic").unwrap().history.entries;
+    let ack = |pending: Result<
+        pm_kernel::Pending<std::result::Result<pm_kernel::Ack, pm_kernel::KernelFailure>>,
+    >| pending.unwrap().wait().unwrap().unwrap();
+    let gesture = match ack(panels.scrub_begin("color")).reply {
+        pm_kernel::Reply::Gesture(id) => id,
+        other => panic!("no gesture: {other:?}"),
+    };
+    for value in [json!([0.05, -0.02, 0.1]), json!([0.1, -0.04, 0.2])] {
+        ack(panels.scrub_step("color", &binding, gesture, value));
+    }
+    // A step of the wrong length is refused; the drag goes on.
+    assert!(
+        panels
+            .scrub_step("color", &binding, gesture, json!([0.3]))
+            .is_err()
+    );
+    ack(panels.scrub_finish("color", gesture, true));
+    let p = kernel.published("synthetic").unwrap();
+    assert_eq!(p.history.entries, before + 1, "one Undo step");
+    let backend = panels
+        .broker
+        .entry("color")
+        .unwrap()
+        .lock()
+        .unwrap()
+        .backend
+        .clone();
+    let projection = backend.lock().unwrap().projection().unwrap();
+    let mut model = pm_panel_inspector::Inspector::new(p, Default::default());
+    for (key, want) in [("liftRed", 0.1), ("liftGreen", -0.04), ("liftBlue", 0.2)] {
+        let id = projection["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["kind"] == "parameter" && r["parameter"]["key"] == key)
+            .unwrap()["parameter"]["id"]
+            .clone();
+        let id = pm_panel_inspector::PropertyId::from_value(
+            &pm_model::json::parse(id.as_str().unwrap()).unwrap(),
+        )
+        .unwrap();
+        let state = model
+            .binding_state(&pm_panel_inspector::Binding::Property(id), 0.)
+            .unwrap();
+        assert_eq!(state.value.as_f64(), Some(want), "{key}");
+    }
+    // A group naming rows of two effects, or out of order, is no binding.
+    let rows: Vec<&Value> = projection["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["kind"] == "parameter")
+        .collect();
+    let pick = |key: &str| {
+        rows.iter()
+            .find(|r| r["parameter"]["key"] == key)
+            .map(|r| r["parameter"].clone())
+            .unwrap()
+    };
+    let (r, g) = (pick("liftRed"), pick("liftGreen"));
+    let handle = format!(
+        "{}+{}",
+        r["binding"].as_str().unwrap(),
+        g["binding"].as_str().unwrap()
+    );
+    let ids = |list: &[&Value]| {
+        list.iter()
+            .map(|v| v["id"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    assert!(data::effect_binding_rows(&projection, &handle, &ids(&[&r, &g])).is_some());
+    assert!(data::effect_binding_rows(&projection, &handle, &ids(&[&g, &r])).is_none());
+    assert!(data::effect_binding_rows(&projection, &handle, &ids(&[&r, &r])).is_none());
+}
+
 /// Two Color Wheels on one layer both grade the picture, so the Color panel
 /// shows each with its own controls, switch and Reset (it showed the first
 /// and hid the second everywhere).
@@ -4344,7 +4475,13 @@ fn every_color_wheels_on_the_layer_has_its_controls_in_the_color_panel() {
             shown.contains(&format!("color:reset:{effect}")),
             "Color Wheels {effect} has no Reset: {shown:?}"
         );
-        for key in ["exposure", "liftMaster", "gainBlue"] {
+        // A wheel's red, green and blue are its drawn wheel (one control
+        // over the three); Tone and each Master are fields.
+        assert!(
+            shown.contains(&format!("color:wheel:{effect}:gain")),
+            "the Gain wheel of Color Wheels {effect} is not drawn"
+        );
+        for key in ["exposure", "liftMaster", "gainMaster"] {
             let row = rows
                 .iter()
                 .find(|r| {

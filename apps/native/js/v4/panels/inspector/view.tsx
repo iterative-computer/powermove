@@ -934,7 +934,7 @@ export function InspectorPanel({
             open={!section.collapsed}
             style={
               section.focused
-                ? { background: token("colors.accent_wash") }
+                ? { background: token("colors.selected_fill") }
                 : undefined
             }
             onChange={(open) =>
