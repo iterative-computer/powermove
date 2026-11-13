@@ -4,9 +4,15 @@
 //! library's, and a project's on a volume other machines write) carries its
 //! owner's pid and a heartbeat and stays at a stable inode: unlinking a
 //! locked inode allows two writers. A *local* lock ([`lock_project`] on a
-//! volume only this Mac writes) is an flock on a file in the profile, never
-//! beside the project: nothing a sync client can replace or upload, and
-//! nothing to refresh.
+//! volume only this Mac writes) is an flock on a file in the user's lock
+//! folder ([`user_lock_root`]), never beside the project: nothing a sync
+//! client can replace or upload, and nothing to refresh.
+//!
+//! On a volume other machines write, the record lock is believed for 30
+//! seconds after its last heartbeat. That measures silence, not death: a
+//! machine that stalls longer is no longer excluded by the lock. What then
+//! protects its save in progress is the save's own record
+//! ([`crate::project_io::Owner`]): another machine never settles it unasked.
 use pm_model::json::{Value, parse};
 use std::os::{
     fd::AsRawFd,
@@ -297,8 +303,31 @@ impl Drop for FileLock {
     }
 }
 
+/// Where every build and every profile of the app that this user runs on
+/// this Mac keeps its local project locks: one folder per user, so the
+/// shipped app, a development build and a second profile exclude each other
+/// from a project file. In the user's Application Support (not a temporary
+/// or cache folder, which the system may clean under a held lock), found
+/// through the user's account, not the environment.
+pub fn user_lock_root() -> PathBuf {
+    // SAFETY: getpwuid returns a pointer to static storage or null; the
+    // directory is copied out before anything else is called.
+    let home = unsafe {
+        let entry = libc::getpwuid(libc::getuid());
+        (!entry.is_null() && !(*entry).pw_dir.is_null()).then(|| {
+            PathBuf::from(std::ffi::OsStr::from_bytes(
+                std::ffi::CStr::from_ptr((*entry).pw_dir).to_bytes(),
+            ))
+        })
+    }
+    .or_else(|| std::env::var_os("HOME").map(PathBuf::from));
+    match home {
+        Some(home) => home.join("Library/Application Support/Powermove Locks"),
+        None => std::env::temp_dir().join("com.powermove.locks"),
+    }
+}
 /// A volume only this Mac writes (`MNT_LOCAL`), where flock is authoritative.
-fn is_local_volume(path: &Path) -> bool {
+pub(crate) fn is_local_volume(path: &Path) -> bool {
     let Ok(c) = std::ffi::CString::new(existing(path).as_os_str().as_bytes()) else {
         return false;
     };
@@ -337,8 +366,9 @@ pub fn local_lock_path(root: &Path, project: &Path) -> io::Result<PathBuf> {
 /// reach it.
 ///
 /// On a volume only this Mac writes (a folder a sync client keeps is one),
-/// that is every instance sharing `root`, a folder of the local profile: a
-/// local lock there, and no file beside the project. What excludes another
+/// that is every instance sharing `root` ([`user_lock_root`]: every build
+/// and profile this user runs): a local lock there, and no file beside the
+/// project. What excludes another
 /// Mac editing the same synced file is nothing but the save's stale-write
 /// check; no lock file can, because a sync client carries files, not locks.
 ///
