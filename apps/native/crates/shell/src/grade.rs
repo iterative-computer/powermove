@@ -161,14 +161,19 @@ fn disc(side: u32, dark: bool) -> Arc<RenderImage> {
         d.borrow_mut()
             .entry((side, dark))
             .or_insert_with(|| {
-                let (ground, strength) = if dark { (0.30, 0.42) } else { (0.80, 0.34) };
+                // Quiet, as a grading tool's wheels are: a neutral ground that
+                // stays grey near the centre, the colours rising toward the rim.
+                let (ground, strength) = if dark { (0.25, 0.26) } else { (0.78, 0.15) };
                 let r = side as f64 / 2.;
                 let mut bgra = Vec::with_capacity((side * side * 4) as usize);
                 for row in 0..side {
                     for col in 0..side {
                         let (x, y) = ((col as f64 + 0.5 - r) / r, (r - row as f64 - 0.5) / r);
-                        let edge = ((1. - x.hypot(y)) * r + 0.5).clamp(0., 1.);
-                        let rgb = offset(x * strength, y * strength).map(|c| {
+                        let radius = x.hypot(y);
+                        let edge = ((1. - radius) * r + 0.5).clamp(0., 1.);
+                        let rise = radius.min(1.).powf(0.6) / radius.max(1e-6);
+                        let (u, v) = (x * rise * strength, y * rise * strength);
+                        let rgb = offset(u, v).map(|c| {
                             let s = (ground + c).clamp(0., 1.);
                             (s * 255.).round() as u8
                         });
@@ -260,11 +265,19 @@ pub fn paint_wheel(
         at - point(px(ring / 2.), px(ring / 2.)),
         size(px(ring), px(ring)),
     );
+    // A ring that reads on every colour of the disc: white with a dark
+    // keyline in dark, the text ink with a light keyline in light.
+    let dark = t.scheme == pm_design::Scheme::Dark;
+    let (ring_ink, keyline) = if dark {
+        (0xffffff, 0x000000)
+    } else {
+        (c.text, 0xffffff)
+    };
     window.paint_quad(round(
         b,
         gpui::transparent_black(),
         t.metrics.border * 2.,
-        gpui::rgba(0xffffff00 | (alpha * 255.).round() as u32),
+        crate::kit::ink(ring_ink, alpha),
     ));
     let outer = Bounds::new(
         b.origin - point(px(w), px(w)),
@@ -274,7 +287,7 @@ pub fn paint_wheel(
         outer,
         gpui::transparent_black(),
         w,
-        gpui::rgba((0.5 * alpha * 255.).round() as u32),
+        crate::kit::ink(keyline, 0.5 * alpha),
     ));
 }
 
@@ -306,9 +319,9 @@ impl Graph {
 /// The ink a curve of `channel` (0 Master, 1 Red, 2 Green, 3 Blue) is drawn in.
 pub fn channel_ink(channel: usize, t: &Tokens) -> u32 {
     match channel {
-        1 => t.colors.scope_red,
-        2 => t.colors.scope_green,
-        3 => t.colors.scope_blue,
+        1 => t.colors.channel_red,
+        2 => t.colors.channel_green,
+        3 => t.colors.channel_blue,
         _ => t.colors.text,
     }
 }
@@ -318,7 +331,7 @@ pub fn channel_ink(channel: usize, t: &Tokens) -> u32 {
 /// which goes on release).
 #[allow(clippy::too_many_arguments)]
 pub fn paint_curve(
-    bounds: Bounds<Pixels>,
+    graph: Graph,
     curve: &Curve,
     channel: usize,
     held: Option<usize>,
@@ -328,9 +341,20 @@ pub fn paint_curve(
     window: &mut Window,
 ) {
     let c = &t.colors;
-    let graph = Graph::new(bounds);
     let alpha = if look.disabled { 0.4 } else { 1. };
     let w = t.metrics.border;
+    // The graph's ground: a value well (the ink at the wash step), its
+    // corner the controls' radius, around the inset graph.
+    let pad = px(t.metrics.keyframe / 2. + w);
+    let a = graph.area;
+    window.paint_quad(
+        PaintQuad::new(Bounds::new(
+            a.origin - point(pad, pad),
+            size(a.size.width + pad * 2., a.size.height + pad * 2.),
+        ))
+        .corner_radii(Corners::all(px(t.metrics.control_radius)))
+        .background(crate::kit::ink(c.text, t.translucency.hover)),
+    );
     let grid = crate::kit::ink(c.text, t.translucency.grid * alpha);
     for i in 1..4 {
         let f = i as f32 / 4.;

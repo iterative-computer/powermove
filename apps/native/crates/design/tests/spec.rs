@@ -87,6 +87,18 @@ const ROLES: &[(&str, &str)] = &[
         "Blue channel scope trace on the dark viewer",
     ),
     (
+        "colors.channel_red",
+        "Red channel ink on panels (curves, channel values)",
+    ),
+    (
+        "colors.channel_green",
+        "Green channel ink on panels (curves, channel values)",
+    ),
+    (
+        "colors.channel_blue",
+        "Blue channel ink on panels (curves, channel values)",
+    ),
+    (
         "colors.media_badge",
         "Badge fill over media (duration, offline); always dark",
     ),
@@ -929,6 +941,23 @@ fn scope_traces_meet_contrast_on_the_specified_dark_viewer() {
         .colors;
         for trace in [c.scope_red, c.scope_green, c.scope_blue] {
             assert!(contrast(trace, c.viewer) >= 3., "scope trace #{trace:06X}");
+        }
+    }
+}
+
+/// A channel's ink reads as text on a panel in both appearances (the Color
+/// panel's channel values are caption-sized numbers).
+#[test]
+fn channel_inks_read_on_panels_in_both_appearances() {
+    for scheme in [Scheme::Dark, Scheme::Light] {
+        let c = Tokens::new(scheme, Default::default()).colors;
+        for ink in [c.channel_red, c.channel_green, c.channel_blue] {
+            assert!(
+                contrast(ink, c.panel) >= 4.5,
+                "{scheme:?} channel ink #{ink:06X} on #{:06X}: {}",
+                c.panel,
+                contrast(ink, c.panel)
+            );
         }
     }
 }

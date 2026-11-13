@@ -40,6 +40,9 @@
       "scope_red": 16739170,
       "scope_green": 5232010,
       "scope_blue": 7055103,
+      "channel_red": 12203568,
+      "channel_green": 1932606,
+      "channel_blue": 3302339,
       "labels": {
         "blue": 13227240,
         "violet": 14209008,
@@ -256,6 +259,9 @@
       "scope_red": 16739170,
       "scope_green": 5232010,
       "scope_blue": 7055103,
+      "channel_red": 12203568,
+      "channel_green": 1932606,
+      "channel_blue": 3302339,
       "labels": {
         "blue": 13227240,
         "violet": 14209008,
@@ -472,6 +478,9 @@
       "scope_red": 16739170,
       "scope_green": 5232010,
       "scope_blue": 7055103,
+      "channel_red": 12203568,
+      "channel_green": 1932606,
+      "channel_blue": 3302339,
       "labels": {
         "blue": 13227240,
         "violet": 14209008,
@@ -688,6 +697,9 @@
       "scope_red": 16739170,
       "scope_green": 5232010,
       "scope_blue": 7055103,
+      "channel_red": 12203568,
+      "channel_green": 1932606,
+      "channel_blue": 3302339,
       "labels": {
         "blue": 13227240,
         "violet": 14209008,
@@ -904,6 +916,9 @@
       "scope_red": 16739170,
       "scope_green": 5232010,
       "scope_blue": 7055103,
+      "channel_red": 16022388,
+      "channel_green": 7327879,
+      "channel_blue": 7384571,
       "labels": {
         "blue": 3883600,
         "violet": 4864875,
@@ -1120,6 +1135,9 @@
       "scope_red": 16739170,
       "scope_green": 5232010,
       "scope_blue": 7055103,
+      "channel_red": 16022388,
+      "channel_green": 7327879,
+      "channel_blue": 7384571,
       "labels": {
         "blue": 3883600,
         "violet": 4864875,
@@ -1336,6 +1354,9 @@
       "scope_red": 16739170,
       "scope_green": 5232010,
       "scope_blue": 7055103,
+      "channel_red": 16022388,
+      "channel_green": 7327879,
+      "channel_blue": 7384571,
       "labels": {
         "blue": 3883600,
         "violet": 4864875,
@@ -1552,6 +1573,9 @@
       "scope_red": 16739170,
       "scope_green": 5232010,
       "scope_blue": 7055103,
+      "channel_red": 16022388,
+      "channel_green": 7327879,
+      "channel_blue": 7384571,
       "labels": {
         "blue": 3883600,
         "violet": 4864875,

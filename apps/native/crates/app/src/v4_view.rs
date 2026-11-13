@@ -86,17 +86,22 @@ impl Outline {
 /// The only pointer the host models. Multi-touch reaches panels as gestures.
 const POINTER: u64 = 1;
 
+#[path = "v4_grade.rs"]
+mod grade;
+
 /// A press on a number field: a click edits, a drag scrubs (language.md §9).
+/// A press on a grading control (`grade`) drags it through the same gesture.
 struct ScrubDrag {
     id: Id,
     start: Point<Pixels>,
     number: crate::v4_compile::NumberFacts,
     binding: Option<SharedString>,
     active: bool,
+    grade: Option<grade::GradeDrag>,
 }
 enum ScrubOp {
     Begin,
-    Value(SharedString, f64),
+    Value(SharedString, Value),
     Finish(bool),
 }
 #[derive(Clone, Copy)]
@@ -145,6 +150,7 @@ pub struct SurfaceView {
     scrub_gesture: Option<u64>,
     scrub_busy: bool,
     scrub_shown: Option<(Id, f64)>,
+    grade_drawn: grade::Drawn,
     move_busy: bool,
     /// Last label of each `role="status"` node; `None` until the first frame,
     /// so a panel's opening state is not read out.
@@ -212,6 +218,7 @@ impl SurfaceView {
             scrub_gesture: None,
             scrub_busy: false,
             scrub_shown: None,
+            grade_drawn: Default::default(),
             move_busy: false,
             statuses: None,
             queued_move: None,
@@ -1313,9 +1320,13 @@ impl SurfaceView {
             number,
             binding: node.binding.clone().filter(|_| !node.local_change),
             active: false,
+            grade: None,
         });
     }
     fn scrub_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        if self.scrub.as_ref().is_some_and(|d| d.grade.is_some()) {
+            return self.grade_move(event, cx);
+        }
         let threshold = self.table.tokens.metrics.drag_threshold;
         let Some(drag) = &mut self.scrub else {
             return;
@@ -1347,7 +1358,8 @@ impl SurfaceView {
         self.scrub_shown = Some((id, value));
         match drag.binding.clone() {
             Some(binding) => {
-                self.scrub_ops.push_back(ScrubOp::Value(binding, value));
+                self.scrub_ops
+                    .push_back(ScrubOp::Value(binding, json!(value)));
                 self.scrub_pump(cx);
             }
             None => self.change(id, json!(value), cx),
@@ -1367,6 +1379,11 @@ impl SurfaceView {
                 self.scrub_ops.push_back(ScrubOp::Finish(commit));
                 self.scrub_pump(cx);
             }
+            if drag.grade.is_some() {
+                cx.notify();
+            }
+        } else if drag.grade.is_some() {
+            // A press on a grading control that never moved changes nothing.
         } else if let Some(field) = self.fields.get(&drag.id) {
             field.update(cx, |f, cx| f.begin_editing(cx));
         }
@@ -1403,7 +1420,7 @@ impl SurfaceView {
                     let pending = match (op, gesture) {
                         (ScrubOp::Begin, _) => runtime.scrub_begin(&panel),
                         (ScrubOp::Value(handle, value), Some(gesture)) => {
-                            runtime.scrub_step(&panel, &handle, gesture, json!(value))
+                            runtime.scrub_step(&panel, &handle, gesture, value)
                         }
                         (ScrubOp::Finish(commit), Some(gesture)) => {
                             runtime.scrub_finish(&panel, gesture, commit)
@@ -1698,6 +1715,19 @@ impl SurfaceView {
         }
         element = self.interactive(element, node, cx);
         element = self.decorate(element, node, window);
+        if let Some(drawing) = self.grade_canvas(id, &node.kit, node.disabled) {
+            element = element.relative().child(drawing);
+            if !node.disabled {
+                element = element.on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |v, event: &MouseDownEvent, window, cx| {
+                        window.prevent_default();
+                        v.grade_press(id, event, cx);
+                        cx.stop_propagation();
+                    }),
+                );
+            }
+        }
         let mut children: Vec<AnyElement> = vec![];
         // A disabled field mounts no editor; it still shows its value, dimmed.
         if let Some(text) = self.disabled_field_text(node) {
@@ -2350,6 +2380,8 @@ impl SurfaceView {
                     ));
                 }
             }
+            // Drawn with their own canvas (`grade_canvas`).
+            Kit::Wheel { .. } | Kit::Curve { .. } => {}
             Kit::Disclosure(open) => {
                 let group: SharedString = format!("disclosure-{}", node.id).into();
                 element = element.group(group.clone()).child(

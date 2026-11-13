@@ -73,6 +73,66 @@ export function curveRows(g: GradeEffect): ParameterRow[] {
   });
 }
 
+/** The four wheels, in the order a colourist reads them: each pushes red,
+ * green and blue together around its neutral value (gain is a multiplier,
+ * so neutral at 1), within its channels' limits. */
+export const WHEELS_OF: {
+  key: string;
+  title: string;
+  neutral: number;
+  range: [number, number];
+}[] = [
+  { key: "lift", title: "Lift", neutral: 0, range: [-1, 1] },
+  { key: "gamma", title: "Gamma", neutral: 0, range: [-2, 2] },
+  { key: "gain", title: "Gain", neutral: 1, range: [0, 8] },
+  { key: "offset", title: "Offset", neutral: 0, range: [-1, 1] },
+];
+/** Controls written together through one grouped binding: their rows' ids
+ * in value order, and the binding the host derives from the rows' own
+ * (joined by `+`). */
+export interface Group {
+  binding: string;
+  channels: string[];
+  value: number[];
+}
+function group(rows: (ParameterRow | undefined)[]): Group | null {
+  if (rows.some((r) => !r || r.parameter.readonly)) return null;
+  const all = rows as ParameterRow[];
+  return {
+    binding: all.map((r) => r.parameter.binding).join("+"),
+    channels: all.map((r) => r.parameter.id),
+    value: all.map((r) => Number(r.parameter.value)),
+  };
+}
+/** A wheel's red, green and blue. */
+export function wheelGroup(g: GradeEffect, wheel: string): Group | null {
+  return group(
+    ["Red", "Green", "Blue"].map((c) => parameter(g, `${wheel}${c}`)),
+  );
+}
+/** A curve's point count and every point: `[count, x0, y0, …, x14, y14]`. */
+export function curveGroup(g: GradeEffect): Group | null {
+  const keys = ["count"];
+  for (let i = 0; i < 15; i++) keys.push(`x${i}`, `y${i}`);
+  return group(keys.map((k) => parameter(g, k)));
+}
+/** Every grouped binding the panel's controls use. */
+export function groups(p: Projection): Group[] {
+  const out: Group[] = [];
+  for (const g of grade(p)) {
+    if (g.header.definition === WHEELS)
+      for (const w of WHEELS_OF) {
+        const x = wheelGroup(g, w.key);
+        if (x) out.push(x);
+      }
+    if (g.header.definition === CURVES) {
+      const x = curveGroup(g);
+      if (x) out.push(x);
+    }
+  }
+  return out;
+}
+
 /** Every action the panel offers a person, with the agent's route to the
  * same result: MCP tools, each `apply_commands` operation named after it.
  * `color.test.ts` checks every name against the MCP catalog and

@@ -91,6 +91,11 @@ pub struct Colors {
     pub scope_green: u32,
     /// Blue channel scope trace; data colour drawn with dark-scheme viewer tokens.
     pub scope_blue: u32,
+    /// A colour channel's ink on panels, per appearance: a red, green or
+    /// blue curve and channel values in the Color panel.
+    pub channel_red: u32,
+    pub channel_green: u32,
+    pub channel_blue: u32,
     /// Clip and layer label fills. Text on them is `text`.
     pub labels: Labels,
 }
@@ -595,6 +600,21 @@ impl Colors {
             scope_red: 0xff6b62,
             scope_green: 0x4fd58a,
             scope_blue: 0x6ba6ff,
+            channel_red: if dark {
+                oklch(0.72, 0.15, 25.)
+            } else {
+                oklch(0.53, 0.17, 27.)
+            },
+            channel_green: if dark {
+                oklch(0.78, 0.14, 150.)
+            } else {
+                oklch(0.52, 0.13, 150.)
+            },
+            channel_blue: if dark {
+                oklch(0.74, 0.13, 255.)
+            } else {
+                oklch(0.52, 0.16, 262.)
+            },
             labels: LABELS[usize::from(!dark)],
         }
     }

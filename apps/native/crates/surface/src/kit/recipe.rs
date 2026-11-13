@@ -37,6 +37,12 @@ pub enum Component {
     PushButton,
     /// A native NSSlider for a bounded value (linear or logarithmic).
     Slider,
+    /// A colour wheel: a puck that pushes red, green and blue together
+    /// (one grouped binding over the three channels).
+    ColorWheel,
+    /// A curve editor: the points of one curve (one grouped binding over
+    /// its point count and every point).
+    CurveEditor,
 }
 impl Component {
     /// Original kit catalog, retained for consumers that enumerate its frozen recipes.
@@ -74,6 +80,8 @@ impl Component {
         Self::Banner,
         Self::PushButton,
         Self::Slider,
+        Self::ColorWheel,
+        Self::CurveEditor,
     ];
     pub fn catalog() -> impl Iterator<Item = Self> {
         Self::ALL.iter().chain(Self::ADDITIONS).copied()
@@ -100,6 +108,8 @@ impl Component {
                 | Self::ViewerGizmo
                 | Self::PushButton
                 | Self::Slider
+                | Self::ColorWheel
+                | Self::CurveEditor
         )
     }
     pub fn surface(self) -> Surface {
@@ -144,6 +154,8 @@ pub enum Widget {
     Banner,
     PushButton,
     Slider,
+    ColorWheel,
+    CurveEditor,
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct Recipe {
@@ -228,6 +240,8 @@ impl Recipe {
             Banner => Widget::Banner,
             PushButton => Widget::PushButton,
             Slider => Widget::Slider,
+            ColorWheel => Widget::ColorWheel,
+            CurveEditor => Widget::CurveEditor,
         };
         let floating = matches!(
             kind,
