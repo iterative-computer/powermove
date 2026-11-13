@@ -46,6 +46,8 @@ pub struct Host {
     /// MCP panel tools).
     pub window_sizes: BTreeMap<String, (f32, f32)>,
     opening_windows: BTreeSet<String>,
+    /// The Settings page the next show asks for (Keyboard Shortcuts…).
+    pub settings_page: Option<String>,
     pub export_job: Option<crate::export_coordinator::Job>,
     pub export_retry: Option<crate::export_coordinator::Frozen>,
     pub export_tasks: Arc<std::sync::Mutex<pm_promedia::tasks::BackgroundTasks>>,
@@ -788,6 +790,18 @@ impl Controller {
         if let Some(existing) = self.builtins.windows.get(id).copied()
             && existing.update(cx, |_, w, _| w.activate()).is_ok()
         {
+            if id == "settings"
+                && let Some(page) = self.builtins.settings_page.take()
+                && let Some(runtime) = self.builtins.runtime.clone()
+            {
+                cx.background_executor()
+                    .spawn(async move {
+                        if let Ok(ticket) = runtime.show_section("settings", &page) {
+                            let _ = ticket.await;
+                        }
+                    })
+                    .detach();
+            }
             return;
         }
         let Some(runtime) = self.builtins.runtime.clone() else {
@@ -837,12 +851,19 @@ impl Controller {
         // Controller update so the window can acquire its published panel safely.
         // The panel's first publication in this window already knows where it is shown.
         let facts = self.facts(cx);
+        let page = (id == "settings")
+            .then(|| self.builtins.settings_page.take())
+            .flatten();
         cx.spawn(async move |this, cx| {
             let told = runtime.clone();
             cx.background_executor()
                 .spawn(async move { told.update_facts(facts) })
                 .await;
-            if let Ok(ticket) = runtime.show(&id) {
+            let shown = match &page {
+                Some(page) => runtime.show_section(&id, page),
+                None => runtime.show(&id),
+            };
+            if let Ok(ticket) = shown {
                 let _ = ticket.await;
             }
             let current = this

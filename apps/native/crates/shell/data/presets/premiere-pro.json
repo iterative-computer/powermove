@@ -236,6 +236,13 @@
    "keys": [
     "alt+shift+down"
    ]
+  },
+  {
+   "command": "keyboardShortcuts",
+   "args": [],
+   "keys": [
+    "cmd+alt+k"
+   ]
   }
  ]
 }

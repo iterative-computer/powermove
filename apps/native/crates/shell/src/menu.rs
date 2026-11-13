@@ -156,6 +156,8 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
                 k("Ripple Delete", "rippleDelete", ""),
                 k("Lift Work Area", "liftWorkArea", ""),
                 k("Extract Work Area", "extractWorkArea", ""),
+                sep(),
+                k("Keyboard Shortcuts…", "keyboardShortcuts", ""),
                 m("contextSelectAll"),
                 r("Deselect All", "deselect"),
                 sep(),

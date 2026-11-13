@@ -2922,6 +2922,11 @@ impl Controller {
                 }
             }
             // Settings, at the open project's own page.
+            // Edit ▸ Keyboard Shortcuts… (After Effects' place for it).
+            "keyboardShortcuts" => {
+                self.builtins.settings_page = Some("shortcuts".into());
+                self.show_builtin("settings", window, cx);
+            }
             "projectSettings" => {
                 if self.published.is_none() {
                     return false;

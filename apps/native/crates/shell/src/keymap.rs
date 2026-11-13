@@ -350,8 +350,10 @@ mod tests {
             keys(&table, "nextSelectedEvent", json!([])),
             ["alt+shift+down"]
         );
+        // Edit ▸ Keyboard Shortcuts… on After Effects' own key.
+        assert_eq!(keys(&table, "keyboardShortcuts", json!([])), ["cmd+alt+'"]);
         // Everything else is the shipped table.
-        assert_eq!(table.len(), shipped().len() + 5);
+        assert_eq!(table.len(), shipped().len() + 6);
         assert_eq!(keys(&table, "workIn", json!([])), ["b", "shift+b"]);
     }
 

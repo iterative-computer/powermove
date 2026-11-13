@@ -545,4 +545,30 @@ mod tests {
         keymap::set_current(keymap::effective(&Keymap::default()));
         assert_eq!(dispatch("alt+shift+[").0, "rippleTrimIn");
     }
+
+    /// Edit ▸ Keyboard Shortcuts… opens the page; each preset gives it its
+    /// editor's key (the palette shows it).
+    #[test]
+    fn keyboard_shortcuts_is_in_the_edit_menu_on_each_editors_key() {
+        let menus = menu::menus();
+        let edit = &menus.iter().find(|(title, _)| *title == "Edit").unwrap().1;
+        assert!(edit.iter().any(|i| i.command == "keyboardShortcuts"));
+        for (preset, chord) in [
+            ("after-effects", "cmd+alt+'"),
+            ("premiere-pro", "cmd+alt+k"),
+            ("final-cut-pro", "cmd+alt+k"),
+            ("davinci-resolve", "cmd+alt+k"),
+        ] {
+            let table = keymap::effective(&Keymap {
+                preset: preset.into(),
+                bindings: vec![],
+            });
+            let keys: Vec<_> = table
+                .iter()
+                .filter(|b| b.command == "keyboardShortcuts")
+                .map(|b| b.chord.as_str())
+                .collect();
+            assert_eq!(keys, [chord], "{preset}");
+        }
+    }
 }
