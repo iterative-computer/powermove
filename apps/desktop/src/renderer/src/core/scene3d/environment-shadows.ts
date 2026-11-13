@@ -76,25 +76,42 @@ const pars=/* glsl */`
 uniform vec4 pmEnvironmentShadowWeights[ NUM_DIR_LIGHT_SHADOWS ];
 // Blocker distance and emitter size give contact-hardening soft shadows.
 // Fixed Poisson taps avoid temporal noise during playback and export.
-vec2 pmEnvironmentDisk(int index) {
+vec2 pmEnvironmentDisk(int index, float count) {
   float angle=float(index)*2.39996323;
-  return vec2(cos(angle),sin(angle))*sqrt((float(index)+0.5)/12.0);
+  return vec2(cos(angle),sin(angle))*sqrt((float(index)+0.5)/count);
 }
 float pmEnvironmentShadow(sampler2D map, DirectionalLightShadow shadow, vec4 coord, float width) {
   vec3 p=coord.xyz/coord.w;p.z+=shadow.shadowBias;
   if(p.x<0.0||p.x>1.0||p.y<0.0||p.y>1.0||p.z>1.0)return 1.0;
   vec2 texel=1.0/shadow.shadowMapSize;
+  // Compare against the receiver's tangent plane at every offset. Using the
+  // centre depth over a sloping surface creates stippling and false blockers.
+  vec3 dx=dFdx(p),dy=dFdy(p);
+  float determinant=dx.x*dy.y-dx.y*dy.x;
+  vec2 gradient=abs(determinant)>0.000000000001
+    ? vec2(dy.y*dx.z-dx.y*dy.z,dx.x*dy.z-dy.x*dx.z)/determinant : vec2(0.0);
+  float pcfBias=shadow.shadowBias-dot(abs(gradient),texel)*1.5;
+  // A small emitter uses the exact same subtexel PCF filter as a Sun light.
+  if(width<=texel.x)return getShadow(map,shadow.shadowMapSize,shadow.shadowIntensity,pcfBias,shadow.shadowRadius,coord);
   float blocker=0.0,count=0.0;
   float search=min(0.04,width*0.25);
   for(int tap=0;tap<12;tap++){
-    float depth=unpackRGBAToDepth(texture2D(map,p.xy+pmEnvironmentDisk(tap)*search));
-    if(depth<p.z){blocker+=depth;count+=1.0;}
+    vec2 offset=pmEnvironmentDisk(tap,12.0)*search;
+    float depth=unpackRGBAToDepth(texture2D(map,p.xy+offset));
+    float distance=p.z+dot(gradient,offset)-depth;
+    if(distance>0.0){blocker+=distance;count+=1.0;}
   }
   if(count==0.0)return 1.0;
-  float radius=max(1.25*texel.x,(p.z-blocker/count)*width);
+  float radius=blocker/count*width;
+  if(radius<=1.5*texel.x)return getShadow(map,shadow.shadowMapSize,shadow.shadowIntensity,pcfBias,shadow.shadowRadius,coord);
   float visibility=0.0;
-  for(int tap=0;tap<12;tap++)visibility+=texture2DCompare(map,p.xy+pmEnvironmentDisk(tap)*radius,p.z);
-  return mix(1.0,visibility/12.0,shadow.shadowIntensity);
+  for(int tap=0;tap<16;tap++){
+    vec2 offset=pmEnvironmentDisk(tap,16.0)*radius;
+    vec4 sampleCoord=coord;sampleCoord.xy+=offset*coord.w;
+    sampleCoord.z+=dot(gradient,offset)*coord.w;
+    visibility+=getShadow(map,shadow.shadowMapSize,1.0,pcfBias,shadow.shadowRadius,sampleCoord);
+  }
+  return mix(1.0,visibility/16.0,shadow.shadowIntensity);
 }
 #endif
 vec3 pmEnvironmentVisibility(vec3 direction, float exponent) {
@@ -189,7 +206,7 @@ export class EnvironmentShadows {
         .replace('getIBLRadiance( geometryViewDir, geometryNormal, material.roughness )','(getIBLRadiance( geometryViewDir, geometryNormal, material.roughness ) * pmEnvironmentVisibility(normalize(mix(reflect(-geometryViewDir, geometryNormal), geometryNormal, material.roughness * material.roughness)), max(1.0, 2.0 / max(0.01, pow(material.roughness, 4.0)) - 2.0)))');
       shader.fragmentShader=shader.fragmentShader.replace('#include <lights_fragment_maps>',chunk);
     };
-    material.customProgramCacheKey=()=>`${key}:pm-environment-shadows-v1`;material.needsUpdate=true;
+    material.customProgramCacheKey=()=>`${key}:pm-environment-shadows-v2`;material.needsUpdate=true;
   }
 
   dispose():void {

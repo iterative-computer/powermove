@@ -1,4 +1,5 @@
 import { expect, test } from './helpers/app';
+import { writeFile } from 'node:fs/promises';
 import { hdrPanorama, exrPanorama, hdrAreaLightPanorama } from '../src/renderer/src/core/scene3d/__fixtures__/environment';
 
 test('Environment Light is a timeline light with its own source, intensity and XYZ rotation', async ({session},info) => {
@@ -49,6 +50,49 @@ test('Environment Light is a timeline light with its own source, intensity and X
   await page.evaluate(id=>{const PM=(window as any).PM;PM.Edit.apply({type:'set_layer',target:id,patch:{visible:false}});},setup.id);
   expect((await render()).rgb).toBeLessThan(beforeSave.rgb*.1);
   await page.evaluate(()=>(window as any).PM.hist.undo());expect((await render()).pixels).toEqual(beforeSave.pixels);
+  expect(session.diagnostics.console.filter(record=>/Shader Error|VALIDATE_STATUS|ERROR: 0:/.test(record.text))).toEqual([]);
+});
+
+test('environment shadow edges interpolate as smoothly as Sun shadows at full resolution',async({session},info)=>{
+  test.setTimeout(120_000);await session.openEditor();const {page}=session;
+  await page.evaluate(()=>{
+    const PM=(window as any).PM;PM.pause();PM.replaceProject(PM.mkProject({w:720,h:720,dur:3}));
+    const api=PM.Kernel.api('shadow-quality-test').scene3d;
+    api.edit({operation:'add_camera',id:'camera',camera:{projection:'orthographic',p:{x:0,y:6,z:.001}}});
+    api.edit({operation:'set_environment',patch:{p:{ambient:0}}});
+    api.edit({operation:'add_object',object:{id:'floor',source:{primitive:'plane',parameters:{width:8,height:8}},p:{rx:-90},material:{p:{color:'#FFFFFF',roughness:1,metalness:0}}}});
+    api.edit({operation:'add_object',object:{id:'box',source:{primitive:'box'},p:{y:.8},material:{p:{color:'#FFFFFF',roughness:1,metalness:0}}}});
+    api.edit({operation:'add_light',light:{id:'env',type:'environment'}});PM.selectLayers(['env']);PM.invalidate();
+  });
+  const source=page.getByRole('combobox',{name:'Source',exact:true}),chooser=page.waitForEvent('filechooser');
+  await source.click();await page.getByRole('option',{name:'Import HDR / EXR…',exact:true}).click();
+  await (await chooser).setFiles({name:'Small emitter.hdr',mimeType:'application/octet-stream',buffer:Buffer.from(hdrAreaLightPanorama(true))});
+  await expect(source).toContainText('Small emitter.hdr');
+  const capture=async(name:string)=>{
+    const result=await page.evaluate(()=>{
+      const PM=(window as any).PM,pixels=PM.GL.renderToPixels(0,720,720,{transparent:true,mblur:false});
+      const levels=new Set<number>();let floorMin=255,floorMax=0;
+      for(let i=0;i<pixels.length;i+=4)if(pixels[i+3]===255 && pixels[i]>2 && pixels[i]<220 && pixels[i]===pixels[i+1] && pixels[i]===pixels[i+2])levels.add(pixels[i]);
+      for(let y=16;y<112;y++)for(let x=16;x<112;x++){
+        const v=pixels[(y*720+x)*4];floorMin=Math.min(floorMin,v);floorMax=Math.max(floorMax,v);
+      }
+      const canvas=document.createElement('canvas');canvas.width=canvas.height=720;
+      canvas.getContext('2d')!.putImageData(new ImageData(new Uint8ClampedArray(pixels),720,720),0,0);
+      return {levels:levels.size,floorRange:floorMax-floorMin,png:canvas.toDataURL('image/png').split(',')[1]};
+    });
+    await writeFile(info.outputPath(name+'.png'),Buffer.from(result.png!,'base64'));
+    expect(result.floorRange,'unoccluded floor stays smooth').toBeLessThanOrEqual(1);return result.levels;
+  };
+  const environmentLevels=await capture('environment-quality');
+  await page.evaluate(()=>{
+    const PM=(window as any).PM,api=PM.Kernel.api('shadow-quality-test').scene3d;
+    api.edit({operation:'update_light',target:'env',patch:{p:{intensity:0}}});
+    const longitude=(80.5/128-.5)*2*Math.PI,latitude=(44.5/64-.5)*Math.PI;
+    api.edit({operation:'add_light',light:{id:'sun',type:'sun',p:{x:6*Math.cos(latitude)*Math.cos(longitude),y:6*Math.sin(latitude),z:6*Math.cos(latitude)*Math.sin(longitude),intensity:1}}});
+  });
+  const sunLevels=await capture('sun-quality');
+  expect(sunLevels).toBeGreaterThan(40);
+  expect(environmentLevels).toBeGreaterThanOrEqual(sunLevels*.75);
   expect(session.diagnostics.console.filter(record=>/Shader Error|VALIDATE_STATUS|ERROR: 0:/.test(record.text))).toEqual([]);
 });
 
