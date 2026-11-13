@@ -354,7 +354,17 @@ impl SurfaceView {
             } else {
                 node.props.get("options").cloned().unwrap_or(Value::Null)
             };
-            if self.leases.get(&id) != Some(&lease) || self.option_sets.get(&id) != Some(&options) {
+            let leased = self.leases.get(&id) == Some(&lease);
+            if leased
+                && view.component == Some(Component::PopUpButton)
+                && self.controls.contains_key(&id)
+            {
+                // A pop-up takes new rows in place (`NativeControl::update`):
+                // the viewer's zoom names its Fit row after the current
+                // zoom, which changes with every step of a window resize,
+                // and a replaced control is gone until its first paint.
+                self.option_sets.insert(id, options);
+            } else if !leased || self.option_sets.get(&id) != Some(&options) {
                 self.subscriptions.remove(&id);
                 self.fields.remove(&id);
                 self.controls.remove(&id);
