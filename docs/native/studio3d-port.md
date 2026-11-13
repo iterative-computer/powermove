@@ -2538,3 +2538,71 @@ floor below it and the black environment above it. An analytic sphere-ray /
 reflected-floor diagnostic predicts 998 boundary pixels; all are within one
 pixel of the rendered edge in both Production and MC4096 (p95 distance 0 px).
 The renderer, floor, material and chrome reference are unchanged.
+
+### Completion gates and round-2 decision (13 November owner update)
+
+The owner re-accepted GPU OIDN despite its matched 10.2% gain: denoise fell
+from 851 to 532 ms and the product export needs that saving. This supersedes
+the earlier “R2 reverted / closed” decision above. Integration must first
+replace the macOS-27 TBB dependency with a macOS-14 build, verify library
+minimum versions, bundle both device backends, and retain explicit CPU fallback.
+The old install stays intact until the replacement verifies.
+
+Full-size rendering remains the default. The 75% option is explicit and never
+automatically enabled. Post-denoise acceptance remains whole/ROI RMS <0.02,
+smooth noise <0.006, bias p95 <0.012, plus the two-seed flicker limit <0.006.
+References remain independent MC4096; speed work cannot relax these limits.
+
+The 1080p real-export gates use at least 30 frames: Draft ≤1 s/frame for every
+scene; Production ≤3 s for standard products and ≤8 s for glass, polished
+chrome and caustics; Final has no time limit. The environment gate is set
+from a new measurement. Its earlier 72.524 s/frame result is a clear outlier:
+70.897 s (97.8%) was tracing, with dense foliage visibility and about 144 mean
+samples per pixel, rather than denoise or encoding, dominating the work.
+The displayed estimate must be within −20%/+30% of actual export time.
+Native Live requires ≥60 presented fps with no stall ≥100 ms; input-to-pixel
+p95 ≤50 ms; Refine ≤2 s. Memory acceptance uses a flat trend over two fixed
+projects, with per-scene editing/export peak RSS and physical footprint also
+reported.
+
+R3 targets a smaller per-scene tracer, background compilation and removal of
+unnecessary per-step waits, with cold and warm export timings. R4 may reduce
+the glass observation floor only if chrome's measured steps 17–32 cost at
+least 1.5 s. Its noise and flicker gates remain unchanged, and floor fireflies
+must be resolved first. The ≥15% speed rule is judged on the targeted scene;
+product and hero may not regress beyond measurement drift. R2's explicit
+exception remains approved. There are at most four speed rounds. Speed work
+stops at 13:00; unfinished or unsuccessful changes are reverted. Remaining
+speed misses are recorded as known, post-v1 work rather than hidden passes.
+
+Real-content evidence also includes the designer's iPhone studio film:
+180 Production frames at 1080p took approximately 40 minutes (about 13 s/frame,
+with shared-GPU contention during part of the run). It uses imported glass and
+titanium materials. This is an owner-reported, contended result, not a quiet
+benchmark or an accepted gate measurement. Estimate and peak-memory checks
+should include the saved project where feasible.
+
+Corrected-backdrop verification uses the real export path, 30 animated-camera
+Production frames at 1920×1080, CPU OIDN, development build, with diagnostic
+sample-count readbacks disabled:
+
+| Current CPU export | Result |
+| --- | ---: |
+| Total export | 96.428 s |
+| Seconds/frame | 3.214 |
+| Trace/frame | 1971.8 ms |
+| OIDN/frame | 775.9 ms |
+| Guide pass + readback/frame | 115.0 ms |
+| Scene preparation/frame | 8.5 ms |
+| Frame-0 upper-left backdrop dark pixels, before → after | 19000 → 0 |
+| Frame-29 upper-left backdrop dark pixels, before → after | 16000 → 0 |
+
+The corrected first and last frames were inspected. Original showcase images
+and video are preserved separately as before evidence; no evidence is stored
+in this repository. This fixes the visible band but does not claim the full
+Production speed gate: 3.214 remains above 3 s/frame.
+
+The quiet-performance and fixed-project memory drivers now accept the
+persistent evidence directory and its `/tmp/pm-shots` symlink equivalently.
+Their canonical-path guard still refuses the public checkout. The focused
+Python path checks pass; on-screen measurement remains a separate run.

@@ -25,9 +25,7 @@ def main():
     spec = importlib.util.spec_from_file_location('quiet', pathlib.Path(__file__).with_name('studio3d-quiet-perf.py'))
     quiet = importlib.util.module_from_spec(spec); spec.loader.exec_module(quiet)
     quiet.allowed()
-    out = args.out.resolve()
-    if not str(out).startswith(('/private/tmp/pm-shots/', '/tmp/pm-shots/')):
-        raise RuntimeError('Evidence belongs under /tmp/pm-shots')
+    out = quiet.evidence_directory(args.out)
     out.mkdir(parents=True, exist_ok=True)
     if any(out.iterdir()):
         raise RuntimeError('Use a new empty evidence directory')
