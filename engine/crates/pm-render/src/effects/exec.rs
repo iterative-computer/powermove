@@ -547,14 +547,17 @@ impl<'c> Gpu<'c> {
             calls.push(("u_time".into(), f(&[time])));
             calls.push(("u_pass".into(), Call::I(i32::from(pass))));
             if let Some(owner) = &step.owner {
-                calls.push(("u_ownerValid".into(), f(&[1.])));
+                calls.push((
+                    "u_ownerValid".into(),
+                    f(&[if owner.valid { 1. } else { 0. }]),
+                ));
                 calls.push((
                     "u_ownerFromUV".into(),
                     Call::M3(super::resources::from_uv(owner)),
                 ));
                 calls.push(("u_layerUV".into(), Call::M3(owner.uv)));
                 calls.push(("u_layerRes".into(), f(&owner.size)));
-                calls.push(("u_pixelScale".into(), f(&owner.pixel_scale)));
+                calls.push(("u_pixelScale".into(), f(&step.density)));
                 calls.push(("u_sourceRes".into(), f(&[f64::from(w), f64::from(h)])));
                 calls.push((
                     "u_sampleLod".into(),
@@ -662,7 +665,14 @@ impl<'c> Gpu<'c> {
                     calls.push(("u_temporalRes".into(), f(&[w as f64, h as f64])));
                     calls.push(("u_temporalIndex".into(), f(&[index as f64])));
                     calls.push(("u_temporalCount".into(), f(&[step.references.len() as f64])));
-                    calls.push(("u_temporalValid".into(), f(&[1.])));
+                    calls.push((
+                        "u_temporalValid".into(),
+                        f(&[if owner.valid && resource.owner.valid {
+                            1.
+                        } else {
+                            0.
+                        }]),
+                    ));
                 }
                 units.push(Some(&resource.target));
             }
@@ -844,9 +854,13 @@ impl<'c> Gpu<'c> {
                 calls.push(("u_time".into(), f(&[time])));
                 calls.push(("u_pass".into(), Call::I(i32::from(pass))));
                 if let Some(owner) = &step.owner {
+                    calls.push((
+                        "u_ownerValid".into(),
+                        f(&[if owner.valid { 1. } else { 0. }]),
+                    ));
                     calls.push(("u_layerUV".into(), Call::M3(owner.uv)));
                     calls.push(("u_layerRes".into(), f(&owner.size)));
-                    calls.push(("u_pixelScale".into(), f(&owner.pixel_scale)));
+                    calls.push(("u_pixelScale".into(), f(&step.density)));
                     calls.push(("u_sourceRes".into(), f(&[f64::from(w), f64::from(h)])));
                     calls.push(("u_sampleLod".into(), f(&[0.])));
                 }
@@ -1361,6 +1375,23 @@ impl EffectPasses for Chain {
     ) -> Option<Arc<dyn EffectPasses>> {
         let mut chain = self.clone();
         chain.inputs = plans;
+        Some(Arc::new(chain))
+    }
+    fn without_effect(&self, instance: &str) -> Option<Arc<dyn EffectPasses>> {
+        if !self.steps.iter().any(|step| step.instance == instance) {
+            return None;
+        }
+        let mut chain = self.clone();
+        let (steps, sources) = self
+            .steps
+            .iter()
+            .cloned()
+            .zip(self.sources.iter().cloned())
+            .filter(|(step, _)| step.instance != instance)
+            .unzip();
+        chain.steps = steps;
+        chain.sources = sources;
+        chain.inputs.clear();
         Some(Arc::new(chain))
     }
     fn key(&self) -> Vec<u8> {

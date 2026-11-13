@@ -477,6 +477,26 @@ fn refused_programs_are_skipped_and_engine_only_failures_routed() {
         ),
         other => panic!("expected routing, got {:?}", other.map(|_| ())),
     }
+    // A viewer keeps the layer, with the same pixels as the plain chain,
+    // and reports the omitted effect through its ordinary failure notices.
+    r.set_isolate_layers(true);
+    let frame = r
+        .render(&doc, "Ptest-root", ticks(0.5), &request(), &res)
+        .unwrap();
+    let pixels = r.read_rgba(&frame).unwrap();
+    assert!(
+        frame.failures.iter().any(|f| f.layer == "img"
+            && f.message.contains("volume")
+            && f.message.contains("bypassed")),
+        "{:?}",
+        frame.failures
+    );
+    let expected = render(&mut r, &plain, &res, 0.5, &request()).unwrap();
+    assert!(
+        max_diff(&pixels, &expected) <= 1.0 / 1024.0,
+        "a refused effect must not erase its image"
+    );
+    r.set_isolate_layers(false);
     assert!(
         unsupported_with_definitions(&doc, "Ptest-root", None, r.effects())
             .iter()

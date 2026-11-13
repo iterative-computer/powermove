@@ -61,7 +61,7 @@ fn backup_budgets_keep_the_newest_generations_and_delete_older_ones() {
         b"old",
     )
     .unwrap();
-    durable::retain(&policy, None).unwrap();
+    durable::retain(&policy, None, &Default::default()).unwrap();
     assert_eq!(
         durable::list_backups(&policy).unwrap(),
         vec![named(5), named(4)]
@@ -74,12 +74,12 @@ fn backup_budgets_keep_the_newest_generations_and_delete_older_ones() {
         max_bytes: 1,
         ..policy.clone()
     };
-    durable::retain(&tight, None).unwrap();
+    durable::retain(&tight, None, &Default::default()).unwrap();
     assert_eq!(durable::list_backups(&tight).unwrap(), vec![named(5)]);
     // Unknown files in an old archive stay, and so does the folder.
     std::fs::create_dir(&archive).unwrap();
     std::fs::write(archive.join("notes.txt"), b"mine").unwrap();
-    durable::retain(&policy, None).unwrap();
+    durable::retain(&policy, None, &Default::default()).unwrap();
     assert_eq!(std::fs::read(archive.join("notes.txt")).unwrap(), b"mine");
 }
 
@@ -150,7 +150,7 @@ fn backup_retention_never_follows_a_linked_archive() {
     let outside = other.join("2026-01-01T00-00-00-000Z.pmv");
     std::fs::write(&outside, b"not ours").unwrap();
     std::os::unix::fs::symlink(&other, policy.directory.join("archived")).unwrap();
-    durable::retain(&policy, None).unwrap();
+    durable::retain(&policy, None, &Default::default()).unwrap();
     assert_eq!(std::fs::read(kept).unwrap(), b"authored generation");
     assert_eq!(std::fs::read(outside).unwrap(), b"not ours");
 }
@@ -190,7 +190,7 @@ fn archive_cleanup_deletes_only_the_exact_names_the_app_wrote() {
         }
     };
     write_all();
-    durable::retain(&policy, None).unwrap();
+    durable::retain(&policy, None, &Default::default()).unwrap();
     for name in &ours {
         assert!(
             !archive.join(name).exists(),
@@ -236,7 +236,7 @@ fn backups_never_follow_a_linked_project_folder() {
         min_versions: 1,
     };
     assert!(
-        durable::retain(&linked, None).is_err(),
+        durable::retain(&linked, None, &Default::default()).is_err(),
         "a linked project folder is refused"
     );
     assert!(durable::list_backups(&linked).is_err());

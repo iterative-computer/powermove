@@ -18,8 +18,14 @@ pub fn configure_layer(
     layer.set_presents_with_transaction(false);
     unsafe {
         let p = layer.as_ptr() as *mut AnyObject;
-        let _: () = msg_send![p,setWantsExtendedDynamicRangeContent:true];
-        let _: () = msg_send![p,setMaximumDrawableCount:3_u64];
+        // Diagnostics: PM_FIX_LAYER_EDR=0 asks for SDR composition;
+        // PM_FIX_LAYER_DRAWABLES=N changes the drawable queue depth.
+        let edr = pm_media::decode::diag::knob("PM_FIX_LAYER_EDR") != Some(0);
+        let _: () = msg_send![p,setWantsExtendedDynamicRangeContent:edr];
+        let drawables = pm_media::decode::diag::knob("PM_FIX_LAYER_DRAWABLES")
+            .filter(|n| (2..=3).contains(n))
+            .unwrap_or(3);
+        let _: () = msg_send![p,setMaximumDrawableCount:drawables];
         let _: () = msg_send![p,setAllowsNextDrawableTimeout:true];
         let space = objc2_core_graphics::CGColorSpace::with_name(Some(
             objc2_core_graphics::kCGColorSpaceExtendedLinearDisplayP3,

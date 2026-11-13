@@ -274,6 +274,11 @@ fn unprotects(project: &str, shown: Option<&str>) -> bool {
 /// made under its name: that copy was made of another file (this one
 /// replaced it, or changed somewhere else since), so it was not opened in
 /// its place. `true` opens the earlier copy.
+fn file_name(path: &std::path::Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
 fn earlier_copy_alert(file: &str, copies: &[String]) -> crate::alert::Alert<bool> {
     use crate::alert::{Alert, Button};
     let which = match copies {
@@ -547,6 +552,9 @@ impl Controller {
                                 }
                                 KernelEvent::Fault { message, .. } => {
                                     v.message = "Something went wrong; see the Error Log.".into();
+                                    v.errors.borrow_mut().push("Kernel", &message);
+                                }
+                                KernelEvent::Log { message } => {
                                     v.errors.borrow_mut().push("Kernel", &message);
                                 }
                                 KernelEvent::Notice { project, notice }
@@ -1498,6 +1506,7 @@ impl Controller {
                         v.report_first_frame(cx);
                         v.load_recent(cx);
                         v.offer_stranded_copies(cx);
+                        v.tell_kept_beside(cx);
                         // No lock reaches another computer through a sync
                         // client: say what does guard the file.
                         if in_place && v.path.as_deref().is_some_and(pm_kernel::locks::is_synced) {
@@ -1591,6 +1600,88 @@ impl Controller {
                     let leader = v.shell_window_id(cx);
                     crate::entry::open_in_new_tab(crate::entry::Pending::Library(newest), leader, cx);
                 });
+            }
+        })
+        .detach();
+    }
+    /// Files kept beside this project's file that nobody was told about: a
+    /// version that arrived during a save no window showed the end of (at
+    /// quit), or what a save that was cut short left. Said once, in a sheet
+    /// with a way to them, and in the Error Log.
+    /// The person has been shown the notice about the kept files `paths`
+    /// (and, with `restored`, that the last saved version was put back;
+    /// with `other`, the notices that are not about a kept file): the
+    /// kernel stops reporting them. Called only once the sheet was answered.
+    fn kept_seen(
+        &mut self,
+        paths: Vec<PathBuf>,
+        restored: bool,
+        other: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        let seen = self.kernel.shell(ShellCall::KeptSeen {
+            session,
+            paths,
+            restored,
+            other,
+        });
+        cx.spawn(async move |_, _| {
+            let _ = seen.await;
+        })
+        .detach();
+    }
+    fn tell_kept_beside(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        let asked = self.kernel.shell(ShellCall::KeptBeside(session));
+        cx.spawn(async move |this, cx| {
+            let Some(Ok(ShellReply::Kept(rows))) = asked.await else {
+                return;
+            };
+            let rows: Vec<(String, Option<PathBuf>)> = rows
+                .iter()
+                .filter_map(|row| {
+                    let text = |key: &str| row.get(key).and_then(pm_model::Value::as_str);
+                    Some((text("why")?.to_owned(), text("path").map(PathBuf::from)))
+                })
+                .collect();
+            let Ok(Some((answer, reveal))) = this.update(cx, |v, _| {
+                let file = v.path.as_deref().map(file_name).unwrap_or_default();
+                let named: Vec<_> = rows
+                    .iter()
+                    .map(|(why, path)| (why.clone(), path.as_deref().map(file_name)))
+                    .collect();
+                let alert = crate::surfaces::documents::kept_beside(&file, &named)?;
+                v.errors.borrow_mut().push(
+                    "Project",
+                    &format!("{} {}", alert.message, alert.informative),
+                );
+                let reveal = rows
+                    .iter()
+                    .find_map(|(_, path)| path.clone())
+                    .or(v.path.clone());
+                Some((alert.sheet(&v.host.borrow().window), reveal))
+            }) else {
+                return;
+            };
+            let answered = answer.recv().await.ok().flatten();
+            // Shown and answered: only now is it not to be told again.
+            let _ = this.update(cx, |v, cx| {
+                v.kept_seen(
+                    rows.iter().filter_map(|(_, path)| path.clone()).collect(),
+                    rows.iter().any(|(why, _)| why == "restored"),
+                    true,
+                    cx,
+                )
+            });
+            if answered == Some(crate::surfaces::documents::Action::ShowInFinder)
+                && let Some(path) = reveal
+            {
+                platform::reveal(&path);
             }
         })
         .detach();
@@ -1714,8 +1805,100 @@ impl Controller {
         })
         .detach();
     }
-    /// S004: an alert naming the file, with Show in Finder when it still exists.
+    /// A file that did not open may have whole versions beside it that a
+    /// save's record proves (a save cut short, a sync client that changed
+    /// the file it left): the newest is offered first (which, when, how
+    /// large; Open This One / Show in Finder / Cancel). Otherwise, or after
+    /// Cancel, the plain open error.
     fn report_open_failure(
+        &mut self,
+        name: &str,
+        path: Option<PathBuf>,
+        error: &KernelFailure,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(file) = path.clone() else {
+            return self.report_open_error(name, path, error, cx);
+        };
+        let asked = self.kernel.shell(ShellCall::Leftovers(file.clone()));
+        let (name, error) = (name.to_owned(), error.clone());
+        cx.spawn(async move |this, cx| {
+            let rows = match asked.await {
+                Some(Ok(ShellReply::Leftovers(rows))) => rows,
+                _ => Vec::new(),
+            };
+            let text = |row: &pm_model::Value, key: &str| {
+                row.get(key)
+                    .and_then(pm_model::Value::as_str)
+                    .map(str::to_owned)
+            };
+            // Never a save that is going on right now; the newest work first.
+            let offered = ["saving", "previous"].iter().find_map(|role| {
+                rows.iter().find(|r| {
+                    text(r, "role").as_deref() == Some(role)
+                        && text(r, "why").as_deref() != Some("active")
+                })
+            });
+            let Some(row) = offered else {
+                let _ = this.update(cx, |v, cx| v.report_open_error(&name, path, &error, cx));
+                return;
+            };
+            let leftover = PathBuf::from(text(row, "path").unwrap_or_default());
+            let saving = text(row, "role").as_deref() == Some("saving");
+            let at = row
+                .get("at")
+                .and_then(pm_model::Value::as_f64)
+                .map_or_else(String::new, |ms| {
+                    pm_kernel::project_io::local_time((ms / 1000.0) as u64)
+                });
+            let bytes = row
+                .get("size")
+                .and_then(pm_model::Value::as_f64)
+                .unwrap_or(0.0) as u64;
+            let Ok(answer) = this.update(cx, |v, _| {
+                let alert = crate::surfaces::documents::version_offer(
+                    &name,
+                    &file_name(&file),
+                    &crate::surfaces::documents::OfferedVersion {
+                        saving,
+                        at: &at,
+                        bytes,
+                    },
+                );
+                v.errors.borrow_mut().push(
+                    "Project",
+                    &format!("{} {}", alert.message, alert.informative),
+                );
+                alert.sheet(&v.host.borrow().window)
+            }) else {
+                return;
+            };
+            use crate::surfaces::documents::Action;
+            match answer.recv().await.ok().flatten() {
+                Some(Action::OpenThisOne) => {
+                    let Ok(used) = this.update(cx, |v, _| {
+                        v.kernel.shell(ShellCall::UseLeftover {
+                            path: file.clone(),
+                            leftover: leftover.clone(),
+                        })
+                    }) else {
+                        return;
+                    };
+                    let used = used.await;
+                    let _ = this.update(cx, |v, cx| match used {
+                        Some(Ok(_)) => v.open_named(SessionSource::File(file), Some(name), cx),
+                        Some(Err(e)) => v.report_open_error(&name, Some(file), &e, cx),
+                        None => {}
+                    });
+                }
+                Some(Action::ShowInFinder) => platform::reveal(&leftover),
+                _ => {}
+            }
+        })
+        .detach();
+    }
+    /// S004: an alert naming the file, with Show in Finder when it still exists.
+    fn report_open_error(
         &mut self,
         name: &str,
         path: Option<PathBuf>,
@@ -2012,11 +2195,6 @@ impl Controller {
     fn other_version_kept(&mut self, kept: PathBuf, cx: &mut Context<Self>) {
         use crate::surfaces::documents::{Action, other_version_kept};
         let name = self.project_name();
-        let file_name = |path: &std::path::Path| {
-            path.file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default()
-        };
         let file = self.path.as_deref().map(file_name).unwrap_or_default();
         self.message = format!("“{name}” was saved. Another version of its file was kept.");
         self.errors.borrow_mut().push(
@@ -2028,8 +2206,13 @@ impl Controller {
         );
         let answer =
             other_version_kept(&name, &file, &file_name(&kept)).sheet(&self.host.borrow().window);
-        cx.spawn(async move |_, _| {
-            if answer.recv().await.ok().flatten() == Some(Action::ShowInFinder) {
+        cx.spawn(async move |this, cx| {
+            let answered = answer.recv().await.ok().flatten();
+            // Shown and answered: the notice about this file was seen.
+            let _ = this.update(cx, |v, cx| {
+                v.kept_seen(vec![kept.clone()], false, false, cx)
+            });
+            if answered == Some(Action::ShowInFinder) {
                 platform::reveal(&kept);
             }
         })
@@ -2039,17 +2222,38 @@ impl Controller {
     /// and Show in Finder are one press away, and the kernel's own account
     /// is an Error Log row, never copy.
     fn save_failed(&mut self, detail: &str, cx: &mut Context<Self>) {
-        use crate::surfaces::documents::{Action, WriteFailure, save_failed};
+        use crate::surfaces::documents::{Action, WriteFailure, save_failed, saved_beside};
         let name = self.project_name();
         self.message = format!("“{name}” couldn’t be saved.");
         self.errors
             .borrow_mut()
             .push("Save", &format!("“{name}” couldn’t be saved: {detail}"));
         let path = self.path.clone().filter(|p| p.exists());
-        let answer = save_failed(&name, WriteFailure::of(detail), path.is_some())
-            .sheet(&self.host.borrow().window);
-        cx.spawn(
-            async move |this, cx| match answer.recv().await.ok().flatten() {
+        // The save's own file, kept next to a version that took the name.
+        let (alert, path) = match pm_kernel::project_io::kept_beside(detail) {
+            Some(kept) => {
+                let file = self.path.as_deref().map(file_name).unwrap_or_default();
+                self.message = format!("“{name}” was saved next to its file.");
+                (saved_beside(&name, &file, &file_name(&kept)), Some(kept))
+            }
+            None => (
+                save_failed(&name, WriteFailure::of(detail), path.is_some()),
+                path,
+            ),
+        };
+        let kept = pm_kernel::project_io::kept_beside(detail);
+        let answer = alert.sheet(&self.host.borrow().window);
+        cx.spawn(async move |this, cx| {
+            let answered = answer.recv().await.ok().flatten();
+            // The save's own kept file was shown. Whatever else that save
+            // kept (another version it found on the way) is told next.
+            if let Some(kept) = kept {
+                let _ = this.update(cx, |v, cx| {
+                    v.kept_seen(vec![kept], false, false, cx);
+                    v.tell_kept_beside(cx);
+                });
+            }
+            match answered {
                 Some(Action::SaveAs) => {
                     let _ = this.update(cx, |v, cx| v.save_dialog(cx));
                 }
@@ -2059,8 +2263,8 @@ impl Controller {
                     }
                 }
                 _ => {}
-            },
-        )
+            }
+        })
         .detach();
     }
     /// An edit the kernel refused or could not answer: plain words in the

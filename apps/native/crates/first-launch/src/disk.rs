@@ -132,10 +132,17 @@ pub struct Stamp {
     device: u64,
 }
 pub fn walk(root: &Path) -> Result<std::collections::BTreeMap<PathBuf, Stamp>> {
+    walk_filtered(root, &[])
+}
+pub(crate) fn walk_filtered(
+    root: &Path,
+    ignored: &[&str],
+) -> Result<std::collections::BTreeMap<PathBuf, Stamp>> {
     fn visit(
         base: &Path,
         p: &Path,
         out: &mut std::collections::BTreeMap<PathBuf, Stamp>,
+        ignored: &[&str],
     ) -> Result<()> {
         let m = fs::symlink_metadata(p)?;
         ensure!(
@@ -144,7 +151,13 @@ pub fn walk(root: &Path) -> Result<std::collections::BTreeMap<PathBuf, Stamp>> {
         );
         if m.is_dir() {
             for e in fs::read_dir(p)? {
-                visit(base, &e?.path(), out)?;
+                let path = e?.path();
+                if !ignored
+                    .iter()
+                    .any(|name| path.file_name().is_some_and(|n| n == *name))
+                {
+                    visit(base, &path, out, ignored)?;
+                }
             }
         } else {
             ensure!(m.is_file(), "nonregular checkpoint source");
@@ -162,7 +175,7 @@ pub fn walk(root: &Path) -> Result<std::collections::BTreeMap<PathBuf, Stamp>> {
     }
     let mut out = std::collections::BTreeMap::new();
     if root.exists() {
-        visit(root, root, &mut out)?;
+        visit(root, root, &mut out, ignored)?;
     }
     Ok(out)
 }

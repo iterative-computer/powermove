@@ -248,10 +248,14 @@ pub fn delta_store(
     publish(&native, &state)?;
     writer.flush()?;
     drop(writer);
-    if extensions_changed || !settings.is_empty() {
+    let repairing_extensions = !state.extensions_imported;
+    crate::extension_import::import(&next, &pending, &native, &mut state)?;
+    if extensions_changed || !settings.is_empty() || repairing_extensions {
         hook(Event::Started(Step::Extensions))?;
         extensions(&native, settings)?;
     }
+    state.extensions_imported = true;
+    publish(&native, &state)?;
     Ok(DeltaPrepared::MediaPending)
 }
 
@@ -371,6 +375,7 @@ pub fn delta_if_changed(
     let (source, native) = validate(config)?;
     let state: State = disk::json(&native.join("migration.json"))?;
     if !native.join("first-launch-deltas/pending").exists()
+        && state.extensions_imported
         && state.source_stamp.as_deref() == Some(&checkpoint::source_stamp(&source)?)
     {
         return Ok(DeltaPrepared::Unchanged);
@@ -598,7 +603,10 @@ impl Merge<'_> {
         let mut extensions_changed = false;
         for relative in paths {
             let (before, after) = (self.base.files.get(relative), self.next.files.get(relative));
-            if relative.starts_with("store") || before.map(|e| &e.hash) == after.map(|e| &e.hash) {
+            if relative == Path::new("extensions-provenance.json")
+                || relative.starts_with("store")
+                || before.map(|e| &e.hash) == after.map(|e| &e.hash)
+            {
                 continue;
             }
             let target = self.native.join(checkpoint::file_target(relative)?);

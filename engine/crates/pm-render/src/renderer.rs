@@ -452,6 +452,8 @@ pub struct Renderer {
     /// comes with each request).
     options3d: crate::scene3d::Options3d,
     vector: crate::vector::cache::VectorCache,
+    /// [`Renderer::set_vector_batching`], kept across cache resets.
+    vector_batching: bool,
     pyramids: crate::sampling::gpu::PyramidCache,
     evaluator: Evaluator,
     bracket: Option<Arc<dyn CommandBracket>>,
@@ -527,6 +529,7 @@ impl Renderer {
             scene3d: Scene3dRenderer::default(),
             options3d: crate::scene3d::Options3d::default(),
             vector: crate::vector::cache::VectorCache::new(),
+            vector_batching: true,
             pyramids: crate::sampling::gpu::PyramidCache::new(),
             evaluator: Evaluator::new().with_expressions(Arc::new(PmExprEngine)),
             device,
@@ -567,6 +570,21 @@ impl Renderer {
     /// (they are validated by revision when it is on again).
     pub fn set_draw_reuse(&mut self, enabled: bool) {
         self.reuse_enabled = enabled;
+    }
+
+    /// Whether a draw list's missing coverage scenes render together
+    /// (`VectorCache::prepare_scenes_in`; on by default). Every texture is
+    /// the one each scene renders alone; tests turn it off to compare.
+    pub fn set_vector_batching(&mut self, enabled: bool) {
+        self.vector_batching = enabled;
+        self.vector.set_batching(enabled);
+    }
+
+    /// Lowers the vector cache's per-frame scratch bound (tests force split
+    /// and refused batches). It never raises the standing bound and resets
+    /// with the cache.
+    pub fn limit_vector_frame_scratch(&mut self, bytes: u64) {
+        self.vector.limit_frame_scratch(bytes);
     }
 
     /// Whether frames plan with the channels found in the same unchanged
@@ -1380,7 +1398,15 @@ impl Renderer {
         self.media.trim_frames(bytes);
     }
     pub fn set_target_pool_budget(&mut self, bytes: u64) {
-        self.pool.set_free_budget(bytes);
+        // PM_FIX_POOL_KEEP: between frames, keep up to the pool's default
+        // free budget (a frame's intermediates are taken again next frame);
+        // idle release still trims to zero.
+        let floor = if pm_media::decode::diag::knob("PM_FIX_POOL_KEEP") == Some(1) {
+            pm_gpu::target::TargetPool::FREE_BUDGET
+        } else {
+            0
+        };
+        self.pool.set_free_budget(bytes.max(floor));
         self.pyramids.set_budget(bytes);
         self.binds.set_budget(bytes);
     }
@@ -1440,8 +1466,19 @@ impl Renderer {
     /// decoded frame of its source while the exact one decodes, and
     /// [`Rendered::stand_ins`] counts such layers. Off by default; never
     /// applies to export requests.
+    /// Whether a drag frame asked for video within `within` (scrub allowance).
+    pub fn scrubbed_within(&self, within: std::time::Duration) -> bool {
+        self.media.scrubbed_within(within)
+    }
+    /// Playback or export: no scrub is in progress any more.
+    pub fn clear_scrub_mark(&self) {
+        self.media.clear_scrub_mark();
+    }
     pub fn set_scrub(&mut self, on: bool) {
         self.media.scrub = on;
+        if on {
+            self.media.note_scrub();
+        }
     }
 
     /// Frames while playing: a video layer waits for its exact frame until
@@ -1589,6 +1626,7 @@ impl Renderer {
         self.trim(0);
         self.media = MediaCache::new(&self.device);
         self.vector = crate::vector::cache::VectorCache::new();
+        self.vector.set_batching(self.vector_batching);
         self.scene3d = Scene3dRenderer::default();
         self.options3d.studio = None;
         self.evaluator.reset();
