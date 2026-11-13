@@ -254,10 +254,9 @@ impl DefinitionsPending {
             [] => format!("the extensions this project uses are loading ({effects})"),
             [one] => format!("{one} is loading ({effects})"),
             [a, b] => format!("{a} and {b} are loading ({effects})"),
-            [a, b, rest @ ..] => format!(
-                "{a}, {b} and {} more are loading ({effects})",
-                rest.len()
-            ),
+            [a, b, rest @ ..] => {
+                format!("{a}, {b} and {} more are loading ({effects})", rest.len())
+            }
         })
     }
 }
@@ -2921,7 +2920,10 @@ mod definitions_pending_tests {
         assert_eq!(
             line(
                 &["deep-glow-pop.effect"],
-                &[("deep-glow", "Deep Glow"), ("deep-glow-pop", "Deep Glow Pop")]
+                &[
+                    ("deep-glow", "Deep Glow"),
+                    ("deep-glow-pop", "Deep Glow Pop")
+                ]
             ),
             "Deep Glow Pop is loading (deep-glow-pop.effect)"
         );

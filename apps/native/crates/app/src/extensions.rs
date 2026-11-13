@@ -313,7 +313,10 @@ fn still_loading_note(names: &[&str]) -> Option<String> {
     let (who, its) = match names {
         [] => return None,
         [one] => (format!("{one} is"), "its effects wait for it"),
-        [one, other] => (format!("{one} and {other} are"), "their effects wait for them"),
+        [one, other] => (
+            format!("{one} and {other} are"),
+            "their effects wait for them",
+        ),
         [one, rest @ ..] => (
             format!("{one} and {} more are", rest.len()),
             "their effects wait for them",
@@ -327,7 +330,10 @@ pub(crate) fn starts_once_loaded(what: &str, resources: &ResourceSnapshot) -> St
         [] => format!("{what} starts once extensions have loaded"),
         [(_, one)] => format!("{what} starts once {one} has loaded"),
         [(_, one), rest @ ..] => {
-            format!("{what} starts once {one} and {} more have loaded", rest.len())
+            format!(
+                "{what} starts once {one} and {} more have loaded",
+                rest.len()
+            )
         }
     }
 }
@@ -2071,12 +2077,18 @@ mod tests {
                 "Export",
                 &ResourceSnapshot {
                     pending: true,
-                    loading: names.iter().map(|n| (n.to_lowercase(), (*n).into())).collect(),
+                    loading: names
+                        .iter()
+                        .map(|n| (n.to_lowercase(), (*n).into()))
+                        .collect(),
                     ..Default::default()
                 },
             )
         };
-        assert_eq!(waiting(&["Deep Glow"]), "Export starts once Deep Glow has loaded");
+        assert_eq!(
+            waiting(&["Deep Glow"]),
+            "Export starts once Deep Glow has loaded"
+        );
         assert_eq!(
             waiting(&["Deep Glow", "Blur", "Grain"]),
             "Export starts once Deep Glow and 2 more have loaded"
@@ -2093,7 +2105,9 @@ mod tests {
         );
         assert_eq!(
             note(&["Deep Glow", "Grain"]).as_deref(),
-            Some("Deep Glow and Grain are still loading. Frames that use their effects wait for them.")
+            Some(
+                "Deep Glow and Grain are still loading. Frames that use their effects wait for them."
+            )
         );
         assert_eq!(
             note(&["A", "B", "C"]).as_deref(),

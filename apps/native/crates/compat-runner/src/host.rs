@@ -731,7 +731,10 @@ impl ExtensionHost {
             .unwrap_or_default();
         let realm = realm.iter().filter_map(|entry| {
             let id = entry["id"].as_str()?;
-            Some((id.to_owned(), entry["name"].as_str().unwrap_or(id).to_owned()))
+            Some((
+                id.to_owned(),
+                entry["name"].as_str().unwrap_or(id).to_owned(),
+            ))
         });
         published.starting.iter().cloned().chain(realm).collect()
     }
@@ -2918,7 +2921,10 @@ mod tests {
         extension(
             &extensions,
             "synthetic-local",
-            &[("index.ts", "export default function(api){api.commands.register({id:'synthetic-local.run',label:'Run',run(){}})}")],
+            &[(
+                "index.ts",
+                "export default function(api){api.commands.register({id:'synthetic-local.run',label:'Run',run(){}})}",
+            )],
         );
         let fixture = Fixture::start(root);
         let has = |id: &str| {
@@ -2946,7 +2952,9 @@ mod tests {
         store(&fixture._root.path().join("extensions"), "synthetic-later");
         fixture.until("the rescan starts it", |host| {
             assert!(!has("synthetic-later.tint"), "registered while settled");
-            host.loading().iter().any(|(id, name)| id == "synthetic-later" && name == "synthetic-later")
+            host.loading()
+                .iter()
+                .any(|(id, name)| id == "synthetic-later" && name == "synthetic-later")
         });
         watch("synthetic-later.tint");
     }
