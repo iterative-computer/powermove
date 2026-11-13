@@ -1765,9 +1765,9 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
         }
     });
     // Diagnostic (traced viewers, `PM_ENGINE_TRACE_PICTURES=1`): every
-    // playing frame is read back as it was drawn and its row carries a hash
-    // of the pixels, so two builds can be compared playing frame by playing
-    // frame. The readback costs time: never on in a timing run.
+    // playing frame's presented picture is read back as presented and its
+    // row carries a hash of its stored bytes (`Submission::picture_hash`),
+    // so two builds can be compared playing frame by playing frame. The readback costs time: never on in a timing run.
     let trace_pictures =
         recorder.is_some() && std::env::var_os("PM_ENGINE_TRACE_PICTURES").is_some();
     // Diagnostic A/B only: the pre-latency-pass schedule (re-present every
@@ -1995,13 +1995,8 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                             "stand_ins": f.submission.stand_ins, "late_layers": f.late_layers,
                             "skipped_targets": v.status.skipped_targets, "held_frames": v.status.held_frames,
                             "render_gpu_ms": render_gpu_ms,
-                            "picture": traced_picture.then(|| {
-                                let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-                                for c in f.submission.pixels().iter().flatten() {
-                                    hash = (hash ^ c.to_bits()).wrapping_mul(0x0000_0100_0000_01b3);
-                                }
-                                format!("{hash:016x}")
-                            }),
+                            "picture": traced_picture
+                                .then(|| format!("{:016x}", f.submission.picture_hash())),
                         }),
                     ) {
                         row.extend(more);
@@ -2696,7 +2691,13 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 Ok(true) => provider
                     .map_or_else(|| Ok(overlays), |p| p(&scene.doc, &scene.comp, spec.time))
                     .and_then(|overlays| {
-                        let read = capture || picture_only;
+                        let read = if capture {
+                            render::Readback::Capture
+                        } else if picture_only {
+                            render::Readback::Presented
+                        } else {
+                            render::Readback::None
+                        };
                         let superseded = &shared.superseded;
                         let armed = superseded.load(std::sync::atomic::Ordering::Acquire);
                         engine.set_interrupt(Some((superseded.clone(), armed)));
