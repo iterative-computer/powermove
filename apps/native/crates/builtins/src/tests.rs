@@ -367,6 +367,45 @@ fn application_agent_and_settings_mount_without_creating_a_project() {
 }
 
 #[test]
+fn bring_my_workspace_opens_a_thread_with_the_request_and_sends_the_agent_its_steps() {
+    let actor = KernelActor::spawn(KernelConfig::default());
+    let mut panels = Builtins::application(actor.handle(), || {}, None).unwrap();
+    // The Agent panel is what carries it: closed, there is nowhere to ask.
+    assert!(panels.bring_workspace().is_err());
+    finish(panels.mount("agent").unwrap());
+    finish(panels.show("agent").unwrap());
+    let agent = {
+        let backend = panels.backend("agent").unwrap();
+        let backend = backend.shared();
+        backend.native.agent.clone().unwrap()
+    };
+    // No agent is signed in: the request waits in the composer of the
+    // visible thread (a blank one is reused, as New Thread reuses it).
+    assert_eq!(panels.bring_workspace(), Ok(false));
+    {
+        let state = agent.shared();
+        let thread = state.panel.active_id();
+        let session = state.panel.session(thread).unwrap();
+        assert_eq!(session.draft.text(), agent_host::WORKSPACE_IMPORT_LABEL);
+        assert_eq!(session.settings.access, pm_agents::Access::Project);
+        assert!(session.run.is_none());
+    }
+    // Sent, the conversation shows the one line and the agent gets the steps.
+    let sent = agent_host::expand_request(agent_host::WORKSPACE_IMPORT_LABEL);
+    assert!(sent.starts_with(agent_host::WORKSPACE_IMPORT_LABEL));
+    for tool in [
+        "inspect_creative_workspace",
+        "inspect_creative_extension",
+        "get_panel_layout",
+        "set_panel_layout",
+    ] {
+        assert!(sent.contains(tool), "{tool}");
+    }
+    assert_eq!(agent_host::expand_request("Make it blue"), "Make it blue");
+    panels.close();
+}
+
+#[test]
 fn application_profile_writes_are_actor_owned_and_document_commands_refuse() {
     let actor = KernelActor::spawn(KernelConfig::default());
     let identity = pm_surface::host_api::Identity {

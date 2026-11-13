@@ -638,6 +638,97 @@ impl Builtins {
         }
         Ok(result)
     }
+    /// Settings › General › Bring My Workspace… (`workspaceImportHandoff`):
+    /// a new thread in this window's Agent panel, with Project access, asking
+    /// for the After Effects workspace. It is sent at once when the thread's
+    /// provider is signed in; otherwise the request waits in the composer,
+    /// where the panel shows how to connect. Answers whether it was sent.
+    /// Call it off the main thread.
+    pub fn bring_workspace(&self) -> std::result::Result<bool, String> {
+        let closed = || "Open the Agent panel to bring your workspace.".to_owned();
+        let failed = |e: pm_panel_agentpanel::Error| format!("{e:?}");
+        let (agent, link) = {
+            let backend = self.backend("agent").map_err(|_| closed())?;
+            let backend = backend.shared();
+            let agent = backend.native.agent.clone().ok_or_else(closed)?;
+            (agent, backend.native.agent_link.clone())
+        };
+        let run_effect = |effect: &pm_panel_agentpanel::model::Effect| {
+            agent_host::run_effect(
+                &agent,
+                &link,
+                &self.broker.kernel,
+                self.broker.application,
+                effect,
+            )
+        };
+        let now = agent_host::now_ms();
+        let label = agent_host::WORKSPACE_IMPORT_LABEL;
+        let thread = {
+            let mut state = agent.shared();
+            state
+                .panel
+                .new_thread(&pm_kernel::new_id("agent-thread"), now)
+                .map_err(failed)?
+        };
+        let access = agent
+            .shared()
+            .panel
+            .set_access(&thread, "project")
+            .map_err(failed)?;
+        if let Some(effect) = access {
+            run_effect(&effect)?;
+        }
+        let effect = {
+            let mut state = agent.shared();
+            let provider = state
+                .panel
+                .session(&thread)
+                .map_err(failed)?
+                .settings
+                .provider;
+            let effect = if link.available(provider) {
+                agent_host::admit_send(&state, &thread)?;
+                Some(
+                    state
+                        .panel
+                        .send_message(
+                            &thread,
+                            label,
+                            &[],
+                            &pm_kernel::new_id("run"),
+                            &pm_kernel::new_id("request"),
+                            now,
+                        )
+                        .map_err(failed)?,
+                )
+            } else {
+                state
+                    .panel
+                    .draft_mut(&thread)
+                    .map_err(failed)?
+                    .set_text(label, now)
+                    .map_err(failed)?;
+                None
+            };
+            state
+                .panel
+                .save(
+                    &mut models::KernelStore::new(
+                        self.broker.kernel.clone(),
+                        self.broker.application,
+                    ),
+                    now,
+                )
+                .map_err(failed)?;
+            effect
+        };
+        if let Some(effect) = &effect {
+            run_effect(effect)?;
+        }
+        link.touch();
+        Ok(effect.is_some())
+    }
     /// Main's orchestrator tools for the run named by `agentRunId` (its MCP
     /// session's `--agent-run`): subagent tasks and run watches, through this
     /// window's Agent panel runs. Call it off the main thread.

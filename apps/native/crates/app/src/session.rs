@@ -2515,6 +2515,7 @@ impl Controller {
                 }
             }
             "settings" | "agent" => self.show_builtin(&cmd.name, window, cx),
+            "bringWorkspace" => self.bring_workspace(window, cx),
             "quit" => cx.defer(crate::lifecycle::begin_quit),
             "closeWindow" | "closeTab" => self.request_close(crate::lifecycle::Intent::Window, cx),
             "cancel" | "deselect" if self.importing.is_some() => {
