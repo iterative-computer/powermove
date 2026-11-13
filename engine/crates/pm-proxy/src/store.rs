@@ -22,7 +22,9 @@ pub struct ProxyRecipe {
 }
 
 impl ProxyRecipe {
-    pub const VERSION: u32 = 3;
+    /// 4: every colour field is tagged with the original's reading
+    /// (untagged originals' proxies were read by their own size).
+    pub const VERSION: u32 = 4;
 
     pub fn new(
         requested_format: ProxyFormat,

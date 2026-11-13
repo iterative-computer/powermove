@@ -355,6 +355,8 @@ impl EngineJobs {
         destination: PathBuf,
         look: bool,
         preview: bool,
+        studio_quality: Option<serde_json::Value>,
+        studio_render_scale:Option<f32>,
         resources: Resources,
     ) -> AnyResult<ExportHandle> {
         let media = crate::media::for_session(
@@ -376,6 +378,8 @@ impl EngineJobs {
             destination,
         )?;
         request.preview = preview;
+        request.studio_quality = studio_quality;
+        request.studio_render_scale = studio_render_scale;
         // The definitions its caller pinned (`Self::resources`): the
         // window's, or with no window the same host run without a page.
         request.resources = (*resources).clone();
@@ -487,7 +491,16 @@ impl ExportChild for EngineJobs {
                 return Err(failed(error));
             }
         };
-        let handle = match self.start(&published, settings, destination, false, false, resources) {
+        let handle = match self.start(
+            &published,
+            settings,
+            destination,
+            false,
+            false,
+            request.options.studio_quality.clone(),
+            request.options.studio_render_scale,
+            resources,
+        ) {
             Ok(handle) => handle,
             Err(error) => {
                 task.finish(Err(error.to_string()));
@@ -712,6 +725,40 @@ fn frame(
     capture: Capture,
     resources: Resources,
 ) -> AnyResult<Vec<u8>> {
+    // Home's poster draws 3D at Draft: a card needs the picture, not a
+    // clean render. A project with no 3D asks for nothing.
+    let studio_quality = (matches!(capture, Capture::Poster)
+        && pm_engine_service::draws_studio(
+            &published.snapshot.document,
+            &published.snapshot.render_comp(),
+        ))
+    .then(|| serde_json::json!("draft"));
+    frame_with(
+        jobs,
+        published,
+        fps,
+        time,
+        size,
+        look,
+        stop,
+        capture,
+        studio_quality,
+        resources,
+    )
+}
+#[allow(clippy::too_many_arguments)]
+fn frame_with(
+    jobs: &EngineJobs,
+    published: &Arc<Published>,
+    fps: f64,
+    time: f64,
+    size: Size,
+    look: Look,
+    stop: &(dyn Fn() -> bool + Sync),
+    capture: Capture,
+    studio_quality: Option<serde_json::Value>,
+    resources: Resources,
+) -> AnyResult<Vec<u8>> {
     let rate = pm_time::rate_from_document(None, fps)?.rate;
     let start = pm_time::ticks_from_seconds(time)?;
     let span = rate.den() as f64 / rate.num() as f64;
@@ -745,6 +792,8 @@ fn frame(
         destination,
         true,
         capture.draws_offline_cards(),
+        studio_quality,
+        None,
         resources,
     )?;
     while matches!(
@@ -783,9 +832,12 @@ fn media_type(path: &Path) -> Option<(&'static str, String)> {
     }
     let extension = path.extension()?.to_str()?.to_lowercase();
     let mime = match extension.as_str() {
+        "hdr" => return Some(("image", "image/vnd.radiance".into())),
+        "exr" => return Some(("image", "image/x-exr".into())),
         "glb" => "model/gltf-binary",
         "gltf" => "model/gltf+json",
         "obj" => "model/obj",
+        "fbx" => "model/fbx",
         _ => return None,
     };
     Some(("model", mime.into()))
@@ -830,6 +882,9 @@ impl MediaImporter for EngineJobs {
         if size > IMPORT_LIMIT {
             return Err(Error::invalid("Import local files up to 512 MiB."));
         }
+        if crate::colour::lut_file(path).is_some() {
+            return self.import_lut(request, size);
+        }
         let (kind, mime) =
             media_type(path).ok_or_else(|| Error::invalid("Unsupported media file."))?;
         let fingerprint = fingerprint(path, size).map_err(failed)?;
@@ -850,13 +905,24 @@ impl MediaImporter for EngineJobs {
                 "Replace media with a file of the same kind.",
             ));
         }
-        let probe = (kind != "model")
+        let environment = matches!(mime.as_str(), "image/vnd.radiance" | "image/x-exr");
+        let image_size = environment
+            .then(|| pm_engine_service::studio::probe_environment(path))
+            .transpose()
+            .map_err(|e| {
+                Error::invalid(format!("This environment image could not be read: {e}"))
+            })?;
+        let probe = (kind != "model" && !environment)
             .then(|| pm_media::probe::probe(path).map(|probed| probed.probe))
             .transpose()
             .map_err(|_| Error::invalid("This file could not be read as media."))?;
         let video = probe.as_ref().and_then(|probe| probe.video.as_ref());
-        let width = video.map(|video| f64::from(video.width));
-        let height = video.map(|video| f64::from(video.height));
+        let width = image_size
+            .map(|d| f64::from(d[0]))
+            .or_else(|| video.map(|video| f64::from(video.width)));
+        let height = image_size
+            .map(|d| f64::from(d[1]))
+            .or_else(|| video.map(|video| f64::from(video.height)));
         // The clip's own length (first frame start to last frame end), as
         // the Project panel's import records it.
         // A relinked asset keeps reading its file's times as it did, so its
@@ -1019,6 +1085,66 @@ impl MediaImporter for EngineJobs {
             "imported"
         };
         Ok(imported(status, id, ack.revision))
+    }
+}
+impl EngineJobs {
+    /// A `.cube` or `.3dl` file, read as Apply LUT… reads it and kept in the
+    /// media archive, becomes a `lut` asset; `add_effect applyColorLut` with
+    /// `inputs: {lut: {kind: "asset", assetId}}` applies it.
+    fn import_lut(&self, request: &MediaImport, size: u64) -> Result<ImportedMedia> {
+        let path = &request.path;
+        if request.replace.is_some() {
+            return Err(Error::invalid(
+                "Relink a LUT by importing it and setting the effect's lut input with set_effect.",
+            ));
+        }
+        let retained = crate::colour::retain_lut(&self.profile, path).map_err(Error::invalid)?;
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let fingerprint = fingerprint(path, size).map_err(failed)?;
+        let id = pm_kernel::new_id("lut");
+        let asset = crate::colour::lut_asset(&name, &retained);
+        let writer = pm_kernel::Caller::realm(request.writer, 1, pm_kernel::Origin::Mcp);
+        let ack = self
+            .kernel
+            .call(
+                &request.frozen.project_id,
+                pm_kernel::Request::new(
+                    writer,
+                    pm_kernel::Call::Transact {
+                        label: Some("Import LUT".into()),
+                        body: pm_kernel::WriteBody::Commands(vec![
+                            pm_kernel::MediaCommand::AddAsset {
+                                asset_id: id.clone(),
+                                asset,
+                            }
+                            .into(),
+                        ]),
+                        expected_revision: Some(request.frozen.revision),
+                    },
+                )
+                .with_document(request.frozen.document_id),
+            )
+            .wait()
+            .ok_or_else(|| Error::unavailable("The app is closing."))?
+            .map_err(Error::kernel)?;
+        if let pm_kernel::Reply::Throw(error) = &ack.reply {
+            return Err(Error::kernel(error));
+        }
+        Ok(ImportedMedia {
+            status: "imported",
+            asset: id,
+            name,
+            kind: "lut".into(),
+            width: None,
+            height: None,
+            duration: None,
+            has_audio: false,
+            fingerprint,
+            revision: ack.revision,
+        })
     }
 }
 /// The last thing the agent said, which is what a caller wants at a glance.
@@ -1738,6 +1864,96 @@ mod relink_tests {
             .filter(|(_, at)| left[*at - 2..*at + 3].iter().any(|v| v.abs() > 0.2))
             .map(|(k, _)| k)
             .collect()
+    }
+
+    /// An agent loads a LUT as Apply LUT… does: `import_media` reads and
+    /// keeps the file as a `lut` asset (the record the menu writes), which
+    /// `add_effect applyColorLut` takes as its input; a broken file is
+    /// refused in a sentence and changes nothing.
+    #[test]
+    fn an_agent_imports_a_lut_file_as_a_lut_asset() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let actor = KernelActor::spawn(KernelConfig {
+            journal_root: Some(root.join("journals")),
+            ..Default::default()
+        });
+        let kernel = actor.handle();
+        kernel
+            .shell(ShellCall::AttachLibrary {
+                profile: root.clone(),
+                format: DiskFormat::V1_2,
+                electron_profile: None,
+            })
+            .wait()
+            .unwrap()
+            .unwrap();
+        let project = json!({"id":"p","name":"Film","compId":"c","w":64,"h":64,"fps":25,"dur":1,
+            "bg":"#000000","comps":{},"layers":[],"assets":{}});
+        kernel
+            .shell(ShellCall::Open {
+                id: "p".into(),
+                source: SessionSource::New(pm_model::json::parse(&project.to_string()).unwrap()),
+                electron_profile: None,
+            })
+            .wait()
+            .unwrap()
+            .unwrap();
+        let jobs = EngineJobs::new(
+            kernel.clone(),
+            PathBuf::new(),
+            Default::default(),
+            root.clone(),
+            OverrideWindows::default(),
+        );
+        let import = |path: &Path| {
+            let (published, project) = root_of(&kernel);
+            jobs.import(&MediaImport {
+                frozen: FrozenProject {
+                    project_id: "p".into(),
+                    document_id: published.snapshot.doc_id,
+                    revision: published.revision(),
+                    project,
+                },
+                path: path.to_owned(),
+                folder: None,
+                replace: None,
+                expected_fingerprint: None,
+                writer: 1,
+            })
+        };
+        let mut table = String::from("LUT_3D_SIZE 2\n");
+        for b in 0..2 {
+            for g in 0..2 {
+                for r in 0..2 {
+                    table.push_str(&format!("{} {} {}\n", r as f64 * 0.9, g, b));
+                }
+            }
+        }
+        let file = root.join("Warm.cube");
+        std::fs::write(&file, table).unwrap();
+        let imported = import(&file).unwrap();
+        assert_eq!(
+            (imported.status, imported.kind.as_str()),
+            ("imported", "lut")
+        );
+        let asset = &root_of(&kernel).1["assets"][&imported.asset];
+        assert_eq!(asset["kind"], "lut");
+        assert_eq!(asset["format"], "cube");
+        assert_eq!(asset["name"], "Warm.cube");
+        let kept = PathBuf::from(asset["sourcePath"].as_str().unwrap());
+        assert_ne!(kept, file, "a retained copy outlives the original");
+        std::fs::remove_file(&file).unwrap();
+        assert!(kept.is_file());
+        let broken = root.join("Broken.cube");
+        std::fs::write(&broken, "LUT_3D_SIZE 2\n0 0 0\n").unwrap();
+        let revision = root_of(&kernel).0.revision();
+        let refused = import(&broken).unwrap_err().to_string();
+        assert!(
+            refused.starts_with("This LUT couldn’t be read."),
+            "{refused}"
+        );
+        assert_eq!(root_of(&kernel).0.revision(), revision);
     }
 
     /// An agent's relink keeps which audio streams are heard, exactly as a

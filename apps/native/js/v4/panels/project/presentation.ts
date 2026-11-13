@@ -25,6 +25,10 @@ export function status(
       detail: `Changed · ${availability.Changed.source}`,
       tone: "warning",
     };
+  // Models aren't probed as media, so they never leave Loading: say what
+  // they are instead (the 3D layer itself reports any load failure).
+  if (availability === "Loading" && a.kind === "model")
+    return { overlay: "3D Model", detail: "", tone: "muted" };
   if (availability === "Loading")
     return { overlay: "Loading…", detail: "", tone: "muted" };
   if (availability === "Offline")

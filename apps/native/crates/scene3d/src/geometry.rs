@@ -25,6 +25,38 @@ impl AssetGeometry for NoAssets {
         fail(format!("3D model geometry is not loaded: {id}"))
     }
 }
+/// Import preflight's normalized geometry box, available before mesh IO.
+/// Legacy records without a retained measurement keep their unit envelope.
+pub struct RetainedAssets;
+impl AssetGeometry for RetainedAssets {
+    fn bounds(&self, _: &str, record: &Value, _: f64) -> Result<Bounds> {
+        if record["kind"] != "model" {
+            return fail("Model geometry is not retained");
+        }
+        if record["native3dBounds"]["version"] == 1 {
+            let array = record["native3dBounds"]["bounds"]
+                .as_array()
+                .filter(|v| v.len() == 6)
+                .ok_or_else(|| Error("Invalid retained model bounds".into()))?;
+            let mut v = [0.; 6];
+            for (i, value) in array.iter().enumerate() {
+                v[i] = value
+                    .as_f64()
+                    .ok_or_else(|| Error("Invalid retained model bounds".into()))?;
+            }
+            let bounds = Bounds {
+                min: [v[0], v[1], v[2]],
+                max: [v[3], v[4], v[5]],
+            };
+            bounds.validate()?;
+            return Ok(bounds);
+        }
+        Ok(Bounds {
+            min: [-1.; 3],
+            max: [1.; 3],
+        })
+    }
+}
 #[derive(Default)]
 pub struct LoadedAssets {
     models: HashMap<String, (Value, std::sync::Arc<crate::import::Model>)>,
@@ -281,6 +313,16 @@ pub fn required_ids(comp: &Value, args: &Value, selection: &[String]) -> Result<
         Ok(matches[0]["id"].as_str().unwrap().into())
     };
     match args["operation"].as_str() {
+        Some("auto_studio") if args["target"].is_string() || args["id"].is_string() => {
+            let id = resolve(args["target"].as_str().or(args["id"].as_str()).unwrap())?;
+            if !ls
+                .iter()
+                .any(|l| l["id"] == id && schema::role(l) == Some(schema::Role::Object))
+            {
+                return fail("Choose a model for Studio setup");
+            }
+            Ok(vec![id])
+        }
         Some("auto_studio") => Ok(ls
             .iter()
             .filter(|l| schema::role(l) == Some(schema::Role::Object))

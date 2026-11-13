@@ -8,6 +8,9 @@ pub const CHANNEL: &str = "viewer.chrome";
 pub const COMMAND: &str = "viewer.chrome.drive";
 
 /// One instance per panel/realm generation, retired with that generation.
+/// `m.viewer_3d_collapse`: below this stage width the 3D group becomes one
+/// pull-down (3d-studio.md §2). A test keeps it equal to the token.
+pub const VIEWER_3D_COLLAPSE: f64 = 560.;
 /// An opaque ticket keeps full-width revisions and selection guards in Rust;
 /// it avoids shipping 60k selected IDs to JS for every chrome publication.
 #[derive(Default)]
@@ -29,7 +32,8 @@ impl Session {
     ) -> Result<Plan, Error> {
         let mut normalized = request.clone();
         match request.get("element").and_then(Value::as_str) {
-            Some("viewer.quality") => {}
+            Some("viewer.quality") | Some("viewer.studio.menu") | Some("viewer.studio.views") => {}
+            Some(s) if s.starts_with("viewer.studio.light") => {}
             Some("viewer.zoom") => {
                 let (element, argument) = match request.get("argument") {
                     Some(Value::String(s)) if s == "fit" => ("viewer.fit", Value::Null),
@@ -75,6 +79,17 @@ impl Session {
             Some(NodeKind::Array(layers)) => layers.is_empty(),
             _ => return Err(Error::Invalid("layers")),
         };
+        // A composition with Studio 3D layers shows the Fast/Quality preview
+        // control (3d-studio.md §2); without them the bar is unchanged.
+        let studio = match comp.get("layers").map(Node::kind) {
+            Some(NodeKind::Array(layers)) => layers.iter().any(|l| {
+                matches!(
+                    l.get("d").and_then(|d| d.get("definition")).map(Node::kind),
+                    Some(NodeKind::String(s)) if s.to_string_lossy().starts_with("powermove.3d.")
+                )
+            }),
+            _ => false,
+        };
         let ticket = self
             .ticket
             .checked_add(1)
@@ -99,6 +114,45 @@ impl Session {
             Value::Number(model.chrome.effective_quality),
         );
         value.insert("canvasLost", Value::Bool(lost));
+        value.insert(
+            "studio",
+            if studio {
+                let tier = match model.ui.viewer.get("studioTier").and_then(Value::as_str) {
+                    Some("refine") => "refine",
+                    _ => "live",
+                };
+                let read = |k: &str, d: &'static str| {
+                    model
+                        .ui
+                        .viewer
+                        .get(k)
+                        .and_then(Value::as_str)
+                        .map(|s| Value::from(s))
+                        .unwrap_or_else(|| Value::from(d))
+                };
+                let mut m = Map::new();
+                m.insert("tier", Value::from(tier));
+                m.insert("tool", read("studioTool", "move"));
+                m.insert("look", read("studioLook", "camera"));
+                m.insert("axes", read("studioAxes", "scene"));
+                m.insert("views", read("studioViews", "1"));
+                // Below the collapse width the group becomes one pull-down.
+                m.insert(
+                    "compact",
+                    // The bar spans every pane: 2 and 4 views are two columns.
+                    Value::Bool({
+                        let columns = match model.ui.viewer.get("studioViews").and_then(Value::as_str) {
+                            Some("2" | "4") => 2.,
+                            _ => 1.,
+                        };
+                        viewport.stage.width * columns < VIEWER_3D_COLLAPSE
+                    }),
+                );
+                Value::Object(m)
+            } else {
+                Value::Null
+            },
+        );
         value.insert("showControls", Value::Bool(model.chrome.show_controls));
         value.insert("empty", Value::Bool(empty));
         value.insert(
@@ -141,5 +195,14 @@ impl Session {
             .ok_or(Error::Invalid("viewer argument"))?
             .clone();
         model.drive(id, argument, Some(viewport), caller)
+    }
+}
+
+#[cfg(test)]
+mod collapse_tests {
+    #[test]
+    fn the_collapse_width_is_the_token() {
+        let t = pm_design::Tokens::new(Default::default(), Default::default());
+        assert_eq!(super::VIEWER_3D_COLLAPSE, t.metrics.viewer_3d_collapse as f64);
     }
 }

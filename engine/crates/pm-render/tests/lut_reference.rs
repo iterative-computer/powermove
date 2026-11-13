@@ -542,7 +542,7 @@ type Space = (
 
 fn spaces() -> Vec<Space> {
     use pm_reference::camera_log::Curve;
-    use pm_reference::color::{Primaries as P, Transfer as T, apply, invert, mul};
+    use pm_reference::color::{Primaries as P, Transfer as T};
     let e_decode = |v: f64| T::Srgb.to_linear(v);
     let e_encode = |v: f64| T::Srgb.from_linear(v);
     let through = |name: &'static str,
@@ -551,21 +551,21 @@ fn spaces() -> Vec<Space> {
                    encode: Box<dyn Fn(f64) -> f64>,
                    decode: Box<dyn Fn(f64) -> f64>|
      -> Space {
-        let to = gamut.map(|g| mul(&invert(&g.to_xyz()), &P::BT709.to_xyz()));
-        let from = to.as_ref().map(invert);
+        let to = gamut.map(|g| P::BT709.convert_to(&g));
+        let from = to.as_ref().map(pm_reference::color::invert);
         (
             name,
             index,
             Box::new(move |working| {
                 let linear = working.map(e_decode);
                 to.as_ref()
-                    .map_or(linear, |m| apply(m, linear))
+                    .map_or(linear, |m| pm_reference::color::apply(m, linear))
                     .map(&encode)
             }),
             Box::new(move |code| {
                 let linear = code.map(&decode);
                 from.as_ref()
-                    .map_or(linear, |m| apply(m, linear))
+                    .map_or(linear, |m| pm_reference::color::apply(m, linear))
                     .map(e_encode)
             }),
         )
@@ -595,7 +595,62 @@ fn spaces() -> Vec<Space> {
             // PQ is defined on codes 0..1: past either end is that end.
             Box::new(|v| T::Pq.to_linear(v.clamp(0.0, 1.0)) * 10000.0 / 203.0),
         ),
+        hlg(),
+        log("ACEScct", 10., Curve::AcesCct, P::AP1),
+        log("Log3G10", 11., Curve::Log3G10, P::RED_WIDE_GAMUT),
+        log("BMD Film Gen 5", 12., Curve::BmdFilm5, P::BMD_WIDE_GAMUT_5),
+        log("F-Log", 13., Curve::FLog, P::BT2020),
+        log("N-Log", 14., Curve::NLog, P::BT2020),
     ]
+}
+
+/// HLG on BT.2100's 1,000-nit reference display, working 1.0 at 203 nits:
+/// BT.2100's OOTF (`hlg_ootf`) after the inverse OETF, and its inverse
+/// (display luminance Yd = Ys^1.2) before the OETF. Light and codes below 0
+/// are black, as in BT.2100.
+fn hlg() -> Space {
+    use pm_reference::color::{Primaries as P, Transfer as T, apply, hlg_ootf, invert};
+    let to = P::BT709.convert_to(&P::BT2020);
+    let from = invert(&to);
+    let luminance = |c: [f64; 3]| 0.2627 * c[0] + 0.6780 * c[1] + 0.0593 * c[2];
+    (
+        "HLG",
+        9.,
+        Box::new(move |working: [f64; 3]| {
+            let display = apply(&to, working.map(|v| T::Srgb.to_linear(v))).map(|l| l * 0.203);
+            let yd = luminance(display);
+            let scene = if yd > 0.0 {
+                display.map(|d| d / yd.powf(0.2 / 1.2))
+            } else {
+                [0.0; 3]
+            };
+            // The inverse is BT.2100's own OOTF run backwards.
+            if yd > 1e-6 && display.iter().all(|&d| d >= 0.0) {
+                let back = hlg_ootf(scene, 1000.0);
+                for c in 0..3 {
+                    assert!((back[c] - display[c]).abs() < 1e-9, "{back:?} {display:?}");
+                }
+            }
+            scene.map(|s| T::Hlg.from_linear(s))
+        }),
+        Box::new(move |code: [f64; 3]| {
+            let display = hlg_ootf(code.map(|v| T::Hlg.to_linear(v)), 1000.0);
+            apply(&from, display.map(|d| d * 1000.0 / 203.0)).map(|l| T::Srgb.from_linear(l))
+        }),
+    )
+}
+
+/// BT.2408: HDR reference white, 203 nits, is HLG 0.75 on a 1,000-nit
+/// display; the display's peak is 1.0.
+#[test]
+fn hlg_reference_white_and_peak() {
+    use pm_reference::color::Transfer as T;
+    let (_, _, encode, _) = hlg();
+    let white = encode([1.0; 3]);
+    assert!((white[1] - 0.75).abs() < 5e-4, "{white:?}");
+    let peak = T::Srgb.from_linear(1000.0 / 203.0);
+    // E = 1 is 0.99999999 with BT.2100's rounded a, b, c.
+    assert!((encode([peak; 3])[1] - 1.0).abs() < 1e-6);
 }
 
 /// A technical LUT is applied on the encoding it was made for: the pixel is
@@ -632,6 +687,7 @@ fn a_lut_is_applied_on_its_stated_input_encoding() {
                 worst = worst.max((f64::from(out[c]) - expected[c]).abs());
             }
         }
+        eprintln!("{name}: {worst:e} from the reference");
         assert!(worst < 1e-4, "{name}: {worst:e} from the reference");
     }
 }

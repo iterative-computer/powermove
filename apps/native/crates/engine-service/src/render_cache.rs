@@ -204,6 +204,9 @@ pub(crate) struct Held {
     id: FrameId,
 }
 
+/// A scene's document, revision, content and composition.
+type SceneState = (usize, u64, u64, String);
+
 /// The composition state a fingerprint is taken of.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Identity {
@@ -463,6 +466,11 @@ struct State {
     /// Rises with every storage change or deletion: fences fills' frames.
     storage: u64,
     frames: Option<Frames>,
+    /// The scene state last looked at, and whether the path-traced 3D
+    /// renderer draws it ([`crate::frame_inputs::draws_studio`]): such a
+    /// composition has no `frames`, so none is rendered to disk or shown
+    /// from it.
+    studio: Option<(SceneState, bool)>,
     known: Known,
     media_checked: Option<Instant>,
     indexed: Option<Instant>,
@@ -844,6 +852,26 @@ impl DiskFrames {
         Ok(())
     }
 
+    /// Whether the path-traced 3D renderer draws `scene`
+    /// ([`crate::frame_inputs::draws_studio`]), looked up once per scene
+    /// state: the frame loop asks again for every frame.
+    pub(crate) fn draws_studio(&self, scene: &Scene) -> bool {
+        let at: SceneState = (
+            Arc::as_ptr(&scene.doc) as usize,
+            scene.doc.revision(),
+            scene.content,
+            scene.comp.clone(),
+        );
+        if let Some((known, studio)) = &self.inner.state.lock().unwrap().studio
+            && *known == at
+        {
+            return *studio;
+        }
+        let studio = crate::frame_inputs::draws_studio(&scene.doc, &scene.comp);
+        self.inner.state.lock().unwrap().studio = Some((at, studio));
+        studio
+    }
+
     /// The engine thread's current scene, drawn at `time`. A new
     /// composition state (scene, output tone, override wrappers, or, looked
     /// at every 2 s, a media file's stamp) takes a new fingerprint off this
@@ -863,6 +891,21 @@ impl DiskFrames {
         state.playhead = Some(time);
         if state.cache.is_none() {
             return false;
+        }
+        drop(state);
+        let studio = self.draws_studio(scene);
+        let mut state = self.inner.state.lock().unwrap();
+        if studio {
+            // Path-traced frames are never kept on disk: whatever was
+            // rendered for an earlier state of this composition stops
+            // showing, and nothing new is rendered.
+            if state.frames.take().is_none() {
+                return false;
+            }
+            state.generation += 1;
+            self.inner.reader.clear(state.generation);
+            bump(&mut state, &self.inner.published);
+            return true;
         }
         let unchanged = state.frames.as_ref().is_some_and(|f| {
             f.identity.scene_matches(scene)
@@ -1779,6 +1822,9 @@ impl DiskFrames {
 
 /// The open composition's frames, if a fill can start from them.
 fn ready(state: &State) -> Result<&Frames, String> {
+    if state.frames.is_none() && state.studio.as_ref().is_some_and(|(_, studio)| *studio) {
+        return Err("Rendering to disk isn't available for a composition with 3D objects.".into());
+    }
     let frames = state
         .frames
         .as_ref()
@@ -1986,6 +2032,8 @@ fn fill_request(
         without_offline: true,
         preview: false,
         cache: Some(fill),
+        studio_quality: None,
+        studio_render_scale:None,
         fonts: source.fonts.as_deref().cloned(),
     })
 }

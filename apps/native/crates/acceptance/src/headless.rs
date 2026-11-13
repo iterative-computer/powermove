@@ -37,7 +37,7 @@ fn scenario(id: &str) -> Check {
 pub fn check(name: &str) -> Check {
     let (_, ids) = TOOLS.iter().find(|t| t.0 == name).ok_or("unprobed tool")?;
     // These are the actual public name/description/input schemas, including the
-    // two explicitly authorized Studio overlays; source snapshots stay frozen.
+    // Studio overlays (get_3d_scene, edit_3d, export_video); source snapshots stay frozen.
     let expected = crate::main_reference::expected_catalog();
     assert_eq!(
         expected["tools"]

@@ -61,6 +61,13 @@ pub struct ExportRequest {
     /// a file (`crate::render_cache`).
     #[serde(default)]
     pub cache: Option<crate::render_cache::CacheFill>,
+    /// Studio preset or quality patch for this export's root composition.
+    /// Omitted jobs use saved composition quality (or legacy camera samples).
+    #[serde(default)]
+    pub studio_quality: Option<serde_json::Value>,
+    /// Explicit 3D-only render fraction. Omitted is full size; never automatic.
+    #[serde(default)]
+    pub studio_render_scale:Option<f32>,
     /// The fonts the asking process resolves from. The job draws with
     /// exactly these (a font activated for the app alone included) or
     /// fails: an export is the viewer's picture, and a frame rendered into
@@ -560,6 +567,8 @@ impl ExportRequest {
             }),
             shader_cache: shader_cache(),
             faces_of: font_broker().map(|broker| broker.generation()),
+            studio_quality: None,
+            studio_render_scale: None,
         })
     }
 }
@@ -1193,7 +1202,10 @@ pub fn run_child() -> Result<()> {
             anyhow::bail!("{}", failure.message);
         }
         #[cfg(feature = "kernel")]
-        crate::studio::attach(&mut renderer, Arc::new(doc.clone()), &media);
+        crate::studio::attach_with_export_options_fonts(
+            &mut renderer,Arc::new(doc.clone()),&media,composition.as_str(),
+            request.studio_quality,request.studio_render_scale.unwrap_or(1.),Some(&fonts),
+        ).map_err(anyhow::Error::msg)?;
         fonts.sync(&mut renderer, &mut None);
         if let Some(fill) = fill {
             let job = request.job.clone();

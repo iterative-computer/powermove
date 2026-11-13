@@ -221,3 +221,52 @@ fn standalone_upgrade_archives_original_three_d_flag() {
     assert_eq!(project["layers"][0]["threeD"], true);
     assert_eq!(project["layers"][0]["native3dArchive"]["source"], original);
 }
+
+#[test]
+fn scatter_keeps_hidden_prototype_resources_without_making_them_visible() {
+    let mut c = comp();
+    let source = service::new_layer(
+        &c,
+        "source",
+        "Source",
+        Role::Object,
+        json!({"object":{"source":{"nature":"grass","seed":41}}}),
+        json!({}),
+        false,
+        None,
+        0.,
+    )
+    .unwrap();
+    let surface = service::new_layer(
+        &c,
+        "surface",
+        "Surface",
+        Role::Object,
+        json!({"object":{"source":{"primitive":"plane"}}}),
+        json!({}),
+        false,
+        None,
+        0.,
+    )
+    .unwrap();
+    let scatter = service::new_layer(&c, "scatter", "Scatter", Role::Object,
+        json!({"object":{"source":{"primitive":"plane"},"scatter":{"model":"source","surface":"surface"}}}), json!({}), true, None, 0.).unwrap();
+    c["layers"] = json!([source, surface, scatter]);
+    let scene = service::composition(&c, 1., &mut service::StaticEvaluator).unwrap();
+    let objects = scene["objects"].as_array().unwrap();
+    assert_eq!(objects.len(), 3);
+    assert_eq!(
+        objects.iter().find(|o| o["id"] == "source").unwrap()["p"]["visible"]["v"],
+        false
+    );
+    assert_eq!(
+        objects.iter().find(|o| o["id"] == "surface").unwrap()["p"]["visible"]["v"],
+        false
+    );
+    let expired = service::composition(&c, 11., &mut service::StaticEvaluator).unwrap();
+    assert!(expired["objects"].as_array().unwrap().is_empty());
+    assert_eq!(
+        c["layers"][0]["on"], false,
+        "evaluation cannot edit authored visibility"
+    );
+}

@@ -40,6 +40,7 @@ mod interpret_sheet;
 mod keyframe_sheets;
 mod poster;
 
+mod agent_commands;
 mod agent_speech;
 mod captions_generate;
 mod captions_panel;
@@ -113,6 +114,7 @@ mod v4_native;
 mod v4_view;
 #[cfg(test)]
 mod v4_view_tests;
+mod studio_panes;
 mod viewer2;
 mod viewer_overlays;
 mod waveforms;

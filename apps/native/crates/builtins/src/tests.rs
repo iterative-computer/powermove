@@ -153,7 +153,7 @@ fn effects_mounts_in_a_separate_v4_isolate() {
     assert!(panels.take_errors().is_empty());
 }
 #[test]
-fn all_nine_authored_entries_mount_and_publish_accessible_native_trees() {
+fn every_authored_entry_mounts_and_publishes_an_accessible_native_tree() {
     let actor = actor();
     let mut panels = Builtins::new(actor.handle(), "synthetic", || {}).unwrap();
     for panel in BUILTIN_PANELS.iter() {
@@ -165,7 +165,7 @@ fn all_nine_authored_entries_mount_and_publish_accessible_native_trees() {
         }
     }
     let publications = panels.take_publications();
-    assert_eq!(publications.len(), 9);
+    assert_eq!(publications.len(), BUILTIN_PANELS.len());
     for p in publications {
         assert!(p.surface.nodes().len() > 1, "{} empty tree", p.panel);
         let kit = pm_surface::kit::Panel::prepare(
@@ -3495,15 +3495,51 @@ fn properties_show_the_3d_section_for_models_lights_and_cameras() {
     let (mut model, p) = publish(&mut presenter, "model");
     assert_eq!(
         titles(&p),
-        ["Model", "Material", "Coat and Glass", "Surface", "Emission"]
+        [
+            "Model",
+            "Material",
+            "Coat and Glass",
+            "Surface",
+            "Emission",
+            "Texture Maps",
+            "Material Options"
+        ]
     );
-    assert_eq!(
-        labels(&p, "Model"),
-        ["Source", "Cast Shadows", "Receive Shadows"]
-    );
+    // A 3D layer is named for what it is and has no 2D canvas rows.
+    assert_eq!(p["target"]["first"]["typeLabel"], "3D Shape");
+    assert_eq!(p["target"]["first"]["studio"], true);
+    assert!(row(&p, "content.w").is_none());
+    // The shadow switches only show while one is off (AE 27 Material Options
+    // replace them).
+    assert_eq!(labels(&p, "Model"), ["Source"]);
     assert_eq!(
         labels(&p, "Material"),
-        ["Screen", "Color", "Roughness", "Metalness", "Opacity"]
+        [
+            "Finish",
+            "Screen",
+            "Color",
+            "Roughness",
+            "Metalness",
+            "Opacity"
+        ]
+    );
+    assert_eq!(row(&p, "3d.finish").unwrap()["hidden"], true);
+    let shelf = p["sections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["title"] == "Material")
+        .unwrap()["finishes"]
+        .clone();
+    assert_eq!(shelf.as_array().unwrap().len(), 11);
+    assert_eq!(
+        labels(&p, "Material Options"),
+        [
+            "Casts Shadows",
+            "Accepts Shadows",
+            "Accepts Lights",
+            "Appears in Reflections"
+        ]
     );
     assert_eq!(row(&p, "3d.source").unwrap()["control"]["value"], "Cube");
     let roughness = row(&p, "m.roughness").unwrap();
@@ -3513,15 +3549,41 @@ fn properties_show_the_3d_section_for_models_lights_and_cameras() {
     write(
         &presenter,
         &mut model,
-        &row(&p, "3d.castShadow").unwrap(),
-        json!(false),
+        &row(&p, "3d.options.castsShadows").unwrap(),
+        json!("only"),
+    );
+    write(
+        &presenter,
+        &mut model,
+        &row(&p, "3d.finish").unwrap(),
+        json!("gold"),
     );
     let (_, p) = publish(&mut presenter, "model");
     assert_eq!(
+        row(&p, "3d.options.castsShadows").unwrap()["control"]["value"],
+        "only"
+    );
+    // The finish wrote its own roughness over the earlier edit.
+    assert_ne!(
         row(&p, "m.roughness").unwrap()["control"]["axes"][0]["value"],
         0.5
     );
-    assert_eq!(row(&p, "3d.castShadow").unwrap()["control"]["value"], false);
+    let transform = p["sections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == "transform")
+        .unwrap()
+        .clone();
+    assert_eq!(
+        transform["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["control"]["axes"].as_array().unwrap().len())
+            .collect::<Vec<_>>(),
+        [3, 3, 3]
+    );
 
     let (mut model, p) = publish(&mut presenter, "lamp");
     assert_eq!(titles(&p), ["Light"]);
@@ -3588,10 +3650,61 @@ fn properties_show_the_3d_section_for_models_lights_and_cameras() {
     );
     let (_, p) = publish(&mut presenter, "cam");
     assert_eq!(labels(&p, "Camera")[1], "Zoom");
-    assert_eq!(row(&p, "3d.samples").unwrap()["disabled"], true);
-    // A 2D layer has no 3D section.
-    let (_, p) = publish(&mut presenter, "a");
-    assert!(titles(&p).is_empty());
+    // The camera shows the composition's Render Quality, not a second sampler.
+    assert!(row(&p, "3d.samples").is_none());
+    assert_eq!(
+        row(&p, "3d.scene.quality").unwrap()["control"]["value"],
+        "production"
+    );
+    // With nothing selected, the composition's 3D Scene section sets quality
+    // and sky for the whole scene.
+    kernel
+        .call(
+            "synthetic",
+            Request::new(
+                Caller::native(),
+                SelectionCall::Layers {
+                    ids: vec![],
+                    add: false,
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    let mut model = pm_panel_inspector::Inspector::new(
+        kernel.published("synthetic").unwrap(),
+        Default::default(),
+    );
+    let p = presenter.snapshot(&mut model, 0., false).unwrap();
+    let scene = row(&p, "3d.scene.quality").unwrap();
+    write(&presenter, &mut model, &scene, json!("final"));
+    let p = presenter.snapshot(&mut model, 0., false).unwrap();
+    assert_eq!(
+        row(&p, "3d.scene.quality").unwrap()["control"]["value"],
+        "final"
+    );
+    assert_eq!(row(&p, "3d.scene.sky").unwrap()["control"]["value"], "none");
+    // A 2D shape has no 3D section, only Extrude, off.
+    let (mut model, p) = publish(&mut presenter, "a");
+    assert_eq!(titles(&p), ["Extrude"]);
+    let on = row(&p, "3d.extrude.enabled").unwrap();
+    assert_eq!(on["control"]["value"], false);
+    // One click: depth from the artwork's size, a rounded bevel and four
+    // surfaces, the composition already being lit.
+    write(&presenter, &mut model, &on, json!(true));
+    let p = presenter.snapshot(&mut model, 0., false).unwrap();
+    assert_eq!(titles(&p), ["Extrude", "Front", "Bevel", "Side", "Back"]);
+    assert_eq!(
+        row(&p, "geo.depth").unwrap()["control"]["axes"][0]["value"],
+        32.
+    );
+    assert_eq!(
+        row(&p, "3d.extrude.bevelStyle").unwrap()["control"]["value"],
+        "convex"
+    );
+    // The face is a stored channel now, keyframeable like any property.
+    assert!(row(&p, "ms.front.roughness").is_some());
 }
 
 #[test]
@@ -3947,6 +4060,144 @@ fn mods_show_in_finder_and_delete_reach_the_app_only_for_what_this_mac_installed
         let (_, platform) = perform(json!({"type":kind,"id":"builtin.panel"}));
         assert!(platform.is_empty());
     }
+}
+
+/// The Color panel, mounted as the app mounts it: it lists the layer's grade
+/// (Color Wheels, and an extension's effect that says `grade: true`) and not
+/// its other effects, opens every grading row, and a value set through one of
+/// its controls is written to the document as Effect Controls writes it.
+#[test]
+fn the_color_panel_lists_the_grade_and_writes_through_its_controls() {
+    let actor = actor();
+    let kernel = actor.handle();
+    // An extension's grading effect.
+    kernel.state_transaction(pm_kernel::state::StateTransaction {
+        expected_revision: None,
+        ops: vec![pm_kernel::state::StateOp::Register { registry:"effects".into(), entry: pm_kernel::state::Registration {
+            token:"synthetic-look-token".into(), owner:Caller::native().writer,
+            id:"synthetic.look".into(), definition: data::model(&json!({"id":"synthetic.look","label":"Synthetic Look","version":1,"grade":true,
+                "frag":"void main(){fragColor=texture(u_tex,v_st);}",
+                "params":[{"k":"strength","label":"Strength","type":"number","def":0.5,"step":0.01}]})).unwrap(),
+        }}],
+    }).wait().unwrap().unwrap();
+    select_layer(&kernel, "a");
+    let mut setup = data::Backend::new(
+        kernel.clone(),
+        pm_surface::host_api::Identity {
+            realm: "color-setup".into(),
+            generation: 1,
+            project: "synthetic".into(),
+        },
+        "layer-effects",
+        false,
+    )
+    .unwrap();
+    for effect in ["colorWheels", "blur", "synthetic.look", "applyColorLut"] {
+        setup.sync().unwrap();
+        let request = setup
+            .model
+            .as_mut()
+            .unwrap()
+            .add_effect_at(Caller::native(), "a", effect, 0.)
+            .unwrap();
+        kernel.call("synthetic", request).wait().unwrap().unwrap();
+    }
+    let mut panels = Builtins::new(kernel.clone(), "synthetic", || {}).unwrap();
+    panels.update_facts(json!({"time":0,"playing":false,"stage":[640.,360.]}));
+    finish(panels.mount("color").unwrap());
+    let backend = panels
+        .broker
+        .entry("color")
+        .unwrap()
+        .lock()
+        .unwrap()
+        .backend
+        .clone();
+    // The panel asks for every row; wait for it to arrive.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let projection = loop {
+        let p = backend.lock().unwrap().projection().unwrap();
+        if p["range"] == json!([0, p["count"]]) && p["count"].as_f64() > Some(20.) {
+            break p;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the panel never asked for its rows: {p}"
+        );
+        thread::sleep(Duration::from_millis(5));
+    };
+    let headers: Vec<_> = projection["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["kind"] == "effect")
+        .map(|r| (r["definition"].clone(), r["grade"].clone()))
+        .collect();
+    assert_eq!(
+        headers,
+        [
+            (json!("colorWheels"), json!(true)),
+            (json!("blur"), json!(false)),
+            (json!("synthetic.look"), json!(true)),
+            (json!("applyColorLut"), json!(true)),
+        ]
+    );
+    // What the person sees: the grade's controls and not Blur's.
+    let publication = panels.take_publications().pop().unwrap();
+    let labels: Vec<String> = publication
+        .surface
+        .nodes()
+        .values()
+        .filter_map(|n| {
+            n.props
+                .get("label")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect();
+    for label in [
+        "Amount",
+        "Input Space",
+        "Color Wheels",
+        "Lift",
+        "Temperature",
+        "Curves",
+        "Load LUT…",
+        "More",
+        "Strength",
+    ] {
+        assert!(
+            labels.iter().any(|l| l == label),
+            "{label} is not shown: {labels:?}"
+        );
+    }
+    assert!(
+        !labels.iter().any(|l| l == "Blurriness"),
+        "Blur is not a grade"
+    );
+    // A value set through the panel's Gain Master control.
+    let gain = projection["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["kind"] == "parameter" && r["parameter"]["key"] == "gainMaster")
+        .unwrap()["parameter"]
+        .clone();
+    finish(
+        panels
+            .write("color", gain["binding"].as_str().unwrap(), json!(1.4))
+            .unwrap(),
+    );
+    let p = kernel.published("synthetic").unwrap();
+    let mut model = pm_panel_inspector::Inspector::new(p, Default::default());
+    let id = pm_panel_inspector::PropertyId::from_value(
+        &pm_model::json::parse(gain["id"].as_str().unwrap()).unwrap(),
+    )
+    .unwrap();
+    let state = model
+        .binding_state(&pm_panel_inspector::Binding::Property(id), 0.)
+        .unwrap();
+    assert_eq!(state.value.as_f64(), Some(1.4));
 }
 
 /// Settings › Shortcuts: the app's page reaches the publication with its

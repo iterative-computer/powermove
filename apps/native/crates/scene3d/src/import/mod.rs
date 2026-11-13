@@ -58,6 +58,7 @@ pub fn load(name: &str, bytes: &[u8]) -> Result<Model> {
                 .map(Model::Obj)
                 .map_err(Error)
         }
+        "fbx" => load("converted.glb", &convert_fbx(bytes)?),
         "splat" => splats::parse_splat(bytes).map(Model::Splats),
         "ply" => splats::parse_ply(bytes).map(Model::Splats),
         "blend" => fail("Blender files are not supported"),
@@ -91,7 +92,17 @@ pub fn prepare(files: Vec<ImportFile>, cad: Option<&dyn cad::Tessellator>) -> Re
         .filter(|(_, f)| {
             matches!(
                 ext(&f.name).as_str(),
-                "obj" | "glb" | "gltf" | "ply" | "splat" | "step" | "stp" | "iges" | "igs" | "brep"
+                "obj"
+                    | "glb"
+                    | "gltf"
+                    | "fbx"
+                    | "ply"
+                    | "splat"
+                    | "step"
+                    | "stp"
+                    | "iges"
+                    | "igs"
+                    | "brep"
             )
         })
         .collect::<Vec<_>>();
@@ -106,6 +117,10 @@ pub fn prepare(files: Vec<ImportFile>, cad: Option<&dyn cad::Tessellator>) -> Re
         let bytes = converter.convert(format, &f.bytes, cad::Settings::default())?;
         load("converted.glb", &bytes)?;
         (replace_ext(&f.name, "glb"), bytes)
+    } else if e == "fbx" {
+        let converted = convert_fbx(&f.bytes)?;
+        load("converted.glb", &converted)?;
+        (replace_ext(&f.name, "glb"), converted)
     } else if e == "obj" && files.len() > 1 {
         match obj::prepare_import(&files).map_err(|e| Error(e.to_string()))? {
             obj::Prepared::Glb { name, bytes } => {
@@ -123,6 +138,21 @@ pub fn prepare(files: Vec<ImportFile>, cad: Option<&dyn cad::Tessellator>) -> Re
         name,
         bytes,
         original: files,
+    })
+}
+/// The shared importer never opens sibling files. Match its Electron host's
+/// stack allowance; source admission and rendering call this on workers.
+fn convert_fbx(bytes: &[u8]) -> Result<Vec<u8>> {
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .name("native-fbx-import".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn_scoped(scope, || pm_import_fbx::convert(bytes))
+            .map_err(|e| Error(format!("Cannot start FBX import: {e}")))?
+            .join()
+            .map_err(|_| Error("FBX import worker stopped".into()))?
+            .map(|imported| imported.glb)
+            .map_err(Error)
     })
 }
 fn replace_ext(name: &str, e: &str) -> String {

@@ -37,6 +37,86 @@ pub fn options(value: &Value) -> Result<Options, String> {
     options.validate()?;
     Ok(options)
 }
+/// "3D Production, about 6 min" for an export of `frames` at `width`×`height`.
+pub fn studio_estimate(
+    comp: &pm_model::Node,
+    options: &Options,
+    frames: u64,
+    width: f64,
+    height: f64,
+) -> Option<String> {
+    let comp = crate::data::wire(&comp.to_value());
+    let choice = options.opaque.get("studioQuality").and_then(Value::as_str);
+    let (policy, label) = pm_panel_studio3d::properties::export_quality(&comp, choice)?;
+    let scale=if options.opaque.get("studioReducedSize").and_then(Value::as_bool)==Some(true){0.75}else{1.};
+    let per = pm_panel_studio3d::properties::estimate_seconds_per_frame(&policy, width*scale, height*scale);
+    Some(format!(
+        "3D {label}, {}",
+        pm_panel_studio3d::properties::about(per * frames as f64)
+    ))
+}
+/// The measured Studio estimate (the viewer's `studioExportEstimate`) for
+/// this export, in the sheet's words: "3D Production, about 2–3 min" when it's
+/// ready for this size and length, "3D Production, measuring…" while it runs.
+/// `None` when there's nothing measured for this export (the sheet keeps the
+/// rough figure).
+pub fn measured_estimate(
+    state: &Value,
+    preset: &str,
+    label: &str,
+    width: u32,
+    height: u32,
+    frames: u64,
+) -> Option<String> {
+    measured_estimate_scaled(state,preset,label,width,height,frames,1.)
+}
+pub fn measured_estimate_scaled(
+    state: &Value,
+    preset: &str,
+    label: &str,
+    width: u32,
+    height: u32,
+    frames: u64,
+    render_scale:f64,
+) -> Option<String> {
+    match state["status"].as_str()? {
+        "queued" | "measuring" => Some(format!("3D {label}, measuring…")),
+        "ready" => {
+            let e = &state["estimate"];
+            // A measurement of another size or length: this one is coming.
+            if e["width"].as_u64() != Some(width as u64)
+                || e["height"].as_u64() != Some(height as u64)
+                || e["frames"].as_u64() != Some(frames)
+                || (e["renderScale"].as_f64().unwrap_or(1.)-render_scale).abs()>1e-6
+            {
+                return Some(format!("3D {label}, measuring…"));
+            }
+            let row = e["presets"].as_array()?.iter().find(|r| r["preset"] == preset)?;
+            let lo = row["totalMs"]["min"].as_f64()? / 1000.;
+            let hi = row["totalMs"]["max"].as_f64()? / 1000.;
+            let about = |s: f64| pm_panel_studio3d::properties::about(s);
+            // A number keeps its unit on one line (no-break space).
+            let keep = |t: String| t.replace(' ', "\u{a0}");
+            Some(if (hi - lo) / hi.max(1.) < 0.25 {
+                let a = about((lo + hi) / 2.);
+                let rest = a.trim_start_matches("about ");
+                format!("3D {label}, about {}", keep(rest.to_owned()))
+            } else {
+                // A range already says "about": "11–63 min", "38 min–3.2 h".
+                let (a, b) = (about(lo), about(hi));
+                let (a, b) = (a.trim_start_matches("about "), b.trim_start_matches("about "));
+                let unit = |t: &str| t.rsplit(' ').next().unwrap_or("").to_owned();
+                let n = |t: &str| t.split(' ').next().unwrap_or("").to_owned();
+                if unit(a) == unit(b) {
+                    format!("3D {label}, {}–{}", n(a), keep(b.to_owned()))
+                } else {
+                    format!("3D {label}, {}–{}", keep(a.to_owned()), keep(b.to_owned()))
+                }
+            })
+        }
+        _ => None,
+    }
+}
 pub struct Plan {
     pub settings: Option<ExportSettings>,
     pub frames: u64,
@@ -187,6 +267,13 @@ pub fn plan(snapshot: &Snapshot, options: &Options, time: f64) -> Result<Plan, S
         let seconds = format!("{:.2}", pm_time::seconds_from_ticks(end - start));
         let seconds = seconds.trim_end_matches('0').trim_end_matches('.');
         format!("{frames} frames · {seconds} s · {}×{}", width, height)
+    };
+    // 3D layers render with the composition's saved quality unless the sheet
+    // overrides it for this export: say which, and roughly how long.
+    let summary = match studio_estimate(comp, &options, frames.max(1), width as f64, height as f64)
+    {
+        Some(note) => format!("{summary} · {note}"),
+        None => summary,
     };
     Ok(Plan {
         settings: Some(settings),
@@ -776,6 +863,15 @@ pub fn observe_media(
     for (id, asset) in &catalog.assets {
         let availability = match originals.get(id) {
             None => Availability::Offline,
+            // A LUT is read when an effect draws it, and refused there in a
+            // sentence; here it is there or it isn't.
+            Some(path) if asset.kind == "lut" => {
+                if path.is_file() {
+                    Availability::Ready
+                } else {
+                    Availability::Offline
+                }
+            }
             Some(path) => {
                 if !matches!(asset.kind.as_str(), "image" | "video" | "audio") {
                     states.insert(id.clone(), RuntimeState::default());
@@ -825,6 +921,41 @@ mod probe_tests {
         std::fs::write(&file, b"replaced bytes").unwrap();
         observe_media("p", &snapshot, &originals, &BTreeMap::new(), &probes).unwrap();
         assert_eq!(probes.runs(), 2, "a changed file is decoded again");
+    }
+
+    /// A LUT asset (Apply LUT…, an agent's import) is ready when its file is
+    /// there and offline when it isn't, never left loading.
+    #[test]
+    fn a_lut_asset_is_ready_or_offline() {
+        use pm_panel_media::Availability;
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("Look.cube");
+        std::fs::write(&file, b"LUT_3D_SIZE 2\n").unwrap();
+        let project = pm_model::json::parse(
+            r##"{"id":"p","name":"Synthetic","compId":"c","w":64,"h":36,"fps":30,"dur":1,"bg":"#000000","assets":{"l":{"name":"Look.cube","kind":"lut","format":"cube"}},"comps":{},"layers":[]}"##,
+        )
+        .unwrap();
+        let snapshot = pm_kernel::DocumentStore::new_untitled(project).snapshot();
+        let originals = BTreeMap::from([("l".to_owned(), file.clone())]);
+        let availability = |originals: &BTreeMap<String, PathBuf>| {
+            use pm_panel_media::MediaRuntime;
+            let stamp = pm_panel_media::Catalog::new("p".into(), snapshot.clone())
+                .unwrap()
+                .stamp;
+            observe_media(
+                "p",
+                &snapshot,
+                originals,
+                &BTreeMap::new(),
+                &MediaProbes::default(),
+            )
+            .unwrap()
+            .state(&stamp, "l")
+            .availability
+        };
+        assert_eq!(availability(&originals), Availability::Ready);
+        std::fs::remove_file(&file).unwrap();
+        assert_eq!(availability(&originals), Availability::Offline);
     }
 }
 
@@ -912,5 +1043,43 @@ mod capability_tests {
             portable_capability(&snapshot, &originals)["available"],
             true
         );
+    }
+}
+#[cfg(test)]
+mod estimate_tests {
+    use super::measured_estimate;
+    use serde_json::json;
+    fn ready(min: f64, max: f64) -> serde_json::Value {
+        json!({"status":"ready","estimate":{"width":1920,"height":1080,"frames":120,
+            "presets":[{"preset":"production","totalMs":{"min":min,"max":max}}]}})
+    }
+    #[test]
+    fn the_sheet_says_measuring_then_the_measured_range() {
+        let say = |s: &serde_json::Value, w| measured_estimate(s, "production", "Production", w, 1080, 120);
+        assert_eq!(say(&json!({"status":"queued"}), 1920).unwrap(), "3D Production, measuring…");
+        assert_eq!(say(&json!({"status":"measuring","completed":3,"total":8}), 1920).unwrap(), "3D Production, measuring…");
+        assert_eq!(say(&ready(660_000., 3_780_000.), 1920).unwrap(), "3D Production, 11–63\u{a0}min");
+        assert_eq!(say(&ready(2_280_000., 11_520_000.), 1920).unwrap(), "3D Production, 38\u{a0}min–3.2\u{a0}h");
+        assert_eq!(say(&ready(400_000., 440_000.), 1920).unwrap(), "3D Production, about 7\u{a0}min");
+        // Another size's measurement: the new one is on its way.
+        assert_eq!(say(&ready(660_000., 3_780_000.), 960).unwrap(), "3D Production, measuring…");
+        // Nothing measured, or a failure: the static guess stays.
+        assert_eq!(say(&json!({"status":"idle"}), 1920), None);
+        assert_eq!(say(&json!({"status":"failed","message":"x"}), 1920), None);
+    }
+}
+
+#[cfg(test)]
+mod scale_estimate_tests {
+    #[test]
+    fn changing_scale_invalidates_the_previous_estimate() {
+        let mut state=serde_json::json!({"status":"ready","estimate":{"width":1920,"height":1080,"frames":30,
+            "renderScale":0.75,"presets":[{"preset":"production","totalMs":{"min":30000,"max":32000}}]}});
+        let say=|s:&serde_json::Value,scale|super::measured_estimate_scaled(s,"production","Production",1920,1080,30,scale).unwrap();
+        assert!(say(&state,0.75).contains("about"));
+        assert!(say(&state,1.).contains("measuring"));
+        state["estimate"].as_object_mut().unwrap().remove("renderScale");
+        assert!(say(&state,1.).contains("about"));
+        assert!(say(&state,0.75).contains("measuring"));
     }
 }

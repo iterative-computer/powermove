@@ -1,6 +1,5 @@
 [package]
 name = "pm-studio"
-links = "pm_studio"
 description = "Studio: the product-shot renderer (docs/3d-studio-redesign.md). Phase 0: Live and Refine on one GPU path tracer"
 version.workspace = true
 edition.workspace = true
@@ -11,15 +10,25 @@ publish.workspace = true
 [dependencies]
 wgpu = { version = "30", default-features = false, features = ["metal", "wgsl"] }
 pollster = "0.4"
+glam = "0.30"
 bytemuck = { version = "1", features = ["derive"] }
 png = "0.18"
+image = { version = "0.25", default-features = false, features = ["hdr", "exr", "png"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
-[target.'cfg(not(target_os = "macos"))'.dependencies]
-wgpu = { version = "30", default-features = false, features = ["vulkan", "wgsl"] }
-
 [features]
+yardstick = []
 # Final-frame denoising with Intel Open Image Denoise (Apache-2.0), linked
 # from OIDN_DIR or Homebrew's open-image-denoise.
 oidn = []
+# macOS 26+ temporal denoising/upscaling; older systems use WGSL history/à-trous.
+metalfx = []
+
+[[bin]]
+name = "studio-yardstick"
+required-features = ["yardstick"]
+
+[[bin]]
+name = "studio-timing"
+required-features = ["oidn"]

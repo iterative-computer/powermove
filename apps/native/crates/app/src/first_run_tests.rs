@@ -154,6 +154,15 @@ fn bringing_a_workspace_records_the_opt_in_and_back_reaches_welcome() {
         panic!("{effects:?}");
     };
     assert_eq!(choices["workspaceImport"], "after-effects");
+    // The choice acts: the next editor takes the request once and starts
+    // the transfer (`firstRunWorkspace`); Start Fresh asks for nothing.
+    assert!(crate::first_run::requests_workspace(choices));
+    assert!(!crate::first_run::requests_workspace(
+        &serde_json::json!({"workspaceImport": null})
+    ));
+    crate::first_run::note_workspace_request(true);
+    assert!(crate::first_run::take_workspace_request());
+    assert!(!crate::first_run::take_workspace_request(), "taken once");
 }
 #[test]
 fn an_existing_user_just_opens_with_a_clean_library_and_no_click() {

@@ -30,6 +30,55 @@ fn self_contained_glb_loads_and_original_bytes_are_retained() {
     };
     assert_eq!(m.triangles, 1);
 }
+
+#[test]
+fn fbx_import_keeps_the_source_and_uses_the_shared_glb_converter() {
+    let original =
+        include_bytes!("../../../../../engine/crates/pm-import-fbx/fixtures/tiny-static.fbx");
+    let prepared = import::prepare(
+        vec![ImportFile {
+            name: "product.FBX".into(),
+            mime: "model/fbx".into(),
+            bytes: original.to_vec(),
+        }],
+        None,
+    )
+    .unwrap();
+    assert_eq!(prepared.name, "product.glb");
+    assert_eq!(prepared.original[0].bytes, original);
+    assert_eq!(&prepared.bytes[..4], b"glTF");
+    let import::Model::Gltf(model) = import::load(&prepared.name, &prepared.bytes).unwrap() else {
+        panic!("converted FBX")
+    };
+    assert_eq!(model.triangles, 1);
+    assert!(!model.materials.is_empty());
+    assert_eq!(model.lights.len(), 1);
+}
+
+#[test]
+fn persisted_fbx_assets_keep_skins_and_baked_animation() {
+    let original =
+        include_bytes!("../../../../../engine/crates/pm-import-fbx/fixtures/tiny-animated.fbx");
+    let import::Model::Gltf(model) = import::load("animation.fbx", original).unwrap() else {
+        panic!("FBX asset")
+    };
+    assert_eq!(model.triangles, 1);
+    assert_eq!(model.skins.len(), 1);
+    assert_eq!(model.clips.len(), 1);
+}
+
+#[test]
+fn malformed_fbx_and_multiple_models_are_rejected() {
+    assert!(import::load("bad.fbx", b"not an FBX").is_err());
+    let original =
+        include_bytes!("../../../../../engine/crates/pm-import-fbx/fixtures/tiny-static.fbx");
+    let file = |name: &str| ImportFile {
+        name: name.into(),
+        mime: "model/fbx".into(),
+        bytes: original.to_vec(),
+    };
+    assert!(import::prepare(vec![file("first.fbx"), file("second.fbx")], None).is_err());
+}
 #[test]
 fn rejects_external_gltf_dependencies_without_network() {
     let v = json!({"asset":{"version":"2.0"},"buffers":[{"uri":"https://example.invalid/geometry.bin","byteLength":36}]});
@@ -335,4 +384,18 @@ fn a_live_model_resource_is_shared_and_a_dropped_one_reloads() {
     drop((a, c));
     assert!(weak.upgrade().is_none());
     assert!(Resource::load("model.glb", &bytes).is_ok());
+}
+
+#[test]
+fn material_pixels_cache_by_content_and_preserve_alpha_on_replacement() {
+    let red = include_bytes!("../../../../../engine/fixtures/still-red.png");
+    let alpha = include_bytes!("../../../../../engine/fixtures/still-alpha.png");
+    let first = pm_scene3d::render::texture_rgba(red).unwrap();
+    let repeated = pm_scene3d::render::texture_rgba(&red.to_vec()).unwrap();
+    assert!(std::sync::Arc::ptr_eq(&first, &repeated));
+    let replaced = pm_scene3d::render::texture_rgba(alpha).unwrap();
+    assert!(!std::sync::Arc::ptr_eq(&first, &replaced));
+    assert!(replaced.chunks_exact(4).any(|p| p[3] < 255));
+    assert_eq!(first.len(), 1024 * 1024 * 4);
+    assert!(pm_scene3d::render::texture_rgba(b"bad image").is_err());
 }

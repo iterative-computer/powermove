@@ -7,7 +7,8 @@
 //! are too): Color Balance (HLS), Black & White, the HLS modes of Invert,
 //! Shift Channels, Channel Combiner and Blend, Duotone's two-colour map and
 //! Find Edges. Levels, Levels (Individual Controls), Arithmetic and Color
-//! Profile Converter clip only where their own switch says so.
+//! Profile Converter clip only where their own switch says so (Levels'
+//! start off).
 mod support;
 
 use pm_protocol::{
@@ -86,12 +87,9 @@ fn a_neutral_colour_effect_keeps_light_above_white_and_colours_outside_rec709() 
     let mut renderer = Renderer::headless().unwrap();
     for (id, neutral) in [
         ("color", json!({})),
-        // Levels clips where its own switches say so; they start on.
-        ("levels", json!({"clipBlack":false,"clipWhite":false})),
-        (
-            "levelsIndividual",
-            json!({"clipBlack":false,"clipWhite":false}),
-        ),
+        // An untouched Levels: its clip switches start off.
+        ("levels", json!({})),
+        ("levelsIndividual", json!({})),
         ("exposure", json!({})),
         ("channelMixer", json!({})),
         ("brightnessContrast", json!({})),
@@ -126,12 +124,18 @@ fn an_effect_saved_before_the_fix_clips_as_it_did() {
         ("channelMixer", json!({}), [1.0, 0.5, 0.0]),
         ("sharpen", json!({"amount":0}), [2.5, 0.5, 0.0]),
         ("grain", json!({"amount":0}), [2.5, 0.5, 0.0]),
+        // Main's Levels started with both clip switches on.
+        ("levels", json!({}), [1.0, 0.5, 0.0]),
+        ("levelsIndividual", json!({}), [1.0, 0.5, 0.0]),
     ] {
-        let out = pixel(&mut renderer, &graded(id, Some(1), neutral, WIDE));
+        let version = pm_fx_defs::catalog::main_catalog().current(id).unwrap();
+        let before =
+            pm_fx_defs::catalog::effect_version(version.metadata.get("version")).unwrap() - 1;
+        let out = pixel(&mut renderer, &graded(id, Some(before), neutral, WIDE));
         for c in 0..3 {
             assert!(
                 (out[c] - clipped[c]).abs() < 1e-5,
-                "{id} revision 1: {out:?}"
+                "{id} revision {before}: {out:?}"
             );
         }
     }
@@ -233,44 +237,53 @@ fn hue_keeps_colour_outside_rec709_and_above_white() {
 /// A pixel with almost no coverage is graded like any other: its straight
 /// colour takes the grade the opaque pixel takes.
 #[test]
-fn color_grades_a_pixel_with_faint_coverage() {
+fn colour_effects_grade_a_pixel_with_faint_coverage() {
     let mut renderer = Renderer::headless().unwrap();
     let colour = [0.8, 0.4, 0.2];
-    let grade = json!({"exposure":1,"saturation":30});
-    let opaque = pixel(
-        &mut renderer,
-        &graded(
-            "color",
-            None,
-            grade.clone(),
-            [colour[0], colour[1], colour[2], 1.0],
-        ),
-    );
-    for alpha in [0.0004, 0.00001] {
-        let faint = pixel(
+    for (id, grade) in [
+        ("color", json!({"exposure":1,"saturation":30})),
+        ("duotone", json!({"amount":60})),
+        ("posterize", json!({"levels":3})),
+    ] {
+        let opaque = pixel(
             &mut renderer,
             &graded(
-                "color",
+                id,
                 None,
                 grade.clone(),
-                [
-                    colour[0] * alpha,
-                    colour[1] * alpha,
-                    colour[2] * alpha,
-                    alpha,
-                ],
+                [colour[0], colour[1], colour[2], 1.0],
             ),
         );
-        for c in 0..3 {
-            assert!(
-                (faint[c] / faint[3] - opaque[c]).abs() < 1e-3,
-                "alpha {alpha}: straight {:?}, opaque {opaque:?}",
-                [
-                    faint[0] / faint[3],
-                    faint[1] / faint[3],
-                    faint[2] / faint[3]
-                ]
+        assert!(
+            (0..3).any(|c| (opaque[c] - colour[c]).abs() > 0.01),
+            "{id} grades the colour"
+        );
+        for alpha in [0.0004, 0.00001] {
+            let faint = pixel(
+                &mut renderer,
+                &graded(
+                    id,
+                    None,
+                    grade.clone(),
+                    [
+                        colour[0] * alpha,
+                        colour[1] * alpha,
+                        colour[2] * alpha,
+                        alpha,
+                    ],
+                ),
             );
+            for c in 0..3 {
+                assert!(
+                    (faint[c] / faint[3] - opaque[c]).abs() < 1e-3,
+                    "{id}, alpha {alpha}: straight {:?}, opaque {opaque:?}",
+                    [
+                        faint[0] / faint[3],
+                        faint[1] / faint[3],
+                        faint[2] / faint[3]
+                    ]
+                );
+            }
         }
     }
 }
@@ -305,6 +318,14 @@ fn colour_effects_grade_the_straight_colour_of_a_transparent_pixel() {
         ("posterize", json!({})),
         ("blackWhite", json!({})),
         ("grain", json!({"amount":50})),
+        (
+            "colorWheels",
+            json!({"liftMaster":0.05,"gammaRed":0.2,"gainBlue":1.2,"saturation":130,"temperature":20}),
+        ),
+        (
+            "colorCurves",
+            json!({"count":3,"x1":0.5,"y1":0.65,"x2":1,"y2":1}),
+        ),
     ] {
         let opaque = pixel(
             &mut renderer,

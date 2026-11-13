@@ -10,6 +10,8 @@ mod chrome;
 mod footage;
 mod layer_raster;
 mod media_prepare;
+mod material_capture;
+pub use material_capture::{MaterialCaptureRequest,MaterialPixels,MaterialCaptureStats};
 mod source;
 mod source_video;
 pub use footage::FrameFootage;
@@ -295,6 +297,7 @@ fn build_options(
     offline_cards: bool,
 ) -> plan::BuildOptions {
     plan::BuildOptions {
+        material: None,
         blur: crate::motion::resolve(comp, request.motion_blur),
         sampling: request.sampling,
         shader_fallback,
@@ -503,6 +506,7 @@ pub struct Renderer {
     /// Source-monitor and filmstrip targets/readbacks reused only by the
     /// source path. Composition frame-reuse and its lease stay independent.
     source_reuse: source::SourceReuse,
+    material: material_capture::State,
     /// Bind groups kept across frames (`crate::binds`).
     binds: crate::binds::BindCache,
 }
@@ -556,6 +560,7 @@ impl Renderer {
             prefix: Default::default(),
             frame_reuse: FrameReuse::default(),
             source_reuse: source::SourceReuse::default(),
+            material: Default::default(),
             binds: crate::binds::BindCache::default(),
         }
     }
@@ -746,6 +751,13 @@ impl Renderer {
             .provider
             .as_ref()
             .map_or_else(Default::default, |p| p.counters())
+    }
+    /// Worker-only query against the attached Studio scene. No frame render,
+    /// path-tracing samples or image readback is needed.
+    pub fn pick_studio_surface(&mut self, request: &crate::scene3d::provider::SceneRequest, x:f32, y:f32) -> Result<Option<crate::scene3d::provider::SurfaceHit>, String> {
+        let Some(settings) = self.options3d.studio else {return Ok(None)};
+        let Some(pass) = self.scene3d.provider.as_mut() else {return Ok(None)};
+        pass.pick_surface(&self.device, &self.queue, request, settings.preview,x,y)
     }
 
     /// Runs layer effects and adjustment layers through `host` instead of
@@ -1595,6 +1607,8 @@ impl Renderer {
     /// raster cache is kept apart from the pool and trims to `bytes` on its
     /// own (`text_gpu().cached_bytes()`).
     pub fn trim(&mut self, bytes: u64) {
+        self.material.trim(bytes.min(128*1024*1024));
+        let bytes=bytes.saturating_sub(self.material.stats.retained_bytes);
         // Kept bind groups hold their views (and textures) alive.
         self.binds.clear();
         // An export's kept staging buffer, frame target and pixels (the
@@ -2136,8 +2150,7 @@ impl Renderer {
             .unwrap_or_else(|| comp.clone());
         let seconds = comp.seconds_at(time.get());
         let (w, h) = (request.output_size.width, request.output_size.height);
-        let scale = request
-            .scale
+        let scale = self.material.scale.or(request.scale)
             .unwrap_or_else(|| plan::derived_scale(&comp, w, h));
         // Overruns measured on earlier frames disable their programs now.
         self.effects
@@ -2164,12 +2177,12 @@ impl Renderer {
             effect_host(&self.effect_host, &self.effects),
             options3d,
             Some(&mut self.text),
-            build_options(
+            plan::BuildOptions { material:self.material.plan, ..build_options(
                 &comp,
                 request,
                 self.shaders.fallback_runner,
                 self.isolate_layers,
-            ),
+            ) },
             self.compat.as_deref(),
             self.reuse_enabled.then_some(&mut self.reuse),
         );
@@ -2431,6 +2444,12 @@ impl Renderer {
         self.media.flush();
         self.media.scrub = scrub;
         failures.extend(exec_failures);
+        if let Some(provider)=&self.scene3d.provider {
+            let mut seen:std::collections::HashSet<_>=failures.iter().map(|f|(f.composition.clone(),f.layer.clone())).collect();
+            for failure in provider.layer_failures() {
+                if seen.insert((failure.composition.clone(),failure.layer.clone())) {failures.push(failure.clone());}
+            }
+        }
         crate::scene3d::metadata::failures(document, &failures, &mut scene3d_meta);
         let fallbacks = self.vector.take_svg_fallbacks();
         let svg_fallbacks = if fallbacks.is_empty() && !self.svg_warned.contains_key(composition) {

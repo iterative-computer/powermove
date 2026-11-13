@@ -3245,13 +3245,16 @@ impl Kernel {
         })
     }
     /// The external file a library entry stands for (plan §6: a file opened
-    /// from disk is its own entry). A recovery copy's backing file is not one.
+    /// from disk is its own entry). A recovery copy with a library body uses
+    /// that body; older file-only entries must still open their backing file.
     fn file_entry(&self, id: &str) -> Option<PathBuf> {
         let w = self.library.as_ref()?;
         let meta = w.store().read(&format!("projectMeta.{id}")).ok()??;
         let path = PathBuf::from(meta.get("file")?.get("path")?.as_str()?);
         let backing = w.store().dir().parent()?.join("recovery-files");
-        (!path.starts_with(backing)).then_some(path)
+        let has_body = path.starts_with(backing)
+            && w.store().read(&format!("project.{id}")).ok()?.is_some();
+        (!has_body).then_some(path)
     }
     /// A closed file entry as a library project, read from its file.
     /// A file entry whose file is gone: its journal's work opens as a

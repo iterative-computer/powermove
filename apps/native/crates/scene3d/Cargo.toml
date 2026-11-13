@@ -10,6 +10,7 @@ publish = false
 sha2 = "0.10"
 pm-model = { path = "../../../../engine/crates/pm-model" }
 pm-geom3d = { path = "../../../../engine/crates/pm-geom3d" }
+pm-import-fbx = { path = "../../../../engine/crates/pm-import-fbx" }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }

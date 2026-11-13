@@ -46,6 +46,7 @@ fn oct_decode(e: vec2f) -> vec3f {
 @group(0) @binding(7) var<storage, read> ebuf: array<vec4f>;
 @group(0) @binding(8) var<storage, read> hist_in: array<Hist>;
 @group(0) @binding(9) var<storage, read_write> hist_out: array<Hist>;
+@group(0) @binding(10) var<storage, read> quality_guides: array<vec4f>;
 
 fn neutral(c0: vec3f) -> vec3f {
   var c = c0;
@@ -149,7 +150,13 @@ fn atrous(@builtin(global_invocation_id) g: vec3u) {
 fn pack(@builtin(global_invocation_id) g: vec3u) {
   if (g.x >= Q.dims.x || g.y >= Q.dims.y) { return; }
   let i = g.y * Q.dims.x + g.x;
-  let c = clamp(src[i], vec4f(0.0), vec4f(1.0));
+  var c = clamp(src[i], vec4f(0.0), vec4f(1.0));
+  // Optional native output mask. The shared trace still includes every layer's
+  // occlusion/reflections; only presentation is separated for the compositor.
+  if (Q.k.z > 0.0 && u32(gbuf[i].z + 0.5) != u32(Q.k.z)) {
+    if (gbuf[i].z > 0.5 || (u32(Q.k.w) & 1u) == 0u) { c = vec4f(0.0); }
+  }
+  if ((u32(Q.k.w) & 2u) != 0u && c.w > 0.0) { c = vec4f(clamp(c.xyz / c.w, vec3f(0.0), vec3f(1.0)), c.w); }
   let q = vec4u(c * 255.0 + 0.5);
   packed[i] = q.x | (q.y << 8u) | (q.z << 16u) | (q.w << 24u);
 }
@@ -158,39 +165,77 @@ fn pack(@builtin(global_invocation_id) g: vec3u) {
 fn temporal(@builtin(global_invocation_id) g: vec3u) {
   if (g.x >= Q.dims.x || g.y >= Q.dims.y) { return; }
   let i = g.y * Q.dims.x + g.x;
-  let cur = src[i];
-  let geo = gbuf[i];
-  // The void (no first hit) and frames without history pass straight through.
-  if (geo.w < 0.0 || Q.dims.w == 0u) {
-    hist_out[i] = Hist(vec4f(cur.xyz, 1.0), geo);
-    dst[i] = cur;
+  let source = src[i];
+  var cur = source;
+  var geo = gbuf[i];
+  let quality = (u32(Q.k.w) & 8u) != 0u;
+  let ortho = (u32(Q.k.w) & 4u) != 0u;
+  let dims = vec2f(Q.dims.xy);
+  let ndc = (vec2f(g.xy) + .5) / dims * 2. - 1.;
+  let d = normalize(Q.cur_fwd.xyz + Q.cur_right.xyz * ndc.x * Q.cur_right.w - Q.cur_up.xyz * ndc.y * Q.cur_up.w);
+  var origin = Q.cur_pos.xyz;
+  var direction = d;
+  if (ortho) {
+    origin += Q.cur_right.xyz * ndc.x * Q.cur_right.w - Q.cur_up.xyz * ndc.y * Q.cur_up.w;
+    direction = Q.cur_fwd.xyz;
+  }
+  var catcher = false;
+  if (quality && geo.w < 0. && (u32(Q.k.w) & 16u) != 0u && direction.y < -1e-6) {
+    let distance = (Q.cur_pos.w - origin.y) / direction.y;
+    if (distance > 0.) {
+      // The analytic catcher has no triangle hit. Reproject its actual plane
+      // and store its scalar shading in the otherwise empty RGB history.
+      geo = vec4f(0., 1., 0., distance);
+      cur = vec4f(vec3f(source.w), source.w);
+      catcher = true;
+    }
+  }
+  var eligible = true;
+  if (quality) { eligible = quality_guides[2u * i + 1u].w >= 0.; }
+  if (geo.w < 0. || Q.dims.w == 0u || !eligible) {
+    hist_out[i] = Hist(vec4f(cur.xyz, 1.), geo);
+    dst[i] = source;
     return;
   }
-  let dims = vec2f(f32(Q.dims.x), f32(Q.dims.y));
-  let ndc = (vec2f(f32(g.x), f32(g.y)) + 0.5) / dims * 2.0 - 1.0;
-  let d = normalize(Q.cur_fwd.xyz + Q.cur_right.xyz * ndc.x * Q.cur_right.w - Q.cur_up.xyz * ndc.y * Q.cur_up.w);
-  let p = Q.cur_pos.xyz + d * geo.w;
-  // Into the previous camera.
-  let v = p - Q.prev_pos.xyz;
+  let point = origin + direction * geo.w;
+  let v = point - Q.prev_pos.xyz;
   let z = dot(v, Q.prev_fwd.xyz);
   var ok = z > 1e-4;
   var prev = vec2i(0);
   if (ok) {
-    let pn = vec2f(dot(v, Q.prev_right.xyz) / (z * Q.prev_right.w), -dot(v, Q.prev_up.xyz) / (z * Q.prev_up.w));
-    let px = (pn * 0.5 + 0.5) * dims;
-    prev = vec2i(floor(px));
-    ok = all(prev >= vec2i(0)) && all(prev < vec2i(i32(Q.dims.x), i32(Q.dims.y)));
+    let scale = select(z, 1., ortho);
+    let pn = vec2f(dot(v, Q.prev_right.xyz) / (scale * Q.prev_right.w), -dot(v, Q.prev_up.xyz) / (scale * Q.prev_up.w));
+    prev = vec2i(floor((pn * .5 + .5) * dims));
+    ok = all(prev >= vec2i(0)) && all(prev < vec2i(Q.dims.xy));
   }
-  var out = vec4f(cur.xyz, 1.0);
+  var result = vec4f(cur.xyz, 1.);
   if (ok) {
     let h = hist_in[u32(prev.y) * Q.dims.x + u32(prev.x)];
-    let dist = length(v);
-    let same = h.g.w >= 0.0 && abs(h.g.w - dist) < 0.03 * dist + 1e-3 && h.g.z == geo.z && dot(oct_decode(h.g.xy), oct_decode(geo.xy)) > 0.9;
+    let distance = select(length(v), z, ortho);
+    let same = h.g.w >= 0. && abs(h.g.w - distance) < .03 * distance + 1e-3 && h.g.z == geo.z && dot(oct_decode(h.g.xy), oct_decode(geo.xy)) > .9;
     if (same) {
-      let n = min(h.c.w + 1.0, 16.0);
-      out = vec4f(mix(h.c.xyz, cur.xyz, 1.0 / n), n);
+      if (quality) {
+        var lo = cur.xyz; var hi = cur.xyz;
+        for (var y = -1; y <= 1; y++) { for (var x = -1; x <= 1; x++) {
+          let q = clamp(vec2i(g.xy) + vec2i(x,y), vec2i(0), vec2i(Q.dims.xy) - 1);
+          let j = u32(q.y) * Q.dims.x + u32(q.x);
+          if (gbuf[j].z == geo.z) {
+            let value = select(src[j].xyz, vec3f(src[j].w), catcher);
+            lo = min(lo, value); hi = max(hi, value);
+          }
+        }}
+        let previous = clamp(h.c.xyz, lo, hi);
+        let delta = max(max(abs(previous.x - cur.x), abs(previous.y - cur.y)), abs(previous.z - cur.z));
+        let luminance = dot(cur.xyz, vec3f(.2126,.7152,.0722));
+        if ((catcher || delta < .03 + .1 * luminance) && abs(h.g.w - distance) < .005 * distance + 1e-4) {
+          result = vec4f(mix(cur.xyz, previous, .5), min(h.c.w + 1., 4.));
+        }
+      } else {
+        let n = min(h.c.w + 1., 16.);
+        result = vec4f(mix(h.c.xyz, cur.xyz, 1. / n), n);
+      }
     }
   }
-  hist_out[i] = Hist(out, geo);
-  dst[i] = vec4f(out.xyz, cur.w);
+  hist_out[i] = Hist(result, geo);
+  dst[i] = select(vec4f(result.xyz, source.w), vec4f(source.xyz, result.x), catcher);
 }

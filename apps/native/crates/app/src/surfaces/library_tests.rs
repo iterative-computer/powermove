@@ -564,6 +564,26 @@ fn disconnected_service_and_unsupported_operations_are_not_successes() {
     );
 }
 
+#[test]
+fn kernel_failure_keeps_a_diagnostic_behind_the_existing_error_alert() {
+    let mut c = ready();
+    c.menu("a", MenuAction::Open).unwrap();
+    let serial = c.port.sent.last().unwrap().serial;
+    let diagnostic = "The recovery journal could not be started: synthetic failure";
+    complete(&mut c, serial, Err(Failure::Kernel {
+        code: ServiceErrorCode::Unavailable,
+        detail: diagnostic.into(),
+    }));
+    let effects = effects(&mut c);
+    assert!(effects.iter().any(|e| matches!(e, HostEffect::Diagnostic(s) if s == diagnostic)));
+    let alert = effects.iter().find_map(|e| match e {
+        HostEffect::Alert { alert, .. } => Some(alert),
+        _ => None,
+    }).unwrap();
+    assert!(!alert.message.contains("synthetic failure"));
+    assert!(alert.informative.contains("Error Log"));
+}
+
 fn service() -> (
     tempfile::TempDir,
     pm_kernel::KernelActor,

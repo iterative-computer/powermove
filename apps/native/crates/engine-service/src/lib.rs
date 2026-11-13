@@ -4,6 +4,8 @@ pub mod audio;
 pub mod clock;
 pub mod color;
 pub mod compat;
+pub mod export_estimate;
+pub use export_estimate::{ExportEstimate, ExportEstimateState, PresetEstimate};
 pub mod frame_codec;
 mod frame_inputs;
 pub mod jobs;
@@ -20,6 +22,8 @@ mod scopes;
 mod settle;
 pub use scopes::ScopeResult;
 pub mod studio;
+pub mod surface;
+pub use surface::{SurfaceQueryKind, SurfaceReply};
 pub mod trace;
 pub mod transport;
 
@@ -53,6 +57,7 @@ use pm_protocol::{
     common::{Size, Ticks},
 };
 pub use policy::{Crop, Moment, Output, Quality, Stamp};
+pub use frame_inputs::draws_studio;
 pub use render::{FrameSpec, Scene, metal_device};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -63,12 +68,12 @@ use std::{
 
 /// Geometry is normalized to the content viewport. Colours are linear P3 RGBA.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct OverlayLine {
     pub ends: [f32; 4],
     pub color: [f32; 4],
 }
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct OverlayGeometry {
     lines: Vec<OverlayLine>,
     channels: Channels,
@@ -343,6 +348,9 @@ pub struct FrameReport {
 }
 #[derive(Clone, Debug, Default)]
 pub struct ViewerStatus {
+    pub refine_progress: Option<studio::RefineProgress>,
+    /// Explicit Studio calibration for the current immutable viewer scene.
+    pub export_estimate: ExportEstimateState,
     pub frame: Option<FrameReport>,
     pub clock: Option<ClockSample>,
     pub levels: Option<AudioLevels>,
@@ -446,6 +454,10 @@ struct View {
     /// When the oldest pending command was sent (host s), for the
     /// diagnostic trace's command-to-frame latency.
     commands_sent: Option<f64>,
+    surface_queries: VecDeque<surface::Pending>,
+    export_estimate: Option<export_estimate::Pending>,
+    export_estimate_stamp: Option<Stamp>,
+    refine_progress_stamp: Option<Stamp>,
     /// A Mixer monitor solo not yet handed to the transport.
     monitor: Option<Vec<String>>,
     desired_rate: pm_protocol::common::PlaybackRate,
@@ -460,6 +472,8 @@ struct View {
     mastering: color::Mastering,
     resources: Arc<resources::ResourceSnapshot>,
     quality: Quality,
+    studio_preview: studio::Preview,
+    studio_view: studio::ViewCamera,
     /// Auto draws dragged frames of a slow project reduced (an editor's
     /// viewer); otherwise every paused frame is exact.
     adapt_drags: bool,
@@ -535,6 +549,13 @@ fn only_moved(v: &View, stamp: Stamp, moves: u64, moment: Moment, capture: bool)
             || v.stamp.sequence.wrapping_sub(stamp.sequence) == v.moves.wrapping_sub(moves))
 }
 impl View {
+    fn set_studio_preview(&mut self, preview: studio::Preview) {
+        if self.studio_preview != preview {
+            self.studio_preview = preview;
+            self.stamp.sequence += 1;
+            self.dirty = true;
+        }
+    }
     fn enqueue(&mut self, cmd: TransportCommand) -> Result<()> {
         if matches!(cmd, TransportCommand::Seek { .. })
             && matches!(self.commands.back(), Some(TransportCommand::Seek { .. }))
@@ -683,12 +704,20 @@ impl Viewer {
     /// authoritative fallback if the consumer missed any change events.
     #[cfg(feature = "kernel")]
     pub fn publish(&self, p: &Published) -> Result<()> {
+        let preview = p
+            .ui_state
+            .viewer
+            .get("studioTier")
+            .and_then(pm_model::Value::as_str)
+            .map_or_else(studio::Preview::debug_default, studio::Preview::parse)
+            .map_err(anyhow::Error::msg)?;
         self.snapshot_traced(
             p.snapshot.clone(),
             Some((
                 p.actor_work.as_secs_f64() * 1000.,
                 p.publication_work.as_secs_f64() * 1000.,
             )),
+            Some(preview),
         )
     }
     /// Attach an event origin before dispatching an asynchronous kernel edit.
@@ -701,9 +730,14 @@ impl Viewer {
         }
     }
     pub fn snapshot(&self, snapshot: Snapshot) -> Result<()> {
-        self.snapshot_traced(snapshot, None)
+        self.snapshot_traced(snapshot, None, None)
     }
-    fn snapshot_traced(&self, snapshot: Snapshot, spans: Option<(f64, f64)>) -> Result<()> {
+    fn snapshot_traced(
+        &self,
+        snapshot: Snapshot,
+        spans: Option<(f64, f64)>,
+        preview: Option<studio::Preview>,
+    ) -> Result<()> {
         self.edit(|v| {
             ensure!(
                 snapshot.doc_id == v.stamp.doc_id,
@@ -713,8 +747,13 @@ impl Viewer {
                 snapshot.revision >= v.stamp.revision,
                 "stale kernel publication"
             );
+            if let Some(preview) = preview {
+                v.set_studio_preview(preview);
+            }
             if snapshot.revision > v.stamp.revision {
-                v.input = v.pending_input.take();
+                if let Some(input) = v.pending_input.take() {
+                    v.input.get_or_insert(input);
+                }
                 let (actor_ms, publication_ms) = spans.unwrap_or_default();
                 v.pipeline = trace::Pipeline {
                     request: trace::now(),
@@ -775,6 +814,70 @@ impl Viewer {
         v.dirty = true;
         self.shared.wake.try_send(()).ok();
         Ok(())
+    }
+    /// Transient Free View for Studio 3D layers (3d-studio.md §4). `None`
+    /// looks through the composition's camera. Never edits the document.
+    pub fn studio_view(&self, view: Option<studio::FreeView>) -> Result<()> {
+        self.studio_camera(view.into())
+    }
+    pub fn studio_view_at(&self, view: Option<studio::FreeView>, input: f64) -> Result<()> {
+        self.studio_camera_at(view.into(), input)
+    }
+    pub fn studio_camera(&self, camera: studio::ViewCamera) -> Result<()> {
+        self.studio_camera_traced(camera, None)
+    }
+    pub fn studio_camera_at(&self, camera: studio::ViewCamera, input: f64) -> Result<()> {
+        ensure!(input.is_finite() && input > 0., "invalid input timestamp");
+        self.studio_camera_traced(camera, Some(input))
+    }
+    fn studio_camera_traced(&self, camera: studio::ViewCamera, input: Option<f64>) -> Result<()> {
+        camera.validate().map_err(anyhow::Error::msg)?;
+        self.edit(|v| {
+            if v.studio_view != camera {
+                v.studio_view = camera;
+                v.stamp.sequence += 1;
+                v.dirty = true;
+                if let Some(input) = input {
+                    let origin=v.pending_input.take().unwrap_or(input);
+                    v.input.get_or_insert(origin);
+                    v.pipeline = trace::Pipeline {
+                        request: trace::now(),
+                        ..Default::default()
+                    };
+                }
+            }
+            Ok(())
+        })
+    }
+    pub fn studio_pane(&self, pane: studio::Pane) -> Result<()> {
+        pane.camera.validate().map_err(anyhow::Error::msg)?;
+        self.edit(|v| {
+            if v.studio_view != pane.camera || v.studio_preview != pane.tier {
+                v.studio_view = pane.camera;
+                v.studio_preview = pane.tier;
+                v.stamp.sequence += 1;
+                v.dirty = true;
+            }
+            Ok(())
+        })
+    }
+    pub fn studio_state(&self) -> Result<studio::Pane> {
+        let state = self.shared.state.lock().unwrap();
+        let view = state
+            .views
+            .get(&self.id)
+            .ok_or_else(|| anyhow::anyhow!("viewer retired"))?;
+        Ok(studio::Pane {
+            camera: view.studio_view.clone(),
+            tier: view.studio_preview,
+        })
+    }
+    /// Transient Studio worker tier, independent of viewer resolution.
+    pub fn studio_preview(&self, preview: studio::Preview) -> Result<()> {
+        self.edit(|v| {
+            v.set_studio_preview(preview);
+            Ok(())
+        })
     }
     /// Render resolution. Auto measures playback; stopped frames are full.
     pub fn quality(&self, quality: Quality) -> Result<()> {
@@ -938,6 +1041,11 @@ impl Viewer {
     /// Safe areas are time-invariant and are drawn with every video frame.
     pub fn safe_areas(&self, geometry: OverlayGeometry) -> Result<()> {
         self.edit(|v| {
+            // Selection/time publications often resend the same guides. They
+            // must not retire a picture currently rendering those exact lines.
+            if v.overlay_time.is_none() && v.locked_provider.is_none() && v.overlays == geometry {
+                return Ok(());
+            }
             v.overlays = geometry;
             v.overlay_time = None;
             v.locked_provider = None;
@@ -948,9 +1056,27 @@ impl Viewer {
         })
     }
     pub fn command(&self, cmd: TransportCommand) -> Result<()> {
+        self.command_traced(cmd, None)
+    }
+    /// Interactive transport input, measured through the frame it presents.
+    pub fn command_at(&self, cmd: TransportCommand, input: f64) -> Result<()> {
+        ensure!(input.is_finite() && input > 0., "invalid input timestamp");
+        self.command_traced(cmd, Some(input))
+    }
+    fn command_traced(&self, cmd: TransportCommand, input: Option<f64>) -> Result<()> {
         use pm_protocol::validate::Validate;
         cmd.validate().map_err(|e| anyhow::anyhow!("{e:?}"))?;
-        self.edit(|v| v.enqueue(cmd))
+        self.edit(|v| {
+            v.enqueue(cmd)?;
+            if let Some(input) = input {
+                v.input = Some(input);
+                v.pipeline = trace::Pipeline {
+                    request: trace::now(),
+                    ..Default::default()
+                };
+            }
+            Ok(())
+        })
     }
     /// The Mixer's monitor solo: only these top-level layers are heard
     /// (empty: every strip). Meters still read every strip.
@@ -1095,7 +1221,14 @@ impl Viewer {
             .unwrap()
             .views
             .get(&self.id)
-            .map(|v| v.status.clone())
+            .map(|v| {
+                let mut status = v.status.clone();
+                if v.refine_progress_stamp != Some(v.stamp) { status.refine_progress = None; }
+                if v.export_estimate_stamp != Some(v.stamp) {
+                    status.export_estimate = ExportEstimateState::Idle;
+                }
+                status
+            })
             .unwrap_or_default()
     }
     pub fn identity(&self) -> u64 {
@@ -1371,6 +1504,10 @@ impl EngineService {
                 locked_provider: None,
                 commands: VecDeque::new(),
                 commands_sent: None,
+                surface_queries: VecDeque::new(),
+                export_estimate: None,
+                export_estimate_stamp: None,
+                refine_progress_stamp: None,
                 monitor: None,
                 desired_rate: pm_protocol::common::PlaybackRate::STOPPED,
                 status: ViewerStatus {
@@ -1385,6 +1522,8 @@ impl EngineService {
                 mastering: Default::default(),
                 resources: Arc::default(),
                 quality: Quality::Auto,
+                studio_preview: studio::Preview::debug_default().map_err(anyhow::Error::msg)?,
+                studio_view: studio::ViewCamera::Active,
                 adapt_drags: false,
                 skim: None,
                 skim_input: None,
@@ -1412,7 +1551,14 @@ impl EngineService {
 }
 impl Drop for EngineService {
     fn drop(&mut self) {
-        self.shared.state.lock().unwrap().stop = true;
+        {
+            let mut state = self.shared.state.lock().unwrap();
+            state.stop = true;
+            for view in state.views.values_mut() {
+                surface::cancel(view, "surface query worker stopped");
+                export_estimate::cancel(view, "export estimate worker stopped");
+            }
+        }
         self.shared.interactive.set(false);
         self.shared.wake.try_send(()).ok();
         if let Some(t) = self.thread.take() {
@@ -1596,6 +1742,8 @@ struct Work {
     /// Automatic's HD proxies), whatever this frame's moment reads.
     rendered_media: Arc<pm_export::render::MediaPaths>,
     spec: FrameSpec,
+    studio_preview: studio::Preview,
+    studio_view: studio::ViewCamera,
     layer: Option<metal::MetalLayer>,
     overlays: OverlayGeometry,
     provider: Option<LockedOverlayProvider>,
@@ -1858,6 +2006,8 @@ fn supervise(engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc
         }
         let now = trace::now();
         for v in state.views.values_mut() {
+            surface::cancel(v, "surface query frame changed after worker restart");
+            export_estimate::cancel(v, "export estimate worker restarted");
             v.status.error = Some(if restarted {
                 format!("The viewer restarted after an internal error.\n{detail}")
             } else {
@@ -1960,6 +2110,24 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
         eprintln!("Built-in effect definitions failed to load: {error:#}");
         engine.definition_failure = Some(error.to_string());
     }
+    // A stable observer survives cached sources; its work identity changes per frame.
+    let progress_work = Arc::new(Mutex::new(None::<(u64, Stamp)>));
+    let progress_context = progress_work.clone();
+    let weak = Arc::downgrade(&shared);
+    engine.studio_progress = Some(Arc::new(move |_request, progress| {
+        let Some((id, stamp)) = *progress_context.lock().unwrap() else { return true; };
+        let Some(shared) = weak.upgrade() else { return false; };
+        let mut state = shared.state.lock().unwrap();
+        if state.stop || state.halted.is_some() { return false; }
+        let Some(v) = state.views.get_mut(&id) else { return false; };
+        if v.stamp != stamp { return false; }
+        if v.status.refine_progress != Some(progress) || v.refine_progress_stamp != Some(stamp) {
+            v.status.refine_progress = Some(progress);
+            v.refine_progress_stamp = Some(stamp);
+            state.notify();
+        }
+        true
+    }));
     engine.set_waker(Some(shared.wake.clone()));
     engine.disk = Some(shared.disk.clone());
     shared.disk.set_wake(shared.wake.clone());
@@ -1980,6 +2148,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
     // tick, picture for the target vsync, unaligned audio start).
     let legacy = std::env::var("PM_ENGINE_PRESENT").as_deref() == Ok("legacy");
     let mut cursor = 0;
+    let mut last_was_surface_query = false;
     let (mut rebuilt_at, mut backoff) = (None::<std::time::Instant>, Duration::ZERO);
     // The settled picture being drawn off this thread, if one is.
     let mut settling = None::<Settling>;
@@ -2245,6 +2414,14 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                     audio_host_seconds: f.audio_host,
                     pixels: readback.map(|_| f.submission.pixels()).or(kept),
                 });
+                // A stale, failed or dropped frame did not answer the input.
+                // Keep its origin through retries; never consume a newer one.
+                if t.gpu_ok
+                    && (t.display.is_some_and(|at| at > 0.) || f.submission.drawable.is_none())
+                    && v.input == f.input
+                {
+                    v.input = None;
+                }
                 if readback.is_some() {
                     v.capture_owed = false;
                 }
@@ -2354,6 +2531,13 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             state.notify();
         }
         pass.mark("settled");
+        if !last_was_surface_query && state.views.values().any(|v| !v.surface_queries.is_empty()) {
+            drop(state);
+            surface::run_one(&mut engine, &shared);
+            last_was_surface_query = true;
+            continue;
+        }
+        last_was_surface_query = false;
         let retired: Vec<_> = runtime
             .keys()
             .filter(|id| !state.views.contains_key(id))
@@ -2836,6 +3020,12 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                     exact: capture,
                     settled,
                 },
+                studio_preview: if capture {
+                    studio::Preview::Final
+                } else {
+                    v.studio_preview
+                },
+                studio_view: if capture { studio::ViewCamera::Active } else { v.studio_view.clone() },
                 layer: v.config.layer.clone(),
                 overlays: if v.overlay_time.is_none_or(|t| t == time) {
                     v.overlays.clone()
@@ -2850,7 +3040,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 due,
                 mastering: v.mastering,
                 resources: v.resources.clone(),
-                input: v.input.take(),
+                input: v.input,
                 pipeline: v.pipeline,
                 audio_host: r
                     .transport
@@ -2895,6 +3085,23 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             state.notify();
         }
         pass.mark("schedule");
+        // A 3D scene's final picture is traced on this thread, as every 3D
+        // picture is (`render::Engine::draws_studio`): its viewer is drawn
+        // again for it, with the stamp it shows.
+        let ask = ask.filter(|ask| {
+            if !shared.disk.draws_studio(&ask.scene) {
+                return true;
+            }
+            if let (Some(v), Some(r)) = (state.views.get_mut(&ask.id), runtime.get_mut(&ask.id))
+                && v.stamp == ask.stamp
+            {
+                v.stamp.sequence += 1;
+                bump_site(line!(), "");
+                v.dirty = true;
+                (r.full_owed, r.settle_at, r.full_for) = (None, None, Some(v.stamp));
+            }
+            false
+        });
         if let Some(ask) = ask {
             if work.is_some() {
                 // A frame is due first; asked again at the next pass.
@@ -2908,6 +3115,18 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 continue;
             }
         }
+        // A requested estimate never competes with viewer work, scanout or
+        // playback. Its small calibration passes check for new input between
+        // submissions, and stale results cannot enter the viewer's state.
+        if work.is_none() && flights.is_empty()
+            && !runtime.values().any(|r| r.transport.running())
+            && state.views.values().all(|v| !v.dirty && v.commands.is_empty() && v.surface_queries.is_empty())
+            && state.views.values().any(|v| v.export_estimate.is_some())
+        {
+            drop(state);
+            export_estimate::run_one(&mut engine, &shared);
+            continue;
+        }
         if let Some(Work {
             id,
             stamp,
@@ -2915,6 +3134,8 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             scene,
             rendered_media,
             spec,
+            studio_preview,
+            studio_view,
             layer,
             overlays,
             provider,
@@ -2938,6 +3159,8 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 count_work: recorder.is_some(),
                 ..Default::default()
             }));
+            engine.studio_preview(studio_preview);
+            engine.studio_camera(studio_view);
             engine.mastering = mastering;
             engine.set_resources(resources);
             engine.use_compat_document(stamp.doc_id);
@@ -3004,11 +3227,14 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             {
                 panic!("injected frame failure");
             }
+            // Whose frame a 3D refinement's progress belongs to.
+            *progress_work.lock().unwrap() = Some((id, stamp));
             let result = provider
                 .map_or_else(|| Ok(overlays), |p| p(&scene.doc, &scene.comp, spec.time))
                 .and_then(|overlays| {
                     engine.frame(&scene, spec, layer.as_ref(), &overlays, capture, trace)
                 });
+            *progress_work.lock().unwrap() = None;
             pass.mark("frame");
             // Media ahead of the playhead is prepared after this frame is
             // submitted: building its plan must not delay this present.
@@ -3150,7 +3376,6 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                         v.capture |= capture;
                         v.status.no_drawable += 1;
                         v.dirty = true;
-                        v.input = input;
                         if let Some(r) = runtime.get_mut(&id) {
                             r.drawable_misses = r.drawable_misses.saturating_add(1);
                             r.not_before = trace::now() + drawable_retry(r.drawable_misses);
@@ -3170,7 +3395,6 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                     Err(e) if render::transient(&e) => {
                         v.capture |= capture;
                         v.dirty = true;
-                        v.input = input;
                         // A raster override's layers: asked of the realm; its
                         // answers redraw (`CompatStore::answer_all`).
                         let pending = match e.downcast_ref::<pm_render::RenderError>() {
@@ -3332,12 +3556,15 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             } else {
                 Duration::from_secs(3600)
             };
+            let surface_query_waiting = state.views.values().any(|v| !v.surface_queries.is_empty());
             drop(state);
             let tap = shared.scopes.lock().unwrap().clone();
             let timeout = engine
                 .flush_scopes(tap.as_ref().map(|(_, tap)| tap))
                 .map_or(timeout, |retry| timeout.min(retry));
-            let timeout = if settle.is_finite() {
+            let timeout = if surface_query_waiting {
+                Duration::from_millis(1)
+            } else if settle.is_finite() {
                 timeout.min(Duration::from_secs_f64(settle))
             } else {
                 timeout
@@ -3714,6 +3941,173 @@ mod worker_tests {
             end: None,
             audio: false,
         }
+    }
+    #[test]
+    fn input_origin_survives_a_stale_submission_until_a_frame_lands() {
+        let service =
+            EngineService::start(pm_gpu::Gpu::new("stale-input-origin").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        v.capture_next().unwrap();
+        drawn(&v);
+        let (entered, signal) = std::sync::mpsc::channel();
+        let (release, barrier) = std::sync::mpsc::channel();
+        *service.shared.before_submit.lock().unwrap() = Some(Box::new(move || {
+            entered.send(()).unwrap();
+            barrier.recv_timeout(Duration::from_secs(10)).unwrap();
+        }));
+        // A captured frame is exact: it never lands as a drag picture of an
+        // earlier state (`only_moved`), so the change below makes it stale.
+        v.capture_next().unwrap();
+        let input = trace::now();
+        v.scrub_at(Ticks::from_whole_seconds(1), input).unwrap();
+        signal.recv_timeout(Duration::from_secs(10)).unwrap();
+        // Like a UI publication arriving while its first frame encodes.
+        v.studio_preview(studio::Preview::Refine).unwrap();
+        release.send(()).unwrap();
+        let status = drawn(&v);
+        assert!(status.stale_rejections > 0);
+        assert_eq!(status.frame.unwrap().input_host_seconds, Some(input));
+        v.capture_next().unwrap();
+        assert_eq!(drawn(&v).frame.unwrap().input_host_seconds, None);
+    }
+    #[test]
+    fn camera_input_keeps_the_oldest_origin_across_superseded_frames() {
+        let service=EngineService::start(pm_gpu::Gpu::new("camera-input-origin").unwrap()).unwrap();
+        let v=shapes_viewer(&service,None);v.capture_next().unwrap();drawn(&v);
+        let (entered,signal)=std::sync::mpsc::channel();let (release,barrier)=std::sync::mpsc::channel();
+        *service.shared.before_submit.lock().unwrap()=Some(Box::new(move||{entered.send(()).unwrap();barrier.recv_timeout(Duration::from_secs(10)).unwrap();}));
+        let origin=trace::now();v.input_event(origin);
+        let mut camera=studio::FreeView{eye:[0.,0.,5.],target:[0.;3],zoom:1.};
+        v.studio_view_at(Some(camera),origin+0.001).unwrap();signal.recv_timeout(Duration::from_secs(10)).unwrap();
+        camera.eye[0]=1.;v.studio_view_at(Some(camera),origin+0.002).unwrap();v.capture_next().unwrap();release.send(()).unwrap();
+        let status=drawn(&v);assert!(status.stale_rejections>0);assert_eq!(status.frame.unwrap().input_host_seconds,Some(origin));
+        v.capture_next().unwrap();assert_eq!(drawn(&v).frame.unwrap().input_host_seconds,None);
+    }
+    #[test]
+    fn interactive_frame_step_retains_its_event_origin() {
+        let service = EngineService::start(pm_gpu::Gpu::new("step-input-origin").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        v.capture_next().unwrap();
+        drawn(&v);
+        let stamp = v.stamp();
+        for invalid in [0., -1., f64::NAN, f64::INFINITY] {
+            assert!(
+                v.command_at(TransportCommand::Step { frames: 1 }, invalid)
+                    .is_err()
+            );
+        }
+        assert_eq!(
+            v.stamp(),
+            stamp,
+            "invalid origins must not enqueue commands"
+        );
+        let input = trace::now();
+        v.command_at(TransportCommand::Step { frames: 1 }, input)
+            .unwrap();
+        v.capture_next().unwrap();
+        let frame = drawn(&v).frame.unwrap();
+        assert_eq!(frame.input_host_seconds, Some(input));
+        assert_eq!(
+            frame.time.get(),
+            pm_time::Rate::FPS_30.frame_start(1).unwrap()
+        );
+        v.command(TransportCommand::Step { frames: 1 }).unwrap();
+        v.capture_next().unwrap();
+        assert_eq!(drawn(&v).frame.unwrap().input_host_seconds, None);
+    }
+    #[test]
+    fn identical_safe_areas_preserve_an_in_flight_frame() {
+        let service =
+            EngineService::start(pm_gpu::Gpu::new("unchanged-overlays").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        v.capture_next().unwrap();
+        drawn(&v);
+        let (entered, signal) = std::sync::mpsc::channel();
+        let (release, barrier) = std::sync::mpsc::channel();
+        *service.shared.before_submit.lock().unwrap() = Some(Box::new(move || {
+            entered.send(()).unwrap();
+            barrier.recv_timeout(Duration::from_secs(10)).unwrap();
+        }));
+        v.command_at(TransportCommand::Step { frames: 1 }, trace::now())
+            .unwrap();
+        v.capture_next().unwrap();
+        signal.recv_timeout(Duration::from_secs(10)).unwrap();
+        let before = v.stamp();
+        v.safe_areas(OverlayGeometry::default()).unwrap();
+        let after = v.stamp();
+        release.send(()).unwrap();
+        let status = drawn(&v);
+        assert_eq!(
+            before, after,
+            "unchanged guides/gizmos must not invalidate the frame"
+        );
+        assert_eq!(status.stale_rejections, 0);
+        assert_eq!(
+            status.frame.unwrap().time.get(),
+            pm_time::Rate::FPS_30.frame_start(1).unwrap()
+        );
+    }
+    #[test]
+    fn surface_hovers_coalesce_without_dropping_clicks_and_the_queue_is_bounded() {
+        let service =
+            EngineService::start(pm_gpu::Gpu::new("surface query queue").unwrap()).unwrap();
+        let (entered, signal) = std::sync::mpsc::channel();
+        let (release, barrier) = std::sync::mpsc::channel();
+        *service.shared.before_submit.lock().unwrap() = Some(Box::new(move || {
+            entered.send(()).unwrap();
+            barrier.recv_timeout(Duration::from_secs(10)).unwrap();
+        }));
+        let viewer = shapes_viewer(&service, None);
+        viewer.capture_next().unwrap();
+        signal.recv_timeout(Duration::from_secs(10)).unwrap();
+        let stamp = viewer.stamp().unwrap();
+        let first = viewer
+            .pick_surface(stamp, Ticks::ZERO, [0.4, 0.5], SurfaceQueryKind::Hover)
+            .unwrap();
+        let _next = viewer
+            .pick_surface(stamp, Ticks::ZERO, [0.5, 0.5], SurfaceQueryKind::Hover)
+            .unwrap();
+        assert!(
+            first
+                .try_recv()
+                .unwrap()
+                .unwrap_err()
+                .contains("superseded")
+        );
+        let click = viewer
+            .pick_surface(stamp, Ticks::ZERO, [0.5, 0.5], SurfaceQueryKind::Click)
+            .unwrap();
+        let _hover = viewer
+            .pick_surface(stamp, Ticks::ZERO, [0.6, 0.5], SurfaceQueryKind::Hover)
+            .unwrap();
+        let mut rest = vec![];
+        for _ in 0..5 {
+            rest.push(
+                viewer
+                    .pick_surface(stamp, Ticks::ZERO, [0.5, 0.5], SurfaceQueryKind::Click)
+                    .unwrap(),
+            );
+        }
+        let count = service.shared.state.lock().unwrap().views[&viewer.id]
+            .surface_queries
+            .len();
+        let full = viewer.pick_surface(stamp, Ticks::ZERO, [0.5, 0.5], SurfaceQueryKind::Click);
+        let click_pending = !click.is_closed();
+        release.send(()).unwrap();
+        assert_eq!(count, 8);
+        assert!(full.is_err());
+        assert!(click_pending, "hover must not supersede a click");
+        drop(service);
+        assert!(
+            click.try_recv().is_ok(),
+            "shutdown must settle accepted queries"
+        );
+        assert!(
+            viewer
+                .pick_surface(stamp, Ticks::ZERO, [0.5, 0.5], SurfaceQueryKind::Click)
+                .is_err()
+        );
+        drop(viewer);
     }
     fn drawn(v: &Viewer) -> ViewerStatus {
         let deadline = std::time::Instant::now() + Duration::from_secs(20);

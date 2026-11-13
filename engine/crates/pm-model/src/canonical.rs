@@ -57,12 +57,31 @@ pub const COMP_FIELDS: [&str; 12] = [
     "audioGain",
 ];
 
+/// Native Studio extends the frozen legacy field set with composition quality.
+/// Keep COMP_FIELDS as the v1 reference inventory; all persistence/projection
+/// paths use COMPOSITION_FIELDS so the current composition retains this data.
+pub const COMPOSITION_FIELDS: [&str; 13] = [
+    "w",
+    "h",
+    "fps",
+    "fpsRational",
+    "dur",
+    "bg",
+    "backgroundFill",
+    "layers",
+    "markers",
+    "work",
+    "shutter",
+    "audioGain",
+    "studioQuality",
+];
+
 /// Composition fields that may be absent; cleared rather than inherited when
 /// the open composition changes.
-pub const OPTIONAL_COMP_FIELDS: [&str; 2] = ["fpsRational", "audioGain"];
+pub const OPTIONAL_COMP_FIELDS: [&str; 3] = ["fpsRational", "audioGain", "studioQuality"];
 
 fn is_comp_field(key: &str) -> bool {
-    COMP_FIELDS.contains(&key)
+    COMPOSITION_FIELDS.contains(&key)
 }
 
 /// Top-level project key for a key on a stored composition (`COMP_TO_ROOT`).
@@ -70,7 +89,7 @@ fn comp_to_root(key: &str) -> Option<&'static str> {
     match key {
         "id" => Some("compId"),
         "name" => Some("compName"),
-        _ => COMP_FIELDS.iter().copied().find(|f| *f == key),
+        _ => COMPOSITION_FIELDS.iter().copied().find(|f| *f == key),
     }
 }
 
@@ -79,7 +98,7 @@ fn root_to_comp(key: &str) -> Option<&'static str> {
     match key {
         "compId" => Some("id"),
         "compName" => Some("name"),
-        _ => COMP_FIELDS.iter().copied().find(|f| *f == key),
+        _ => COMPOSITION_FIELDS.iter().copied().find(|f| *f == key),
     }
 }
 
@@ -370,7 +389,7 @@ fn root_comp(project: &Map) -> Map {
     if let Some(name) = project.get("compName") {
         comp.insert("name", name.clone());
     }
-    for key in COMP_FIELDS {
+    for key in COMPOSITION_FIELDS {
         if let Some(v) = project.get(key) {
             comp.insert(key, v.clone());
         }
@@ -418,7 +437,7 @@ pub fn rotate_project(project: Value, id: &JsString) -> Value {
         _ => Value::from("Comp"),
     };
     next.insert("compName", name);
-    for key in COMP_FIELDS {
+    for key in COMPOSITION_FIELDS {
         match target.get(key) {
             Some(v) => {
                 next.insert(key, v.clone());
