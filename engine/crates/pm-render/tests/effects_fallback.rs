@@ -963,3 +963,36 @@ fn user_programs_draw_natively_on_first_use() {
         assert_eq!(render(&mut r, &doc).unwrap(), first, "{kind}");
     }
 }
+
+#[test]
+fn fallback_extension_uniforms_use_the_requested_raster_on_every_pass() {
+    let _gpu = gpu();
+    let mut r = renderer();
+    r.set_shader_fallback_runner(true);
+    let doc = stack(fx("acme.cube-invert"), Value::Null);
+    let req = RenderRequest {
+        export: true,
+        output_kind: pm_render::OutputKind::Final,
+        ..RenderRequest::at_scale(Size::new(64, 32), 0.5, Precision::Float16)
+    };
+    let requests = match r.render(
+        &doc,
+        "P-root",
+        Ticks::new(0).unwrap(),
+        &req,
+        &MapResolver::default(),
+    ) {
+        Err(RenderError::ShaderFallbackPending(requests)) => requests,
+        other => panic!("expected fallback, got {:?}", other.map(|_| ())),
+    };
+    let q = &requests[0];
+    assert_eq!((q.width, q.height), (32, 16));
+    for calls in std::iter::once(&q.calls).chain(&q.more_passes) {
+        let get = |name: &str| &calls.iter().find(|c| c.name == name).unwrap().v;
+        assert_eq!(get("u_res"), &[32., 16.]);
+        assert_eq!(get("u_texel"), &[1. / 32., 1. / 16.]);
+        assert_eq!(get("u_sourceRes"), &[32., 16.]);
+        assert_eq!(get("u_effectScale"), &[0.5, 0.5]);
+        assert_eq!(get("u_pixelScale"), &[0.5, 0.5]);
+    }
+}

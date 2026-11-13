@@ -38,7 +38,7 @@ type Resources = Arc<pm_engine_service::resources::ResourceSnapshot>;
 /// Each open document's extension definitions (its window's), for the
 /// captures and exports agents start; a request copies them when it starts.
 static RESOURCES: Mutex<Option<HashMap<u64, Resources>>> = Mutex::new(None);
-/// Document `doc_id`'s definitions now (none: its window has no extensions).
+/// Document `doc_id`'s window definitions (none: no window publication).
 pub(crate) fn set_resources(doc_id: u64, resources: Option<Resources>) {
     let mut all = RESOURCES.lock().unwrap();
     let all = all.get_or_insert_with(HashMap::new);
@@ -55,7 +55,7 @@ pub fn connect_engine(
     tools: &Tools,
     activity: pm_engine_service::jobs::Activity,
     overrides: OverrideWindows,
-) -> AnyResult<()> {
+) -> AnyResult<Arc<EngineJobs>> {
     let jobs = EngineJobs::new(
         tools.host.kernel.clone(),
         std::env::current_exe()?,
@@ -72,7 +72,7 @@ pub fn connect_engine(
     ));
     automation.media_registry = Some(jobs.clone());
     automation.threads = Some(jobs.clone());
-    automation.engine = Some(jobs);
+    automation.engine = Some(jobs.clone());
     let extensions = crate::extension_authoring::AppExtensions::new(tools.host.profile.clone());
     // Before any window scans: finish or undo a promotion a crash interrupted.
     if let Err(error) = pm_mcp::extensions::recover_all(&extensions) {
@@ -80,7 +80,7 @@ pub fn connect_engine(
     }
     automation.extensions = Some(Arc::new(extensions));
     automation.store_reads = Some(Arc::new(StoreHttp));
-    Ok(())
+    Ok(jobs)
 }
 /// The Store's public read routes over the system HTTP stack, for
 /// `store_search`, `store_extension` and `store_source` (runs on MCP workers).
@@ -145,7 +145,12 @@ pub fn headless(profile: PathBuf, exports: PathBuf, launch: Option<PathBuf>) -> 
             )?;
         }
         let tools = Tools::new(host, exports);
-        connect_engine(&tools, Default::default(), Default::default())?;
+        let jobs = connect_engine(&tools, Default::default(), Default::default())?;
+        if let Some(session) = tools.host.current()
+            && let Some(published) = tools.host.kernel.published(&session.project)
+        {
+            jobs.resources(&published)?;
+        }
         let shared = tools.clone();
         let server =
             pm_mcp::transport::LoopbackServer::start_with(&profile, move || shared.connect())?;
@@ -161,6 +166,10 @@ pub fn headless(profile: PathBuf, exports: PathBuf, launch: Option<PathBuf>) -> 
     .join()
     .map_err(|_| anyhow::anyhow!("MCP worker panicked"))?
 }
+struct ProjectExtensions {
+    project: String,
+    host: Arc<pm_compat_runner::host::ExtensionHost>,
+}
 /// Starts engine child jobs from the running executable. `activity` lets the
 /// viewer keep precedence over export bands, as it does for panel exports.
 pub struct EngineJobs {
@@ -172,6 +181,10 @@ pub struct EngineJobs {
     progress: Mutex<HashMap<u64, Progress>>,
     /// Whose extensions answer a project's raster overrides.
     overrides: OverrideWindows,
+    /// Projects without a window still own the production V8 extension host.
+    /// Its discovery, enabled preferences, reloads and Store confinement are
+    /// identical to a window's; only DOM panels are absent.
+    extensions: Mutex<HashMap<u64, ProjectExtensions>>,
 }
 impl EngineJobs {
     pub fn new(
@@ -189,7 +202,53 @@ impl EngineJobs {
             profile,
             progress: Mutex::default(),
             overrides,
+            extensions: Mutex::default(),
         })
+    }
+    pub(crate) fn resources(&self, published: &Arc<Published>) -> AnyResult<Resources> {
+        if let Some(resources) = resources_of(published.snapshot.doc_id) {
+            // Retire a worker host once the window owns this document again.
+            self.extensions
+                .lock()
+                .unwrap()
+                .remove(&published.snapshot.doc_id);
+            return Ok(resources);
+        }
+        let host = {
+            let mut hosts = self.extensions.lock().unwrap();
+            hosts.retain(|doc, entry| {
+                // A closed/reopened document must not keep an old realm alive.
+                self.kernel
+                    .published(&entry.project)
+                    .is_some_and(|p| p.snapshot.doc_id == *doc)
+            });
+            hosts
+                .entry(published.snapshot.doc_id)
+                .or_insert_with(|| ProjectExtensions {
+                    project: published.project.clone(),
+                    host: Arc::new(pm_compat_runner::host::ExtensionHost::start(
+                        pm_compat_runner::host::HostConfig {
+                            kernel: self.kernel.clone(),
+                            project: published.project.clone(),
+                            roots: crate::extensions::roots(&self.profile),
+                            cache: self.profile.join("extensions-build"),
+                            owner: None,
+                            text: None,
+                            frames: None,
+                            rasters: None,
+                            wake: Arc::new(|| {}),
+                        },
+                    )),
+                })
+                .host
+                .clone()
+        };
+        let (generation, value) = host.wait_contributions(Duration::from_secs(60))?;
+        Ok(Arc::new(pm_engine_service::resources::ResourceSnapshot {
+            generation,
+            definitions: crate::extensions::definitions(&value),
+            ..Default::default()
+        }))
     }
     fn published(&self, frozen: &FrozenProject) -> Result<Arc<Published>> {
         self.kernel
@@ -224,10 +283,9 @@ impl EngineJobs {
             destination,
         )?;
         request.preview = preview;
-        // An agent's capture draws the effects its project's window defines.
-        if let Some(resources) = resources_of(published.snapshot.doc_id) {
-            request.resources = (*resources).clone();
-        }
+        // Pin the window's definitions, or activate the same host without a
+        // page when this project has no window (headless, agents, posters).
+        request.resources = (*self.resources(published)?).clone();
         // A capture shows the project as the viewer does; a video is a delivery.
         request.bypass_missing_effects = look;
         // As the shipped app's agent exports: silent offline clips are left

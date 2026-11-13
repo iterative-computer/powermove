@@ -290,6 +290,15 @@ pub(crate) fn roots(profile: &std::path::Path) -> Vec<PathBuf> {
         profile.join("extensions"),
     ]
 }
+/// Window viewers and headless jobs decode the same realm snapshot.
+pub(crate) fn definitions(value: &Value) -> Vec<pm_protocol::definitions::DefinitionSnapshot> {
+    value["definitions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|d| serde_json::from_value(d.clone()).ok())
+        .collect()
+}
 /// The app's one effect clipboard: Effect Controls in every window and v1–3
 /// extensions' inspector service copy and paste through it.
 pub(crate) fn effect_clipboard() -> pm_builtins::EffectClipboard {
@@ -1095,12 +1104,7 @@ impl Controller {
         shell.contributed_choices = self.extensions.palette_choices();
         shell.set_contributed_bindings(OWNER, bindings);
         drop(shell);
-        let definitions: Vec<_> = value["definitions"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|definition| serde_json::from_value(definition.clone()).ok())
-            .collect();
+        let definitions = definitions(&value);
         if definitions != self.extensions.resources.definitions {
             self.extensions.resources = Arc::new(ResourceSnapshot {
                 generation: self.extensions.resources.generation + 1,
