@@ -231,11 +231,12 @@ fn colour_effects_grade_the_straight_colour_of_a_transparent_pixel() {
     }
 }
 
-/// A grade belongs on an adjustment layer. An effect that reads its layer's
-/// rectangle (Levels does) sees the composition there, and gives what it
-/// gives on the layer below.
+/// A grade belongs on an adjustment layer or a group. An effect that reads
+/// its layer's rectangle (Levels does) sees the composition on an adjustment
+/// layer and the members' rectangle on a group, and gives what it gives on
+/// the layer itself. (A text layer: `text_colors`.)
 #[test]
-fn an_effect_that_reads_its_layers_rectangle_grades_on_an_adjustment_layer() {
+fn an_effect_that_reads_its_layers_rectangle_grades_on_an_adjustment_layer_and_a_group() {
     let mut renderer = Renderer::headless().unwrap();
     let colour = [0.6, 0.3, 0.15, 1.0];
     for (id, overrides) in [
@@ -248,22 +249,27 @@ fn an_effect_that_reads_its_layers_rectangle_grades_on_an_adjustment_layer() {
     ] {
         let direct = graded(id, None, overrides.clone(), colour);
         let expected = pixel(&mut renderer, &direct);
-        let mut over = direct.clone();
-        let fx = over["layers"][0]["fx"].take();
-        over["layers"][0]["fx"] = json!([]);
-        let mut adjustment = layer("grade", "adjustment", json!({}), 0., 0., 1.);
-        adjustment["fx"] = fx;
-        over["layers"].as_array_mut().unwrap().insert(0, adjustment);
-        let out = pixel(&mut renderer, &over);
-        for c in 0..4 {
-            assert!(
-                (out[c] - expected[c]).abs() < 1e-6,
-                "{id} on an adjustment layer: {out:?}, on the layer {expected:?}"
-            );
-        }
         assert!(
-            (0..3).any(|c| (out[c] - colour[c]).abs() > 1e-3),
+            (0..3).any(|c| (expected[c] - colour[c]).abs() > 1e-3),
             "{id}: the grade changes the colour"
         );
+        for holder in ["adjustment", "group"] {
+            let mut over = direct.clone();
+            let fx = over["layers"][0]["fx"].take();
+            over["layers"][0]["fx"] = json!([]);
+            let mut grade = layer("grade", holder, json!({}), 0., 0., 1.);
+            grade["fx"] = fx;
+            if holder == "group" {
+                over["layers"][0]["group"] = json!("grade");
+            }
+            over["layers"].as_array_mut().unwrap().insert(0, grade);
+            let out = pixel(&mut renderer, &over);
+            for c in 0..4 {
+                assert!(
+                    (out[c] - expected[c]).abs() < 1e-6,
+                    "{id} on {holder}: {out:?}, on the layer {expected:?}"
+                );
+            }
+        }
     }
 }
