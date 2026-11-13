@@ -417,7 +417,7 @@ fn set_property_inner(
     // Migrate only an inactive legacy atmosphere when it is first enabled.
     // This remains part of this single-writer edit and its Undo record.
     if migrate_fog && channel == "world.fogDensity" && !keyed && value.as_f64().is_some_and(|v| v > 0.) {
-        migrate_inactive_landscape_fog(cx, &loc, &mut layer)?;
+        migrate_inactive_fog(&mut layer)?;
     }
     if keyed {
         let prop = channels::get_mut(&mut layer, &path).expect("resolved");
@@ -465,15 +465,9 @@ fn set_property_inner(
 }
 
 /// Never reinterpret active, animated, expression-driven or hand-shaped fog.
-fn migrate_inactive_landscape_fog(
-    cx: &Cx<'_>,
-    loc: &LayerLoc,
-    layer: &mut Value,
-) -> Result<(), CommandError> {
-    let comp = pm_scene3d::from_model(&cx.comp_node(loc.comp_id.as_deref())?.to_value())
-        .map_err(|e| CommandError::Invalid(e.to_string()))?;
+fn migrate_inactive_fog(layer: &mut Value) -> Result<(), CommandError> {
     let source = pm_scene3d::from_model(layer).map_err(|e| CommandError::Invalid(e.to_string()))?;
-    if !pm_scene3d::contract::inactive_legacy_landscape_fog(&comp, &source) {
+    if !pm_scene3d::contract::inactive_legacy_fog(&source) {
         return Ok(());
     }
     for (key, value) in [("fogHeightFalloff", 0.06), ("fogDistance", 400.)] {

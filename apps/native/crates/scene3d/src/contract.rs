@@ -271,9 +271,9 @@ pub fn channels(object: &Value) -> Vec<(String, &Value)> {
     out
 }
 
-/// An inactive, unanimated legacy default may adopt the landscape atmosphere.
+/// An inactive, unanimated legacy default may adopt the bounded atmosphere.
 /// Called only by an explicit density edit, never by document deserialization.
-pub fn inactive_legacy_landscape_fog(comp: &Value, layer: &Value) -> bool {
+pub fn inactive_legacy_fog(layer: &Value) -> bool {
     let world = &layer["d"]["data"]["object"]["world"];
     if !world.is_object() {
         return false;
@@ -298,11 +298,7 @@ pub fn inactive_legacy_landscape_fog(comp: &Value, layer: &Value) -> bool {
             return false;
         }
     }
-    comp["layers"].as_array().is_some_and(|layers| {
-        layers
-            .iter()
-            .any(|l| l["d"]["data"]["object"].get("terrain").is_some())
-    })
+    true
 }
 
 /// Typed actor plan for environment layers and composition quality.
@@ -404,7 +400,7 @@ pub fn plan(
     }
     if kind == "world" && patch["p"]["fogDensity"].as_f64().is_some_and(|v|v>0.)
         && ["fogBaseHeight","fogHeightFalloff","fogDistance"].iter().all(|k| patch["p"].get(*k).is_none())
-        && existing.is_some_and(|l| inactive_legacy_landscape_fog(comp,l)) {
+        && existing.is_none_or(inactive_legacy_fog) {
         patch["p"]["fogHeightFalloff"]=json!(0.06);
         patch["p"]["fogDistance"]=json!(400.);
     }

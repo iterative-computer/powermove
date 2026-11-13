@@ -2484,3 +2484,24 @@ checks pass for scale arithmetic and estimate invalidation. A headless Metal
 integration test observes actual transport requests changing from 64×64 to
 48×48 at 75%, while delivery remains 64×64 and the document stays identical.
 Full-HD real-export timings of the option are recorded separately when available.
+
+### Studio fog without terrain
+
+Enabling an untouched, inactive legacy World no longer retains a uniform
+10 km fog volume merely because the composition has no terrain. A positive
+`world.fogDensity` property edit or `set_world` activation adopts the existing
+bounded defaults: height falloff 0.06 and distance 400. Creating a World with
+positive density and no authored shape uses the same defaults.
+
+The kernel owns this change in the original action and journal entry. Undo,
+Redo and save/reopen retain it exactly. Active, keyed, expression-driven,
+hand-shaped and explicitly patched fog stays authored; opening a project does
+not rewrite it. No panel or control is added.
+
+Verification: all 38 native scene kernel regressions pass (0.33 s), including
+studio activation, creation, explicit-shape preservation and Undo/reopen.
+The headless GPU checks for scale and fog pass (10.38 s); foreground mean RGB
+with fog is 0.356825 in Live and 0.493285 in Refine. These correspond to the
+current native pane's Fast and Quality labels. The combined app builds in
+31.86 s. These checks were completed before the travel pause on the identical
+fog source; they do not substitute for the remaining full scene regressions.
