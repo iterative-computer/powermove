@@ -4166,3 +4166,80 @@ fn the_shortcuts_page_publishes_the_apps_page_and_hands_its_actions_to_the_app()
             .is_err()
     );
 }
+
+/// Round 7: an imported model's material slots are Properties sections with
+/// the file's own values; an edit becomes a keyframeable `mi.<slot>.<key>`.
+#[test]
+fn properties_list_an_imported_models_parts_with_their_own_values() {
+    let actor = actor();
+    let kernel = actor.handle();
+    let run = |args: Value| {
+        let call = pm_kernel::Call::Transact {
+            label: None,
+            expected_revision: None,
+            body: pm_kernel::WriteBody::Commands(vec![
+                pm_kernel::Scene3dCommand::Apply {
+                    comp: None,
+                    args: data::model(&args).unwrap(),
+                    selection: vec![],
+                    time: 0.,
+                    autokey: false,
+                }
+                .into(),
+            ]),
+        };
+        let ack = kernel
+            .call("synthetic", Request::new(Caller::native(), call))
+            .wait()
+            .unwrap()
+            .unwrap();
+        if let pm_kernel::Reply::Throw(e) = &ack.reply {
+            panic!("{args}: {e}");
+        }
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("Product.gltf");
+    std::fs::write(
+        &file,
+        r#"{"asset":{"version":"2.0"},"materials":[{"name":"Aluminium","pbrMetallicRoughness":{"metallicFactor":1,"roughnessFactor":0.4}},{"name":"Glass"}]}"#,
+    )
+    .unwrap();
+    run(json!({"operation":"add_object","id":"model","object":{"source":{"assetId":"a1"},"useSourceMaterials":true}}));
+    let mut presenter = properties::Properties::default();
+    presenter.originals.insert("a1".into(), file);
+    let publish = |presenter: &mut properties::Properties| {
+        select_layer(&kernel, "model");
+        let mut model = pm_panel_inspector::Inspector::new(
+            kernel.published("synthetic").unwrap(),
+            Default::default(),
+        );
+        presenter.snapshot(&mut model, 0., false).unwrap()
+    };
+    let row = |p: &Value, id: &str| {
+        p["sections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|s| s["rows"].as_array().unwrap())
+            .find(|r| r["id"] == id)
+            .cloned()
+    };
+    let p = publish(&mut presenter);
+    let titles: Vec<_> = p["sections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|s| s["id"].as_str().unwrap().starts_with("3d.part."))
+        .map(|s| s["title"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(titles, ["Aluminium", "Glass"]);
+    let rough = row(&p, "3d.part.0.roughness").expect("the file's roughness");
+    assert_eq!(rough["control"]["axes"][0]["value"], 0.4);
+    assert!(row(&p, "3d.part.1.map.color").is_some(), "a layer can be the part's colour");
+    run(json!({"operation":"set_material_properties","target":"model","materialIndex":0,"patch":{"roughness":0.1}}));
+    let p = publish(&mut presenter);
+    let rough = row(&p, "mi.0.roughness").expect("an override is a channel row");
+    assert_eq!(rough["control"]["axes"][0]["value"], 0.1);
+    assert_eq!(rough["animation"], "static");
+    assert!(row(&p, "3d.part.0.roughness").is_none());
+}

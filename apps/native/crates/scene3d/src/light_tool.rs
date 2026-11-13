@@ -308,3 +308,144 @@ impl Tuning {
         self.change.take().map(|c| (c.id, c.before))
     }
 }
+
+/// Where a light preset goes for a product centred at `c` with radius `r`,
+/// seen from `eye`. Directions are the camera's: "left" is screen left and
+/// "behind" is away from the camera.
+pub struct Placement {
+    pub at: Vec3,
+    pub width: f64,
+    pub height: f64,
+    pub intensity: f64,
+    pub name: &'static str,
+}
+/// The edge-highlight presets (the iPad film's missing look: thin bright
+/// lines along chamfered edges):
+/// - `rim_left` / `rim_right`: a tall, thin strip behind and beside the
+///   product, so its silhouette edge catches a bright line;
+/// - `top`: a large softbox overhead for a soft top gradient;
+/// - `edge_card`: a narrow card beside the product, slightly toward the
+///   camera, so the near chamfer (and a lens ring) catches a highlight;
+/// - `strip`: a front-side strip, the usual product key.
+pub fn preset_placement(preset: &str, c: Vec3, r: f64, eye: Vec3) -> Result<Placement> {
+    let mut f = sub(c, eye);
+    f[1] = 0.;
+    let f = if length(f) < 1e-6 { [0., 0., -1.] } else { normalize(f) };
+    let right = normalize(cross(f, [0., 1., 0.]));
+    let up = [0., 1., 0.];
+    let at = |side: f64, ahead: f64, lift: f64| {
+        add(add(add(c, mul(right, side * r)), mul(f, ahead * r)), mul(up, lift * r))
+    };
+    Ok(match preset {
+        "rim_left" => Placement {
+            at: at(-2.2, 1.6, 0.3),
+            width: 0.22 * r,
+            height: 3.2 * r,
+            intensity: 30.,
+            name: "Rim Strip Left",
+        },
+        "rim_right" => Placement {
+            at: at(2.2, 1.6, 0.3),
+            width: 0.22 * r,
+            height: 3.2 * r,
+            intensity: 30.,
+            name: "Rim Strip Right",
+        },
+        "top" => Placement {
+            at: at(0., 0.2, 3.),
+            width: 2.6 * r,
+            height: 2.6 * r,
+            intensity: 12.,
+            name: "Top Softbox",
+        },
+        "edge_card" => Placement {
+            at: at(2.4, -0.5, 0.5),
+            width: 0.35 * r,
+            height: 2.4 * r,
+            intensity: 25.,
+            name: "Edge Highlight Card",
+        },
+        "strip" => Placement {
+            at: at(-2., -1.2, 1.),
+            width: 0.3 * r,
+            height: 3. * r,
+            intensity: 15.,
+            name: "Strip Light",
+        },
+        _ => return fail("Choose a light preset: rim_left, rim_right, top, edge_card or strip"),
+    })
+}
+/// A light's colour for a colour temperature in kelvin (1000–40000 K), as
+/// sRGB hex: 6500 K is about white, 3200 K tungsten, 9000 K cool daylight.
+pub fn kelvin_hex(kelvin: f64) -> String {
+    let t = kelvin.clamp(1000., 40000.) / 100.;
+    let red = if t <= 66. {
+        255.
+    } else {
+        329.698727446 * (t - 60.).powf(-0.1332047592)
+    };
+    let green = if t <= 66. {
+        99.4708025861 * t.ln() - 161.1195681661
+    } else {
+        288.1221695283 * (t - 60.).powf(-0.0755148492)
+    };
+    let blue = if t >= 66. {
+        255.
+    } else if t <= 19. {
+        0.
+    } else {
+        138.5177312231 * (t - 10.).ln() - 305.0447927307
+    };
+    let c = |v: f64| v.round().clamp(0., 255.) as u8;
+    format!("#{:02X}{:02X}{:02X}", c(red), c(green), c(blue))
+}
+/// The colour temperature (100 K steps, 1000–12000 K) whose colour is
+/// nearest a light's sRGB hex, for the Light panel's Temperature reading.
+pub fn kelvin_of(hex: &str) -> Option<f64> {
+    let rgb = |h: &str| -> Option<[i32; 3]> {
+        let h = h.strip_prefix('#')?;
+        if h.len() != 6 {
+            return None;
+        }
+        let n = |i: usize| i32::from_str_radix(&h[i..i + 2], 16).ok();
+        Some([n(0)?, n(2)?, n(4)?])
+    };
+    let want = rgb(hex)?;
+    (10..=120)
+        .map(|k| f64::from(k) * 100.)
+        .min_by_key(|k| {
+            let got = rgb(&kelvin_hex(*k)).unwrap_or_default();
+            (0..3).map(|i| (got[i] - want[i]).pow(2)).sum::<i32>()
+        })
+}
+
+#[cfg(test)]
+mod preset_tests {
+    use super::*;
+    #[test]
+    fn rim_strips_sit_behind_and_beside_the_product_as_the_camera_sees_it() {
+        // Camera on +z looking at the origin: screen right is +x, behind is -z.
+        let eye = [0., 0., 5.];
+        let left = preset_placement("rim_left", [0., 0., 0.], 1., eye).unwrap();
+        let right = preset_placement("rim_right", [0., 0., 0.], 1., eye).unwrap();
+        assert!(left.at[0] < -1. && left.at[2] < -1., "{:?}", left.at);
+        assert!(right.at[0] > 1. && right.at[2] < -1., "{:?}", right.at);
+        assert!(left.height > 10. * left.width, "a strip is tall and thin");
+        let top = preset_placement("top", [0., 0., 0.], 1., eye).unwrap();
+        assert!(top.at[1] > 2.);
+        let card = preset_placement("edge_card", [0., 0., 0.], 1., eye).unwrap();
+        assert!(card.at[0] > 1. && card.at[2] > 0., "beside, toward the camera");
+        assert!(preset_placement("disco", [0.; 3], 1., eye).is_err());
+    }
+    #[test]
+    fn colour_temperature_runs_warm_to_cool() {
+        assert_eq!(kelvin_hex(6600.), "#FFFFFF");
+        let warm = kelvin_hex(3200.);
+        let cool = kelvin_hex(9000.);
+        assert!(warm.starts_with("#FF") && &warm[5..] < "C0", "{warm}");
+        assert!(cool.ends_with("FF") && &cool[1..3] < "E0", "{cool}");
+        assert_eq!(kelvin_of(&kelvin_hex(3200.)), Some(3200.));
+        assert_eq!(kelvin_of("#FFFFFF"), Some(6600.));
+        assert_eq!(kelvin_of("nope"), None);
+    }
+}

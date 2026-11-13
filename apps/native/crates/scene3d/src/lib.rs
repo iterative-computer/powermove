@@ -9,6 +9,7 @@ pub mod light_tool;
 pub mod migration;
 pub mod navigation;
 pub mod operations;
+pub mod part_material;
 pub mod presentation;
 pub mod render;
 pub mod schema;

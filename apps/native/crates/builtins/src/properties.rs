@@ -28,6 +28,10 @@ pub struct Properties {
     pub(crate) commands: Vec<(String, Vec<Value>)>,
     /// Each listed row's label, for what a row action shows about it.
     labels: BTreeMap<String, String>,
+    /// Imported files by asset ID, for a model's material slots (read once
+    /// per asset into `slots`).
+    pub originals: BTreeMap<String, std::path::PathBuf>,
+    slots: BTreeMap<String, Vec<Value>>,
 }
 /// What Add Expression… starts from, as the shipped editor did.
 pub const STARTING_EXPRESSION: &str = "value + wiggle(2, 20)";
@@ -392,6 +396,7 @@ impl Properties {
                 if let Some((role, fields)) = pm_panel_studio3d::properties::fields(&record) {
                     sections
                         .extend(self.scene_sections(model, &layer, &record, role, fields, time)?);
+                    sections.extend(self.part_sections(model, &layer, &record, time)?);
                 } else if matches!(record["type"].as_str(), Some("text" | "shape")) {
                     sections.extend(self.extrude_sections(model, &layer, &record, time)?);
                 }
@@ -720,6 +725,104 @@ impl Properties {
             .or_insert_with(|| format!("{}#{id}", self.key))
             .clone();
         json!({"handle":handle,"channels":[id]})
+    }
+    /// An imported model's material slots (its parts): one section each,
+    /// closed until opened, with the part's own values until it's edited.
+    /// Edits are overrides in the project (`mi.<slot>.<key>`, keyframeable);
+    /// the file is never touched.
+    fn part_sections(
+        &mut self,
+        model: &mut Inspector,
+        layer: &str,
+        record: &Value,
+        time: f64,
+    ) -> Result<Vec<Value>, String> {
+        let object = &record["d"]["data"]["object"];
+        let Some(asset) = object["source"]["assetId"].as_str() else {
+            return Ok(vec![]);
+        };
+        if object["useSourceMaterials"] != true {
+            return Ok(vec![]);
+        }
+        if !self.slots.contains_key(asset) {
+            let slots = self
+                .originals
+                .get(asset)
+                .and_then(|path| Some((path.file_name()?.to_string_lossy().into_owned(), std::fs::read(path).ok()?)))
+                .map(|(name, bytes)| pm_scene3d::import::material_slot_values_from_file(&name, &bytes))
+                .unwrap_or_default();
+            if self.originals.contains_key(asset) {
+                self.slots.insert(asset.to_owned(), slots);
+            }
+        }
+        let slots = self.slots.get(asset).cloned().unwrap_or_default();
+        let locked = !model.editable(layer);
+        let live = pm_panel_studio3d::extrude::sources(model.published(), layer)
+            .map_err(|e| e.to_string())?;
+        let mut sections = vec![];
+        for slot in slots {
+            let Some(index) = slot["index"].as_u64() else { continue };
+            let title = slot["name"].as_str().unwrap_or("Part").to_owned();
+            let stored = &object["sourceMaterialProperties"][index.to_string()];
+            let mut rows = vec![];
+            for (key, label, range, unit) in [
+                ("color", "Color", None, ""),
+                ("metallic", "Metalness", Some((0., 1., 0.01)), ""),
+                ("roughness", "Roughness", Some((0., 1., 0.01)), ""),
+                ("clearcoat", "Clearcoat", Some((0., 1., 0.01)), ""),
+                ("transmission", "Transmission", Some((0., 1., 0.01)), ""),
+                ("ior", "IOR", Some((1., 2.6, 0.01)), ""),
+                ("emissionColor", "Emission", None, ""),
+                ("emissionIntensity", "Emission Strength", Some((0., 100., 0.1)), ""),
+                ("iridescence", "Iridescence", Some((0., 1200., 10.)), "nm"),
+            ] {
+                let path = format!("mi.{index}.{key}");
+                if stored.get(key).is_some() {
+                    let binding = Binding::Property(PropertyId::new(layer, &path));
+                    if let Ok(state) = model.binding_state(&binding, time) {
+                        let value = super::data::wire(&state.value);
+                        let lease = self.lease(model, &path, binding)?;
+                        let control = match (range, &value) {
+                            (_, Value::String(_)) => json!({"kind":"colour","binding":lease,"value":value}),
+                            (Some((min, max, step)), Value::Number(_)) => json!({"kind":"number","axes":[{"binding":lease,"value":value,"unit":unit,"step":step,"precision":2,"min":min,"max":max}]}),
+                            _ => continue,
+                        };
+                        let animation = if state.key_at_playhead {
+                            "key-at-playhead"
+                        } else if state.animated {
+                            "animated"
+                        } else {
+                            "static"
+                        };
+                        rows.push(json!({"id":path,"label":label,"locked":locked,"animation":animation,"control":control}));
+                        continue;
+                    }
+                }
+                // Not overridden yet: the part's own value; the first edit
+                // creates the override.
+                let id = format!("3d.part.{index}.{key}");
+                let lease = self.control_lease(&id);
+                let value = slot["values"][key].clone();
+                let control = match range {
+                    None => json!({"kind":"colour","binding":lease,"value":if value.is_string() { value } else { json!("#FFFFFF") }}),
+                    Some((min, max, step)) => json!({"kind":"number","axes":[{"binding":lease,"value":if value.is_number() { value } else { json!(min) },"unit":unit,"step":step,"precision":2,"min":min,"max":max}]}),
+                };
+                rows.push(json!({"id":id,"label":label,"locked":locked,"animation":null,"control":control}));
+            }
+            // AE 27: a layer, group or composition as the part's material.
+            let mut options = vec![json!({"v":null,"label":"None"})];
+            options.extend(live.iter().cloned());
+            let value = pm_panel_studio3d::extrude::source_value(
+                &object["sourceMaterials"][index.to_string()]["color"],
+            );
+            let id = format!("3d.part.{index}.map.color");
+            let lease = self.control_lease(&id);
+            rows.push(json!({"id":id,"label":"Color Map","locked":locked,"animation":null,"control":{"kind":"choice","binding":lease,"value":value,"options":options}}));
+            let id = format!("3d.part.{index}");
+            let collapsed = self.collapsed.get(&id).copied().unwrap_or(true);
+            sections.push(json!({"id":id,"title":title,"collapsed":collapsed,"rows":rows}));
+        }
+        Ok(sections)
     }
     /// Text and shape extrusion: Extrude (on, depth, bevel, detail), then
     /// Front, Bevel, Side and Back, each with its own look. A surface value

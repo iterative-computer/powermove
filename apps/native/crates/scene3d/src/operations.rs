@@ -195,6 +195,13 @@ pub fn plan(
     let operation = args["operation"]
         .as_str()
         .ok_or_else(|| Error("Missing 3D operation".into()))?;
+    // Per-part materials on imported models; text and shapes fall through
+    // to extrusion's surfaces.
+    if matches!(operation, "set_material_properties" | "set_material_map")
+        && let Some(plan) = crate::part_material::plan(comp, args, selection)?
+    {
+        return Ok(plan);
+    }
     if crate::extrusion::OPERATIONS.contains(&operation) {
         return crate::extrusion::plan(comp, args, selection);
     }
@@ -216,6 +223,8 @@ pub fn plan(
     if [
         "apply_material",
         "light_highlight",
+        "light_preset",
+        "aim_light",
         "shot",
         "set_studio",
         "soften",
