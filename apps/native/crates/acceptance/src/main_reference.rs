@@ -25,7 +25,10 @@ pub fn expected_catalog() -> Value {
         serde_json::from_str(include_str!("../data/fixtures/scene3d-source-catalog.json"))
             .expect("pinned Studio source contracts");
     for overlay in studio["tools"].as_array().unwrap() {
-        assert!(["edit_3d", "get_3d_scene"].contains(&overlay["name"].as_str().unwrap()));
+        assert!(
+            ["edit_3d", "get_3d_scene", "export_video"]
+                .contains(&overlay["name"].as_str().unwrap())
+        );
         let base = catalog["tools"]
             .as_array_mut()
             .unwrap()
