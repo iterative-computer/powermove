@@ -80,6 +80,118 @@ impl Drop for Client {
         let _ = self.child.wait();
     }
 }
+
+#[test]
+fn app_headless_clean_reopen_handles_stale_connection_and_torn_lock() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = root.path().join("profile");
+    std::fs::create_dir_all(profile.join("store")).unwrap();
+    std::fs::write(profile.join("store/library.lock"), b"{\"pid\":").unwrap();
+    let mut first = Client::new(&profile, None);
+    first.rpc("initialize", json!({}));
+    let id = first.tool("create_project", json!({"name":"Synthetic clean reopen"}))["projectId"].clone();
+    first.tool("start_session", json!({"prompt":"Synthetic reopen test"}));
+    first.tool("apply_commands", json!({"commands":[{"type":"add_layer","id":"synthetic","layerType":"solid","name":"Synthetic"}]}));
+    first.tool("save_project", json!({}));
+    first.tool("finish_session", json!({"commit":true}));
+    drop(first.input.take());
+    assert!(first.child.wait().unwrap().success());
+    // A descriptor from a killed/older app must not force the next launch to proxy.
+    let descriptor = profile.join("mcp/connection.json");
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&descriptor).unwrap();
+    write!(file, "{}", json!({"version":1,"instanceId":"synthetic-stale","pid":i32::MAX,"port":1,"token":"0".repeat(64)})).unwrap();
+    drop(file);
+    let mut second = Client::new(&profile, None);
+    second.rpc("initialize", json!({}));
+    let opened = second.tool("open_project", json!({"projectId":id}));
+    assert_ne!(opened["recoveryRequired"], true, "{opened}");
+    second.tool("start_session", json!({"prompt":"Inspect reopened work"}));
+    assert_eq!(second.tool("get_project_state", json!({"indexOnly":true}))["layerCount"], 1);
+    second.tool("finish_session", json!({"commit":true}));
+    drop(second.input.take());
+    assert!(second.child.wait().unwrap().success());
+    assert!(!descriptor.exists());
+}
+
+#[test]
+fn app_headless_geometry_and_highlights_work_without_an_editor_view() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("triangle.glb");
+    std::fs::write(&path, pm_scene3d::import::triangle_glb(&[[0.,0.,0.],[0.2,0.,0.],[0.,0.4,0.]], &[0,1,2])).unwrap();
+    let mut client = Client::new(&root.path().join("profile"), None);
+    client.rpc("initialize", json!({}));
+    client.tool("create_project", json!({"name":"Synthetic headless geometry"}));
+    client.tool("start_session", json!({"prompt":"Synthetic model placement"}));
+    let asset = client.tool("import_media_to_timeline", json!({"path":path}))["assetId"].clone();
+    client.tool("edit_3d", json!({"operation":"add_object","id":"source-scale","object":{"source":{"assetId":asset}},"keepRealWorldScale":true}));
+    let source = client.tool("get_3d_scene", json!({"target":"source-scale"}));
+    assert!((source["scene"]["objects"][0]["p"]["sy"]["v"].as_f64().unwrap() - 0.05_f64.sqrt() / 0.1).abs() < 1e-5);
+    client.tool("edit_3d", json!({"operation":"add_object","id":"model","object":{"source":{"assetId":asset}}}));
+    client.tool("edit_3d", json!({"operation":"auto_studio","target":"model"}));
+    client.tool("edit_3d", json!({"operation":"drop_to_floor","target":"model"}));
+    client.tool("edit_3d", json!({"operation":"set_camera","patch":{"p":{"x":0,"y":4,"z":6}}}));
+    let light = client.tool("edit_3d", json!({"operation":"light_highlight","at":[0,1,0],"normal":[0,0,1]}))["result"]["id"].clone();
+    let scene = client.tool("get_3d_scene", json!({}));
+    let highlight = scene["scene"]["lights"].as_array().unwrap().iter().find(|l| l["id"] == light).unwrap();
+    assert!(highlight["p"]["y"]["v"].as_f64().unwrap() > 0.);
+    client.tool("finish_session", json!({"commit":true}));
+    drop(client.input.take());
+    assert!(client.child.wait().unwrap().success());
+}
+
+#[test]
+fn app_mcp_interrupted_work_can_be_recovered_or_declined() {
+    for decision in ["recover", "discard"] {
+        let root = tempfile::tempdir().unwrap();
+        let profile = root.path().join("profile");
+        let mut first = Client::new(&profile, None);
+        first.rpc("initialize", json!({}));
+        let id = first.tool("create_project", json!({"name":"Synthetic interrupted work"}))["projectId"].clone();
+        first.tool("start_session", json!({"prompt":"Synthetic interruption"}));
+        first.tool("apply_commands", json!({"commands":[{"type":"add_layer","id":"synthetic","layerType":"solid","name":"Synthetic"}]}));
+        first.tool("finish_session", json!({"commit":true}));
+        first.child.kill().unwrap();
+        first.child.wait().unwrap();
+        let mut second = Client::new(&profile, None);
+        second.rpc("initialize", json!({}));
+        let required = second.tool("open_project", json!({"projectId":id}));
+        assert_eq!(required["recoveryRequired"], true);
+        second.tool("open_project", json!({"projectId":id,"recovery":{"ticket":required["ticket"],"decision":decision}}));
+        second.tool("start_session", json!({"prompt":"Inspect recovery decision"}));
+        assert_eq!(second.tool("get_project_state", json!({"indexOnly":true}))["layerCount"], u64::from(decision == "recover"));
+        second.tool("finish_session", json!({"commit":true}));
+        drop(second.input.take());
+        assert!(second.child.wait().unwrap().success());
+    }
+}
+
+#[test]
+fn app_launch_file_recovery_is_listed_and_accepts_a_command_choice() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = root.path().join("profile");
+    let path = root.path().join("project.json");
+    let original = serde_json::to_vec(&json!({"id":"P","name":"Synthetic working file","compId":"C","compName":"Main","w":64,"h":36,"fps":30,"dur":2,"layers":[],"assets":{},"comps":{}})).unwrap();
+    std::fs::write(&path, &original).unwrap();
+    let mut first = Client::new(&profile, Some(&path));
+    first.rpc("initialize", json!({}));
+    first.tool("start_session", json!({"prompt":"Synthetic unsaved working file"}));
+    first.tool("apply_commands", json!({"commands":[{"type":"add_layer","id":"synthetic","layerType":"solid","name":"Synthetic"}]}));
+    first.tool("finish_session", json!({"commit":true}));
+    first.child.kill().unwrap();
+    first.child.wait().unwrap();
+    let mut second = Client::new(&profile, Some(&path));
+    second.rpc("initialize", json!({}));
+    let pending = second.tool("list_projects", json!({}))["pendingRecoveries"][0].clone();
+    assert_eq!(pending["recoveryRequired"], true);
+    second.tool("open_project", json!({"projectId":pending["projectId"],"recovery":{"ticket":pending["ticket"],"decision":"recover"}}));
+    second.tool("start_session", json!({"prompt":"Inspect recovered working file"}));
+    assert_eq!(second.tool("get_project_state", json!({"indexOnly":true}))["layerCount"], 1);
+    second.tool("finish_session", json!({"commit":true}));
+    drop(second.input.take());
+    assert!(second.child.wait().unwrap().success());
+    assert_eq!(std::fs::read(path).unwrap(), original, "EOF must not overwrite unsaved working files");
+}
 #[test]
 fn app_stdio_conformance_on_a_corpus_copy_commit_and_rollback() {
     let root = tempfile::tempdir().unwrap();
