@@ -932,6 +932,11 @@ export function InspectorPanel({
             id={`section:${section.id}`}
             label={section.title}
             open={!section.collapsed}
+            style={
+              section.focused
+                ? { background: token("colors.accent_wash") }
+                : undefined
+            }
             onChange={(open) =>
               session.send({
                 type: "collapse",

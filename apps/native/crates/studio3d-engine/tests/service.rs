@@ -647,3 +647,26 @@ fn one_surface_output_can_own_the_backdrop_and_duplicate_owners_are_rejected() {
             .contains("multiple output owners")
     );
 }
+#[test]
+fn immutable_geometry_reuses_identical_replacement_but_never_hides_copy_on_write_edits() {
+    let mut source=Source::new();
+    let mut service=StudioService::default();
+    let tier=Tier::Final{samples:8,salt:0,denoise:Denoise::None};
+    let first=service.render(&source,request(),tier).unwrap();let before=pixels(&service,&first);
+    assert_eq!(service.geometry_uploads(),1);
+    source.mesh=Arc::new((*source.mesh).clone());
+    let same=service.render(&source,request(),tier).unwrap();
+    assert_eq!(service.geometry_uploads(),1,"byte-identical replacement rebuilt geometry");
+    assert_eq!(pixels(&service,&same),before);
+    // The service retains a strong identity; make_mut must separate the edited
+    // allocation even when the client still holds the same Arc variable.
+    for position in &mut Arc::make_mut(&mut source.mesh).positions{*position = *position * 0.5;}
+    let edited=service.render(&source,request(),tier).unwrap();
+    assert_eq!(service.geometry_uploads(),2,"copy-on-write edit reused stale geometry");
+    assert_ne!(pixels(&service,&edited),before);
+    let edited_pixels=pixels(&service,&edited);
+    source.changed.store(1,Ordering::SeqCst);
+    let material=service.render(&source,request(),tier).unwrap();
+    assert_eq!(service.geometry_uploads(),2,"material-only edit rebuilt geometry");
+    assert_ne!(pixels(&service,&material),edited_pixels,"material edit reused stale output");
+}

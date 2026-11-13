@@ -382,6 +382,7 @@ test("source Back and empty Open callbacks; no visible viewer title or unrelated
   };
   const { root } = recorder();
   const actions = {
+    command() {},
     drive: (id: string) => {
       seen.push(id);
     },

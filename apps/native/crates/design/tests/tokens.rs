@@ -219,5 +219,8 @@ fn a_strip_keeps_its_layer_hue_and_its_states_differ_by_the_rim() {
         }
         assert!(t.strip_radius(22.) >= t.radius.sm && t.strip_radius(200.) <= t.radius.lg);
         assert_eq!(t.playhead().line, t.metrics.border);
+        // v1's playhead: the accent, under an 11 pt pin resting on the ruler.
+        assert_eq!(t.playhead().color, t.colors.accent);
+        assert_eq!((t.playhead().head, t.playhead().head_foot), (11., 1.));
     }
 }

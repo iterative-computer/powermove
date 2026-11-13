@@ -172,12 +172,13 @@ impl pm_mcp::store::StoreRead for StoreHttp {
     }
 }
 pub fn headless(profile: PathBuf, exports: PathBuf, launch: Option<PathBuf>) -> anyhow::Result<()> {
-    std::thread::spawn(move || -> anyhow::Result<()> {
+    crate::mcp_extensions::run(move |fonts| -> anyhow::Result<()> {
         let actor = pm_kernel::KernelActor::spawn(pm_kernel::KernelConfig {
             journal_root: Some(profile.join("journals")),
             backup_root: Some(profile.join("backups")),
             write_coordinator: Some(crate::file_coordination::system()),
             trash: Some(crate::file_coordination::trash()),
+            text: Some(crate::text_host::text_host(&fonts)),
             ..Default::default()
         });
         let host = crate::mcp::Host::new(actor.handle(), profile.clone());
@@ -213,11 +214,10 @@ pub fn headless(profile: PathBuf, exports: PathBuf, launch: Option<PathBuf>) -> 
             tools.connect(),
         );
         drop(server);
+        let result = result.and_then(|()| tools.automation.lock().unwrap().close_headless());
         actor.shutdown();
         result.map_err(Into::into)
     })
-    .join()
-    .map_err(|_| anyhow::anyhow!("MCP worker panicked"))?
 }
 struct ProjectExtensions {
     project: String,
@@ -313,6 +313,7 @@ impl EngineJobs {
                     },
                 ));
                 overrides.connect(host.raster_inbox());
+                crate::mcp_extensions::watch(&host);
                 ProjectExtensions {
                     project: published.project.clone(),
                     host,
@@ -1256,6 +1257,14 @@ impl MediaRegistry for EngineJobs {
 impl EngineHook for EngineJobs {
     fn capture(&self, _: &CaptureRequest) -> Result<Value> {
         Err(Error::invalid("Frame capture needs a frozen project"))
+    }
+    fn scene3d_assets(&self, frozen: &FrozenProject) -> Result<Arc<dyn pm_scene3d::geometry::AssetGeometry>> {
+        let published = self.published(frozen)?;
+        let media = crate::media::for_session(
+            &published.snapshot, &published.media, published.path.as_deref(),
+            &crate::media::cache_root(&self.profile),
+        ).map_err(failed)?;
+        Ok(Arc::new(pm_scene3d::geometry::FileAssets::new(media.catalog.originals.into_iter().collect())))
     }
     fn capture_snapshot(&self, request: &CaptureRequest, frozen: &FrozenProject) -> Result<Value> {
         let published = self.published(frozen)?;

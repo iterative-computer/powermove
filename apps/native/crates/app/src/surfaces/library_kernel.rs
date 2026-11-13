@@ -228,7 +228,10 @@ impl KernelLibrary {
                         "Kernel Trash currently refuses open projects; add safe open-session Trash without closing or losing edits.",
                     ));
                 }
-                changed(self.shell(ShellCall::Trash(id))?)?;
+                changed(self.shell(ShellCall::Trash(id.clone()))?)?;
+                // Its Home poster goes with it; Put Back renders a new one at
+                // the project's next save or close.
+                crate::poster::forget(&self.profile.join("caches/thumbnails"), &id);
                 Ok(Outcome::Changed)
             }
             Command::PutBack(id) => {
@@ -258,7 +261,10 @@ impl KernelLibrary {
             rows.push(row);
         }
         for entry in trash {
-            rows.push(self.row(&store, entry.raw, true)?);
+            let row = self.row(&store, entry.raw, true)?;
+            // Trashed by any route (Home, an agent): its poster goes too.
+            crate::poster::forget(&self.profile.join("caches/thumbnails"), &row.id);
+            rows.push(row);
         }
         Ok(Snapshot { rows, recents })
     }

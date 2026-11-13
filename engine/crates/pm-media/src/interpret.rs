@@ -76,6 +76,9 @@ pub enum AlphaChoice {
 /// The parsed `interpret` member. `None` (or `Auto`) is "as the file says".
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Interpretation {
+    /// Persisted on an imported asset, outside the user's `interpret` choices.
+    /// Reproduce the Electron preview's colour reading for legacy projects.
+    pub electron_color: bool,
     pub primaries: Option<Primaries>,
     pub transfer: Option<Transfer>,
     pub matrix: Option<MatrixCoefficients>,

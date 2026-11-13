@@ -96,6 +96,28 @@ fn recover_descriptor(file: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Probe before choosing proxy versus headless mode. A leftover descriptor is
+/// not evidence of a running app. Use the same publication lock and conservative
+/// PID/socket checks as server startup; uncertain owners are left untouched.
+pub fn has_running_host(profile: &Path) -> Result<bool> {
+    let directory = profile.join("mcp");
+    if !directory.try_exists()? {
+        return Ok(false);
+    }
+    let _publication = descriptor_lock(&directory)?;
+    let file = directory.join("connection.json");
+    let bytes = match std::fs::read(&file) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e.into()),
+    };
+    if !descriptor_is_stale(&bytes) {
+        return Ok(true);
+    }
+    recover_descriptor(&file)?;
+    Ok(false)
+}
+
 pub trait ToolConnection {
     /// The grant token of the provider run whose tool server this is, if any.
     fn bind_agent_run(&mut self, _token: &str) {}

@@ -2398,6 +2398,7 @@ fn absent_saved_quality_uses_source_production_defaults_without_mutating_legacy_
     );
     assert_eq!(quality.noise_threshold, 0.12);
     assert!(quality.denoise && quality.caustics);
+    assert_eq!(quality.sampling, pm_studio3d_engine::sampling::SamplingPolicy::PRODUCTION);
     assert_eq!(doc.to_value(), before);
 }
 
@@ -3479,18 +3480,32 @@ fn viewer_export_estimates_measure_the_shot_and_publish_four_presets_without_edi
     };
     assert_eq!(estimate.presets.iter().map(|p|p.preset.as_str()).collect::<Vec<_>>(), ["draft","preview","production","final"]);
     assert_eq!((estimate.width, estimate.height, estimate.frames), (1920,1080,12));
-    assert_eq!((estimate.calibration_width, estimate.calibration_height), (320,180));
+    assert_eq!((estimate.calibration_width, estimate.calibration_height), (480,270));
     assert!(estimate.extrapolated);
     for p in &estimate.presets {
         assert!(p.frame_ms.min > 0. && p.frame_ms.max >= p.frame_ms.min, "{p:?}");
-        assert_eq!(p.total_ms.max, p.frame_ms.max * 12.);
-        assert_eq!((p.calibration.cold_samples, p.calibration.warm_samples), (8,16));
-        // Draft denoises on the GPU; every other preset runs the denoiser,
-        // when this build has it (the guided filter otherwise).
-        if p.preset == "draft" || !studio::OIDN {
+        assert!((p.total_ms.max-p.frame_ms.max*12.).abs() <= p.total_ms.max.max(1.)*1e-9);
+        let policy=pm_scene3d::quality::preset(&p.preset).unwrap();
+        assert_eq!(p.min_samples,policy["minSamples"].as_u64().unwrap() as u32);
+        assert_eq!(p.max_samples,policy["maxSamples"].as_u64().unwrap() as u32);
+        // Calibration now follows each real preset until convergence or its
+        // ceiling, yielding in four-sample chunks; it no longer forces 8/16.
+        for done in [p.calibration.cold_samples,p.calibration.warm_samples] {
+            assert!(done>0 && done<=p.max_samples && done%4==0,"{p:?}");
+            if done<p.max_samples {assert_eq!(done%32,0,"early stop must use a convergence check");}
+        }
+        assert!(p.calibration.average_samples>=f64::from(p.min_samples));
+        assert!(p.calibration.average_samples<=f64::from(p.max_samples));
+        assert!((0. ..=1.).contains(&p.calibration.cap_fraction));
+        if p.preset=="draft" {
+            assert_eq!(p.calibration.denoise_backend,"none");
+            assert_eq!(p.calibration.oidn_ms,0.);assert_eq!(p.oidn_ms,0.);
+        } else if !studio::OIDN {
+            // OIDN-free builds retain the guided-filter fallback without
+            // charging an OIDN calibration or per-frame denoise cost.
             assert_eq!((p.calibration.oidn_ms, p.oidn_ms), (0., 0.), "{p:?}");
-        } else {
-            assert!(p.calibration.oidn_ms > 0. && p.oidn_ms > 0., "{p:?}");
+        } else if matches!(p.calibration.denoise_backend.as_str(),"cpu"|"metal") {
+            assert!(p.calibration.oidn_ms>0. && p.oidn_ms>0.);
         }
     }
     assert!(matches!(viewer.status().export_estimate, ExportEstimateState::Ready { .. }));
@@ -3870,7 +3885,6 @@ fn orthographic_live_text_keeps_bright_bevel_edges_free_of_dark_outliers() {
     assert!(rms < 0.05, "orthographic text RMS {rms}");
 }
 
-
 #[test]
 fn native_studio_export_scale_reduces_only_transport_and_preserves_document_and_output() {
     use pm_studio3d_engine::{compositor,extract};
@@ -3900,4 +3914,203 @@ fn native_studio_export_scale_reduces_only_transport_and_preserves_document_and_
         assert!(actual.iter().all(|dims|*dims==expected),"{actual:?}");
         assert_eq!(doc.to_value(),before);
     }
+}
+
+#[test]
+fn native_studio_fog_activation_keeps_foreground_visible_in_fast_and_quality() {
+    let mut store=pm_kernel::DocumentStore::new_untitled(document(false,100.).to_value().unwrap());
+    store.execute(pm_kernel::Scene3dCommand::Apply {
+        comp:Some("test".into()),args:pm_scene3d::to_model(&json!({"operation":"set_world","id":"world","world":{"p":{"sunIntensity":0}}})),
+        selection:vec![],time:0.,autokey:false,
+    }.into(),pm_kernel::Origin::Interface).unwrap();
+    store.execute(pm_kernel::PropertyCommand::Set(pm_kernel::commands::properties::SetProperty::new("world","world.fogDensity",0.004,0.)).into(),pm_kernel::Origin::Interface).unwrap();
+    let doc=store.snapshot().document;
+    let before=doc.to_value();let mut renderer=Renderer::headless().unwrap();
+    let req=studio::SceneRequest{composition:"test".into(),revision:doc.revision(),ticks:0,width:64,height:64};
+    for tier in [studio::Preview::Live,studio::Preview::Refine] {
+        studio::attach_with_preview(&mut renderer,doc.clone(),&Default::default(),&req,tier).unwrap();
+        let mut r=request();r.export=false;r.output_kind=OutputKind::Preview;
+        let frame=renderer.render(&doc,"test",Ticks::ZERO,&r,&pm_render::MapResolver::default()).unwrap();
+        assert!(frame.failures.is_empty(),"{:?}",frame.failures);
+        let pixels=renderer.read_rgba(&frame).unwrap();
+        let rgb=(20..44).flat_map(|y|(20..44).map(move|x|(y*64+x)*4)).map(|i|pixels[i]+pixels[i+1]+pixels[i+2]).sum::<f32>()/(24.*24.*3.);
+        eprintln!("STUDIO_FOG tier={tier:?} center_mean_rgb={rgb:.6}");
+        assert!(rgb>0.02,"studio fog must retain lit foreground in {tier:?}: {rgb}");
+        assert_eq!(doc.to_value(),before);
+    }
+}
+
+#[test]
+fn studio_asset_maps_load_deduplicate_and_draw_in_windowless_frames() {
+    use studio::SceneSource;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("image.bin");
+    std::fs::write(
+        &path,
+        [
+            137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 2, 0, 0, 0, 2,
+            8, 6, 0, 0, 0, 114, 182, 13, 36, 0, 0, 0, 23, 73, 68, 65, 84, 120, 156, 99, 252, 207,
+            192, 240, 159, 129, 129, 129, 129, 145, 129, 225, 63, 152, 1, 0, 42, 3, 3, 255, 7, 53,
+            54, 238, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+        ],
+    )
+    .unwrap();
+    let mut project: Value = serde_json::from_str(&pm_model::json::to_canonical_string(
+        &document(false, 100.).to_value().unwrap(),
+    ))
+    .unwrap();
+    let object = project["comps"]["test"]["layers"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|l| l["id"] == "mirror")
+        .unwrap();
+    object["d"]["data"]["object"]["source"] =
+        json!({"primitive":"plane","parameters":{"width":2,"height":2}});
+    object["d"]["data"]["object"]["material"] = json!({"p":{"color":"#FFFFFF","roughness":1,"metalness":0,"emissive":"#FFFFFF","emissiveIntensity":1},"maps":{"color":"image","emissive":"image"},"doubleSided":true});
+    project["assets"]["image"] = json!({"id":"image","kind":"image","format":"png","w":2,"h":2});
+    let doc = pm_kernel::DocumentStore::new_untitled(
+        pm_model::json::parse(&project.to_string()).unwrap(),
+    )
+    .snapshot()
+    .document;
+    let mut media = pm_export::render::MediaPaths::default();
+    media.insert("image", path);
+    let source = studio::DocumentSource::new(doc.clone(), media.clone());
+    let input = source
+        .scene(&studio::SceneRequest {
+            composition: "test".into(),
+            revision: doc.revision(),
+            ticks: 0,
+            width: 64,
+            height: 64,
+        })
+        .unwrap();
+    let maps = input.maps.unwrap();
+    assert_eq!(
+        maps.layers.len(),
+        1,
+        "the two colour slots share the same image"
+    );
+    let m = &input.materials.unwrap()[input.instances[0].material];
+    assert_eq!(m.maps[0], m.maps[1]);
+    assert_eq!(
+        &maps.layers[0][..4],
+        &[255, 0, 0, 255],
+        "native mesh UVs already orient image rows"
+    );
+    let mut renderer = Renderer::headless().unwrap();
+    studio::attach(&mut renderer, doc.clone(), &media);
+    let frame = renderer
+        .render(
+            &doc,
+            "test",
+            Ticks::ZERO,
+            &request(),
+            &pm_render::MapResolver::default(),
+        )
+        .unwrap();
+    assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+    let pixels = renderer.read_rgba(&frame).unwrap();
+    assert!(
+        pixels
+            .chunks_exact(4)
+            .filter(|p| p[0] > 0.05 && p[0] > p[2] * 5.0)
+            .count()
+            > 100
+    );
+    assert!(
+        pixels
+            .chunks_exact(4)
+            .filter(|p| p[2] > 0.05 && p[2] > p[0] * 5.0)
+            .count()
+            > 100
+    );
+    let missing = studio::DocumentSource::new(doc.clone(), Default::default());
+    let scene_request = studio::SceneRequest {
+        composition: "test".into(), revision: doc.revision(), ticks: 0, width: 64, height: 64,
+    };
+    missing.scene(&scene_request).unwrap();
+    assert!(missing.layer_failures(&scene_request).unwrap()[0].message.contains("Material image is not loaded"));
+}
+
+#[test]
+fn imported_electron_scene_keeps_raster_materials_and_native_scene_keeps_tracing() {
+    use pm_render::plan::{Content, Source};
+    let mut renderer = Renderer::headless().unwrap();
+    let native = document(true, 100.);
+    studio::attach(&mut renderer, native.clone(), &Default::default());
+    let planned = |renderer: &mut Renderer, doc: &pm_model::Document| {
+        let (plan, failures) = renderer
+            .plan(
+                doc,
+                "test",
+                Ticks::ZERO,
+                &request(),
+                &pm_render::MapResolver::default(),
+            )
+            .unwrap();
+        assert!(failures.is_empty(), "{failures:?}");
+        plan.draws
+            .iter()
+            .filter_map(|draw| match &draw.content {
+                Content::Texture {
+                    source: Source::Object3d(plan),
+                    ..
+                } => Some(matches!(
+                    plan.kind,
+                    pm_render::scene3d::Render3d::Studio { .. }
+                )),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    assert!(planned(&mut renderer, &native).iter().all(|studio| *studio));
+    let mut value = native.to_value().unwrap();
+    value
+        .as_object_mut()
+        .unwrap()
+        .insert("render3d", pm_model::Value::from("electron"));
+    let legacy = Arc::new(pm_model::Document::new(Some(value), native.revision()));
+    studio::attach(&mut renderer, legacy.clone(), &Default::default());
+    let flags = planned(&mut renderer, &legacy);
+    assert!(!flags.is_empty());
+    assert!(flags.iter().all(|studio| !*studio));
+}
+
+
+// Test-only transport probe for a saved intrinsic project. No AppKit window,
+// source-project writes or preset changes; the same native export source/compositor is
+// retained for every frame. Media is extracted into an owned canonical tempdir.
+#[test]
+#[ignore = "explicit saved-project GPU diagnostic; hold the shared build lock"]
+fn native_saved_project_transport_probe() {
+    let path=std::env::var_os("PM_STUDIO_PERF_PROJECT").expect("set PM_STUDIO_PERF_PROJECT");
+    let opened=pm_kernel::project_io::open_project(std::path::Path::new(&path),Default::default()).unwrap();
+    let media_dir=tempfile::tempdir().unwrap();
+    let media_root=media_dir.path().canonicalize().unwrap();
+    let mut media=pm_export::render::MediaPaths::default();
+    for (index,entry) in opened.file.media.iter().enumerate() {
+        let extension=match entry.media_type.to_string().as_str() {
+            "model/obj"|"text/plain"=>"obj","model/gltf+json"=>"gltf","model/gltf-binary"=>"glb","model/fbx"=>"fbx",
+            "image/png"=>"png","image/jpeg"=>"jpg","image/vnd.radiance"=>"hdr",_=>"bin",
+        };
+        let path=media_root.join(format!("media-{index}.{extension}"));entry.copy_to(&path).unwrap();
+        media.insert(entry.id.to_string(),path);
+    }
+    let comp=opened.open_comp.clone().expect("open composition");
+    let doc=pm_kernel::DocumentStore::open(opened).snapshot().document;
+    let original=doc.to_value();
+    let mut renderer=Renderer::headless().unwrap();
+    studio::attach_with_quality(&mut renderer,doc.clone(),&media,&comp,json!("production")).unwrap();
+    let mut r=RenderRequest::sized(Size::new(1920,1080),Precision::Float16);
+    r.export=true;r.output_kind=OutputKind::Final;
+    for frame in 0..4 {
+        let time=Ticks::new(317_520_000+frame*23_520_000).unwrap();
+        eprintln!("NATIVE_FIXTURE_FRAME {frame} ticks={}",time.get());
+        let rendered=renderer.render(&doc,&comp,time,&r,&pm_render::MapResolver::default()).unwrap();
+        assert!(rendered.failures.is_empty(),"{:?}",rendered.failures);
+        assert!(!renderer.read_rgba(&rendered).unwrap().is_empty());
+    }
+    assert_eq!(doc.to_value(),original);
 }

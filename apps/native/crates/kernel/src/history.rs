@@ -1024,7 +1024,7 @@ fn import_entry(
                 }
                 let normalized = op.to_value();
                 let mut members: Vec<_> = normalized.as_object().unwrap().iter().collect();
-                members.sort_by(|(a, _), (b, _)| a.cmp(b));
+                members.sort_by_key(|(a, _)| *a);
                 if i > 0 {
                     text.push(',');
                 }

@@ -1251,9 +1251,9 @@ fn enabling_untouched_legacy_landscape_fog_migrates_with_undo_and_reopen() {
     assert_eq!(project(&reopened), before);
 }
 #[test]
-fn authored_or_active_legacy_fog_and_non_landscapes_are_preserved() {
+fn authored_or_active_legacy_fog_is_preserved_in_studios_and_landscapes() {
     for (channels, terrain) in [
-        (json!({"fogDensity":0.002}), true),
+        (json!({"fogDensity":0.002,"fogDistance":10000.,"fogHeightFalloff":0.}), false),
         (json!({"fogHeightFalloff":0.03}), true),
         (json!({"fogBaseHeight":5}), true),
         (
@@ -1264,7 +1264,6 @@ fn authored_or_active_legacy_fog_and_non_landscapes_are_preserved() {
             json!({"fogHeightFalloff":{"v":0,"kf":[],"expr":"time*0"}}),
             true,
         ),
-        (json!({}), false),
     ] {
         let mut s = store();
         apply(
@@ -1292,7 +1291,6 @@ fn world_density_migration_respects_an_explicit_shape_patch() {
     for explicit in [false, true] {
         let mut s = store();
         apply(&mut s, json!({"operation":"set_world","id":"world"}));
-        apply(&mut s, json!({"operation":"add_terrain","id":"terrain"}));
         let mut p = json!({"fogDensity":0.004});
         if explicit {
             p["fogDistance"] = json!(10000);
@@ -1322,4 +1320,38 @@ fn offline_sampling_limits_are_undoable_saved_and_legacy_quality_still_opens() {
     legacy["minSamples"]=json!(32);legacy["maxSamples"]=json!(256);legacy["noiseThreshold"]=json!(0.03);
     assert_eq!(pm_scene3d::quality::validate(legacy.clone()).unwrap(),legacy);
     legacy["diffuseBounces"]=json!(33);assert!(pm_scene3d::quality::validate(legacy).is_err());
+}
+
+#[test]
+fn enabling_untouched_legacy_studio_fog_migrates_without_terrain() {
+    let mut s=store();
+    apply(&mut s,json!({"operation":"set_world","id":"world"}));
+    let before=project(&s);
+    s.execute(PropertyCommand::Set(SetProperty::new("world","world.fogDensity",0.004,0.)).into(),Origin::Interface).unwrap();
+    let p=layer(&s,"world")["d"]["data"]["object"]["world"]["p"].clone();
+    assert_eq!(p["fogHeightFalloff"]["v"],0.06);
+    assert_eq!(p["fogDistance"]["v"],400.);
+    let enabled=project(&s);s.undo().unwrap();assert_eq!(project(&s),before);
+    s.redo().unwrap();assert_eq!(project(&s),enabled);
+    let mut dir=common::TempDir::new("studio-fog");dir.0=std::fs::canonicalize(&dir.0).unwrap();
+    let path=dir.path("fog.pmv");common::save_as(&mut s,&path).unwrap();
+    let mut reopened=common::open_store(&path);assert_eq!(project(&reopened),enabled);
+    reopened.undo().unwrap();assert_eq!(project(&reopened),before);
+}
+
+#[test]
+fn studio_world_fog_activation_and_creation_migrate_only_untouched_shapes() {
+    for existing in [false,true] { for explicit in [false,true] {
+        let mut s=store();
+        if existing {apply(&mut s,json!({"operation":"set_world","id":"world"}));}
+        let before=project(&s);
+        let mut p=json!({"fogDensity":0.004});
+        if explicit {p["fogDistance"]=json!(10000.);p["fogHeightFalloff"]=json!(0.);}
+        apply(&mut s,json!({"operation":"set_world","id":"world","world":{"p":p}}));
+        let p=layer(&s,"world")["d"]["data"]["object"]["world"]["p"].clone();
+        assert_eq!(p["fogDistance"]["v"],if explicit {10000.}else{400.});
+        assert_eq!(p["fogHeightFalloff"]["v"],if explicit {0.}else{0.06});
+        let after=project(&s);s.undo().unwrap();assert_eq!(project(&s),before);
+        s.redo().unwrap();assert_eq!(project(&s),after);
+    }}
 }

@@ -10,6 +10,29 @@ pub struct VertexAttributes {
     pub colors: Arc<Vec<[f32; 4]>>,
     pub secondary_uvs: Arc<Vec<[f32; 2]>>,
 }
+/// A legacy image material uses the same 1024² RGBA8 array as imported
+/// Studio maps. Generated geometry uses Three.js' default flipped image UVs;
+/// imported glTF geometry keeps the image's original row order.
+pub fn material_texture(path: &std::path::Path, flip_y: bool) -> Result<Vec<u8>> {
+    let mut reader = image::ImageReader::open(path)
+        .map_err(|e| Error(format!("Material image: {e}")))?
+        .with_guessed_format()
+        .map_err(|e| Error(format!("Material image: {e}")))?;
+    let mut limits = image::Limits::default();
+    limits.max_alloc = Some(256 << 20);
+    reader.limits(limits);
+    let source = reader
+        .decode()
+        .map_err(|e| Error(format!("Material image: {e}")))?
+        .into_rgba8();
+    let mut image =
+        image::imageops::resize(&source, 1024, 1024, image::imageops::FilterType::Triangle);
+    if flip_y {
+        image::imageops::flip_vertical_in_place(&mut image);
+    }
+    Ok(image.into_raw())
+}
+
 pub struct Part {
     pub geometry: Arc<Geometry>,
     pub world: [f64; 16],
@@ -25,6 +48,8 @@ pub struct Resource {
     pub key: String,
     meshes: std::sync::Mutex<HashMap<(usize, u64), Arc<Geometry>>>,
     attributes: std::sync::Mutex<HashMap<usize, Arc<VertexAttributes>>>,
+    /// The triangle picker (its BVH builds once per resource).
+    picker: std::sync::OnceLock<Option<Arc<gltf::pick::Picker>>>,
 }
 impl Resource {
     pub fn new(model: Model) -> Self {
@@ -33,7 +58,18 @@ impl Resource {
             key: String::new(),
             meshes: Default::default(),
             attributes: Default::default(),
+            picker: Default::default(),
         }
+    }
+    /// A glTF model's triangle picker, built on first use; `None` for
+    /// formats without material slots (OBJ, splats).
+    pub fn picker(&self) -> Option<Arc<gltf::pick::Picker>> {
+        self.picker
+            .get_or_init(|| match &self.model {
+                Model::Gltf(m) => Some(Arc::new(gltf::pick::Picker::new(Arc::new((**m).clone())))),
+                _ => None,
+            })
+            .clone()
     }
     pub fn load(name: &str, bytes: &[u8]) -> Result<Arc<Self>> {
         use sha2::{Digest, Sha256};

@@ -6,9 +6,9 @@
 //! text-weight-probe.mjs` measured it: a Helvetica "l" stem's coverage width
 //! in today's export path, Regular and Bold, white on black and black on
 //! white, 12 to 96 px. This gate draws the same cases with the default
-//! weight: closer to today than the exact weight, within 0.12 px of today
-//! on average and 0.45 px at worst (2026-11-11: 0.096 and 0.37, against the
-//! exact weight's 0.479 mean), and the exact weight paint-independent.
+//! weight: within 0.01 px of today on average and 0.02 px at worst. This
+//! rejects the old outline smoothing fit (0.096 px mean) and guards the
+//! Canvas mask path. The exact weight stays paint-independent.
 //!
 //! `PM_TEXT_WEIGHT_PROFILE=<file>` writes each case's exact middle-row
 //! coverage, the data the fit was made from.
@@ -121,11 +121,9 @@ fn main() {
                 "exact weight depends on paint at {size} px: {exact} {other}"
             ));
         }
-        // One glyph's width under a nonlinear coverage curve depends on the
-        // phase its edges land at, which differs between the apps by a
-        // fraction of a pixel (the residuals alternate in sign by size): each
-        // case within 0.45 px, the mean within 0.12 px.
-        if (smoothed - today).abs() > 0.45 {
+        // Independent Canvas captures, allowing a few RGBA8 code values
+        // across the stem. The old fitted coverage is not accurate enough.
+        if (smoothed - today).abs() > 0.02 {
             failures.push(format!(
                 "{weight} {} {size} px: smoothed {smoothed:.3} against today's {today:.3}",
                 if white { "white" } else { "black" }
@@ -141,9 +139,9 @@ fn main() {
     if sum_smoothed >= sum_exact {
         failures.push("the default weight is not closer to today than the exact one".into());
     }
-    if sum_smoothed / n > 0.12 {
+    if sum_smoothed / n > 0.01 {
         failures.push(format!(
-            "mean |width − today| {:.3} px exceeds 0.12",
+            "mean |width − today| {:.3} px exceeds 0.01",
             sum_smoothed / n
         ));
     }

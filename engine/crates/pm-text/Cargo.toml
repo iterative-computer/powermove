@@ -23,6 +23,8 @@ ink = ["dep:kurbo", "dep:skrifa", "dep:png"]
 render = ["ink", "dep:vello_cpu", "dep:libm", "dep:pm-color", "dep:i_overlay"]
 # The CoreText reference rasterizer (macOS; level 2 gate and review sheets).
 coretext-reference = ["render", "system", "objc2-core-graphics/CGContext", "objc2-core-graphics/CGBitmapContext", "objc2-core-graphics/CGColorSpace", "objc2-core-graphics/CGDataProvider"]
+# Chromium-compatible glyph masks for the native macOS legacy raster path.
+canvas2d = ["render", "objc2-core-graphics/CGContext", "objc2-core-graphics/CGBitmapContext", "objc2-core-graphics/CGColorSpace", "objc2-core-graphics/CGDataProvider"]
 
 [dependencies]
 i_overlay = { version = "9.1", optional = true }

@@ -25,6 +25,38 @@ pub(super) fn apply(
     if basic {
         return;
     }
+    // Per-part look development (Properties ▸ Material ▸ Part, edit_3d
+    // set_material_properties {materialIndex}): base colour tints the part
+    // (its texture too, as a glTF factor), then coat, transmission, IOR and
+    // a thin film.
+    if let Some(color) = property("color").and_then(Value::as_str).map(srgb_hex) {
+        material.base = color;
+        gpu.base[..3].copy_from_slice(&[color.x, color.y, color.z]);
+    }
+    if let Some(coat) = number("clearcoat") {
+        material.coat = coat;
+        gpu.spec[1] = coat;
+    }
+    if let Some(coat_roughness) = number("clearcoatRoughness") {
+        material.coat_roughness = coat_roughness;
+        gpu.spec[2] = coat_roughness.max(0.002);
+    }
+    if let Some(transmission) = number("transmission") {
+        material.transmission = transmission;
+        gpu.spec[3] = transmission;
+    }
+    if let Some(ior) = number("ior") {
+        material.ior = ior;
+        gpu.extra[0] = ior;
+    }
+    if let Some(film) = number("iridescence") {
+        material.film_nm = film;
+        gpu.layers[1] = film;
+        // An imported part's own thin film follows the override too.
+        gpu.imported[1][3] = if film > 0. { 1. } else { 0. };
+        gpu.imported[3][3] = film;
+        gpu.imported[4][0] = film;
+    }
     if let Some(roughness) = number("roughness") {
         material.roughness = roughness;
         gpu.spec[0] = roughness.max(0.002);

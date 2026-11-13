@@ -559,6 +559,88 @@ fn a_preview_still_shows_a_layer_without_a_definition_and_an_export_refuses_it()
     let message = refused.error.unwrap().message;
     assert!(message.contains("acme.field.layer"), "{message}");
 }
+
+/// A broken installed shader leaves its own layer out of a viewer still;
+/// it must not prevent the rest of the project from opening or rendering.
+/// Delivery captures continue to report the invalid definition.
+#[test]
+fn a_preview_still_isolates_an_invalid_extension_shader_and_deliveries_refuse_it() {
+    use pm_protocol::definitions::*;
+    use serde_json::json;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut project: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/shapes.json")).unwrap();
+    let one = |document: &str, destination: std::path::PathBuf, preview| {
+        let mut r = request_for(document, destination, 1);
+        r.preview = preview;
+        let JobSpec::Export { settings, .. } = &mut r.spec else {
+            unreachable!()
+        };
+        settings.format = ExportFormat::PngStill { sixteen_bit: false };
+        settings.range.end = Ticks::new(settings.range.start.get() + 1).unwrap();
+        r
+    };
+    let baseline_path = dir.path().join("baseline.png");
+    let baseline = finish(one(&project.to_string(), baseline_path.clone(), true));
+    assert_eq!(baseline.state, JobState::Done, "{baseline:?}");
+
+    let mut field = project["layers"][0].clone();
+    field["id"] = "broken".into();
+    field["type"] = "extension".into();
+    field["d"] = json!({"definition":"acme.invalid.layer","version":1,
+        "w":{"v":160},"h":{"v":90},"params":{"enabled":{"v":true}},"data":{}});
+    field["fx"] = json!([]);
+    project["layers"].as_array_mut().unwrap().insert(0, field);
+    // A float comparison on a declared boolean is invalid in WebGL as well
+    // as in the native validator. Do not repair the author's shader here.
+    let fragment = "out vec4 result; void main(){result=vec4(u_enabled > 0.5 ? 1.0 : 0.0);}";
+    let prefix = format!(
+        "{}\nuniform bool u_enabled;\n",
+        pm_render::shader_layers::header()
+    );
+    let definition = DefinitionSnapshot {
+        id: "acme.invalid.layer".into(),
+        kind: DefinitionKind::Layer,
+        version: 1,
+        origin: DefinitionOrigin::Local,
+        renderer: Some(LayerRenderer::Fragment {
+            fragment: fragment.into(),
+        }),
+        glsl: Some(WrappedGlsl {
+            source: format!("{prefix}{fragment}"),
+            body_line_offset: prefix.matches('\n').count() as u32,
+            body_utf16_len: fragment.encode_utf16().count() as u32,
+            body_utf8_len: fragment.len() as u32,
+        }),
+        params: vec![ParamSpec::Toggle {
+            key: "enabled".into(),
+            default: true,
+        }],
+        flags: DefinitionFlags::default(),
+    };
+    let still_path = dir.path().join("still.png");
+    let mut still = one(&project.to_string(), still_path.clone(), true);
+    still.bypass_missing_effects = true;
+    still.resources.definitions = vec![definition.clone()];
+    let drawn = finish(still);
+    assert_eq!(drawn.state, JobState::Done, "{drawn:?}");
+    assert_eq!(
+        std::fs::read(still_path).unwrap(),
+        std::fs::read(baseline_path).unwrap(),
+        "the rest of the scene must retain the baseline's pixels"
+    );
+
+    let mut delivery = one(&project.to_string(), dir.path().join("delivery.png"), false);
+    delivery.resources.definitions = vec![definition];
+    let refused = finish(delivery);
+    assert_eq!(refused.state, JobState::Failed, "{refused:?}");
+    let message = refused.error.unwrap().message;
+    assert!(
+        message.contains("acme.invalid.layer") && message.contains("does not compile"),
+        "{message}"
+    );
+}
 #[test]
 fn a_preview_still_draws_offline_media_and_an_export_refuses_it() {
     let dir = tempfile::tempdir().unwrap();

@@ -114,6 +114,8 @@ export interface Section {
   note?: string;
   /** Studio finishes: swatch tiles under the heading; a click applies one. */
   finishes?: Finish[];
+  /** The imported-model part a viewer double-click picked. */
+  focused?: boolean;
 }
 export interface InspectorSnapshot {
   target: Target;

@@ -180,6 +180,27 @@ fn reflect_obeys_reflection_law() {
     assert!(highlight_placement(p, [0.; 3], eye, 5.).is_err());
 }
 #[test]
+fn upright_glass_highlight_stays_above_the_floor_on_the_same_reflection_ray() {
+    let point = [0., 1., 0.];
+    let normal = [0., 0., 1.];
+    let eye = [0., 4., 6.];
+    let requested = 6.;
+    let original = highlight_placement(point, normal, eye, requested).unwrap();
+    assert!(original[1] < 0., "reproduce the reported below-floor placement");
+    for size in [None, Some(0.2)] {
+        let (at, width) = highlight_above_floor(point, normal, eye, requested, size, 0.).unwrap();
+        assert!(at[1] - width * 0.31 > 0., "whole panel clears the floor");
+        assert!(length(sub(at, point)) < requested);
+        let direction = normalize(sub(at, point));
+        let reflected = normalize(sub(original, point));
+        for i in 0..3 { near(direction[i], reflected[i]); }
+        if let Some(size) = size { near(width, size); }
+    }
+    assert!(highlight_above_floor([0.;3], normal, eye, requested, None, 0.).is_err());
+    let (at, width) = highlight_above_floor([0.;3], [0.,1.,0.], eye, requested, None, 0.).unwrap();
+    assert!(at[1] - width * 0.31 > 0.);
+}
+#[test]
 fn direct_aim_faces_surface_normal() {
     let h = Hit {
         point: [1., 0., 2.],

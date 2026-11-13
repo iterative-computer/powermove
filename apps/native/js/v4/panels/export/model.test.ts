@@ -482,7 +482,7 @@ test("ProRes 422 has no alpha; settings saved before profiles keep ProRes 4444",
       r.operation.type === "command" && r.operation.command === "export.begin",
   )!;
   const options = (
-    begin.operation as { args: { options: Record<string, unknown> } }
+    begin.operation as unknown as { args: { options: Record<string, unknown> } }
   ).args.options;
   expect(options.codec).toBe("hevc");
   expect(options.profile).toBe("422hq");
