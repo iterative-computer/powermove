@@ -10,9 +10,10 @@ fn main() {}
 /// GPUI's real open path, as the app opens the Agent popover: a PopUp asked to
 /// show and take focus while the app is inactive stays off screen, attached to
 /// the window that asked, through its activate path too, and never shows once
-/// that window closed. A sheet (a Dialog on its window, GPUI's own prompt)
-/// asked for while inactive begins on nothing and moves no window: it waits
-/// for activation and is dropped once its window closed. Activation is
+/// that window closed. A Dialog begins as a sheet at once in a normal launch;
+/// in a development lane launch a sheet (a Dialog, GPUI's own prompt) asked
+/// for while inactive begins on nothing and moves no window: it waits for
+/// activation and is cancelled once its window closed. Activation is
 /// prohibited, as in the shell's smoke mode; the parent is never shown.
 /// Exits the process when done.
 #[cfg(target_os = "macos")]
@@ -79,7 +80,43 @@ fn gpui_open_path() {
                     .is_some_and(|p| std::ptr::eq(&*p, &*parent_ns)),
                 "a child of the window that asked"
             );
-            // A sheet asked for while inactive waits, attached to nothing.
+            // A normal launch: a Dialog begins as a sheet at once, as AppKit
+            // does, even while the app is inactive.
+            let mut options = WindowOptions {
+                kind: WindowKind::Dialog,
+                show: true,
+                focus: true,
+                window_bounds: bounds,
+                ..Default::default()
+            };
+            let own = cx
+                .open_window(
+                    WindowOptions {
+                        show: false,
+                        focus: false,
+                        window_bounds: bounds,
+                        ..Default::default()
+                    },
+                    |_, cx| cx.new(|_| Empty),
+                )
+                .unwrap();
+            let own_ns = own.update(cx, |_, w, _| native(w)).unwrap();
+            options.parent = Some(own.into());
+            let attached = cx.open_window(options, |_, cx| cx.new(|_| Empty)).unwrap();
+            let attached_ns = attached.update(cx, |_, w, _| native(w)).unwrap();
+            assert!(
+                attached_ns
+                    .sheetParent()
+                    .is_some_and(|p| std::ptr::eq(&*p, &*own_ns)),
+                "a normal launch begins the sheet at once"
+            );
+            assert!(!sheet_pending(&own_ns));
+            own_ns.endSheet(&attached_ns);
+            attached.update(cx, |_, w, _| w.remove_window()).unwrap();
+            own.update(cx, |_, w, _| w.remove_window()).unwrap();
+            // A development lane launch: a sheet asked for while inactive
+            // waits, attached to nothing.
+            gpui_macos::child_window::hold_sheets_while_inactive(false);
             let mut options = WindowOptions {
                 kind: WindowKind::Dialog,
                 show: true,

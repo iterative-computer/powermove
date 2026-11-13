@@ -73,8 +73,8 @@ pub fn terminations() -> async_channel::Receiver<()> {
         .clone()
 }
 
-/// Puts a file panel on `window` as a sheet, only while the app is active
-/// (`child_window::sheet`: a sheet orders its window front).
+/// Puts a file panel on `window` as a sheet (`child_window::sheet`; a
+/// dropped panel drops `done` and its sender: cancelled).
 fn begin_panel(
     panel: &objc2_app_kit::NSSavePanel,
     window: &NSWindow,
@@ -82,9 +82,12 @@ fn begin_panel(
 ) {
     use objc2::Message;
     let (on, shown) = (window.retain(), panel.retain());
-    gpui_macos::child_window::sheet(window, panel, move || {
-        shown.beginSheetModalForWindow_completionHandler(&on, &done);
-    });
+    gpui_macos::child_window::sheet(
+        window,
+        panel,
+        move || shown.beginSheetModalForWindow_completionHandler(&on, &done),
+        || {},
+    );
 }
 
 /// An open sheet that takes `.cube` files.

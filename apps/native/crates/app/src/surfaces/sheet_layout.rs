@@ -705,13 +705,22 @@ pub mod native {
                 }
             }
         }
-        pub fn present(&self, owner: &NSWindow, first: Option<&str>) {
-            // Only while the app is active (a sheet orders its window
-            // front); the first field takes the keyboard either way.
+        /// Puts the sheet on `owner`. `cancel` answers whatever waits on it
+        /// if the sheet never begins (a development lane holds sheets while
+        /// the app is inactive: `child_window::sheet`).
+        pub fn present(
+            &self,
+            owner: &NSWindow,
+            first: Option<&str>,
+            cancel: impl FnOnce() + 'static,
+        ) {
             let (on, sheet) = (objc2::Message::retain(owner), self.window.clone());
-            gpui_macos::child_window::sheet(owner, &self.window, move || {
-                on.beginSheet_completionHandler(&sheet, None);
-            });
+            gpui_macos::child_window::sheet(
+                owner,
+                &self.window,
+                move || on.beginSheet_completionHandler(&sheet, None),
+                cancel,
+            );
             if let Some(field) = first.and_then(|id| self.fields.get(id)) {
                 self.window.makeFirstResponder(Some(field));
                 unsafe { field.selectText(None) };

@@ -212,9 +212,12 @@ pub struct Extensions {
 }
 impl Default for Extensions {
     fn default() -> Self {
-        // An extension's sheet waits for the app to be active, as the app's own do.
-        pm_compat_host::set_sheet_gate(|parent, sheet, begin| {
-            gpui_macos::child_window::sheet(parent, sheet, begin)
+        // An extension's sheet goes through the app's gate, as the app's own do.
+        pm_compat_host::set_sheet_gate(pm_compat_host::SheetGate {
+            begin: |parent, sheet, begin, cancel| {
+                gpui_macos::child_window::sheet(parent, sheet, begin, cancel)
+            },
+            forget: gpui_macos::child_window::forget_sheet,
         });
         Self {
             contributed: Vec::new(),
