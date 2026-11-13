@@ -764,7 +764,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "label": "Snapping",
                     "metadata": {
                       "designTodo": "T1",
-                      "requiredSymbol": "magnet",
+                      "requiredSymbol": "arrow.right.and.line.vertical.and.arrow.left",
                     },
                     "style": {
                       "background": {
@@ -962,6 +962,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                 },
                 "style": {
                   "flexGrow": 1,
+                  "paddingBottom": {
+                    "token": "metrics.ruler",
+                  },
                   "paddingTop": {
                     "token": "metrics.ruler",
                   },
@@ -1578,7 +1581,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "label": "Snapping",
                     "metadata": {
                       "designTodo": "T1",
-                      "requiredSymbol": "magnet",
+                      "requiredSymbol": "arrow.right.and.line.vertical.and.arrow.left",
                     },
                     "style": {
                       "background": {
@@ -1693,7 +1696,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.muted",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -1702,7 +1705,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "metrics.hit",
                                       },
                                       "symbolSize": {
-                                        "token": "metrics.symbol_panel",
+                                        "token": "metrics.symbol_inline",
                                       },
                                     },
                                     "tabIndex": -1,
@@ -1902,6 +1905,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                 },
                 "style": {
                   "flexGrow": 1,
+                  "paddingBottom": {
+                    "token": "metrics.ruler",
+                  },
                   "paddingTop": {
                     "token": "metrics.ruler",
                   },
@@ -2518,7 +2524,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "label": "Snapping",
                     "metadata": {
                       "designTodo": "T1",
-                      "requiredSymbol": "magnet",
+                      "requiredSymbol": "arrow.right.and.line.vertical.and.arrow.left",
                     },
                     "style": {
                       "background": {
@@ -2633,7 +2639,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.muted",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -2642,7 +2648,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "metrics.hit",
                                       },
                                       "symbolSize": {
-                                        "token": "metrics.symbol_panel",
+                                        "token": "metrics.symbol_inline",
                                       },
                                     },
                                     "tabIndex": -1,
@@ -2960,6 +2966,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                 },
                 "style": {
                   "flexGrow": 1,
+                  "paddingBottom": {
+                    "token": "metrics.ruler",
+                  },
                   "paddingTop": {
                     "token": "metrics.ruler",
                   },
@@ -3576,7 +3585,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "label": "Snapping",
                     "metadata": {
                       "designTodo": "T1",
-                      "requiredSymbol": "magnet",
+                      "requiredSymbol": "arrow.right.and.line.vertical.and.arrow.left",
                     },
                     "style": {
                       "background": {
@@ -3691,7 +3700,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.muted",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -3700,7 +3709,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "metrics.hit",
                                       },
                                       "symbolSize": {
-                                        "token": "metrics.symbol_panel",
+                                        "token": "metrics.symbol_inline",
                                       },
                                     },
                                     "tabIndex": -1,
@@ -4018,6 +4027,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                 },
                 "style": {
                   "flexGrow": 1,
+                  "paddingBottom": {
+                    "token": "metrics.ruler",
+                  },
                   "paddingTop": {
                     "token": "metrics.ruler",
                   },
@@ -4634,7 +4646,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "label": "Snapping",
                     "metadata": {
                       "designTodo": "T1",
-                      "requiredSymbol": "magnet",
+                      "requiredSymbol": "arrow.right.and.line.vertical.and.arrow.left",
                     },
                     "style": {
                       "background": {
@@ -4749,7 +4761,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.muted",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -4758,7 +4770,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "metrics.hit",
                                       },
                                       "symbolSize": {
-                                        "token": "metrics.symbol_panel",
+                                        "token": "metrics.symbol_inline",
                                       },
                                     },
                                     "tabIndex": -1,
@@ -5073,6 +5085,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                 },
                 "style": {
                   "flexGrow": 1,
+                  "paddingBottom": {
+                    "token": "metrics.ruler",
+                  },
                   "paddingTop": {
                     "token": "metrics.ruler",
                   },
@@ -5689,7 +5704,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "label": "Snapping",
                     "metadata": {
                       "designTodo": "T1",
-                      "requiredSymbol": "magnet",
+                      "requiredSymbol": "arrow.right.and.line.vertical.and.arrow.left",
                     },
                     "style": {
                       "background": {
@@ -5804,7 +5819,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.muted",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -5813,7 +5828,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "metrics.hit",
                                       },
                                       "symbolSize": {
-                                        "token": "metrics.symbol_panel",
+                                        "token": "metrics.symbol_inline",
                                       },
                                     },
                                     "tabIndex": -1,
@@ -5936,6 +5951,24 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   },
                                   "type": "button",
                                 },
+                                {
+                                  "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
+                                },
                               ],
                               "props": {
                                 "style": {
@@ -6013,7 +6046,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.muted",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -6022,7 +6055,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "metrics.hit",
                                       },
                                       "symbolSize": {
-                                        "token": "metrics.symbol_panel",
+                                        "token": "metrics.symbol_inline",
                                       },
                                     },
                                     "tabIndex": -1,
@@ -6032,7 +6065,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 },
                                 {
                                   "props": {
-                                    "aria-pressed": true,
                                     "data-pm-component": "toolbar-item",
                                     "disabled": true,
                                     "id": "timeline:diamond:property:opacity",
@@ -6042,11 +6074,8 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "requiredSymbol": "diamond.fill",
                                     },
                                     "style": {
-                                      "background": {
-                                        "token": "colors.selected_fill",
-                                      },
                                       "color": {
-                                        "token": "colors.text",
+                                        "token": "colors.accent",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -6055,7 +6084,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "metrics.hit",
                                       },
                                       "symbolSize": {
-                                        "token": "metrics.symbol_panel",
+                                        "token": "metrics.symbol_inline",
                                       },
                                     },
                                     "tabIndex": -1,
@@ -6075,7 +6104,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.muted",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -6084,7 +6113,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "metrics.hit",
                                       },
                                       "symbolSize": {
-                                        "token": "metrics.symbol_panel",
+                                        "token": "metrics.symbol_inline",
                                       },
                                     },
                                     "tabIndex": -1,
@@ -6119,6 +6148,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "alignItems": "center",
                                   "display": "flex",
                                   "flexDirection": "row",
+                                  "paddingLeft": {
+                                    "token": "metrics.gap",
+                                  },
                                 },
                               },
                               "type": "div",
@@ -6276,6 +6308,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                 },
                 "style": {
                   "flexGrow": 1,
+                  "paddingBottom": {
+                    "token": "metrics.ruler",
+                  },
                   "paddingTop": {
                     "token": "metrics.ruler",
                   },
@@ -6892,7 +6927,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "label": "Snapping",
                     "metadata": {
                       "designTodo": "T1",
-                      "requiredSymbol": "magnet",
+                      "requiredSymbol": "arrow.right.and.line.vertical.and.arrow.left",
                     },
                     "style": {
                       "background": {
@@ -7007,7 +7042,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.muted",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -7016,7 +7051,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "metrics.hit",
                                       },
                                       "symbolSize": {
-                                        "token": "metrics.symbol_panel",
+                                        "token": "metrics.symbol_inline",
                                       },
                                     },
                                     "tabIndex": -1,
@@ -7216,6 +7251,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                 },
                 "style": {
                   "flexGrow": 1,
+                  "paddingBottom": {
+                    "token": "metrics.ruler",
+                  },
                   "paddingTop": {
                     "token": "metrics.ruler",
                   },
@@ -7884,7 +7922,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "label": "Snapping",
                     "metadata": {
                       "designTodo": "T1",
-                      "requiredSymbol": "magnet",
+                      "requiredSymbol": "arrow.right.and.line.vertical.and.arrow.left",
                     },
                     "style": {
                       "background": {
@@ -7999,7 +8037,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.muted",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -8008,7 +8046,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "metrics.hit",
                                       },
                                       "symbolSize": {
-                                        "token": "metrics.symbol_panel",
+                                        "token": "metrics.symbol_inline",
                                       },
                                     },
                                     "tabIndex": -1,
@@ -8326,6 +8364,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                 },
                 "style": {
                   "flexGrow": 1,
+                  "paddingBottom": {
+                    "token": "metrics.ruler",
+                  },
                   "paddingTop": {
                     "token": "metrics.ruler",
                   },
@@ -8948,7 +8989,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "label": "Snapping",
                     "metadata": {
                       "designTodo": "T1",
-                      "requiredSymbol": "magnet",
+                      "requiredSymbol": "arrow.right.and.line.vertical.and.arrow.left",
                     },
                     "style": {
                       "background": {
@@ -9063,7 +9104,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.muted",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -9072,7 +9113,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "metrics.hit",
                                       },
                                       "symbolSize": {
-                                        "token": "metrics.symbol_panel",
+                                        "token": "metrics.symbol_inline",
                                       },
                                     },
                                     "tabIndex": -1,
@@ -9266,7 +9307,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.muted",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -9275,7 +9316,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "metrics.hit",
                                       },
                                       "symbolSize": {
-                                        "token": "metrics.symbol_panel",
+                                        "token": "metrics.symbol_inline",
                                       },
                                     },
                                     "tabIndex": -1,
@@ -9478,6 +9519,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                 },
                 "style": {
                   "flexGrow": 1,
+                  "paddingBottom": {
+                    "token": "metrics.ruler",
+                  },
                   "paddingTop": {
                     "token": "metrics.ruler",
                   },
@@ -10101,7 +10145,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "label": "Snapping",
                     "metadata": {
                       "designTodo": "T1",
-                      "requiredSymbol": "magnet",
+                      "requiredSymbol": "arrow.right.and.line.vertical.and.arrow.left",
                     },
                     "style": {
                       "background": {
@@ -10216,7 +10260,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.muted",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -10225,7 +10269,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "metrics.hit",
                                       },
                                       "symbolSize": {
-                                        "token": "metrics.symbol_panel",
+                                        "token": "metrics.symbol_inline",
                                       },
                                     },
                                     "tabIndex": -1,
@@ -10425,6 +10469,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                 },
                 "style": {
                   "flexGrow": 1,
+                  "paddingBottom": {
+                    "token": "metrics.ruler",
+                  },
                   "paddingTop": {
                     "token": "metrics.ruler",
                   },
@@ -11041,7 +11088,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "label": "Snapping",
                     "metadata": {
                       "designTodo": "T1",
-                      "requiredSymbol": "magnet",
+                      "requiredSymbol": "arrow.right.and.line.vertical.and.arrow.left",
                     },
                     "style": {
                       "background": {
@@ -11156,7 +11203,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.muted",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -11165,7 +11212,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "metrics.hit",
                                       },
                                       "symbolSize": {
-                                        "token": "metrics.symbol_panel",
+                                        "token": "metrics.symbol_inline",
                                       },
                                     },
                                     "tabIndex": -1,
@@ -11356,7 +11403,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.muted",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -11365,7 +11412,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "metrics.hit",
                                       },
                                       "symbolSize": {
-                                        "token": "metrics.symbol_panel",
+                                        "token": "metrics.symbol_inline",
                                       },
                                     },
                                     "tabIndex": -1,
@@ -11556,7 +11603,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.muted",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -11565,7 +11612,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "metrics.hit",
                                       },
                                       "symbolSize": {
-                                        "token": "metrics.symbol_panel",
+                                        "token": "metrics.symbol_inline",
                                       },
                                     },
                                     "tabIndex": -1,
@@ -11756,7 +11803,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.muted",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -11765,7 +11812,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "metrics.hit",
                                       },
                                       "symbolSize": {
-                                        "token": "metrics.symbol_panel",
+                                        "token": "metrics.symbol_inline",
                                       },
                                     },
                                     "tabIndex": -1,
@@ -11956,7 +12003,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.muted",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -11965,7 +12012,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "metrics.hit",
                                       },
                                       "symbolSize": {
-                                        "token": "metrics.symbol_panel",
+                                        "token": "metrics.symbol_inline",
                                       },
                                     },
                                     "tabIndex": -1,
@@ -12156,7 +12203,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.muted",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -12165,7 +12212,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "metrics.hit",
                                       },
                                       "symbolSize": {
-                                        "token": "metrics.symbol_panel",
+                                        "token": "metrics.symbol_inline",
                                       },
                                     },
                                     "tabIndex": -1,
@@ -12356,7 +12403,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.muted",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -12365,7 +12412,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "metrics.hit",
                                       },
                                       "symbolSize": {
-                                        "token": "metrics.symbol_panel",
+                                        "token": "metrics.symbol_inline",
                                       },
                                     },
                                     "tabIndex": -1,
@@ -12556,7 +12603,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.muted",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -12565,7 +12612,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "metrics.hit",
                                       },
                                       "symbolSize": {
-                                        "token": "metrics.symbol_panel",
+                                        "token": "metrics.symbol_inline",
                                       },
                                     },
                                     "tabIndex": -1,
@@ -12756,7 +12803,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.muted",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -12765,7 +12812,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "metrics.hit",
                                       },
                                       "symbolSize": {
-                                        "token": "metrics.symbol_panel",
+                                        "token": "metrics.symbol_inline",
                                       },
                                     },
                                     "tabIndex": -1,
@@ -12956,7 +13003,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.muted",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -12965,7 +13012,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "metrics.hit",
                                       },
                                       "symbolSize": {
-                                        "token": "metrics.symbol_panel",
+                                        "token": "metrics.symbol_inline",
                                       },
                                     },
                                     "tabIndex": -1,
@@ -13156,7 +13203,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.muted",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -13165,7 +13212,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "metrics.hit",
                                       },
                                       "symbolSize": {
-                                        "token": "metrics.symbol_panel",
+                                        "token": "metrics.symbol_inline",
                                       },
                                     },
                                     "tabIndex": -1,
@@ -13356,7 +13403,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.muted",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -13365,7 +13412,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "metrics.hit",
                                       },
                                       "symbolSize": {
-                                        "token": "metrics.symbol_panel",
+                                        "token": "metrics.symbol_inline",
                                       },
                                     },
                                     "tabIndex": -1,
@@ -13556,7 +13603,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.muted",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -13565,7 +13612,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "metrics.hit",
                                       },
                                       "symbolSize": {
-                                        "token": "metrics.symbol_panel",
+                                        "token": "metrics.symbol_inline",
                                       },
                                     },
                                     "tabIndex": -1,
@@ -13756,7 +13803,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.muted",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -13765,7 +13812,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "metrics.hit",
                                       },
                                       "symbolSize": {
-                                        "token": "metrics.symbol_panel",
+                                        "token": "metrics.symbol_inline",
                                       },
                                     },
                                     "tabIndex": -1,
@@ -13956,7 +14003,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.muted",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -13965,7 +14012,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "metrics.hit",
                                       },
                                       "symbolSize": {
-                                        "token": "metrics.symbol_panel",
+                                        "token": "metrics.symbol_inline",
                                       },
                                     },
                                     "tabIndex": -1,
@@ -14156,7 +14203,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.muted",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -14165,7 +14212,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "metrics.hit",
                                       },
                                       "symbolSize": {
-                                        "token": "metrics.symbol_panel",
+                                        "token": "metrics.symbol_inline",
                                       },
                                     },
                                     "tabIndex": -1,
@@ -14356,7 +14403,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.muted",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -14365,7 +14412,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "metrics.hit",
                                       },
                                       "symbolSize": {
-                                        "token": "metrics.symbol_panel",
+                                        "token": "metrics.symbol_inline",
                                       },
                                     },
                                     "tabIndex": -1,
@@ -14556,7 +14603,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.muted",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -14565,7 +14612,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "metrics.hit",
                                       },
                                       "symbolSize": {
-                                        "token": "metrics.symbol_panel",
+                                        "token": "metrics.symbol_inline",
                                       },
                                     },
                                     "tabIndex": -1,
@@ -14756,7 +14803,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.muted",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -14765,7 +14812,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "metrics.hit",
                                       },
                                       "symbolSize": {
-                                        "token": "metrics.symbol_panel",
+                                        "token": "metrics.symbol_inline",
                                       },
                                     },
                                     "tabIndex": -1,
@@ -14956,7 +15003,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.muted",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -14965,7 +15012,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "metrics.hit",
                                       },
                                       "symbolSize": {
-                                        "token": "metrics.symbol_panel",
+                                        "token": "metrics.symbol_inline",
                                       },
                                     },
                                     "tabIndex": -1,
@@ -15156,7 +15203,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.muted",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -15165,7 +15212,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "metrics.hit",
                                       },
                                       "symbolSize": {
-                                        "token": "metrics.symbol_panel",
+                                        "token": "metrics.symbol_inline",
                                       },
                                     },
                                     "tabIndex": -1,
@@ -15356,7 +15403,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.muted",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -15365,7 +15412,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "metrics.hit",
                                       },
                                       "symbolSize": {
-                                        "token": "metrics.symbol_panel",
+                                        "token": "metrics.symbol_inline",
                                       },
                                     },
                                     "tabIndex": -1,
@@ -15556,7 +15603,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.muted",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -15565,7 +15612,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "metrics.hit",
                                       },
                                       "symbolSize": {
-                                        "token": "metrics.symbol_panel",
+                                        "token": "metrics.symbol_inline",
                                       },
                                     },
                                     "tabIndex": -1,
@@ -15756,7 +15803,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.muted",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -15765,7 +15812,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "metrics.hit",
                                       },
                                       "symbolSize": {
-                                        "token": "metrics.symbol_panel",
+                                        "token": "metrics.symbol_inline",
                                       },
                                     },
                                     "tabIndex": -1,
@@ -15956,7 +16003,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.muted",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -15965,7 +16012,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "metrics.hit",
                                       },
                                       "symbolSize": {
-                                        "token": "metrics.symbol_panel",
+                                        "token": "metrics.symbol_inline",
                                       },
                                     },
                                     "tabIndex": -1,
@@ -16156,7 +16203,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.muted",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -16165,7 +16212,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "metrics.hit",
                                       },
                                       "symbolSize": {
-                                        "token": "metrics.symbol_panel",
+                                        "token": "metrics.symbol_inline",
                                       },
                                     },
                                     "tabIndex": -1,
@@ -16356,7 +16403,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.muted",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -16365,7 +16412,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "metrics.hit",
                                       },
                                       "symbolSize": {
-                                        "token": "metrics.symbol_panel",
+                                        "token": "metrics.symbol_inline",
                                       },
                                     },
                                     "tabIndex": -1,
@@ -16556,7 +16603,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.muted",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -16565,7 +16612,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "metrics.hit",
                                       },
                                       "symbolSize": {
-                                        "token": "metrics.symbol_panel",
+                                        "token": "metrics.symbol_inline",
                                       },
                                     },
                                     "tabIndex": -1,
@@ -16756,7 +16803,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.muted",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -16765,7 +16812,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "metrics.hit",
                                       },
                                       "symbolSize": {
-                                        "token": "metrics.symbol_panel",
+                                        "token": "metrics.symbol_inline",
                                       },
                                     },
                                     "tabIndex": -1,
@@ -16956,7 +17003,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.muted",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -16965,7 +17012,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "metrics.hit",
                                       },
                                       "symbolSize": {
-                                        "token": "metrics.symbol_panel",
+                                        "token": "metrics.symbol_inline",
                                       },
                                     },
                                     "tabIndex": -1,
@@ -17165,6 +17212,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                 },
                 "style": {
                   "flexGrow": 1,
+                  "paddingBottom": {
+                    "token": "metrics.ruler",
+                  },
                   "paddingTop": {
                     "token": "metrics.ruler",
                   },
@@ -17808,7 +17858,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "label": "Snapping",
                     "metadata": {
                       "designTodo": "T1",
-                      "requiredSymbol": "magnet",
+                      "requiredSymbol": "arrow.right.and.line.vertical.and.arrow.left",
                     },
                     "style": {
                       "background": {
@@ -17923,7 +17973,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.muted",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -17932,7 +17982,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "metrics.hit",
                                       },
                                       "symbolSize": {
-                                        "token": "metrics.symbol_panel",
+                                        "token": "metrics.symbol_inline",
                                       },
                                     },
                                     "tabIndex": -1,
@@ -18132,6 +18182,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                 },
                 "style": {
                   "flexGrow": 1,
+                  "paddingBottom": {
+                    "token": "metrics.ruler",
+                  },
                   "paddingTop": {
                     "token": "metrics.ruler",
                   },
@@ -18803,7 +18856,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "label": "Snapping",
                     "metadata": {
                       "designTodo": "T1",
-                      "requiredSymbol": "magnet",
+                      "requiredSymbol": "arrow.right.and.line.vertical.and.arrow.left",
                     },
                     "style": {
                       "background": {
@@ -18918,7 +18971,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.muted",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -18927,7 +18980,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "metrics.hit",
                                       },
                                       "symbolSize": {
-                                        "token": "metrics.symbol_panel",
+                                        "token": "metrics.symbol_inline",
                                       },
                                     },
                                     "tabIndex": -1,
@@ -19127,6 +19180,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                 },
                 "style": {
                   "flexGrow": 1,
+                  "paddingBottom": {
+                    "token": "metrics.ruler",
+                  },
                   "paddingTop": {
                     "token": "metrics.ruler",
                   },
@@ -19753,7 +19809,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "label": "Snapping",
                     "metadata": {
                       "designTodo": "T1",
-                      "requiredSymbol": "magnet",
+                      "requiredSymbol": "arrow.right.and.line.vertical.and.arrow.left",
                     },
                     "style": {
                       "background": {
@@ -20044,6 +20100,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                 },
                 "style": {
                   "flexGrow": 1,
+                  "paddingBottom": {
+                    "token": "metrics.ruler",
+                  },
                   "paddingTop": {
                     "token": "metrics.ruler",
                   },
@@ -20660,7 +20719,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "label": "Snapping",
                     "metadata": {
                       "designTodo": "T1",
-                      "requiredSymbol": "magnet",
+                      "requiredSymbol": "arrow.right.and.line.vertical.and.arrow.left",
                     },
                     "style": {
                       "background": {
@@ -20775,7 +20834,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.muted",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -20784,7 +20843,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "metrics.hit",
                                       },
                                       "symbolSize": {
-                                        "token": "metrics.symbol_panel",
+                                        "token": "metrics.symbol_inline",
                                       },
                                     },
                                     "tabIndex": -1,
@@ -20984,6 +21043,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                 },
                 "style": {
                   "flexGrow": 1,
+                  "paddingBottom": {
+                    "token": "metrics.ruler",
+                  },
                   "paddingTop": {
                     "token": "metrics.ruler",
                   },
@@ -21682,7 +21744,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "label": "Snapping",
                     "metadata": {
                       "designTodo": "T1",
-                      "requiredSymbol": "magnet",
+                      "requiredSymbol": "arrow.right.and.line.vertical.and.arrow.left",
                     },
                     "style": {
                       "background": {
@@ -21797,7 +21859,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.muted",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -21806,7 +21868,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "metrics.hit",
                                       },
                                       "symbolSize": {
-                                        "token": "metrics.symbol_panel",
+                                        "token": "metrics.symbol_inline",
                                       },
                                     },
                                     "tabIndex": -1,
@@ -22018,6 +22080,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                 },
                 "style": {
                   "flexGrow": 1,
+                  "paddingBottom": {
+                    "token": "metrics.ruler",
+                  },
                   "paddingTop": {
                     "token": "metrics.ruler",
                   },
@@ -22634,7 +22699,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                     "label": "Snapping",
                     "metadata": {
                       "designTodo": "T1",
-                      "requiredSymbol": "magnet",
+                      "requiredSymbol": "arrow.right.and.line.vertical.and.arrow.left",
                     },
                     "style": {
                       "background": {
@@ -22728,7 +22793,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.muted",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -22737,7 +22802,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "metrics.hit",
                                       },
                                       "symbolSize": {
-                                        "token": "metrics.symbol_panel",
+                                        "token": "metrics.symbol_inline",
                                       },
                                     },
                                     "tabIndex": -1,
@@ -22747,7 +22812,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 },
                                 {
                                   "props": {
-                                    "aria-pressed": true,
                                     "data-pm-component": "toolbar-item",
                                     "disabled": false,
                                     "id": "timeline:diamond:property:scale",
@@ -22757,11 +22821,8 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       "requiredSymbol": "diamond.fill",
                                     },
                                     "style": {
-                                      "background": {
-                                        "token": "colors.selected_fill",
-                                      },
                                       "color": {
-                                        "token": "colors.text",
+                                        "token": "colors.accent",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -22770,7 +22831,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "metrics.hit",
                                       },
                                       "symbolSize": {
-                                        "token": "metrics.symbol_panel",
+                                        "token": "metrics.symbol_inline",
                                       },
                                     },
                                     "tabIndex": -1,
@@ -22790,7 +22851,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.muted",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -22799,7 +22860,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                         "token": "metrics.hit",
                                       },
                                       "symbolSize": {
-                                        "token": "metrics.symbol_panel",
+                                        "token": "metrics.symbol_inline",
                                       },
                                     },
                                     "tabIndex": -1,
@@ -22834,6 +22895,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "alignItems": "center",
                                   "display": "flex",
                                   "flexDirection": "row",
+                                  "paddingLeft": {
+                                    "token": "metrics.gap",
+                                  },
                                 },
                               },
                               "type": "div",
@@ -23006,6 +23070,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                 },
                 "style": {
                   "flexGrow": 1,
+                  "paddingBottom": {
+                    "token": "metrics.ruler",
+                  },
                   "paddingTop": {
                     "token": "metrics.ruler",
                   },

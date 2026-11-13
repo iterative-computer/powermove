@@ -345,6 +345,42 @@ disabled drops chroma and opacity. Rows are 30 pt (v1's height), so a strip is
 `Tokens::playhead` is a hairline with a round head. Strips are drawn by the
 timeline renderer, never system views.
 
+## Timeline
+
+One solid ground carries the layer column, the ruler, the tracks and the
+bottom bar; hairlines part them (the ruler's foot runs across the whole
+panel, the column's edge from top to bottom, the bar's top edge), and the
+layer column is a step of value, not a box. Everything is on a 2 pt grid:
+ruler 24, layer rows 30 (strip 26), property rows 22, bottom bar 24.
+
+- Layer row: its number (tabular, muted), the disclosure (a small muted
+  chevron), the kind badge in the layer's colour, the name. Switches stand at
+  the trailing edge in fixed columns (parent, solo, lock, visibility, the last
+  at the edge): a set switch always shows, the rest come with the pointer,
+  keyboard focus or a single selection, and a set switch keeps the columns
+  after it open so each kind stays in its own column down the list.
+- Property row: the key navigator (previous, the key mark, next) stands in
+  the columns the number, disclosure and badge take, so the property's name
+  starts where its layer's does; the value is tabular at the trailing edge.
+  The key mark carries its state in its colour (accent once animated, muted
+  before), with no lit ground.
+- Ruler: a label over a dot at each step, smaller fainter dots counting the
+  steps between (`minor_step`: the finest whole division that leaves 7 pt),
+  a faint line down the tracks at each label. The work area is the lit
+  stretch of the ruler (ink at 9 %) between two short bars at its foot, in
+  the ink, never the accent; the tracks outside it are veiled. The playhead
+  is the ruler's one bright mark.
+- Bottom bar (`pm_panel_timeline::footer`): under the layer column, zoom (a
+  minus, a slider on a logarithmic scale, a plus; twice on the slider fits
+  the composition) and the composition's length; under the tracks, the
+  navigator: a thumb as long as the time on screen, dragged to scroll, a
+  press beside it bringing the thumb there. Rows scroll with a thumb of the
+  same recipe at the tracks' trailing edge. Thumbs are ink at 22 %, 38 %
+  under the pointer or held, and are absent when there is nothing to scroll.
+- A strip too short for three letters of its name shows its colour alone.
+- Playing changes the playhead layer and the timecode only: the canvas, the
+  bar and the rows are not repainted.
+
 ## Three mistakes to avoid
 
 1. A border or an outer shadow on a translucent surface. Use the elevation
