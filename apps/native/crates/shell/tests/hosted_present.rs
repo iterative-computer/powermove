@@ -2,7 +2,8 @@
 //! the main thread never waits for a drawable, a scene is never drawn into a
 //! drawable of another size, a view staged by a paint that was never shown is
 //! not placed over a later scene, and a pop-up's rows follow a publication
-//! without destroying the items of an open menu. Runs on the main thread
+//! without destroying the items of an open menu, and the viewer's picture
+//! shows in a window that opened on Home. Runs on the main thread
 //! with activation prohibited and never orders a window on screen.
 #[cfg(target_os = "macos")]
 fn main() {
@@ -15,6 +16,7 @@ fn main() {
     macos::drawables();
     macos::paints(mtm);
     macos::rows();
+    macos::viewer_slot(mtm);
     println!("hosted_present: ok");
 }
 #[cfg(not(target_os = "macos"))]
@@ -294,5 +296,59 @@ mod macos {
         rows.popup.selectItemAtIndex(1);
         rows.act();
         assert_eq!(rows.chosen.try_recv().ok(), Some(json!(2)));
+    }
+
+    /// A window that opens on Home hides its viewer slot before the first
+    /// project frame gives it a transform. The hide reaches the Metal layer
+    /// (still the view's backing layer); clipping then makes a root the
+    /// view's layer, so showing the view alone left the picture hidden (an
+    /// empty viewer and the viewer's ground). Showing the slot shows it.
+    pub fn viewer_slot(mtm: MainThreadMarker) {
+        use pm_shell::viewer_slot;
+        let window = unsafe {
+            NSWindow::initWithContentRect_styleMask_backing_defer(
+                NSWindow::alloc(mtm),
+                NSRect::new(NSPoint::new(-20000., -20000.), NSSize::new(400., 300.)),
+                NSWindowStyleMask::Borderless,
+                NSBackingStoreType::Buffered,
+                true,
+            )
+        };
+        unsafe { window.setReleasedWhenClosed(false) };
+        let content = window.contentView().expect("a content view");
+        let hidden = |layer: &metal::MetalLayer| -> bool {
+            unsafe { msg_send![layer.as_ptr() as *mut AnyObject, isHidden] }
+        };
+        let slot = || {
+            let view = NSView::initWithFrame(NSView::alloc(mtm), NSRect::ZERO);
+            view.setWantsLayer(true);
+            let layer = metal::MetalLayer::new();
+            unsafe {
+                let _: () = msg_send![&*view, setLayer: layer.as_ptr() as *mut AnyObject];
+            }
+            content.addSubview(&view);
+            (view, layer)
+        };
+        // The trap, as AppKit has it: the view's hide stays on the layer.
+        let (view, layer) = slot();
+        view.setHidden(true);
+        assert!(hidden(&layer), "hiding a layer-backed view hides its layer");
+        viewer_slot::clip(&view, &layer, 0);
+        view.setHidden(false);
+        assert!(hidden(&layer), "the clipped picture stays hidden");
+        // Home first, then a project: the picture shows.
+        let (view, layer) = slot();
+        viewer_slot::show(&view, &layer, false);
+        viewer_slot::clip(&view, &layer, 0);
+        viewer_slot::show(&view, &layer, true);
+        assert!(!view.isHidden() && !hidden(&layer), "the picture shows");
+        let root = view.layer().expect("the clipping root");
+        let sub: *mut AnyObject =
+            unsafe { msg_send![layer.as_ptr() as *mut AnyObject, superlayer] };
+        assert_eq!(sub, Retained::as_ptr(&root) as *mut AnyObject);
+        // And hidden again with Home.
+        viewer_slot::show(&view, &layer, false);
+        assert!(view.isHidden());
+        window.close();
     }
 }

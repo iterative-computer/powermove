@@ -241,6 +241,9 @@ pub struct SessionSaveCompletion {
     session: SessionHandle,
     ticket: String,
     result: Result<crate::SaveReceipt, crate::ProjectIoError>,
+    /// The file a failed save put back under the project's name as a copy
+    /// ([`crate::ProjectIoError::PutBack`]), read by the worker.
+    put_back: Option<project_io::FileVersion>,
 }
 impl SessionSaveCompletion {
     pub(crate) fn project(&self) -> &str {
@@ -248,11 +251,19 @@ impl SessionSaveCompletion {
     }
 }
 impl SessionSave {
+    /// **Blocking**: the save's disk work, and after a save that put the
+    /// last saved version back as a copy, that copy read whole.
     pub fn run(self) -> SessionSaveCompletion {
+        let destination = self.plan.destination.clone();
+        let result = self.plan.run();
+        let put_back = matches!(result, Err(crate::ProjectIoError::PutBack(_)))
+            .then(|| project_io::FileVersion::read(&destination).ok().flatten())
+            .flatten();
         SessionSaveCompletion {
             session: self.session,
             ticket: self.ticket,
-            result: self.plan.run(),
+            result,
+            put_back,
         }
     }
 }
@@ -359,6 +370,12 @@ pub struct Unfinalized {
     path: Option<PathBuf>,
     lock: Option<FileLock>,
 }
+/// Whether a save to `path` (`None`: in place) adopts `ticket`, the save
+/// that could not sync its folder: a save in place does, and so does a
+/// Save As again to the file that save wrote.
+fn adopts(ticket: Option<&Unfinalized>, path: Option<&std::path::Path>) -> bool {
+    ticket.is_some_and(|t| path.is_none() || (t.path.is_some() && t.path.as_deref() == path))
+}
 /// What a save or a recovery needs from the kernel besides the files, owned,
 /// so a worker can run it.
 #[derive(Clone)]
@@ -446,14 +463,35 @@ impl OpenJob {
                 }
             }
         }
-        // The file itself, where the open is certain to read it.
-        if pre.decision == OpenDecision::Writable
-            && pre.settled.unsynced.is_none()
+        // The file itself, where the open is certain to read it: in place,
+        // or as a copy (no lock to take, nothing settled).
+        if (pre.decision != OpenDecision::Writable || pre.settled.unsynced.is_none())
             && path.is_file()
         {
             pre.opened = Some(project_io::open_project(&path, OpenOptions::default()));
         }
         pre
+    }
+}
+
+/// The disk work of a choice after a failed open, apart from the kernel:
+/// finding the versions a save's record proves (each read whole), or
+/// putting the chosen one under the project's name (read again, perhaps
+/// copied) under the project's lock. The actor hands it to a worker; a
+/// direct caller runs it in place.
+pub struct DiskJob {
+    /// The project file it changes, reserved while it runs.
+    path: Option<PathBuf>,
+    work: Box<dyn FnOnce() -> Result<ShellReply, KernelFailure> + Send>,
+}
+impl DiskJob {
+    pub fn path(&self) -> Option<&std::path::Path> {
+        self.path.as_deref()
+    }
+    /// **Blocking**: whole-file reads (and perhaps a copy) on the
+    /// project's disk.
+    pub fn run(self) -> Result<ShellReply, KernelFailure> {
+        (self.work)()
     }
 }
 
@@ -470,6 +508,10 @@ pub struct SaveJob {
     path: Option<PathBuf>,
     version: Option<std::sync::Arc<project_io::FileVersion>>,
     unsynced: Option<PathBuf>,
+    /// The file the save that could not sync its folder installed: proven
+    /// here to be still that save's (a whole-file read when its times
+    /// moved), for the save in place to adopt.
+    ticket: Option<std::sync::Arc<project_io::FileVersion>>,
     warm: Box<dyn FnOnce() + Send>,
     host: OwnedHost,
 }
@@ -480,6 +522,10 @@ pub struct SavePrelude {
     settled: project_io::Settled,
     /// The folder of the save that could not sync it, and how it went now.
     synced: Option<(PathBuf, Result<(), String>)>,
+    /// Whether the file of that save was proven to be still its version:
+    /// the stat that proof covers (the same before and after it), or
+    /// `None` when it was not proven.
+    ticket: Option<Option<project_io::FileStat>>,
 }
 impl SaveJob {
     pub fn project(&self) -> &str {
@@ -496,6 +542,17 @@ impl SaveJob {
             Some(path) => project_io::settle(path, &self.host.host()),
             None => project_io::Settled::default(),
         };
+        // The proof covers the file only if the name led to the same file,
+        // unchanged, before and after it: that stat goes with the proof.
+        let ticket = self.ticket.map(|version| {
+            let before = project_io::lstat_file(&version.path).ok().flatten();
+            let unchanged = version.is_unchanged().unwrap_or(false);
+            if let Some(hook) = &self.host.hooks.after_proof {
+                hook(&version.path);
+            }
+            let after = project_io::lstat_file(&version.path).ok().flatten();
+            after.filter(|after| unchanged && before.as_ref() == Some(after))
+        });
         // Proven once per state of the file: the kernel's own look at it
         // then finds the proof and reads nothing.
         if let (Some(_), Some(version)) = (&self.path, &self.version) {
@@ -508,6 +565,7 @@ impl SaveJob {
             path: self.path,
             settled,
             synced,
+            ticket,
         }
     }
 }
@@ -774,22 +832,11 @@ impl Kernel {
                 }
                 Ok(ShellReply::Kept(Vec::new()))
             }
-            ShellCall::Leftovers(path) => Ok(ShellReply::Leftovers(
-                project_io::leftovers(&path)
-                    .iter()
-                    .map(leftover_row)
-                    .collect(),
-            )),
-            ShellCall::UseLeftover {
-                path,
-                leftover,
-                unproven,
-            } => {
-                // Under the project's lock: no save of it is in its steps.
-                let _lock = self.lock_project(&path).map_err(failure)?;
-                let left = project_io::use_leftover(&path, &leftover, unproven, &self.host())
-                    .map_err(failure)?;
-                Ok(ShellReply::Kept(left.iter().map(left_row).collect()))
+            call @ (ShellCall::Leftovers(_) | ShellCall::UseLeftover { .. }) => {
+                match self.disk_job(&call)? {
+                    Some(job) => job.run(),
+                    None => Err(failure("Nothing to do")),
+                }
             }
             ShellCall::DecideRecovery { ticket, decision } => {
                 let mut pending = self
@@ -1150,6 +1197,7 @@ impl Kernel {
             .unfinalized
             .as_ref()
             .is_some_and(|ticket| ticket.path.is_some() && ticket.path == path);
+        // As [`adopts`] decides it for the save's worker.
         if path.is_none() || again {
             self.adopt_unfinalized(&session.project)?;
             if again
@@ -1226,6 +1274,7 @@ impl Kernel {
             session,
             ticket,
             result,
+            put_back,
         } = completion;
         self.check_session(&session)?;
         if self.sessions[&session.project]
@@ -1262,7 +1311,7 @@ impl Kernel {
                 }));
             }
             Err(e) => {
-                self.adopt_put_back(&session.project, &e);
+                self.adopt_put_back(&session.project, &e, put_back);
                 return Err(failure(e));
             }
         };
@@ -2925,6 +2974,55 @@ impl Kernel {
             host: self.owned_host(),
         }))
     }
+    /// The disk work of `call`, if it is a choice after a failed open
+    /// ([`DiskJob`]). `Err`: that file is being opened, or chosen for, now.
+    pub fn disk_job(&self, call: &ShellCall) -> Result<Option<DiskJob>, KernelFailure> {
+        match call {
+            ShellCall::Leftovers(path) => {
+                let path = path.clone();
+                Ok(Some(DiskJob {
+                    path: None,
+                    work: Box::new(move || {
+                        Ok(ShellReply::Leftovers(
+                            project_io::leftovers(&path)
+                                .iter()
+                                .map(leftover_row)
+                                .collect(),
+                        ))
+                    }),
+                }))
+            }
+            ShellCall::UseLeftover {
+                path,
+                leftover,
+                unproven,
+            } => {
+                if self.opening.contains(path) {
+                    return Err(failure("This project is already being opened."));
+                }
+                let (path, leftover, unproven) = (path.clone(), leftover.clone(), *unproven);
+                let (lock_root, host) = (self.lock_root(), self.owned_host());
+                Ok(Some(DiskJob {
+                    path: Some(path.clone()),
+                    work: Box::new(move || {
+                        // Under the project's lock: no save of it is in its
+                        // steps, and no window has it open.
+                        let _lock = locks::lock_project(&lock_root, &path).map_err(failure)?;
+                        let left =
+                            project_io::use_leftover(&path, &leftover, unproven, &host.host())
+                                .map_err(failure)?;
+                        Ok(ShellReply::Kept(left.iter().map(left_row).collect()))
+                    }),
+                }))
+            }
+            _ => Ok(None),
+        }
+    }
+    /// After a [`DiskJob`] a worker ran: what it found that no record tells
+    /// is told.
+    pub(crate) fn disk_job_done(&mut self) {
+        self.tell_strays();
+    }
     /// What a save of `session` to `path` (`None`: in place) does before the
     /// kernel freezes it ([`SaveJob`]). `Err`: the session cannot save now
     /// (another save of it is under way).
@@ -2950,16 +3048,23 @@ impl Kernel {
             }
             _ => None,
         };
+        // The ticket of a save that could not sync its folder is proven and
+        // its folder synced here whenever this save adopts it (decided as
+        // [`Kernel::prepare_session_save`] decides it, whatever the
+        // session's own destination is: a library project's first Save As
+        // again to that file adopts it too).
+        let ticket = ticket.filter(|t| adopts(Some(t), path));
         Ok(Some(SaveJob {
             project: session.project.clone(),
             version: project.store().file().version.clone(),
-            unsynced: ticket.filter(|_| in_place.is_some()).map(|t| {
+            unsynced: ticket.map(|t| {
                 t.receipt
                     .path
                     .parent()
                     .unwrap_or(std::path::Path::new("."))
                     .to_owned()
             }),
+            ticket: ticket.map(|t| t.receipt.version.clone()),
             path: in_place,
             warm: Box::new(project.store().save_warmup()),
             host: self.owned_host(),
@@ -2991,7 +3096,12 @@ impl Kernel {
     /// bytes in another file. The session carries on with that file, so
     /// its next save is an ordinary one, if the file there holds exactly
     /// the version the session read.
-    fn adopt_put_back(&mut self, id: &str, error: &crate::ProjectIoError) {
+    fn adopt_put_back(
+        &mut self,
+        id: &str,
+        error: &crate::ProjectIoError,
+        put_back: Option<project_io::FileVersion>,
+    ) {
         if !matches!(error, crate::ProjectIoError::PutBack(_)) {
             return;
         }
@@ -3004,7 +3114,9 @@ impl Kernel {
         else {
             return;
         };
-        if let Ok(Some(now)) = project_io::FileVersion::read(path)
+        // Read by the save's worker, right after it put the file back.
+        if let Some(now) = put_back
+            && now.path == *path
             && now.hash == version.hash
         {
             self.project_mut(id).unwrap().store_mut().file_moved(now);
@@ -3091,7 +3203,28 @@ impl Kernel {
             path,
             lock,
         } = ticket;
-        if !receipt.version.is_unchanged().unwrap_or(false) {
+        // Proven by the worker that ran this save's disk work, only if the
+        // name still leads to exactly the file that proof covered; else (a
+        // direct caller) here. Anything else is not adopted: the work stays
+        // unsaved, with its journal, and the save finds the file changed.
+        let proven = self
+            .save_prelude
+            .as_mut()
+            .filter(|pre| pre.project == id)
+            .and_then(|pre| pre.ticket.take());
+        let unchanged = match proven {
+            Some(Some(covered)) => {
+                covered.same_identity(&receipt.version.stat)
+                    && project_io::lstat_file(&receipt.version.path)
+                        .ok()
+                        .flatten()
+                        .as_ref()
+                        == Some(&covered)
+            }
+            Some(None) => false,
+            None => receipt.version.is_unchanged().unwrap_or(false),
+        };
+        if !unchanged {
             return Ok(());
         }
         self.note_changed(id, &receipt);
@@ -3117,13 +3250,14 @@ impl Kernel {
     /// Error Log says where each is (the Trash, or hidden where it was).
     /// The save's record tells the person until they have seen it; one
     /// whose record could not be written is told by the open session's own
-    /// rows instead.
+    /// rows instead, and waits for a session of its project when none is
+    /// open (an Open that failed after its recovery ran).
     fn tell_strays(&mut self) {
         let strays = match self.publish_hooks.strays.lock() {
             Ok(mut strays) => std::mem::take(&mut *strays),
             Err(_) => return,
         };
-        for stray in strays {
+        for stray in &strays {
             self.log(format!(
                 "A file from an earlier save of {} was changed after it was saved and could \
                  not be kept next to the project; it is {}: {}",
@@ -3135,13 +3269,19 @@ impl Kernel {
                 },
                 stray.path.display()
             ));
-            if stray.recorded {
-                continue;
+        }
+        let mut waiting = std::mem::take(&mut self.unseen_strays);
+        for stray in strays.into_iter().filter(|stray| !stray.recorded) {
+            if !waiting.contains(&stray) {
+                waiting.push(stray);
             }
+        }
+        for stray in waiting {
             let Some(id) = self.sessions.iter().find_map(|(id, s)| {
                 matches!(&s.destination, Destination::File(p) if *p == stray.project)
                     .then(|| id.clone())
             }) else {
+                self.unseen_strays.push(stray);
                 continue;
             };
             let why = if stray.trashed { "trashed" } else { "hidden" };
@@ -3252,8 +3392,8 @@ impl Kernel {
         let meta = w.store().read(&format!("projectMeta.{id}")).ok()??;
         let path = PathBuf::from(meta.get("file")?.get("path")?.as_str()?);
         let backing = w.store().dir().parent()?.join("recovery-files");
-        let has_body = path.starts_with(backing)
-            && w.store().read(&format!("project.{id}")).ok()?.is_some();
+        let has_body =
+            path.starts_with(backing) && w.store().read(&format!("project.{id}")).ok()?.is_some();
         (!has_body).then_some(path)
     }
     /// A closed file entry as a library project, read from its file.

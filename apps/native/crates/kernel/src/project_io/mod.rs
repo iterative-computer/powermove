@@ -56,10 +56,10 @@ pub use durable::{
     BackupPolicy, FileStat, FileVersion, Publish, check_version, hash_file, list_backups,
     local_time, temporary_sibling,
 };
-pub(crate) use durable::{Host, folder_sync_now, remove_abandoned_temps};
+pub(crate) use durable::{Host, folder_sync_now, lstat_file, remove_abandoned_temps};
 pub use durable::{
-    PublishHook, PublishHooks, SharedWriteCoordinator, StepHook, Stray, Strays, TrashHook,
-    WriteCoordinator,
+    PublishHook, PublishHooks, ReadHook, SharedWriteCoordinator, StepHook, Stray, Strays,
+    TrashHook, WholeReads, WriteCoordinator, watch_whole_reads,
 };
 pub use save::{SaveOptions, SavePlan, SaveReceipt, SaveTarget, VerifyLevel, WriteFault};
 pub use transaction::{LeftAside, Leftover, Owner, Settled, Undecided};
@@ -392,6 +392,7 @@ fn hash_project_file(
     size: u64,
     media: &[&MediaRecord],
 ) -> Result<String, ProjectIoError> {
+    durable::reading_whole(path);
     let bad = || {
         ProjectIoError::Container(pm_model::container::ContainerError::Invalid(
             "The project media checksum does not match.",
@@ -485,6 +486,11 @@ pub fn open_project(path: &Path, options: OpenOptions) -> Result<OpenedProject, 
         ));
     }
     let before = durable::stat_of(&meta);
+    // The start of a copy (a sync client's, another computer's save) is
+    // not a damaged project: it is refused as one still arriving.
+    if durable::file_head_held_back(&file) {
+        return Err(ProjectIoError::StillCopying);
+    }
     // Index and document checksums are always verified by the reader; media
     // checksums are verified below, in the single hashing pass.
     let container = read_container(
