@@ -71,6 +71,24 @@ fn store(dir: &Path, project: &str, png: &[u8]) -> std::io::Result<PathBuf> {
     Ok(path)
 }
 
+/// Removes every poster of `project` (it was deleted or moved to the Trash).
+pub fn forget(project: &str) {
+    let Some(dir) = DIR.get() else {
+        return;
+    };
+    remove_posters(dir, project);
+}
+fn remove_posters(dir: &Path, project: &str) {
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if id_of(&name).is_some_and(|(id, _)| id == project) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+    if let Some(index) = INDEX.lock().unwrap().as_mut() {
+        index.remove(project);
+    }
+}
 /// Renders `published` at `time` as a poster on a worker thread, then calls
 /// `done` (Home redraws). Failures are quiet: the card keeps its size label.
 pub fn refresh(
@@ -128,6 +146,11 @@ mod tests {
             .collect();
         assert_eq!(left.len(), 1);
         assert_eq!(std::fs::read(kept).unwrap(), b"newest");
+        // Deleting the project removes its poster and keeps the others.
+        remove_posters(&dir, "P1");
+        let found = scan(&dir);
+        assert!(!found.contains_key("P1"));
+        assert!(found.contains_key("P2"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

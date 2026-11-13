@@ -1,4 +1,4 @@
-import { useEffect, useState } from "preact/hooks";
+import { useEffect, useRef, useState } from "preact/hooks";
 import {
   EmptyState,
   PopUpButton,
@@ -229,7 +229,24 @@ export function ViewerPanel({
   ) : null;
   // 3d-studio.md §6: the Light panel, top-leading over the stage while Light
   // is the tool. Values are the model's; a pull is one Undo ("Light Size").
-  const light = m.studio?.tool === "light" ? m.studio.light : undefined;
+  // 3d-studio.md §6 motion: the panel springs in when Light is chosen and
+  // out when it isn't. The host animates any node marked `pmKit.presence`;
+  // the panel stays, marked closing, for the exit (motion.exit, 0.12 s) and a
+  // frame's grace, then goes.
+  const liveLight = m.studio?.tool === "light" ? m.studio.light : undefined;
+  const lastLight = useRef<typeof liveLight>(undefined);
+  if (liveLight) lastLight.current = liveLight;
+  const [, rerender] = useState(0);
+  useEffect(() => {
+    if (liveLight || !lastLight.current) return;
+    const timer = setTimeout(() => {
+      lastLight.current = undefined;
+      rerender((n) => n + 1);
+    }, 160);
+    return () => clearTimeout(timer);
+  }, [!!liveLight]);
+  const light = liveLight ?? lastLight.current;
+  const lightClosing = !liveLight;
   const kinds = [
     { v: "area", label: "Softbox" },
     { v: "spot", label: "Spotlight" },
@@ -241,6 +258,7 @@ export function ViewerPanel({
       id="viewer.studio.lightPanel"
       role="group"
       label="Light Tool"
+      metadata={{ pmKit: { presence: true, closing: lightClosing } }}
       style={{
         position: "absolute",
         left: token("metrics.gap"),
