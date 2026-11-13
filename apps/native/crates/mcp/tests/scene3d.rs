@@ -55,11 +55,13 @@ fn error(s: &mut McpSession, args: Value) -> Value {
     serde_json::to_value(error).unwrap()
 }
 #[test]
-fn only_studio_and_export_schemas_change_from_the_frozen_catalog() {
+fn only_studio_export_and_project_recovery_schemas_change_from_the_frozen_catalog() {
     let original: Value =
         serde_json::from_str(include_str!("../fixtures/catalog-main-c7f46a056.json")).unwrap();
     let source: Value =
         serde_json::from_str(include_str!("../fixtures/studio3d-native-catalog.json")).unwrap();
+    let projects: Value =
+        serde_json::from_str(include_str!("../fixtures/project-native-catalog.json")).unwrap();
     assert_eq!(catalog::tools().len(), 68);
     for tool in catalog::tools() {
         let name = tool["name"].as_str().unwrap();
@@ -73,6 +75,8 @@ fn only_studio_and_export_schemas_change_from_the_frozen_catalog() {
                     .find(|t| t["name"] == name)
                     .unwrap()
             );
+        } else if name == "open_project" {
+            assert_eq!(tool, &projects["tools"][0]);
         } else {
             assert_eq!(
                 tool,
@@ -204,6 +208,116 @@ fn unloaded_imported_geometry_is_a_visible_failure() {
         json!({"operation":"drop_to_floor","target":"model"}),
     );
     assert!(e["message"].as_str().unwrap().contains("not loaded"));
+    assert_eq!(f.read(), before);
+}
+
+struct GeometryEngine { path: PathBuf }
+impl pm_mcp::EngineHook for GeometryEngine {
+    fn capture(&self, _: &pm_mcp::CaptureRequest) -> pm_mcp::Result<Value> {
+        Err(pm_mcp::Error::unavailable("no renderer needed for geometry commands"))
+    }
+    fn scene3d_assets(&self, _: &pm_mcp::services::FrozenProject) -> pm_mcp::Result<Arc<dyn pm_scene3d::geometry::AssetGeometry>> {
+        Ok(Arc::new(pm_scene3d::geometry::FileAssets::new([("asset".into(), self.path.clone())].into())))
+    }
+}
+#[test]
+fn headless_auto_studio_and_floor_tools_load_imported_geometry() {
+    let f = Fixture::new();
+    let path = f.root.join("original.bin");
+    std::fs::write(&path, pm_scene3d::import::triangle_glb(&[[0.,0.,0.],[2.,0.,0.],[0.,4.,0.]], &[0,1,2])).unwrap();
+    {
+        let mut host = f.host.lock().unwrap();
+        let revision = host.revision(&f.id).unwrap();
+        host.apply_commands(&f.id, vec![pm_kernel::MediaCommand::AddAsset {
+            asset_id:"asset".into(), asset:pm_scene3d::to_model(&json!({"id":"asset","kind":"model","name":"triangle.glb","format":"glb"})),
+        }.into()], "Synthetic model", pm_kernel::Origin::Mcp, revision, 1).unwrap();
+        host.engine = Some(Arc::new(GeometryEngine { path }));
+    }
+    let mut session = f.session();
+    ok(session.call("edit_3d", json!({"operation":"add_object","id":"model","object":{"source":{"assetId":"asset"}}})));
+    ok(session.call("edit_3d", json!({"operation":"auto_studio","target":"model"})));
+    ok(session.call("edit_3d", json!({"operation":"drop_to_floor","target":"model"})));
+    let scene = ok(session.call("get_3d_scene", json!({})));
+    assert!(scene["scene"]["objects"][0]["p"]["y"]["v"].as_f64().unwrap() > 0.);
+    assert_eq!(scene["scene"]["lights"].as_array().unwrap().len(), 3);
+}
+
+#[test]
+fn real_world_import_preserves_relative_glb_size_and_shared_source_origin() {
+    let f = Fixture::new();
+    let mut paths = std::collections::HashMap::new();
+    let mut commands = vec![];
+    for (id, points) in [
+        ("large", [[0.,0.,0.],[0.2,0.,0.],[0.,0.4,0.]]),
+        ("small", [[0.3,0.,0.],[0.4,0.,0.],[0.3,0.2,0.]]),
+    ] {
+        let path = f.root.join(format!("{id}.bin"));
+        std::fs::write(&path, pm_scene3d::import::triangle_glb(&points, &[0,1,2])).unwrap();
+        paths.insert(id.into(), path);
+        commands.push(pm_kernel::MediaCommand::AddAsset {
+            asset_id:id.into(), asset:pm_scene3d::to_model(&json!({"id":id,"kind":"model","name":format!("{id}.glb"),"format":"glb"})),
+        }.into());
+    }
+    {
+        let mut host = f.host.lock().unwrap();
+        let revision = host.revision(&f.id).unwrap();
+        host.apply_commands(&f.id, commands, "Synthetic product parts", pm_kernel::Origin::Mcp, revision, 1).unwrap();
+        host.scene3d_assets = Some(Arc::new(pm_scene3d::geometry::FileAssets::new(paths)));
+    }
+    let mut session = f.session();
+    ok(session.call("edit_3d", json!({"operation":"set_world","world":{"mode":"none","p":{"metersPerUnit":0.01}}})));
+    for source in ["large", "small"] {
+        for keep in [false, true] {
+            ok(session.call("edit_3d", json!({"operation":"add_object","id":format!("{source}-{keep}"),"object":{"source":{"assetId":source}},"keepRealWorldScale":keep})));
+        }
+    }
+    let read = ok(session.call("get_3d_scene", json!({})));
+    let objects = read["scene"]["objects"].as_array().unwrap();
+    let property = |id: &str, key: &str| objects.iter().find(|o| o["id"] == id).unwrap()["p"][key]["v"].as_f64().unwrap();
+    assert_eq!(property("large-false", "sx"), 1.);
+    assert_eq!(property("small-false", "sx"), 1.);
+    assert!((property("large-true", "sx") / property("small-true", "sx") - 2.).abs() < 1e-6);
+    for (id, key, value) in [("large-true","x",10.),("large-true","y",20.),("small-true","x",35.),("small-true","y",10.)] {
+        assert!((property(id,key)-value).abs() < 1e-5, "{id} {key}");
+    }
+    // Ambiguous transforms and unsupported combinations fail atomically.
+    let before = f.read();
+    for args in [
+        json!({"operation":"add_object","object":{"source":{"assetId":"large"},"p":{"sx":2}},"keepRealWorldScale":true}),
+        json!({"operation":"add_object","object":{"source":{"primitive":"box"}},"keepRealWorldScale":true}),
+        json!({"operation":"auto_studio","keepRealWorldScale":true}),
+    ] { assert!(session.dispatch("edit_3d", &args).is_err()); }
+    assert_eq!(f.read(), before);
+}
+
+#[test]
+fn object_scale_factors_and_percent_keyframes_evaluate_identically() {
+    let f = Fixture::new();
+    let mut session = f.session();
+    ok(session.call("edit_3d", json!({"operation":"add_object","id":"model","object":{"source":{"primitive":"box"},"p":{"sx":1.188}}})));
+    let factor = ok(session.call("get_3d_scene", json!({"target":"model"})))["scene"]["objects"][0]["p"]["sx"]["v"].as_f64().unwrap();
+    ok(session.call("apply_commands", json!({"commands":[{"type":"replace_keyframes","target":"model","path":"scale.x","keyframes":[{"time":0,"value":118.8},{"time":1,"value":118.8}]}]})));
+    let keyed = ok(session.call("get_3d_scene", json!({"target":"model"})))["scene"]["objects"][0]["p"]["sx"]["v"].as_f64().unwrap();
+    assert!((factor - 1.188).abs() < 1e-12);
+    assert!((keyed - factor).abs() < 1e-12);
+    let before = f.read();
+    for p in [json!({"sx":"118.8%"}), json!({"scale.x":118.8})] {
+        assert!(session.dispatch("edit_3d", &json!({"operation":"update_object","target":"model","patch":{"p":p}})).is_err());
+    }
+    assert_eq!(f.read(), before);
+}
+
+#[test]
+fn highlight_command_clears_the_floor_and_rejects_impossible_placements_atomically() {
+    let f = Fixture::new();
+    let mut session = f.session();
+    ok(session.call("edit_3d", json!({"operation":"add_camera","camera":{"camera":{"p":{"x":0,"y":4,"z":6}},"environment":{"shadowCatcher":true}}})));
+    let id = ok(session.call("edit_3d", json!({"operation":"light_highlight","at":[0,1,0],"normal":[0,0,1]})))["result"]["id"].clone();
+    let scene = ok(session.call("get_3d_scene", json!({})));
+    let light = scene["scene"]["lights"].as_array().unwrap().iter().find(|l| l["id"] == id).unwrap();
+    assert!(light["p"]["y"]["v"].as_f64().unwrap() - light["p"]["height"]["v"].as_f64().unwrap()/2. > 0.);
+    let before = f.read();
+    assert!(session.dispatch("edit_3d", &json!({"operation":"light_highlight","at":[0,0,0],"normal":[0,0,1]})).is_err());
     assert_eq!(f.read(), before);
 }
 

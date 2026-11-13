@@ -70,6 +70,44 @@ pub fn highlight_placement(point: Vec3, normal: Vec3, eye: Vec3, distance: f64) 
     let v = normalize(sub(eye, point));
     Ok(add(point, mul(sub(mul(n, 2. * dot(v, n)), v), distance)))
 }
+/// Preserve the reflection ray while fitting the whole softbox above the
+/// studio floor. A downward-looking camera can require a downward reflection
+/// ray on upright glass: shorten that ray instead of flipping its Y component
+/// (which would move the highlight). Default size follows the actual distance.
+pub fn highlight_above_floor(
+    point: Vec3,
+    normal: Vec3,
+    eye: Vec3,
+    distance: f64,
+    size: Option<f64>,
+    floor: f64,
+) -> Result<(Vec3, f64)> {
+    let position = highlight_placement(point, normal, eye, distance)?;
+    if !floor.is_finite() || size.is_some_and(|s| !s.is_finite() || s <= 0.) {
+        return fail("Invalid softbox size or floor height");
+    }
+    let direction = normalize(sub(position, point));
+    let mut distance = distance;
+    let mut width = size.unwrap_or(distance * 0.6);
+    let clearance = floor + 0.0001;
+    // Its height is 0.62 * width. Using the full half-height is conservative
+    // for any tilt of the panel and keeps even its lowest edge above the set.
+    if position[1] - width * 0.31 < clearance {
+        let (height, slope) = match size {
+            Some(width) => (point[1] - clearance - width * 0.31, -direction[1]),
+            None => (point[1] - clearance, 0.6 * 0.31 - direction[1]),
+        };
+        let limit = height / slope;
+        if slope <= 0. || !limit.is_finite() || limit <= 0. {
+            return fail(
+                "This reflection cannot fit above the studio floor; choose a higher surface point or a smaller softbox",
+            );
+        }
+        distance = distance.min(limit * 0.999);
+        width = size.unwrap_or(distance * 0.6);
+    }
+    Ok((add(point, mul(direction, distance)), width))
+}
 pub fn aim(mut s: Snapshot, h: Hit, mode: Aim) -> Result<Snapshot> {
     s.validate()?;
     let distance = length(sub(s.position, s.target)).max(0.05);

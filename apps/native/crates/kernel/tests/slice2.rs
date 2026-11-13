@@ -499,12 +499,19 @@ fn a_crashed_owner_is_taken_over_at_once_and_a_live_one_never() {
     assert!(FileLock::acquire(&path).is_ok());
 }
 #[test]
-fn malformed_lock_is_never_stolen() {
+fn torn_local_lock_recovers_without_stealing_a_live_flock() {
     let dir = common::TempDir::new("bad-lock");
     let path = dir.path("lock");
-    fs::write(&path, b"broken").unwrap();
-    assert!(FileLock::acquire(&path).is_err());
-    assert_eq!(fs::read(path).unwrap(), b"broken");
+    for bytes in [b"broken".as_slice(), b"", b"{\"pid\":", b"\xff"] {
+        fs::write(&path, bytes).unwrap();
+        fs::write(owner_record_path(&path), bytes).unwrap();
+        let lock = FileLock::acquire(&path).unwrap();
+        assert!(FileLock::acquire(&path).is_err(), "live flock must win over torn metadata");
+        let owner = parse(&fs::read_to_string(owner_record_path(&path)).unwrap()).unwrap();
+        assert_eq!(owner.get("pid"), Some(&Value::Number(std::process::id() as f64)));
+        drop(lock);
+        drop(FileLock::acquire(&path).unwrap());
+    }
 }
 #[test]
 fn lock_child_process() {

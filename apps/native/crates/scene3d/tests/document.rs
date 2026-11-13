@@ -175,6 +175,24 @@ fn static_assembly_keeps_new_fields_and_default_light() {
     assert_eq!(s["lights"][0]["type"], "sun");
 }
 #[test]
+fn world_lighting_does_not_add_an_implicit_sun() {
+    for mode in ["hdri", "sky", "none"] {
+        let mut c = comp();
+        let world = service::new_layer(
+            &c, "world", "World", Role::Object,
+            json!({"object":{"source":{"primitive":"box"},"world":{"mode":mode,"source":"studio-map"}}}),
+            json!({}), true, None, 0.,
+        ).unwrap();
+        c["layers"] = json!([world]);
+        let scene = service::composition(&c, 1., &mut service::StaticEvaluator).unwrap();
+        assert_eq!(scene["lights"].as_array().unwrap().len(), usize::from(mode == "none"), "{mode}");
+        // A hidden or out-of-range World must not change legacy lighting.
+        c["layers"][0]["on"] = json!(false);
+        let scene = service::composition(&c, 1., &mut service::StaticEvaluator).unwrap();
+        assert_eq!(scene["lights"][0]["type"], "sun");
+    }
+}
+#[test]
 fn legacy_container_archive_and_outer_intent_survive() {
     let mut c = comp();
     let old = json!({"id":"old","name":"Old","type":"extension","from":2,"dur":5,"p":{"position.x":{"v":14,"kf":[],"expr":null}},"fx":[{"id":"fx"}],"masks":[],"lock":true,"future":{"keep":true},"d":{"definition":schema::SCENE,"data":{"scene":{"objects":[{"id":"a","source":{"primitive":"box"}}]}}}});
