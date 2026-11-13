@@ -102,8 +102,21 @@ fn shutter_times_preserve_negative_shutter_order_and_exact_fps() {
 }
 #[test]
 fn every_current_parameter_default_equals_main_at_source_sizes() {
+    // Main's revision of each effect: the revisions made here keep main's
+    // as history, and say what they change (`catalog::revise`).
+    let pinned: Value = serde_json::from_str(include_str!("../src/main-effects.json")).unwrap();
+    let main_version = |id: &str| {
+        let effect = pinned["effects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["id"] == id)
+            .unwrap();
+        effect_version(effect.get("version")).unwrap()
+    };
     for row in oracle()["defaults"].as_array().unwrap() {
-        let def = main_catalog().current(row["id"].as_str().unwrap()).unwrap();
+        let id = row["id"].as_str().unwrap();
+        let def = main_catalog().get(id, main_version(id)).unwrap();
         let param = def.params.iter().find(|p| p.k == row["key"]).unwrap();
         assert_json_number_equivalent(
             parameter_default(

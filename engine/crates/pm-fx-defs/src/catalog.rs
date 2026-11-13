@@ -141,10 +141,10 @@ pub fn main_effects() -> &'static MainEffects {
 }
 
 /// A revision of `id` made here and not in main: the pinned shader with each
-/// `(from, to)` replaced once. Its parameters and their defaults stay main's.
-/// The definition it replaces stays as history, so an effect saved with it
-/// draws as it did.
-fn revise(main: &mut MainEffects, id: &str, edits: &[(&str, &str)]) {
+/// `(from, to)` replaced once. Its parameters stay main's, with the default
+/// of each `(key, value)` in `defaults` changed. The definition it replaces
+/// stays as history, so an effect saved with it draws as it did.
+fn revise(main: &mut MainEffects, id: &str, edits: &[(&str, &str)], defaults: &[(&str, Value)]) {
     let revision = main
         .effects
         .iter_mut()
@@ -160,6 +160,14 @@ fn revise(main: &mut MainEffects, id: &str, edits: &[(&str, &str)]) {
     for (from, to) in edits {
         assert_eq!(revision.frag.matches(from).count(), 1, "{id}: {from}");
         revision.frag = revision.frag.replacen(from, to, 1);
+    }
+    for (key, value) in defaults {
+        let param = revision
+            .params
+            .iter_mut()
+            .find(|p| p.k == *key)
+            .unwrap_or_else(|| panic!("{id} has no parameter {key}"));
+        param.def = value.clone();
     }
     revision
         .metadata
@@ -235,6 +243,7 @@ fn add_unclipped_revisions(main: &mut MainEffects) {
                 "o = vec4(x * c.a, c.a);",
             ),
         ],
+        &[],
     );
     revise(
         main,
@@ -243,6 +252,7 @@ fn add_unclipped_revisions(main: &mut MainEffects) {
             "o = vec4(clamp(mixed, 0., 1.) * c.a, c.a);",
             "o = vec4(mixed * c.a, c.a);",
         )],
+        &[],
     );
     revise(
         main,
@@ -251,6 +261,7 @@ fn add_unclipped_revisions(main: &mut MainEffects) {
             "o = vec4(clamp(c.rgb + (c.rgb - b.rgb*.25) * (u_p0/100.), 0., 4.), c.a);",
             "o = vec4(c.rgb + (c.rgb - b.rgb*.25) * (u_p0/100.), c.a);",
         )],
+        &[],
     );
     revise(
         main,
@@ -259,6 +270,37 @@ fn add_unclipped_revisions(main: &mut MainEffects) {
             "o = vec4(clamp(c.rgb + n * (u_p0/100.) * c.a, 0., 8.), c.a);",
             "o = vec4(c.rgb + n * (u_p0/100.) * c.a, c.a);",
         )],
+        &[],
+    );
+    // An untouched Levels passes light above white and colour outside the
+    // output range: its clip switches start off (After Effects' are off in a
+    // 32-bit project; here every depth's intermediates are float).
+    for id in ["levels", "levelsIndividual"] {
+        revise(
+            main,
+            id,
+            &[],
+            &[
+                ("clipBlack", Value::Bool(false)),
+                ("clipWhite", Value::Bool(false)),
+            ],
+        );
+    }
+    // Any pixel with coverage is graded, however faint.
+    revise(
+        main,
+        "duotone",
+        &[(
+            "if (c.a < .0005) { o = c; return; }",
+            "if (c.a <= 0.) { o = c; return; }",
+        )],
+        &[],
+    );
+    revise(
+        main,
+        "posterize",
+        &[("if (c.a<.0005){o=c;return;}", "if (c.a<=0.){o=c;return;}")],
+        &[],
     );
 }
 
