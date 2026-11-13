@@ -74,16 +74,17 @@ pub fn terminations() -> async_channel::Receiver<()> {
 }
 
 /// An open sheet that takes `.cube` files.
-pub fn cube_file(window: &NSWindow) -> async_channel::Receiver<Option<PathBuf>> {
+pub fn lut_file(window: &NSWindow) -> async_channel::Receiver<Option<PathBuf>> {
     let (tx, rx) = async_channel::bounded(1);
     let mtm = MainThreadMarker::new().unwrap();
     let panel = NSOpenPanel::openPanel(mtm);
     panel.setCanChooseDirectories(false);
     panel.setAllowsMultipleSelection(false);
-    panel.setMessage(Some(&NSString::from_str("Choose a .cube LUT")));
+    panel.setMessage(Some(&NSString::from_str("Choose a .cube or .3dl LUT")));
     #[allow(deprecated)]
     panel.setAllowedFileTypes(Some(&objc2_foundation::NSArray::from_retained_slice(&[
         NSString::from_str("cube"),
+        NSString::from_str("3dl"),
     ])));
     let retained = panel.clone();
     let done = block2::RcBlock::new(move |result: NSModalResponse| {

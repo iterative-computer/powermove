@@ -126,15 +126,23 @@ impl Assets {
             let loaded = (|| {
                 let record = node::member(node::member(Some(root), "assets"), &id);
                 let kind = node::string(node::member(record, "kind")).map(|s| s.to_string_lossy());
+                // The sentences a person reads when the file can't be used.
+                let what = if lut { "LUT" } else { "image" };
+                let name = node::string(node::member(record, "name"))
+                    .map(|s| s.to_string_lossy())
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or_else(|| id.clone());
+                let unreadable =
+                    |why: String| format!("The {what} “{name}” couldn’t be read. {why}");
                 if kind.as_deref() != Some(if lut { "lut" } else { "image" }) {
                     return Err(format!(
-                        "Effect asset requires {} metadata: {id}",
-                        if lut { "lut" } else { "image" }
+                        "“{name}” isn’t {} file.",
+                        if lut { "a LUT" } else { "an image" }
                     ));
                 }
-                let path = resolver
-                    .path(&id, record)
-                    .ok_or_else(|| format!("Effect asset is offline: {id}"))?;
+                let path = resolver.path(&id, record).ok_or_else(|| {
+                    format!("The {what} “{name}” can’t be found. Relink it or remove the effect.")
+                })?;
                 let request = (id.clone(), lut);
                 let stamp = crate::media::stamp(&path);
                 if let Some(stamp) = stamp {
@@ -158,12 +166,17 @@ impl Assets {
                 };
                 let mut bytes = vec![];
                 std::fs::File::open(path)
-                    .map_err(|e| e.to_string())?
-                    .take(limit + 1)
-                    .read_to_end(&mut bytes)
-                    .map_err(|e| e.to_string())?;
+                    .and_then(|file| file.take(limit + 1).read_to_end(&mut bytes))
+                    .map_err(|_| {
+                        format!(
+                            "The {what} “{name}” can’t be found. Relink it or remove the effect."
+                        )
+                    })?;
                 if bytes.len() as u64 > limit {
-                    return Err(format!("Effect asset exceeds {} MiB", limit / 1024 / 1024));
+                    return Err(format!(
+                        "The {what} “{name}” is larger than {} MiB.",
+                        limit / 1024 / 1024
+                    ));
                 }
                 let key = Sha256::digest(&bytes).into();
                 if let Some(Ok(asset)) = old.get(&request)
@@ -172,11 +185,16 @@ impl Assets {
                     return Ok(asset.clone());
                 }
                 let asset = if lut {
-                    let cube = pm_color::lut::CubeLut::parse(
-                        std::str::from_utf8(&bytes).map_err(|e| e.to_string())?,
-                    )
-                    .and_then(|lut| lut.gpu())
-                    .map_err(|e| e.to_string())?;
+                    let cube = std::str::from_utf8(&bytes)
+                        .map_err(|_| unreadable("It isn’t a text file.".into()))
+                        .and_then(|text| {
+                            let format = node::string(node::member(record, "format"))
+                                .map(|s| s.to_string_lossy())
+                                .unwrap_or_default();
+                            pm_color::lut::CubeLut::parse_format(&format, text)
+                                .and_then(|lut| lut.gpu())
+                                .map_err(|e| unreadable(e.to_string()))
+                        })?;
                     Asset {
                         key,
                         width: cube.width,
@@ -187,12 +205,12 @@ impl Assets {
                         brush: false,
                     }
                 } else {
-                    let image = crate::scene3d::gltf::asset::decode(&bytes)?;
+                    let image = crate::scene3d::gltf::asset::decode(&bytes).map_err(unreadable)?;
                     if image.width > 16384
                         || image.height > 16384
                         || image.rgba.len() > 256 * 1024 * 1024
                     {
-                        return Err("Effect image exceeds texture budget".into());
+                        return Err(format!("The image “{name}” is too large for an effect."));
                     }
                     // FBO rows for shared sample_<key>; image alpha is straight.
                     let mut rgba = Vec::with_capacity(image.rgba.len());
