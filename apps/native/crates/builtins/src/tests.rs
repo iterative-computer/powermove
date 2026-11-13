@@ -696,6 +696,80 @@ fn application_scope_never_exposes_a_real_document_with_the_transport_id() {
 }
 
 #[test]
+fn the_distribute_buttons_space_three_selected_layers_as_one_undo_step() {
+    let actor = KernelActor::spawn(KernelConfig::default());
+    let layer = |id: &str, x: f64| {
+        json!({"id":id,"type":"shape","name":id,"from":0,"dur":10,"on":true,"lock":false,
+        "p":{"opacity":{"v":100,"kf":[]},"position.x":{"v":x,"kf":[]},"position.y":{"v":180,"kf":[]}},
+        "d":{"w":40,"h":40},"fx":[]})
+    };
+    let project = json!({"id":"synthetic","name":"Synthetic","compId":"c","w":640,"h":360,"fps":30,"dur":10,
+        "bg":"#000000","assets":{},"comps":{},"layers":[layer("a",100.),layer("b",150.),layer("c",500.)]});
+    let kernel = actor.handle();
+    kernel
+        .open(
+            "synthetic",
+            OpenSource::Untitled(pm_model::json::parse(&project.to_string()).unwrap()),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    let select = |ids: &[&str]| {
+        kernel
+            .call(
+                "synthetic",
+                Request::new(
+                    Caller::native(),
+                    SelectionCall::Layers {
+                        ids: ids.iter().map(|id| (*id).to_owned()).collect(),
+                        add: false,
+                    },
+                ),
+            )
+            .wait()
+            .unwrap()
+            .unwrap();
+    };
+    let identity = pm_surface::host_api::Identity {
+        realm: "inspector".into(),
+        generation: 1,
+        project: "synthetic".into(),
+    };
+    let mut backend = data::Backend::new(kernel.clone(), identity, "inspector", false).unwrap();
+    let press = |backend: &mut data::Backend| {
+        backend.native_command(
+            "panel.inspector",
+            &json!({"type":"distribute","axis":"horizontal"}),
+        )
+    };
+    // Two layers: nothing to distribute, and the panel says why.
+    select(&["a", "b"]);
+    backend.inspector_snapshot().unwrap();
+    assert!(press(&mut backend).is_err());
+    select(&["a", "b", "c"]);
+    backend.inspector_snapshot().unwrap();
+    let Ok(models::NativeCommand::Kernel(request)) = press(&mut backend) else {
+        panic!("the button edits the project")
+    };
+    kernel.call("synthetic", request).wait().unwrap().unwrap();
+    let published = kernel.published("synthetic").unwrap();
+    let x = |id: &str| {
+        pm_kernel::QueryMirror::new(&published)
+            .queries()
+            .evaluate(None, id, "position.x", 0.)
+            .unwrap()
+            .as_f64()
+            .unwrap()
+    };
+    // The outer two stay; the middle one takes the midpoint.
+    assert_eq!((x("a"), x("b"), x("c")), (100., 300., 500.));
+    assert_eq!(
+        published.history.undo_label.as_deref(),
+        Some("Distribute Layers")
+    );
+}
+
+#[test]
 fn render_presets_use_the_legacy_actor_key_and_archive_same_name_records() {
     let actor = actor();
     let identity = pm_surface::host_api::Identity {

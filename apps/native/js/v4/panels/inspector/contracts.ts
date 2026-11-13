@@ -111,6 +111,7 @@ export type Intent =
   | { type: "key"; row: string; removeAnimation: boolean }
   | { type: "row-action"; row: string; action: RowAction }
   | { type: "align"; alignment: Alignment }
+  | { type: "distribute"; axis: "horizontal" | "vertical" }
   | { type: "collapse"; section: string; collapsed: boolean }
   | { type: "section-action"; section: string; action: SectionAction }
   | { type: "drop-effect"; effect: Json; target: string }
