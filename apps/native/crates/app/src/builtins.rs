@@ -728,6 +728,7 @@ impl Controller {
         &mut self,
         id: &str,
         bounds: pm_shell::layout::Rect,
+        tabbed: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
@@ -741,8 +742,10 @@ impl Controller {
             .builtins
             .headers
             .entry(id.into())
-            .or_insert_with(|| cx.new(|cx| crate::v4_view::HeaderView::new(view, cx)));
-        Some(div().w_full().child(header.clone()).into_any_element())
+            .or_insert_with(|| cx.new(|cx| crate::v4_view::HeaderView::new(view, cx)))
+            .clone();
+        header.update(cx, |h, cx| h.set_tabbed(tabbed, cx));
+        Some(div().w_full().child(header).into_any_element())
     }
     /// Settings › General › Bring My Workspace…: Settings gives way to the
     /// Agent panel, where a new thread asks for the After Effects workspace.
