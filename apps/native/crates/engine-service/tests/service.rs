@@ -811,7 +811,16 @@ fn paused_notifications_are_coalesced_and_resource_pins_retire_cache() {
     let service = EngineService::start(pm_gpu::Gpu::new("status-resource-test").unwrap()).unwrap();
     let rx = service.notifications();
     let v = service.viewer(config(snapshot())).unwrap();
-    wait_frame(&v, v.stamp().unwrap());
+    // A paused picture is drawn at the drawable's size, then once more at
+    // the composition's: the service is quiet after the one that stays.
+    loop {
+        let stamp = v.stamp().unwrap();
+        wait_frame(&v, stamp);
+        std::thread::sleep(Duration::from_millis(100));
+        if v.stamp() == Some(stamp) {
+            break;
+        }
+    }
     while rx.try_recv().is_ok() {}
     std::thread::sleep(Duration::from_millis(30));
     assert!(
