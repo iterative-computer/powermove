@@ -58,7 +58,7 @@ pub const CAMERA_LOGS: [CameraLog; 6] = [
 ];
 
 /// The video or image asset a layer shows.
-fn layer_asset(p: &Published, layer: &str) -> Option<String> {
+pub(crate) fn layer_asset(p: &Published, layer: &str) -> Option<String> {
     let root = p.snapshot.root()?;
     let at = pm_kernel::model::find_layer(root, layer)?;
     let node = pm_kernel::model::layer_at(root, &at)?;
@@ -67,7 +67,7 @@ fn layer_asset(p: &Published, layer: &str) -> Option<String> {
 }
 
 /// Edits the Interpret Footage overrides of the asset `layer` shows.
-fn edit_interpretation(
+pub(crate) fn edit_interpretation(
     p: &Published,
     layer: &str,
     edit: impl FnOnce(&mut Map),
@@ -120,32 +120,50 @@ pub fn clean_aperture_command(p: &Published, layer: &str) -> Result<Command, Str
     })
 }
 
-/// The first Apply Color LUT on `layer` with no file yet, as the Effects browser
-/// adds it.
-fn empty_lut_effect(p: &Published, layer: &str) -> Option<String> {
+/// The first Apply Color LUT on `layer` that needs a file: one the Effects
+/// browser added with none yet, or one whose LUT is in `missing`.
+fn open_lut_effect(
+    p: &Published,
+    layer: &str,
+    missing: &std::collections::BTreeSet<String>,
+) -> Option<String> {
     let root = p.snapshot.root()?;
     let at = pm_kernel::model::find_layer(root, layer)?;
     let effects = pm_kernel::model::layer_at(root, &at)?.get("fx")?.to_value();
     effects.as_array()?.iter().find_map(|effect| {
         let id = effect.get("id")?.as_str()?;
-        let empty = effect.get("type")?.as_str()? == "applyColorLut"
-            && effect
-                .get("inputs")
-                .and_then(|inputs| inputs.get("lut"))
-                .and_then(|lut| lut.get("assetId"))
-                .is_none_or(Value::is_null);
-        empty.then(|| id.to_owned())
+        let asset = effect
+            .get("inputs")
+            .and_then(|inputs| inputs.get("lut"))
+            .and_then(|lut| lut.get("assetId"));
+        let open = effect.get("type")?.as_str()? == "applyColorLut"
+            && asset.is_none_or(|asset| {
+                asset.is_null() || asset.as_str().is_some_and(|id| missing.contains(id))
+            });
+        open.then(|| id.to_owned())
     })
 }
 
-/// Adds the LUT as an asset on `layer`'s empty Apply Color LUT, or on a new
-/// one, in one Undo step. `path` is the retained copy of the file.
+/// A LUT file's format, from its name: `3dl`, or `cube`.
+fn lut_format(name: &str) -> &'static str {
+    let extension = Path::new(name).extension().and_then(|e| e.to_str());
+    if extension.is_some_and(|e| e.eq_ignore_ascii_case("3dl")) {
+        "3dl"
+    } else {
+        "cube"
+    }
+}
+
+/// Adds the LUT as an asset on `layer`'s Apply Color LUT that needs a file (an
+/// empty one, or one whose LUT is in `missing`: a relink), or on a new one, in
+/// one Undo step. `path` is the retained copy of the file.
 pub fn lut_commands(
     p: &Published,
     layer: &str,
     asset_id: &str,
     name: &str,
     path: &Path,
+    missing: &std::collections::BTreeSet<String>,
 ) -> Result<Vec<Command>, String> {
     use pm_kernel::commands::effects::{
         AddEffect, EffectCommand, EffectPatch, saved_builtin_definition,
@@ -153,7 +171,7 @@ pub fn lut_commands(
     let mut asset = Map::new();
     asset.insert("name", Value::from(name));
     asset.insert("kind", Value::from("lut"));
-    asset.insert("format", Value::from("cube"));
+    asset.insert("format", Value::from(lut_format(name)));
     asset.insert("sourcePath", Value::from(path.to_string_lossy().as_ref()));
     let mut input = Map::new();
     input.insert("kind", Value::from("asset"));
@@ -161,7 +179,7 @@ pub fn lut_commands(
     let mut inputs = Map::new();
     inputs.insert("lut", Value::Object(input));
     let inputs = Some(Value::Object(inputs));
-    let effect = match empty_lut_effect(p, layer) {
+    let effect = match open_lut_effect(p, layer, missing) {
         Some(effect) => EffectCommand::Set {
             layer_id: layer.to_owned(),
             effect,
@@ -199,7 +217,7 @@ pub fn lut_commands(
     ])
 }
 
-/// Worker: validates the `.cube` and keeps a copy that outlives the original.
+/// Worker: validates the LUT and keeps a copy that outlives the original.
 fn retain_lut(profile: &Path, path: &Path) -> Result<PathBuf, String> {
     let unreadable = |reason: String| format!("This LUT couldn’t be read. {reason}");
     let size = std::fs::metadata(path)
@@ -209,7 +227,7 @@ fn retain_lut(profile: &Path, path: &Path) -> Result<PathBuf, String> {
         return Err("This LUT is too large.".into());
     }
     let text = std::fs::read_to_string(path).map_err(|e| unreadable(e.to_string()))?;
-    pm_color::lut::CubeLut::parse(&text)
+    pm_color::lut::CubeLut::parse_format(lut_format(&path.to_string_lossy()), &text)
         .and_then(|lut| lut.gpu())
         .map_err(|e| unreadable(e.to_string()))?;
     let archive = pm_kernel::media_archive::Archive::open(profile).map_err(|e| e.to_string())?;
@@ -313,7 +331,7 @@ impl Controller {
         self.change_interpretation(clean_aperture_command, cx);
     }
 
-    fn change_interpretation(
+    pub(crate) fn change_interpretation(
         &mut self,
         change: impl FnOnce(&Published, &str) -> Result<Command, String>,
         cx: &mut Context<Self>,
@@ -347,14 +365,15 @@ impl Controller {
         .detach();
     }
 
-    /// `Apply LUT…`: asks for a `.cube` file and adds it to the selected layer.
+    /// `Apply LUT…`: asks for a `.cube` or `.3dl` file and adds it to the
+    /// selected layer, or relinks the layer's LUT whose file is missing.
     pub fn apply_lut(&mut self, cx: &mut Context<Self>) {
         let Some(layer) = self.selected.clone() else {
             self.message = "Select a layer to apply a LUT".into();
             cx.notify();
             return;
         };
-        let picked = crate::platform::cube_file(&self.host.borrow().window);
+        let picked = crate::platform::lut_file(&self.host.borrow().window);
         let profile = self.profile.clone();
         cx.spawn(async move |this, cx| {
             let Ok(Some(path)) = picked.recv().await else {
@@ -371,7 +390,8 @@ impl Controller {
                 Ok(retained) => {
                     let p = v.published.clone()?;
                     let asset_id = pm_kernel::new_id("lut");
-                    match lut_commands(&p, &layer, &asset_id, &name, &retained) {
+                    let missing = v.offline_media();
+                    match lut_commands(&p, &layer, &asset_id, &name, &retained, &missing) {
                         // The media refresh resolves the new asset's sourcePath.
                         Ok(commands) => Some(
                             v.kernel

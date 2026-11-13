@@ -100,6 +100,9 @@ pub struct MediaPaths {
     pub paths: BTreeMap<String, PathBuf>,
     /// Assets the host is still resolving (the viewer's; exports never).
     pub resolving: std::collections::BTreeSet<String>,
+    /// The original of an asset whose `paths` entry is a converted copy (a
+    /// proxy or optimized media).
+    pub originals: BTreeMap<String, PathBuf>,
 }
 
 impl MediaPaths {
@@ -114,6 +117,9 @@ impl pm_render::AssetResolver for MediaPaths {
     }
     fn resolving(&self, asset: &str) -> bool {
         self.resolving.contains(asset)
+    }
+    fn original(&self, asset: &str) -> Option<PathBuf> {
+        self.originals.get(asset).cloned()
     }
 }
 

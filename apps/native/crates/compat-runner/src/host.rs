@@ -158,6 +158,8 @@ pub struct HostConfig {
     pub frames: Option<crate::FrameRenderer>,
     /// The app's base rasters and override answers (`render.raster`).
     pub rasters: Option<crate::RasterHooks>,
+    /// Values for extensions' declared `vars`.
+    pub vars: Option<crate::VarsSource>,
 }
 
 enum Input {
@@ -228,10 +230,57 @@ struct Published {
     canvases: BTreeMap<(u64, String), CanvasFrame>,
     surfaces: Vec<Value>,
     ready: bool,
+    /// Store helpers starting (id, name): their registrations are not
+    /// published yet, so nothing has settled.
+    starting: Vec<(String, String)>,
     activations: usize,
     /// The realm generation drawing now, 0 with none. Its page is keyed by this.
     view: u64,
     revision: u64,
+}
+impl Published {
+    fn publication(&self) -> Publication {
+        let realm = self
+            .contributions
+            .as_ref()
+            .and_then(|c| c["loading"].as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| {
+                let id = entry["id"].as_str()?;
+                Some((
+                    id.to_owned(),
+                    entry["name"].as_str().unwrap_or(id).to_owned(),
+                ))
+            });
+        Publication {
+            revision: self.revision,
+            settled: self.starting.is_empty()
+                && match &self.contributions {
+                    Some(contributions) => contributions["settled"] != false,
+                    None => self.ready,
+                },
+            loading: self.starting.iter().cloned().chain(realm).collect(),
+            contributions: self.contributions.clone(),
+        }
+    }
+}
+/// One moment of what a host publishes. A reader takes everything it pins
+/// from one of these: definitions read at one moment and a flag read at
+/// another could pair a finished-looking list with a load still running.
+#[derive(Clone, Debug, Default)]
+pub struct Publication {
+    pub revision: u64,
+    /// `None` until the first activation pass publishes (or with no
+    /// extension to run).
+    pub contributions: Option<Arc<Value>>,
+    /// No load pass is running: every extension has registered what it
+    /// registers, or has failed. Until then an effect the project uses that
+    /// no definition provides yet may still arrive, so it is not "not installed".
+    pub settled: bool,
+    /// The extensions still loading, as (id, name): the realm's load pass's
+    /// and the Store helpers starting. Empty once settled.
+    pub loading: Vec<(String, String)>,
 }
 
 struct Shared {
@@ -308,6 +357,43 @@ struct Events {
     page_missed: AtomicBool,
     dom_pending: AtomicBool,
     canvas_pending: AtomicBool,
+}
+/// The declared keys that have a value, as the shipped loader delivered them.
+pub(crate) fn vars_of(source: Option<&crate::VarsSource>, id: &str, keys: &[String]) -> Value {
+    let Some(source) = source.filter(|_| !keys.is_empty()) else {
+        return json!({});
+    };
+    let values: serde_json::Map<String, Value> = source(id, keys)
+        .into_iter()
+        .filter(|(key, value)| keys.contains(key) && !value.is_empty())
+        .map(|(key, value)| (key, Value::String(value)))
+        .collect();
+    Value::Object(values)
+}
+/// The keys an extension's manifest declares, as the host read it from disk.
+pub(crate) fn declared_keys(manifest: &Value) -> Vec<String> {
+    manifest["vars"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|decl| decl["key"].as_str().map(str::to_owned))
+        .collect()
+}
+/// What a trusted realm's load receives: for each of `records` that
+/// declares keys, the declared keys that have a value. Chosen here, by the
+/// host, from the manifests it read; the realm selects nothing.
+pub(crate) fn staged_vars(source: Option<&crate::VarsSource>, records: &Value) -> Value {
+    let mut all = serde_json::Map::new();
+    for record in records.as_array().into_iter().flatten() {
+        let Some(id) = record["id"].as_str() else {
+            continue;
+        };
+        let values = vars_of(source, id, &declared_keys(&record["manifest"]));
+        if values.as_object().is_some_and(|values| !values.is_empty()) {
+            all.insert(id.to_owned(), values);
+        }
+    }
+    Value::Object(all)
 }
 impl RealmEvents for Arc<Events> {
     fn health(&self, id: &str, health: &Value) {
@@ -596,6 +682,19 @@ impl RasterInbox {
     }
 }
 
+/// Opt-in load timings on stderr (`PM_NATIVE_MAIN_TRACE=1`), seconds since
+/// this process's first trace line.
+fn trace(value: Value) {
+    static ON: std::sync::LazyLock<Option<std::time::Instant>> = std::sync::LazyLock::new(|| {
+        (std::env::var("PM_NATIVE_MAIN_TRACE").as_deref() == Ok("1")).then(std::time::Instant::now)
+    });
+    if let Some(start) = *ON {
+        let mut value = value;
+        value["s"] = json!((start.elapsed().as_secs_f64() * 1000.).round() / 1000.);
+        eprintln!("PM_EXT {value}");
+    }
+}
+
 pub struct ExtensionHost {
     inbox: Sender<Input>,
     shared: Arc<Shared>,
@@ -693,10 +792,11 @@ impl ExtensionHost {
             .wait_timeout_while(
                 self.shared.published.lock().unwrap(),
                 timeout.saturating_sub(started.elapsed()),
-                |p| !p.ready,
+                // Ready, and nothing still loading (a Store helper, a reload).
+                |p| !p.ready || !p.publication().settled,
             )
             .unwrap();
-        if !published.ready {
+        if !published.ready || !published.publication().settled {
             return Err(Error::Host("Extensions did not finish starting".into()));
         }
         Ok((
@@ -707,11 +807,13 @@ impl ExtensionHost {
                 .unwrap_or_else(|| Arc::new(json!({}))),
         ))
     }
-    pub fn revision(&self) -> u64 {
-        self.shared.published.lock().unwrap().revision
-    }
     pub fn is_ready(&self) -> bool {
         self.shared.published.lock().unwrap().ready
+    }
+    /// What the host publishes now, read at one moment: definitions are only
+    /// ever paired with the flag and the names published with them.
+    pub fn publication(&self) -> Publication {
+        self.shared.published.lock().unwrap().publication()
     }
     /// The realm generation drawing now, 0 with none. A page belongs to one
     /// generation: when this moves, that page is finished.
@@ -1233,6 +1335,7 @@ impl Owner {
                     viewport: self.viewport,
                     text: self.config.text.as_ref().map(|text| text()),
                     rasters: self.config.rasters.clone(),
+                    vars: self.config.vars.clone(),
                     kernel: self.config.kernel.clone(),
                     shared: self.shared.clone(),
                     closing: self.closing.clone(),
@@ -1465,9 +1568,14 @@ impl Owner {
             merge_store(&mut next, &store);
             published.contributions = Some(Arc::new(next));
         }
-        drop(published);
         *self.shared.store.lock().unwrap() = store;
-        self.shared.update(|_| ());
+        // What the helpers registered is published with them: they have
+        // settled in the same publication that carries their definitions.
+        published.starting.clear();
+        published.revision += 1;
+        drop(published);
+        self.shared.changed.notify_all();
+        (self.shared.wake)();
     }
     fn realm_message(&mut self, envelope: RealmEnvelope) {
         if envelope.project != self.config.project {
@@ -1591,6 +1699,7 @@ impl Owner {
         });
     }
     fn set_health(&mut self, id: &str, health: Value) {
+        trace(json!({"extension": id, "health": health["state"]}));
         for record in &mut self.records {
             if record["id"] == id {
                 record["health"] = health.clone();
@@ -1646,10 +1755,7 @@ impl Owner {
                 p.activations += 1;
                 p.ready = false;
             });
-            self.eval(&format!(
-                "__compat.update({records},{},\"enable\")",
-                json!([id])
-            ));
+            self.load(&records, "update", &format!(",{},\"enable\"", json!([id])));
         }
         self.publish_records();
     }
@@ -1882,11 +1988,28 @@ impl Owner {
         for store in stop {
             self.stop_store(store);
         }
+        let starting: Vec<(String, String)> = wanted
+            .keys()
+            .filter(|id| !self.stores.iter().any(|store| store.extension.id == **id))
+            .map(|id| (id.clone(), self.name_of(id)))
+            .collect();
+        if !starting.is_empty() {
+            // Cleared by `publish_store`, which every caller runs next.
+            self.shared.update(|p| p.starting = starting);
+        }
         for (id, hash) in wanted {
             if !self.stores.iter().any(|store| store.extension.id == id) {
                 self.start_store(&id, hash);
             }
         }
+    }
+    fn name_of(&self, id: &str) -> String {
+        self.records
+            .iter()
+            .find(|r| r["id"] == id)
+            .and_then(|r| r["manifest"]["name"].as_str())
+            .unwrap_or(id)
+            .to_owned()
     }
     fn start_store(&mut self, id: &str, hash: String) {
         let Some((found, graph)) = self.confined.get(id).cloned() else {
@@ -1903,6 +2026,12 @@ impl Owner {
             pending: Mutex::default(),
             refused: AtomicBool::new(false),
         });
+        // As the shipped app's sandbox init: the values for its declared keys.
+        let keys = found
+            .manifest
+            .as_ref()
+            .map(declared_keys)
+            .unwrap_or_default();
         let started = StoreExtension::start(
             Arc::new(self.config.kernel.clone()),
             &self.config.project,
@@ -1911,6 +2040,7 @@ impl Owner {
             &graph,
             owner,
             views.clone(),
+            vars_of(self.config.vars.as_ref(), id, &keys),
         );
         match started {
             Ok(extension) => {
@@ -1977,6 +2107,10 @@ impl Owner {
         self.publish_entries();
     }
     fn start_realm(&mut self, clock: Option<(f64, bool)>) -> Result<()> {
+        #[cfg(test)]
+        if tests::FAIL_START.lock().unwrap().as_deref() == Some(self.config.cache.as_path()) {
+            return Err(Error::Host("no realm for this test".into()));
+        }
         if std::mem::take(&mut self.retired) {
             self.writer.generation += 1;
             forward_mailbox(&self.config.kernel, self.writer, self.inbox.clone());
@@ -2042,6 +2176,7 @@ impl Owner {
         Ok(())
     }
     fn boot(&mut self) {
+        trace(json!({"extensions": "boot"}));
         let found = discovery::scan(&self.config.roots);
         self.folders = found
             .iter()
@@ -2053,8 +2188,10 @@ impl Owner {
             self.shared.update(|p| p.ready = true);
             return;
         }
+        // A realm that cannot start has definitively failed: nothing is loading.
         if let Err(error) = self.start_realm(None) {
             self.shared.update(|p| {
+                p.ready = true;
                 p.toasts
                     .push(format!("Extensions could not start: {error}"))
             });
@@ -2065,6 +2202,7 @@ impl Owner {
             Ok(compiler) => compiler,
             Err(error) => {
                 self.shared.update(|p| {
+                    p.ready = true;
                     p.toasts
                         .push(format!("Extensions could not compile: {error}"))
                 });
@@ -2072,14 +2210,28 @@ impl Owner {
             }
         };
         self.confined.clear();
+        trace(json!({"extensions": "compile", "found": found.len()}));
         self.records = found.iter().map(|f| self.compile(&compiler, f)).collect();
         compiler.realm().close();
+        trace(json!({"extensions": "compiled"}));
         self.sync_stores();
         self.publish_records();
         self.publish_store();
         let records = self.realm_plan();
         self.replay_window();
-        self.eval(&format!("__compat.boot({records})"));
+        self.load(&records, "boot", "");
+    }
+    /// Asks the realm for a load pass (`boot`, or `update` with its
+    /// arguments) of `records`, with the values their manifests declare
+    /// staged for that pass alone.
+    fn load(&mut self, records: &Value, entry: &str, arguments: &str) {
+        let Some(live) = &self.realm else { return };
+        let token = live
+            .host
+            .stage_vars(staged_vars(self.config.vars.as_ref(), records));
+        self.eval(&format!(
+            "__compatHost.{entry}({records}{arguments},\"{token}\")"
+        ));
     }
     /// A new realm learns the window it lives in before anything activates.
     fn replay_window(&mut self) {
@@ -2147,10 +2299,11 @@ impl Owner {
             p.activations += 1;
             p.ready = false;
         });
-        self.eval(&format!(
-            "__compat.update({records},{},\"rescan\")",
-            Value::Array(changed)
-        ));
+        self.load(
+            &records,
+            "update",
+            &format!(",{},\"rescan\"", Value::Array(changed)),
+        );
     }
     /// D11: "not responding — Wait / Stop", named for the extension that was
     /// activating when there is one. The task keeps running while the user decides.
@@ -2215,6 +2368,9 @@ impl Owner {
         let transport = live.host.transport();
         let clock = (transport.time(), transport.playing());
         self.retire_realm();
+        // What the retired realm contributed went with it: nothing of it is
+        // settled until the realm that replaces it has loaded.
+        self.publish_without_realm(false);
         // Repeated failures nobody can name stop the realm; a Stop that turns
         // its culprit off is not a loop.
         if culprit.is_none() {
@@ -2240,15 +2396,12 @@ impl Owner {
             });
         }
         if self.restarts > MAX_RESTARTS {
-            // Helpers stay; what the realm contributed went with it.
-            let mut value = json!({});
-            merge_store(&mut value, &self.shared.store.lock().unwrap());
+            self.publish_without_realm(true);
             self.shared.update(|p| {
-                p.contributions = Some(Arc::new(value));
                 p.toasts.push(
                     "Extensions stopped after repeated failures. Reopen the project to retry."
                         .into(),
-                );
+                )
             });
             self.publish_records();
             return;
@@ -2258,13 +2411,28 @@ impl Owner {
                 self.publish_records();
                 let records = self.realm_plan();
                 self.replay_window();
-                self.eval(&format!("__compat.boot({records})"));
+                self.load(&records, "boot", "");
             }
-            Err(error) => self.shared.update(|p| {
-                p.toasts
-                    .push(format!("Extensions could not start: {error}"))
-            }),
+            // No realm will finish this load: it has failed, by name, and
+            // nothing waits for it (held frames, exports, stills).
+            Err(error) => {
+                self.publish_without_realm(true);
+                self.shared.update(|p| {
+                    p.toasts
+                        .push(format!("Extensions could not start: {error}"))
+                });
+                self.publish_records();
+            }
         }
+    }
+    /// The contributions with no trusted realm behind them: the helpers'
+    /// stay. `settled` is false while a realm that will load is starting.
+    fn publish_without_realm(&self, settled: bool) {
+        let mut value = json!({"settled": settled, "commands": [], "panels": [], "effects": [],
+            "transitions": [], "layers": [], "definitions": []});
+        merge_store(&mut value, &self.shared.store.lock().unwrap());
+        self.shared
+            .update(|p| p.contributions = Some(Arc::new(value)));
     }
 }
 
@@ -2273,6 +2441,8 @@ mod tests {
     use super::*;
     use pm_kernel::{HistoryCall, KernelActor, KernelConfig, OpenSource, Reply, Request};
     use std::{fs, path::Path, time::Instant};
+    /// The host whose compiled-extension cache is here cannot start a realm.
+    pub(super) static FAIL_START: Mutex<Option<std::path::PathBuf>> = Mutex::new(None);
     fn extension(root: &Path, id: &str, files: &[(&str, &str)]) {
         let directory = root.join(id);
         fs::create_dir_all(&directory).unwrap();
@@ -2325,6 +2495,7 @@ mod tests {
                 text: None,
                 frames,
                 rasters,
+                vars: None,
                 wake: Arc::new(|| ()),
             });
             Self {
@@ -2506,6 +2677,7 @@ mod tests {
             wake: Arc::new(|| ()),
             frames: None,
             rasters: None,
+            vars: None,
         });
         let deadline = Instant::now() + Duration::from_secs(20);
         while !later.is_ready() || later.contributions().is_none() {
@@ -2793,6 +2965,232 @@ mod tests {
         }
         assert_eq!(fixture.name(), "Synthetic extension check");
     }
+    /// While a load pass runs, a definition the project uses may still arrive:
+    /// the published contributions say so until every extension has registered
+    /// what it registers (or failed), so nothing calls it not installed.
+    #[test]
+    fn contributions_stay_unsettled_until_a_slow_extension_has_registered() {
+        let root = tempfile::tempdir().unwrap();
+        let effect = |id: &str| {
+            format!(
+                "api.effects.register({{id:'{id}',label:'{id}',group:'Stylize',params:[],frag:'o = src(v_uv);'}})"
+            )
+        };
+        let extensions = root.path().join("extensions");
+        extension(
+            &extensions,
+            "a-fast",
+            &[(
+                "index.ts",
+                &format!("export default function(api){{{}}}", effect("fast.tint")),
+            )],
+        );
+        extension(
+            &extensions,
+            "b-slow",
+            &[(
+                "index.ts",
+                &format!(
+                    "export default async function(api){{await new Promise(r=>setTimeout(r,1500));{}}}",
+                    effect("slow.tint")
+                ),
+            )],
+        );
+        let fixture = Fixture::start(root);
+        let has = |c: &Value, id: &str| {
+            c["definitions"]
+                .as_array()
+                .is_some_and(|d| d.iter().any(|d| d["id"] == id))
+        };
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut partial = None;
+        let mut named = false;
+        loop {
+            // One publication: its definitions, its flag and its names.
+            let now = fixture.host.publication();
+            match &now.contributions {
+                Some(c) if has(c, "slow.tint") && now.settled => break,
+                Some(c) => {
+                    if has(c, "fast.tint") {
+                        partial.get_or_insert(now.clone());
+                    }
+                    // Who is still loading is named while it loads.
+                    named |= now.loading.iter().any(|(id, _)| id == "b-slow");
+                    assert!(
+                        !now.settled,
+                        "settled without slow.tint: {}",
+                        c["definitions"]
+                    );
+                }
+                None => assert!(!now.settled, "settled before anything activated"),
+            }
+            assert!(Instant::now() < deadline, "slow.tint never registered");
+            thread::sleep(Duration::from_millis(2));
+        }
+        // A publication read while the slow extension loaded still says so
+        // after the host has settled: a reader that pins it later pins a
+        // load in progress, never these definitions as the finished list.
+        let partial = partial.expect("the fast extension's effect was published first");
+        assert!(!partial.settled && !has(partial.contributions.as_ref().unwrap(), "slow.tint"));
+        assert!(named, "the slow extension was named as loading");
+        let settled = fixture.host.publication();
+        assert!(settled.loading.is_empty() && settled.revision > partial.revision);
+    }
+    /// An extension reloading through the public API (`api.extensions.reload`,
+    /// `PM.Kernel.loader.reload`) is loading: from the reload being asked for
+    /// until it has registered again (or failed), no publication calls the
+    /// effects it owns settled-and-absent, so no frame draws them bypassed
+    /// and nothing says "not installed".
+    #[test]
+    fn a_public_reload_counts_as_loading_for_the_effects_it_owns() {
+        let root = tempfile::tempdir().unwrap();
+        let extensions = root.path().join("extensions");
+        // Its first activation registers at once; a later one takes a while,
+        // as a reload that fetches or compiles does.
+        extension(
+            &extensions,
+            "a-effect",
+            &[(
+                "index.ts",
+                "export default async function(api){
+                   const round=(api.storage.get('round')||0)+1;
+                   api.storage.set('round',round);
+                   if(round>1) await new Promise(r=>setTimeout(r,1500));
+                   api.effects.register({id:'a-effect.tint',label:'Tint '+round,group:'Stylize',params:[],frag:'o = src(v_uv);'});
+                 }",
+            )],
+        );
+        extension(
+            &extensions,
+            "b-driver",
+            &[(
+                "index.ts",
+                "export default function(api){
+                   api.commands.register({id:'b-driver.reload',label:'Reload',run(){api.extensions.reload('a-effect')}});
+                   api.commands.register({id:'b-driver.raw',label:'Raw',run(){api.host.pm.Kernel.loader.reload('a-effect')}});
+                 }",
+            )],
+        );
+        let fixture = Fixture::start(root);
+        let label = |now: &Publication| {
+            now.contributions.as_ref().and_then(|c| {
+                c["effects"]
+                    .as_array()?
+                    .iter()
+                    .find(|e| e["id"] == "a-effect.tint")?["label"]
+                    .as_str()
+                    .map(str::to_owned)
+            })
+        };
+        fixture.until("the first load settles", |host| {
+            let now = host.publication();
+            now.settled && label(&now).as_deref() == Some("Tint 1")
+        });
+        for (command, round) in [("b-driver.reload", "Tint 2"), ("b-driver.raw", "Tint 3")] {
+            fixture.host.run_command(command, json!([]));
+            let deadline = Instant::now() + Duration::from_secs(20);
+            let mut named = false;
+            loop {
+                let now = fixture.host.publication();
+                let label = label(&now);
+                if now.settled && label.as_deref() == Some(round) {
+                    break;
+                }
+                if label.as_deref() != Some(round) {
+                    // The old registration, or none: only ever while loading
+                    // once the reload has been published.
+                    named |= now.loading.iter().any(|(id, _)| id == "a-effect");
+                    assert!(
+                        !now.settled || !named && label.is_some(),
+                        "settled without the reloading effect ({command}): {label:?}"
+                    );
+                }
+                assert!(Instant::now() < deadline, "{round} never registered");
+                thread::sleep(Duration::from_millis(2));
+            }
+            assert!(named, "the reloading extension was named as loading");
+            assert!(fixture.host.publication().loading.is_empty());
+        }
+    }
+    /// A Store helper's activation is part of the load: until it has
+    /// registered its effect (at boot, or when it is installed later) the
+    /// contributions are not settled.
+    #[test]
+    fn a_store_helper_activation_counts_toward_settled() {
+        let root = tempfile::tempdir().unwrap();
+        let extensions = root.path().join("extensions");
+        let store = |dir: &Path, id: &str| {
+            extension(
+                dir,
+                id,
+                &[
+                    (
+                        "index.ts",
+                        "export default async function(api: any){
+                           await new Promise(r=>setTimeout(r,800));
+                           api.effects.register({id:'tint',label:'Store tint',group:'Stylize',params:[],frag:'o = src(v_uv);'});
+                         }",
+                    ),
+                    (".powermove-store.json", "{\"repoId\":\"r\",\"releaseId\":\"synthetic\"}"),
+                ],
+            )
+        };
+        store(&extensions, "synthetic-store");
+        extension(
+            &extensions,
+            "synthetic-local",
+            &[(
+                "index.ts",
+                "export default function(api){api.commands.register({id:'synthetic-local.run',label:'Run',run(){}})}",
+            )],
+        );
+        let fixture = Fixture::start(root);
+        let has = |id: &str| {
+            fixture.host.contributions().is_some_and(|c| {
+                c["definitions"]
+                    .as_array()
+                    .is_some_and(|d| d.iter().any(|d| d["id"] == id))
+            })
+        };
+        let watch = |id: &str| {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            loop {
+                let now = fixture.host.publication();
+                let has = now.contributions.as_ref().is_some_and(|c| {
+                    c["definitions"]
+                        .as_array()
+                        .is_some_and(|d| d.iter().any(|d| d["id"] == id))
+                });
+                if has && now.settled {
+                    break;
+                }
+                assert!(!now.settled, "settled without {id}");
+                assert!(Instant::now() < deadline, "{id} never registered");
+                thread::sleep(Duration::from_millis(2));
+            }
+        };
+        watch("synthetic-store.tint");
+        // Installed while the window is open: settled again only once it has
+        // registered.
+        store(&fixture._root.path().join("extensions"), "synthetic-later");
+        fixture.until("the rescan starts it", |host| {
+            assert!(!has("synthetic-later.tint"), "registered while settled");
+            host.publication()
+                .loading
+                .iter()
+                .any(|(id, name)| id == "synthetic-later" && name == "synthetic-later")
+        });
+        watch("synthetic-later.tint");
+    }
+    /// A project with no extensions has nothing to wait for.
+    #[test]
+    fn no_extensions_settle_at_once() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("extensions")).unwrap();
+        let fixture = Fixture::start(root);
+        fixture.until("an empty boot settles", |host| host.publication().settled);
+        assert!(fixture.host.contributions().is_none());
+    }
     #[test]
     fn contributed_effects_reach_kernel_registries_and_engine_definitions() {
         let root = tempfile::tempdir().unwrap();
@@ -2823,6 +3221,331 @@ mod tests {
             glsl.source.lines().nth(glsl.body_line_offset as usize),
             Some("o = src(v_uv) * u_amount;")
         );
+    }
+    /// v1's `api.vars`: an extension reads the values entered for the keys its
+    /// manifest declares, delivered per activation; an undeclared key, an empty
+    /// value or another extension's value never reaches it.
+    #[test]
+    fn declared_vars_reach_api_vars_and_nothing_else_does() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("extensions").join("needs-key");
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(
+            directory.join("manifest.json"),
+            json!({"id":"needs-key","name":"Needs key","version":"1.0.0","apiVersion":2,
+                "vars":[{"key":"API_KEY","label":"API key","secret":true},{"key":"MODEL","label":"Model"},{"key":"EMPTY","label":"Empty"}]})
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(
+            directory.join("index.ts"),
+            "export default function(api){api.storage.set('seen',{key:api.vars.get('API_KEY'),model:api.vars.get('MODEL'),keys:api.vars.keys(),other:api.vars.has('OTHER'),empty:api.vars.has('EMPTY')})}",
+        )
+        .unwrap();
+        let actor = KernelActor::spawn(KernelConfig::default());
+        let kernel = actor.handle();
+        let document = pm_model::json::parse(&crate::initial()["document"].to_string()).unwrap();
+        kernel
+            .open("window", OpenSource::Untitled(document))
+            .wait()
+            .unwrap()
+            .unwrap();
+        let asked = Arc::new(Mutex::new(vec![]));
+        let seen = asked.clone();
+        let host = ExtensionHost::start(HostConfig {
+            kernel: kernel.clone(),
+            project: "window".into(),
+            roots: vec![root.path().join("extensions")],
+            cache: root.path().join("cache"),
+            owner: None,
+            text: None,
+            frames: None,
+            rasters: None,
+            vars: Some(Arc::new(move |id: &str, keys: &[String]| {
+                seen.lock().unwrap().push((id.to_owned(), keys.to_vec()));
+                [
+                    ("API_KEY", "sk-synthetic"),
+                    ("MODEL", "m-1"),
+                    ("EMPTY", ""),
+                    ("OTHER", "x"),
+                ]
+                .into_iter()
+                .map(|(k, v)| (k.to_owned(), v.to_owned()))
+                .collect()
+            })),
+            wake: Arc::new(|| ()),
+        });
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !host.is_ready() {
+            assert!(Instant::now() < deadline, "{:?}", host.records());
+            thread::sleep(Duration::from_millis(5));
+        }
+        let storage = crate::adapter::storage_of(&kernel);
+        let stored = storage
+            .as_object()
+            .and_then(|all| {
+                all.iter().find_map(|(key, v)| {
+                    if key.ends_with(".seen") {
+                        Some(v.clone())
+                    } else {
+                        v.get("seen").cloned()
+                    }
+                })
+            })
+            .unwrap_or_else(|| panic!("no storage: {storage}"));
+        assert_eq!(
+            stored,
+            json!({"key":"sk-synthetic","model":"m-1","keys":["API_KEY","MODEL"],"other":false,"empty":false})
+        );
+        assert_eq!(
+            *asked.lock().unwrap(),
+            vec![(
+                "needs-key".to_owned(),
+                vec!["API_KEY".to_owned(), "MODEL".to_owned(), "EMPTY".to_owned()]
+            )]
+        );
+        drop(host);
+        drop(actor);
+    }
+    /// The values behind every key of every extension, as a profile holds
+    /// them: whatever is asked of the source, it has.
+    fn every_value(sentinel: &'static str) -> crate::VarsSource {
+        Arc::new(move |_: &str, keys: &[String]| {
+            keys.iter()
+                .map(|key| (key.clone(), sentinel.to_owned()))
+                .collect()
+        })
+    }
+    fn needs_key(root: &Path, source: &str) {
+        let directory = root.join("needs-key");
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(
+            directory.join("manifest.json"),
+            json!({"id":"needs-key","name":"Needs key","version":"1.0.0","apiVersion":2,
+                "vars":[{"key":"API_KEY","label":"API key","secret":true}]})
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(directory.join("index.ts"), source).unwrap();
+    }
+    fn stored(kernel: &KernelHandle, name: &str) -> Option<Value> {
+        let storage = crate::adapter::storage_of(kernel);
+        storage.as_object()?.iter().find_map(|(key, v)| {
+            if key.ends_with(&format!(".{name}")) {
+                Some(v.clone())
+            } else {
+                v.get(name).cloned()
+            }
+        })
+    }
+    /// An extension receives the values of the keys its own manifest
+    /// declares and can ask the host for nothing: another extension's key, a
+    /// key of its own it did not declare, the loader's records and the
+    /// host's entry points give it no value. The host decides by the
+    /// manifests it read from disk, not by what the realm says.
+    #[test]
+    fn one_extension_cannot_read_another_extensions_vars() {
+        const SECRET: &str = "sk-another-extensions-secret";
+        let root = tempfile::tempdir().unwrap();
+        let extensions = root.path().join("extensions");
+        needs_key(
+            &extensions,
+            "export default function(api){
+               let undeclared = null;
+               try { undeclared = runtime.engine('extension.vars',{id:'needs-key',keys:['UNDECLARED']}) } catch(e) { undeclared = 'refused' }
+               api.storage.set('own',{has:api.vars.has('API_KEY'),length:(api.vars.get('API_KEY')||'').length,keys:api.vars.keys(),undeclared});
+             }",
+        );
+        // Declares nothing; activates after `needs-key`.
+        extension(
+            &extensions,
+            "thief",
+            &[(
+                "index.ts",
+                "export default function(api){
+                   const tries = {};
+                   const attempt = (name, fn) => { try { tries[name] = fn() } catch(e) { tries[name] = 'refused' } };
+                   attempt('ask', () => runtime.engine('extension.vars',{id:'needs-key',keys:['API_KEY']}));
+                   attempt('token', () => runtime.engine('extension.vars',{token:''}));
+                   attempt('bare', () => runtime.engine('extension.vars',{}));
+                   attempt('records', () => JSON.stringify(api.host.pm.Kernel.loader.records()));
+                   attempt('list', () => JSON.stringify(api.extensions.list()));
+                   attempt('taker', () => typeof globalThis.__compatVars === 'function' ? String(globalThis.__compatVars()('needs-key')?.API_KEY) : 'gone');
+                   attempt('own', () => api.vars.keys());
+                   api.storage.set('loot', tries);
+                 }",
+            )],
+        );
+        let actor = KernelActor::spawn(KernelConfig::default());
+        let kernel = actor.handle();
+        let document = pm_model::json::parse(&crate::initial()["document"].to_string()).unwrap();
+        kernel
+            .open("window", OpenSource::Untitled(document))
+            .wait()
+            .unwrap()
+            .unwrap();
+        let host = ExtensionHost::start(HostConfig {
+            kernel: kernel.clone(),
+            project: "window".into(),
+            roots: vec![extensions],
+            cache: root.path().join("cache"),
+            owner: None,
+            text: None,
+            frames: None,
+            rasters: None,
+            vars: Some(every_value(SECRET)),
+            wake: Arc::new(|| ()),
+        });
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !host.publication().settled || stored(&kernel, "loot").is_none() {
+            assert!(Instant::now() < deadline, "{:?}", host.records());
+            thread::sleep(Duration::from_millis(5));
+        }
+        // Its own declared key arrived, and only that.
+        let own = stored(&kernel, "own").unwrap();
+        assert_eq!(own["has"], true);
+        assert_eq!(own["length"], SECRET.len());
+        assert_eq!(own["keys"], json!(["API_KEY"]));
+        assert!(
+            !own["undeclared"].to_string().contains(SECRET),
+            "an undeclared key of its own: {own}"
+        );
+        let loot = stored(&kernel, "loot").unwrap();
+        assert!(
+            !loot.to_string().contains(SECRET),
+            "the other extension's value: {loot}"
+        );
+        assert_eq!(loot["own"], json!([]));
+        drop(host);
+        drop(actor);
+    }
+    /// A run with a secret value entered for an extension leaves it nowhere
+    /// but in that extension's `api.vars`: not in the load trace or anything
+    /// else the process prints, the published contributions and records,
+    /// toasts and requests, the kernel's registries and extension entries,
+    /// the project, or the compiled-extension cache on disk.
+    #[test]
+    fn a_vars_value_never_reaches_logs_traces_published_state_the_project_or_caches() {
+        const SECRET: &str = "sk-sentinel-0f1e2d3c4b5a69788796";
+        if std::env::var_os("PM_VARS_SENTINEL_RUN").is_none() {
+            // The run itself, in a process of its own with the load trace on,
+            // so everything it prints can be read back.
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "host::tests::a_vars_value_never_reaches_logs_traces_published_state_the_project_or_caches",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env("PM_VARS_SENTINEL_RUN", "1")
+                .env("PM_NATIVE_MAIN_TRACE", "1")
+                .output()
+                .unwrap();
+            let printed = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(output.status.success(), "the run failed: {printed}");
+            assert!(
+                printed.contains("PM_EXT"),
+                "the load trace was on: {printed}"
+            );
+            assert!(!printed.contains(SECRET), "the value was printed");
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let extensions = root.path().join("extensions");
+        // Reads its value, says so without repeating it, then fails: the
+        // failure's text and toast are the host's.
+        needs_key(
+            &extensions,
+            "export default function(api){
+               const value = api.vars.get('API_KEY') || '';
+               api.commands.register({id:'needs-key.got',label:'got '+value.length,run(){ throw new Error('command failed') }});
+               api.effects.register({id:'needs-key.tint',label:'Tint',group:'Stylize',params:[],frag:'o = src(v_uv);'});
+             }",
+        );
+        extension(
+            &extensions,
+            "z-fails",
+            &[(
+                "index.ts",
+                "export default function(api){ throw new Error('activation failed') }",
+            )],
+        );
+        let actor = KernelActor::spawn(KernelConfig::default());
+        let kernel = actor.handle();
+        let document = pm_model::json::parse(&crate::initial()["document"].to_string()).unwrap();
+        kernel
+            .open("window", OpenSource::Untitled(document))
+            .wait()
+            .unwrap()
+            .unwrap();
+        let host = ExtensionHost::start(HostConfig {
+            kernel: kernel.clone(),
+            project: "window".into(),
+            roots: vec![extensions],
+            cache: root.path().join("cache"),
+            owner: None,
+            text: None,
+            frames: None,
+            rasters: None,
+            vars: Some(every_value(SECRET)),
+            wake: Arc::new(|| ()),
+        });
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let label = |host: &ExtensionHost| {
+            host.contributions().and_then(|c| {
+                c["commands"]
+                    .as_array()?
+                    .iter()
+                    .find(|c| c["id"] == "needs-key.got")?["label"]
+                    .as_str()
+                    .map(str::to_owned)
+            })
+        };
+        while !host.publication().settled || label(&host).is_none() {
+            assert!(Instant::now() < deadline, "{:?}", host.records());
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(label(&host), Some(format!("got {}", SECRET.len())));
+        host.run_command("needs-key.got", json!([]));
+        thread::sleep(Duration::from_millis(300));
+        let published = kernel.published("window").unwrap();
+        let state = kernel.state();
+        let mut seen = vec![
+            format!("{:?}", host.publication()),
+            format!("{:?}", host.records()),
+            format!("{:?}", host.take_toasts()),
+            format!("{:?}", host.take_requests()),
+            format!("{:?}", host.surfaces()),
+            format!("{:?}", state.registries),
+            format!("{:?}", state.extensions),
+            pm_model::json::to_canonical_string(&published.snapshot.root().unwrap().to_value()),
+        ];
+        let mut folders = vec![root.path().to_owned()];
+        while let Some(folder) = folders.pop() {
+            for entry in fs::read_dir(folder).unwrap().flatten() {
+                if entry.path().is_dir() {
+                    folders.push(entry.path());
+                } else {
+                    seen.push(
+                        String::from_utf8_lossy(&fs::read(entry.path()).unwrap()).into_owned(),
+                    );
+                }
+            }
+        }
+        assert!(seen.len() > 8, "the cache and extension folders were read");
+        for text in &seen {
+            assert!(
+                !text.contains(SECRET),
+                "the value was kept: {}",
+                &text[..text.len().min(300)]
+            );
+        }
+        drop(host);
+        drop(actor);
     }
     #[test]
     fn a_store_install_runs_confined_and_contributes_like_a_local_one() {
@@ -3088,6 +3811,67 @@ mod tests {
             "build-error" | "activation-error"
         ));
         assert!(command(&fixture, "synthetic-good.run"));
+    }
+    /// Stop on a hung activation rebuilds the realm; when the new realm
+    /// cannot start, nothing is left loading: the publication settles
+    /// without the realm's definitions and says why, instead of keeping the
+    /// hung load's "still loading" forever (frames held, exports waiting).
+    #[test]
+    fn a_restart_that_cannot_start_settles_with_the_failure_named() {
+        let root = tempfile::tempdir().unwrap();
+        let extensions = root.path().join("extensions");
+        extension(
+            &extensions,
+            "a-effect",
+            &[(
+                "index.ts",
+                "export default function(api){api.effects.register({id:'a-effect.tint',label:'Tint',group:'Stylize',params:[],frag:'o = src(v_uv);'})}",
+            )],
+        );
+        extension(
+            &extensions,
+            "z-hangs",
+            &[("index.ts", "export default function(){for(;;);}")],
+        );
+        let cache = root.path().join("cache");
+        let fixture = Fixture::start(root);
+        let asked = fixture.answer_unresponsive(Some("z-hangs"));
+        let hung = fixture.host.publication();
+        assert!(!hung.settled, "the hung load is still loading");
+        *FAIL_START.lock().unwrap() = Some(cache);
+        fixture.host.answer_unresponsive(asked, true);
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut toasts = vec![];
+        let settled = loop {
+            toasts.extend(fixture.host.take_toasts());
+            let now = fixture.host.publication();
+            if now.settled {
+                break now;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the failed restart never settled: {now:?}, toasts {toasts:?}"
+            );
+            thread::sleep(Duration::from_millis(5));
+        };
+        *FAIL_START.lock().unwrap() = None;
+        assert!(settled.loading.is_empty());
+        let definitions = settled
+            .contributions
+            .as_ref()
+            .map(|c| c["definitions"].clone());
+        assert!(
+            definitions.is_none_or(|d| d.as_array().is_none_or(Vec::is_empty)),
+            "the retired realm's definitions went with it"
+        );
+        thread::sleep(Duration::from_millis(50));
+        toasts.extend(fixture.host.take_toasts());
+        assert!(
+            toasts
+                .iter()
+                .any(|t| t.starts_with("Extensions could not start: ")),
+            "{toasts:?}"
+        );
     }
     #[test]
     fn a_hung_activation_is_stopped_and_the_realm_comes_back_without_it() {
@@ -3919,5 +4703,384 @@ mod tests {
         );
         fixture.host.set_viewport(1200., 700., 2.);
         fixture.until("resize", has("synthetic-size.resized-1200"));
+    }
+    /// The raw `PM` a v1–3 extension reaches through `api.host.pm` has every
+    /// member the shipped app (v1.2.0) assigned to it, except the reviewed list
+    /// of the app's own machinery it lacks.
+    #[test]
+    fn the_realm_pm_has_the_shipped_app_pm_roster() {
+        let root = tempfile::tempdir().unwrap();
+        extension(
+            &root.path().join("extensions"),
+            "roster",
+            &[(
+                "index.ts",
+                "export default function(api){const pm=api.host.pm;const keys=[];for(const k in pm)keys.push(k);for(let o=pm;o&&o!==Object.prototype;o=Object.getPrototypeOf(o))keys.push(...Object.getOwnPropertyNames(o));api.storage.set('keys',[...new Set(keys)])}",
+            )],
+        );
+        let fixture = Fixture::start(root);
+        fixture.until("activation", |host| host.is_ready());
+        let storage = crate::adapter::storage_of(&fixture.kernel);
+        let keys: BTreeSet<String> = storage
+            .as_object()
+            .and_then(|all| {
+                all.iter().find_map(|(key, v)| {
+                    if key.ends_with(".keys") {
+                        Some(v.clone())
+                    } else {
+                        v.get("keys").cloned()
+                    }
+                })
+            })
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_else(|| panic!("no roster: {storage} {:?}", fixture.host.records()));
+        let shipped = include_str!("../tests/fixtures/v1-pm-roster.txt");
+        // The shipped app's own machinery (its WebGL renderer, DOM chrome,
+        // agent harness, project file I/O): no sample extension reaches them.
+        let not_in_realm: BTreeSet<&str> = include_str!("../tests/fixtures/v1-pm-not-in-realm.txt")
+            .lines()
+            .collect();
+        let missing: Vec<&str> = shipped
+            .lines()
+            .filter(|m| !m.is_empty() && !keys.contains(*m) && !not_in_realm.contains(m))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "missing from the realm's PM: {missing:?}"
+        );
+        // A member the realm gains leaves the list.
+        let gained: Vec<&&str> = not_in_realm.iter().filter(|m| keys.contains(**m)).collect();
+        assert!(
+            gained.is_empty(),
+            "now in the realm, drop from the list: {gained:?}"
+        );
+    }
+    /// The model helpers of the shipped app's `PM` an extension can call:
+    /// the ones that are pure model work answer as the shipped app's did, and
+    /// each of the rest fails saying which member it is, never as
+    /// "undefined is not a function".
+    #[test]
+    fn the_shipped_model_helpers_answer_or_name_the_member_that_is_missing() {
+        let root = tempfile::tempdir().unwrap();
+        extension(
+            &root.path().join("extensions"),
+            "helpers",
+            &[(
+                "index.ts",
+                "export default function(api){const PM=api.host.pm;
+                   api.effects.register({id:'helpers.tint',label:'Tint',group:'Stylize',params:[{k:'amount',label:'Amount',min:0,max:1,def:0.5}],frag:'o = src(v_uv);'});
+                   const said=(fn)=>{try{fn();return 'returned'}catch(e){return String(e.message)}};
+                   const made=PM.mkEffect('helpers.tint');
+                   const uniforms=PM.parseUniforms('uniform float uSpeed;   // @param 0.35 0 3\\nuniform vec3 uTint; // @param #FF6B1A\\nuniform float iTime;');
+                   api.storage.set('answers',{
+                     scope:Array.isArray(PM.scope)&&PM.scope.length===0,
+                     compOf:[PM.compOf(null),PM.compOf({type:'shape',d:{}}),PM.compOf({type:'precomp',d:{comp:'none'}})],
+                     made:{type:made.type,on:made.on,amount:made.p.amount.v,id:typeof made.id},
+                     def:PM.effectDef({type:'helpers.tint'}).label,
+                     noDef:PM.effectDef({type:'nothing.provides'})===undefined,
+                     fx:Object.keys(PM.FX),fxLabel:PM.FX['helpers.tint'].label,
+                     transitions:Object.keys(PM.TRANSITIONS),noTransition:PM.transitionDef('nothing.provides')===undefined,
+                     uniforms,
+                     said:{
+                       mkEffect:said(()=>PM.mkEffect('nothing.provides')),
+                       mkTransition:said(()=>PM.mkTransition('nothing.provides')),
+                       precompose:said(()=>PM.precompose(['a'],'Name')),
+                       comps:said(()=>PM.Comps.precompose(['a'],{})),
+                       assetKind:said(()=>PM.assetKind({name:'a.png',type:'image/png'})),
+                       resolveAssetKind:said(()=>PM.resolveAssetKind({name:'a.png'})),
+                       takes:said(()=>PM.takes.list()),
+                       script:said(()=>PM.Script.run('1')),
+                       importFiles:said(()=>PM.importFiles([])),
+                       pickFiles:said(()=>PM.pickFiles()),
+                       saveProject:said(()=>PM.saveProject()),
+                     }});
+                   const layer=(id)=>Object.assign(PM.mkLayer('shape',{name:id}),{id});
+                   api.commands.register({id:'helpers.add',label:'Add',run(id){PM.addLayer(layer(id),0)}});
+                   api.commands.register({id:'helpers.remove',label:'Remove',run(){PM.removeLayers('gone')}});
+                 }",
+            )],
+        );
+        let fixture = Fixture::start(root);
+        fixture.until("activation", |host| {
+            host.publication().settled && host.is_ready()
+        });
+        let got = stored(&fixture.kernel, "answers")
+            .unwrap_or_else(|| panic!("{:?}", fixture.host.records()));
+        assert_eq!(got["scope"], true);
+        assert_eq!(got["compOf"], json!([null, null, null]));
+        assert_eq!(
+            got["made"],
+            json!({"type":"helpers.tint","on":true,"amount":0.5,"id":"string"})
+        );
+        assert_eq!(got["def"], "Tint");
+        assert_eq!(got["noDef"], true);
+        assert_eq!(got["fx"], json!(["helpers.tint"]));
+        assert_eq!(got["fxLabel"], "Tint");
+        assert_eq!(got["transitions"], json!([]));
+        assert_eq!(got["noTransition"], true);
+        assert_eq!(
+            got["uniforms"],
+            json!([
+                {"name":"uSpeed","type":"float","label":"Speed","control":"num","def":0.35,"min":0,"max":3},
+                {"name":"uTint","type":"vec3","label":"Tint","control":"color","def":"#FF6B1A"}
+            ])
+        );
+        for (tried, member) in [
+            ("mkEffect", "PM.mkEffect"),
+            ("mkTransition", "PM.mkTransition"),
+            ("precompose", "PM.precompose"),
+            ("comps", "PM.Comps.precompose"),
+            ("assetKind", "PM.assetKind"),
+            ("resolveAssetKind", "PM.resolveAssetKind"),
+            ("takes", "PM.takes.list"),
+            ("script", "PM.Script.run"),
+            ("importFiles", "PM.importFiles"),
+            ("pickFiles", "PM.pickFiles"),
+            ("saveProject", "PM.saveProject"),
+        ] {
+            let said = got["said"][tried].as_str().unwrap_or_default();
+            assert!(said.contains(member), "{tried} said {said:?}, not {member}");
+        }
+        // `removeLayers` on its own is one step of the history, as `addLayer`.
+        let ids = |fixture: &Fixture| -> Vec<String> {
+            let published = fixture.kernel.published("window").unwrap();
+            published
+                .snapshot
+                .layers(None)
+                .iter()
+                .map(|l| l.id.clone())
+                .collect()
+        };
+        for id in ["kept", "gone"] {
+            fixture.host.run_command("helpers.add", json!([id]));
+            fixture.until("a layer is added", |_| {
+                ids(&fixture).first().map(String::as_str) == Some(id)
+            });
+        }
+        assert_eq!(ids(&fixture), ["gone", "kept"]);
+        fixture.host.run_command("helpers.remove", json!([]));
+        fixture.until("the layer is removed", |_| {
+            !ids(&fixture).contains(&"gone".to_owned())
+        });
+        assert!(ids(&fixture).contains(&"kept".to_owned()));
+        let ack = fixture
+            .kernel
+            .call_blocking(
+                "window",
+                Request::new(pm_kernel::Caller::native(), HistoryCall::Undo),
+            )
+            .unwrap();
+        assert!(
+            matches!(ack.reply, Reply::Bool(true)),
+            "Undo of the removal"
+        );
+        fixture.until("Undo puts it back", |_| {
+            ids(&fixture).contains(&"gone".to_owned())
+        });
+    }
+    /// What an extension changes inside `PM.Edit.mutate` stays in its own
+    /// project afterwards: the realm is told its edit landed, so the layer it
+    /// just added is still there when it looks, and its next change does not
+    /// write the project back without it (the layer used to be deleted by
+    /// the extension's next write to the layer list).
+    #[test]
+    fn a_layer_added_inside_an_edit_stays_in_the_realms_project() {
+        let root = tempfile::tempdir().unwrap();
+        extension(
+            &root.path().join("extensions"),
+            "edits",
+            &[(
+                "index.ts",
+                "export default function(api){const PM=api.host.pm;
+                   const layer=(id)=>Object.assign(PM.mkLayer('shape',{name:id}),{id});
+                   const seen=[];
+                   api.commands.register({id:'edits.add',label:'Add',run(id){
+                     const done=PM.Edit.mutate('Add',()=>{PM.proj.name='Edited '+id;PM.proj.layers.push(layer(id))});
+                     seen.push({ok:done.ok,layers:PM.proj.layers.map(l=>l.id),name:PM.proj.name});
+                     api.storage.set('seen',seen)}});
+                 }",
+            )],
+        );
+        let fixture = Fixture::start(root);
+        fixture.until("activation", |host| {
+            host.publication().settled && host.is_ready()
+        });
+        let ids = |fixture: &Fixture| -> Vec<String> {
+            let published = fixture.kernel.published("window").unwrap();
+            published
+                .snapshot
+                .layers(None)
+                .iter()
+                .map(|l| l.id.clone())
+                .collect()
+        };
+        for id in ["first", "second", "third"] {
+            fixture.host.run_command("edits.add", json!([id]));
+            fixture.until("the edit lands", |_| ids(&fixture).contains(&id.to_owned()));
+        }
+        fixture.until("the realm reported", |_| {
+            stored(&fixture.kernel, "seen")
+                .is_some_and(|s| s.as_array().is_some_and(|s| s.len() == 3))
+        });
+        assert_eq!(
+            ids(&fixture),
+            ["first", "second", "third"],
+            "every layer is kept"
+        );
+        assert_eq!(
+            stored(&fixture.kernel, "seen").unwrap(),
+            json!([
+                {"ok":true,"layers":["first"],"name":"Edited first"},
+                {"ok":true,"layers":["first","second"],"name":"Edited second"},
+                {"ok":true,"layers":["first","second","third"],"name":"Edited third"},
+            ]),
+            "the realm sees its own edits"
+        );
+    }
+    /// Raw `PM.addLayer` called on its own (a command, a panel callback: no
+    /// edit open) is one step of the project's history: Undo takes the layer
+    /// out and Redo puts it back. Called inside an edit it belongs to that
+    /// edit, with the edit's other changes.
+    #[test]
+    fn raw_add_layer_outside_an_edit_is_one_undoable_step() {
+        let root = tempfile::tempdir().unwrap();
+        extension(
+            &root.path().join("extensions"),
+            "raw-pm",
+            &[(
+                "index.ts",
+                "export default function(api){const PM=api.host.pm;
+                   const layer=(id)=>({...PM.proj.layers[0]??{},id,name:id});
+                   api.commands.register({id:'raw-pm.alone',label:'Alone',run(){PM.addLayer(layer('alone'),0)}});
+                   api.commands.register({id:'raw-pm.both',label:'Both',run(){
+                     PM.Edit.mutate('Both',()=>{PM.proj.name='Both';PM.addLayer(layer('in-edit'),0)})}});
+                 }",
+            )],
+        );
+        let fixture = Fixture::start(root);
+        fixture.until("activation", |host| {
+            host.publication().settled && host.is_ready()
+        });
+        let first = |fixture: &Fixture| {
+            let published = fixture.kernel.published("window").unwrap();
+            published
+                .snapshot
+                .layers(None)
+                .first()
+                .map(|l| l.id.clone())
+        };
+        let history = |call: HistoryCall| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let ack = fixture
+                    .kernel
+                    .call_blocking(
+                        "window",
+                        Request::new(pm_kernel::Caller::native(), call.clone()),
+                    )
+                    .unwrap();
+                if matches!(ack.reply, Reply::Bool(true)) {
+                    return;
+                }
+                assert!(Instant::now() < deadline, "{call:?} stayed refused");
+                thread::sleep(Duration::from_millis(5));
+            }
+        };
+        let before = first(&fixture);
+        let name = fixture.name();
+        fixture.host.run_command("raw-pm.alone", json!([]));
+        fixture.until("the layer is added", |_| {
+            first(&fixture).as_deref() == Some("alone")
+        });
+        history(HistoryCall::Undo);
+        fixture.until("Undo takes the layer out", |_| first(&fixture) == before);
+        history(HistoryCall::Redo);
+        fixture.until("Redo puts it back", |_| {
+            first(&fixture).as_deref() == Some("alone")
+        });
+        // Inside an edit: one entry with the edit's other change.
+        fixture.host.run_command("raw-pm.both", json!([]));
+        fixture.until("the edit lands", |_| {
+            first(&fixture).as_deref() == Some("in-edit") && fixture.name() == "Both"
+        });
+        let published = fixture.kernel.published("window").unwrap();
+        let all: Vec<String> = published
+            .snapshot
+            .layers(None)
+            .iter()
+            .map(|l| l.id.clone())
+            .collect();
+        assert!(
+            all.contains(&"alone".to_owned()),
+            "the earlier layer is kept: {all:?}"
+        );
+        history(HistoryCall::Undo);
+        fixture.until("one Undo for the whole edit", |_| {
+            first(&fixture).as_deref() == Some("alone") && fixture.name() == name
+        });
+    }
+    /// The raw members a real extension used to cut a layer out of a clip:
+    /// `PM.MediaStore.get` reads the asset's file (the app answers with it, held
+    /// on disk) and `PM.addLayer` inserts a layer as main did, inside an edit.
+    #[test]
+    fn media_store_reads_an_assets_file_and_add_layer_inserts_a_layer() {
+        let root = tempfile::tempdir().unwrap();
+        extension(
+            &root.path().join("extensions"),
+            "raw-pm",
+            &[(
+                "index.ts",
+                "export default async function(api){const PM=api.host.pm;\
+                 PM.Edit.mutate('Add',()=>{PM.addLayer({...PM.proj.layers[0]??{},id:'added',name:'Added'},0)});\
+                 const blob=await PM.MediaStore.get({id:'clip'});const none=await PM.MediaStore.get({id:'gone'});\
+                 let refused='';try{PM.MediaStore.put('x',blob)}catch(e){refused=String(e.message)}\
+                 api.storage.set('read',{size:blob?.size??-1,text:blob?await blob.text():'',none,refused})}",
+            )],
+        );
+        let file = root.path().join("clip.bin");
+        fs::write(&file, b"clip bytes").unwrap();
+        let fixture = Fixture::start(root);
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut answered = 0;
+        while answered < 2 {
+            for request in fixture.host.take_requests() {
+                if request["kind"] != "mediaFile" {
+                    continue;
+                }
+                let token = request["token"].as_u64().unwrap();
+                let answer = if request["asset"] == "clip" {
+                    let held = crate::files::hold_picked(file.clone());
+                    json!({"token":held.to_string(),"name":"clip.bin","type":"","size":10,"lastModified":0})
+                } else {
+                    Value::Null
+                };
+                fixture.host.answer(token, answer);
+                answered += 1;
+            }
+            assert!(Instant::now() < deadline, "{:?}", fixture.host.records());
+            thread::sleep(Duration::from_millis(5));
+        }
+        fixture.until("read", |_| {
+            crate::adapter::storage_of(&fixture.kernel)
+                .to_string()
+                .contains("refused")
+        });
+        let storage = crate::adapter::storage_of(&fixture.kernel).to_string();
+        assert!(
+            storage.contains(r#""size":10"#) && storage.contains("clip bytes"),
+            "{storage}"
+        );
+        assert!(storage.contains(r#""none":null"#), "{storage}");
+        assert!(
+            storage.contains("PM.MediaStore.put is not available"),
+            "{storage}"
+        );
+        let published = fixture.kernel.published("window").unwrap();
+        let layers = published.snapshot.layers(None);
+        assert_eq!(
+            layers.first().map(|l| l.id.as_str()),
+            Some("added"),
+            "{layers:?}"
+        );
     }
 }

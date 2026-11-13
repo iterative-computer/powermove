@@ -38,6 +38,10 @@ type Resources = Arc<pm_engine_service::resources::ResourceSnapshot>;
 /// Each open document's extension definitions (its window's), for the
 /// captures and exports agents start; a request copies them when it starts.
 static RESOURCES: Mutex<Option<HashMap<u64, Resources>>> = Mutex::new(None);
+static SETTLED: std::sync::Condvar = std::sync::Condvar::new();
+/// How long a capture or export waits for its window's extensions to load
+/// before it goes ahead with what is registered (and says what is missing).
+const EXTENSIONS_WAIT: Duration = Duration::from_secs(120);
 /// Document `doc_id`'s window definitions (none: no window publication).
 pub(crate) fn set_resources(doc_id: u64, resources: Option<Resources>) {
     let mut all = RESOURCES.lock().unwrap();
@@ -46,9 +50,49 @@ pub(crate) fn set_resources(doc_id: u64, resources: Option<Resources>) {
         Some(resources) => all.insert(doc_id, resources),
         None => all.remove(&doc_id),
     };
+    SETTLED.notify_all();
 }
-fn resources_of(doc_id: u64) -> Option<Resources> {
-    RESOURCES.lock().unwrap().as_ref()?.get(&doc_id).cloned()
+/// The wait for a document's extensions was stopped by who asked (a
+/// cancelled export, a stopped capture).
+#[derive(Debug, PartialEq)]
+struct Stopped;
+/// How often a waiting capture or export looks at its stop.
+const STOP_POLL: Duration = Duration::from_millis(50);
+/// Document `doc_id`'s definitions once its extensions have loaded: an
+/// effect still loading is never exported or captured as not installed.
+/// `wait: false` (an extension's own capture, which its realm may be loading
+/// for) takes them as they are. A wait ends as soon as `stop` says so (the
+/// person cancelled the export, the capture's task was stopped), not when
+/// the extensions settle or the wait runs out.
+fn resources_of(
+    doc_id: u64,
+    wait: bool,
+    stop: &(dyn Fn() -> bool + Sync),
+) -> std::result::Result<Option<Resources>, Stopped> {
+    let deadline = Instant::now() + EXTENSIONS_WAIT;
+    let mut all = RESOURCES.lock().unwrap();
+    loop {
+        let Some(resources) = all.as_ref().and_then(|all| all.get(&doc_id).cloned()) else {
+            return Ok(None);
+        };
+        let left = deadline.saturating_duration_since(Instant::now());
+        if !wait || !resources.pending || left.is_zero() {
+            return Ok(Some(resources));
+        }
+        if stop() {
+            return Err(Stopped);
+        }
+        all = SETTLED.wait_timeout(all, left.min(STOP_POLL)).unwrap().0;
+    }
+}
+/// A capture draws a missing effect bypassed, as the viewer does, but never
+/// one its window's extensions may still register: past the wait it fails
+/// saying the effect is still loading instead of showing the frame without it.
+fn bypasses_missing(
+    look: bool,
+    resources: &pm_engine_service::resources::ResourceSnapshot,
+) -> bool {
+    look && !resources.pending
 }
 /// Install the production engine hosts. Call on a worker before serving.
 pub fn connect_engine(
@@ -149,7 +193,7 @@ pub fn headless(profile: PathBuf, exports: PathBuf, launch: Option<PathBuf>) -> 
         if let Some(session) = tools.host.current()
             && let Some(published) = tools.host.kernel.published(&session.project)
         {
-            jobs.resources(&published)?;
+            jobs.resources(&published, true, &never)?;
         }
         let shared = tools.clone();
         let server =
@@ -205,8 +249,19 @@ impl EngineJobs {
             extensions: Mutex::default(),
         })
     }
-    pub(crate) fn resources(&self, published: &Arc<Published>) -> AnyResult<Resources> {
-        if let Some(resources) = resources_of(published.snapshot.doc_id) {
+    /// The definitions a job of `published` draws with: its window's, once
+    /// that window's extensions have loaded when `wait` asks (ended early by
+    /// `stop`: a cancelled export, a stopped capture), or with no window the
+    /// same host started without a page.
+    pub(crate) fn resources(
+        &self,
+        published: &Arc<Published>,
+        wait: bool,
+        stop: &(dyn Fn() -> bool + Sync),
+    ) -> AnyResult<Resources> {
+        let window = resources_of(published.snapshot.doc_id, wait, stop)
+            .map_err(|Stopped| anyhow::anyhow!(CAPTURE_STOPPED))?;
+        if let Some(resources) = window {
             // Retire a worker host once the window owns this document again.
             self.extensions
                 .lock()
@@ -236,6 +291,7 @@ impl EngineJobs {
                             text: None,
                             frames: None,
                             rasters: None,
+                            vars: Some(crate::extensions::vars_source(&self.profile)),
                             wake: Arc::new(|| {}),
                         },
                     )),
@@ -263,6 +319,7 @@ impl EngineJobs {
         destination: PathBuf,
         look: bool,
         preview: bool,
+        resources: Resources,
     ) -> AnyResult<ExportHandle> {
         let media = crate::media::for_session(
             &published.snapshot,
@@ -283,11 +340,11 @@ impl EngineJobs {
             destination,
         )?;
         request.preview = preview;
-        // Pin the window's definitions, or activate the same host without a
-        // page when this project has no window (headless, agents, posters).
-        request.resources = (*self.resources(published)?).clone();
+        // The definitions its caller pinned (`Self::resources`): the
+        // window's, or with no window the same host run without a page.
+        request.resources = (*resources).clone();
         // A capture shows the project as the viewer does; a video is a delivery.
-        request.bypass_missing_effects = look;
+        request.bypass_missing_effects = bypasses_missing(look, &request.resources);
         // As the shipped app's agent exports: silent offline clips are left
         // out, not asked about; missing audio still fails by name. Captures
         // refuse offline media unless they draw the card (agent stills).
@@ -381,7 +438,20 @@ impl ExportChild for EngineJobs {
         let task =
             crate::export_coordinator::AgentExport::start(&name, &frozen.project_id, plan.frames)
                 .map_err(failed)?;
-        let handle = match self.start(&published, settings, destination, false, false) {
+        let cancelled = || failed("The person cancelled this export in Background Tasks.");
+        // Cancel in Background Tasks ends the wait for extensions too.
+        let resources = match self.resources(&published, true, &|| task.cancelled()) {
+            Ok(resources) => resources,
+            Err(_) if task.cancelled() => {
+                task.finish(Err("cancelled".into()));
+                return Err(cancelled());
+            }
+            Err(error) => {
+                task.finish(Err(error.to_string()));
+                return Err(failed(error));
+            }
+        };
+        let handle = match self.start(&published, settings, destination, false, false, resources) {
             Ok(handle) => handle,
             Err(error) => {
                 task.finish(Err(error.to_string()));
@@ -414,9 +484,7 @@ impl ExportChild for EngineJobs {
         if task.cancelled() {
             let _ = handle.wait();
             task.finish(Err("cancelled".into()));
-            return Err(failed(
-                "The person cancelled this export in Background Tasks.",
-            ));
+            return Err(cancelled());
         }
         let result = finish(handle);
         task.finish(result.as_ref().map(|_| ()).map_err(|e| e.message.clone()));
@@ -447,64 +515,116 @@ pub(crate) fn frame_renderer(
         profile,
         overrides,
     );
-    // The last few frames by document revision: a panel that asks for the same
-    // frame again (thumbnails, a check on every redraw) gets it without a render.
+    let epochs = jobs.overrides.clone();
+    let pins = jobs.clone();
+    Ok(cached_frames(
+        kernel,
+        project,
+        move |doc_id| epochs.of(doc_id).and_then(|o| o.epoch()),
+        // An extension's own capture never waits for its realm's load.
+        move |published, request| {
+            pins.resources(
+                published,
+                capture != Capture::ExtensionSnapshot,
+                request.stop,
+            )
+            .map_err(|e| e.to_string())
+        },
+        move |published, request, resources| {
+            let root = published.snapshot.root().ok_or("No open project")?;
+            let open = published.snapshot.open_comp();
+            let comp = pm_kernel::model::comp_node(root, open.as_deref()).unwrap_or(root);
+            let fps = comp
+                .get("fps")
+                .and_then(|n| n.to_value().as_f64())
+                .unwrap_or(30.);
+            std::fs::create_dir_all(&jobs.cache).map_err(|e| e.to_string())?;
+            let look = Look {
+                alpha: AlphaOutput::None,
+                motion_blur: request.motion_blur,
+            };
+            // An extension's snapshot (renderFrameTo, PM.Export.snapshot) is a
+            // delivery: offline media refuses, so no Media Offline card is ever
+            // cached here or saved by an extension. Home's poster is a look at
+            // the project and draws the card (its renderer is its own).
+            frame(
+                &jobs,
+                published,
+                fps,
+                request.time,
+                Size::new(request.width, request.height),
+                look,
+                request.stop,
+                capture,
+                resources,
+            )
+            .map_err(|e| e.to_string())
+        },
+    ))
+}
+/// A frame renderer that keeps the last few frames it drew: a panel that asks
+/// for the same frame again (thumbnails, a check on every redraw) gets it
+/// without a render. A kept frame is the same document revision drawn by the
+/// same override wrappers (`epoch`) and the same extension definitions: the
+/// resources are pinned (`pin`) before the lookup and `render` draws with
+/// those, so a frame drawn before an extension reloaded is never the answer
+/// after it. While extensions load nothing is kept or served: a frame drawn
+/// then lacks, or is about to gain, an effect.
+fn cached_frames(
+    kernel: KernelHandle,
+    project: String,
+    epoch: impl Fn(u64) -> Option<u64> + Send + Sync + 'static,
+    pin: impl Fn(
+        &Arc<Published>,
+        &pm_compat_runner::FrameRequest,
+    ) -> std::result::Result<Resources, String>
+    + Send
+    + Sync
+    + 'static,
+    render: impl Fn(
+        &Arc<Published>,
+        &pm_compat_runner::FrameRequest,
+        Resources,
+    ) -> std::result::Result<Vec<u8>, String>
+    + Send
+    + Sync
+    + 'static,
+) -> pm_compat_runner::FrameRenderer {
     let cache: Mutex<std::collections::VecDeque<(String, Arc<Vec<u8>>)>> = Mutex::default();
-    Ok(Arc::new(move |request: &pm_compat_runner::FrameRequest| {
+    Arc::new(move |request: &pm_compat_runner::FrameRequest| {
         let published = match &request.published {
             Some(frozen) => frozen.clone(),
             None => kernel.published(&project).ok_or("No open project")?,
         };
-        // The same frame drawn by other override wrappers is another frame.
-        let key = format!(
-            "{}:{}:{:?}:{}:{}x{}:{}",
-            published.snapshot.doc_id,
-            published.revision(),
-            jobs.overrides
-                .of(published.snapshot.doc_id)
-                .and_then(|o| o.epoch()),
-            request.time.to_bits(),
-            request.width,
-            request.height,
-            request.motion_blur
-        );
-        if let Some((_, png)) = cache.lock().unwrap().iter().find(|(k, _)| *k == key) {
+        let doc_id = published.snapshot.doc_id;
+        let resources = pin(&published, request)?;
+        let key = (!resources.pending).then(|| {
+            format!(
+                "{doc_id}:{}:{:?}:{}:{}:{}x{}:{}",
+                published.revision(),
+                epoch(doc_id),
+                resources.generation,
+                request.time.to_bits(),
+                request.width,
+                request.height,
+                request.motion_blur
+            )
+        });
+        if let Some(key) = &key
+            && let Some((_, png)) = cache.lock().unwrap().iter().find(|(k, _)| k == key)
+        {
             return Ok(png.as_ref().clone());
         }
-        let root = published.snapshot.root().ok_or("No open project")?;
-        let open = published.snapshot.open_comp();
-        let comp = pm_kernel::model::comp_node(root, open.as_deref()).unwrap_or(root);
-        let fps = comp
-            .get("fps")
-            .and_then(|n| n.to_value().as_f64())
-            .unwrap_or(30.);
-        std::fs::create_dir_all(&jobs.cache).map_err(|e| e.to_string())?;
-        let look = Look {
-            alpha: AlphaOutput::None,
-            motion_blur: request.motion_blur,
-        };
-        // An extension's snapshot (renderFrameTo, PM.Export.snapshot) is a
-        // delivery: offline media refuses, so no Media Offline card is ever
-        // cached here or saved by an extension. Home's poster is a look at
-        // the project and draws the card (its renderer is its own).
-        let png = frame(
-            &jobs,
-            &published,
-            fps,
-            request.time,
-            Size::new(request.width, request.height),
-            look,
-            request.stop,
-            capture,
-        )
-        .map_err(|e| e.to_string())?;
-        let mut cache = cache.lock().unwrap();
-        if cache.len() >= 4 {
-            cache.pop_front();
+        let png = render(&published, request, resources)?;
+        if let Some(key) = key {
+            let mut cache = cache.lock().unwrap();
+            if cache.len() >= 4 {
+                cache.pop_front();
+            }
+            cache.push_back((key, Arc::new(png.clone())));
         }
-        cache.push_back((key, Arc::new(png.clone())));
         Ok(png)
-    }))
+    })
 }
 /// How a captured frame looks: MCP captures keep alpha; an extension's
 /// `renderFrameTo` is opaque over black with motion blur, as main draws it.
@@ -522,6 +642,7 @@ const MCP_LOOK: Look = Look {
 fn never() -> bool {
     false
 }
+const CAPTURE_STOPPED: &str = "The frame capture was stopped";
 /// Renders one frame; `stop` cancels the export (a stopped task, a deadline).
 /// Who asked for a frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -553,6 +674,7 @@ fn frame(
     look: Look,
     stop: &(dyn Fn() -> bool + Sync),
     capture: Capture,
+    resources: Resources,
 ) -> AnyResult<Vec<u8>> {
     let rate = pm_time::rate_from_document(None, fps)?.rate;
     let start = pm_time::ticks_from_seconds(time)?;
@@ -587,6 +709,7 @@ fn frame(
         destination,
         true,
         capture.draws_offline_cards(),
+        resources,
     )?;
     while matches!(
         handle.status().state,
@@ -595,7 +718,7 @@ fn frame(
         if stop() {
             handle.cancel();
             let _ = handle.wait();
-            anyhow::bail!("The frame capture was stopped");
+            anyhow::bail!(CAPTURE_STOPPED);
         }
         std::thread::sleep(Duration::from_millis(4));
     }
@@ -818,6 +941,7 @@ impl MediaImporter for EngineJobs {
                 }],
                 request.folder.clone(),
                 request.replace.clone(),
+                &[],
             )
             .map_err(|e| match e {
                 pm_panel_media::Error::MissingItem => {
@@ -990,8 +1114,18 @@ impl EngineHook for EngineJobs {
             let bytes =
                 // render_frames is a look at the project: offline media draws
                 // the Media Offline card. Nothing caches these stills.
-                frame(self, &published, fps, *time, size, MCP_LOOK, &never, Capture::AgentStill)
-                    .map_err(failed)?;
+                frame(
+                    self,
+                    &published,
+                    fps,
+                    *time,
+                    size,
+                    MCP_LOOK,
+                    &never,
+                    Capture::AgentStill,
+                    self.resources(&published, true, &never).map_err(failed)?,
+                )
+                .map_err(failed)?;
             images.push(format!("data:image/png;base64,{}", base64(&bytes)));
         }
         Ok(json!({"times":request.times,"images":images}))
@@ -1095,6 +1229,7 @@ impl EngineHook for EngineJobs {
                 MCP_LOOK,
                 &never,
                 Capture::Sheet,
+                self.resources(&published, true, &never).map_err(failed)?,
             )
             .map_err(failed)?;
             cells.push(decode_png(&bytes).map_err(failed)?);
@@ -1282,6 +1417,207 @@ fn seconds(micros: Option<i64>) -> Option<f64> {
 }
 fn decibels(level: f64) -> f64 {
     (20. * level.max(1e-9).log10() * 10.).round() / 10.
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pm_engine_service::resources::ResourceSnapshot;
+    /// A capture's pin from its window alone (production adds the pageless
+    /// host for a project with no window).
+    fn window_pin(
+        wait: bool,
+    ) -> impl Fn(
+        &Arc<Published>,
+        &pm_compat_runner::FrameRequest,
+    ) -> std::result::Result<Resources, String> {
+        move |published, request| {
+            resources_of(published.snapshot.doc_id, wait, request.stop)
+                .map_err(|Stopped| CAPTURE_STOPPED.to_owned())?
+                .ok_or_else(|| "no window".to_owned())
+        }
+    }
+    fn snapshot(generation: u64, pending: bool) -> Option<Resources> {
+        Some(Arc::new(ResourceSnapshot {
+            generation,
+            pending,
+            ..Default::default()
+        }))
+    }
+    /// An export, poster or agent still of a document whose window is still
+    /// loading extensions waits for them; an extension's own capture (its
+    /// realm may be the one loading) takes what is registered.
+    /// A capture taken after the wait while an extension still loads (one
+    /// that hangs) is refused, never drawn without that extension's effect.
+    #[test]
+    fn a_capture_never_bypasses_an_effect_still_loading() {
+        let loaded = ResourceSnapshot::default();
+        let loading = ResourceSnapshot {
+            pending: true,
+            ..Default::default()
+        };
+        assert!(bypasses_missing(true, &loaded));
+        assert!(!bypasses_missing(true, &loading));
+        assert!(!bypasses_missing(false, &loaded));
+    }
+    /// A frame an extension captured (a GLSL-only effect: no override
+    /// wrapper, so no epoch moves) is not the answer after that effect's
+    /// extension reloaded with other code, at the same document revision:
+    /// the kept frame is of the definitions it was drawn with, nothing is
+    /// kept or served while the reload runs, and each render draws with the
+    /// resources pinned for its lookup.
+    #[test]
+    fn a_kept_capture_is_never_served_after_its_effect_reloaded() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let actor = pm_kernel::KernelActor::spawn(pm_kernel::KernelConfig::default());
+        let kernel = actor.handle();
+        let project = json!({"id":"p","name":"Film","compId":"c","w":64,"h":36,"fps":25,"dur":1,
+            "bg":"#000000","comps":{},"layers":[],"assets":{}});
+        kernel
+            .open(
+                "capture-cache",
+                pm_kernel::OpenSource::Untitled(
+                    pm_model::json::parse(&project.to_string()).unwrap(),
+                ),
+            )
+            .wait()
+            .unwrap()
+            .unwrap();
+        let doc = kernel.published("capture-cache").unwrap().snapshot.doc_id;
+        let renders = Arc::new(AtomicUsize::new(0));
+        let count = renders.clone();
+        // Stands in for the engine child: the "pixels" are the generation of
+        // the definitions the frame was drawn with; a frame drawn while they
+        // load is refused, as the engine refuses it.
+        let capture = cached_frames(
+            kernel.clone(),
+            "capture-cache".into(),
+            |_| None,
+            window_pin(false),
+            move |_, _, resources| {
+                count.fetch_add(1, Ordering::Relaxed);
+                if resources.pending {
+                    return Err("still loading".into());
+                }
+                Ok(resources.generation.to_le_bytes().to_vec())
+            },
+        );
+        let ask = || {
+            capture(&pm_compat_runner::FrameRequest {
+                time: 0.5,
+                width: 64,
+                height: 36,
+                motion_blur: true,
+                stop: &never,
+                published: None,
+            })
+        };
+        let drawn = |generation: u64| Ok(generation.to_le_bytes().to_vec());
+        set_resources(doc, snapshot(1, false));
+        assert_eq!(ask(), drawn(1));
+        assert_eq!(ask(), drawn(1));
+        assert_eq!(renders.load(Ordering::Relaxed), 1, "the same frame is kept");
+        // The reload starts: the old frame is not the answer, and what is
+        // drawn meanwhile is not kept.
+        set_resources(doc, snapshot(2, true));
+        assert_eq!(ask(), Err("still loading".into()));
+        assert_eq!(ask(), Err("still loading".into()));
+        assert_eq!(renders.load(Ordering::Relaxed), 3);
+        // The reloaded code: drawn again with it, at the same revision.
+        set_resources(doc, snapshot(3, false));
+        assert_eq!(ask(), drawn(3));
+        assert_eq!(ask(), drawn(3));
+        assert_eq!(renders.load(Ordering::Relaxed), 4);
+        set_resources(doc, None);
+        actor.shutdown();
+    }
+    #[test]
+    fn captures_wait_for_their_window_extensions_to_load() {
+        let doc = 0x5e77_1ed0;
+        set_resources(doc, snapshot(1, true));
+        let of = |wait| resources_of(doc, wait, &never).unwrap();
+        assert_eq!(of(false).map(|r| r.pending), Some(true));
+        let waiter = std::thread::spawn(move || {
+            resources_of(doc, true, &never)
+                .unwrap()
+                .map(|r| r.generation)
+        });
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(!waiter.is_finished(), "a capture went ahead while loading");
+        set_resources(doc, snapshot(2, true));
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(!waiter.is_finished(), "still loading");
+        set_resources(doc, snapshot(3, false));
+        assert_eq!(waiter.join().unwrap(), Some(3));
+        set_resources(doc, None);
+        assert!(of(true).is_none());
+    }
+    /// Cancelling an agent's export in Background Tasks while it waits for
+    /// extensions that are still loading ends the wait at once (it used to
+    /// last until they settled, or two minutes); so does stopping a still.
+    #[test]
+    fn a_cancelled_export_or_stopped_still_stops_waiting_for_extensions_at_once() {
+        let doc = 0x5e77_1ed1;
+        set_resources(doc, snapshot(1, true));
+        // The export, as `export_video` waits: its Background Tasks row's
+        // Cancel is the stop.
+        let task = crate::export_coordinator::AgentExport::start("Film", "p-wait", 10).unwrap();
+        let id = task.id();
+        let waiting = std::thread::spawn(move || {
+            let stopped = resources_of(doc, true, &|| task.cancelled());
+            task.finish(Err("cancelled".into()));
+            stopped.map(|_| ())
+        });
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!waiting.is_finished(), "it waits while extensions load");
+        assert!(crate::export_coordinator::cancel_export(id));
+        let cancelled = Instant::now();
+        assert_eq!(waiting.join().unwrap(), Err(Stopped));
+        assert!(cancelled.elapsed() < Duration::from_secs(2));
+        // A still whose task is stopped: no render is started for it.
+        let actor = pm_kernel::KernelActor::spawn(pm_kernel::KernelConfig::default());
+        let kernel = actor.handle();
+        let project = json!({"id":"p","name":"Film","compId":"c","w":64,"h":36,"fps":25,"dur":1,
+            "bg":"#000000","comps":{},"layers":[],"assets":{}});
+        kernel
+            .open(
+                "still-wait",
+                pm_kernel::OpenSource::Untitled(
+                    pm_model::json::parse(&project.to_string()).unwrap(),
+                ),
+            )
+            .wait()
+            .unwrap()
+            .unwrap();
+        let open = kernel.published("still-wait").unwrap().snapshot.doc_id;
+        set_resources(open, snapshot(1, true));
+        let still = cached_frames(
+            kernel.clone(),
+            "still-wait".into(),
+            |_| None,
+            window_pin(true),
+            |_, _, _| panic!("a stopped still was rendered"),
+        );
+        let started = Instant::now();
+        let stop = move || started.elapsed() > Duration::from_millis(150);
+        let answer = still(&pm_compat_runner::FrameRequest {
+            time: 0.,
+            width: 64,
+            height: 36,
+            motion_blur: false,
+            stop: &stop,
+            published: None,
+        });
+        assert_eq!(answer, Err(CAPTURE_STOPPED.to_owned()));
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the stop was honoured after {:?}",
+            started.elapsed()
+        );
+        set_resources(doc, None);
+        set_resources(open, None);
+        actor.shutdown();
+    }
 }
 
 #[cfg(test)]

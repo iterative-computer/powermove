@@ -266,9 +266,6 @@ pub struct SaveReceipt {
     /// version kept on this machine until a later save's copy takes its place.
     pub unproven: bool,
     pub local_copy: Option<PathBuf>,
-    /// Earlier versions this save no longer needed that could not be moved
-    /// to the Trash: they stay where they are, and the person is told.
-    pub untrashed: Vec<PathBuf>,
     /// Keeps the store's "save in progress" guard alive until adopted.
     #[allow(dead_code)]
     pub(crate) ticket: Arc<()>,
@@ -991,7 +988,6 @@ impl SavePlan {
             changed: published.changed,
             unproven: published.unproven,
             local_copy: published.local_copy,
-            untrashed: published.untrashed,
             ticket: self.ticket.clone(),
         };
         // Installed, but its folder did not sync: reported failed, with the

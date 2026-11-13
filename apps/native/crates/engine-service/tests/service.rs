@@ -209,6 +209,13 @@ fn export_resolver_never_silently_uses_proxies() {
         Some("original.mov")
     );
     assert_eq!(c.export_paths(true).paths["a"].to_str(), Some("proxy.mov"));
+    // A draft's proxy is named with its original, so Interpret Footage is
+    // carried to it as the proxy's maker left it; a file drawn as itself
+    // (an original, or a proxy whose original is gone) names none.
+    assert!(c.export_paths(false).originals.is_empty());
+    let draft = c.export_paths(true).originals;
+    assert_eq!(draft.len(), 1);
+    assert_eq!(draft["a"].to_str(), Some("original.mov"));
 }
 #[test]
 fn headless_pixels_equal_export_reference_and_overlays_share_pass() {
@@ -767,15 +774,30 @@ fn paused_notifications_are_coalesced_and_resource_pins_retire_cache() {
         "paused service generated a periodic wake"
     );
     let old = v.stamp().unwrap();
-    v.resources(Arc::new(resources::ResourceSnapshot {
-        generation: 2,
-        ..Default::default()
-    }))
-    .unwrap();
+    // New pins (a contributed definition) retire the cache; a snapshot that
+    // pins the same again (only its generation moved) retires nothing.
+    let mut contributed = pm_render::all_builtin_definitions()
+        .definitions
+        .into_iter()
+        .find(|d| d.id.as_str() == "invert")
+        .unwrap();
+    contributed.id = "ext.invert".into();
+    contributed.origin = pm_protocol::definitions::DefinitionOrigin::Local;
+    let pins = |generation| {
+        Arc::new(resources::ResourceSnapshot {
+            generation,
+            definitions: vec![contributed.clone()],
+            ..Default::default()
+        })
+    };
+    v.resources(pins(2)).unwrap();
     let frame = wait_frame(&v, v.stamp().unwrap());
     assert!(!frame.cache_hit);
     assert!(frame.stamp.generation > old.generation);
     assert!(rx.try_recv().is_ok());
+    let pinned = v.stamp().unwrap();
+    v.resources(pins(3)).unwrap();
+    assert_eq!(v.stamp().unwrap().generation, pinned.generation);
     assert!(v.resources(Arc::default()).is_err());
     for i in 0..100 {
         v.scrub(Ticks::new(i * 1000).unwrap()).unwrap();

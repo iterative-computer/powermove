@@ -27,6 +27,11 @@ pub struct ExportRequest {
     pub document: String,
     pub originals: std::collections::BTreeMap<String, PathBuf>,
     pub proxies: std::collections::BTreeMap<String, PathBuf>,
+    /// A render cache fill draws what the viewer draws (`originals` holds
+    /// the viewer's files): the original of each one that is a proxy or
+    /// optimized copy.
+    #[serde(default)]
+    pub copies_of: std::collections::BTreeMap<String, PathBuf>,
     pub destination: PathBuf,
     #[serde(default)]
     pub saving_app_version: Option<String>,
@@ -475,6 +480,7 @@ impl ExportRequest {
             document: pm_model::json::to_canonical_string(&document),
             originals: media.originals,
             proxies: media.proxies,
+            copies_of: Default::default(),
             destination,
             saving_app_version: snapshot.document.saving_app_version().map(str::to_owned),
             resources: Default::default(),
@@ -990,7 +996,8 @@ pub fn run_child() -> Result<()> {
             proxies: request.proxies,
             ..Default::default()
         };
-        let media = catalog.export_paths(settings.draft_from_proxies);
+        let mut media = catalog.export_paths(settings.draft_from_proxies);
+        media.originals.extend(request.copies_of);
         let mut doc = pm_model::Document::new(
             Some(pm_model::json::parse(&request.document)?),
             request.revision,
@@ -1088,6 +1095,12 @@ pub fn run_child() -> Result<()> {
             match &missing.revision {
                 Some(revision) => anyhow::bail!(
                     "{} version {revision} was saved by a newer Powermove ({uses}{others}). Export it there, or turn the effect off, then export again.",
+                    missing.effect
+                ),
+                // The app waits for extensions before it starts a delivery;
+                // one sent early is never told an effect is missing.
+                None if request.resources.pending => anyhow::bail!(
+                    "{} is still loading ({uses}{others}). Try again once the project's extensions have loaded.",
                     missing.effect
                 ),
                 None => anyhow::bail!(

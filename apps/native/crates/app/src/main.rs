@@ -27,6 +27,7 @@ mod error_log;
 mod export_coordinator;
 mod expression_sheet;
 mod extension_authoring;
+mod extension_vars;
 mod extensions;
 mod figma_paste;
 mod file_coordination;
@@ -35,6 +36,7 @@ mod generated_panel;
 mod gizmo;
 #[cfg(all(test, target_os = "macos"))]
 mod gpui_memory_tests;
+mod interpret_sheet;
 mod keyframe_sheets;
 mod poster;
 

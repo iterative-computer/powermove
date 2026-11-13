@@ -54,6 +54,8 @@ thread_local! {
     /// shows this again.
     static V1_THEME: std::cell::RefCell<Option<(String, Patches)>> = const { std::cell::RefCell::new(None) };
 }
+/// A document, its revision and a resource generation.
+type AwaitKey = (u64, u64, u64);
 /// A theme's patches for dark and for light windows.
 type Patches = (pm_shell::theme::Patch, pm_shell::theme::Patch);
 /// Page messages enter here on AppKit's main thread, so this only enqueues.
@@ -201,6 +203,12 @@ pub struct Extensions {
     presented: Option<u64>,
     /// `inspector.focusText`'s layer, for Properties once its view exists.
     pub(crate) focus_text: Option<String>,
+    /// The project whose open waits for effects its extensions are loading,
+    /// once its panels have mounted (`Controller::settled`).
+    pub(crate) settle_after: Option<String>,
+    /// Whether the open composition waits on such effects, for a document
+    /// revision and resource generation.
+    awaiting: std::cell::Cell<Option<(AwaitKey, bool)>>,
 }
 impl Default for Extensions {
     fn default() -> Self {
@@ -242,12 +250,19 @@ impl Default for Extensions {
             booted: false,
             unresponsive: None,
             stopped_for_quit: false,
-            resources: Arc::default(),
+            // Until the host says its first load pass is over, an effect the
+            // project uses may still be registered.
+            resources: Arc::new(ResourceSnapshot {
+                pending: true,
+                ..Default::default()
+            }),
             stage: Rc::default(),
             stage_used: false,
             stage_sent: None,
             presented: None,
             focus_text: None,
+            settle_after: None,
+            awaiting: Default::default(),
         }
     }
 }
@@ -289,6 +304,99 @@ pub(crate) fn roots(profile: &std::path::Path) -> Vec<PathBuf> {
         profile.join("extensions-shared"),
         profile.join("extensions"),
     ]
+}
+/// How long an open waits for the effects its extensions are loading before
+/// the project opens without them (their frames keep waiting).
+const OPEN_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+/// The status note when an open stops waiting for extensions still loading.
+fn still_loading_note(names: &[&str]) -> Option<String> {
+    let (who, its) = match names {
+        [] => return None,
+        [one] => (format!("{one} is"), "its effects wait for it"),
+        [one, other] => (
+            format!("{one} and {other} are"),
+            "their effects wait for them",
+        ),
+        [one, rest @ ..] => (
+            format!("{one} and {} more are", rest.len()),
+            "their effects wait for them",
+        ),
+    };
+    Some(format!("{who} still loading. Frames that use {its}."))
+}
+/// The status line while `what` waits for this window's extensions to load.
+pub(crate) fn starts_once_loaded(what: &str, resources: &ResourceSnapshot) -> String {
+    match resources.loading.as_slice() {
+        [] => format!("{what} starts once extensions have loaded"),
+        [(_, one)] => format!("{what} starts once {one} has loaded"),
+        [(_, one), rest @ ..] => {
+            format!(
+                "{what} starts once {one} and {} more have loaded",
+                rest.len()
+            )
+        }
+    }
+}
+/// The resources one host publication pins after `current`, or `None` when
+/// it pins what `current` does. Definitions, the pending flag and the names
+/// of who is loading all come from that publication, never from the host
+/// again: a later look could pair these definitions with a load that has
+/// since finished, and the frame would draw a late effect as not installed.
+fn pinned(
+    current: &ResourceSnapshot,
+    publication: &pm_compat_runner::host::Publication,
+) -> Option<ResourceSnapshot> {
+    let definitions = publication
+        .contributions
+        .as_deref()
+        .map(definitions)
+        .unwrap_or_default();
+    let pending = !publication.settled;
+    let loading = if pending {
+        publication.loading.clone()
+    } else {
+        vec![]
+    };
+    if definitions == current.definitions
+        && pending == current.pending
+        && loading == current.loading
+    {
+        return None;
+    }
+    Some(ResourceSnapshot {
+        generation: current.generation + 1,
+        definitions,
+        pending,
+        loading,
+        ..Default::default()
+    })
+}
+/// Effect types the engine draws without any extension.
+fn builtin_effects() -> &'static BTreeSet<String> {
+    static BUILTIN: std::sync::LazyLock<BTreeSet<String>> = std::sync::LazyLock::new(|| {
+        pm_render::effects::versions::builtin_snapshot()
+            .definitions
+            .into_iter()
+            .filter(|d| d.kind == pm_protocol::definitions::DefinitionKind::Effect)
+            .map(|d| d.id.as_str().to_owned())
+            .collect()
+    });
+    &BUILTIN
+}
+/// The values entered for extensions' declared `vars` in `profile`, for a
+/// window's host and a pageless one alike: sealed ones only from this
+/// build's own Keychain service, read off the main thread.
+pub(crate) fn vars_source(profile: &std::path::Path) -> pm_compat_runner::VarsSource {
+    let profile = profile.to_owned();
+    let service = crate::extension_vars::own_service();
+    Arc::new(move |id: &str, keys: &[String]| {
+        let items = |service: &str, account: &str| {
+            crate::cloud::keychain::read(service, account)
+                .ok()
+                .flatten()
+        };
+        crate::extension_vars::values(&profile, id, keys, &service, &items)
+    })
 }
 /// Window viewers and headless jobs decode the same realm snapshot.
 pub(crate) fn definitions(value: &Value) -> Vec<pm_protocol::definitions::DefinitionSnapshot> {
@@ -346,9 +454,11 @@ impl Controller {
         let generation = self.extensions.resources.generation;
         self.extensions = Extensions::default();
         self.extensions.resources = Arc::new(ResourceSnapshot {
-            generation,
+            generation: generation + 1,
+            pending: true,
             ..Default::default()
         });
+        self.apply_extension_resources();
     }
     pub fn start_extensions(&mut self, cx: &mut Context<Self>) {
         let mut shell = self.host.borrow_mut();
@@ -394,9 +504,14 @@ impl Controller {
             wake: Arc::new(move || {
                 let _ = wake_tx.try_send(());
             }),
+            vars: Some(vars_source(&self.profile)),
         });
         rasters.connect(host.raster_inbox());
         self.extensions.doc_id = doc_id;
+        if let Some(doc_id) = doc_id {
+            // Captures and exports of this document wait for its extensions.
+            crate::mcp_services::set_resources(doc_id, Some(self.extensions.resources.clone()));
+        }
         self.extensions.overrides = Some(rasters);
         self.extensions.host = Some(host);
         self.wire_effect_desk();
@@ -440,7 +555,9 @@ impl Controller {
         let Some(host) = &self.extensions.host else {
             return;
         };
-        let revision = host.revision();
+        // Everything pinned below comes from this one publication.
+        let publication = host.publication();
+        let revision = publication.revision;
         // A rebuilt realm is a new document: render again so open panels
         // replace the page the old one drew into.
         if self
@@ -471,13 +588,11 @@ impl Controller {
         if revision != self.extensions.seen {
             self.extensions.seen = revision;
             self.mount_surfaces(cx);
-            if let Some(contributions) = self
-                .extensions
-                .host
-                .as_ref()
-                .and_then(|h| h.contributions())
-            {
-                self.apply_contributions(&contributions, cx);
+            if publication.contributions.is_some() {
+                self.apply_contributions(&publication, cx);
+            } else {
+                // No extension to run, or none has published yet.
+                self.pin_definitions(&publication);
             }
         }
         self.present_page();
@@ -659,6 +774,10 @@ impl Controller {
             Some("download") => {
                 let url = request["url"].as_str().unwrap_or_default().to_owned();
                 self.download_for_extension(token, url, cx);
+            }
+            Some("mediaFile") => {
+                let asset = request["asset"].as_str().unwrap_or_default();
+                self.media_file_for_extension(token, asset, cx);
             }
             Some("pick") => {
                 let accept = request["accept"].as_str().unwrap_or_default().to_owned();
@@ -997,7 +1116,14 @@ impl Controller {
         })
         .detach();
     }
-    fn apply_contributions(&mut self, value: &Value, cx: &mut Context<Self>) {
+    fn apply_contributions(
+        &mut self,
+        publication: &pm_compat_runner::host::Publication,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(value) = publication.contributions.as_deref() else {
+            return;
+        };
         let panels: Vec<(String, String)> = value["panels"]
             .as_array()
             .into_iter()
@@ -1112,18 +1238,7 @@ impl Controller {
         shell.contributed_choices = self.extensions.palette_choices();
         shell.set_contributed_bindings(OWNER, bindings);
         drop(shell);
-        let definitions = definitions(&value);
-        if definitions != self.extensions.resources.definitions {
-            self.extensions.resources = Arc::new(ResourceSnapshot {
-                generation: self.extensions.resources.generation + 1,
-                definitions,
-                ..Default::default()
-            });
-            if let Some(doc_id) = self.extensions.doc_id {
-                crate::mcp_services::set_resources(doc_id, Some(self.extensions.resources.clone()));
-            }
-            self.apply_extension_resources();
-        }
+        self.pin_definitions(publication);
         self.apply_v1_theme(&value["nativeTheme"], cx);
         self.update_builtins(cx);
         cx.notify();
@@ -1164,10 +1279,104 @@ impl Controller {
             Err(message) => self.errors.borrow_mut().tell("Theme", &message),
         }
     }
-    /// Every live viewer renders the same contributed definitions.
+    /// The contributed definitions every viewer, capture and export of this
+    /// window draws with, and whether a load pass is still running (an effect
+    /// the project uses may yet arrive: `ResourceSnapshot::pending`), all from
+    /// one publication of the host.
+    fn pin_definitions(&mut self, publication: &pm_compat_runner::host::Publication) {
+        let current = &self.extensions.resources;
+        let Some(next) = pinned(current, publication) else {
+            return;
+        };
+        if current.pending && !next.pending {
+            crate::diag::line(
+                json!({"extensions": "settled", "definitions": next.definitions.len()}),
+            );
+        }
+        self.extensions.resources = Arc::new(next);
+        if let Some(doc_id) = self.extensions.doc_id {
+            crate::mcp_services::set_resources(doc_id, Some(self.extensions.resources.clone()));
+        }
+        self.apply_extension_resources();
+        if let Some(project) = self.extensions.settle_after.take() {
+            self.settled(&project);
+        }
+    }
+    /// An open waiting for effects its extensions load waits [`OPEN_WAIT`] at
+    /// most: then the project opens, frames that need an effect still loading
+    /// stay held (the viewer's status line names who they wait for), and the
+    /// person is told which extensions are still loading.
+    pub(crate) fn bound_open_wait(&mut self, project: &str, cx: &mut Context<Self>) {
+        if self.extensions.settle_after.as_deref() != Some(project) {
+            return;
+        }
+        let project = project.to_owned();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(OPEN_WAIT).await;
+            let _ = this.update(cx, |v, cx| {
+                if v.extensions.settle_after.as_deref() != Some(project.as_str()) {
+                    return;
+                }
+                v.extensions.settle_after = None;
+                v.finish_open(&project);
+                crate::diag::line(json!({"extensions": "open-released"}));
+                let names: Vec<&str> = v
+                    .extensions
+                    .resources
+                    .loading
+                    .iter()
+                    .map(|(_, name)| name.as_str())
+                    .collect();
+                if let Some(text) = still_loading_note(&names) {
+                    v.note(text, cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+    /// The open composition uses an effect no definition provides yet while
+    /// this window's extensions load: the viewer shows the open as still
+    /// loading, and nothing renders it, until they register it or fail.
+    pub(crate) fn awaiting_extension_effects(&self) -> bool {
+        let resources = &self.extensions.resources;
+        let Some(p) = self.published.as_ref().filter(|_| resources.pending) else {
+            return false;
+        };
+        let key = (p.snapshot.doc_id, p.snapshot.revision, resources.generation);
+        if let Some((at, awaiting)) = self.extensions.awaiting.get()
+            && at == key
+        {
+            return awaiting;
+        }
+        let effect = |d: &&pm_protocol::definitions::DefinitionSnapshot| {
+            d.kind == pm_protocol::definitions::DefinitionKind::Effect
+        };
+        let defined: BTreeSet<&str> = resources
+            .definitions
+            .iter()
+            .filter(effect)
+            .map(|d| d.id.as_str())
+            .collect();
+        let builtin = builtin_effects();
+        let unavailable = |ty: &str, _: Option<&pm_model::Node>| {
+            (!builtin.contains(ty) && !defined.contains(ty)).then_some(None)
+        };
+        let awaiting = !pm_render::effects::versions::missing_effects(
+            &p.snapshot.document,
+            &p.snapshot.render_comp(),
+            &unavailable,
+        )
+        .is_empty();
+        self.extensions.awaiting.set(Some((key, awaiting)));
+        awaiting
+    }
+    /// Every live viewer of this window (the editor's, the popout's) renders
+    /// the same contributed definitions, now and after each change.
     pub fn apply_extension_resources(&mut self) {
-        if let Some(viewer) = &self.viewer
-            && let Err(error) = viewer.resources(self.extensions.resources.clone())
+        if let Err(error) = self
+            .resource_feed
+            .publish(self.extensions.resources.clone())
         {
             self.message = error.to_string();
         }
@@ -1904,6 +2113,105 @@ impl Controller {
 
 #[cfg(test)]
 mod tests {
+    /// What a window pins comes from one publication of the host: the
+    /// definitions published while an extension was still loading stay a
+    /// load in progress however far the host has moved on since, so a frame
+    /// never pairs them with "everything has loaded".
+    #[test]
+    fn a_window_pins_definitions_and_their_flag_from_one_publication() {
+        use super::{ResourceSnapshot, pinned};
+        use pm_compat_runner::host::Publication;
+        use serde_json::json;
+        use std::sync::Arc;
+        let effect = |id: &str| {
+            let mut definition = serde_json::to_value(
+                pm_render::all_builtin_definitions()
+                    .definitions
+                    .into_iter()
+                    .find(|d| d.id.as_str() == "invert")
+                    .unwrap(),
+            )
+            .unwrap();
+            definition["id"] = json!(id);
+            definition
+        };
+        let early = Publication {
+            revision: 3,
+            contributions: Some(Arc::new(json!({"definitions": [effect("fast.tint")]}))),
+            settled: false,
+            loading: vec![("b-slow".into(), "Slow".into())],
+        };
+        // The host settles (with the late effect) before the window pins.
+        let late = Publication {
+            revision: 4,
+            contributions: Some(Arc::new(
+                json!({"definitions": [effect("fast.tint"), effect("slow.tint")]}),
+            )),
+            settled: true,
+            loading: vec![],
+        };
+        let start = ResourceSnapshot {
+            pending: true,
+            ..Default::default()
+        };
+        let first = pinned(&start, &early).unwrap();
+        assert!(
+            first.pending,
+            "the early definitions are a load in progress"
+        );
+        assert_eq!(first.loading, early.loading);
+        assert_eq!(first.definitions.len(), 1);
+        assert!(pinned(&first, &early).is_none(), "the same pins again");
+        let second = pinned(&first, &late).unwrap();
+        assert!(!second.pending && second.loading.is_empty());
+        assert_eq!(second.definitions.len(), 2);
+        assert!(second.generation > first.generation);
+    }
+    #[test]
+    fn a_job_waiting_for_extensions_names_them() {
+        use super::{ResourceSnapshot, starts_once_loaded};
+        let waiting = |names: &[&str]| {
+            starts_once_loaded(
+                "Export",
+                &ResourceSnapshot {
+                    pending: true,
+                    loading: names
+                        .iter()
+                        .map(|n| (n.to_lowercase(), (*n).into()))
+                        .collect(),
+                    ..Default::default()
+                },
+            )
+        };
+        assert_eq!(
+            waiting(&["Deep Glow"]),
+            "Export starts once Deep Glow has loaded"
+        );
+        assert_eq!(
+            waiting(&["Deep Glow", "Blur", "Grain"]),
+            "Export starts once Deep Glow and 2 more have loaded"
+        );
+        assert_eq!(waiting(&[]), "Export starts once extensions have loaded");
+    }
+    #[test]
+    fn an_open_that_stops_waiting_says_who_is_still_loading() {
+        use super::still_loading_note as note;
+        assert_eq!(note(&[]), None);
+        assert_eq!(
+            note(&["Deep Glow"]).as_deref(),
+            Some("Deep Glow is still loading. Frames that use its effects wait for it.")
+        );
+        assert_eq!(
+            note(&["Deep Glow", "Grain"]).as_deref(),
+            Some(
+                "Deep Glow and Grain are still loading. Frames that use their effects wait for them."
+            )
+        );
+        assert_eq!(
+            note(&["A", "B", "C"]).as_deref(),
+            Some("A and 2 more are still loading. Frames that use their effects wait for them.")
+        );
+    }
     use super::{external_link, menu_entries};
     use serde_json::json;
 
