@@ -236,6 +236,23 @@ Opus review remain outstanding. No P1/colour/performance gate is declared passed
   streams NDJSON as frames complete. It remains readable after AppKit termination;
   overflow/disconnection is an explicit status failure. Missing/zero
   display timestamps never become GPU-derived presentation timestamps.
+  A frame row also carries the loop's refresh `interval` and `ahead`,
+  `stand_ins`, `late_layers` (override layers drawn from an earlier answer),
+  the running `skipped_targets` and `held_frames`, the render's work counters
+  (`work`: GPU and cache counters, `pm-perf`) and `render_gpu_ms`: from when
+  the GPU was free for the render (its submission, or the frame before leaving
+  the GPU; producer and presenter share one queue) to the start of its present
+  pass. `gpu_start`/`gpu_done` are the present pass alone. Other rows:
+  `after_frame` (what the worker did after a playing frame before it could take
+  the next: `ask_ahead_ms`, `upload_ahead_ms`, `prepare_ms`, the realm's batch
+  state), `audio_start` (how long a start waited for the audio clock, and
+  whether it fell back to the host clock), `commands`, `refused`.
+- Dependency: the app builds `wgpu`'s front crate from
+  `engine/third_party/wgpu` (the engine's vendored 30.0.1 with its work
+  counters; `[patch.crates-io]` in `apps/native/Cargo.toml`, as in
+  `engine/Cargo.toml`), so the app and the engine's tests run one wgpu source
+  and a traced viewer's rows carry the GPU counters. A wgpu update is made in
+  that folder for both workspaces (`engine/third_party/wgpu/POWERMOVE.md`).
 
 Minimal app wiring: `src/playback.rs` replaces the 16 ms polling loop with the
 notification/display-link feed, attaches `OutputBinding`, forwards peak levels,

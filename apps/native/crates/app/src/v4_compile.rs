@@ -445,6 +445,12 @@ fn compile(
             Some(Component::List | Component::Tree) => sheet.flex_1(),
             // Sections stand a gap apart; the heading is a row of its own.
             Some(Component::DisclosureGroup) => sheet.w_full().mt(px(t.metrics.gap)),
+            // Indeterminate: a small spinner leads the label, as AppKit's
+            // spinning indicator beside "Checking…"; determinate: a bar
+            // under it.
+            Some(Component::ProgressRow) if node.props.get("aria-valuenow").is_none() => {
+                sheet.flex_row().items_center().gap(px(t.metrics.gap))
+            }
             Some(Component::ProgressRow) => sheet.gap(px(t.metrics.inner_radius)).justify_center(),
             Some(Component::Banner) => sheet
                 .flex_row()

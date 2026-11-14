@@ -143,21 +143,21 @@ test("disclosure removes hidden descendants from native focus and AX tree togeth
   await root.render(
     <AgentView publication={p} send={(a) => actions.push(a)} />,
   );
-  const button = root
+  // A running step's turn is live: its work line is open, the step shows.
+  const step = root
     .inspect()
     .nodes.find(
-      (n) => n.props.label === "Make the headline" && n.type === "button",
+      (n) =>
+        n.props.label === "Make the headline" && n.props.role === "listitem",
     )!;
-  await root.drive(button.id, "click");
+  await root.drive(step.id, "click");
   expect(actions).toEqual([{ type: "disclose", id: "tool", open: false }]);
-  const stop = root
-    .inspect()
-    .nodes.find((n) => n.props.label === "Stop Make the headline")!.id;
+  const result = root.inspect().nodes.find((n) => n.text === "Done.")!.id;
   p.snapshot.rows.items[0].open = false;
   await root.render(<AgentView publication={p} send={() => {}} />);
   const reply = assertWire(commits);
-  expect(reply.nodes[stop]).toBeUndefined();
-  expect(reply.focusOrder).not.toContain(stop);
+  expect(reply.nodes[result]).toBeUndefined();
+  expect(reply.focusOrder).not.toContain(result);
   root.dispose();
 });
 test("60k logical rows mount only the supplied window and preserve logical count for integration", async () => {
@@ -399,9 +399,21 @@ test("all conversation item kinds preserve exact prose and expose explicit unsup
     value,
   }));
   await root.render(<AgentView publication={withRows(rows)} send={() => {}} />);
+  // A finished turn's steps fold into one quiet line each; opening them
+  // shows the steps.
+  const lines = root
+    .inspect()
+    .nodes.filter((n) => String(n.props.label ?? "").endsWith(", collapsed"));
+  expect(lines.map((n) => n.props.label)).toEqual([
+    "1 step · 3.2 s, collapsed",
+    "1 step, collapsed",
+  ]);
+  for (const line of lines) await root.drive(line.id, "click");
+  await root.flush();
   expect(
     root.inspect().nodes.some((n) => n.props.label === "Thought for 3 s"),
   ).toBe(true);
+  expect(root.inspect().nodes.some((n) => n.text === "Failed")).toBe(true);
   expect(
     root.inspect().nodes.some((n) => n.props.label === "Timing chart"),
   ).toBe(true);

@@ -596,8 +596,9 @@ pub(crate) fn ensure_worker(
 fn deliver(shared: SharedAgent, link: Arc<AgentLink>, kernel: KernelHandle, application: bool) {
     let mut store = KernelStore::new(kernel, application);
     let mut closed: Option<Instant> = None;
+    let mut published = Instant::now();
     loop {
-        let (changed, failed, done) = {
+        let (changed, failed, done, running) = {
             let mut guard = shared.shared();
             let state = &mut *guard;
             if link.closing.load(Ordering::Acquire) && closed.is_none() {
@@ -624,11 +625,13 @@ fn deliver(shared: SharedAgent, link: Arc<AgentLink>, kernel: KernelHandle, appl
                 || tasks
                 || failed
                 || saved != state.panel.save_error;
-            (changed, failed, done)
+            (changed, failed, done, !state.runs.is_empty())
         };
-        if changed {
+        // A quiet run still moves its "Working · m:ss" line: once a second.
+        if changed || running && published.elapsed() >= Duration::from_secs(1) {
             link.touch();
             link.publish();
+            published = Instant::now();
         }
         if done {
             return;

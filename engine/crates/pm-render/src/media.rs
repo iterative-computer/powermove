@@ -1371,8 +1371,13 @@ pub struct MediaCache {
     /// frames, then video layers take stand-ins ([`Want::Playback`]).
     pub playback: Option<std::time::Instant>,
     /// The frame (presented index in its source) of each video layer drawn
-    /// with a stand-in since the list was reset.
+    /// with a stand-in since the list was reset (0 for a still drawn from
+    /// an earlier picture of it).
     pub stand_ins: Vec<usize>,
+    /// A still of this frame was not ready ([`MediaFailure::Pending`]).
+    pub(crate) still_pending: bool,
+    /// What says the frame being drawn is superseded (viewer frames).
+    pub(crate) interrupt: Option<Interrupt>,
     /// Converted video frames replaced during the current render, and those
     /// replaced earlier (free to overwrite: every read of them is
     /// submitted). A UHD frame converts into 66 MB (`rgba16float`).
@@ -1382,6 +1387,12 @@ pub struct MediaCache {
     images: BTreeMap<ImageKey, Target>,
     image_seen: BTreeMap<ImageKey, u64>,
     image_budget: u64,
+    /// Critical memory pressure: after a frame is submitted its stills too
+    /// go down to the budget ([`Self::flush`]).
+    image_pressure: bool,
+    /// The stills the last frame read, in bytes, when they alone exceeded
+    /// the budget, and that budget: an over-budget frame.
+    image_over: Option<(u64, u64)>,
     frame_budget: u64,
     /// Stills at the view's resolution (ImageIO's filtered thumbnail).
     pub(crate) preview_media: bool,
@@ -1420,7 +1431,21 @@ pub struct MediaCache {
 pub enum MediaFailure {
     Unsupported(Feature),
     Failed(String),
+    /// A still whose decode on the prefetch worker outlasted the frame's
+    /// wait, with no earlier picture of it to show: the frame is held
+    /// ([`crate::RenderError::MediaPending`]) and drawn again when it lands.
+    Pending,
 }
+
+/// How long an exact frame (paused, a capture) waits for a still the
+/// prefetch worker is decoding before it is held and drawn again when the
+/// decode lands: longer than a playing frame's budget, short enough that a
+/// read that stalls never holds the one render thread.
+const EXACT_STILL_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// The frame being drawn is superseded once this counter moves past the
+/// value it was armed at (a seek, a new revision, its viewer closing).
+pub type Interrupt = (Arc<std::sync::atomic::AtomicU64>, u64);
 
 impl MediaCache {
     pub fn new(device: &wgpu::Device) -> MediaCache {
@@ -1449,12 +1474,16 @@ impl MediaCache {
             scrub: false,
             playback: None,
             stand_ins: Vec::new(),
+            still_pending: false,
+            interrupt: None,
             retired_frames: Vec::new(),
             free_frames: Vec::new(),
             importer: DecodeImporter::new(device).ok(),
             images: BTreeMap::new(),
             image_seen: BTreeMap::new(),
             image_budget: 48 << 20,
+            image_pressure: false,
+            image_over: None,
             frame_budget: 24 << 20,
             preview_media: false,
             preview_video: false,
@@ -1546,9 +1575,6 @@ impl MediaCache {
             edge,
             interpreted: interpret.is_some(),
         };
-        // A worker decoding this still now (a playing sequence's next file)
-        // finishes sooner than a second decode started beside it.
-        self.stills.finish_pending(path, (len, modified), ask);
         let issue = |i: ProbeIssue| match i {
             ProbeIssue::Unsupported(f) => MediaFailure::Unsupported(f),
             ProbeIssue::Unreadable(m) => MediaFailure::Failed(m),
@@ -1557,6 +1583,37 @@ impl MediaCache {
             |e: pm_media::MediaError| MediaFailure::Failed(format!("{}: {e}", path.display()));
         let none = Interpretation::default();
         let interp = interpret.unwrap_or(&none);
+        // A worker decoding this still now (a playing sequence's next file)
+        // finishes sooner than a second decode started beside it; before the
+        // probe, whose first read of a file is a decode too. A playing frame
+        // waits until its deadline, a scrubbed one not at all, an exact one a
+        // little longer unless it is superseded.
+        let now = std::time::Instant::now();
+        let (until, stand_in) = match self.playback {
+            Some(deadline) => (deadline, true),
+            None if self.scrub => (now, true),
+            None => (now + EXACT_STILL_WAIT, false),
+        };
+        let interrupt = self.interrupt.clone();
+        let cancelled = move || {
+            interrupt
+                .as_ref()
+                .is_some_and(|(at, armed)| at.load(std::sync::atomic::Ordering::Acquire) != *armed)
+        };
+        if self
+            .stills
+            .wait_for_decoding(path, (len, modified), ask, until, &cancelled)
+            == stills::Waited::Pending
+        {
+            // What it has: an earlier picture of this still (another size,
+            // the file before it changed), as video stands in.
+            if stand_in && let Some(t) = self.earlier_picture(&key) {
+                self.stand_ins.push(0);
+                return Ok(t);
+            }
+            self.still_pending = true;
+            return Err(MediaFailure::Pending);
+        }
         // A still seen for the first time is decoded once: its facts are
         // read from that decode (a worker's decode gave them otherwise).
         let mut whole = None;
@@ -1676,19 +1733,61 @@ impl MediaCache {
                 format,
             );
         }
-        // Older versions of the same file are dropped.
+        // Older versions of the same file are dropped. This version's other
+        // sizes and readings stay: one still drawn at two sizes in a frame
+        // (two layers, or a preview and an exact read) would otherwise drop
+        // each other's texture and be decoded again for every frame.
         // (Dropped, not destroyed: a frame being recorded may still use it.)
         self.images.retain(|k, _| {
             k.path != key.path
+                || (k.len == key.len && k.modified == key.modified)
                 || k.precision != key.precision
                 || k.linear != key.linear
                 || k.hdr_light != key.hdr_light
         });
         self.image_seen.insert(key.clone(), self.frame_epoch);
         self.images.insert(key, target.clone());
-        self.trim_images(self.image_budget);
-        self.recount();
+        // While the frame draws, the frame before's stills stay: it draws
+        // its newest still first (the top layer), and pushing them out here
+        // decoded again the ones it reads next. Those it did not read again
+        // go once it is submitted ([`Self::flush`]).
+        self.evict_images(self.frame_epoch.saturating_sub(1));
         Ok(target)
+    }
+
+    /// A converted picture of the same file read the same way as `key`, at
+    /// another size or of the file before it changed: the largest.
+    fn earlier_picture(&self, key: &ImageKey) -> Option<Target> {
+        self.images
+            .iter()
+            .filter(|(k, _)| {
+                k.path == key.path
+                    && k.precision == key.precision
+                    && k.reading == key.reading
+                    && k.linear == key.linear
+                    && k.hdr_light == key.hdr_light
+            })
+            .max_by_key(|(k, _)| {
+                (
+                    (k.len, k.modified) == (key.len, key.modified),
+                    k.edge.unwrap_or(u32::MAX),
+                )
+            })
+            .map(|(_, t)| t.clone())
+    }
+
+    /// A still of the frame about to be drawn whose decode an earlier frame
+    /// gave up on and which has no earlier picture to stand in (or a frame
+    /// that may not show one): the frame is held before any of it is drawn.
+    pub(crate) fn still_held(&mut self, path: &Path) -> bool {
+        let Some(stamp) = stamp(path) else {
+            return false;
+        };
+        if !self.stills.pending(path, stamp) {
+            return false;
+        }
+        let stands_in = self.playback.is_some() || self.scrub;
+        !(stands_in && self.images.keys().any(|k| k.path == path))
     }
 
     /// Decodes the still at `path` on a worker when no converted texture of
@@ -2025,8 +2124,11 @@ impl MediaCache {
                     let step = self.scrub_last.insert(path.to_path_buf(), n);
                     let continues = step.is_some_and(|last| n > last && n - last <= 2);
                     let video2 = pm_media::decode::diag::video2();
-                    let gated = video2 || pm_media::decode::diag::knob("PM_FIX_WAIT_STEP") == Some(1);
-                    match pm_media::decode::diag::knob("PM_FIX_SCRUB_WAIT_MS").or(video2.then_some(8)) {
+                    let gated =
+                        video2 || pm_media::decode::diag::knob("PM_FIX_WAIT_STEP") == Some(1);
+                    match pm_media::decode::diag::knob("PM_FIX_SCRUB_WAIT_MS")
+                        .or(video2.then_some(8))
+                    {
                         Some(ms) if ms > 0 && (!gated || continues) => {
                             Want::Playback(std::time::Duration::from_millis(ms))
                         }
@@ -2237,6 +2339,23 @@ impl MediaCache {
         Ok(self.source(path)?.color)
     }
 
+    /// Critical memory pressure ([`Self::flush`]).
+    pub fn set_image_pressure(&mut self, critical: bool) {
+        self.image_pressure = critical;
+    }
+
+    /// The last frame's stills alone exceeded the image budget: their bytes
+    /// and the budget. Never trimmed below while the frame drew them.
+    pub fn image_over_budget(&self) -> Option<(u64, u64)> {
+        self.image_over
+    }
+
+    /// Decoded stills the prefetch workers hold for frames to come (counted
+    /// with the decoded frames in [`Self::media_usage`]).
+    pub fn still_prefetch_bytes(&self) -> u64 {
+        self.stills.held() as u64
+    }
+
     /// Bytes of converted textures held (images and decoded frames).
     pub fn texture_bytes(&self) -> u64 {
         self.bytes
@@ -2256,14 +2375,35 @@ impl MediaCache {
         self.recount();
     }
 
+    /// Keeps the stills within `budget`, oldest first. What the last frame
+    /// drawn read stays whatever the budget: a still whose texture alone is
+    /// larger than the budget (a full-size read on a 3D plane) was dropped
+    /// as soon as it was cached and decoded again for every frame. The
+    /// frame before it keeps its stills while there is room. A budget of
+    /// zero (a viewer at rest, memory pressure) releases everything.
     pub fn trim_images(&mut self, budget: u64) {
         self.image_budget = budget;
+        if budget == 0 {
+            self.stills.clear();
+        }
+        self.evict_images(if budget == 0 {
+            u64::MAX
+        } else {
+            self.frame_epoch
+        });
+    }
+
+    /// Evicts stills last read before frame `floor`, oldest first, until
+    /// the budget holds.
+    fn evict_images(&mut self, floor: u64) {
+        let budget = self.image_budget;
         self.image_seen
             .retain(|key, _| self.images.contains_key(key));
         while self.image_bytes() > budget {
             let Some(key) = self
                 .image_seen
                 .iter()
+                .filter(|(_, at)| **at < floor)
                 .min_by_key(|(_, at)| **at)
                 .map(|(k, _)| k.clone())
             else {
@@ -2339,10 +2479,11 @@ impl MediaCache {
             .find_map(|(target, revision)| (&target.texture == texture).then_some(*revision))
     }
 
-    /// Changes whenever a display frame a scrub asked for has decoded, and
-    /// whenever a sequence's file is found unreadable as it is drawn.
+    /// Changes whenever a display frame a scrub asked for has decoded,
+    /// whenever a sequence's file is found unreadable as it is drawn, and
+    /// whenever a still a frame gave up waiting for lands.
     pub fn landed(&self) -> u64 {
-        self.viewer.landed() + self.unreadable
+        self.viewer.landed() + self.unreadable + self.stills.landed()
     }
 
     /// Forgets everything read of `path` (it changed while it was read):
@@ -2373,6 +2514,18 @@ impl MediaCache {
     pub(crate) fn unreadable_found(&mut self) {
         self.unreadable += 1;
         self.stand_ins.push(0);
+    }
+
+    /// Tests: holds every still decode before it reads, until released
+    /// (from any thread).
+    #[cfg(test)]
+    pub(crate) fn still_decode_gate(&self) -> impl Fn(bool) + Send + 'static {
+        self.stills.decode_gate()
+    }
+    /// Tests: a prefetch worker is inside a decode.
+    #[cfg(test)]
+    pub(crate) fn still_decoding(&self) -> bool {
+        self.stills.decoding()
     }
 
     /// The display decode workers' counters.
@@ -2430,6 +2583,8 @@ impl MediaCache {
             self.idle_media = false;
         }
         self.frame_epoch = self.frame_epoch.wrapping_add(1);
+        self.still_pending = false;
+        self.image_over = None;
         let frame = self.frame_epoch;
         self.frames.retain(|key, _| {
             self.frame_seen
@@ -2439,6 +2594,13 @@ impl MediaCache {
         self.frame_seen
             .retain(|_, seen| frame.wrapping_sub(*seen) <= 30);
         self.recount();
+    }
+
+    /// A source snapshot's frame of the cache: what earlier snapshots and
+    /// frames read gives way to it within the budget; the look-ahead state
+    /// (a viewer playing on the same cache) is left as it is.
+    pub(crate) fn begin_source_frame(&mut self) {
+        self.begin_frame(self.look_ahead);
     }
 
     /// Queue-owned GPU references remain valid; this only drops cache handles.
@@ -2481,12 +2643,26 @@ impl MediaCache {
     }
 
     /// After a render's commands are submitted: releases CoreVideo texture
-    /// cache entries no longer in use, and makes converted frames this
-    /// render replaced free for reuse (two are kept).
+    /// cache entries no longer in use, makes converted frames this render
+    /// replaced free for reuse (two are kept), notes a frame whose own
+    /// stills exceeded the image budget, and brings the stills back within
+    /// the budget: the frame before's that this one did not read go first,
+    /// and under critical memory pressure this frame's too (nothing is being
+    /// drawn now; the submitted commands own what they read).
     pub fn flush(&mut self) {
         if let Some(i) = &self.importer {
             i.flush_cache();
         }
+        let epoch = self.frame_epoch;
+        let current: u64 = self
+            .image_seen
+            .iter()
+            .filter(|(_, at)| **at == epoch)
+            .filter_map(|(key, _)| self.images.get(key))
+            .map(Target::bytes)
+            .sum();
+        self.image_over = (current > self.image_budget).then_some((current, self.image_budget));
+        self.evict_images(if self.image_pressure { u64::MAX } else { epoch });
         self.free_frames.append(&mut self.retired_frames);
         let excess = self.free_frames.len().saturating_sub(2);
         self.free_frames.drain(..excess);

@@ -905,6 +905,7 @@ exports[`spec §4 empty: op-tree snapshot and Rust wire/accessibility validator 
           "gap": {
             "token": "metrics.inset",
           },
+          "overflow": "hidden",
           "paddingLeft": {
             "token": "metrics.inset",
           },
@@ -2002,6 +2003,7 @@ exports[`spec §4 empty-other-access: op-tree snapshot and Rust wire/accessibili
           "gap": {
             "token": "metrics.inset",
           },
+          "overflow": "hidden",
           "paddingLeft": {
             "token": "metrics.inset",
           },
@@ -3099,6 +3101,7 @@ exports[`spec §4 empty-extension: op-tree snapshot and Rust wire/accessibility 
           "gap": {
             "token": "metrics.inset",
           },
+          "overflow": "hidden",
           "paddingLeft": {
             "token": "metrics.inset",
           },
@@ -4145,6 +4148,7 @@ exports[`spec §4 checking: op-tree snapshot and Rust wire/accessibility validat
           "gap": {
             "token": "metrics.inset",
           },
+          "overflow": "hidden",
           "paddingLeft": {
             "token": "metrics.inset",
           },
@@ -5239,6 +5243,7 @@ exports[`spec §4 sign-in: op-tree snapshot and Rust wire/accessibility validato
           "gap": {
             "token": "metrics.inset",
           },
+          "overflow": "hidden",
           "paddingLeft": {
             "token": "metrics.inset",
           },
@@ -6471,6 +6476,7 @@ exports[`spec §4 unavailable: op-tree snapshot and Rust wire/accessibility vali
           "gap": {
             "token": "metrics.inset",
           },
+          "overflow": "hidden",
           "paddingLeft": {
             "token": "metrics.inset",
           },
@@ -6809,6 +6815,7 @@ exports[`spec §4 loading: op-tree snapshot and Rust wire/accessibility validato
             0,
             2,
           ],
+          "scrollAnchor": "end",
           "textSelected": false,
         },
         "role": "list",
@@ -6852,6 +6859,9 @@ exports[`spec §4 loading: op-tree snapshot and Rust wire/accessibility validato
           "display": "flex",
           "flexDirection": "row",
           "justifyContent": "end",
+          "paddingLeft": {
+            "token": "metrics.message_inset",
+          },
         },
       },
       "text": "",
@@ -6882,11 +6892,17 @@ exports[`spec §4 loading: op-tree snapshot and Rust wire/accessibility validato
           "lineHeight": {
             "token": "typography.reading_leading",
           },
+          "paddingBottom": {
+            "token": "metrics.text_padding",
+          },
           "paddingLeft": {
             "token": "metrics.inset",
           },
           "paddingRight": {
             "token": "metrics.inset",
+          },
+          "paddingTop": {
+            "token": "metrics.text_padding",
           },
         },
       },
@@ -7723,6 +7739,7 @@ exports[`spec §4 loading: op-tree snapshot and Rust wire/accessibility validato
           "gap": {
             "token": "metrics.inset",
           },
+          "overflow": "hidden",
           "paddingLeft": {
             "token": "metrics.inset",
           },
@@ -8884,6 +8901,7 @@ exports[`spec §4 working: op-tree snapshot and Rust wire/accessibility validato
           "gap": {
             "token": "metrics.inset",
           },
+          "overflow": "hidden",
           "paddingLeft": {
             "token": "metrics.inset",
           },
@@ -10028,6 +10046,7 @@ exports[`spec §4 stopping: op-tree snapshot and Rust wire/accessibility validat
           "gap": {
             "token": "metrics.inset",
           },
+          "overflow": "hidden",
           "paddingLeft": {
             "token": "metrics.inset",
           },
@@ -10311,6 +10330,7 @@ exports[`spec §4 awaiting-answer: op-tree snapshot and Rust wire/accessibility 
             0,
             1,
           ],
+          "scrollAnchor": "end",
           "textSelected": false,
         },
         "role": "list",
@@ -11262,6 +11282,7 @@ exports[`spec §4 awaiting-answer: op-tree snapshot and Rust wire/accessibility 
           "gap": {
             "token": "metrics.inset",
           },
+          "overflow": "hidden",
           "paddingLeft": {
             "token": "metrics.inset",
           },
@@ -11487,11 +11508,12 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
     10,
     12,
     17,
-    21,
-    23,
-    26,
-    27,
+    22,
     29,
+    31,
+    34,
+    35,
+    37,
   ],
   "nodes": {
     "0": {
@@ -11510,7 +11532,7 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
       "children": [
         2,
         9,
-        19,
+        27,
       ],
       "id": 1,
       "input": null,
@@ -11562,6 +11584,7 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
             0,
             1,
           ],
+          "scrollAnchor": "end",
           "textSelected": false,
         },
         "role": "list",
@@ -11589,30 +11612,18 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
     "11": {
       "children": [
         12,
-        14,
+        16,
       ],
       "id": 11,
       "input": null,
       "listeners": {},
       "parent": 10,
       "props": {
-        "data-pm-component": "disclosure-group",
-        "id": "live:tool",
-        "label": "Make the headline",
+        "label": "1 step",
         "role": "group",
-        "state": {
-          "hover": true,
-        },
         "style": {
-          "background": {
-            "token": "colors.hover",
-          },
-          "color": {
-            "token": "colors.secondary",
-          },
-          "fontSize": {
-            "token": "typography.body",
-          },
+          "display": "flex",
+          "flexDirection": "column",
         },
       },
       "text": "",
@@ -11621,6 +11632,7 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
     "12": {
       "children": [
         13,
+        14,
       ],
       "id": 12,
       "input": null,
@@ -11631,36 +11643,56 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
           "keys": [],
           "preventDefault": false,
         },
+        "keydown": {
+          "bubble": true,
+          "capture": false,
+          "keys": [
+            "Enter",
+            " ",
+          ],
+          "preventDefault": true,
+        },
       },
       "parent": 11,
       "props": {
-        "aria-controls": "P0-0",
-        "aria-expanded": true,
-        "data-pm-component": "disclosure-button",
-        "label": "Make the headline",
+        "aria-selected": false,
+        "data-pm-component": "list-item",
+        "id": "live:tool-work",
+        "label": "1 step, expanded",
+        "preventDefault": {
+          "keydown": [
+            "Enter",
+            " ",
+          ],
+        },
+        "role": "listitem",
         "style": {
+          "alignItems": "center",
           "color": {
-            "token": "colors.text",
+            "token": "colors.muted",
           },
+          "display": "flex",
+          "flexDirection": "row",
           "fontSize": {
-            "token": "typography.label",
+            "token": "typography.body",
           },
-          "fontWeight": {
-            "token": "typography.semibold_weight",
+          "gap": {
+            "token": "metrics.gap",
           },
           "height": {
             "token": "metrics.row",
           },
           "minHeight": {
-            "token": "metrics.row",
+            "token": "metrics.hit",
           },
           "minWidth": {
             "token": "metrics.hit",
           },
         },
+        "tabIndex": 0,
       },
       "text": "",
-      "type": "button",
+      "type": "div",
     },
     "13": {
       "children": [],
@@ -11668,37 +11700,35 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
       "input": null,
       "listeners": {},
       "parent": 12,
-      "props": {},
-      "text": "Make the headline",
-      "type": "text",
-    },
-    "14": {
-      "children": [
-        15,
-        17,
-      ],
-      "id": 14,
-      "input": null,
-      "listeners": {},
-      "parent": 11,
       "props": {
-        "id": "P0-0",
+        "metadata": {
+          "symbol": "chevron.down",
+        },
+        "style": {
+          "color": {
+            "token": "colors.muted",
+          },
+          "flexShrink": 0,
+          "symbolSize": {
+            "token": "metrics.symbol_inline",
+          },
+        },
       },
       "text": "",
       "type": "div",
     },
-    "15": {
+    "14": {
       "children": [
-        16,
+        15,
       ],
-      "id": 15,
+      "id": 14,
       "input": null,
       "listeners": {},
-      "parent": 14,
+      "parent": 12,
       "props": {
         "style": {
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.muted",
           },
           "fontSize": {
             "token": "typography.body",
@@ -11708,19 +11738,40 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
       "text": "",
       "type": "text",
     },
-    "16": {
+    "15": {
       "children": [],
+      "id": 15,
+      "input": null,
+      "listeners": {},
+      "parent": 14,
+      "props": {},
+      "text": "1 step",
+      "type": "text",
+    },
+    "16": {
+      "children": [
+        17,
+        24,
+      ],
       "id": 16,
       "input": null,
       "listeners": {},
-      "parent": 15,
-      "props": {},
-      "text": "Done.",
-      "type": "text",
+      "parent": 11,
+      "props": {
+        "style": {
+          "display": "flex",
+          "flexDirection": "column",
+        },
+      },
+      "text": "",
+      "type": "div",
     },
     "17": {
       "children": [
         18,
+        19,
+        21,
+        22,
       ],
       "id": 17,
       "input": null,
@@ -11731,14 +11782,187 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
           "keys": [],
           "preventDefault": false,
         },
+        "keydown": {
+          "bubble": true,
+          "capture": false,
+          "keys": [
+            "Enter",
+            " ",
+          ],
+          "preventDefault": true,
+        },
       },
-      "parent": 14,
+      "parent": 16,
+      "props": {
+        "aria-selected": false,
+        "data-pm-component": "list-item",
+        "id": "live:tool",
+        "label": "Make the headline",
+        "preventDefault": {
+          "keydown": [
+            "Enter",
+            " ",
+          ],
+        },
+        "role": "listitem",
+        "state": {
+          "hover": true,
+        },
+        "style": {
+          "alignItems": "center",
+          "color": {
+            "token": "colors.secondary",
+          },
+          "display": "flex",
+          "flexDirection": "row",
+          "fontSize": {
+            "token": "typography.body",
+          },
+          "gap": {
+            "token": "metrics.gap",
+          },
+          "height": {
+            "token": "metrics.row",
+          },
+          "minHeight": {
+            "token": "metrics.hit",
+          },
+          "minWidth": {
+            "token": "metrics.hit",
+          },
+        },
+        "tabIndex": 0,
+      },
+      "text": "",
+      "type": "div",
+    },
+    "18": {
+      "children": [],
+      "id": 18,
+      "input": null,
+      "listeners": {},
+      "parent": 17,
+      "props": {
+        "metadata": {
+          "symbol": "wrench.and.screwdriver",
+        },
+        "style": {
+          "color": {
+            "token": "colors.muted",
+          },
+          "flexShrink": 0,
+          "symbolSize": {
+            "token": "metrics.symbol_inline",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "19": {
+      "children": [
+        20,
+      ],
+      "id": 19,
+      "input": null,
+      "listeners": {},
+      "parent": 17,
+      "props": {
+        "style": {
+          "color": {
+            "token": "colors.secondary",
+          },
+          "flexShrink": 1,
+          "fontSize": {
+            "token": "typography.body",
+          },
+        },
+      },
+      "text": "",
+      "type": "text",
+    },
+    "2": {
+      "children": [
+        3,
+        5,
+      ],
+      "id": 2,
+      "input": null,
+      "listeners": {},
+      "parent": 1,
+      "props": {
+        "data-pm-slot": "header",
+        "id": "agent-header",
+        "label": "Agent",
+        "metadata": {
+          "apiGap": "shell",
+        },
+        "role": "group",
+        "style": {
+          "alignItems": "center",
+          "display": "flex",
+          "flexDirection": "row",
+          "height": {
+            "token": "metrics.header",
+          },
+          "justifyContent": "space-between",
+          "paddingLeft": {
+            "token": "metrics.inset",
+          },
+          "paddingRight": {
+            "token": "metrics.inset",
+          },
+        },
+        "title": "Drag to move or pin to workspace",
+      },
+      "text": "",
+      "type": "div",
+    },
+    "20": {
+      "children": [],
+      "id": 20,
+      "input": null,
+      "listeners": {},
+      "parent": 19,
+      "props": {},
+      "text": "Make the headline",
+      "type": "text",
+    },
+    "21": {
+      "children": [],
+      "id": 21,
+      "input": null,
+      "listeners": {},
+      "parent": 17,
+      "props": {
+        "style": {
+          "flexGrow": 1,
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "22": {
+      "children": [
+        23,
+      ],
+      "id": 22,
+      "input": null,
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+      },
+      "parent": 17,
       "props": {
         "data-pm-component": "toolbar-item",
         "label": "Stop Make the headline",
         "style": {
           "color": {
-            "token": "colors.secondary",
+            "token": "colors.accent_text",
           },
           "minHeight": {
             "token": "metrics.hit",
@@ -11754,22 +11978,77 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
       "text": "",
       "type": "button",
     },
-    "18": {
+    "23": {
       "children": [],
-      "id": 18,
+      "id": 23,
       "input": null,
       "listeners": {},
-      "parent": 17,
+      "parent": 22,
       "props": {},
       "text": "Stop",
       "type": "text",
     },
-    "19": {
+    "24": {
       "children": [
-        20,
         25,
       ],
-      "id": 19,
+      "id": 24,
+      "input": null,
+      "listeners": {},
+      "parent": 16,
+      "props": {
+        "style": {
+          "background": {
+            "token": "colors.field",
+          },
+          "borderRadius": {
+            "token": "metrics.control_radius",
+          },
+          "padding": {
+            "token": "metrics.text_padding",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "25": {
+      "children": [
+        26,
+      ],
+      "id": 25,
+      "input": null,
+      "listeners": {},
+      "parent": 24,
+      "props": {
+        "style": {
+          "color": {
+            "token": "colors.secondary",
+          },
+          "fontSize": {
+            "token": "typography.body",
+          },
+        },
+      },
+      "text": "",
+      "type": "text",
+    },
+    "26": {
+      "children": [],
+      "id": 26,
+      "input": null,
+      "listeners": {},
+      "parent": 25,
+      "props": {},
+      "text": "Done.",
+      "type": "text",
+    },
+    "27": {
+      "children": [
+        28,
+        33,
+      ],
+      "id": 27,
       "input": null,
       "listeners": {},
       "parent": 1,
@@ -11815,52 +12094,15 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
       "text": "",
       "type": "div",
     },
-    "2": {
+    "28": {
       "children": [
-        3,
-        5,
+        29,
+        30,
       ],
-      "id": 2,
+      "id": 28,
       "input": null,
       "listeners": {},
-      "parent": 1,
-      "props": {
-        "data-pm-slot": "header",
-        "id": "agent-header",
-        "label": "Agent",
-        "metadata": {
-          "apiGap": "shell",
-        },
-        "role": "group",
-        "style": {
-          "alignItems": "center",
-          "display": "flex",
-          "flexDirection": "row",
-          "height": {
-            "token": "metrics.header",
-          },
-          "justifyContent": "space-between",
-          "paddingLeft": {
-            "token": "metrics.inset",
-          },
-          "paddingRight": {
-            "token": "metrics.inset",
-          },
-        },
-        "title": "Drag to move or pin to workspace",
-      },
-      "text": "",
-      "type": "div",
-    },
-    "20": {
-      "children": [
-        21,
-        22,
-      ],
-      "id": 20,
-      "input": null,
-      "listeners": {},
-      "parent": 19,
+      "parent": 27,
       "props": {
         "id": "agent-field",
         "style": {
@@ -11889,9 +12131,9 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
       "text": "",
       "type": "div",
     },
-    "21": {
+    "29": {
       "children": [],
-      "id": 21,
+      "id": 29,
       "input": {
         "composing": false,
         "composition": null,
@@ -11923,7 +12165,7 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
           "preventDefault": false,
         },
       },
-      "parent": 20,
+      "parent": 28,
       "props": {
         "control": "text",
         "data-pm-component": "text-field",
@@ -11969,15 +12211,39 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
       "text": "",
       "type": "textarea",
     },
-    "22": {
+    "3": {
       "children": [
-        23,
-        24,
+        4,
       ],
-      "id": 22,
+      "id": 3,
       "input": null,
       "listeners": {},
-      "parent": 20,
+      "parent": 2,
+      "props": {
+        "style": {
+          "color": {
+            "token": "colors.text",
+          },
+          "fontSize": {
+            "token": "typography.title",
+          },
+          "fontWeight": {
+            "token": "typography.semibold_weight",
+          },
+        },
+      },
+      "text": "",
+      "type": "text",
+    },
+    "30": {
+      "children": [
+        31,
+        32,
+      ],
+      "id": 30,
+      "input": null,
+      "listeners": {},
+      "parent": 28,
       "props": {
         "style": {
           "alignItems": "center",
@@ -11992,9 +12258,9 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
       "text": "",
       "type": "div",
     },
-    "23": {
+    "31": {
       "children": [],
-      "id": 23,
+      "id": 31,
       "input": null,
       "listeners": {
         "click": {
@@ -12004,7 +12270,7 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
           "preventDefault": false,
         },
       },
-      "parent": 22,
+      "parent": 30,
       "props": {
         "attr": {
           "symbol": "plus",
@@ -12033,9 +12299,9 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
       "text": "",
       "type": "button",
     },
-    "24": {
+    "32": {
       "children": [],
-      "id": 24,
+      "id": 32,
       "input": null,
       "listeners": {
         "click": {
@@ -12045,7 +12311,7 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
           "preventDefault": false,
         },
       },
-      "parent": 22,
+      "parent": 30,
       "props": {
         "data-pm-component": "toolbar-item",
         "disabled": true,
@@ -12074,17 +12340,17 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
       "text": "",
       "type": "button",
     },
-    "25": {
+    "33": {
       "children": [
-        26,
-        27,
-        28,
-        29,
+        34,
+        35,
+        36,
+        37,
       ],
-      "id": 25,
+      "id": 33,
       "input": null,
       "listeners": {},
-      "parent": 19,
+      "parent": 27,
       "props": {
         "id": "agent-options",
         "style": {
@@ -12103,9 +12369,9 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
       "text": "",
       "type": "div",
     },
-    "26": {
+    "34": {
       "children": [],
-      "id": 26,
+      "id": 34,
       "input": null,
       "listeners": {
         "change": {
@@ -12115,7 +12381,7 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
           "preventDefault": false,
         },
       },
-      "parent": 25,
+      "parent": 33,
       "props": {
         "binding": "",
         "control": "select",
@@ -12170,9 +12436,9 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
       "text": "",
       "type": "button",
     },
-    "27": {
+    "35": {
       "children": [],
-      "id": 27,
+      "id": 35,
       "input": null,
       "listeners": {
         "change": {
@@ -12182,7 +12448,7 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
           "preventDefault": false,
         },
       },
-      "parent": 25,
+      "parent": 33,
       "props": {
         "binding": "",
         "control": "select",
@@ -12237,12 +12503,12 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
       "text": "",
       "type": "button",
     },
-    "28": {
+    "36": {
       "children": [],
-      "id": 28,
+      "id": 36,
       "input": null,
       "listeners": {},
-      "parent": 25,
+      "parent": 33,
       "props": {
         "style": {
           "flexGrow": 1,
@@ -12251,9 +12517,9 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
       "text": "",
       "type": "div",
     },
-    "29": {
+    "37": {
       "children": [],
-      "id": 29,
+      "id": 37,
       "input": null,
       "listeners": {
         "change": {
@@ -12263,7 +12529,7 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
           "preventDefault": false,
         },
       },
-      "parent": 25,
+      "parent": 33,
       "props": {
         "binding": "",
         "control": "select",
@@ -12334,30 +12600,6 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
       },
       "text": "",
       "type": "button",
-    },
-    "3": {
-      "children": [
-        4,
-      ],
-      "id": 3,
-      "input": null,
-      "listeners": {},
-      "parent": 2,
-      "props": {
-        "style": {
-          "color": {
-            "token": "colors.text",
-          },
-          "fontSize": {
-            "token": "typography.title",
-          },
-          "fontWeight": {
-            "token": "typography.semibold_weight",
-          },
-        },
-      },
-      "text": "",
-      "type": "text",
     },
     "4": {
       "children": [],
@@ -12519,6 +12761,7 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
           "gap": {
             "token": "metrics.inset",
           },
+          "overflow": "hidden",
           "paddingLeft": {
             "token": "metrics.inset",
           },
@@ -12599,12 +12842,58 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
     "setProps",
     "setProps",
     "setProps",
+    "create",
     "setProps",
     "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setProps",
+    "setListeners",
+    "setListeners",
     "setProps",
     "create",
     "setProps",
     "setProps",
+    "insertBefore",
+    "create",
+    "setProps",
+    "create",
+    "setText",
+    "insertBefore",
+    "insertBefore",
+    "insertBefore",
+    "create",
+    "setProps",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setProps",
+    "setListeners",
+    "setListeners",
+    "setProps",
+    "create",
+    "setProps",
+    "setProps",
+    "insertBefore",
+    "create",
+    "setProps",
+    "create",
+    "setText",
+    "insertBefore",
+    "insertBefore",
+    "create",
+    "setProps",
+    "insertBefore",
+    "create",
     "setProps",
     "setListeners",
     "setProps",
@@ -12613,6 +12902,7 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
     "setText",
     "insertBefore",
     "insertBefore",
+    "insertBefore",
     "create",
     "setProps",
     "create",
@@ -12620,14 +12910,6 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
     "create",
     "setText",
     "insertBefore",
-    "insertBefore",
-    "create",
-    "setProps",
-    "setListeners",
-    "setProps",
-    "setProps",
-    "create",
-    "setText",
     "insertBefore",
     "insertBefore",
     "insertBefore",
@@ -12821,6 +13103,7 @@ exports[`spec §4 focus: op-tree snapshot and Rust wire/accessibility validator 
             0,
             2,
           ],
+          "scrollAnchor": "end",
           "textSelected": false,
         },
         "role": "list",
@@ -12864,6 +13147,9 @@ exports[`spec §4 focus: op-tree snapshot and Rust wire/accessibility validator 
           "display": "flex",
           "flexDirection": "row",
           "justifyContent": "end",
+          "paddingLeft": {
+            "token": "metrics.message_inset",
+          },
         },
       },
       "text": "",
@@ -12894,11 +13180,17 @@ exports[`spec §4 focus: op-tree snapshot and Rust wire/accessibility validator 
           "lineHeight": {
             "token": "typography.reading_leading",
           },
+          "paddingBottom": {
+            "token": "metrics.text_padding",
+          },
           "paddingLeft": {
             "token": "metrics.inset",
           },
           "paddingRight": {
             "token": "metrics.inset",
+          },
+          "paddingTop": {
+            "token": "metrics.text_padding",
           },
         },
       },
@@ -13734,6 +14026,7 @@ exports[`spec §4 focus: op-tree snapshot and Rust wire/accessibility validator 
           "gap": {
             "token": "metrics.inset",
           },
+          "overflow": "hidden",
           "paddingLeft": {
             "token": "metrics.inset",
           },
@@ -14024,6 +14317,7 @@ exports[`spec §4 selected: op-tree snapshot and Rust wire/accessibility validat
             0,
             2,
           ],
+          "scrollAnchor": "end",
           "textSelected": true,
         },
         "role": "list",
@@ -14067,6 +14361,9 @@ exports[`spec §4 selected: op-tree snapshot and Rust wire/accessibility validat
           "display": "flex",
           "flexDirection": "row",
           "justifyContent": "end",
+          "paddingLeft": {
+            "token": "metrics.message_inset",
+          },
         },
       },
       "text": "",
@@ -14097,11 +14394,17 @@ exports[`spec §4 selected: op-tree snapshot and Rust wire/accessibility validat
           "lineHeight": {
             "token": "typography.reading_leading",
           },
+          "paddingBottom": {
+            "token": "metrics.text_padding",
+          },
           "paddingLeft": {
             "token": "metrics.inset",
           },
           "paddingRight": {
             "token": "metrics.inset",
+          },
+          "paddingTop": {
+            "token": "metrics.text_padding",
           },
         },
       },
@@ -14937,6 +15240,7 @@ exports[`spec §4 selected: op-tree snapshot and Rust wire/accessibility validat
           "gap": {
             "token": "metrics.inset",
           },
+          "overflow": "hidden",
           "paddingLeft": {
             "token": "metrics.inset",
           },
@@ -16044,6 +16348,7 @@ exports[`spec §4 disabled: op-tree snapshot and Rust wire/accessibility validat
           "gap": {
             "token": "metrics.inset",
           },
+          "overflow": "hidden",
           "paddingLeft": {
             "token": "metrics.inset",
           },
@@ -16242,11 +16547,11 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
     7,
     8,
     13,
-    24,
-    26,
-    29,
+    25,
+    27,
     30,
-    32,
+    31,
+    33,
   ],
   "nodes": {
     "0": {
@@ -16265,7 +16570,7 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
       "children": [
         2,
         9,
-        22,
+        23,
       ],
       "id": 1,
       "input": null,
@@ -16366,6 +16671,7 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
             0,
             1,
           ],
+          "scrollAnchor": "end",
           "textSelected": false,
         },
         "role": "list",
@@ -16393,7 +16699,7 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
     "14": {
       "children": [
         15,
-        17,
+        18,
       ],
       "id": 14,
       "input": null,
@@ -16403,9 +16709,16 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
         "label": "ChatGPT couldn’t be reached.",
         "metadata": {
           "rowId": "error",
-          "symbol": "exclamationmark.triangle.fill",
         },
         "role": "listitem",
+        "style": {
+          "alignItems": "start",
+          "display": "flex",
+          "flexDirection": "column",
+          "gap": {
+            "token": "metrics.gap",
+          },
+        },
       },
       "text": "",
       "type": "div",
@@ -16419,6 +16732,36 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
       "listeners": {},
       "parent": 14,
       "props": {
+        "metadata": {
+          "symbol": "exclamationmark.triangle.fill",
+        },
+        "style": {
+          "alignItems": "center",
+          "color": {
+            "token": "colors.danger",
+          },
+          "display": "flex",
+          "flexDirection": "row",
+          "fontSize": {
+            "token": "typography.body",
+          },
+          "gap": {
+            "token": "metrics.gap",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "16": {
+      "children": [
+        17,
+      ],
+      "id": 16,
+      "input": null,
+      "listeners": {},
+      "parent": 15,
+      "props": {
         "style": {
           "color": {
             "token": "colors.text",
@@ -16431,21 +16774,21 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
       "text": "",
       "type": "text",
     },
-    "16": {
+    "17": {
       "children": [],
-      "id": 16,
+      "id": 17,
       "input": null,
       "listeners": {},
-      "parent": 15,
+      "parent": 16,
       "props": {},
       "text": "ChatGPT couldn’t be reached.",
       "type": "text",
     },
-    "17": {
+    "18": {
       "children": [
-        18,
+        19,
       ],
-      "id": 17,
+      "id": 18,
       "input": null,
       "listeners": {},
       "parent": 14,
@@ -16479,33 +16822,15 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
       "text": "",
       "type": "button",
     },
-    "18": {
-      "children": [],
-      "id": 18,
-      "input": null,
-      "listeners": {},
-      "parent": 17,
-      "props": {},
-      "text": "Try Again",
-      "type": "text",
-    },
     "19": {
-      "children": [
-        20,
-      ],
+      "children": [],
       "id": 19,
       "input": null,
       "listeners": {},
-      "parent": 9,
-      "props": {
-        "label": "Couldn’t stop this task.",
-        "metadata": {
-          "symbol": "exclamationmark.triangle.fill",
-        },
-        "role": "status",
-      },
-      "text": "",
-      "type": "div",
+      "parent": 18,
+      "props": {},
+      "text": "Try Again",
+      "type": "text",
     },
     "2": {
       "children": [
@@ -16551,7 +16876,25 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
       "id": 20,
       "input": null,
       "listeners": {},
-      "parent": 19,
+      "parent": 9,
+      "props": {
+        "label": "Couldn’t stop this task.",
+        "metadata": {
+          "symbol": "exclamationmark.triangle.fill",
+        },
+        "role": "status",
+      },
+      "text": "",
+      "type": "div",
+    },
+    "21": {
+      "children": [
+        22,
+      ],
+      "id": 21,
+      "input": null,
+      "listeners": {},
+      "parent": 20,
       "props": {
         "style": {
           "color": {
@@ -16565,22 +16908,22 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
       "text": "",
       "type": "text",
     },
-    "21": {
+    "22": {
       "children": [],
-      "id": 21,
+      "id": 22,
       "input": null,
       "listeners": {},
-      "parent": 20,
+      "parent": 21,
       "props": {},
       "text": "Couldn’t stop this task.",
       "type": "text",
     },
-    "22": {
+    "23": {
       "children": [
-        23,
-        28,
+        24,
+        29,
       ],
-      "id": 22,
+      "id": 23,
       "input": null,
       "listeners": {},
       "parent": 1,
@@ -16626,15 +16969,15 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
       "text": "",
       "type": "div",
     },
-    "23": {
+    "24": {
       "children": [
-        24,
         25,
+        26,
       ],
-      "id": 23,
+      "id": 24,
       "input": null,
       "listeners": {},
-      "parent": 22,
+      "parent": 23,
       "props": {
         "id": "agent-field",
         "style": {
@@ -16663,9 +17006,9 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
       "text": "",
       "type": "div",
     },
-    "24": {
+    "25": {
       "children": [],
-      "id": 24,
+      "id": 25,
       "input": {
         "composing": false,
         "composition": null,
@@ -16697,7 +17040,7 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
           "preventDefault": false,
         },
       },
-      "parent": 23,
+      "parent": 24,
       "props": {
         "control": "text",
         "data-pm-component": "text-field",
@@ -16743,15 +17086,15 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
       "text": "",
       "type": "textarea",
     },
-    "25": {
+    "26": {
       "children": [
-        26,
         27,
+        28,
       ],
-      "id": 25,
+      "id": 26,
       "input": null,
       "listeners": {},
-      "parent": 23,
+      "parent": 24,
       "props": {
         "style": {
           "alignItems": "center",
@@ -16766,9 +17109,9 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
       "text": "",
       "type": "div",
     },
-    "26": {
+    "27": {
       "children": [],
-      "id": 26,
+      "id": 27,
       "input": null,
       "listeners": {
         "click": {
@@ -16778,7 +17121,7 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
           "preventDefault": false,
         },
       },
-      "parent": 25,
+      "parent": 26,
       "props": {
         "attr": {
           "symbol": "plus",
@@ -16807,9 +17150,9 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
       "text": "",
       "type": "button",
     },
-    "27": {
+    "28": {
       "children": [],
-      "id": 27,
+      "id": 28,
       "input": null,
       "listeners": {
         "click": {
@@ -16819,7 +17162,7 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
           "preventDefault": false,
         },
       },
-      "parent": 25,
+      "parent": 26,
       "props": {
         "data-pm-component": "toolbar-item",
         "disabled": true,
@@ -16848,17 +17191,17 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
       "text": "",
       "type": "button",
     },
-    "28": {
+    "29": {
       "children": [
-        29,
         30,
         31,
         32,
+        33,
       ],
-      "id": 28,
+      "id": 29,
       "input": null,
       "listeners": {},
-      "parent": 22,
+      "parent": 23,
       "props": {
         "id": "agent-options",
         "style": {
@@ -16877,9 +17220,33 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
       "text": "",
       "type": "div",
     },
-    "29": {
+    "3": {
+      "children": [
+        4,
+      ],
+      "id": 3,
+      "input": null,
+      "listeners": {},
+      "parent": 2,
+      "props": {
+        "style": {
+          "color": {
+            "token": "colors.text",
+          },
+          "fontSize": {
+            "token": "typography.title",
+          },
+          "fontWeight": {
+            "token": "typography.semibold_weight",
+          },
+        },
+      },
+      "text": "",
+      "type": "text",
+    },
+    "30": {
       "children": [],
-      "id": 29,
+      "id": 30,
       "input": null,
       "listeners": {
         "change": {
@@ -16889,7 +17256,7 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
           "preventDefault": false,
         },
       },
-      "parent": 28,
+      "parent": 29,
       "props": {
         "binding": "",
         "control": "select",
@@ -16944,33 +17311,9 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
       "text": "",
       "type": "button",
     },
-    "3": {
-      "children": [
-        4,
-      ],
-      "id": 3,
-      "input": null,
-      "listeners": {},
-      "parent": 2,
-      "props": {
-        "style": {
-          "color": {
-            "token": "colors.text",
-          },
-          "fontSize": {
-            "token": "typography.title",
-          },
-          "fontWeight": {
-            "token": "typography.semibold_weight",
-          },
-        },
-      },
-      "text": "",
-      "type": "text",
-    },
-    "30": {
+    "31": {
       "children": [],
-      "id": 30,
+      "id": 31,
       "input": null,
       "listeners": {
         "change": {
@@ -16980,7 +17323,7 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
           "preventDefault": false,
         },
       },
-      "parent": 28,
+      "parent": 29,
       "props": {
         "binding": "",
         "control": "select",
@@ -17035,12 +17378,12 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
       "text": "",
       "type": "button",
     },
-    "31": {
+    "32": {
       "children": [],
-      "id": 31,
+      "id": 32,
       "input": null,
       "listeners": {},
-      "parent": 28,
+      "parent": 29,
       "props": {
         "style": {
           "flexGrow": 1,
@@ -17049,9 +17392,9 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
       "text": "",
       "type": "div",
     },
-    "32": {
+    "33": {
       "children": [],
-      "id": 32,
+      "id": 33,
       "input": null,
       "listeners": {
         "change": {
@@ -17061,7 +17404,7 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
           "preventDefault": false,
         },
       },
-      "parent": 28,
+      "parent": 29,
       "props": {
         "binding": "",
         "control": "select",
@@ -17281,7 +17624,7 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
       "children": [
         10,
         13,
-        19,
+        20,
       ],
       "id": 9,
       "input": null,
@@ -17295,6 +17638,7 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
           "gap": {
             "token": "metrics.inset",
           },
+          "overflow": "hidden",
           "paddingLeft": {
             "token": "metrics.inset",
           },
@@ -17386,10 +17730,15 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
     "setProps",
     "setProps",
     "setProps",
+    "setProps",
+    "create",
+    "setProps",
+    "setProps",
     "create",
     "setProps",
     "create",
     "setText",
+    "insertBefore",
     "insertBefore",
     "insertBefore",
     "create",
@@ -18376,6 +18725,7 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
           "gap": {
             "token": "metrics.inset",
           },
+          "overflow": "hidden",
           "paddingLeft": {
             "token": "metrics.inset",
           },
@@ -18641,6 +18991,7 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
             0,
             2,
           ],
+          "scrollAnchor": "end",
           "textSelected": false,
         },
         "role": "list",
@@ -18684,6 +19035,9 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
           "display": "flex",
           "flexDirection": "row",
           "justifyContent": "end",
+          "paddingLeft": {
+            "token": "metrics.message_inset",
+          },
         },
       },
       "text": "",
@@ -18714,11 +19068,17 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
           "lineHeight": {
             "token": "typography.reading_leading",
           },
+          "paddingBottom": {
+            "token": "metrics.text_padding",
+          },
           "paddingLeft": {
             "token": "metrics.inset",
           },
           "paddingRight": {
             "token": "metrics.inset",
+          },
+          "paddingTop": {
+            "token": "metrics.text_padding",
           },
         },
       },
@@ -19554,6 +19914,7 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
           "gap": {
             "token": "metrics.inset",
           },
+          "overflow": "hidden",
           "paddingLeft": {
             "token": "metrics.inset",
           },
@@ -19844,6 +20205,7 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
             30000,
             30002,
           ],
+          "scrollAnchor": "end",
           "textSelected": false,
         },
         "role": "list",
@@ -19887,6 +20249,9 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
           "display": "flex",
           "flexDirection": "row",
           "justifyContent": "end",
+          "paddingLeft": {
+            "token": "metrics.message_inset",
+          },
         },
       },
       "text": "",
@@ -19917,11 +20282,17 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
           "lineHeight": {
             "token": "typography.reading_leading",
           },
+          "paddingBottom": {
+            "token": "metrics.text_padding",
+          },
           "paddingLeft": {
             "token": "metrics.inset",
           },
           "paddingRight": {
             "token": "metrics.inset",
+          },
+          "paddingTop": {
+            "token": "metrics.text_padding",
           },
         },
       },
@@ -20757,6 +21128,7 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
           "gap": {
             "token": "metrics.inset",
           },
+          "overflow": "hidden",
           "paddingLeft": {
             "token": "metrics.inset",
           },
@@ -21042,6 +21414,9 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
           "display": "flex",
           "flexDirection": "row",
           "justifyContent": "end",
+          "paddingLeft": {
+            "token": "metrics.message_inset",
+          },
         },
       },
       "text": "",
@@ -21072,11 +21447,17 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
           "lineHeight": {
             "token": "typography.reading_leading",
           },
+          "paddingBottom": {
+            "token": "metrics.text_padding",
+          },
           "paddingLeft": {
             "token": "metrics.inset",
           },
           "paddingRight": {
             "token": "metrics.inset",
+          },
+          "paddingTop": {
+            "token": "metrics.text_padding",
           },
         },
       },
@@ -21871,6 +22252,7 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
           "gap": {
             "token": "metrics.inset",
           },
+          "overflow": "hidden",
           "paddingLeft": {
             "token": "metrics.inset",
           },
@@ -21902,6 +22284,7 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
             0,
             2,
           ],
+          "scrollAnchor": "end",
           "textSelected": false,
         },
         "role": "list",
@@ -22190,6 +22573,9 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
           "display": "flex",
           "flexDirection": "row",
           "justifyContent": "end",
+          "paddingLeft": {
+            "token": "metrics.message_inset",
+          },
         },
       },
       "text": "",
@@ -22220,11 +22606,17 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
           "lineHeight": {
             "token": "typography.reading_leading",
           },
+          "paddingBottom": {
+            "token": "metrics.text_padding",
+          },
           "paddingLeft": {
             "token": "metrics.inset",
           },
           "paddingRight": {
             "token": "metrics.inset",
+          },
+          "paddingTop": {
+            "token": "metrics.text_padding",
           },
         },
       },
@@ -23019,6 +23411,7 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
           "gap": {
             "token": "metrics.inset",
           },
+          "overflow": "hidden",
           "paddingLeft": {
             "token": "metrics.inset",
           },
@@ -23050,6 +23443,7 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
             0,
             2,
           ],
+          "scrollAnchor": "end",
           "textSelected": false,
         },
         "role": "list",
@@ -24166,6 +24560,7 @@ exports[`spec §4 increase-contrast: op-tree snapshot and Rust wire/accessibilit
           "gap": {
             "token": "metrics.inset",
           },
+          "overflow": "hidden",
           "paddingLeft": {
             "token": "metrics.inset",
           },
@@ -25263,6 +25658,7 @@ exports[`spec §4 reduce-transparency: op-tree snapshot and Rust wire/accessibil
           "gap": {
             "token": "metrics.inset",
           },
+          "overflow": "hidden",
           "paddingLeft": {
             "token": "metrics.inset",
           },
@@ -26360,6 +26756,7 @@ exports[`spec §4 reduce-motion: op-tree snapshot and Rust wire/accessibility va
           "gap": {
             "token": "metrics.inset",
           },
+          "overflow": "hidden",
           "paddingLeft": {
             "token": "metrics.inset",
           },
