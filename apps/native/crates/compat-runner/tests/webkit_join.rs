@@ -94,6 +94,23 @@ mod mac {
             },
         )?;
         web.present(viewport)?;
+        // Files dragged over the window are the native panels' (and the
+        // window's own drop): the shared page never takes a drag, even when
+        // WebKit registers it again (as it does joining a window or loading).
+        assert_eq!(
+            web.web_view().registeredDraggedTypes().count(),
+            0,
+            "the page is a drag destination"
+        );
+        web.web_view()
+            .registerForDraggedTypes(&objc2_foundation::NSArray::from_slice(&[unsafe {
+                objc2_app_kit::NSPasteboardTypeFileURL
+            }]));
+        assert_eq!(
+            web.web_view().registeredDraggedTypes().count(),
+            0,
+            "the page registered for file drags"
+        );
         // The helper run this page draws, as the app reads it from contributions.
         let view = loop {
             let view = host.contributions().and_then(|c| {
@@ -166,6 +183,12 @@ mod mac {
                     }
                     1 if text == "typed in Store" => {
                         println!("store_event_ran_confined_closure=1");
+                        // Still none once the page has loaded and run.
+                        assert_eq!(
+                            web.web_view().registeredDraggedTypes().count(),
+                            0,
+                            "the loaded page became a drag destination"
+                        );
                         web.destroy(1)?;
                         return Ok(());
                     }
@@ -258,6 +281,23 @@ mod mac {
             },
         )?;
         web.present(viewport)?;
+        // Files dragged over the window are the native panels' (and the
+        // window's own drop): the shared page never takes a drag, even when
+        // WebKit registers it again (as it does joining a window or loading).
+        assert_eq!(
+            web.web_view().registeredDraggedTypes().count(),
+            0,
+            "the page is a drag destination"
+        );
+        web.web_view()
+            .registerForDraggedTypes(&objc2_foundation::NSArray::from_slice(&[unsafe {
+                objc2_app_kit::NSPasteboardTypeFileURL
+            }]));
+        assert_eq!(
+            web.web_view().registeredDraggedTypes().count(),
+            0,
+            "the page registered for file drags"
+        );
         let deadline = Instant::now() + Duration::from_secs(30);
         // The page belongs to one realm generation, as in the app.
         while host.view() == 0 {
@@ -356,6 +396,12 @@ mod mac {
                     }
                     5 if text == "action ran and closed" && web.child_web_views().is_empty() => {
                         println!("modal_action_ran_closed_and_called_on_close=1");
+                        // Still none once the page has loaded and run.
+                        assert_eq!(
+                            web.web_view().registeredDraggedTypes().count(),
+                            0,
+                            "the loaded page became a drag destination"
+                        );
                         web.destroy(1)?;
                         store_view(&app, mtm, &host)?;
                         drop(host);
