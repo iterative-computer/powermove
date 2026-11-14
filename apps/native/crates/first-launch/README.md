@@ -90,3 +90,8 @@ The CLI copies only and explicitly reports that activation is unchecked. For rea
 load results use the app callback above. Tests: `cargo test -p pm-first-launch`.
 Compatibility evidence for a person’s installed library belongs outside this
 public repository; do not commit profile snapshots, private paths or reports.
+
+Synthetic app launches that must not discover the original app can set
+`PM_NATIVE_NO_ORIGINAL=1`. `PM_NATIVE_ELECTRON_PROFILE` selects a different
+original source. Profile overrides alone keep full migration disabled when no
+explicit migration source is supplied, while allowing the extension offer and Storage.

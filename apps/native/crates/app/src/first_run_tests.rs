@@ -76,12 +76,13 @@ fn the_default_profile_is_the_one_the_coordinator_writes() {
     let plan = plan(&home);
     let support = home.join(APPLICATION_SUPPORT);
     assert_eq!(plan.profile, support.join(pm_first_launch::BETA_BUNDLE_ID));
+    assert_eq!(plan.original, plan.config);
     let config = plan.config.unwrap();
     assert_eq!(config.native_profile, plan.profile);
     assert_eq!(config.electron_profile, support.join("Powermove"));
 }
 #[test]
-fn an_override_never_reaches_the_real_profiles() {
+fn an_override_keeps_full_migration_disabled() {
     let (_temp, home) = home();
     let isolated = home.join("isolated");
     source(&home.join(APPLICATION_SUPPORT));
@@ -96,7 +97,10 @@ fn an_override_never_reaches_the_real_profiles() {
     assert_eq!(plan.profile, isolated);
     assert_eq!(plan.launch, Launch::Fresh);
     assert!(!plan.onboard);
-    assert_eq!(plan.electron(), None);
+    assert_eq!(
+        plan.electron(),
+        Some(home.join(APPLICATION_SUPPORT).join("Powermove"))
+    );
     assert!(Plan::resolve(None, None, None).is_none());
     assert!(Plan::resolve(None, None, Some("".into())).is_none());
 }
@@ -686,7 +690,7 @@ fn existing_library_with_original_extensions(home: &Path) -> (Plan, PathBuf) {
     (plan, native)
 }
 fn scan_into(flow: &mut Flow) -> Vec<Effect> {
-    let config = flow.plan.config.clone().unwrap();
+    let config = flow.plan.original.clone().unwrap();
     let scanned = crate::extension_transfer::scan(&config);
     flow.message(Message::Extensions(Update::Scanned(scanned)))
 }
@@ -836,4 +840,76 @@ fn keychain_error_survives_the_consent_context() {
         panic!("expected a Keychain reason")
     };
     assert!(reason.contains("couldn’t show"));
+}
+
+#[test]
+fn overridden_existing_library_discovers_original_and_not_now_survives_relaunch() {
+    let (_temp, home) = home();
+    let (_, native) = existing_library_with_original_extensions(&home);
+    let resolve = || {
+        Plan::resolve(
+            Some(native.clone()),
+            None,
+            Some(home.as_os_str().to_owned()),
+        )
+        .unwrap()
+    };
+    let plan = resolve();
+    assert!(plan.config.is_none());
+    assert_eq!(plan.launch, Launch::Fresh);
+    assert!(!plan.onboard);
+    assert!(plan.electron().is_some());
+    let mut flow = Flow::new(plan.clone());
+    assert_eq!(flow.start(), vec![Effect::ScanExtensions]);
+    scan_into(&mut flow);
+    assert_eq!(flow.frame().surface, "N004");
+    assert_eq!(
+        flow.action("not_now"),
+        vec![Effect::DeclineExtensions, Effect::Enter(None)]
+    );
+    crate::extension_transfer::decline(&native);
+    let mut again = Flow::new(resolve());
+    assert_eq!(again.start(), vec![Effect::Enter(None)]);
+    let report = crate::storage::measure(&native, plan.electron().as_deref());
+    assert_eq!(report.original.unwrap().extensions, Some((2, 2)));
+    assert!(crate::extension_transfer::eligible(plan.original.as_ref()).is_some());
+    assert!(!later_store(&plan, |_| panic!("isolated profile must not merge")).unwrap());
+}
+
+#[test]
+fn explicit_original_overrides_default_discovery() {
+    let (_temp, home) = home();
+    let native = home.join("isolated");
+    let original = home.join("explicit-original");
+    fs::create_dir_all(&original).unwrap();
+    let plan = Plan::resolve(
+        Some(native.clone()),
+        Some(original.clone()),
+        Some(home.as_os_str().to_owned()),
+    )
+    .unwrap();
+    assert_eq!(plan.electron(), Some(original.clone()));
+    assert_eq!(
+        plan.original.unwrap(),
+        Config {
+            electron_profile: original,
+            native_profile: native
+        }
+    );
+}
+
+#[test]
+fn synthetic_runs_can_disable_original_discovery() {
+    let (_temp, home) = home();
+    let defaults = pm_first_launch::default_paths(&home.join(APPLICATION_SUPPORT));
+    assert!(Plan::original_source(&home.join("isolated"), None, Some(&defaults), true).is_none());
+    assert!(
+        Plan::original_source(
+            &home.join("isolated"),
+            Some(home.join("explicit")),
+            Some(&defaults),
+            true
+        )
+        .is_none()
+    );
 }
