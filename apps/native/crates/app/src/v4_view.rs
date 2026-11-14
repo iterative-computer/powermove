@@ -2212,8 +2212,7 @@ impl SurfaceView {
         // A tooltip says what is not already in view: one that repeats the
         // text the element shows (an effect's name, a row's label) only
         // covers its neighbours.
-        if let Some(title) = self.tooltip_title(node.id)
-        {
+        if let Some(title) = self.tooltip_title(node.id) {
             let tokens = self.table.tokens.clone();
             element = element.tooltip(move |_, cx| {
                 let (title, tokens) = (title.clone(), tokens.clone());
