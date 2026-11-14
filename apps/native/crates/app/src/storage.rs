@@ -202,6 +202,9 @@ pub(crate) struct Original {
     pub total: u64,
     /// Removable part id → bytes.
     pub parts: Vec<(&'static str, u64)>,
+    /// Media this library reads in place from inside this folder.
+    pub linked_items: u64,
+    pub linked_bytes: u64,
 }
 pub(crate) fn measure(native: &Path, original: Option<&Path>) -> Report {
     let library = sum(&children(
@@ -226,13 +229,23 @@ pub(crate) fn measure(native: &Path, original: Option<&Path>) -> Report {
             "updates",
         ],
     ));
-    let original = original.filter(|p| p.is_dir()).map(|root| Original {
-        path: root.to_owned(),
-        total: used(root),
-        parts: REMOVABLE
-            .iter()
-            .map(|r| (r.id, sum(&(r.entries)(root))))
-            .collect(),
+    // Linked records name the original folder by its real (canonical) path.
+    let linked = pm_native_migrate::linked_summary(&native.join("Media Store")).ok();
+    let original = original.filter(|p| p.is_dir()).map(|root| {
+        let real = root.canonicalize().unwrap_or_else(|_| root.to_owned());
+        let inside = linked
+            .as_ref()
+            .and_then(|l| l.folders.get(&real).or_else(|| l.folders.get(root)));
+        Original {
+            path: root.to_owned(),
+            total: used(root),
+            parts: REMOVABLE
+                .iter()
+                .map(|r| (r.id, sum(&(r.entries)(root))))
+                .collect(),
+            linked_items: inside.map_or(0, |f| f.items),
+            linked_bytes: inside.map_or(0, |f| f.bytes),
+        }
     });
     Report {
         library,
@@ -274,6 +287,8 @@ pub(crate) fn remove(original: &Path, id: &str) -> Result<u64, String> {
 
 static LATEST: Mutex<Option<Report>> = Mutex::new(None);
 static MEASURING: AtomicBool = AtomicBool::new(false);
+/// Bytes moved and to move while Move Into Library runs.
+static ADOPTING: Mutex<Option<(u64, u64)>> = Mutex::new(None);
 
 /// Settings › Storage's rows, ready for the panel.
 pub(crate) fn rows(generated: Option<u64>, original_running: bool) -> Vec<Value> {
@@ -323,6 +338,33 @@ pub(crate) fn rows(generated: Option<u64>, original_running: bool) -> Vec<Value>
         } else {
             "The Powermove you used before. Removing these never touches its projects or the media they use."
         }}));
+    let adopting = *ADOPTING.lock().unwrap();
+    if original.linked_items > 0 || adopting.is_some() {
+        let (value, detail) = match adopting {
+            Some((done, total)) => (
+                format!("Moving… {} of {}", bytes(done), bytes(total)),
+                "Copying them into Powermove’s own folder. You can keep working.".to_owned(),
+            ),
+            None => (
+                bytes(original.linked_bytes),
+                format!(
+                    "Your projects here read {} {} from this folder. Move them into Powermove’s own folder before you delete the original app.",
+                    original.linked_items,
+                    if original.linked_items == 1 {
+                        "media file"
+                    } else {
+                        "media files"
+                    }
+                ),
+            ),
+        };
+        rows.push(
+            json!({"id":"storage.original.linked","section":"storage","group":GROUP,
+            "label":"Media Your Projects Use","detail":detail,"control":"action",
+            "action":"storage.adopt","actionLabel":"Move Into Library…","value":value,
+            "disabled":adopting.is_some()}),
+        );
+    }
     let mut removable = 0;
     for part in REMOVABLE {
         let size = original
@@ -393,12 +435,105 @@ impl crate::session::Controller {
                     crate::platform::reveal(original);
                 }
             }
+            "storage.adopt" => self.confirm_adopt(cx),
             _ => {
                 if let Some(id) = action.strip_prefix("storage.delete.") {
                     self.confirm_storage_delete(id, cx);
                 }
             }
         }
+    }
+    /// The Settings window, for sheets about rows pressed there.
+    fn settings_window(
+        &self,
+        cx: &mut gpui::Context<Self>,
+    ) -> objc2::rc::Retained<objc2_app_kit::NSWindow> {
+        self.builtins
+            .windows
+            .get("settings")
+            .copied()
+            .and_then(|h| {
+                h.update(cx, |_, w, _| crate::platform::ns_window(w))
+                    .ok()
+                    .flatten()
+            })
+            .unwrap_or_else(|| self.host.borrow().window.clone())
+    }
+    /// Move Into Library: copies media the library reads from elsewhere into
+    /// Powermove's own Media Store (clones on this volume), verified, resumable.
+    fn confirm_adopt(&mut self, cx: &mut gpui::Context<Self>) {
+        if ADOPTING.lock().unwrap().is_some() {
+            return;
+        }
+        let bytes_inside = LATEST
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|r| r.original.as_ref())
+            .map_or(0, |o| o.linked_bytes);
+        use crate::alert::{Alert, Button};
+        let alert = Alert::new(
+            "Move your media into Powermove?",
+            format!(
+                "Powermove copies the {} of media your projects read from the original app into its own folder. Afterwards you can delete the original app without your projects losing media. On the same disk the copies share space with the originals.",
+                bytes(bytes_inside)
+            ),
+            vec![
+                Button::new("Move", true).default(),
+                Button::new("Cancel", false).cancel(),
+            ],
+        );
+        let answer = alert.sheet(&self.settings_window(cx));
+        let media_root = self.profile.join("Media Store");
+        cx.spawn(async move |this, cx| {
+            if answer.recv().await != Ok(Some(true)) {
+                return;
+            }
+            *ADOPTING.lock().unwrap() = Some((0, 0));
+            let _ = this.update(cx, |v, cx| v.update_builtins(cx));
+            let job = cx.background_executor().spawn(async move {
+                pm_native_migrate::adopt_linked(&media_root, |done, total| {
+                    *ADOPTING.lock().unwrap() = Some((done, total));
+                    Ok(())
+                })
+                .map_err(|e| format!("{e:#}"))
+            });
+            // Progress redraws once a second while it copies.
+            let ticker = {
+                let this = this.clone();
+                cx.spawn(async move |cx| {
+                    loop {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_secs(1))
+                            .await;
+                        if ADOPTING.lock().unwrap().is_none()
+                            || this.update(cx, |v, cx| v.update_builtins(cx)).is_err()
+                        {
+                            break;
+                        }
+                    }
+                })
+            };
+            let result = job.await;
+            *ADOPTING.lock().unwrap() = None;
+            drop(ticker);
+            let _ = this.update(cx, |v, cx| {
+                v.message = match result {
+                    Ok(report) if report.missing > 0 => format!(
+                        "Moved {} into Powermove. {} couldn’t be found and stay offline.",
+                        bytes(report.adopted_bytes),
+                        report.missing
+                    ),
+                    Ok(report) => format!("Moved {} into Powermove", bytes(report.adopted_bytes)),
+                    Err(e) => format!("Couldn’t move your media. {e}"),
+                };
+                // Open projects pick up their media's new home.
+                v.refresh_media(cx);
+                v.refresh_storage(cx);
+                cx.notify();
+            });
+        })
+        .detach();
     }
     fn confirm_storage_delete(&mut self, id: &str, cx: &mut gpui::Context<Self>) {
         let (Some(original), Some(part)) =
@@ -423,18 +558,7 @@ impl crate::session::Controller {
             ],
         );
         // On the Settings window the person pressed it in.
-        let window = self
-            .builtins
-            .windows
-            .get("settings")
-            .copied()
-            .and_then(|h| {
-                h.update(cx, |_, w, _| crate::platform::ns_window(w))
-                    .ok()
-                    .flatten()
-            })
-            .unwrap_or_else(|| self.host.borrow().window.clone());
-        let answer = alert.sheet(&window);
+        let answer = alert.sheet(&self.settings_window(cx));
         let id = id.to_owned();
         let label = part.label;
         cx.spawn(async move |this, cx| {
@@ -464,6 +588,42 @@ mod tests {
     fn write(path: &Path, bytes: &[u8]) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, bytes).unwrap();
+    }
+    #[test]
+    fn media_read_from_the_original_folder_offers_move_into_library() {
+        *LATEST.lock().unwrap() = Some(Report {
+            original: Some(Original {
+                path: PathBuf::from("/synthetic/Powermove"),
+                total: 50_000_000_000,
+                parts: vec![("backups", 9_000_000_000)],
+                linked_items: 1161,
+                linked_bytes: 20_028_248_489,
+            }),
+            ..Report::default()
+        });
+        let rows = rows(None, false);
+        let linked = rows
+            .iter()
+            .find(|r| r["id"] == "storage.original.linked")
+            .unwrap();
+        assert_eq!(linked["action"], "storage.adopt");
+        assert_eq!(linked["value"], "20.0 GB");
+        assert!(
+            linked["detail"]
+                .as_str()
+                .unwrap()
+                .contains("1161 media files")
+        );
+        *ADOPTING.lock().unwrap() = Some((5_000_000_000, 20_000_000_000));
+        let rows = super::rows(None, false);
+        let moving = rows
+            .iter()
+            .find(|r| r["id"] == "storage.original.linked")
+            .unwrap();
+        assert_eq!(moving["value"], "Moving… 5.0 GB of 20.0 GB");
+        assert_eq!(moving["disabled"], true);
+        *ADOPTING.lock().unwrap() = None;
+        *LATEST.lock().unwrap() = None;
     }
     #[test]
     fn leftover_media_is_only_what_no_index_record_names() {
