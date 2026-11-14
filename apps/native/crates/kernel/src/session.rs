@@ -280,6 +280,8 @@ pub enum RecoveryResult {
     },
     Unrecoverable {
         reason: String,
+        /// What the session held: kept on disk, said to the person.
+        lost: crate::journal::LostWork,
     },
     /// Unsaved work left for another file (`name`, no longer where it was)
     /// whose saved content is exactly this file's. It may be this file
@@ -2068,8 +2070,9 @@ impl Kernel {
                         project: id.clone(),
                         truncated: r.truncated,
                     },
-                    Recovery::Unrecoverable { reason, .. } => RecoveryResult::Unrecoverable {
+                    Recovery::Unrecoverable { reason, session } => RecoveryResult::Unrecoverable {
                         reason: reason.clone(),
+                        lost: crate::journal::lost_work(session),
                     },
                     _ => unreachable!(),
                 },
@@ -2175,8 +2178,10 @@ impl Kernel {
                 Recovery::Unrecoverable { session, .. } => vec![session.clone()],
                 _ => vec![],
             };
+            // With the sessions it continues from: set aside alone, it could
+            // no longer be replayed once a clean close deleted them.
             for path in paths {
-                crate::journal::archive_session(path).map_err(failure)?;
+                crate::journal::archive_chain(path).map_err(failure)?;
             }
         }
         if matches!(
@@ -2195,9 +2200,9 @@ impl Kernel {
             };
             let crashed = r.session.clone();
             let copy = self.recovery_copy(r, recovery_file)?;
-            // The copy holds that work now; left live, every later open and
-            // quit would replay it again.
-            crate::journal::archive_session(crashed).map_err(failure)?;
+            // The copy holds that work now, durably: the journal it came from
+            // (with the sessions it continues) is retired, not kept for good.
+            crate::journal::retire_chain(&crashed);
             let profile = self.library.as_ref().unwrap().store().dir().to_path_buf();
             return self.open_session(
                 id,
@@ -2215,12 +2220,15 @@ impl Kernel {
         };
         let recovery = match recovered {
             Recovery::Nothing => RecoveryResult::None,
-            Recovery::Unrecoverable { reason, .. } => RecoveryResult::Unrecoverable { reason },
+            Recovery::Unrecoverable { reason, session } => RecoveryResult::Unrecoverable {
+                lost: crate::journal::lost_work(&session),
+                reason,
+            },
             Recovery::Copy { recovered, .. } => {
                 let truncated = recovered.truncated;
                 let crashed = recovered.session.clone();
                 let copy = self.recovery_copy(recovered, recovery_file.clone())?;
-                crate::journal::archive_session(crashed).map_err(failure)?;
+                crate::journal::retire_chain(&crashed);
                 RecoveryResult::OfferCopy {
                     project: copy,
                     truncated,
@@ -2228,6 +2236,26 @@ impl Kernel {
             }
             Recovery::Recovered(recovered) => {
                 let truncated = recovered.truncated;
+                // What the recovered work descends from, kept for the session
+                // that replaces it: only the base just matched, and only with
+                // the undo history it holds now. A start base alone matches any
+                // history, so another writer's same document with its own
+                // history would be adopted in place and its history replaced.
+                let history = saved_state(&source).map(|(h, _)| h.identity());
+                let ancestors: Vec<crate::journal::Ancestor> = recovered
+                    .bases
+                    .iter()
+                    .filter_map(|a| match (&a.history, &history) {
+                        (Some(_), _) => Some(a.clone()),
+                        (None, Some(h)) if a.hash == base => Some(crate::journal::Ancestor {
+                            hash: a.hash.clone(),
+                            history: Some(h.clone()),
+                        }),
+                        _ => None,
+                    })
+                    .collect();
+                let mut recovered = recovered;
+                recovered.bases = ancestors.clone();
                 source = match source {
                     OpenSource::LibraryWithFile { mut file, .. } => {
                         file.envelope.workspace = Some(recovered.workspace);
@@ -2239,6 +2267,7 @@ impl Kernel {
                                 history: Some(recovered.history),
                             },
                             supersedes: vec![recovered.session],
+                            ancestors,
                         }
                     }
                     OpenSource::File(mut opened) => {
@@ -2248,6 +2277,7 @@ impl Kernel {
                         OpenSource::RecoveredFile {
                             opened,
                             supersedes: vec![recovered.session],
+                            ancestors,
                         }
                     }
                     _ => OpenSource::Recovered {
@@ -2286,7 +2316,11 @@ impl Kernel {
                 ) => slot == &lib.id && lib.journal_applied == 0 && !lib.from_autosave,
                 _ => false,
             };
-        let mut info = self.open_known(&id, source, known)?;
+        let durable_id = match &destination {
+            Destination::Library(slot) if *slot != id => Some(slot.clone()),
+            _ => None,
+        };
+        let mut info = self.open_known(&id, source, known, durable_id.as_deref())?;
         // What the first save would work out about a long undo history on
         // this thread is worked out beside it instead, from now.
         if let Some(p) = self.project(&id) {
@@ -2378,10 +2412,13 @@ impl Kernel {
         let v = pm_model::canonical::realize_project(
             recovered.document.to_value().unwrap_or(Value::Null),
         );
-        let name = format!(
-            "{} — Recovered",
-            v.get("name").and_then(Value::as_str).unwrap_or("Project")
-        );
+        // One suffix, however many times its work was recovered.
+        const SUFFIX: &str = " — Recovered";
+        let mut stem = v.get("name").and_then(Value::as_str).unwrap_or("Project");
+        while let Some(shorter) = stem.strip_suffix(SUFFIX) {
+            stem = shorter;
+        }
+        let name = format!("{stem}{SUFFIX}");
         let history = recovered.history.snapshot().to_saved_packed();
         let workspace = recovered.workspace.clone();
         let mut meta = Value::Object(Map::new());
@@ -3408,7 +3445,7 @@ impl Kernel {
             Recovery::Recovered(r) | Recovery::Copy { recovered: r, .. } => {
                 let crashed = r.session.clone();
                 let copy = self.recovery_copy(r, None)?;
-                crate::journal::archive_session(crashed).map_err(failure)?;
+                crate::journal::retire_chain(&crashed);
                 let profile = self.library.as_ref().unwrap().store().dir().to_path_buf();
                 self.open_session(
                     id,

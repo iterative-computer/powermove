@@ -76,6 +76,8 @@ pub enum OpenSource {
     RecoveredFile {
         opened: OpenedProject,
         supersedes: Vec<PathBuf>,
+        /// What the recovered work descends from ([`Recovered::bases`]).
+        ancestors: Vec<crate::journal::Ancestor>,
     },
     /// A library slot read by [`crate::library::LibraryStore::load`].
     Library(LibraryProject),
@@ -275,15 +277,22 @@ impl Kernel {
 
     /// Opens a project under `id` (the library id, or any unique id).
     pub fn open(&mut self, id: &str, source: OpenSource) -> Result<OpenInfo, KernelFailure> {
-        self.open_known(id, source, None)
+        self.open_known(id, source, None, None)
     }
     /// [`Kernel::open`] given the canonical hash of `source`'s document,
     /// which a large project should not pay for twice.
+    ///
+    /// `durable_id`: the library slot the session will save to when it is not
+    /// `id` (a recovered or read-only file opened as a copy). The journal
+    /// starts in that slot's folder, where its later sessions go and where
+    /// recovery of that slot looks, never in the folder of the file `id`
+    /// names (whose next open would try to replay it onto the file).
     pub(crate) fn open_known(
         &mut self,
         id: &str,
         source: OpenSource,
         known_base: Option<String>,
+        durable_id: Option<&str>,
     ) -> Result<OpenInfo, KernelFailure> {
         if crate::library::parse_key(&format!("project.{id}")).is_none() {
             return Err(KernelFailure::Storage("Invalid project id".into()));
@@ -292,6 +301,7 @@ impl Kernel {
             return Err(KernelFailure::AlreadyOpen(id.to_owned()));
         }
         let mut supersedes = Vec::new();
+        let mut ancestors = Vec::new();
         // The opened state is exactly its file or slot (not recovered work).
         let mut saved = matches!(
             source,
@@ -317,7 +327,9 @@ impl Kernel {
             OpenSource::RecoveredFile {
                 opened,
                 supersedes: old,
+                ancestors: from,
             } => {
+                ancestors = from;
                 workspace = opened
                     .file
                     .envelope
@@ -358,6 +370,7 @@ impl Kernel {
                 recovered,
                 supersedes: old,
             } => {
+                ancestors = recovered.bases.clone();
                 supersedes = old;
                 workspace = recovered.workspace;
                 DocumentStore::recovered(recovered.document, recovered.history)
@@ -398,7 +411,11 @@ impl Kernel {
         }
         let mut project = Project::new(store);
         project.set_workspace(workspace.clone());
-        let journal = match (&self.durability, self.project_dir(id)) {
+        let dir = match durable_id {
+            Some(slot) => self.config.journal_root.as_ref().map(|r| r.join(slot)),
+            None => self.project_dir(id),
+        };
+        let journal = match (&self.durability, dir) {
             (Some(durability), Some(dir)) => {
                 project.store_mut().enable_tap();
                 let store = project.store();
@@ -409,8 +426,10 @@ impl Kernel {
                     workspace,
                 };
                 Some(
-                    Journal::create(durability, &dir, id, &base_hash, initial, supersedes, saved)
-                        .map_err(|e| KernelFailure::Journal(e.to_string()))?,
+                    Journal::create(
+                        durability, &dir, id, &base_hash, initial, supersedes, saved, ancestors,
+                    )
+                    .map_err(|e| KernelFailure::Journal(e.to_string()))?,
                 )
             }
             _ => None,
@@ -843,7 +862,7 @@ impl Kernel {
                 old.push(j.dir().to_path_buf());
             }
             // Called after the save is durable: the base holds this state.
-            let j = Journal::create(d, &dir, id, &hash, state, old, true)
+            let j = Journal::create(d, &dir, id, &hash, state, old, true, Vec::new())
                 .map_err(|e| KernelFailure::Journal(e.to_string()))?;
             slot.journal = Some(j);
         }

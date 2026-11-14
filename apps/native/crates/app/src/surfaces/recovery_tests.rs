@@ -49,7 +49,7 @@ fn unarchivable_edits_never_offer_discard() {
 }
 #[test]
 fn unrecoverable_preserves_saved_file_and_omits_missing_file_action() {
-    let a = unrecoverable("Launch Film", true);
+    let a = unrecoverable("Launch Film", true, &Default::default());
     assert_eq!(a.message, "“Launch Film” couldn’t be recovered.");
     assert_eq!(
         a.informative,
@@ -57,7 +57,7 @@ fn unrecoverable_preserves_saved_file_and_omits_missing_file_action() {
     );
     assert_eq!(labels(&a), ["Open Saved Version", "OK"]);
     assert_eq!(on_return(&a), Some(Action::OpenSavedVersion));
-    let a = unrecoverable("Launch Film", false);
+    let a = unrecoverable("Launch Film", false, &Default::default());
     assert_eq!(labels(&a), ["OK"]);
     assert_eq!(on_return(&a), Some(Action::Acknowledge));
 }
@@ -136,6 +136,7 @@ fn unrecoverable_reply_never_leaks_diagnostics_or_discards() {
             ticket: "ticket".into(),
             recovery: RecoveryResult::Unrecoverable {
                 reason: "PRIVATE DIAGNOSTIC SENTINEL".into(),
+                lost: Default::default(),
             },
         },
         "Synthetic",
@@ -163,4 +164,35 @@ fn reopening_after_a_stop_says_so_and_keeps_the_choices() {
     );
     assert_eq!(labels(&a), ["Recover", "Open as Copy"]);
     assert_eq!(on_return(&a), Some(Action::Recover));
+}
+
+#[test]
+fn unrecoverable_says_what_could_not_be_recovered() {
+    let lost = pm_kernel::journal::LostWork {
+        changes: 3,
+        steps: vec!["Rename".into(), "work area".into()],
+        from: Some(1_794_684_909),
+        until: Some(1_794_684_909 + 125),
+    };
+    let a = unrecoverable("Launch Film", true, &lost);
+    assert_eq!(a.message, "“Launch Film” couldn’t be recovered.");
+    assert!(
+        a.informative.starts_with("3 changes made between "),
+        "{}",
+        a.informative
+    );
+    assert!(
+        a.informative.contains(
+            "(“Rename”, “work area”) couldn’t be added to the saved project, which is unchanged."
+        ),
+        "{}",
+        a.informative
+    );
+    assert!(
+        a.informative
+            .contains("They’re kept with Powermove’s recovery data."),
+        "{}",
+        a.informative
+    );
+    assert_eq!(labels(&a), ["Open Saved Version", "OK"]);
 }
