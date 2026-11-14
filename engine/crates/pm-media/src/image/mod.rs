@@ -179,6 +179,9 @@ pub struct ImageColor {
     pub mastering_peak: Option<f64>,
     /// H.273 `chroma_sample_loc_type` of Y′CbCr samples (AVIF), when known.
     pub chroma_location: Option<u8>,
+    /// The file carries a gain map (ISO 21496-1 or Apple's), whichever
+    /// rendition was read ([`Rendition`]).
+    pub gain_map: bool,
 }
 
 impl ImageColor {
@@ -195,6 +198,7 @@ impl ImageColor {
             gamma: None,
             mastering_peak: None,
             chroma_location: None,
+            gain_map: false,
         }
     }
 
@@ -237,14 +241,96 @@ pub struct Animation {
     pub loop_count: Option<u32>,
 }
 
-/// Reads a still (the first frame of an animation).
+/// Which picture of a still with a gain map is read (Interpret Footage's
+/// `gainMap`: `"hdr"`, `"sdrBase"`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Rendition {
+    /// The HDR picture: the base with its gain map applied at the headroom
+    /// the map describes (BT.709 PQ, SDR white at 203 cd/m²).
+    #[default]
+    Hdr,
+    /// The SDR base image only, as its own decoder reads it.
+    SdrBase,
+}
+
+/// Reads a still (the first frame of an animation); a still with a gain
+/// map as HDR.
 pub fn read(path: &Path, pool: &FramePool) -> Result<StillImage> {
+    read_with(path, pool, Rendition::Hdr)
+}
+
+/// [`read`], choosing the rendition of a still with a gain map. JPEG and
+/// AVIF stills are asked of ImageIO only when their headers carry the
+/// structure a gain map needs (a JPEG's MPF segment, an AVIF's `tmap`), so
+/// others keep their own decoders.
+pub fn read_with(path: &Path, pool: &FramePool, rendition: Rendition) -> Result<StillImage> {
     let mut head = [0u8; 512];
     let n = {
         use std::io::Read;
         std::fs::File::open(path)?.read(&mut head)?
     };
     let format = sniff(&head[..n]);
+    let hdr = rendition == Rendition::Hdr;
+    let mapped = !matches!(format, ImageFormat::Heif) && gain_map(path, format, &head[..n])?;
+    if mapped && hdr {
+        return imageio::read_still(path, pool, format, true);
+    }
+    let mut still = read_native(path, pool, format, hdr)?;
+    still.color.gain_map |= mapped;
+    Ok(still)
+}
+
+/// Whether the still at `path` carries a gain map (Interpret Footage offers
+/// its SDR base then).
+pub fn has_gain_map(path: &Path) -> Result<bool> {
+    let mut head = [0u8; 512];
+    let n = {
+        use std::io::Read;
+        std::fs::File::open(path)?.read(&mut head)?
+    };
+    gain_map(path, sniff(&head[..n]), &head[..n])
+}
+
+/// A JPEG, AVIF or HEIF still with a gain map, asking ImageIO only when the
+/// header has the structure one needs.
+fn gain_map(path: &Path, format: ImageFormat, head: &[u8]) -> Result<bool> {
+    Ok(match format {
+        ImageFormat::Jpeg => jpeg_mpf(path)? && imageio::has_gain_map(path)?,
+        ImageFormat::Avif => head.windows(4).any(|w| w == b"tmap") && imageio::has_gain_map(path)?,
+        ImageFormat::Heif => imageio::has_gain_map(path)?,
+        _ => false,
+    })
+}
+
+/// Whether a JPEG has an MPF segment (APP2 `MPF\0`) before its scan: where
+/// gain-map JPEGs (ISO 21496-1, Apple's, Adobe's) keep their second image.
+fn jpeg_mpf(path: &Path) -> Result<bool> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::io::BufReader::new(std::fs::File::open(path)?);
+    let mut at = 2u64;
+    for _ in 0..64 {
+        file.seek(SeekFrom::Start(at))?;
+        let mut marker = [0u8; 8];
+        if file.read_exact(&mut marker).is_err() || marker[0] != 0xFF {
+            return Ok(false);
+        }
+        let length = u64::from(u16::from_be_bytes([marker[2], marker[3]]));
+        match marker[1] {
+            0xDA | 0xD9 => return Ok(false),
+            0xE2 if &marker[4..8] == b"MPF\0" => return Ok(true),
+            _ => at += 2 + length,
+        }
+    }
+    Ok(false)
+}
+
+fn read_native(
+    path: &Path,
+    pool: &FramePool,
+    format: ImageFormat,
+    hdr: bool,
+) -> Result<StillImage> {
     match format {
         ImageFormat::Exr => exr::read(path, pool),
         ImageFormat::Jpeg => jpeg::read(path, pool),
@@ -252,7 +338,7 @@ pub fn read(path: &Path, pool: &FramePool) -> Result<StillImage> {
         ImageFormat::Dpx => ffmpeg_still(path, pool),
         ImageFormat::Avif => avif::read(path, pool),
         ImageFormat::Heif | ImageFormat::Tga | ImageFormat::Psd | ImageFormat::Other => {
-            imageio::read_frame(path, 0, pool, format)
+            imageio::read_still(path, pool, format, hdr)
         }
         // The `image` crate reads RGB and gray TIFFs only: it fails on
         // palette, YCbCr, and Lab, and turns CMYK into RGB without its

@@ -92,6 +92,29 @@ const POINTER: u64 = 1;
 #[path = "v4_grade.rs"]
 mod grade;
 
+/// A number field's value after an arrow key: the typed text (else the
+/// field's value) one step up or down, ten with Shift, within its limits.
+fn arrow_step(typed: &str, facts: crate::v4_compile::NumberFacts, key: &str) -> f64 {
+    let current = typed
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|n| n.is_finite())
+        .unwrap_or(facts.value);
+    let step = if facts.step > 0. { facts.step } else { 1. };
+    let delta = match key {
+        "up" => step,
+        "down" => -step,
+        "shiftUp" => step * 10.,
+        _ => -step * 10.,
+    };
+    let next = current + delta;
+    // A step keeps to the step's own grid: 0.1 + 0.2 shows 0.3.
+    let places = (-step.log10().floor()).max(0.) as i32 + 1;
+    let scale = 10f64.powi(places);
+    ((next * scale).round() / scale).clamp(facts.min, facts.max)
+}
+
 /// A press on a number field: a click edits, a drag scrubs (language.md §9).
 /// A press on a grading control (`grade`) drags it through the same gesture.
 struct ScrubDrag {
@@ -111,6 +134,9 @@ enum ScrubOp {
 struct Capture {
     target: Id,
     button: u64,
+    /// Where the press was: an item that drags lifts once the pointer has
+    /// moved past the drag threshold from here.
+    origin: Point<Pixels>,
 }
 /// A scroller anchored at its end (`metadata.scrollAnchor: "end"`): the
 /// panel hears when the reader scrolls away from the end and back (a
@@ -170,6 +196,9 @@ pub struct SurfaceView {
     capture: Option<Capture>,
     scrub: Option<ScrubDrag>,
     scrub_ops: VecDeque<ScrubOp>,
+    /// The panel item being dragged (its `dragstart` ran): `dragend` goes to
+    /// it once the drag is over, wherever it was dropped.
+    dragging: Option<Id>,
     scrub_gesture: Option<u64>,
     scrub_busy: bool,
     scrub_shown: Option<(Id, f64)>,
@@ -246,6 +275,7 @@ impl SurfaceView {
             capture: None,
             scrub: None,
             scrub_ops: VecDeque::new(),
+            dragging: None,
             scrub_gesture: None,
             scrub_busy: false,
             scrub_shown: None,
@@ -776,7 +806,10 @@ impl SurfaceView {
                     quiet: crate::v4_compile::variant(node) == Some("quiet"),
                     tint: None,
                     symbol: None,
-                    glass: false,
+                    // `data-pm-variant="glass"`: a segmented control in the
+                    // system's capsule at the large size.
+                    glass: crate::v4_compile::variant(node) == Some("glass")
+                        && matches!(kind, crate::v4_control::Kind::Segmented),
                 },
                 &tokens,
                 window,
@@ -1031,6 +1064,21 @@ impl SurfaceView {
                             };
                             this.send(id, "keydown", detail, cx);
                         }
+                    }
+                    // Up and Down in a number field step its value (Shift:
+                    // ten steps) and write it, as a spin field does.
+                    TextEvent::Key(key @ ("up" | "down" | "shiftUp" | "shiftDown")) if number => {
+                        let Some(facts) = this.prepared.node(id).and_then(|n| n.number) else {
+                            return;
+                        };
+                        let Some(field) = this.fields.get(&id).cloned() else {
+                            return;
+                        };
+                        let typed = field.read(cx).editing_text();
+                        let next = arrow_step(&typed, facts, key);
+                        let shown = facts.text(next);
+                        field.update(cx, |f, cx| f.replace_text(&shown, cx));
+                        this.change(id, json!(next), cx);
                     }
                     // Canvas editors only.
                     TextEvent::Selection { .. } | TextEvent::Key(_) | TextEvent::Blurred => {}
@@ -1603,7 +1651,11 @@ impl SurfaceView {
     }
     fn press(&mut self, id: Id, event: &MouseDownEvent, cx: &mut Context<Self>) {
         let button = button_code(event.button);
-        self.capture = Some(Capture { target: id, button });
+        self.capture = Some(Capture {
+            target: id,
+            button,
+            origin: event.position,
+        });
         let detail = self.detail(
             event.position,
             Some(button),
@@ -1793,6 +1845,18 @@ impl SurfaceView {
                         let Some(capture) = v.capture else {
                             return;
                         };
+                        // A press on an item that drags (`onDragStart`) gives
+                        // the pointer up past the threshold: the move goes on
+                        // to the item, which lifts it (GPUI's drag).
+                        let threshold = v.table.tokens.metrics.drag_threshold;
+                        if v.prepared
+                            .node(capture.target)
+                            .is_some_and(|n| n.events.drag_start)
+                            && (event.position - capture.origin).magnitude() > threshold as f64
+                        {
+                            v.capture = None;
+                            return;
+                        }
                         cx.stop_propagation();
                         if v.prepared
                             .node(capture.target)
@@ -2502,15 +2566,66 @@ impl SurfaceView {
             return element;
         }
         // Finder drops reach targets that take files; the window's drop
-        // handler places anything landing elsewhere at the playhead.
+        // handler places anything landing elsewhere at the playhead. The
+        // panel's own items dragged onto them move there (into a bin).
         if events.file_drop {
             let target = rgb(self.table.tokens.colors.selected_fill);
+            let panel = self.publication.panel.clone();
+            let own = move |drag: &PanelDrag| drag.panel == panel;
+            let own_over = own.clone();
             element = element
                 .on_drag_over::<ExternalPaths>(move |style, _, _, _| style.bg(target))
                 .on_drop(cx.listener(move |v, paths: &ExternalPaths, window, cx| {
+                    cx.stop_propagation();
                     let detail = file_drop(paths.paths(), window.modifiers().alt);
                     v.send(id, "drop", detail, cx);
+                }))
+                .on_drag_over::<PanelDrag>(move |style, drag, _, _| {
+                    if own_over(drag) {
+                        style.bg(target)
+                    } else {
+                        style
+                    }
+                })
+                .on_drop(cx.listener(move |v, drag: &PanelDrag, window, cx| {
+                    if !own(drag) {
+                        return;
+                    }
+                    cx.stop_propagation();
+                    let detail = EventDetail {
+                        alt_key: Some(window.modifiers().alt),
+                        ..Default::default()
+                    };
+                    v.send(id, "dragover", detail.clone(), cx);
+                    v.send(id, "drop", detail, cx);
+                    v.end_drag(cx);
                 }));
+        }
+        // A panel item lifts after the drag threshold: the panel learns of
+        // it (`dragstart`), and the timeline, the viewer and the panel's own
+        // targets take it.
+        if events.drag_start {
+            let c = &self.table.tokens.colors;
+            let drag = PanelDrag {
+                panel: self.publication.panel.clone(),
+                label: node
+                    .ax
+                    .as_ref()
+                    .and_then(|ax| ax.label.clone())
+                    .unwrap_or_else(|| "Media".into()),
+                colors: (c.floating, c.separator, c.text),
+            };
+            let view = cx.entity().downgrade();
+            element = element.on_drag(drag, move |drag, _, _, cx| {
+                let view = view.clone();
+                cx.defer(move |cx| {
+                    let _ = view.update(cx, |v, cx| {
+                        v.dragging = Some(id);
+                        v.send(id, "dragstart", EventDetail::default(), cx);
+                    });
+                });
+                cx.new(|_| drag.clone())
+            });
         }
         if node.number.is_some() {
             element = element.cursor_col_resize().on_mouse_down(
@@ -2663,6 +2778,26 @@ impl SurfaceView {
             .iter()
             .find(|(_, h)| h.is_focused(window))
             .map(|(id, _)| *id)
+    }
+    /// A key its window's root took while nothing in the panel was focused
+    /// (a sheet just opened): the panel's root hears it as its own keys,
+    /// so Return presses a sheet's default button and Escape cancels it.
+    pub(crate) fn root_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let root = self
+            .publication
+            .surface
+            .node(0)
+            .and_then(|n| n.children.first().copied());
+        if let Some(root) = root
+            && self.prepared.has_keydown
+        {
+            self.key_down(root, event, window, cx);
+        }
     }
     fn key_down(
         &mut self,
@@ -2976,6 +3111,41 @@ impl SurfaceView {
         wrapper.into_any_element()
     }
 }
+/// A panel item being dragged (`onDragStart`), and the image under the
+/// pointer while it is: its name on the floating fill.
+#[derive(Clone, Debug)]
+pub struct PanelDrag {
+    /// The panel it came from (`Publication::panel`).
+    pub panel: String,
+    pub label: SharedString,
+    /// Floating fill, its edge, text.
+    colors: (u32, u32, u32),
+}
+impl Render for PanelDrag {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let (fill, edge, text) = self.colors;
+        div()
+            .px(px(8.))
+            .py(px(4.))
+            .rounded(px(6.))
+            .bg(rgb(fill))
+            .border(px(1.))
+            .border_color(rgb(edge))
+            .text_color(rgb(text))
+            .text_size(px(12.))
+            .whitespace_nowrap()
+            .child(self.label.clone())
+    }
+}
+impl SurfaceView {
+    /// The item drag is over (dropped anywhere, or let go): the panel
+    /// clears its drag state.
+    pub fn end_drag(&mut self, cx: &mut Context<Self>) {
+        if let Some(id) = self.dragging.take() {
+            self.send(id, "dragend", EventDetail::default(), cx);
+        }
+    }
+}
 /// A file drop as the panel's JS reads it (`public.file-url`, as on AppKit).
 fn file_drop(paths: &[std::path::PathBuf], alt: bool) -> EventDetail {
     const FILES: &str = "public.file-url";
@@ -2996,6 +3166,13 @@ fn file_drop(paths: &[std::path::PathBuf], alt: bool) -> EventDetail {
 
 impl Render for SurfaceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // A drag let go over nothing that took it ends here.
+        if self.dragging.is_some() && !cx.has_active_drag() {
+            let view = cx.entity().downgrade();
+            cx.defer(move |cx| {
+                let _ = view.update(cx, |v, cx| v.end_drag(cx));
+            });
+        }
         #[cfg(test)]
         {
             self.renders += 1;
@@ -3370,6 +3547,30 @@ fn host_rows_source(node: &pm_surface::Node) -> Option<Value> {
 mod tests {
     use super::file_drop;
     use serde_json::json;
+
+    /// Up and Down step a number field from what is typed (else its value),
+    /// ten steps with Shift, on the step's grid, within the field's limits.
+    #[test]
+    fn arrow_keys_step_a_number_field() {
+        let facts = crate::v4_compile::NumberFacts {
+            value: 0.,
+            step: 0.1,
+            speed: 1.,
+            min: -10.,
+            max: 10.,
+            precision: None,
+        };
+        assert_eq!(super::arrow_step("0.5", facts, "up"), 0.6);
+        assert_eq!(super::arrow_step("0.2", facts, "up"), 0.3);
+        assert_eq!(super::arrow_step("0.5", facts, "down"), 0.4);
+        assert_eq!(super::arrow_step("0.5", facts, "shiftUp"), 1.5);
+        assert_eq!(super::arrow_step("", facts, "down"), -0.1);
+        assert_eq!(super::arrow_step("9.95", facts, "shiftUp"), 10.);
+        let whole = crate::v4_compile::NumberFacts { step: 1., ..facts };
+        assert_eq!(super::arrow_step("3", whole, "down"), 2.);
+        let unstepped = crate::v4_compile::NumberFacts { step: 0., ..facts };
+        assert_eq!(super::arrow_step("3", unstepped, "up"), 4.);
+    }
 
     #[test]
     fn a_file_drop_carries_paths_under_the_key_the_project_panel_reads() {

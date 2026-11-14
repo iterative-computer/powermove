@@ -706,7 +706,7 @@ impl Controller {
                     title,
                     body,
                     vec![
-                        Button::new("Wait", false).default(),
+                        Button::new("Wait", false).default().cancel(),
                         Button::new("Stop", true),
                     ],
                 )

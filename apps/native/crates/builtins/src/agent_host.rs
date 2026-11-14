@@ -196,9 +196,14 @@ impl AgentLink {
             saved
                 .choices()
                 .into_iter()
-                .map(|id| pm_agents::account::Model {
+                .enumerate()
+                .map(|(at, id)| pm_agents::account::Model {
                     efforts: pm_agents::compatible::efforts(&id),
                     label: id.clone(),
+                    // The configured model (listed first) runs by default.
+                    default: at == 0,
+                    aliases: vec![],
+                    default_effort: None,
                     id,
                 })
                 .collect()
@@ -229,10 +234,22 @@ impl AgentLink {
             self.accounts()
                 .map_or_else(Vec::new, |accounts| accounts.models(provider))
         };
-        let mut models = vec![(String::new(), "Default".to_owned())];
+        // Only real models: no choice reads as the provider's default model.
+        let mut models = vec![];
+        let mut resolves = vec![];
+        let mut default_efforts = vec![];
         let mut efforts = vec![String::new()];
         let mut model_efforts = vec![];
         for model in listed {
+            if model.default {
+                resolves.push((String::new(), model.id.clone()));
+            }
+            for alias in &model.aliases {
+                resolves.push((alias.clone(), model.id.clone()));
+            }
+            if let Some(effort) = &model.default_effort {
+                default_efforts.push((model.id.clone(), effort.clone()));
+            }
             for effort in &model.efforts {
                 if !efforts.contains(effort) {
                     efforts.push(effort.clone());
@@ -247,6 +264,8 @@ impl AgentLink {
             efforts,
             model_efforts,
             claude: provider == Provider::Claude,
+            resolves,
+            default_efforts,
         }
     }
     /// Republishes the panel's realms (a change made outside an action).
@@ -510,7 +529,19 @@ fn launch_request(
         prompt: prompt(&state.panel, thread, text)?,
         provider: settings.provider,
         model: Some(settings.model.clone()).filter(|m| !m.is_empty()),
-        effort: Some(settings.effort.clone()).filter(|e| !e.is_empty()),
+        // The effort the picker shows is the one that runs: with none saved,
+        // the model's default, sent by name (Claude Code names none of its own).
+        effort: Some(
+            state
+                .panel
+                .session(thread)
+                .ok()
+                .map(|s| s.catalog.resolve_effort(&settings.model, &settings.effort))
+                // No listing yet: the saved choice, as before.
+                .filter(|e| !e.is_empty())
+                .unwrap_or_else(|| settings.effort.clone()),
+        )
+        .filter(|e| !e.is_empty() && e != "default"),
         access: settings.access,
         approval: settings.approval,
         workspace: directory,

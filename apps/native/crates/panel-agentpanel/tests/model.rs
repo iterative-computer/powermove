@@ -394,6 +394,8 @@ fn provider_cannot_switch_during_run_and_model_uses_catalog_ids() {
         efforts: vec!["high".into()],
         model_efforts: vec![],
         claude: true,
+        resolves: vec![],
+        default_efforts: vec![],
     };
     p.set_provider("t", Provider::Claude, "sonnet".into(), catalog.clone())
         .unwrap();
@@ -1071,6 +1073,8 @@ fn new_ui_thread_preserves_provider_model_effort_and_requires_its_own_computer_g
             efforts: vec!["high".into()],
             model_efforts: vec![],
             claude: true,
+            resolves: vec![],
+            default_efforts: vec![],
         },
     )
     .unwrap();
@@ -1126,6 +1130,8 @@ fn switching_models_keeps_only_an_effort_the_new_model_takes() {
             ("deep".into(), vec!["low".into(), "xhigh".into()]),
         ],
         claude: false,
+        resolves: vec![],
+        default_efforts: vec![],
     };
     p.set_provider("t", Provider::Chatgpt, "deep".into(), catalog)
         .unwrap();
@@ -1140,4 +1146,181 @@ fn switching_models_keeps_only_an_effort_the_new_model_takes() {
     // Asking Fast for an effort it lacks fails.
     assert!(p.set_model("t", "fast".into(), "xhigh".into()).is_err());
     p.set_model("t", "fast".into(), "low".into()).unwrap();
+}
+
+#[test]
+fn a_thread_saved_with_no_model_or_default_reads_as_the_providers_default_model() {
+    // The pickers list only real models; a saved "" / null / "default" (and
+    // Claude's resolved id) resolve to one, while the saved value is kept so
+    // the provider still picks its own default.
+    let catalog = Catalog {
+        providers: vec![("claude".into(), "Claude".into())],
+        models: vec![
+            ("opus".into(), "Opus".into()),
+            ("sonnet".into(), "Sonnet".into()),
+        ],
+        efforts: vec!["".into(), "low".into(), "max".into()],
+        model_efforts: vec![
+            ("opus".into(), vec!["low".into(), "max".into()]),
+            ("sonnet".into(), vec!["low".into()]),
+        ],
+        claude: true,
+        resolves: vec![
+            ("".into(), "opus".into()),
+            ("claude-opus-5-5".into(), "opus".into()),
+        ],
+        default_efforts: vec![],
+    };
+    assert!(
+        !catalog
+            .models
+            .iter()
+            .any(|(id, label)| id.is_empty() || label.contains("Default"))
+    );
+    let mut p = panel();
+    let mut store = Memory::default();
+    p.save(&mut store, 1).unwrap();
+    for (saved, shown) in [
+        (Value::Null, "opus"),
+        (json!(""), "opus"),
+        (json!("default"), "opus"),
+        (json!("claude-opus-5-5"), "opus"),
+        (json!("sonnet"), "sonnet"),
+    ] {
+        let mut store = Memory {
+            values: store.values.clone(),
+            ..Default::default()
+        };
+        let record = &mut store.values.get_mut("agentThreads.p").unwrap()["threads"][0];
+        record["provider"] = json!("claude");
+        record["model"] = saved.clone();
+        let mut restored = Panel::load(&mut store, "p", "blank", 2).unwrap();
+        restored.set_catalog("t", catalog.clone()).unwrap();
+        let settings = &restored.session("t").unwrap().settings;
+        assert_eq!(catalog.resolve(&settings.model), shown, "{saved}");
+        // Its efforts are the resolved model's own.
+        assert_eq!(
+            catalog.efforts_for(&settings.model).len(),
+            if shown == "opus" { 3 } else { 2 },
+            "{saved}"
+        );
+        // Effort changes on the resolved model are accepted.
+        restored.set_model("t", shown.into(), "low".into()).unwrap();
+    }
+    // A provider with no listing yet keeps the saved value: nothing to name.
+    assert_eq!(Catalog::default().resolve(""), "");
+    // No default flagged: the first listed model is the one that runs.
+    let unflagged = Catalog {
+        resolves: vec![],
+        default_efforts: vec![],
+        ..catalog.clone()
+    };
+    assert_eq!(unflagged.resolve(""), "opus");
+    assert_eq!(unflagged.resolve("unknown-model"), "unknown-model");
+}
+
+fn effort_catalog() -> Catalog {
+    Catalog {
+        providers: vec![("chatgpt".into(), "ChatGPT".into())],
+        models: vec![
+            ("sol".into(), "Sol".into()),
+            ("astra".into(), "Astra".into()),
+            ("plain".into(), "Plain".into()),
+        ],
+        efforts: vec!["".into(), "low".into(), "medium".into(), "xhigh".into()],
+        model_efforts: vec![
+            (
+                "sol".into(),
+                vec!["low".into(), "medium".into(), "xhigh".into()],
+            ),
+            ("astra".into(), vec!["low".into(), "xhigh".into()]),
+            // A model with no effort levels: no effort picker.
+            ("plain".into(), vec![]),
+        ],
+        claude: false,
+        resolves: vec![("".into(), "sol".into())],
+        // The provider names Sol's default; Astra's is left to the usual one.
+        default_efforts: vec![("sol".into(), "xhigh".into())],
+    }
+}
+#[test]
+fn the_effort_picker_offers_only_the_models_efforts_and_names_its_default() {
+    let catalog = effort_catalog();
+    // Only the model's own efforts; never an empty "Default".
+    assert_eq!(catalog.effort_choices(""), ["low", "medium", "xhigh"]);
+    assert_eq!(catalog.effort_choices("astra"), ["low", "xhigh"]);
+    assert!(catalog.effort_choices("plain").is_empty());
+    // No saved effort (null reads as "", or an older "default") is the
+    // model's default by name: the provider's, else Medium, else its first.
+    for saved in ["", "default"] {
+        assert_eq!(catalog.resolve_effort("", saved), "xhigh");
+        assert_eq!(catalog.resolve_effort("sol", saved), "xhigh");
+        assert_eq!(catalog.resolve_effort("astra", saved), "low");
+    }
+    let usual = Catalog {
+        default_efforts: vec![],
+        ..catalog.clone()
+    };
+    assert_eq!(usual.resolve_effort("sol", ""), "medium");
+    // A saved effort the model takes stays; one it lacks reads as its default.
+    assert_eq!(catalog.resolve_effort("astra", "xhigh"), "xhigh");
+    assert_eq!(catalog.resolve_effort("astra", "medium"), "low");
+    // No levels: nothing to name or send.
+    assert_eq!(catalog.resolve_effort("plain", ""), "");
+}
+#[test]
+fn an_effort_is_carried_to_a_new_model_that_takes_it_else_its_default() {
+    let mut p = panel();
+    let mut store = Memory::default();
+    p.save(&mut store, 1).unwrap();
+    for saved in [Value::Null, json!(""), json!("default")] {
+        let mut store = Memory {
+            values: store.values.clone(),
+            ..Default::default()
+        };
+        let record = &mut store.values.get_mut("agentThreads.p").unwrap()["threads"][0];
+        record["reasoningEffort"] = saved.clone();
+        let mut restored = Panel::load(&mut store, "p", "blank", 2).unwrap();
+        restored.set_catalog("t", effort_catalog()).unwrap();
+        let catalog = effort_catalog();
+        let shown = |p: &Panel| {
+            let s = &p.session("t").unwrap().settings;
+            (
+                catalog.resolve(&s.model).to_owned(),
+                catalog.resolve_effort(&s.model, &s.effort),
+            )
+        };
+        assert_eq!(shown(&restored), ("sol".into(), "xhigh".into()), "{saved}");
+        // The picker sends the model with the effort it shows: Astra takes
+        // Extra High, so it is kept.
+        restored
+            .set_model("t", "astra".into(), "xhigh".into())
+            .unwrap();
+        assert_eq!(shown(&restored), ("astra".into(), "xhigh".into()));
+        // Low is picked; Plain has no levels, so nothing carries.
+        restored
+            .set_model("t", "astra".into(), "low".into())
+            .unwrap();
+        restored
+            .set_model("t", "plain".into(), "low".into())
+            .unwrap();
+        assert_eq!(shown(&restored), ("plain".into(), "".into()));
+        // Back to Sol: no effort saved, so Sol's own default.
+        restored.set_model("t", "sol".into(), "".into()).unwrap();
+        assert_eq!(shown(&restored), ("sol".into(), "xhigh".into()));
+        // Medium is Sol's; Astra lacks it and falls back to its default.
+        restored
+            .set_model("t", "sol".into(), "medium".into())
+            .unwrap();
+        restored
+            .set_model("t", "astra".into(), "medium".into())
+            .unwrap();
+        assert_eq!(shown(&restored), ("astra".into(), "low".into()));
+        // Asking the same model for an effort it lacks still fails.
+        assert!(
+            restored
+                .set_model("t", "astra".into(), "medium".into())
+                .is_err()
+        );
+    }
 }

@@ -188,6 +188,8 @@ pub struct RetainedAsset {
 
 /// One host/pool per project window. A realm and native state exist separately
 /// for every extension; there is no editor-isolate shortcut for v4 built-ins.
+/// The Project panel's id (its media, bins and compositions).
+pub const PROJECT_PANEL: &str = "assets";
 pub struct Builtins {
     pool: RuntimePool,
     broker: Arc<Broker>,
@@ -896,6 +898,13 @@ impl Builtins {
             session.elapsed_ms(agent_host::now_ms()),
             background,
         )
+    }
+    /// What the Project panel is dragging (its `dragstart`): the items the
+    /// timeline or the viewer places when it is dropped there.
+    pub fn project_drag(&self) -> Option<pm_panel_media::Drag> {
+        let backend = self.backend(PROJECT_PANEL).ok()?;
+        let backend = backend.shared();
+        backend.native.project.panel.drag.clone()
     }
     /// The agent panel's state and link, for an answer the window gives.
     fn agent_state(

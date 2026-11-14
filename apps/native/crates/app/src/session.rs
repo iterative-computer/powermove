@@ -419,16 +419,19 @@ impl pm_shell::integration::Integration for Bridge {
             // The viewer's transport and timecode follow the timeline's
             // presence: one set of play controls on screen, never two.
             let timeline = shown.contains(&"timeline");
+            // A panel not on screen (another one maximised, a workspace
+            // without it) leaves no native playhead or timecode behind. Each
+            // layout pass clears the places before this runs, so the change
+            // of what is shown is what wakes the paused playback loop.
+            let mut gone = false;
             if v.timeline_shown.replace(timeline) != Some(timeline) {
+                gone = true;
                 // Republished after this layout pass, not inside it.
                 cx.spawn(async move |this, cx| {
                     let _ = this.update(cx, |v, cx| v.update_builtins(cx));
                 })
                 .detach();
             }
-            // A panel not on screen (another one maximised, a workspace
-            // without it) leaves no native playhead or timecode behind.
-            let mut gone = false;
             if !shown.contains(&"timeline") {
                 gone |= v.builtins.timeline_place.take().is_some();
             }

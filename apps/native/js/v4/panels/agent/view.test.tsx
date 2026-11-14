@@ -97,6 +97,7 @@ test("focus order follows the thread bar, conversation and composer as the origi
     "agent-attach",
     "agent-send",
     "agent-model",
+    "agent-effort",
     "agent-access",
   ]);
   expect(byId(root, "agent-conversation").props.label).toBe(
@@ -225,7 +226,7 @@ test("the thread picker lists threads with their state, switches, and offers New
   assertWire(commits);
   root.dispose();
 });
-test("provider, model and effort share one menu; access has its own; picks reach the model", async () => {
+test("provider and model share one menu; effort and access have their own; picks reach the model", async () => {
   const { root } = mount();
   const actions: Action[] = [];
   const p = fixture();
@@ -238,11 +239,11 @@ test("provider, model and effort share one menu; access has its own; picks reach
       ["chatgpt", "ChatGPT"],
       ["claude", "Claude"],
     ],
-    efforts: ["", "high"],
+    efforts: ["low", "high"],
   };
   p.snapshot.settings.model = "gpt-6";
   p.snapshot.settings.effort = "high";
-  const picks = ["provider:claude", "model:gpt-6-mini", "effort:", "auto"];
+  const picks = ["provider:claude", "model:gpt-6-mini", "low", "auto"];
   const asked: MenuOption[][] = [];
   const menu: Menu = async (r) => {
     asked.push(r.options);
@@ -251,29 +252,112 @@ test("provider, model and effort share one menu; access has its own; picks reach
   await root.render(
     <AgentView publication={p} menu={menu} send={(a) => actions.push(a)} />,
   );
-  expect(byId(root, "agent-model").props.label).toBe(
-    "Model and reasoning effort, GPT-6 · High",
-  );
+  expect(byId(root, "agent-model").props.label).toBe("Model, GPT-6");
+  expect(byId(root, "agent-effort").props.label).toBe("Reasoning effort, High");
   for (const id of [
     "agent-model",
     "agent-model",
-    "agent-model",
+    "agent-effort",
     "agent-access",
   ]) {
     await root.drive(byId(root, id).id, "click");
     await Promise.resolve();
   }
+  // One place for each: the model menu has no effort rows.
   expect([...new Set(asked[0]!.map((o) => o.category))]).toEqual([
     "Provider",
     "Model",
-    "Reasoning Effort",
+  ]);
+  expect(asked[2]!.map((o) => [o.label, o.checked])).toEqual([
+    ["Low", false],
+    ["High", true],
   ]);
   expect(actions).toEqual([
     { type: "setProvider", provider: "claude" },
     { type: "setModel", model: "gpt-6-mini", effort: "high" },
-    { type: "setModel", model: "gpt-6", effort: "" },
+    { type: "setModel", model: "gpt-6", effort: "low" },
     { type: "setAccess", access: "auto" },
   ]);
+  root.dispose();
+});
+test("the effort picker names the model's effort, lists only its levels and hides for a model with none", async () => {
+  const { root } = mount();
+  const p = fixture();
+  p.snapshot.catalog = {
+    models: [["gpt-6.1-sol", "GPT-6.1-Sol"]],
+    providers: [["chatgpt", "ChatGPT"]],
+    // The model publishes only the efforts the selected model takes.
+    efforts: ["low", "medium", "xhigh"],
+  };
+  p.snapshot.settings.model = "gpt-6.1-sol";
+  // With none saved, the model publishes the model's default by name.
+  p.snapshot.settings.effort = "medium";
+  const asked: MenuOption[][] = [];
+  const menu: Menu = async (r) => {
+    asked.push(r.options);
+    return null;
+  };
+  await root.render(<AgentView publication={p} menu={menu} send={() => {}} />);
+  expect(byId(root, "agent-effort").props.label).toBe(
+    "Reasoning effort, Medium",
+  );
+  await root.drive(byId(root, "agent-effort").id, "click");
+  await Promise.resolve();
+  expect(asked[0]!.map((o) => [o.label, o.checked])).toEqual([
+    ["Low", false],
+    ["Medium", true],
+    ["Extra high", false],
+  ]);
+  expect(asked[0]!.some((o) => /Default/.test(o.label))).toBe(false);
+  // A model with no effort levels: no picker at all, not a disabled one.
+  p.snapshot.catalog.efforts = [];
+  p.snapshot.settings.effort = "";
+  await root.render(<AgentView publication={p} menu={menu} send={() => {}} />);
+  expect(has(root, "Reasoning effort, ")).toBe(false);
+  expect(root.inspect().nodes.some((n) => n.props.id === "agent-effort")).toBe(
+    false,
+  );
+  root.dispose();
+});
+test("the model picker lists only real models and names the one that runs", async () => {
+  const { root } = mount();
+  const p = fixture();
+  // The model resolves a thread with no choice to the provider's default
+  // model; the catalog has no "Default" row.
+  p.snapshot.catalog = {
+    models: [
+      ["gpt-6.1-sol", "GPT-6.1-Sol"],
+      ["gpt-6-astra", "GPT-6-Astra"],
+    ],
+    providers: [["chatgpt", "ChatGPT"]],
+    efforts: ["", "high"],
+  };
+  p.snapshot.settings.model = "gpt-6.1-sol";
+  p.snapshot.settings.effort = "";
+  const asked: MenuOption[][] = [];
+  const menu: Menu = async (r) => {
+    asked.push(r.options);
+    return null;
+  };
+  await root.render(<AgentView publication={p} menu={menu} send={() => {}} />);
+  expect(byId(root, "agent-model").props.label).toBe("Model, GPT-6.1-Sol");
+  await root.drive(byId(root, "agent-model").id, "click");
+  await Promise.resolve();
+  const models = asked[0]!.filter((o) => o.category === "Model");
+  expect(models.map((o) => [o.label, o.checked])).toEqual([
+    ["GPT-6.1-Sol", true],
+    ["GPT-6-Astra", false],
+  ]);
+  // Before a provider lists its models there is no model to name: the
+  // picker names the provider, and no blank row is added.
+  p.snapshot.catalog.models = [];
+  p.snapshot.settings.model = "";
+  await root.render(<AgentView publication={p} menu={menu} send={() => {}} />);
+  expect(byId(root, "agent-model").props.label).toBe("Model, ChatGPT");
+  await root.drive(byId(root, "agent-model").id, "click");
+  await Promise.resolve();
+  expect(asked[1]!.filter((o) => o.category === "Model")).toEqual([]);
+  expect(asked.flat().some((o) => /^Default/.test(o.label))).toBe(false);
   root.dispose();
 });
 const turn = (): Row[] => [

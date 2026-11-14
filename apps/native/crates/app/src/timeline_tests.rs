@@ -1142,6 +1142,50 @@ fn option_wheel_and_pinch_zoom_around_the_pointer(cx: &mut TestAppContext) {
     s.idle(cx);
     assert!(s.surface.read_with(&s.vcx, |t, _| t.pps()) > after);
 }
+/// Scrolling and zooming stay on the timeline's time: a long sweep right
+/// stops a little past the end, and zooming out stops once the whole of it
+/// fits the time area (the view never sits on empty time past the end).
+#[gpui::test]
+fn scroll_and_zoom_out_stop_at_the_timelines_end(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    let at = s.at(0, 1.);
+    let end = s
+        .surface
+        .read_with(&s.vcx, |t, _| t.model().index.maximum_time());
+    for _ in 0..40 {
+        s.vcx.simulate_event(ScrollWheelEvent {
+            position: at,
+            delta: ScrollDelta::Pixels(point(px(-400.), px(0.))),
+            modifiers: Modifiers::none(),
+            ..Default::default()
+        });
+    }
+    s.idle(cx);
+    let (pps, scroll, room) = s.surface.read_with(&s.vcx, |t, _| t.time_view());
+    // `time_view`'s width leaves Fit's 48 points: the view's right edge.
+    let right = scroll + (room + 48.) / pps;
+    assert!(right > end, "the end itself can be reached");
+    assert!(right <= end + 48. / pps + 1e-6, "{right} past {end}");
+    for _ in 0..40 {
+        s.vcx.simulate_event(ScrollWheelEvent {
+            position: at,
+            delta: ScrollDelta::Pixels(point(px(0.), px(-400.))),
+            modifiers: Modifiers {
+                alt: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+    }
+    s.idle(cx);
+    let (pps, scroll, room) = s.surface.read_with(&s.vcx, |t, _| t.time_view());
+    let shown = (room + 48.) / pps;
+    assert!(
+        shown <= end + 48. / pps + 1e-6,
+        "zoomed out to {shown} s of {end}"
+    );
+    assert!(scroll >= 0. && scroll + shown >= end);
+}
 /// Wheel scrolling moves the view at once and writes it once, after it rests:
 /// every write publishes to all panels.
 #[gpui::test]

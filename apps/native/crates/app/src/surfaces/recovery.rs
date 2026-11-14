@@ -70,7 +70,7 @@ pub fn unrecoverable(name: &str, saved_file_exists: bool) -> Alert<Action> {
     if saved_file_exists {
         buttons.push(Button::new("Open Saved Version", Action::OpenSavedVersion).default());
     }
-    let ok = Button::new("OK", Action::Acknowledge);
+    let ok = Button::new("OK", Action::Acknowledge).cancel();
     buttons.push(if saved_file_exists { ok } else { ok.default() });
     Alert::new(
         format!("“{name}” couldn’t be recovered."),

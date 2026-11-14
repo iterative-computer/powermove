@@ -732,7 +732,17 @@ impl Engine {
     fn release_idle_memory_inner(&mut self) {
         self.renderer.clear_draw_reuse();
         self.renderer.release_idle_targets();
-        self.renderer.release_idle_media();
+        // Paused in the frontmost app: the decoders of the clips under the
+        // playhead stay open (references only, no decoded frames), so Play
+        // continues their run. On a clip with one sync sample, Play after a
+        // closed decoder decoded the clip from its first frame again
+        // (~150 ms, wrong frames at Play; Fable 5.5 at 46 s). Approved
+        // exception to idle release (2026-11-14); see `maintain_memory`.
+        if keep_paused_decoders() {
+            self.renderer.release_idle_media_keeping_decoders();
+        } else {
+            self.renderer.release_idle_media();
+        }
         self.renderer.trim(0);
         self.clear_cache();
         self.disk_next = None;
@@ -744,6 +754,13 @@ impl Engine {
 
     pub fn maintain_memory(&mut self) -> bool {
         self.govern_memory();
+        // Kept paused decoders go when the app is hidden or in the
+        // background, or under memory pressure; drawing again (playhead
+        // moved, Play) and a project's release end them as well.
+        if self.idle_released && self.renderer.kept_decoders() > 0 && !keep_paused_decoders() {
+            self.renderer.release_kept_decoders();
+            crate::memory::pressure_relief();
+        }
         if !self.idle_released && self.last_frame.elapsed() >= Duration::from_secs(2) {
             self.release_idle_memory();
             return true;
@@ -752,6 +769,7 @@ impl Engine {
     }
 
     pub fn release_project_memory(&mut self) {
+        self.renderer.release_kept_decoders();
         objc2::rc::autoreleasepool(|_| self.release_project_memory_inner());
         crate::memory::pressure_relief();
     }
@@ -1816,7 +1834,7 @@ impl Engine {
             found
         } else {
             let uploading = std::time::Instant::now();
-            let surface = self.cache_surface(size)?;
+            let surface = self.cache_surface_for(size, spec.moment == Moment::Playing && !spec.exact)?;
             if let Some((_, pixels)) = disk {
                 self.upload(&surface, size, &pixels);
                 if let Some(error) = self.failed.lock().unwrap().take() {
@@ -2142,6 +2160,9 @@ impl Engine {
     /// A pooled surface of `size` for a frame the cache will hold, making
     /// room in the cache first.
     fn cache_surface(&mut self, size: Size) -> Result<Arc<ExportedSurface>> {
+        self.cache_surface_for(size, false)
+    }
+    fn cache_surface_for(&mut self, size: Size, playing: bool) -> Result<Arc<ExportedSurface>> {
         let bytes = u64::from(size.width) * u64::from(size.height) * 8;
         // PM_FIX_OUT_HALF: the output frame cache keeps within half the
         // engine's grant, leaving the rest to decode and conversion.
@@ -2154,12 +2175,27 @@ impl Engine {
         } else {
             FRAME_CACHE_BYTES
         };
-        let capacity = ((limit / bytes).clamp(1, 8)) as usize;
+        // A linear playback run needs its current and upcoming surfaces,
+        // not a long cache of frames it has already passed. Returning those
+        // bytes lets the same grant retain the live video working set.
+        let capacity = ((limit / bytes).clamp(1, if playing { 3 } else { 8 })) as usize;
         while self.cache.len() >= capacity {
             self.cache.pop_front();
         }
         self.pool
             .retain(|s| s.size == size || Arc::strong_count(s) > 1);
+        // Reclaim free surplus when a paused cache becomes a playing pool.
+        // In-flight references are kept and return on subsequent frames.
+        while self.pool.iter().filter(|s| s.size == size).count() > capacity {
+            let Some(free) = self
+                .pool
+                .iter()
+                .position(|s| s.size == size && Arc::strong_count(s) == 1)
+            else {
+                break;
+            };
+            self.pool.remove(free);
+        }
         // The half-grant bound covers the output surfaces in flight too,
         // including frames with stand-ins (which never enter `self.cache`).
         // Keeping a full cache beside those surfaces starved video decode
@@ -3296,6 +3332,39 @@ mod lifetime_tests {
 #[cfg(test)]
 mod playback_pool_tests {
     use super::*;
+
+    #[test]
+    fn a_playing_pool_returns_surplus_without_increasing_its_grant() {
+        let mut engine = Engine::without_definitions(
+            Gpu::new("playing-pool-returns-surplus").unwrap(),
+            None,
+        )
+        .unwrap();
+        let size = Size::new(1612, 850);
+        let grant = engine.memory_client.grant();
+        let held: Vec<_> = (0..6)
+            .map(|_| engine.cache_surface(size).unwrap())
+            .collect();
+        assert_eq!(engine.pool.len(), 6);
+        drop(held);
+        let mut flights = VecDeque::new();
+        for _ in 0..32 {
+            if flights.len() == 3 {
+                flights.pop_front();
+            }
+            flights.push_back(engine.cache_surface_for(size, true).unwrap());
+            assert_eq!(engine.pool.len(), 3, "free surfaces of past frames must return");
+            assert_eq!(
+                engine.memory_client.grant(),
+                grant,
+                "the playback allowance stays fixed"
+            );
+        }
+        assert!(
+            engine.memory_usage().surface_bytes
+                <= 3 * u64::from(size.width) * u64::from(size.height) * 8
+        );
+    }
 
     #[test]
     fn in_flight_stand_ins_share_the_output_cache_allowance() {
@@ -4808,4 +4877,18 @@ mod text_grid_tests {
             );
         }
     }
+}
+
+/// Whether a paused viewer keeps the decoders of the clips under its
+/// playhead: only while this app is frontmost and not hidden, and memory is
+/// not under pressure. Engine processes without an active app never do.
+fn keep_paused_decoders() -> bool {
+    if crate::memory::pressure() != crate::memory::Pressure::Normal {
+        return false;
+    }
+    if std::env::var_os("PM_KEEP_PAUSED_DECODERS").is_some_and(|v| v == "0") {
+        return false;
+    }
+    let app = objc2_app_kit::NSRunningApplication::currentApplication();
+    app.isActive() && !app.isHidden()
 }
