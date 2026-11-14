@@ -333,6 +333,7 @@ pub struct GizmoSurface {
     hover_alt: bool,
     /// Where the pointer last hovered, to re-read the cursor when ⌥ changes.
     hover_at: Option<Point<Pixels>>,
+    modifier_subscription: Option<Subscription>,
     studio: studio3d::State,
     kernel: KernelHandle,
     project: String,
@@ -604,6 +605,7 @@ impl GizmoSurface {
             hover_deep: false,
             hover_alt: false,
             hover_at: None,
+            modifier_subscription: None,
             studio: Default::default(),
             kernel,
             project,
@@ -2706,6 +2708,15 @@ fn overlay(poses: &[Pose], frame: ViewFrame, t: &pm_design::Tokens) -> Vec<Overl
 }
 impl Render for GizmoSurface {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.modifier_subscription.is_none() {
+            // A hovered viewer need not own keyboard focus. A window observer
+            // keeps Alt-release cursor updates independent of the focus path.
+            self.modifier_subscription = Some(cx.observe_window_modifiers(window, |s, window, cx| {
+                if s.bounds.contains(&window.mouse_position()) {
+                    s.on_modifiers(window.modifiers().alt, cx);
+                }
+            }));
+        }
         let this = cx.entity().downgrade();
         let focus = self.focus.get_or_insert_with(|| cx.focus_handle()).clone();
         // Flying holds the keyboard so a released key stops its move.

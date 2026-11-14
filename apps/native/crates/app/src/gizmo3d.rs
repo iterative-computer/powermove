@@ -2242,7 +2242,7 @@ impl GizmoSurface {
         true
     }
     /// Pinching zooms (Blender's trackpad zoom), the camera in camera view.
-    pub(super) fn studio_pinch(&mut self, delta: f64, cx: &mut Context<Self>) -> bool {
+    pub(crate) fn studio_pinch(&mut self, delta: f64, cx: &mut Context<Self>) -> bool {
         let Some(scene) = self.studio.scene.clone() else {
             return false;
         };
