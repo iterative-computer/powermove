@@ -78,6 +78,7 @@ pub struct Model {
     /// exposing a secret count on the gate.
     pub report_needs_review: bool,
     pub failure: Failure,
+    pub keychain_error: Option<String>,
     /// Steps already published, for the step rows.
     pub finished: std::collections::BTreeSet<Step>,
     /// Live bytes of the running step (done, total; total 0 = unknown), polled.
@@ -96,6 +97,7 @@ impl Default for Model {
             summary: None,
             report_needs_review: false,
             failure: Failure::Unknown,
+            keychain_error: None,
             finished: Default::default(),
             bytes: None,
             waiting_folder: None,
@@ -226,7 +228,7 @@ impl Model {
             Gate::ProfileRefused => ("Powermove Can’t Start".into(), "Its library folder isn’t usable. Your original app wasn’t changed.".into(), None, vec![], Some("quit")),
             Gate::Consent | Gate::InterruptedConsent => (if self.gate == Gate::Consent { "Keep Your Sign-Ins".into() } else { "The Keychain Request Didn’t Finish".into() }, if self.gate == Gate::Consent { crate::secrets::PROMPT.into() } else { "Powermove stopped before macOS answered. Continuing asks macOS one more time. Your original app stays unchanged.".into() }, None, vec![Button::new("skip_secret_consent", "Not Now"), Button::new("resume_with_secret_consent", "Continue")], Some("resume_with_secret_consent")),
             Gate::WaitingForMacos => ("Keep Your Sign-Ins".into(), crate::secrets::PROMPT.into(), Some("Waiting for macOS…".into()), vec![Button { id: "skip_secret_consent", label: "Not Now", enabled: false }, Button { id: "resume_with_secret_consent", label: "Continue", enabled: false }], None),
-            Gate::Denied => ("Keychain Access Wasn’t Allowed".into(), "Your sign-ins and extension values stay in the original app. You can sign in again here, or try again.".into(), None, vec![Button::new("skip_secret_consent", "Continue Without Them"), Button::new("resume_with_secret_consent", "Try Again")], Some("skip_secret_consent")),
+            Gate::Denied => ("Keychain Access Wasn’t Allowed".into(), format!("{} Your sign-ins and extension values stay in the original app. You can continue and sign in here.", self.keychain_error.as_deref().unwrap_or("macOS didn’t allow access to the sign-in key.")), None, vec![Button::new("skip_secret_consent", "Continue Without Them"), Button::new("resume_with_secret_consent", "Try Again")], Some("skip_secret_consent")),
             Gate::Complete => ("Your Library Is Ready".into(), format!("{} Your original app stays unchanged.", copied(self.summary.as_ref().map_or(0, |s| s.projects))), None, if self.report_needs_review || self.summary.as_ref().is_some_and(|s| !s.rows().is_empty()) { vec![Button::new("show_report", "Show Report…"), Button::new("open_native", "Open Powermove")] } else { vec![Button::new("open_native", "Open Powermove")] }, Some("open_native")),
         };
         let mut buttons = buttons;

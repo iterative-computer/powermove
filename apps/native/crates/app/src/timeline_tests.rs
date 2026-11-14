@@ -543,6 +543,26 @@ fn the_column_splitter_resizes_and_double_click_resets(cx: &mut TestAppContext) 
     s.idle(cx);
     assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.layer_column()), column);
 }
+/// As v1 (GUTTER_MIN): the layer column never narrows past a row's least
+/// width, so a row's switches always fit beside a truncated name.
+#[gpui::test]
+fn the_column_splitter_stops_where_a_rows_switches_still_fit(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    let m = tokens().metrics;
+    let least = crate::timeline_surface::least_layer_column(&m);
+    // Number, disclosure, badge, three slots of name and five switches.
+    let gap = m.gap as f64;
+    let row = 6. * gap + 10. * m.hit as f64 + m.kind_badge as f64;
+    assert!(least >= row && least >= 320., "{least} < {row}");
+    let column = s.surface.read_with(&s.vcx, |t, _| t.layer_column());
+    assert!(column >= least);
+    let y = s.at(1, 0.).y;
+    let at = point(s.origin().x + px(column as f32), y);
+    // Dragged far past the least: it stops there.
+    let far = point(s.origin().x + px(20.), y);
+    s.drag(cx, at, far, Modifiers::none());
+    assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.layer_column()), least);
+}
 #[gpui::test]
 fn each_timeline_draws_its_own_editors_offline_media(cx: &mut TestAppContext) {
     let mut s = stage_project(cx, crate::v4_view_tests::strips_json());

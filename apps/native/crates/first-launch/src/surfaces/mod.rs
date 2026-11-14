@@ -1,6 +1,7 @@
 //! Headless presentation and action models from Opus specifications at ce36cb6fc.
 //! No rendering, invented tokens, permissions, engine mutation or OS prompt here.
 //! Hosts drive actions by stable ids on workers and apply the existing tokens.
+pub mod extensions;
 pub mod migration;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

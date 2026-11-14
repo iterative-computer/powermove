@@ -17,11 +17,11 @@ use std::{
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Receipt {
-    hash: String,
+    pub(crate) hash: String,
     #[serde(default)]
-    pending: Option<String>,
+    pub(crate) pending: Option<String>,
 }
-fn tree(root: &Path) -> Result<Option<String>> {
+pub(crate) fn tree(root: &Path) -> Result<Option<String>> {
     if !root.exists() {
         return Ok(None);
     }
@@ -46,6 +46,16 @@ pub(crate) fn import(
     capture: &Path,
     native: &Path,
     state: &mut State,
+) -> Result<()> {
+    import_with_publisher(cp, capture, native, state, |state| publish(native, state))
+}
+
+pub(crate) fn import_with_publisher(
+    cp: &Checkpoint,
+    capture: &Path,
+    native: &Path,
+    state: &mut State,
+    mut save: impl FnMut(&State) -> Result<()>,
 ) -> Result<()> {
     let active = native.join("extensions");
     disk::private_dir(&active)?;
@@ -110,7 +120,7 @@ pub(crate) fn import(
                 .entry(id.clone())
                 .or_default()
                 .pending = Some(next.clone());
-            publish(native, state)?;
+            save(state)?;
             if target.exists() {
                 // Hidden archives cannot become discovered extension providers.
                 let old = active.join(format!(".{id}.previous"));
@@ -130,7 +140,7 @@ pub(crate) fn import(
                 pending: None,
             },
         );
-        publish(native, state)?;
+        save(state)?;
     }
     // Merge provenance per extension: unrelated native Store installs and local
     // authorship must survive. Never infer trust from a missing marker.
@@ -162,5 +172,5 @@ pub(crate) fn import(
             conflict(state, &format!("{id}/provenance"));
         }
     }
-    publish(native, state)
+    save(state)
 }
