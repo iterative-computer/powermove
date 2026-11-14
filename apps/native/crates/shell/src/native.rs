@@ -2398,7 +2398,7 @@ impl Host {
                         .map(|r| r.class().name().to_string_lossy().to_string())
                         .unwrap_or_default();
                     // WebKit keeps its DOM-first key order. S5 forwards unhandled keys explicitly.
-                    if name.contains("WK") || name.contains("Web") {
+                    if menu::owns_text_edit(false, &name) {
                         return event.as_ptr();
                     }
                     let chord = chord(e);
@@ -4033,7 +4033,10 @@ impl Host {
                     .or_else(|| self.window.firstResponder());
                 if !responder
                     .as_ref()
-                    .is_some_and(|r| unsafe { msg_send![&**r,isKindOfClass:NSTextView::class()] })
+                    .is_some_and(|r| menu::owns_text_edit(
+                        unsafe { msg_send![&**r,isKindOfClass:NSTextView::class()] },
+                        &r.class().name().to_string_lossy(),
+                    ))
                 {
                     return false;
                 }
