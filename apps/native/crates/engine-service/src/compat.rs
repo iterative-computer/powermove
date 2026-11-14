@@ -313,6 +313,13 @@ struct Answers {
     per_need: Option<Duration>,
     /// Override layers in the last look-ahead frame, and the last frame it asked.
     layers: usize,
+    /// An edit is being dragged since this revision (`set_editing`): every
+    /// step is a new revision, so its frames draw a late layer from the
+    /// answers of the gesture's earlier revisions (`earlier`), never waiting.
+    editing_since: Option<u64>,
+    /// The answers of the gesture's latest earlier revision, by layer and
+    /// frame: one revision's worth, replaced as the gesture goes on.
+    earlier: HashMap<(String, String), BTreeMap<i64, (NeedKey, CompatAnswer)>>,
     /// The last frame the look-ahead asked for, and the scale it asked at:
     /// answers at another scale cover nothing (a windowed raster stands in
     /// only at its own scale).
@@ -406,6 +413,20 @@ impl Drop for Wakes {
 /// coarser frame's (playback at a reduced resolution): the frame's crop is
 /// then taken to the answer's pixels, and the finer answer is sampled down,
 /// never up.
+/// A revision's answers by layer and frame (to stand in for an edit's next
+/// revision while it is dragged).
+fn by_layer(
+    map: HashMap<NeedKey, CompatAnswer>,
+) -> HashMap<(String, String), BTreeMap<i64, (NeedKey, CompatAnswer)>> {
+    let mut layers: HashMap<_, BTreeMap<_, _>> = HashMap::new();
+    for (key, answer) in map {
+        layers
+            .entry((key.0.clone(), key.1.clone()))
+            .or_default()
+            .insert(key.2, (key, answer));
+    }
+    layers
+}
 fn stands_in(key: &NeedKey, answer: &CompatAnswer, scale: f64, crop: Option<PixelRect>) -> bool {
     let CompatAnswer::Raster(raster) = answer else {
         return true;
@@ -473,6 +494,31 @@ impl Answers {
             .range(ticks..)
             .filter_map(|(_, key)| Some((key, self.map.get(key)?)))
             .find(|(key, answer)| stands_in(key, answer, scale, crop))
+            .map(|(_, answer)| answer)
+    }
+    /// While an edit is dragged: the layer's answer from the gesture's
+    /// earlier revision nearest to `ticks` (at or before, else after) that
+    /// stands in at `scale` and `crop`. The edit may have changed it a step
+    /// ago; the exact picture is drawn when the gesture ends.
+    fn nearest_earlier(
+        &self,
+        composition: &str,
+        layer: &str,
+        ticks: i64,
+        scale: f64,
+        crop: Option<PixelRect>,
+    ) -> Option<&CompatAnswer> {
+        self.editing_since?;
+        let times = self
+            .earlier
+            .get(&(composition.to_owned(), layer.to_owned()))?;
+        let fits = |(key, answer): &&(NeedKey, CompatAnswer)| stands_in(key, answer, scale, crop);
+        times
+            .range(..=ticks)
+            .rev()
+            .map(|(_, a)| a)
+            .find(fits)
+            .or_else(|| times.range(ticks..).map(|(_, a)| a).find(fits))
             .map(|(_, answer)| answer)
     }
     fn forget(&mut self, key: &NeedKey) {
@@ -586,7 +632,15 @@ impl CompatStore {
         if answers.revision != revision || answers.epoch != epoch {
             // An edit or new wrappers: no earlier answer stands in, so a
             // frame never shows content the edit changed.
-            let old = std::mem::take(&mut *answers);
+            let mut old = std::mem::take(&mut *answers);
+            // While an edit is dragged the last revision's answers stand in
+            // for the next (one revision's worth); new wrappers keep none.
+            let editing = old.editing_since.filter(|_| old.epoch == epoch);
+            let earlier = match editing {
+                Some(_) if !old.map.is_empty() => by_layer(std::mem::take(&mut old.map)),
+                Some(_) => std::mem::take(&mut old.earlier),
+                None => HashMap::new(),
+            };
             *answers = Answers {
                 revision,
                 epoch,
@@ -595,6 +649,8 @@ impl CompatStore {
                 stood_in: old.stood_in,
                 per_need: old.per_need,
                 layers: old.layers,
+                editing_since: editing,
+                earlier,
                 ..Answers::default()
             };
         }
@@ -603,6 +659,21 @@ impl CompatStore {
         drop(answers);
         if changed && let Some(redraw) = self.rewrapped.lock().unwrap().clone() {
             redraw();
+        }
+    }
+    /// A gesture opened (`true`) or ended. While it is open each step is a
+    /// new revision: frames draw late layers from the gesture's earlier
+    /// answers and late answers for its revisions are kept. When it ends
+    /// they go, and the paused picture waits for its exact answers.
+    pub fn set_editing(&self, on: bool) {
+        let mut answers = self.answers.lock().unwrap();
+        match (on, answers.editing_since) {
+            (true, None) => answers.editing_since = Some(answers.revision),
+            (false, Some(_)) => {
+                answers.editing_since = None;
+                answers.earlier.clear();
+            }
+            _ => {}
         }
     }
     pub fn producing_now(&self) -> bool {
@@ -773,6 +844,36 @@ impl CompatStore {
     /// The realm's answers for `revision` and `epoch`; stale ones are dropped.
     pub fn answer_all(&self, revision: u64, epoch: u64, answered: Vec<(CompatNeed, Reply)>) {
         let mut answers = self.answers.lock().unwrap();
+        if answers.epoch == epoch
+            && revision < answers.revision
+            && answers.editing_since.is_some_and(|since| revision >= since)
+        {
+            // A late answer for one of the gesture's revisions: kept to
+            // stand in for its next frames, never dropped.
+            for (need, reply) in answered {
+                if let Reply::Draw(answer) = reply {
+                    let key = need_key(&need);
+                    answers
+                        .earlier
+                        .entry((key.0.clone(), key.1.clone()))
+                        .or_default()
+                        .insert(key.2, (key, answer));
+                }
+            }
+            // Its batch is over: the needs that waited go now.
+            answers.in_flight = None;
+            let queued = std::mem::take(&mut answers.queued);
+            let queued = answers.fresh(queued);
+            if queued.is_empty() {
+                drop(answers);
+            } else {
+                self.dispatch(answers, queued);
+            }
+            if let Some(redraw) = self.redraw.lock().unwrap().clone() {
+                redraw();
+            }
+            return;
+        }
         if answers.revision != revision || answers.epoch != epoch {
             return;
         }
@@ -944,6 +1045,7 @@ impl CompatRasters for CompatStore {
         let stand_in = answers
             .nearest(composition, layer, ticks, scale, crop)
             .or_else(|| answers.nearest_after(composition, layer, ticks, scale, crop))
+            .or_else(|| answers.nearest_earlier(composition, layer, ticks, scale, crop))
             .cloned()
             .unwrap_or(CompatAnswer::Native);
         answers.stood_in.push(CompatNeed {
@@ -1487,6 +1589,44 @@ mod tests {
         store.begin_frame(Moment::Paused);
         assert!(matches!(answer_at(&store, "x", 1.), CompatAnswer::Missing));
         store.end_frame();
+        store.begin_frame(Moment::Scrub);
+        assert!(matches!(answer_at(&store, "x", 1.), CompatAnswer::Native));
+        store.end_frame();
+    }
+    /// A layer an extension draws, dragged: every step is a new revision and
+    /// the realm answers a step after the next one began. The step's frames
+    /// draw the gesture's earlier answers (never the layer without its
+    /// override, never a wait), keep the late answers, and the picture after
+    /// release waits for its exact answer.
+    #[test]
+    fn a_dragged_edit_draws_its_earlier_answers_and_keeps_late_ones() {
+        use crate::policy::Moment;
+        let store = CompatStore::default();
+        store.set_state(true, 7, 1);
+        store.answer_all(7, 1, vec![(at("x", 1.), draw(10))]);
+        store.set_editing(true);
+        store.set_state(true, 8, 1);
+        store.begin_frame(Moment::Scrub);
+        assert_eq!(
+            byte_of(answer_at(&store, "x", 1.)),
+            Some(10),
+            "the step before"
+        );
+        assert_eq!(store.end_frame().len(), 1, "marked late, redrawn exact");
+        // Revision 8's answer lands after revision 9 began: kept, and drawn.
+        store.set_state(true, 9, 1);
+        store.answer_all(8, 1, vec![(at("x", 1.), draw(20))]);
+        store.begin_frame(Moment::Scrub);
+        assert_eq!(byte_of(answer_at(&store, "x", 1.)), Some(20));
+        store.end_frame();
+        // Released: nothing earlier stands in; the paused picture waits.
+        store.set_editing(false);
+        store.set_state(true, 10, 1);
+        store.begin_frame(Moment::Paused);
+        assert!(matches!(answer_at(&store, "x", 1.), CompatAnswer::Missing));
+        store.end_frame();
+        // Not editing, an earlier revision's answer is dropped as before.
+        store.answer_all(9, 1, vec![(at("x", 1.), draw(30))]);
         store.begin_frame(Moment::Scrub);
         assert!(matches!(answer_at(&store, "x", 1.), CompatAnswer::Native));
         store.end_frame();

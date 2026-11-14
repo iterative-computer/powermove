@@ -508,6 +508,9 @@ impl Drop for Overrides {
 /// frame of its open composition at a time.
 pub(crate) fn published(engine: &EngineService, p: &pm_kernel::Published) {
     let store = engine.compat(p.snapshot.doc_id);
+    // An open gesture (a drag) first: its steps' revisions keep the answers
+    // of the ones before to stand in.
+    store.set_editing(p.entry.is_some());
     store.set_state(store.producing_now(), p.revision(), store.epoch());
     let fps = p
         .snapshot
