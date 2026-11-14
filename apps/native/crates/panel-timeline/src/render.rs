@@ -2063,7 +2063,7 @@ impl Frame {
             })
             .collect()
     }
-    pub fn hit_clip(&self, x: f64, y: f64) -> Option<(&str, Option<Edge>)> {
+    pub fn hit_clip<'a>(&'a self, x: f64, y: f64) -> Option<(&'a str, Option<Edge>)> {
         if y < 0.
             || y >= self.viewport.height
             || x < self.viewport.layer_column
@@ -2071,7 +2071,7 @@ impl Frame {
         {
             return None;
         }
-        self.ops.iter().rev().find_map(|o| {
+        let hit = |o: &'a Op, inside: bool| {
             if !o.id.starts_with("clip:") || o.clip.is_some_and(|clip| !clip.contains(x, y)) {
                 return None;
             }
@@ -2083,13 +2083,23 @@ impl Frame {
             } else {
                 None
             };
-            // A strip is drawn inside its layer's times; its trim zones reach
-            // past the drawn ends to the authored edges and beyond, over the
-            // strip's height.
             let b = o.bounds;
             let level = y >= b.y && y < b.y + b.height;
-            (b.contains(x, y) || (level && edge.is_some())).then(|| (&o.id[5..], edge))
-        })
+            let found = if inside {
+                b.contains(x, y)
+            } else {
+                level && edge.is_some()
+            };
+            found.then(|| (&o.id[5..], edge))
+        };
+        // The strip under the point first (two that meet: each trims its own
+        // end); else a trim zone, which reaches past a strip's drawn end to
+        // its layer's edge and beyond, over the strip's height.
+        self.ops
+            .iter()
+            .rev()
+            .find_map(|o| hit(o, true))
+            .or_else(|| self.ops.iter().rev().find_map(|o| hit(o, false)))
     }
 }
 
