@@ -358,6 +358,9 @@ impl Controller {
                 state.proxy = status(proxy, &state.proxy);
                 state.optimized = status(optimized, &state.optimized);
                 state.play_original = self.pro_media.plays_original(&project, id);
+                if let Some(key) = self.thumbs.key(id) {
+                    state.poster = Some(key);
+                }
             })
     }
     /// Readiness depends only on the media inputs, so an edit that left them
@@ -631,6 +634,7 @@ impl Controller {
         }
         self.start_builtins(cx);
         self.probe_builtin_media(cx);
+        self.want_thumbnails(cx);
         if self.builtins.updating {
             self.builtins.again = true;
             return;
@@ -1684,6 +1688,40 @@ impl Controller {
                 }
                 "agentMenu" => {
                     self.agent_menu(&runtime, &request, cx);
+                    continue;
+                }
+                // The Project panel's list/grid choice, kept in the
+                // profile: `{view}` saves it; without one, the saved one
+                // (list until the person chooses).
+                "project.view" => {
+                    let path = self.profile.join("Project").join("view.json");
+                    let view = request.input["view"].as_str().map(str::to_owned);
+                    let runtime = runtime.clone();
+                    let io = cx.background_executor().spawn(async move {
+                        match view {
+                            Some(view) if view == "list" || view == "grid" => {
+                                let _ = std::fs::create_dir_all(path.parent().expect("a folder"));
+                                std::fs::write(&path, json!({ "view": view }).to_string())
+                                    .map(|()| view)
+                                    .map_err(|e| format!("The view choice wasn't saved: {e}"))
+                            }
+                            Some(other) => Err(format!("Unknown Project view {other}")),
+                            None => Ok(std::fs::read(&path)
+                                .ok()
+                                .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+                                .and_then(|v| v["view"].as_str().map(str::to_owned))
+                                .filter(|v| v == "grid")
+                                .unwrap_or_else(|| "list".into())),
+                        }
+                    });
+                    cx.spawn(async move |this, cx| {
+                        let reply = io.await;
+                        if reply.as_deref() == Ok("grid") {
+                            let _ = this.update(cx, |c, cx| c.show_thumbnails(cx));
+                        }
+                        runtime.platform_reply(request.id, reply.map(Value::from));
+                    })
+                    .detach();
                     continue;
                 }
                 "project.menu" => {

@@ -185,6 +185,9 @@ pub struct NodeView {
     pub text: Option<SharedString>,
     pub symbol: Option<SharedString>,
     pub symbol_size: f32,
+    /// An `img`'s resource: an opaque key the host resolves (a Project
+    /// panel thumbnail, `media_thumbs`), never a path.
+    pub resource: Option<SharedString>,
     pub disabled: bool,
     pub events: Events,
     pub ax: Option<Ax>,
@@ -194,6 +197,9 @@ pub struct NodeView {
     pub native: Option<SharedString>,
     pub kit: Kit,
     pub virtual_window: Option<pm_builtins::virtualization::Window>,
+    /// A virtual list whose items are each exactly its `itemSize` tall
+    /// (`metadata.fixedItems`), so an item may fill its height.
+    pub fixed_items: bool,
     pub is_plain_text: bool,
     pub binding: Option<SharedString>,
     pub number: Option<NumberFacts>,
@@ -748,7 +754,10 @@ fn compile(
         })
         .flatten();
     let meta = node.props.get("metadata");
+    let fixed_items = virtual_window.is_some()
+        && meta.and_then(|m| m.get("fixedItems")) == Some(&Value::Bool(true));
     NodeView {
+        fixed_items,
         well: slot_control
             && matches!(
                 component,
@@ -797,6 +806,10 @@ fn compile(
         text: (!node.text.is_empty()).then(|| node.text.clone().into()),
         symbol,
         symbol_size: compiled.symbol_size.unwrap_or(t.metrics.symbol_panel),
+        resource: (node.r#type == "img")
+            .then(|| node.props.get("resource").and_then(Value::as_str))
+            .flatten()
+            .map(|r| SharedString::from(r.to_owned())),
         disabled,
         events: Events::of(node),
         ax,

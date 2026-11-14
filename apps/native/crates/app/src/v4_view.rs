@@ -153,6 +153,8 @@ pub struct SurfaceView {
     /// The panel item being dragged (its `dragstart` ran): `dragend` goes to
     /// it once the drag is over, wherever it was dropped.
     dragging: Option<Id>,
+    /// Each virtual list's width last told to its panel.
+    list_widths: HashMap<Id, f32>,
     scrub_gesture: Option<u64>,
     scrub_busy: bool,
     scrub_shown: Option<(Id, f64)>,
@@ -227,6 +229,7 @@ impl SurfaceView {
             scrub: None,
             scrub_ops: VecDeque::new(),
             dragging: None,
+            list_widths: HashMap::new(),
             scrub_gesture: None,
             scrub_busy: false,
             scrub_shown: None,
@@ -1752,25 +1755,22 @@ impl SurfaceView {
         }
         if let Some(geometry) = node.virtual_window {
             element = element.on_scroll_wheel(cx.listener(move |_, _, window, cx| {
-                cx.defer_in(window, move |v, _, cx| {
-                    let Some(scroll) = v.scrolls.get(&id) else {
-                        return;
-                    };
-                    let offset = -f32::from(scroll.offset().y) as f64;
-                    let height = f32::from(scroll.bounds().size.height) as f64;
-                    if let Ok(range) = geometry.visible(offset, height) {
-                        v.send(
-                            id,
-                            "rangechange",
-                            EventDetail {
-                                range: Some(range),
-                                ..Default::default()
-                            },
-                            cx,
-                        );
-                    }
-                });
+                cx.defer_in(window, move |v, _, cx| v.range_change(id, geometry, cx));
             }));
+            // A list laid out from its width (a grid's columns) hears of a
+            // new width once its frame has it.
+            if let Some(scroll) = self.scrolls.get(&id) {
+                let width = f32::from(scroll.bounds().size.width);
+                if width > 0. && self.list_widths.get(&id) != Some(&width) {
+                    let view = cx.entity().downgrade();
+                    cx.defer(move |cx| {
+                        let _ = view.update(cx, |v, cx| {
+                            v.list_widths.insert(id, width);
+                            v.range_change(id, geometry, cx);
+                        });
+                    });
+                }
+            }
         }
         // A floating surface springs in when it appears and out while its
         // panel keeps it for the exit (`pmKit.closing`): opacity, and a
@@ -1862,6 +1862,18 @@ impl SurfaceView {
                     if let Some(text) = &c.text {
                         children.push(text.clone().into_any_element());
                     }
+                }
+                _ if node.fixed_items => {
+                    let size = node.virtual_window.map_or(0., |g| g.item_size) as f32;
+                    children.push(
+                        div()
+                            .flex_none()
+                            .h(px(size))
+                            .flex()
+                            .flex_col()
+                            .child(self.element(*child, window, cx, skip))
+                            .into_any_element(),
+                    );
                 }
                 _ => children.push(self.element(*child, window, cx, skip)),
             }
@@ -2574,6 +2586,21 @@ impl SurfaceView {
                 window,
             ));
         }
+        // A picture the host made (a Project thumbnail): it fills the node,
+        // cropped to its shape; until it exists the node shows its fill.
+        if let Some(path) = node
+            .resource
+            .as_ref()
+            .and_then(|key| crate::media_thumbs::resolve(key))
+        {
+            element = element.child(
+                img(path)
+                    .absolute()
+                    .inset_0()
+                    .size_full()
+                    .object_fit(ObjectFit::Cover),
+            );
+        }
         if let Some(text) = &node.text {
             element = element.child(text.clone());
         }
@@ -2706,6 +2733,32 @@ impl Render for PanelDrag {
     }
 }
 impl SurfaceView {
+    /// A virtual list's visible rows and width (`rangechange`).
+    fn range_change(
+        &mut self,
+        id: Id,
+        geometry: pm_builtins::virtualization::Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(scroll) = self.scrolls.get(&id) else {
+            return;
+        };
+        let offset = -f32::from(scroll.offset().y) as f64;
+        let bounds = scroll.bounds();
+        let height = f32::from(bounds.size.height) as f64;
+        if let Ok(range) = geometry.visible(offset, height) {
+            self.send(
+                id,
+                "rangechange",
+                EventDetail {
+                    range: Some(range),
+                    width: Some(f32::from(bounds.size.width) as f64),
+                    ..Default::default()
+                },
+                cx,
+            );
+        }
+    }
     /// The item drag is over (dropped anywhere, or let go): the panel
     /// clears its drag state.
     pub fn end_drag(&mut self, cx: &mut Context<Self>) {

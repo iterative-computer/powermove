@@ -167,6 +167,53 @@ pub struct RetainedAsset {
 
 /// One host/pool per project window. A realm and native state exist separately
 /// for every extension; there is no editor-isolate shortcut for v4 built-ins.
+/// The Project panel's layout (media-browser §2): list rows, or a grid of
+/// `columns = max(1, ⌊(W − 2·inset + inset) ÷ (thumbnail_min + inset)⌋)`,
+/// each card a 16:9 thumbnail filling its column over a name and a meta
+/// line, rows `inset` apart. `width` is the grid's own width, inside the
+/// panel's `inset` margins (W − 2·inset); a grid without one yet is laid
+/// out at the narrowest column.
+fn project_layout(grid: bool, width: Option<f64>, m: &pm_design::Metrics) -> Value {
+    if !grid {
+        return json!({"columns": 1, "rowHeight": m.row});
+    }
+    let (inset, min) = (f64::from(m.inset), f64::from(m.thumbnail_min));
+    let width = width.filter(|w| w.is_finite() && *w > 0.).unwrap_or(min);
+    let columns = (((width + inset) / (min + inset)).floor() as usize).max(1);
+    let thumb_width = ((width - (columns - 1) as f64 * inset) / columns as f64).max(min / 2.);
+    let thumb_height = (thumb_width * 9. / 16.).round();
+    let row_height = thumb_height + f64::from(m.gap) + 2. * f64::from(m.field) + inset;
+    json!({
+        "columns": columns,
+        "rowHeight": row_height,
+        "thumbWidth": thumb_width.floor(),
+        "thumbHeight": thumb_height,
+    })
+}
+
+#[cfg(test)]
+mod project_layout_tests {
+    /// The list is one column of rows; the grid fills its width with
+    /// columns of at least the narrowest thumbnail (media-browser §2).
+    #[test]
+    fn the_project_grid_lays_out_columns_from_its_width() {
+        let m = pm_design::Tokens::new(pm_design::Scheme::Dark, Default::default()).metrics;
+        let list = super::project_layout(false, Some(900.), &m);
+        assert_eq!(list["columns"], 1);
+        assert_eq!(list["rowHeight"].as_f64(), Some(f64::from(m.row)));
+        let (inset, min) = (f64::from(m.inset), f64::from(m.thumbnail_min));
+        // Widths inside the panel's margins.
+        for (width, columns) in [(min, 1), (2. * min + inset, 2), (2. * min + inset - 1., 1), (576., 4), (66., 1)] {
+            let grid = super::project_layout(true, Some(width), &m);
+            assert_eq!(grid["columns"], columns, "width {width}");
+            let thumb = grid["thumbWidth"].as_f64().unwrap();
+            assert!(columns == 1 && width < min || thumb >= min - 1., "width {width}: {thumb}");
+            let height = grid["thumbHeight"].as_f64().unwrap();
+            assert!((height - thumb * 9. / 16.).abs() <= 1., "width {width}: {height}");
+        }
+    }
+}
+
 /// The Project panel's id (its media, bins and compositions).
 pub const PROJECT_PANEL: &str = "assets";
 pub struct Builtins {
@@ -2160,9 +2207,11 @@ impl EngineProxy for Broker {
                 .shared()
                 .settings_snapshot()
                 .map_err(Error::Host),
-            "project.layout" => Ok(
-                json!({"columns":1,"rowHeight":pm_design::Tokens::new(pm_design::Scheme::Dark,Default::default()).metrics.row}),
-            ),
+            "project.layout" => Ok(project_layout(
+                input.get("view").and_then(Value::as_str) == Some("grid"),
+                input.get("width").and_then(Value::as_f64),
+                &pm_design::Tokens::new(pm_design::Scheme::Dark, Default::default()).metrics,
+            )),
             "platform.enqueue" => {
                 let mut requests = self.platform.shared();
                 if requests.len() >= 128 {

@@ -56,6 +56,7 @@ mod mcp_services;
 mod media;
 mod media_import;
 mod media_refresh;
+mod media_thumbs;
 mod media_sequence;
 #[cfg(debug_assertions)]
 mod memory_review;
