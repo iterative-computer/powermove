@@ -167,6 +167,8 @@ export function ProjectView(props: ProjectViewProps) {
     setQuery(view.query);
   }, [view?.host_filter]);
   const [hovered, setHovered] = useState<string | null>(null);
+  /** The page last asked for by the list's range (offset, limit, document). */
+  const askedPage = useRef("");
   const [rename, setRename] = useState("");
   const [crumbFocus, setCrumbFocus] = useState(0);
   const document = view?.page.stamp.document;
@@ -969,10 +971,14 @@ export function ProjectView(props: ProjectViewProps) {
               // the next publication then brings without a scroll (the native
               // model clamps to what exists).
               const room = to >= count ? FIRST_PAGE : 0;
-              props.page(
-                from * layout.columns,
-                Math.min(4096, (to - from) * layout.columns + room),
-              );
+              const offset = from * layout.columns;
+              const limit = Math.min(4096, (to - from) * layout.columns + room);
+              // Every wheel event reports the range; a page is asked for only
+              // when it moves (each one republishes and redraws the panel).
+              const key = `${offset}:${limit}:${view.page.stamp.document}`;
+              if (key === askedPage.current) return;
+              askedPage.current = key;
+              props.page(offset, limit);
             }}
           >
             {Array.from({ length: end - start }, (_, index) => {

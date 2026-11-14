@@ -52,6 +52,8 @@ pub struct Thumbs {
     asked: HashSet<String>,
     queue: VecDeque<Item>,
     running: usize,
+    /// A republish is due for thumbnails made since the last one.
+    flush_due: bool,
     /// Bumped when a project opens: thumbnails finishing for the last one
     /// are dropped (asset ids are per project).
     generation: u64,
@@ -512,6 +514,24 @@ impl crate::session::Controller {
         self.thumbs.want(items);
         self.start_thumbnails(cx);
     }
+    /// Thumbnails made reach the panel together, at most every quarter
+    /// second: a bin of hundreds republished once per thumbnail made every
+    /// frame of a scroll heavy while they were made.
+    fn flush_thumbnails(&mut self, cx: &mut gpui::Context<Self>) {
+        if std::mem::replace(&mut self.thumbs.flush_due, true) {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(250))
+                .await;
+            let _ = this.update(cx, |c, cx| {
+                c.thumbs.flush_due = false;
+                c.update_builtins(cx);
+            });
+        })
+        .detach();
+    }
     fn start_thumbnails(&mut self, cx: &mut gpui::Context<Self>) {
         let dir = crate::media::cache_root(&self.profile).join("media-thumbnails");
         let generation = self.thumbs.generation();
@@ -529,7 +549,7 @@ impl crate::session::Controller {
                     c.thumbs.done(generation, asset, made);
                     c.start_thumbnails(cx);
                     if drew {
-                        c.update_builtins(cx);
+                        c.flush_thumbnails(cx);
                     }
                 });
             })

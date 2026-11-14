@@ -636,3 +636,27 @@ test("keys on a clicked card reach the grid: Space previews, arrows move", async
   ).toEqual(["Space", "Right"]);
   await root.dispose();
 });
+test("scrolling within the same rows asks for no new page", async () => {
+  const { root } = recorder();
+  const pages: unknown[] = [];
+  await root.render(
+    <ProjectView
+      view={huge}
+      input={() => {}}
+      menu={() => {}}
+      page={(...p) => pages.push(p)}
+      native={native}
+      layout={layout}
+    />,
+  );
+  const list = root.inspect().nodes.find((n) => n.type === "virtual-list")!;
+  // Every wheel event reports the range; most leave it where it was.
+  for (let i = 0; i < 5; i++)
+    await event(root, list.id, "rangechange", { range: [100, 106] });
+  await event(root, list.id, "rangechange", { range: [101, 107] });
+  expect(pages).toEqual([
+    [200, 12],
+    [202, 12],
+  ]);
+  await root.dispose();
+});
