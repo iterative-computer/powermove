@@ -256,6 +256,55 @@ fn an_hdr_source_takes_the_tone_mapping_chosen_for_it() {
     }
 }
 
+/// PQ and HLG clips in an HDR project keep their BT.2100 light, each pixel
+/// against the f64 oracle on the decoded frame (1.0 = 203 cd/m²; HLG shown
+/// at its 1000 cd/m² nominal peak): relative above 1, as the tone mapping
+/// test.
+#[test]
+fn hdr_sources_keep_their_light_in_an_hdr_project() {
+    for (file, signal) in [
+        ("hdr/hdr10.mov", HdrSignal::Pq),
+        ("hdr/hlg.mov", HdrSignal::Hlg),
+    ] {
+        let Some(path) = formats(file) else { return };
+        let src = MediaSource::open(&path).unwrap();
+        let v = src.probe.video.as_ref().unwrap();
+        let reading = resolve_video(v, &Interpretation::default());
+        let (w, h) = (v.width, v.height);
+        let mut r = Renderer::headless().unwrap();
+        let transfer = if signal == HdrSignal::Pq { "pq" } else { "hlg" };
+        let (mut doc, res) = document(&path, (w, h), 25.0, Some(json!({ "transfer": transfer })));
+        doc["color"] = json!({ "mode": "hdr" });
+        let ours = render(&mut r, &doc, (w, h), 0.13, &res);
+        let n = src.select(ticks(0.13).get()).unwrap();
+        let f = decode(&path, n);
+        let want: Vec<[f64; 3]> = frame_rgb(&f, reading.siting.value, reading.matrix.value)
+            .into_iter()
+            .map(|code| {
+                let light =
+                    pm_color::tonemap::to_working_light(signal, code.map(|v| v.clamp(0., 1.)));
+                pm_color::primaries::apply(&bt2020_to_709(), light)
+                    .map(pm_color::transfer::display_encode)
+            })
+            .collect();
+        let d = want
+            .iter()
+            .enumerate()
+            .flat_map(|(i, w)| {
+                let ours = &ours;
+                (0..3).map(move |c| (f64::from(ours[i * 4 + c]) - w[c]).abs() / w[c].abs().max(1.))
+            })
+            .fold(0f64, f64::max);
+        eprintln!(
+            "{file} in an HDR project: max |Δ| {d:.2e} (relative above 1) against the f64 oracle"
+        );
+        // As the tone mapping test's None: light kept up to the PQ curve's
+        // steep top magnifies f32 differences of the decoded codes about
+        // tenfold, so twice the BT.2390 bound.
+        assert!(d < 2e-3, "{file}: {d}");
+    }
+}
+
 /// The project's Output sets the clip defaults: an HDR clip keeps its light
 /// in either HDR output and is tone mapped only when the output is SDR; the
 /// HDR transfer (PQ or HLG) is a delivery choice and leaves the picture as is.

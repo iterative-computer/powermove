@@ -4383,17 +4383,20 @@ fn the_color_panel_lists_the_grade_and_writes_through_its_controls() {
                 .map(str::to_owned)
         })
         .collect();
+    // Every grade in the order it applies, each under its own name (an
+    // extension's included), and the panel's Add actions.
     for label in [
         "Amount",
         "Input Space",
         "Color Wheels",
         "Lift",
         "Temperature",
-        "Curves",
+        "Add Curve",
         "Load LUT…",
-        "Color Space Transform",
-        "More",
+        "Add Color Space Transform",
+        "Synthetic Look",
         "Strength",
+        "Remove Color Wheels",
     ] {
         assert!(
             labels.iter().any(|l| l == label),
@@ -4997,6 +5000,48 @@ fn properties_list_an_imported_models_parts_with_their_own_values() {
     presenter.snapshot(&mut model, 0., false).unwrap();
     let p = publish(&mut presenter);
     assert_eq!(section(&p, "3d.part.1")["focused"], false);
+}
+
+/// Playing, Properties shows a keyframed value at the playhead: the time the
+/// app hands over each display tick (`follow_time`) republishes that panel.
+#[test]
+fn properties_follow_the_playhead_while_playing() {
+    let actor = KernelActor::spawn(KernelConfig::default());
+    let project = pm_model::json::parse(r##"{"id":"synthetic","name":"Synthetic Film","compId":"c","w":640,"h":360,"fps":30,"dur":10,"bg":"#000000","assets":{},"comps":{},"layers":[{"id":"a","type":"shape","name":"Headline","from":0,"dur":10,"on":true,"lock":false,"p":{"opacity":{"v":100,"kf":[{"t":0,"v":0},{"t":10,"v":100}]},"position.x":{"v":320,"kf":[]},"position.y":{"v":180,"kf":[]}},"d":{"w":100,"h":100},"fx":[]}]}"##).unwrap();
+    let kernel = actor.handle();
+    kernel
+        .open("synthetic", OpenSource::Untitled(project))
+        .wait()
+        .unwrap()
+        .unwrap();
+    select_layer(&kernel, "a");
+    let mut panels = Builtins::new(kernel.clone(), "synthetic", || {}).unwrap();
+    panels.update_facts(json!({"time":0,"playing":false,"stage":[640.,360.]}));
+    finish(panels.mount("inspector").unwrap());
+    let opacity = |panels: &Builtins| {
+        let publication = panels.take_publications().pop()?;
+        publication
+            .surface
+            .nodes()
+            .values()
+            .find(|n| n.props.get("id").and_then(Value::as_str) == Some("value:opacity:0"))
+            .map(|n| Value::Object(n.props.clone()))
+    };
+    let first = opacity(&panels).expect("an opacity field");
+    assert!(first.to_string().contains("\"value\":0"), "{first}");
+    for time in [2.5, 5.] {
+        finish(
+            panels
+                .follow_time("inspector", time, true)
+                .unwrap()
+                .unwrap(),
+        );
+        let shown = opacity(&panels).expect("Properties published while playing");
+        let wanted = format!("\"value\":{}", time * 10.);
+        assert!(shown.to_string().contains(&wanted), "{time}: {shown}");
+    }
+    assert!(panels.follow_time("not-open", 1., true).is_none());
+    assert!(panels.take_errors().is_empty());
 }
 
 /// Properties' Parent and Track Matte rows carry only what the closed

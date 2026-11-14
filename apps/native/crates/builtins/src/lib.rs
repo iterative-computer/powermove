@@ -1389,6 +1389,31 @@ impl Builtins {
             .map(|(id, realm)| (id.clone(), realm.eval("__pmBuiltin.publish()")))
             .collect()
     }
+    /// Playing, one panel follows the playhead (Properties' keyframed
+    /// values): its time facts move and it alone publishes, so the others,
+    /// and the timeline's native playhead, cost nothing. `None` while the
+    /// panel is not running.
+    pub fn follow_time(
+        &self,
+        panel: &str,
+        time: f64,
+        playing: bool,
+    ) -> Option<Result<Ticket<Evaluation>>> {
+        let realm = self.realms.shared().get(panel).cloned()?;
+        let entry = self.broker.entry(panel)?;
+        {
+            let mut facts = self.broker.facts.shared();
+            facts["time"] = json!(time);
+            facts["playing"] = json!(playing);
+        }
+        let backend = entry.shared().backend.clone();
+        {
+            let mut backend = backend.shared();
+            backend.native.facts["time"] = json!(time);
+            backend.native.facts["playing"] = json!(playing);
+        }
+        Some(realm.eval("__pmBuiltin.publish()"))
+    }
     pub fn take_publications(&self) -> Vec<Publication> {
         std::mem::take(&mut *self.broker.publications.shared())
             .into_values()

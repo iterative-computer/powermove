@@ -1246,7 +1246,7 @@ impl Controller {
             output: popout.initial_output(),
             layer: Some(popout.layer.clone()),
             rate: self.rate,
-            end: Some((self.duration * pm_protocol::common::TICKS_PER_SECOND as f64) as i64),
+            end: Some((crate::session::composition_duration(&p) * pm_protocol::common::TICKS_PER_SECOND as f64) as i64),
             audio: false,
         }) {
             Ok(viewer) => {

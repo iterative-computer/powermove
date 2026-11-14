@@ -51,6 +51,48 @@ export function grade(p: Projection): GradeEffect[] {
   return out;
 }
 
+/** Each grade's name as the panel shows it: its effect's name (a curve by
+ * its channel, "Master Curve"), numbered from the second of the same name in
+ * the order they apply ("Color Wheels", "Color Wheels 2"). */
+export function names(tools: GradeEffect[]): string[] {
+  const seen = new Map<string, number>();
+  return tools.map((g) => {
+    const base = baseName(g);
+    const n = (seen.get(base) ?? 0) + 1;
+    seen.set(base, n);
+    return n === 1 ? base : `${base} ${n}`;
+  });
+}
+function baseName(g: GradeEffect) {
+  if (g.header.definition !== CURVES) return g.header.label;
+  const channel = parameter(g, "channel");
+  const label = channel?.parameter.options?.find(
+    (o) => o.v === channel.parameter.value,
+  )?.label;
+  return `${label ?? CURVE_CHANNELS[Number(channel?.parameter.value ?? 0)] ?? "Master"} Curve`;
+}
+
+/** Where a new grade goes: after the last grade, else the stack's end. */
+export function addSlot(tools: GradeEffect[]): number | undefined {
+  const last = tools.at(-1)?.header.ordinal;
+  return last === undefined ? undefined : last + 1;
+}
+
+/** The intent that moves grade `i` one place up (-1) or down (1) among the
+ * grades, past any other effect between them (the effect stack's own order,
+ * as Effect Controls shows it); null at either end. */
+export function move(
+  tools: GradeEffect[],
+  i: number,
+  direction: -1 | 1,
+): Intent | null {
+  const g = tools[i];
+  const other = tools[i + direction];
+  const at = other?.header.ordinal;
+  if (!g || at === undefined) return null;
+  return { type: "drop", id: g.header.id, slot: direction < 0 ? at : at + 1 };
+}
+
 /** What the panel asks of the model so every grading row is projected:
  * the whole list as its window, and each grading effect disclosed. */
 export function coverage(p: Projection): Intent[] {
@@ -143,6 +185,8 @@ export const ACTIONS: { action: string; agent: string[] }[] = [
   { action: "Add Color Wheels", agent: ["apply_commands", "add_effect"] },
   { action: "Add Curve", agent: ["apply_commands", "add_effect"] },
   { action: "Remove a tool", agent: ["apply_commands", "remove_effect"] },
+  // set_effect's index: the effect's place in the stack.
+  { action: "Move a tool up or down", agent: ["apply_commands", "set_effect"] },
   {
     // Adds Apply Color LUT, or relinks the one whose file is missing.
     action: "Load LUT…",

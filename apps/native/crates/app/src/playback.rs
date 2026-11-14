@@ -238,7 +238,7 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                     if std::env::var_os("PM_ENGINE_TRACE").is_some() {
                         let _ = viewer.command(pm_protocol::clock::TransportCommand::SetLoop { range: Some(pm_protocol::common::TickRange {
                             start: pm_protocol::common::Ticks::ZERO,
-                            end: pm_protocol::common::Ticks::new((v.duration * pm_protocol::common::TICKS_PER_SECOND as f64) as i64).unwrap_or(pm_protocol::common::Ticks::from_whole_seconds(1))
+                            end: pm_protocol::common::Ticks::new((v.duration() * pm_protocol::common::TICKS_PER_SECOND as f64) as i64).unwrap_or(pm_protocol::common::Ticks::from_whole_seconds(1))
                         }) });
                     }
                 }
@@ -283,7 +283,7 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                     // Never before the sample itself (a run's pre-roll is ahead).
                     let at=shown_at(&clock,vsync,playing);
                     let head_time=clock.media_time_at(at);
-                    let fraction=(head_time.get()as f64/pm_protocol::common::TICKS_PER_SECOND as f64/v.duration).clamp(0.,1.);
+                    let fraction=(head_time.get()as f64/pm_protocol::common::TICKS_PER_SECOND as f64/v.duration()).clamp(0.,1.);
                     // One transaction for the engine's layer feed and this placement.
                     // The feed sets the playhead layer to a 1×1 progress frame; committed
                     // apart, a vsync between the two showed the head as that dot (gone).

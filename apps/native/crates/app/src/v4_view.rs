@@ -1137,6 +1137,11 @@ impl SurfaceView {
             .filter(|(key, _)| key.as_str() == semantic || key.ends_with(semantic))
             .min_by_key(|(key, _)| key.len())
             .map(|(_, id)| *id);
+        // A value committed to a field goes where typing and Return send it
+        // (a bound field writes through its lease, not a JS listener).
+        if let (Some(id), "change", Some(value)) = (id, event, value.clone()) {
+            return self.change(id, value, cx);
+        }
         if let Some(id) = id {
             let detail = EventDetail {
                 value,
@@ -2431,6 +2436,12 @@ impl SurfaceView {
             );
         if !disabled && (clickable || events.double_click) {
             element = element.on_click(cx.listener(move |v, event: &ClickEvent, window, cx| {
+                // A node that only takes double-clicks (a layer's name) leaves
+                // a single click to what it sits in (its row selects).
+                let double = events.double_click && event.click_count() == 2;
+                if !clickable && !double {
+                    return;
+                }
                 cx.stop_propagation();
                 let position = event.position();
                 let detail = v.detail(position, Some(0), 0, event.click_count(), event.modifiers());
