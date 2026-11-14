@@ -87,6 +87,8 @@
       "settings_width": 760.0,
       "settings_height": 520.0,
       "settings_sidebar": 200.0,
+      "settings_column": 680.0,
+      "store_column": 960.0,
       "menu_inset": 12.0,
       "menu_row": 30.0,
       "inner_radius": 6.0,
@@ -207,7 +209,8 @@
       "overlay_idle": 2.0,
       "tooltip_delay": 0.38,
       "tooltip_warm": 0.6,
-      "note_hold": 2.2
+      "note_hold": 2.2,
+      "menu_fade": 0.1
     },
     "translucency": {
       "ground": 15658737,
@@ -315,6 +318,8 @@
       "settings_width": 760.0,
       "settings_height": 520.0,
       "settings_sidebar": 200.0,
+      "settings_column": 680.0,
+      "store_column": 960.0,
       "menu_inset": 12.0,
       "menu_row": 30.0,
       "inner_radius": 6.0,
@@ -435,7 +440,8 @@
       "overlay_idle": 2.0,
       "tooltip_delay": 0.38,
       "tooltip_warm": 0.6,
-      "note_hold": 2.2
+      "note_hold": 2.2,
+      "menu_fade": 0.1
     },
     "translucency": {
       "ground": 15658737,
@@ -543,6 +549,8 @@
       "settings_width": 760.0,
       "settings_height": 520.0,
       "settings_sidebar": 200.0,
+      "settings_column": 680.0,
+      "store_column": 960.0,
       "menu_inset": 12.0,
       "menu_row": 30.0,
       "inner_radius": 6.0,
@@ -663,7 +671,8 @@
       "overlay_idle": 2.0,
       "tooltip_delay": 0.38,
       "tooltip_warm": 0.6,
-      "note_hold": 2.2
+      "note_hold": 2.2,
+      "menu_fade": 0.1
     },
     "translucency": {
       "ground": 15658737,
@@ -771,6 +780,8 @@
       "settings_width": 760.0,
       "settings_height": 520.0,
       "settings_sidebar": 200.0,
+      "settings_column": 680.0,
+      "store_column": 960.0,
       "menu_inset": 12.0,
       "menu_row": 30.0,
       "inner_radius": 6.0,
@@ -891,7 +902,8 @@
       "overlay_idle": 2.0,
       "tooltip_delay": 0.38,
       "tooltip_warm": 0.6,
-      "note_hold": 2.2
+      "note_hold": 2.2,
+      "menu_fade": 0.1
     },
     "translucency": {
       "ground": 15658737,
@@ -999,6 +1011,8 @@
       "settings_width": 760.0,
       "settings_height": 520.0,
       "settings_sidebar": 200.0,
+      "settings_column": 680.0,
+      "store_column": 960.0,
       "menu_inset": 12.0,
       "menu_row": 30.0,
       "inner_radius": 6.0,
@@ -1119,7 +1133,8 @@
       "overlay_idle": 2.0,
       "tooltip_delay": 0.38,
       "tooltip_warm": 0.6,
-      "note_hold": 2.2
+      "note_hold": 2.2,
+      "menu_fade": 0.1
     },
     "translucency": {
       "ground": 789001,
@@ -1227,6 +1242,8 @@
       "settings_width": 760.0,
       "settings_height": 520.0,
       "settings_sidebar": 200.0,
+      "settings_column": 680.0,
+      "store_column": 960.0,
       "menu_inset": 12.0,
       "menu_row": 30.0,
       "inner_radius": 6.0,
@@ -1347,7 +1364,8 @@
       "overlay_idle": 2.0,
       "tooltip_delay": 0.38,
       "tooltip_warm": 0.6,
-      "note_hold": 2.2
+      "note_hold": 2.2,
+      "menu_fade": 0.1
     },
     "translucency": {
       "ground": 789001,
@@ -1455,6 +1473,8 @@
       "settings_width": 760.0,
       "settings_height": 520.0,
       "settings_sidebar": 200.0,
+      "settings_column": 680.0,
+      "store_column": 960.0,
       "menu_inset": 12.0,
       "menu_row": 30.0,
       "inner_radius": 6.0,
@@ -1575,7 +1595,8 @@
       "overlay_idle": 2.0,
       "tooltip_delay": 0.38,
       "tooltip_warm": 0.6,
-      "note_hold": 2.2
+      "note_hold": 2.2,
+      "menu_fade": 0.1
     },
     "translucency": {
       "ground": 789001,
@@ -1683,6 +1704,8 @@
       "settings_width": 760.0,
       "settings_height": 520.0,
       "settings_sidebar": 200.0,
+      "settings_column": 680.0,
+      "store_column": 960.0,
       "menu_inset": 12.0,
       "menu_row": 30.0,
       "inner_radius": 6.0,
@@ -1803,7 +1826,8 @@
       "overlay_idle": 2.0,
       "tooltip_delay": 0.38,
       "tooltip_warm": 0.6,
-      "note_hold": 2.2
+      "note_hold": 2.2,
+      "menu_fade": 0.1
     },
     "translucency": {
       "ground": 789001,

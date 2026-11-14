@@ -130,6 +130,7 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `metrics.ruler` | Timeline ruler height | 24 | 24 | 24 | 24 |
 | `metrics.section_gap` | Space above each Settings section after the first | 40 | 40 | 40 | 40 |
 | `metrics.segment_radius` | Segment and tab corner inside a pill (concentric) | 6 | 6 | 6 | 6 |
+| `metrics.settings_column` | Settings form column's greatest width, insets included | 680 | 680 | 680 | 680 |
 | `metrics.settings_height` | Settings window height | 520 | 520 | 520 | 520 |
 | `metrics.settings_sidebar` | Settings sidebar width | 200 | 200 | 200 | 200 |
 | `metrics.settings_width` | Settings window width | 760 | 760 | 760 | 760 |
@@ -142,6 +143,7 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `metrics.splitter_reach` | How far a dock divider's grab reaches into the panels beside its gap | 4 | 4 | 4 | 4 |
 | `metrics.status` | Status bar height | 24 | 24 | 24 | 24 |
 | `metrics.status_dot` | Attention dot and drop insertion-line end circle | 6 | 6 | 6 | 6 |
+| `metrics.store_column` | Store content column's greatest width | 960 | 960 | 960 | 960 |
 | `metrics.symbol_action` | SF Symbol size of a surface's one primary action glyph | 20 | 20 | 20 | 20 |
 | `metrics.symbol_inline` | SF Symbol size inside rows | 12 | 12 | 12 | 12 |
 | `metrics.symbol_panel` | SF Symbol size in panel headers | 14 | 14 | 14 | 14 |
@@ -203,6 +205,7 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `motion.enter` | Spring response for appearing surfaces (s) | 0.32 | 0.32 | 0.32 | 0.32 |
 | `motion.exit` | Fade-out for dismissed surfaces (s) | 0.12 | 0.12 | 0.12 | 0.12 |
 | `motion.interaction` | Hover, press and selection feedback (s) | 0.075 | 0.075 | 0.075 | 0.075 |
+| `motion.menu_fade` | Palette and pop-up menu fade in and out (s) | 0.1 | 0.1 | 0.1 | 0.1 |
 | `motion.note_hold` | Time a status note holds before the status line returns (s) | 2.2 | 2.2 | 2.2 | 2.2 |
 | `motion.overlay_idle` | Still time before the Focus overlay capsule fades (s) | 2 | 2 | 2 | 2 |
 | `motion.reduced` | Cross-fade used under Reduce Motion (s) | 0.15 | 0.15 | 0.15 | 0.15 |
