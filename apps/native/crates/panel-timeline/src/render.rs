@@ -1350,6 +1350,8 @@ fn strip_state(c: &Clip) -> pm_design::StripState {
         StripState::Rest
     }
 }
+/// The least width a strip is drawn at, in points (v1's 4 px).
+const MIN_STRIP: f64 = 4.;
 /// Paints clip `c` and gives back its strip's box on screen (none when the
 /// clip is off screen).
 fn paint_clip(
@@ -1364,10 +1366,14 @@ fn paint_clip(
     let m = t.metrics;
     let colors = &t.colors;
     // Each strip is its own object: an even gap all round (pm-design `strip_gap`).
+    // A layer shorter than a few points at this zoom (a tenth of a second
+    // zoomed out) still shows, `MIN_STRIP` wide from its start (v1 drew every
+    // clip at least 4 px wide).
     let gap = t.strip_gap() as f64;
+    let start = v.x(c.from) + gap / 2.;
     let r = span(
-        v.x(c.from) + gap / 2.,
-        v.x(c.from + c.duration) - gap / 2.,
+        start,
+        (v.x(c.from + c.duration) - gap / 2.).max(start + MIN_STRIP),
         y + gap,
         h - 2. * gap,
         v,

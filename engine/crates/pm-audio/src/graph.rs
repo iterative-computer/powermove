@@ -28,8 +28,8 @@
 //!   follows the speed per clip (`pitch`, [`crate::conform::Pitch`]); a
 //!   conformed frame rate (Interpret Footage) scales the soundtrack's time
 //!   with the picture's.
-//! * A negative layer start plays from the right source time (the legacy
-//!   walk clamps `from` to 0 and shifts the clip).
+//! * A negative layer start plays from the right source time, as today's
+//!   walk does since 16087057b.
 //! * Animated `audioMuted`, precomposition `on`, and groups enclosing a
 //!   precomposition are evaluated over time, not only when static.
 
@@ -372,9 +372,10 @@ impl<'d> Walk<'_, 'd> {
                     window.0.max(offset + from),
                     window.1.min(offset + from + dur),
                 );
-                // Today clamps a negative start to 0 (`audioLayers`), so a
-                // layer starting before its composition still sounds there.
-                let today = offset + from.max(0.0);
+                // Today keeps a negative start (`audioLayers`): a layer
+                // starting before its composition sounds there from the
+                // matching source time.
+                let today = offset + from;
                 if window.1 - window.0 <= MIN_WINDOW
                     && path.window.1.min(today + dur) - path.window.0.max(today) <= MIN_WINDOW
                 {
