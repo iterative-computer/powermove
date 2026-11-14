@@ -419,7 +419,9 @@ impl Render for TextField {
                     move |bounds, _, window, cx| {
                         // A new width wraps the text anew: count again.
                         let width = f32::from(bounds.size.width);
-                        if multiline.is_some() && (seen.replace(width) - width).abs() > 0.5 {
+                        if (multiline.is_some() || composer.is_some())
+                            && (seen.replace(width) - width).abs() > 0.5
+                        {
                             let _ = entity.update(cx, |_, cx| cx.notify());
                         }
                         let mask = window.content_mask().bounds;

@@ -257,7 +257,23 @@ impl SurfaceView {
     /// A reopened panel window keeps its view; later publications install
     /// there, and so does one that finished while no window was open.
     pub fn attach(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.window = window.window_handle();
+        let handle = window.window_handle();
+        if handle != self.window && (!self.controls.is_empty() || !self.fields.is_empty()) {
+            // AppKit controls and editors live in the window they were
+            // mounted in. A reopened window (the Agent popover closes and
+            // opens again with the same view) mounts its own, or its
+            // pop-ups, buttons and composer would be missing.
+            self.controls.clear();
+            self.fields.clear();
+            self.leases.clear();
+            self.option_sets.clear();
+            self.subscriptions.clear();
+            cx.defer_in(window, |v, window, cx| {
+                v.reconcile(window, cx);
+                cx.notify();
+            });
+        }
+        self.window = handle;
         if let Some(compiled) = self.parked.take() {
             self.install(compiled, window, cx);
         }
