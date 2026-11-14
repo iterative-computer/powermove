@@ -309,7 +309,9 @@ fn paletted_grey_and_16_bit_tga_are_drawn() {
         five.extend(w.to_le_bytes());
     }
     let widen = |v: u16| f32::from(((v << 3) | (v >> 2)) as u8) / 255.0;
-    let cases: [(&str, Vec<u8>, Vec<[f32; 3]>); 3] = [
+    // (file, its bytes, each pixel's colour codes in display sRGB)
+    type Case = (&'static str, Vec<u8>, Vec<[f32; 3]>);
+    let cases: [Case; 3] = [
         (
             "paletted.tga",
             paletted,
