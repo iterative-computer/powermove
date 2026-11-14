@@ -436,8 +436,8 @@ fn a_waveform_shows_the_sound_where_the_mix_plays_it() {
 /// Matroska keeps no length per stream: a ten-second picture with half a
 /// second of sound must not report ten seconds of sound. The imported
 /// sound length is where the mix stops playing it, read either way, for
-/// PCM, FLAC, AAC and Opus (the coded ones within one codec frame: their
-/// container times are whole milliseconds and the mix drops the priming).
+/// PCM, FLAC, AAC and Opus (AAC to Matroska's millisecond, its last block
+/// ending the sound; Opus within one codec frame).
 #[test]
 fn a_short_soundtrack_in_matroska_reports_its_own_length() {
     let dir = temp_dir("clip-origin-mkv-short-sound");
@@ -446,7 +446,7 @@ fn a_short_soundtrack_in_matroska_reports_its_own_length() {
     for (codec, slack) in [
         ("pcm_s16le", 48.0),
         ("flac", 48.0),
-        ("aac", 1024.0),
+        ("aac", 48.0),
         ("libopus", 960.0),
     ] {
         let file = dir.join(format!("short-{codec}.mkv"));
@@ -689,3 +689,70 @@ fn a_soundtrack_presented_before_zero_is_placed_against_the_presentation() {
     }
 }
 
+/// AAC in Matroska has no edit list: the stream's end is where its last
+/// block ends (that block's duration), and what the decoder returns past it
+/// is the encoder's padding. The mix ends the sound there, and the length
+/// an import records is the same, to Matroska's millisecond, read either
+/// way, with a picture and without.
+#[test]
+fn aac_in_matroska_ends_where_its_last_block_ends() {
+    let dir = temp_dir("clip-origin-mkv-aac-end");
+    let wav = dir.join("tone.wav");
+    write_wav(&wav, SR, &[tone(SR, 0.5, 1000.0, 0.5)]);
+    let with_picture = dir.join("aac.mkv");
+    let status = std::process::Command::new(ffmpeg())
+        .args(["-hide_banner", "-loglevel", "error", "-y"])
+        .args([
+            "-f",
+            "lavfi",
+            "-i",
+            "color=gray:size=64x64:rate=25:duration=2",
+        ])
+        .arg("-i")
+        .arg(&wav)
+        .args(["-c:v", "mpeg4", "-q:v", "8", "-c:a", "aac"])
+        .arg(&with_picture)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let alone = dir.join("aac.mka");
+    let status = std::process::Command::new(ffmpeg())
+        .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
+        .arg(&wav)
+        .args(["-c:a", "aac"])
+        .arg(&alone)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let end = SR as f64 * 0.5;
+    for (path, kind) in [(&with_picture, "video"), (&alone, "audio")] {
+        let name = path.file_name().unwrap().to_string_lossy();
+        for (timing, member) in [
+            (pm_media::clip::ClipTiming::Presentation, r#","timing":2"#),
+            (pm_media::clip::ClipTiming::Legacy, ""),
+        ] {
+            let a = audio("A", "v", 0.0, 1.0, "", "");
+            let text = format!(
+                r#"{{"id":"P","compId":"C","name":"T","w":320,"h":180,"fps":25,"dur":1,"layers":[{a}],"comps":{{}},"assets":{{"v":{{"id":"v","kind":"{kind}"{member}}}}},"params":{{}}}}"#
+            );
+            let doc = pm_model::Document::new(Some(pm_model::json::parse(&text).unwrap()), 1);
+            let rig = Rig::new(&[("v", path)]);
+            let mut mixer = rig.mixer(doc, "C", MixFormat::stereo(SR));
+            let out = rig.render(&mut mixer, 0, SR as i64, 4096).remove(0);
+            let last = out.iter().rposition(|v| v.abs() > 1e-3).unwrap() + 1;
+            assert!(
+                (last as f64 - end).abs() <= 48.0,
+                "{name}, {timing:?}: the mix plays to sample {last}, the sound ends at {end}"
+            );
+            let facts = pm_media::facts::media_facts_as(path, None, timing).unwrap();
+            let length = facts
+                .audio_duration
+                .or(facts.duration.filter(|_| kind == "audio"))
+                .map(|d| d * f64::from(SR));
+            assert!(
+                length.is_some_and(|l| (l - end).abs() <= 48.0),
+                "{name}, {timing:?}: imported sound {length:?} samples, the sound ends at {end}"
+            );
+        }
+    }
+}
