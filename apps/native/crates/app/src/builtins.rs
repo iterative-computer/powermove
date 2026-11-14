@@ -1920,6 +1920,9 @@ impl crate::timeline_surface::Delegate for ControllerDelegate {
     fn drop_media(&self, drop: crate::timeline_surface::MediaDrop, cx: &mut App) {
         let _ = self.0.update(cx, |v, cx| v.drop_media(drop, cx));
     }
+    fn drop_effect(&self, drop: crate::timeline_surface::EffectDrop, cx: &mut App) {
+        let _ = self.0.update(cx, |v, cx| v.drop_effect(drop, cx));
+    }
     fn skim(&self, seconds: Option<f64>, cx: &mut App) {
         let input = crate::skimming::input();
         let _ = self.0.update(cx, |v, _| v.skim(seconds, input));
@@ -2099,6 +2102,12 @@ impl crate::gizmo::Host for ControllerDelegate {
             let at = v.time();
             v.place_project_items(at, Some(0), cx);
         });
+    }
+    fn drop_effect(&self, drop: crate::timeline_surface::EffectDrop, cx: &mut App) {
+        let _ = self.0.update(cx, |v, cx| v.drop_effect(drop, cx));
+    }
+    fn drop_files(&self, paths: Vec<std::path::PathBuf>, alt: bool, cx: &mut App) {
+        let _ = self.0.update(cx, |v, cx| v.drop_on_viewer(paths, alt, cx));
     }
     fn time(&self, cx: &App) -> f64 {
         self.0.upgrade().map_or(0., |c| c.read(cx).time())

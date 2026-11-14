@@ -221,6 +221,14 @@ pub fn import_paths(
 ) -> async_channel::Receiver<Vec<PathBuf>> {
     choose_paths(window, folders, multiple, extensions, "Import")
 }
+/// Import Media's panel: media files and folders, several at once (a folder
+/// of numbered frames is offered as an image sequence).
+pub fn import_media_paths(
+    window: &NSWindow,
+    extensions: &[&str],
+) -> async_channel::Receiver<Vec<PathBuf>> {
+    open_panel(window, true, true, true, extensions, "Import")
+}
 
 #[cfg(debug_assertions)]
 thread_local! {
@@ -369,6 +377,16 @@ pub fn choose_paths(
     extensions: &[&str],
     prompt: &str,
 ) -> async_channel::Receiver<Vec<PathBuf>> {
+    open_panel(window, !folders, folders, multiple, extensions, prompt)
+}
+fn open_panel(
+    window: &NSWindow,
+    files: bool,
+    folders: bool,
+    multiple: bool,
+    extensions: &[&str],
+    prompt: &str,
+) -> async_channel::Receiver<Vec<PathBuf>> {
     use objc2::{msg_send, runtime::AnyObject};
     use objc2_foundation::NSArray;
     let (tx, rx) = async_channel::bounded(1);
@@ -379,11 +397,11 @@ pub fn choose_paths(
     }
     let mtm = MainThreadMarker::new().unwrap();
     let panel = NSOpenPanel::openPanel(mtm);
-    panel.setCanChooseFiles(!folders);
+    panel.setCanChooseFiles(files);
     panel.setCanChooseDirectories(folders);
     panel.setAllowsMultipleSelection(multiple);
     panel.setPrompt(Some(&NSString::from_str(prompt)));
-    panel.setCanCreateDirectories(folders);
+    panel.setCanCreateDirectories(folders && !files);
     let types: Vec<Retained<AnyObject>> = extensions
         .iter()
         .filter_map(|extension| unsafe {

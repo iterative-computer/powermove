@@ -263,6 +263,10 @@ export function EffectsPanel({
                 onDoubleClick={() => {
                   void model.apply(item.id);
                 }}
+                // Lifts onto a layer's row or the viewer (the host starts the
+                // drag; `metadata.item` names the effect). A definition that
+                // failed to load doesn't lift.
+                onDragStart={item.failed ? undefined : () => {}}
                 onPointerMove={() => model.hover(row.key)}
                 onFocus={() => {
                   model.focused = row.key;
