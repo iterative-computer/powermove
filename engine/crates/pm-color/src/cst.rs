@@ -143,11 +143,13 @@ pub fn gamut(index: usize) -> Chromaticities {
             [0.095612, -0.084589],
             D65,
         ),
+        // Blackmagic gives its white to seven digits (D65 rounded to four is
+        // 3e-5 off in the matrix); the LUT effect reads the same.
         11 => c(
             [0.7177215, 0.3171181],
             [0.2280410, 0.8615690],
             [0.1005841, -0.0820452],
-            D65,
+            [0.3127170, 0.3290312],
         ),
         _ => tagged(Primaries::Bt709),
     }
@@ -700,9 +702,8 @@ mod tests {
             let m = conversion(0, g);
             for j in 0..3 {
                 for i in 0..3 {
-                    // The LUT's Blackmagic matrix came from a white given to
-                    // more digits; they differ by 3e-5 at most.
-                    assert!((m[i][j] - n[j * 3 + i]).abs() < 5e-5, "{}", GAMUTS[g]);
+                    // Both from the published primaries and white.
+                    assert!((m[i][j] - n[j * 3 + i]).abs() < 2e-9, "{}", GAMUTS[g]);
                 }
             }
         }
