@@ -95,8 +95,8 @@ function RowControl({
     ) : null;
   if (row.control === "colour" && typeof row.value === "string")
     return <UI.ColorWell {...common} minimal value={row.value} />;
-  if (row.control === "action")
-    return (
+  if (row.control === "action") {
+    const button = (
       <Button
         // A new label (Sign In… → Sign Out) is a new control: the native
         // button keeps the title it was created with.
@@ -108,6 +108,15 @@ function RowControl({
         }}
       />
     );
+    // A size beside its button (Settings › Storage: 9.3 GB  Delete…).
+    if (typeof row.value !== "string") return button;
+    return (
+      <div style={trailing}>
+        <Copy secondary>{row.value}</Copy>
+        {button}
+      </div>
+    );
+  }
   if (row.control === "status")
     return <Copy>{typeof row.value === "string" ? row.value : ""}</Copy>;
   // An unknown authored value stays in the service; never coerce it into a default.

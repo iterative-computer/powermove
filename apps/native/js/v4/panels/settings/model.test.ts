@@ -14,6 +14,7 @@ for (const project of [undefined, { id: "p", name: "Fixture" }])
       "general",
       "shortcuts",
       "media",
+      "storage",
       "accounts",
       "transcription",
       "extensions",

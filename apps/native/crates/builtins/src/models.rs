@@ -737,11 +737,14 @@ impl Backend {
             publication["memory"] =
                 json!({"enabled":pm_model::memory::enabled(&root),"entries":entries});
         }
-        // Settings › Shortcuts and General › Timeline show with or without a project.
+        // Settings › Shortcuts, General › Timeline and Storage show with or
+        // without a project.
         let timeline_rows = self.timeline_rows();
+        let storage_rows = self.storage_rows();
         if let Some(rows) = publication["rows"].as_array_mut() {
             rows.extend(timeline_rows);
             rows.extend(shortcut_rows);
+            rows.extend(storage_rows);
         }
         // Targets stay here: recorded for this revision, not published.
         let mut targets = serde_json::Map::new();

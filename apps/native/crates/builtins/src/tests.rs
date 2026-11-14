@@ -4102,6 +4102,33 @@ fn media_and_playback_rows_show_without_a_project_and_follow_their_fact() {
     assert_ne!(backend.settings_snapshot().unwrap()["revision"], before);
 }
 #[test]
+fn storage_rows_show_without_a_project_and_a_new_measurement_republishes() {
+    let actor = actor();
+    let identity = pm_surface::host_api::Identity {
+        realm: "settings".into(),
+        generation: 1,
+        project: "builtin-application".into(),
+    };
+    let mut backend = data::Backend::new(actor.handle(), identity, "settings", true).unwrap();
+    let fact = |value: &str| {
+        json!({"storageSettings":{"rows":[
+            {"id":"storage.native.total","section":"storage","group":"Powermove",
+             "label":"Space Used","control":"status","value":value},
+            {"id":"storage.original.backups","section":"storage","group":"Original App",
+             "label":"Backups","control":"action","action":"storage.delete.backups",
+             "actionLabel":"Delete…","value":"9.3 GB"}]}})
+    };
+    backend.native.facts = fact("Calculating…");
+    let before = backend.settings_snapshot().unwrap();
+    let rows = before["rows"].as_array().unwrap();
+    assert!(rows.iter().any(|r| r["id"] == "storage.original.backups"));
+    backend.native.facts = fact("1.2 GB");
+    let after = backend.settings_snapshot().unwrap();
+    assert_ne!(after["revision"], before["revision"]);
+    // A removal is a destructive row action: it reaches the app as itself.
+    assert!(super::settings::destructive_for_test("storage.delete.backups"));
+}
+#[test]
 fn mods_show_in_finder_and_delete_reach_the_app_only_for_what_this_mac_installed() {
     let actor = actor();
     let entry = |id: &str, installed: bool| {

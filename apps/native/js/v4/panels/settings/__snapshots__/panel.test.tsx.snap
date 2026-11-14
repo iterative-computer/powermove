@@ -16,6 +16,8 @@ exports[`empty: six-op tree snapshot passes the real Rust wire and kit validator
             text "Shortcuts"
           div list-item listitem settings.nav.media label="Media"
             text "Media"
+          div list-item listitem settings.nav.storage label="Storage"
+            text "Storage"
           div list-item listitem settings.nav.accounts label="Accounts"
             text "Accounts"
           div list-item listitem settings.nav.transcription label="Transcription"
@@ -108,6 +110,8 @@ exports[`loading: six-op tree snapshot passes the real Rust wire and kit validat
             text "Shortcuts"
           div list-item listitem settings.nav.media label="Media"
             text "Media"
+          div list-item listitem settings.nav.storage label="Storage"
+            text "Storage"
           div list-item listitem settings.nav.accounts label="Accounts"
             text "Accounts"
           div list-item listitem settings.nav.transcription label="Transcription"
@@ -200,6 +204,8 @@ exports[`selected: six-op tree snapshot passes the real Rust wire and kit valida
             text "Shortcuts"
           div list-item listitem settings.nav.media label="Media"
             text "Media"
+          div list-item listitem settings.nav.storage label="Storage"
+            text "Storage"
           div list-item listitem settings.nav.accounts label="Accounts" selected
             text "Accounts"
           div list-item listitem settings.nav.transcription label="Transcription"
@@ -324,6 +330,8 @@ exports[`hover-system-controls: six-op tree snapshot passes the real Rust wire a
             text "Shortcuts"
           div list-item listitem settings.nav.media label="Media"
             text "Media"
+          div list-item listitem settings.nav.storage label="Storage"
+            text "Storage"
           div list-item listitem settings.nav.accounts label="Accounts"
             text "Accounts"
           div list-item listitem settings.nav.transcription label="Transcription"
@@ -416,6 +424,8 @@ exports[`focus-system-rings: six-op tree snapshot passes the real Rust wire and 
             text "Shortcuts"
           div list-item listitem settings.nav.media label="Media"
             text "Media"
+          div list-item listitem settings.nav.storage label="Storage"
+            text "Storage"
           div list-item listitem settings.nav.accounts label="Accounts"
             text "Accounts"
           div list-item listitem settings.nav.transcription label="Transcription"
@@ -508,6 +518,8 @@ exports[`disabled: six-op tree snapshot passes the real Rust wire and kit valida
             text "Shortcuts"
           div list-item listitem settings.nav.media label="Media"
             text "Media"
+          div list-item listitem settings.nav.storage label="Storage"
+            text "Storage"
           div list-item listitem settings.nav.accounts label="Accounts"
             text "Accounts"
           div list-item listitem settings.nav.transcription label="Transcription"
@@ -600,6 +612,8 @@ exports[`error: six-op tree snapshot passes the real Rust wire and kit validator
             text "Shortcuts"
           div list-item listitem settings.nav.media label="Media"
             text "Media"
+          div list-item listitem settings.nav.storage label="Storage"
+            text "Storage"
           div list-item listitem settings.nav.accounts label="Accounts"
             text "Accounts"
           div list-item listitem settings.nav.transcription label="Transcription"
@@ -692,6 +706,8 @@ exports[`unavailable: six-op tree snapshot passes the real Rust wire and kit val
             text "Shortcuts"
           div list-item listitem settings.nav.media label="Media"
             text "Media"
+          div list-item listitem settings.nav.storage label="Storage"
+            text "Storage"
           div list-item listitem settings.nav.accounts label="Accounts"
             text "Accounts"
           div list-item listitem settings.nav.transcription label="Transcription"
@@ -784,6 +800,8 @@ exports[`no-search-results: six-op tree snapshot passes the real Rust wire and k
             text "Shortcuts"
           div list-item listitem settings.nav.media label="Media"
             text "Media"
+          div list-item listitem settings.nav.storage label="Storage"
+            text "Storage"
           div list-item listitem settings.nav.accounts label="Accounts"
             text "Accounts"
           div list-item listitem settings.nav.transcription label="Transcription"
@@ -814,6 +832,8 @@ exports[`extension-detail: six-op tree snapshot passes the real Rust wire and ki
             text "Shortcuts"
           div list-item listitem settings.nav.media label="Media"
             text "Media"
+          div list-item listitem settings.nav.storage label="Storage"
+            text "Storage"
           div list-item listitem settings.nav.accounts label="Accounts"
             text "Accounts"
           div list-item listitem settings.nav.transcription label="Transcription"
@@ -906,6 +926,8 @@ exports[`drag-drop-not-applicable: six-op tree snapshot passes the real Rust wir
             text "Shortcuts"
           div list-item listitem settings.nav.media label="Media"
             text "Media"
+          div list-item listitem settings.nav.storage label="Storage"
+            text "Storage"
           div list-item listitem settings.nav.accounts label="Accounts"
             text "Accounts"
           div list-item listitem settings.nav.transcription label="Transcription"
@@ -998,6 +1020,8 @@ exports[`multi-select-not-applicable: six-op tree snapshot passes the real Rust 
             text "Shortcuts"
           div list-item listitem settings.nav.media label="Media"
             text "Media"
+          div list-item listitem settings.nav.storage label="Storage"
+            text "Storage"
           div list-item listitem settings.nav.accounts label="Accounts"
             text "Accounts"
           div list-item listitem settings.nav.transcription label="Transcription"
@@ -1090,6 +1114,8 @@ exports[`60k-extensions: six-op tree snapshot passes the real Rust wire and kit 
             text "Shortcuts"
           div list-item listitem settings.nav.media label="Media"
             text "Media"
+          div list-item listitem settings.nav.storage label="Storage"
+            text "Storage"
           div list-item listitem settings.nav.accounts label="Accounts"
             text "Accounts"
           div list-item listitem settings.nav.transcription label="Transcription"
@@ -1453,6 +1479,8 @@ exports[`project-open: six-op tree snapshot passes the real Rust wire and kit va
             text "Shortcuts"
           div list-item listitem settings.nav.media label="Media"
             text "Media"
+          div list-item listitem settings.nav.storage label="Storage"
+            text "Storage"
           div list-item listitem settings.nav.accounts label="Accounts"
             text "Accounts"
           div list-item listitem settings.nav.transcription label="Transcription"
@@ -1588,196 +1616,6 @@ exports[`project-open: six-op tree snapshot passes the real Rust wire and kit va
 Focus: ["settings.search","settings.sections"]"
 `;
 
-exports[`transcription available wire/AX state 1`] = `
-"root
-  div group settings label="Settings"
-    div group label="Settings sections"
-      div
-        input text-field settings.search label="Search" value=""
-      div list list settings.sections label="Settings sections"
-        div group label="App"
-          text
-            text "App"
-          div list-item listitem settings.nav.general label="General"
-            text "General"
-          div list-item listitem settings.nav.shortcuts label="Shortcuts"
-            text "Shortcuts"
-          div list-item listitem settings.nav.media label="Media"
-            text "Media"
-          div list-item listitem settings.nav.accounts label="Accounts"
-            text "Accounts"
-          div list-item listitem settings.nav.transcription label="Transcription" selected
-            text "Transcription"
-          div list-item listitem settings.nav.extensions label="Extensions"
-            text "Extensions"
-    div
-      scroll group settings.detail label="Transcription"
-        div group settings.section.transcription label="Transcription"
-          div
-            text heading
-              text "Transcription"
-            text
-              text "Turn speech into text for captions and your agent, on this Mac."
-          div group label="Models"
-            text heading
-              text "Models"
-            div form-group group label="Models"
-              div group label="Fixture speech"
-                div
-                  text
-                    text "Fixture speech"
-                  text
-                    text "Fixture size"
-                div
-                  button push-button label="Download"
-                    text "Download"
-Focus: ["settings.search","settings.sections","Download"]"
-`;
-
-exports[`transcription downloading wire/AX state 1`] = `
-"root
-  div group settings label="Settings"
-    div group label="Settings sections"
-      div
-        input text-field settings.search label="Search" value=""
-      div list list settings.sections label="Settings sections"
-        div group label="App"
-          text
-            text "App"
-          div list-item listitem settings.nav.general label="General"
-            text "General"
-          div list-item listitem settings.nav.shortcuts label="Shortcuts"
-            text "Shortcuts"
-          div list-item listitem settings.nav.media label="Media"
-            text "Media"
-          div list-item listitem settings.nav.accounts label="Accounts"
-            text "Accounts"
-          div list-item listitem settings.nav.transcription label="Transcription" selected
-            text "Transcription"
-          div list-item listitem settings.nav.extensions label="Extensions"
-            text "Extensions"
-    div
-      scroll group settings.detail label="Transcription"
-        div group settings.section.transcription label="Transcription"
-          div
-            text heading
-              text "Transcription"
-            text
-              text "Turn speech into text for captions and your agent, on this Mac."
-          div group label="Models"
-            text heading
-              text "Models"
-            div form-group group label="Models"
-              div group label="Fixture speech"
-                div
-                  text
-                    text "Fixture speech"
-                  text
-                    text "Fixture size"
-                div
-                  div progress-row progressbar label="Fixture speech" value=0.25
-                    text "Fixture speech"
-                  button push-button label="Cancel"
-                    text "Cancel"
-Focus: ["settings.search","settings.sections","Cancel"]"
-`;
-
-exports[`transcription installed wire/AX state 1`] = `
-"root
-  div group settings label="Settings"
-    div group label="Settings sections"
-      div
-        input text-field settings.search label="Search" value=""
-      div list list settings.sections label="Settings sections"
-        div group label="App"
-          text
-            text "App"
-          div list-item listitem settings.nav.general label="General"
-            text "General"
-          div list-item listitem settings.nav.shortcuts label="Shortcuts"
-            text "Shortcuts"
-          div list-item listitem settings.nav.media label="Media"
-            text "Media"
-          div list-item listitem settings.nav.accounts label="Accounts"
-            text "Accounts"
-          div list-item listitem settings.nav.transcription label="Transcription" selected
-            text "Transcription"
-          div list-item listitem settings.nav.extensions label="Extensions"
-            text "Extensions"
-    div
-      scroll group settings.detail label="Transcription"
-        div group settings.section.transcription label="Transcription"
-          div
-            text heading
-              text "Transcription"
-            text
-              text "Turn speech into text for captions and your agent, on this Mac."
-          div group label="Models"
-            text heading
-              text "Models"
-            div form-group group label="Models"
-              div group label="Fixture speech"
-                div
-                  text
-                    text "Fixture speech"
-                  text
-                    text "Fixture size"
-                div
-                  button push-button label="Use"
-                    text "Use"
-                  button push-button label="Delete…"
-                    text "Delete…"
-Focus: ["settings.search","settings.sections","Use","Delete…"]"
-`;
-
-exports[`transcription error wire/AX state 1`] = `
-"root
-  div group settings label="Settings"
-    div group label="Settings sections"
-      div
-        input text-field settings.search label="Search" value=""
-      div list list settings.sections label="Settings sections"
-        div group label="App"
-          text
-            text "App"
-          div list-item listitem settings.nav.general label="General"
-            text "General"
-          div list-item listitem settings.nav.shortcuts label="Shortcuts"
-            text "Shortcuts"
-          div list-item listitem settings.nav.media label="Media"
-            text "Media"
-          div list-item listitem settings.nav.accounts label="Accounts"
-            text "Accounts"
-          div list-item listitem settings.nav.transcription label="Transcription" selected
-            text "Transcription"
-          div list-item listitem settings.nav.extensions label="Extensions"
-            text "Extensions"
-    div
-      scroll group settings.detail label="Transcription"
-        div group settings.section.transcription label="Transcription"
-          div
-            text heading
-              text "Transcription"
-            text
-              text "Turn speech into text for captions and your agent, on this Mac."
-          div group label="Models"
-            text heading
-              text "Models"
-            div form-group group label="Models"
-              div group label="Fixture speech"
-                div
-                  text
-                    text "Fixture speech"
-                  text
-                    text "Fixture size"
-                div
-                  div status label="Fixture service error"
-                    text "Fixture service error"
-                  button push-button label="Retry"
-                    text "Retry"
-Focus: ["settings.search","settings.sections","Retry"]"
-`;
-
 exports[`shortcuts: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
 "root
   div group settings label="Settings"
@@ -1794,6 +1632,8 @@ exports[`shortcuts: six-op tree snapshot passes the real Rust wire and kit valid
             text "Shortcuts"
           div list-item listitem settings.nav.media label="Media"
             text "Media"
+          div list-item listitem settings.nav.storage label="Storage"
+            text "Storage"
           div list-item listitem settings.nav.accounts label="Accounts"
             text "Accounts"
           div list-item listitem settings.nav.transcription label="Transcription"
@@ -1868,4 +1708,202 @@ exports[`shortcuts: six-op tree snapshot passes the real Rust wire and kit valid
                   text
                     text "Tried in this order: Add or Remove Scale Keyframe, then Audio Skimming."
 Focus: ["settings.search","settings.sections","Reset","Remove","Change…","Cancel","Change…"]"
+`;
+
+exports[`transcription available wire/AX state 1`] = `
+"root
+  div group settings label="Settings"
+    div group label="Settings sections"
+      div
+        input text-field settings.search label="Search" value=""
+      div list list settings.sections label="Settings sections"
+        div group label="App"
+          text
+            text "App"
+          div list-item listitem settings.nav.general label="General"
+            text "General"
+          div list-item listitem settings.nav.shortcuts label="Shortcuts"
+            text "Shortcuts"
+          div list-item listitem settings.nav.media label="Media"
+            text "Media"
+          div list-item listitem settings.nav.storage label="Storage"
+            text "Storage"
+          div list-item listitem settings.nav.accounts label="Accounts"
+            text "Accounts"
+          div list-item listitem settings.nav.transcription label="Transcription" selected
+            text "Transcription"
+          div list-item listitem settings.nav.extensions label="Extensions"
+            text "Extensions"
+    div
+      scroll group settings.detail label="Transcription"
+        div group settings.section.transcription label="Transcription"
+          div
+            text heading
+              text "Transcription"
+            text
+              text "Turn speech into text for captions and your agent, on this Mac."
+          div group label="Models"
+            text heading
+              text "Models"
+            div form-group group label="Models"
+              div group label="Fixture speech"
+                div
+                  text
+                    text "Fixture speech"
+                  text
+                    text "Fixture size"
+                div
+                  button push-button label="Download"
+                    text "Download"
+Focus: ["settings.search","settings.sections","Download"]"
+`;
+
+exports[`transcription downloading wire/AX state 1`] = `
+"root
+  div group settings label="Settings"
+    div group label="Settings sections"
+      div
+        input text-field settings.search label="Search" value=""
+      div list list settings.sections label="Settings sections"
+        div group label="App"
+          text
+            text "App"
+          div list-item listitem settings.nav.general label="General"
+            text "General"
+          div list-item listitem settings.nav.shortcuts label="Shortcuts"
+            text "Shortcuts"
+          div list-item listitem settings.nav.media label="Media"
+            text "Media"
+          div list-item listitem settings.nav.storage label="Storage"
+            text "Storage"
+          div list-item listitem settings.nav.accounts label="Accounts"
+            text "Accounts"
+          div list-item listitem settings.nav.transcription label="Transcription" selected
+            text "Transcription"
+          div list-item listitem settings.nav.extensions label="Extensions"
+            text "Extensions"
+    div
+      scroll group settings.detail label="Transcription"
+        div group settings.section.transcription label="Transcription"
+          div
+            text heading
+              text "Transcription"
+            text
+              text "Turn speech into text for captions and your agent, on this Mac."
+          div group label="Models"
+            text heading
+              text "Models"
+            div form-group group label="Models"
+              div group label="Fixture speech"
+                div
+                  text
+                    text "Fixture speech"
+                  text
+                    text "Fixture size"
+                div
+                  div progress-row progressbar label="Fixture speech" value=0.25
+                    text "Fixture speech"
+                  button push-button label="Cancel"
+                    text "Cancel"
+Focus: ["settings.search","settings.sections","Cancel"]"
+`;
+
+exports[`transcription installed wire/AX state 1`] = `
+"root
+  div group settings label="Settings"
+    div group label="Settings sections"
+      div
+        input text-field settings.search label="Search" value=""
+      div list list settings.sections label="Settings sections"
+        div group label="App"
+          text
+            text "App"
+          div list-item listitem settings.nav.general label="General"
+            text "General"
+          div list-item listitem settings.nav.shortcuts label="Shortcuts"
+            text "Shortcuts"
+          div list-item listitem settings.nav.media label="Media"
+            text "Media"
+          div list-item listitem settings.nav.storage label="Storage"
+            text "Storage"
+          div list-item listitem settings.nav.accounts label="Accounts"
+            text "Accounts"
+          div list-item listitem settings.nav.transcription label="Transcription" selected
+            text "Transcription"
+          div list-item listitem settings.nav.extensions label="Extensions"
+            text "Extensions"
+    div
+      scroll group settings.detail label="Transcription"
+        div group settings.section.transcription label="Transcription"
+          div
+            text heading
+              text "Transcription"
+            text
+              text "Turn speech into text for captions and your agent, on this Mac."
+          div group label="Models"
+            text heading
+              text "Models"
+            div form-group group label="Models"
+              div group label="Fixture speech"
+                div
+                  text
+                    text "Fixture speech"
+                  text
+                    text "Fixture size"
+                div
+                  button push-button label="Use"
+                    text "Use"
+                  button push-button label="Delete…"
+                    text "Delete…"
+Focus: ["settings.search","settings.sections","Use","Delete…"]"
+`;
+
+exports[`transcription error wire/AX state 1`] = `
+"root
+  div group settings label="Settings"
+    div group label="Settings sections"
+      div
+        input text-field settings.search label="Search" value=""
+      div list list settings.sections label="Settings sections"
+        div group label="App"
+          text
+            text "App"
+          div list-item listitem settings.nav.general label="General"
+            text "General"
+          div list-item listitem settings.nav.shortcuts label="Shortcuts"
+            text "Shortcuts"
+          div list-item listitem settings.nav.media label="Media"
+            text "Media"
+          div list-item listitem settings.nav.storage label="Storage"
+            text "Storage"
+          div list-item listitem settings.nav.accounts label="Accounts"
+            text "Accounts"
+          div list-item listitem settings.nav.transcription label="Transcription" selected
+            text "Transcription"
+          div list-item listitem settings.nav.extensions label="Extensions"
+            text "Extensions"
+    div
+      scroll group settings.detail label="Transcription"
+        div group settings.section.transcription label="Transcription"
+          div
+            text heading
+              text "Transcription"
+            text
+              text "Turn speech into text for captions and your agent, on this Mac."
+          div group label="Models"
+            text heading
+              text "Models"
+            div form-group group label="Models"
+              div group label="Fixture speech"
+                div
+                  text
+                    text "Fixture speech"
+                  text
+                    text "Fixture size"
+                div
+                  div status label="Fixture service error"
+                    text "Fixture service error"
+                  button push-button label="Retry"
+                    text "Retry"
+Focus: ["settings.search","settings.sections","Retry"]"
 `;
