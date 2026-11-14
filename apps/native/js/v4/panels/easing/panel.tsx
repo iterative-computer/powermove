@@ -23,7 +23,12 @@ const row = {
   paddingRight: t("metrics.inset"),
 };
 
-const pair = { ...row, paddingLeft: 0, paddingRight: 0, flexWrap: "nowrap" };
+const pair = {
+  display: "flex",
+  flexDirection: "row",
+  alignItems: "center",
+  gap: t("metrics.gap"),
+};
 
 export interface EasingProps {
   model: EasingModel;
@@ -223,7 +228,7 @@ export function EasingPanel({ model, bindings }: EasingProps) {
                 id={`${PANEL_ID}:thumb:${p.id}`}
                 label={presetName(p.id)}
                 value={p.curve}
-                style={{ width: 44, height: 32 }}
+                style={{ width: t("metrics.header"), height: t("metrics.row") }}
               />
               <text
                 style={{

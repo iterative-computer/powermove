@@ -800,7 +800,10 @@ export function EaseCurve(props: EaseCurveProps) {
       metadata: kitMetadata(props, {}),
     },
     // Across its group; the host makes it a little taller than wide.
-    { minHeight: token("metrics.curve_editor") },
+    {
+      minWidth: token("metrics.hit"),
+      minHeight: token("metrics.curve_editor"),
+    },
   );
 }
 /** A drawing of an easing curve `[x1, y1, x2, y2]` (a preset's thumbnail):
