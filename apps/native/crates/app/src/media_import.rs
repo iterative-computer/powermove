@@ -17,7 +17,9 @@ pub(crate) struct ExtensionImport {
 
 impl Controller {
     /// File ▸ Import…, Project panel Import and Replace. `place` adds a layer
-    /// per file at the playhead, as `PM.pickFiles` does.
+    /// per file at the playhead, as `PM.pickFiles` does. Import takes files
+    /// and folders: a folder of numbered frames, or one numbered frame with
+    /// its run beside it, is offered as an image sequence (`plan_import`).
     pub(crate) fn pick_media(
         &mut self,
         replace: Option<String>,
@@ -29,17 +31,21 @@ impl Controller {
             cx.notify();
             return;
         }
-        let multiple = replace.is_none();
-        let rx = platform::import_paths(&self.host.borrow().window, false, multiple, &extensions());
+        let window = self.host.borrow().window.clone();
+        let rx = if replace.is_some() {
+            platform::import_paths(&window, false, false, &extensions())
+        } else {
+            platform::import_media_paths(&window, &extensions())
+        };
         cx.spawn(async move |this, cx| {
             if let Ok(paths) = rx.recv().await
                 && !paths.is_empty()
             {
                 let _ = this.update(cx, |v, cx| {
                     let place_at = (place && replace.is_none()).then(|| v.time());
-                    // Numbered stills ask whether they are one clip.
-                    if replace.is_none() && crate::media_sequence::candidate(&paths) {
-                        return v.choose_sequence(paths, false, place_at, None, cx);
+                    if replace.is_none() {
+                        let plan = plan_import(paths, false);
+                        return v.bring(plan, place_at.map(|at| (at, None)), None, cx);
                     }
                     v.import(
                         ImportRequest {
@@ -209,6 +215,16 @@ impl Controller {
         let at = self.time();
         self.import_drop(paths, false, Some((at, None)), None, cx);
     }
+    /// Files dropped on the viewer: placed at the playhead, on top.
+    pub(crate) fn drop_on_viewer(
+        &mut self,
+        paths: Vec<PathBuf>,
+        alt: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let at = self.time();
+        self.import_drop(paths, alt, Some((at, Some(0))), None, cx);
+    }
     /// Files dropped on the Project panel: assets in `folder`, no layers.
     pub(crate) fn import_to_panel(
         &mut self,
@@ -307,22 +323,22 @@ impl Controller {
                 self.import_captions(path, at, cx);
             }
         }
-        let (folders, files): (Vec<_>, Vec<_>) = media.into_iter().partition(|p| p.is_dir());
-        let place_at = place.map(|(at, _)| at);
-        let mut sequence = None;
-        let mut kept = vec![];
-        for dir in folders {
-            let frames = folder_frames(&dir);
-            if !alt && sequence.is_none() && crate::media_sequence::candidate(&frames) {
-                sequence = Some(frames);
-            } else {
-                kept.push(dir);
-            }
-        }
-        if !kept.is_empty() {
+        self.bring(plan_import(media, alt), place, folder, cx);
+    }
+    /// Imports what `plan` brings: kept folders into the Project panel, files
+    /// placed at `place` (a time and a place in the stack), and the sequence
+    /// it found offered on its sheet, its layer landing at the same place.
+    fn bring(
+        &mut self,
+        plan: Brought,
+        place: Option<(f64, Option<usize>)>,
+        folder: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if !plan.kept.is_empty() {
             self.import(
                 ImportRequest {
-                    paths: kept,
+                    paths: plan.kept,
                     folder: folder.clone(),
                     keep_folders: true,
                     ..Default::default()
@@ -330,22 +346,20 @@ impl Controller {
                 cx,
             );
         }
-        if sequence.is_none() && crate::media_sequence::candidate(&files) {
-            sequence = Some(files);
-        } else if !files.is_empty() {
+        if !plan.files.is_empty() {
             self.import(
                 ImportRequest {
-                    paths: files,
+                    paths: plan.files,
                     folder: folder.clone(),
-                    place_at,
+                    place_at: place.map(|(at, _)| at),
                     place_index: place.and_then(|(_, index)| index),
                     ..Default::default()
                 },
                 cx,
             );
         }
-        if let Some(frames) = sequence {
-            self.choose_sequence(frames, false, place_at, folder, cx);
+        if let Some((frames, picked)) = plan.sequence {
+            self.choose_sequence(frames, Some(picked), false, place, folder, cx);
         }
     }
     /// A dropped project opens instead of importing. Returns the media to import.
@@ -657,6 +671,42 @@ pub(crate) fn stage_pasted_image(data: Vec<u8>, png: bool) -> Option<(tempfile::
     Some((dir, path))
 }
 
+/// What picked or dropped paths bring in ([`plan_import`]).
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct Brought {
+    /// Folders that keep their structure in the Project panel.
+    pub kept: Vec<PathBuf>,
+    /// Files imported as they are.
+    pub files: Vec<PathBuf>,
+    /// One image sequence to offer: its frames, and what Individual Images
+    /// imports instead.
+    pub sequence: Option<(Vec<PathBuf>, Vec<PathBuf>)>,
+}
+/// A folder of numbered frames, numbered files chosen together, or one
+/// numbered frame with its run beside it is offered as one image sequence
+/// (never with `alt`: Option keeps files apart); other folders keep their
+/// structure; other files import as they are.
+pub(crate) fn plan_import(paths: Vec<PathBuf>, alt: bool) -> Brought {
+    let (folders, files): (Vec<_>, Vec<_>) = paths.into_iter().partition(|p| p.is_dir());
+    let mut plan = Brought::default();
+    for dir in folders {
+        let frames = folder_frames(&dir);
+        if !alt && plan.sequence.is_none() && crate::media_sequence::candidate(&frames) {
+            plan.sequence = Some((frames.clone(), frames));
+        } else {
+            plan.kept.push(dir);
+        }
+    }
+    match (!alt && plan.sequence.is_none())
+        .then(|| crate::media_sequence::offered(&files))
+        .flatten()
+    {
+        Some(frames) => plan.sequence = Some((frames, files)),
+        None => plan.files = files,
+    }
+    plan
+}
+
 /// A dropped folder's own media files (not its subfolders'), in name order:
 /// what is offered as an image sequence when they are one.
 fn folder_frames(dir: &std::path::Path) -> Vec<PathBuf> {
@@ -673,7 +723,49 @@ fn folder_frames(dir: &std::path::Path) -> Vec<PathBuf> {
 
 #[cfg(test)]
 mod drop_tests {
-    use super::folder_frames;
+    use super::{Brought, folder_frames, plan_import};
+
+    /// What Import and a drop bring: a folder of numbered frames and one
+    /// numbered frame with its run each offer one sequence (Individual
+    /// Images keeps what was picked); with Option they import apart; another
+    /// folder keeps its structure.
+    #[test]
+    fn picked_and_dropped_frames_are_offered_as_a_sequence() {
+        let dir = tempfile::tempdir().unwrap();
+        let renders = dir.path().join("renders");
+        std::fs::create_dir_all(&renders).unwrap();
+        for n in 1..=3 {
+            std::fs::write(renders.join(format!("shot.{n:04}.png")), b"png").unwrap();
+        }
+        let frames = folder_frames(&renders);
+        let mixed = dir.path().join("mixed");
+        std::fs::create_dir_all(&mixed).unwrap();
+        std::fs::write(mixed.join("intro.png"), b"png").unwrap();
+        assert_eq!(
+            plan_import(vec![renders.clone(), mixed.clone()], false),
+            Brought {
+                kept: vec![mixed.clone()],
+                files: vec![],
+                sequence: Some((frames.clone(), frames.clone())),
+            }
+        );
+        let one = renders.join("shot.0002.png");
+        assert_eq!(
+            plan_import(vec![one.clone()], false),
+            Brought {
+                sequence: Some((frames.clone(), vec![one.clone()])),
+                ..Default::default()
+            }
+        );
+        assert_eq!(
+            plan_import(vec![one.clone(), renders.clone()], true),
+            Brought {
+                kept: vec![renders],
+                files: vec![one],
+                sequence: None,
+            }
+        );
+    }
 
     /// A dropped folder of numbered frames is offered as one image sequence
     /// (its own media files in name order; notes and subfolders are not

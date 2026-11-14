@@ -183,8 +183,8 @@ fn review_files(rest: &str, cx: &mut App) {
         editor.update(cx, |v, cx| match route.as_str() {
             "drop" => v.import_dropped(paths, cx),
             "sequence" => {
-                let at = Some(v.time());
-                v.choose_sequence(paths, true, at, None, cx)
+                let at = Some((v.time(), None));
+                v.choose_sequence(paths, None, true, at, None, cx)
             }
             // What Paste reads from the pasteboard, from a file: reviews
             // never overwrite the person's clipboard.
