@@ -60,7 +60,7 @@ impl SceneSource for Product {
             maps: Some(TextureMaps {
                 width: 512,
                 height: 744,
-                layers: vec![self.screen.clone()],
+                layers: vec![Arc::new(self.screen.clone())],
             }),
             view: Default::default(),
         })

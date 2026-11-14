@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { TimelinePanel } from "../panel";
 import { checkFrame } from "../model";
 import type { Intent } from "../model";
-import { states, frame } from "./fixtures";
+import { states, frame, layer } from "./fixtures";
 import { recorder, nativeValidators } from "./helpers";
 import type { SurfaceRoot } from "../../../src/renderer";
 import type { Commit } from "../../../src/protocol";
@@ -161,6 +161,85 @@ test("v1 head: one graph switch, its options while shown, snapping only in Track
   await root.dispose();
 });
 
+test("a layer row's switches keep fixed columns at its trailing edge; the name gives way", async () => {
+  const { root } = recorder();
+  await root.render(<TimelinePanel frame={frame()} send={() => {}} />);
+  const row = byId(root, "timeline:row:layer:headline");
+  const [name, switches] = row.children;
+  // The name side shrinks (and clips) first; the switches never shrink.
+  expect(name.props.style).toMatchObject({
+    flexShrink: 1,
+    overflow: "hidden",
+  });
+  expect(switches.props.style).toMatchObject({ flexShrink: 0 });
+  // At rest (not hovered, not selected): five columns, the parent link and
+  // visibility drawn (as v1), Shy, Solo and Lock held open.
+  expect(switches.children.length).toBe(5);
+  expect(byId(root, "timeline:parent:layer:headline")).toBeDefined();
+  expect(byId(root, "timeline:visibility:layer:headline")).toBeDefined();
+  for (const name of ["shy", "solo", "lock"])
+    expect(byId(root, `timeline:${name}:layer:headline`)).toBeUndefined();
+  // Every column holds a switch's width (a hit target), drawn or not.
+  for (const slot of switches.children)
+    expect(slot.props.style).toMatchObject({
+      minWidth: { token: "metrics.hit" },
+    });
+  // Hovered: every switch, in the same five columns.
+  await root.render(
+    <TimelinePanel
+      frame={frame({
+        window: { total: 1, first: 0, rows: [{ ...layer(), hovered: true }] },
+      })}
+      send={() => {}}
+    />,
+  );
+  const hovered = byId(root, "timeline:row:layer:headline").children[1];
+  expect(hovered.children.length).toBe(5);
+  for (const name of ["parent", "shy", "solo", "lock", "visibility"])
+    expect(byId(root, `timeline:${name}:layer:headline`)).toBeDefined();
+  await root.dispose();
+});
+
+test("an empty composition: the layer area holds a centred, inset invitation; the tab sits at a control's height", async () => {
+  const { root } = recorder();
+  const actions: Intent[] = [];
+  await root.render(
+    <TimelinePanel
+      frame={frame({ window: { total: 0, first: 0, rows: [] } })}
+      send={(a) => actions.push(a)}
+    />,
+  );
+  const empty = byId(root, "timeline:empty");
+  // Fills the layer area under the head, never the head or the tracks.
+  expect(empty.props.style).toMatchObject({
+    position: "absolute",
+    inset: "fill",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: { token: "metrics.inset" },
+    padding: { token: "metrics.inset" },
+  });
+  const [sentence, button] = empty.children;
+  expect(sentence.props.style).toMatchObject({
+    textAlign: "center",
+    whiteSpace: "normal",
+  });
+  // Import… is a push button (a control's hit target and hover), not text.
+  expect(button.props["data-pm-component"]).toBe("push-button");
+  await drive(root, "timeline:import");
+  expect(actions).toEqual([{ type: "import" }]);
+  // The empty block is not a row of the outline.
+  expect(byId(root, "timeline:tracks").children.length).toBe(0);
+  // The composition tab: centred in the bar at a control's height.
+  expect(byId(root, "timeline:tabs").props.style).toMatchObject({
+    alignItems: "center",
+  });
+  expect(byId(root, "timeline:tab:launch").props.style).toMatchObject({
+    height: { token: "metrics.control" },
+  });
+  await root.dispose();
+});
+
 test("modifiers reach native selection, child switches never also select the row", async () => {
   const { root } = recorder();
   const actions: Intent[] = [];
@@ -307,7 +386,9 @@ test("60k projection mounts only the bounded native window and exposes full coun
     firstRow: 29990,
     indexDigits: 5,
   });
-  expect(root.host.nodes.size).toBeLessThan(400);
+  // Bounded by the visible window, not the 60k rows (each row now holds
+  // its five switch columns, drawn or held open).
+  expect(root.host.nodes.size).toBeLessThan(500);
   expect(replay(commits).at(-1).accessibilityNodes).toBe(root.host.nodes.size);
   await root.dispose();
 });

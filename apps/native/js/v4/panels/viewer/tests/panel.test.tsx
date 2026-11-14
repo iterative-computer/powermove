@@ -479,12 +479,12 @@ test("a 3D composition adds no toolbar; away from the shot one top-left control 
     <ViewerPanel state={at("camera")} actions={{ ...actions, drive }} />,
   );
   let nodes = root.inspect().nodes;
-  // No 3D group in the bar, no Light panel, no return control on the shot.
+  // No 3D group in the bar, no Light panel, no return control on the shot
+  // (the one 3D control in the bar is the preview pop-up, tested below).
   for (const id of [
     "viewer.studio",
     "viewer.studio.tool",
     "viewer.studio.look",
-    "viewer.studio.tier",
     "viewer.studio.lightPanel",
     "viewer.studio.viewCamera",
   ])
@@ -511,4 +511,32 @@ test("a 3D composition adds no toolbar; away from the shot one top-left control 
   await free.drive(ret.id, "click", {});
   expect(seen).toEqual([["viewer.studio.look", "camera"]]);
   await free.dispose();
+});
+
+test("a 3D composition's bar has one preview pop-up: Fast by default, before RGB", async () => {
+  const seen: [string, unknown][] = [];
+  const drive = (id: string, v?: unknown) => void seen.push([id, v]);
+  const s = fixture();
+  s.model!.studio = { tier: "fast", tool: "move", look: "camera" };
+  const { root } = recorder();
+  await root.render(<ViewerPanel state={s} actions={{ ...actions, drive }} />);
+  const nodes = root.inspect().nodes;
+  const ids = nodes.map((n) => String(n.props.id));
+  const tier = nodes.find((n) => n.props.id === "viewer.studio.tier")!;
+  expect(tier).toBeDefined();
+  expect(tier.props.label).toBe("3D preview, Fast");
+  expect(ids.indexOf("viewer.studio.tier")).toBeLessThan(ids.indexOf("viewer.channels"));
+  await root.drive(tier.id, "change", { value: "live" });
+  await root.drive(tier.id, "change", { value: "refine" });
+  await root.drive(tier.id, "change", { value: "final" });
+  expect(seen).toEqual([
+    ["viewer.studio.tier", "live"],
+    ["viewer.studio.tier", "refine"],
+  ]);
+  await root.dispose();
+  // A 2D composition has no 3D preview control.
+  const { root: flat } = recorder();
+  await flat.render(<ViewerPanel state={fixture()} actions={{ ...actions, drive }} />);
+  expect(flat.inspect().nodes.some((n) => n.props.id === "viewer.studio.tier")).toBe(false);
+  await flat.dispose();
 });

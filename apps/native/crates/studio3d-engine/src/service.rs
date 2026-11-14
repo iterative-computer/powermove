@@ -94,7 +94,7 @@ struct PreparedScene {
     failures: Vec<pm_render::LayerFailure>,
 }
 
-/// The existing compositor's Fast path. A host must attach it explicitly.
+/// The compositor's Fast path, attached on the shared worker device.
 /// A missing path returns an error; it never yields a blank "success".
 pub trait FastRenderer: Send {
     fn render(
@@ -102,6 +102,15 @@ pub trait FastRenderer: Send {
         input: &SceneInput,
         request: &SceneRequest,
     ) -> Result<RenderedScene, String>;
+    fn render_outputs(
+        &mut self, input: &SceneInput, request: &SceneRequest, flip_y: bool,
+        _auxiliary: &[crate::extract::AuxiliaryLayer],
+    ) -> Result<RenderedScene, String> {
+        if flip_y { self.render_bottom_up(input, request) } else { self.render(input, request) }
+    }
+    fn render_bottom_up(&mut self, input: &SceneInput, request: &SceneRequest) -> Result<RenderedScene, String> {
+        self.render(input, request)
+    }
 }
 
 /// Synchronous worker API. A native engine host must queue calls onto its
@@ -119,7 +128,9 @@ pub struct StudioService {
     geometry_uploads: u64,
     scene_updates: u64,
     texture_uploads: u64,
-    texture_key: Option<Vec<u8>>,
+    // Retain the uploaded images, rather than another flattened copy.
+    // Sources can reuse these bytes without a second decoded-image cache.
+    uploaded_maps: Option<crate::extract::TextureMaps>,
 }
 
 impl StudioService {
@@ -137,7 +148,9 @@ impl StudioService {
         if !x.is_finite() || !y.is_finite() || !(0. ..=1.).contains(&x) || !(0. ..=1.).contains(&y) {
             return Err("Surface coordinates must be finite and in 0..=1".into());
         }
-        if tier == Tier::Fast { return Err("Surface picking requires the Studio scene".into()); }
+        // Picking still queries the same scene in Fast; this prepares geometry
+        // for a single surface query and never renders/refines the preview.
+        let tier = if tier == Tier::Fast { Tier::QualityLive } else { tier };
         let prepared = self.prepare_scene(source, request.clone(), tier)?;
         if self.previous.as_ref().is_none_or(|(r,k)| *r != request || *k != prepared.key) || self.previous_tier != Some(tier) {
             // Querying another view must not let its GPU state masquerade as
@@ -255,7 +268,9 @@ impl StudioService {
         let geometry_changed = self.geometry_uploads == 0
             || geometry_key.as_ref().is_some_and(|key| *key != self.geometry_key);
         let epoch = self.geometry_uploads + u64::from(geometry_changed);
-        let (mut key, resource_start) = content(&input, &extracted, epoch);
+        let textures_changed = self.texture_uploads == 0 || self.uploaded_maps != input.maps;
+        let texture_epoch = self.texture_uploads + u64::from(textures_changed);
+        let (mut key, resource_start) = content(&input, &extracted, epoch, texture_epoch);
         key.extend_from_slice(format!("{auxiliary:?}").as_bytes());
         let mut outputs: Vec<_> = extracted
             .layers
@@ -325,16 +340,15 @@ impl StudioService {
                 shape: GeometryIdentity::shape(&extracted), instances: input.instances.clone(),
             });
         }
-        let texture_key = texture_key(input.maps.as_ref());
-        if self.texture_key.as_ref() != Some(&texture_key) {
+        if textures_changed {
             if let Some(maps) = &input.maps {
-                let pixels: Vec<_> = maps.layers.iter().flatten().copied().collect();
+                let pixels: Vec<_> = maps.layers.iter().flat_map(|m| m.iter()).copied().collect();
                 r.set_maps(&pixels, maps.width, maps.height, maps.layers.len() as u32);
             } else {
                 r.set_screen(&[0; 4], 1, 1);
             }
             self.texture_uploads += 1;
-            self.texture_key = Some(texture_key);
+            self.uploaded_maps = input.maps.clone();
         }
         if reset {
             r.set_camera(&input.scene);
@@ -401,7 +415,17 @@ impl StudioService {
         if request.width == 0 || request.height == 0 {return Err("Studio output is empty".into())}
         if tier == Tier::Fast {
             let input = source.scene(&request)?;
-            return self.fast.as_mut().ok_or("Fast compositor adapter is not attached")?.render(&input, &request);
+            // Lazily attach on every construction path, keeping Full-only
+            // workers free of raster pipelines and preview resources.
+            if self.fast.is_none() {
+                if self.renderer.is_none() { self.renderer = Some(Renderer::new(request.width, request.height)?); }
+                let r = self.renderer.as_ref().unwrap();
+                self.fast_renderer(Box::new(crate::fast::Raster::new(r.device().clone(), r.queue().clone())));
+            }
+            let fast = self.fast.as_mut().unwrap();
+            let mut rendered = fast.render_outputs(&input, &request, flip_y, &source.auxiliary_layers(&request)?)?;
+            rendered.failures = source.layer_failures(&request)?;
+            return Ok(rendered);
         }
         let PreparedScene { quality, denoise, live_guided, orthographic, reset, width, height, outputs, key, resource_start, adaptive, failures, .. } =
             self.prepare_scene(source, request.clone(), tier)?;
@@ -589,17 +613,7 @@ impl StudioService {
     }
 }
 
-fn texture_key(maps: Option<&crate::extract::TextureMaps>) -> Vec<u8> {
-    let Some(maps) = maps else { return vec![] };
-    let mut key = Vec::new();
-    key.extend_from_slice(&maps.width.to_le_bytes());
-    key.extend_from_slice(&maps.height.to_le_bytes());
-    key.extend_from_slice(&(maps.layers.len() as u64).to_le_bytes());
-    for layer in &maps.layers { key.extend_from_slice(layer); }
-    key
-}
-
-fn content(input: &SceneInput, e: &Extracted, geometry_epoch: u64) -> (Vec<u8>, usize) {
+fn content(input: &SceneInput, e: &Extracted, geometry_epoch: u64, texture_epoch: u64) -> (Vec<u8>, usize) {
     let p = &e.prepared;
     let mut key = format!(
         "{:?}{:?}{:?}{:?}{:?}{}{}:{}",
@@ -619,6 +633,10 @@ fn content(input: &SceneInput, e: &Extracted, geometry_epoch: u64) -> (Vec<u8>, 
     // never a partial hash. Keep only the changing TLAS here, not another copy
     // of every vertex, triangle and BLAS node in the scene.
     key.extend_from_slice(&geometry_epoch.to_le_bytes());
+    // Exact equality of the shared pixels advances this epoch above. A
+    // second copy of every map in each frame's identity costs both memory
+    // and a large byte copy on the interactive worker at Play.
+    key.extend_from_slice(&texture_epoch.to_le_bytes());
     for data in [
         bytemuck::cast_slice(&p.nodes[..e.tlas_capacity]),
         bytemuck::cast_slice(&p.materials),
@@ -626,13 +644,6 @@ fn content(input: &SceneInput, e: &Extracted, geometry_epoch: u64) -> (Vec<u8>, 
     ] {
         key.extend_from_slice(&(data.len() as u64).to_le_bytes());
         key.extend_from_slice(data);
-    }
-    if let Some(maps) = &input.maps {
-        key.extend_from_slice(&maps.width.to_le_bytes());
-        key.extend_from_slice(&maps.height.to_le_bytes());
-        for map in &maps.layers {
-            key.extend_from_slice(map);
-        }
     }
     (key, resource_start)
 }
