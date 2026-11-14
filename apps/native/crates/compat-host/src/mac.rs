@@ -464,6 +464,20 @@ fn fail_task(task: &ProtocolObject<dyn WKURLSchemeTask>) {
     }
 }
 
+/// The shared page is never a drag destination. It spans the whole window
+/// under the native panels, and AppKit gives a drag to the registered view
+/// under the pointer whatever `hitTest:` answers, so a WKWebView registered
+/// for files (WebKit's default, set again as it joins a window) took every
+/// file dragged over the window, panels it does not show included. As in
+/// v1.2.0 (an extension panel's drop reached the window's own), files go to
+/// the native drop targets, and over an extension panel to the window's
+/// drop, which imports them.
+fn refuse_drags(web: &WKWebView) {
+    if web.registeredDraggedTypes().count() > 0 {
+        web.unregisterDraggedTypes();
+    }
+}
+
 // A shared full-window page with an exact mask and identical native hit geometry.
 define_class!(
     #[unsafe(super(NSView))]
@@ -626,6 +640,7 @@ impl MacDomHost {
                 &NSString::from_str("drawsBackground"),
             );
         }
+        refuse_drags(&web);
         let slot = SlotView::new(mtm, frame);
         slot.addSubview(&web);
         slot.setAccessibilityElement(true);
@@ -853,6 +868,7 @@ impl MacDomHost {
             NSWindowOrderingMode::Below,
             Some(gpui),
         );
+        refuse_drags(&self.web);
     }
     /// Shell rectangles the shared document shows through this frame.
     pub fn set_regions(&mut self, regions: Vec<Rect>) -> Result<()> {
@@ -882,6 +898,7 @@ impl MacDomHost {
             NSSize::new(viewport.w, viewport.h),
         ));
         self.slot.clip(self.shared.panels.borrow().visible());
+        refuse_drags(&self.web);
         self.shared.geometry_dirty.set(false);
         Ok(())
     }

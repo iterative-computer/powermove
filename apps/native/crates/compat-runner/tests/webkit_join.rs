@@ -94,6 +94,13 @@ mod mac {
             },
         )?;
         web.present(viewport)?;
+        // Files dragged over the window are the native panels' (and the
+        // window's own drop): the shared page never takes a drag.
+        assert_eq!(
+            web.web_view().registeredDraggedTypes().count(),
+            0,
+            "the page is a drag destination"
+        );
         // The helper run this page draws, as the app reads it from contributions.
         let view = loop {
             let view = host.contributions().and_then(|c| {
@@ -258,6 +265,13 @@ mod mac {
             },
         )?;
         web.present(viewport)?;
+        // Files dragged over the window are the native panels' (and the
+        // window's own drop): the shared page never takes a drag.
+        assert_eq!(
+            web.web_view().registeredDraggedTypes().count(),
+            0,
+            "the page is a drag destination"
+        );
         let deadline = Instant::now() + Duration::from_secs(30);
         // The page belongs to one realm generation, as in the app.
         while host.view() == 0 {
