@@ -480,17 +480,50 @@ fn refuse_drags(web: &WKWebView) {
     }
 }
 
+// The shared page's web view. It is never a drag destination (above), and
+// it spans the whole window under the native
+// panels and, once a person has clicked an extension panel, holds the
+// keyboard: AppKit then sent it every plain mouse move in the window, so the
+// timeline, the viewer and every native panel lost their hover (no whiter rim,
+// no trim grip, no row switches) and WebKit's cursor reset to an arrow over
+// them, until the next click elsewhere. A move or cursor update over the
+// window's own content (outside the extension panels, where the native view
+// answers the hit test) goes to that view instead; over a panel it is
+// WebKit's.
 define_class!(
-    #[unsafe(super(WKWebView, NSView, NSResponder, NSObject))]
+    #[unsafe(super(WKWebView))]
     #[thread_kind=MainThreadOnly]
-    #[name="PMCompatPageView"]
-    /// The extension page's WKWebView: never a drag destination.
+    #[name="PMCompatWebView"]
     struct PageView;
     impl PageView {
+        /// WebKit registers for files as it is made, joins a window and
+        /// loads: ignored, so the page never takes a Finder drop.
         #[unsafe(method(registerForDraggedTypes:))]
         fn register_for_dragged_types(&self, _types: &NSArray<NSPasteboardType>) {}
+        #[unsafe(method(mouseMoved:))]
+        fn mouse_moved(&self, event: &NSEvent) {
+            match self.native_under(event) {
+                Some(view) => unsafe { msg_send![&*view, mouseMoved: event] },
+                None => unsafe { msg_send![super(self), mouseMoved: event] },
+            }
+        }
+        #[unsafe(method(cursorUpdate:))]
+        fn cursor_update(&self, event: &NSEvent) {
+            if self.native_under(event).is_none() {
+                unsafe { msg_send![super(self), cursorUpdate: event] }
+            }
+        }
     }
 );
+impl PageView {
+    /// The native view under `event`'s pointer, when it is not this page
+    /// (the pointer is outside every extension panel).
+    fn native_under(&self, event: &NSEvent) -> Option<Retained<NSView>> {
+        let window = self.window()?;
+        let hit = window.contentView()?.hitTest(event.locationInWindow())?;
+        (!hit.isDescendantOf(self)).then_some(hit)
+    }
+}
 
 // A shared full-window page with an exact mask and identical native hit geometry.
 define_class!(
@@ -641,10 +674,11 @@ impl MacDomHost {
                 .setJavaScriptCanOpenWindowsAutomatically(!trust.is_store());
         }
         let frame = NSRect::new(NSPoint::ZERO, NSSize::new(1., 1.));
-        let page: Retained<PageView> = unsafe {
-            msg_send![PageView::alloc(mtm), initWithFrame: frame, configuration: &*config]
+        let web: Retained<WKWebView> = unsafe {
+            let page: Retained<PageView> =
+                msg_send![PageView::alloc(mtm), initWithFrame: frame, configuration: &*config];
+            Retained::into_super(page)
         };
-        let web: Retained<WKWebView> = Retained::into_super(page);
         unsafe {
             web.setNavigationDelegate(Some(ProtocolObject::from_ref(&*bridge)));
             web.setUIDelegate(Some(ProtocolObject::from_ref(&*bridge)));

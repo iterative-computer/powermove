@@ -428,3 +428,32 @@ fn material_pixels_cache_by_content_and_preserve_alpha_on_replacement() {
     assert_eq!(first.len(), 1024 * 1024 * 4);
     assert!(pm_scene3d::render::texture_rgba(b"bad image").is_err());
 }
+
+#[test]
+fn live_material_pixels_reuse_more_than_sixteen_images_and_release_with_their_owner() {
+    use image::ImageEncoder;
+    use std::sync::Arc;
+    let images: Vec<_> = (0..22)
+        .map(|i| {
+            let mut bytes = Vec::new();
+            image::codecs::png::PngEncoder::new(&mut bytes)
+                .write_image(&[i, 211, 17, 231], 1, 1, image::ExtendedColorType::Rgba8)
+                .unwrap();
+            bytes
+        })
+        .collect();
+    let pixels: Vec<_> = images
+        .iter()
+        .map(|bytes| pm_scene3d::render::texture_rgba(bytes).unwrap())
+        .collect();
+    for (bytes, first) in images.iter().zip(&pixels) {
+        let next = pm_scene3d::render::texture_rgba(&bytes.clone()).unwrap();
+        assert!(Arc::ptr_eq(first, &next), "a live image was resized again");
+    }
+    let weak: Vec<_> = pixels.iter().map(Arc::downgrade).collect();
+    drop(pixels);
+    assert!(
+        weak.iter().all(|image| image.upgrade().is_none()),
+        "the content index retained a second pixel cache"
+    );
+}

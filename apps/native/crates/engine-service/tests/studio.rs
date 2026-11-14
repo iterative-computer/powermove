@@ -56,6 +56,82 @@ fn document(card: bool, opacity: f64) -> Arc<pm_model::Document> {
         .clone(),
     )
 }
+
+// More than 16 image maps used to reload and resize every PNG for each
+// frame. Removing the files after upload makes a reopen fail loudly.
+#[test]
+fn uploaded_material_images_survive_without_a_second_pixel_cache() {
+    use studio::SceneSource;
+    let dir = tempfile::tempdir().unwrap();
+    let mut project: Value = serde_json::from_str(&pm_model::json::to_canonical_string(
+        &document(false, 100.).to_value().unwrap(),
+    ))
+    .unwrap();
+    let comp = &mut project["comps"]["test"];
+    let mut template = comp["layers"].as_array().unwrap()[2].clone();
+    template["d"]["data"]["object"]["source"] =
+        json!({"primitive":"plane","parameters":{"width":2,"height":2}});
+    comp["layers"].as_array_mut().unwrap().truncate(2);
+    let mut media = pm_export::render::MediaPaths::default();
+    for i in 0..22 {
+        let id = format!("paint-{i}");
+        let path = dir.path().join(format!("{id}.png"));
+        pm_studio3d_engine::gpu::write_png(&path, 1, 1, &[i * 10, 128, 255, 255]).unwrap();
+        media.insert(&id, path);
+        let mut layer = template.clone();
+        layer["id"] = json!(format!("object-{i}"));
+        layer["d"]["data"]["object"]["material"]["maps"] = json!({"color":id});
+        comp["layers"].as_array_mut().unwrap().push(layer);
+    }
+    let doc = pm_kernel::DocumentStore::new_untitled(
+        pm_model::json::parse(&project.to_string()).unwrap(),
+    )
+    .snapshot()
+    .document;
+    let source = studio::DocumentSource::new(doc.clone(), media);
+    let mut service = studio::StudioService::default();
+    let mut request = studio::SceneRequest {
+        composition: "test".into(),
+        revision: doc.revision(),
+        ticks: 0,
+        width: 16,
+        height: 16,
+    };
+    let frame = service
+        .render(&source, request.clone(), studio::Tier::QualityLive)
+        .unwrap();
+    assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+    assert_eq!(frame.layers.len(), 22);
+    let uploads = service.texture_uploads();
+    // No SceneInput survives the call: reuse belongs to the uploaded maps.
+    for file in std::fs::read_dir(dir.path()).unwrap() {
+        std::fs::remove_file(file.unwrap().path()).unwrap();
+    }
+    request.ticks = pm_protocol::common::TICKS_PER_SECOND / 30;
+    let next = service
+        .render(&source, request, studio::Tier::QualityLive)
+        .unwrap();
+    assert!(
+        next.failures.is_empty(),
+        "maps reopened: {:?}",
+        next.failures
+    );
+    assert_eq!(next.layers.len(), 22);
+    assert_eq!(service.texture_uploads(), uploads);
+    // The weak source index releases pixels with their uploaded identity.
+    drop(service);
+    let input = source
+        .scene(&studio::SceneRequest {
+            composition: "test".into(),
+            revision: doc.revision(),
+            ticks: 2,
+            width: 16,
+            height: 16,
+        })
+        .unwrap();
+    assert!(input.maps.is_none(), "source retained an extra pixel cache");
+}
+
 fn request() -> RenderRequest {
     let mut r = RenderRequest::sized(Size::new(64, 64), Precision::Float16);
     r.export = true;
@@ -368,6 +444,7 @@ fn viewer_tiers_reach_the_retained_native_backend_without_document_edits() {
     let mut uploads = None;
     for (tier, samples) in [
         (studio::Preview::Live, None),
+        (studio::Preview::Fast, Some(1)),
         (studio::Preview::Refine, Some(32)),
         (studio::Preview::Final, Some(4)),
         (studio::Preview::Live, None),
@@ -403,7 +480,19 @@ fn viewer_tiers_reach_the_retained_native_backend_without_document_edits() {
         pm_model::json::to_canonical_string(&doc.to_value().unwrap()),
         original
     );
-    assert!(studio::Preview::parse("fast").is_err());
+    // Export bypasses the viewer's transient tier even on the same renderer.
+    let mut export = request.clone(); export.export = true; export.viewer = false;
+    export.output_kind = OutputKind::Final;
+    let mut frames = Vec::new();
+    for tier in [studio::Preview::Fast, studio::Preview::Final] {
+        studio::attach_with_preview(&mut renderer, doc.clone(), &Default::default(), &scene, tier).unwrap();
+        let frame = renderer.render(&doc, "test", Ticks::ZERO, &export, &pm_render::MapResolver::default()).unwrap();
+        assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+        frames.push(renderer.read_rgba(&frame).unwrap());
+    }
+    assert_eq!(frames[0].iter().map(|x|x.to_bits()).collect::<Vec<_>>(), frames[1].iter().map(|x|x.to_bits()).collect::<Vec<_>>(), "export bytes must ignore viewer tier");
+    assert_eq!(pm_model::json::to_canonical_string(&doc.to_value().unwrap()), original);
+    assert_eq!(studio::Preview::parse("fast").unwrap(),studio::Preview::Fast);
 }
 #[test]
 fn metal_native_document_reflection_final_repeat_and_service_export() {
