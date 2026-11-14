@@ -1,6 +1,6 @@
 import type { EditCommand, HostOperation, HostQuery } from "../../src/host-api";
 import type { Json } from "../../src/protocol";
-import type { Option, SegmentOption } from "../../src/components";
+import type { HostRows, Option, SegmentOption } from "../../src/components";
 
 /** Read-only presentation, supplied by pm-panel-inspector's application adapter.
  * No writable document, layer collection or 60k-selection expansion belongs here.
@@ -49,7 +49,12 @@ export interface NumberAxis extends Field<number> {
 export type Control =
   | { kind: "number" | "point"; axes: NumberAxis[] }
   | ({ kind: "text"; multiline?: boolean } & Field<string>)
-  | ({ kind: "choice" | "font"; options: (string | Option)[] } & Field<Json>)
+  | ({
+      kind: "choice" | "font";
+      options: (string | Option)[];
+      /** Filled by the host when the menu opens (Parent, Track Matte). */
+      rows?: HostRows;
+    } & Field<Json>)
   | ({ kind: "toggle" } & Field<boolean>)
   | ({ kind: "colour"; hexBinding?: Binding; hex?: string } & Field<string>)
   | ({ kind: "fill"; description: string } & Field<Json>)

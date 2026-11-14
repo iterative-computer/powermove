@@ -185,11 +185,6 @@ pub struct AutoQuality {
     late_plays: u32,
     /// Consecutive reduced playing frames under [`PLAY_UNDER`].
     quick_plays: u32,
-    /// The frames being played draw layers only an extension draws: their
-    /// answers are per resolution, and a full-resolution frame draws them
-    /// from earlier answers when the extension is slower than playback, so
-    /// those frames always play at full resolution.
-    overrides: bool,
 }
 impl AutoQuality {
     pub fn reset(&mut self) {
@@ -207,11 +202,6 @@ impl AutoQuality {
         } else if cost_ms < UNDER * interval_ms {
             self.slow_stills = false;
         }
-    }
-    /// Whether the frames being played draw extension layers (a frame held
-    /// for them, or the look-ahead finding them).
-    pub fn overrides(&mut self, overrides: bool) {
-        self.overrides = overrides;
     }
     /// A playing frame drawn at `scale` took `cost_ms` (start to GPU done)
     /// against its content frame of `frame_ms`.
@@ -250,9 +240,7 @@ impl Quality {
     pub fn scale(self, auto: &AutoQuality, moment: Moment) -> f64 {
         match self {
             Self::Auto if moment == Moment::Scrub && auto.slow_stills => AUTO_FLOOR,
-            Self::Auto if moment == Moment::Playing && auto.slow_play && !auto.overrides => {
-                AUTO_FLOOR
-            }
+            Self::Auto if moment == Moment::Playing && auto.slow_play => AUTO_FLOOR,
             Self::Auto | Self::Full => 1.,
             Self::Half => 0.5,
             Self::Quarter => 0.25,
@@ -314,25 +302,6 @@ mod tests {
         assert_eq!(play(&auto), AUTO_FLOOR);
         auto.record_play(5., frame, AUTO_FLOOR);
         assert_eq!(play(&auto), 1., "a second of cheap reduced frames");
-    }
-
-    /// Frames that draw extension layers play at full resolution in Auto
-    /// however late they are; without them, slow playback reduces again; a
-    /// fixed quality is what it says either way.
-    #[test]
-    fn frames_with_extension_layers_play_full_in_auto() {
-        let frame = 1000. / 24.;
-        let mut auto = AutoQuality::default();
-        for _ in 0..3 {
-            auto.record_play(120., frame, 1.);
-        }
-        let play = |auto: &AutoQuality| Quality::Auto.scale(auto, Moment::Playing);
-        assert_eq!(play(&auto), AUTO_FLOOR);
-        auto.overrides(true);
-        assert_eq!(play(&auto), 1.);
-        assert_eq!(Quality::Half.scale(&auto, Moment::Playing), 0.5);
-        auto.overrides(false);
-        assert_eq!(play(&auto), AUTO_FLOOR);
     }
 
     #[test]

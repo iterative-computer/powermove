@@ -1367,7 +1367,7 @@ impl Panel {
         if !catalog.providers.iter().any(|(p, _)| p == provider.name()) {
             return Err(Error::Invalid("provider"));
         }
-        if !(catalog.models.iter().any(|(m, _)| *m == model)
+        if !(catalog.accepts(&model)
             || provider == Provider::Claude && crate::input::valid_claude_id(&model))
         {
             return Err(Error::Invalid("provider model"));
@@ -1384,7 +1384,7 @@ impl Panel {
             .sessions
             .get_mut(id)
             .ok_or_else(|| Error::UnknownId(id.into()))?;
-        if !(s.catalog.models.iter().any(|(m, _)| *m == model)
+        if !(s.catalog.accepts(&model)
             || s.settings.provider == Provider::Claude && crate::input::valid_claude_id(&model))
         {
             return Err(Error::Invalid("model or effort"));

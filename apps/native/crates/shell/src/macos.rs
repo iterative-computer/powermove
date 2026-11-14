@@ -113,6 +113,17 @@ fn launch(
     });
     Ok(())
 }
+/// Whether the left mouse button is down now, as the hardware (HID system)
+/// state has it: whatever events reached this app, or the session's view of
+/// the button after a release that went astray.
+pub fn left_button_held() -> bool {
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" {
+        fn CGEventSourceButtonState(state: i32, button: u32) -> bool;
+    }
+    // kCGEventSourceStateHIDSystemState, kCGMouseButtonLeft.
+    unsafe { CGEventSourceButtonState(1, 0) }
+}
 pub fn tokens() -> Tokens {
     let scheme = if std::env::var("PM_NATIVE_APPEARANCE").as_deref() == Ok("light") {
         Scheme::Light

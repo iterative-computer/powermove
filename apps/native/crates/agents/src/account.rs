@@ -56,6 +56,11 @@ pub struct Model {
     pub id: String,
     pub label: String,
     pub efforts: Vec<String>,
+    /// The model the provider runs when none is chosen.
+    pub default: bool,
+    /// Other ids the provider accepts for this model (Claude's resolved
+    /// `claude-opus-5-5` for `opus`), so a saved one still reads as its name.
+    pub aliases: Vec<String>,
 }
 struct Slot {
     status: Status,
@@ -409,6 +414,8 @@ fn chatgpt_models(peer: &mut Peer) -> Result<Vec<Model>, String> {
                     .flatten()
                     .filter_map(|e| text(&e["reasoningEffort"], 16))
                     .collect(),
+                default: entry["isDefault"] == true,
+                aliases: vec![],
             });
         }
         cursor = text(&page["nextCursor"], 500).filter(|c| !seen.contains(c));
@@ -526,33 +533,74 @@ fn claude_models(binary: &PathBuf, vars: BTreeMap<String, String>) -> Result<Vec
         if message["type"] != "control_response" || message["response"]["request_id"] != "models" {
             continue;
         }
-        let mut models = Vec::<Model>::new();
         let list = message["response"]["response"]["models"].as_array();
-        for entry in list.into_iter().flatten() {
-            let efforts = entry["supportedEffortLevels"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|e| text(e, 16))
-                .collect::<Vec<_>>();
-            for key in ["value", "resolvedModel"] {
-                let id = entry[key].as_str().filter(|id| is_valid_model_id(id));
-                let Some(id) = id.filter(|id| !models.iter().any(|m| m.id == *id)) else {
-                    continue;
-                };
-                models.push(Model {
-                    id: id.into(),
-                    label: if key == "value" {
-                        text(&entry["displayName"], 120).unwrap_or_else(|| id.into())
-                    } else {
-                        id.into()
-                    },
-                    efforts: efforts.clone(),
-                });
-            }
-        }
-        return Ok(models);
+        return Ok(claude_listing(list.into_iter().flatten()));
     }
+}
+/// Claude Code's model list as the pickers show it: one row per model under
+/// its own name. Claude's own "Default (recommended)" row is no model; the
+/// model it resolves to is marked as the default instead.
+fn claude_listing<'a>(entries: impl Iterator<Item = &'a Value>) -> Vec<Model> {
+    let entries: Vec<&Value> = entries.collect();
+    let valid = |v: &Value| {
+        v.as_str()
+            .filter(|id| is_valid_model_id(id))
+            .map(str::to_owned)
+    };
+    let default = entries
+        .iter()
+        .find(|e| e["value"] == "default")
+        .and_then(|e| valid(&e["resolvedModel"]));
+    let mut models = Vec::<Model>::new();
+    for entry in entries {
+        let Some(id) = valid(&entry["value"]) else {
+            continue;
+        };
+        let resolved = valid(&entry["resolvedModel"]).filter(|r| *r != id);
+        if id == "default" {
+            continue;
+        }
+        if models.iter().any(|m| m.id == id || m.aliases.contains(&id)) {
+            continue;
+        }
+        let efforts = entry["supportedEffortLevels"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|e| text(e, 16))
+            .collect::<Vec<_>>();
+        // Two names for one resolved model: the first listed keeps it.
+        let resolved = resolved.filter(|r| !models.iter().any(|m| m.aliases.contains(r)));
+        let is_default = default
+            .as_ref()
+            .is_some_and(|d| *d == id || resolved.as_ref() == Some(d))
+            && !models.iter().any(|m| m.default);
+        models.push(Model {
+            label: text(&entry["displayName"], 120).unwrap_or_else(|| id.clone()),
+            id,
+            efforts,
+            default: is_default,
+            aliases: resolved.into_iter().collect(),
+        });
+    }
+    // A default no listed row names still shows, under its own id.
+    if let Some(d) = default.filter(|d| !models.iter().any(|m| m.default || m.id == *d)) {
+        let efforts = models
+            .first()
+            .map(|m| m.efforts.clone())
+            .unwrap_or_default();
+        models.insert(
+            0,
+            Model {
+                id: d.clone(),
+                label: d,
+                efforts,
+                default: true,
+                aliases: vec![],
+            },
+        );
+    }
+    models
 }
 /// A short-lived newline-JSON peer. Dropping it ends the process.
 struct Peer {
@@ -696,6 +744,41 @@ mod tests {
         ] {
             assert!(trusted_auth_url(bad).is_err(), "{bad}");
         }
+    }
+    #[test]
+    fn claudes_default_row_is_no_model_and_marks_the_model_it_resolves_to() {
+        // Claude Code 2.1's own initialize answer, trimmed to the read fields.
+        let e = |value: &str, resolved: &str, name: &str| {
+            json!({"value":value,"resolvedModel":resolved,"displayName":name,
+                "supportedEffortLevels":["low","high"]})
+        };
+        let listed = [
+            e("default", "claude-opus-5-5", "Default (recommended)"),
+            e("opus", "claude-opus-5-5", "Opus"),
+            e("fable", "claude-fable-5-2", "Fable"),
+            e("sonnet", "claude-sonnet-5-5", "Sonnet"),
+        ];
+        let models = claude_listing(listed.iter());
+        let rows: Vec<_> = models
+            .iter()
+            .map(|m| (m.id.as_str(), m.label.as_str(), m.default))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("opus", "Opus", true),
+                ("fable", "Fable", false),
+                ("sonnet", "Sonnet", false)
+            ]
+        );
+        assert_eq!(models[0].aliases, ["claude-opus-5-5"]);
+        assert_eq!(models[0].efforts, ["low", "high"]);
+        // A default no row names is still listed, under its id.
+        let only = claude_listing([e("default", "claude-next", "Default (recommended)")].iter());
+        assert_eq!(
+            (only[0].id.as_str(), only[0].default),
+            ("claude-next", true)
+        );
     }
     /// App Server that answers slowly, has no model list, and signs in at once.
     const SLOW_CODEX: &str = r#"#!/usr/bin/python3

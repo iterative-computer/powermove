@@ -181,12 +181,15 @@ impl Properties {
             let mut time_rows = vec![];
             // The model decides applicability; this adapter only maps authored
             // labels and supported control descriptors to frozen v4 rows.
-            for field in model.fields().map_err(|e| e.to_string())? {
-                let definition = model
-                    .layer(&layer)
-                    .ok()
-                    .and_then(|l| l.get("d")?.get("definition")?.as_str().map(str::to_owned))
-                    .unwrap_or_default();
+            let fields = model.fields().map_err(|e| e.to_string())?;
+            // A contributed layer type's definition, read once (not a copy of the
+            // layer per field).
+            let definition = model
+                .layer(&layer)
+                .ok()
+                .and_then(|l| l.get("d")?.get("definition")?.as_str().map(str::to_owned))
+                .unwrap_or_default();
+            for field in fields {
                 let contributed = match &field.binding {
                     Binding::Property(id) => id
                         .path
@@ -347,17 +350,16 @@ impl Properties {
                                     .flat_map(|p| p.options.iter().map(super::data::wire))
                                     .collect::<Vec<_>>()
                             ),
+                            // Every layer a layer can follow is the host's to list
+                            // when the menu opens (`HostRows`): the closed button
+                            // shows only None and the current layer.
                             "layer.parent" | "layer.matteSource" => {
-                                let ids = if id == "layer.parent" {
-                                    model.parent_candidates(&layer)
-                                } else {
-                                    model.matte_candidates(&layer)
-                                }
-                                .map_err(|e| e.to_string())?;
                                 let mut options = vec![json!({"v":null,"label":"None"})];
-                                for id in ids {
-                                    let candidate = model.layer(&id).map_err(|e| e.to_string())?;
-                                    options.push(json!({"v":id,"label":candidate.get("name").and_then(pm_model::Value::as_str).unwrap_or(&id)}));
+                                if let Some(current) = value.as_str() {
+                                    let label = model
+                                        .layer_name(current)
+                                        .unwrap_or_else(|| current.to_owned());
+                                    options.push(json!({"v":current,"label":label}));
                                 }
                                 json!(options)
                             }
@@ -365,7 +367,15 @@ impl Properties {
                             // DESIGN-TODO(opus): supply blend/matte menu descriptors.
                             _ => continue,
                         };
-                        json!({"kind":"choice","binding":lease,"value":value,"options":options,"mixed":state.mixed})
+                        let mut choice = json!({"kind":"choice","binding":lease,"value":value,"options":options,"mixed":state.mixed});
+                        if let Some(source) = match id {
+                            "layer.parent" => Some("layer-parents"),
+                            "layer.matteSource" => Some("layer-mattes"),
+                            _ => None,
+                        } {
+                            choice["rows"] = json!({"source": source, "layer": layer});
+                        }
+                        choice
                     }
                     _ => continue,
                 };
@@ -699,16 +709,22 @@ impl Properties {
                 .snapshot
                 .root()
                 .and_then(|root| {
-                    pm_kernel::model::comp_node(root, model.published().snapshot.open_comp().as_deref())
-                        .and_then(|c| c.get("layers").map(|l| l.to_value()))
+                    pm_kernel::model::comp_node(
+                        root,
+                        model.published().snapshot.open_comp().as_deref(),
+                    )
+                    .and_then(|c| c.get("layers"))
+                    .map(|l| matches!(l.kind(), pm_model::NodeKind::Array(a) if a.is_empty()))
                 })
-                .is_some_and(|l| l.as_array().is_some_and(|a| a.is_empty()));
+                .unwrap_or(false);
             if !empty {
                 return Ok(None);
             }
-            return Ok(Some(json!({"id":"3d.scene","title":"3D Scene","collapsed":false,"rows":[],
+            return Ok(Some(
+                json!({"id":"3d.scene","title":"3D Scene","collapsed":false,"rows":[],
                 "note":"Add a model, text or light from Layer ▸ Add 3D Layer, or start from a lit studio set.",
-                "action":"set-up-studio"})));
+                "action":"set-up-studio"}),
+            ));
         };
         let quality = summary["quality"]["preset"]
             .as_str()
@@ -757,7 +773,8 @@ impl Properties {
         // Add Shot (§8): a command pull-down, so it always shows its title.
         // Every row is explicitly unchecked: the title row is the control's
         // value, and a pop-up would otherwise mark it as a current choice.
-        let mut shots = vec![json!({"v":"add","label":"Add Shot…","disabled":true,"checked":false})];
+        let mut shots =
+            vec![json!({"v":"add","label":"Add Shot…","disabled":true,"checked":false})];
         shots.extend(
             pm_panel_studio3d::properties::shots()
                 .as_array()
@@ -803,8 +820,15 @@ impl Properties {
             let slots = self
                 .originals
                 .get(asset)
-                .and_then(|path| Some((path.file_name()?.to_string_lossy().into_owned(), std::fs::read(path).ok()?)))
-                .map(|(name, bytes)| pm_scene3d::import::material_slot_values_from_file(&name, &bytes))
+                .and_then(|path| {
+                    Some((
+                        path.file_name()?.to_string_lossy().into_owned(),
+                        std::fs::read(path).ok()?,
+                    ))
+                })
+                .map(|(name, bytes)| {
+                    pm_scene3d::import::material_slot_values_from_file(&name, &bytes)
+                })
                 .unwrap_or_default();
             if self.originals.contains_key(asset) {
                 self.slots.insert(asset.to_owned(), slots);
@@ -816,7 +840,9 @@ impl Properties {
             .map_err(|e| e.to_string())?;
         let mut sections = vec![];
         for slot in slots {
-            let Some(index) = slot["index"].as_u64() else { continue };
+            let Some(index) = slot["index"].as_u64() else {
+                continue;
+            };
             let title = slot["name"].as_str().unwrap_or("Part").to_owned();
             let stored = &object["sourceMaterialProperties"][index.to_string()];
             let mut rows = vec![];
@@ -828,7 +854,12 @@ impl Properties {
                 ("transmission", "Transmission", Some((0., 1., 0.01)), ""),
                 ("ior", "IOR", Some((1., 2.6, 0.01)), ""),
                 ("emissionColor", "Emission", None, ""),
-                ("emissionIntensity", "Emission Strength", Some((0., 100., 0.1)), ""),
+                (
+                    "emissionIntensity",
+                    "Emission Strength",
+                    Some((0., 100., 0.1)),
+                    "",
+                ),
                 ("iridescence", "Iridescence", Some((0., 1200., 10.)), "nm"),
             ] {
                 let path = format!("mi.{index}.{key}");
@@ -838,8 +869,12 @@ impl Properties {
                         let value = super::data::wire(&state.value);
                         let lease = self.lease(model, &path, binding)?;
                         let control = match (range, &value) {
-                            (_, Value::String(_)) => json!({"kind":"colour","binding":lease,"value":value}),
-                            (Some((min, max, step)), Value::Number(_)) => json!({"kind":"number","axes":[{"binding":lease,"value":value,"unit":unit,"step":step,"precision":2,"min":min,"max":max}]}),
+                            (_, Value::String(_)) => {
+                                json!({"kind":"colour","binding":lease,"value":value})
+                            }
+                            (Some((min, max, step)), Value::Number(_)) => {
+                                json!({"kind":"number","axes":[{"binding":lease,"value":value,"unit":unit,"step":step,"precision":2,"min":min,"max":max}]})
+                            }
                             _ => continue,
                         };
                         let animation = if state.key_at_playhead {
@@ -859,8 +894,12 @@ impl Properties {
                 let lease = self.control_lease(&id);
                 let value = slot["values"][key].clone();
                 let control = match range {
-                    None => json!({"kind":"colour","binding":lease,"value":if value.is_string() { value } else { json!("#FFFFFF") }}),
-                    Some((min, max, step)) => json!({"kind":"number","axes":[{"binding":lease,"value":if value.is_number() { value } else { json!(min) },"unit":unit,"step":step,"precision":2,"min":min,"max":max}]}),
+                    None => {
+                        json!({"kind":"colour","binding":lease,"value":if value.is_string() { value } else { json!("#FFFFFF") }})
+                    }
+                    Some((min, max, step)) => {
+                        json!({"kind":"number","axes":[{"binding":lease,"value":if value.is_number() { value } else { json!(min) },"unit":unit,"step":step,"precision":2,"min":min,"max":max}]})
+                    }
                 };
                 rows.push(json!({"id":id,"label":label,"locked":locked,"animation":null,"control":control}));
             }
@@ -921,7 +960,9 @@ impl Properties {
             let lease = this.lease(model, path, binding)?;
             let control = match (range, &value) {
                 (_, Value::String(_)) => json!({"kind":"colour","binding":lease,"value":value}),
-                (Some((min, max, step)), Value::Number(_)) => json!({"kind":"number","axes":[{"binding":lease,"value":value,"unit":unit,"step":step,"precision":2,"min":min,"max":max}]}),
+                (Some((min, max, step)), Value::Number(_)) => {
+                    json!({"kind":"number","axes":[{"binding":lease,"value":value,"unit":unit,"step":step,"precision":2,"min":min,"max":max}]})
+                }
                 _ => return Ok(None),
             };
             let animation = if state.key_at_playhead {
@@ -942,9 +983,19 @@ impl Properties {
             Value::Null,
             json!({"kind":"toggle","binding":lease,"value":on}),
         ));
-        let bevel = data["p"]["bevelStyle"]["v"].as_str().unwrap_or("none").to_owned();
+        let bevel = data["p"]["bevelStyle"]["v"]
+            .as_str()
+            .unwrap_or("none")
+            .to_owned();
         if on {
-            if let Some(r) = channel(self, model, "geo.depth", "Depth", "px", Some((0., 10000., 1.)))? {
+            if let Some(r) = channel(
+                self,
+                model,
+                "geo.depth",
+                "Depth",
+                "px",
+                Some((0., 10000., 1.)),
+            )? {
                 rows.push(r);
             }
             let lease = self.control_lease("3d.extrude.bevelStyle");
@@ -959,10 +1010,24 @@ impl Properties {
                 json!({"kind":"choice","binding":lease,"value":bevel,"options":options}),
             ));
             if bevel != "none" {
-                if let Some(r) = channel(self, model, "geo.bevelDepth", "Bevel Size", "px", Some((0., 1000., 0.5)))? {
+                if let Some(r) = channel(
+                    self,
+                    model,
+                    "geo.bevelDepth",
+                    "Bevel Size",
+                    "px",
+                    Some((0., 1000., 0.5)),
+                )? {
                     rows.push(r);
                 }
-                if let Some(r) = channel(self, model, "geo.holeBevelDepth", "Inner Bevel", "%", Some((0., 100., 1.)))? {
+                if let Some(r) = channel(
+                    self,
+                    model,
+                    "geo.holeBevelDepth",
+                    "Inner Bevel",
+                    "%",
+                    Some((0., 100., 1.)),
+                )? {
                     rows.push(r);
                 }
             }
@@ -979,9 +1044,12 @@ impl Properties {
             ));
         }
         let collapsed = self.collapsed.get("3d.extrude").copied().unwrap_or(false);
-        let mut section = json!({"id":"3d.extrude","title":"Extrude","collapsed":collapsed,"rows":rows});
+        let mut section =
+            json!({"id":"3d.extrude","title":"Extrude","collapsed":collapsed,"rows":rows});
         if !on {
-            section["note"] = json!("Give this layer depth, a bevel and its own surfaces. It lights like any 3D model.");
+            section["note"] = json!(
+                "Give this layer depth, a bevel and its own surfaces. It lights like any 3D model."
+            );
         }
         sections.push(section);
         if !on {
@@ -1002,7 +1070,13 @@ impl Properties {
                 ("metallic", "Metalness", Some((0., 1., 0.01)), "", 2),
                 ("opacity", "Opacity", Some((0., 100., 1.)), "%", 0),
                 ("emissionColor", "Emission", None, "", 2),
-                ("emissionIntensity", "Emission Strength", Some((0., 100., 0.1)), "", 1),
+                (
+                    "emissionIntensity",
+                    "Emission Strength",
+                    Some((0., 100., 0.1)),
+                    "",
+                    1,
+                ),
             ] {
                 let path = format!("ms.{surface}.{key}");
                 if extrude::has_override(record, surface, key)
@@ -1017,7 +1091,9 @@ impl Properties {
                 let value = extrude::surface_value(record, surface, key);
                 let control = match range {
                     None => json!({"kind":"colour","binding":lease,"value":value}),
-                    Some((min, max, step)) => json!({"kind":"number","axes":[{"binding":lease,"value":value,"unit":unit,"step":step,"precision":precision,"min":min,"max":max}]}),
+                    Some((min, max, step)) => {
+                        json!({"kind":"number","axes":[{"binding":lease,"value":value,"unit":unit,"step":step,"precision":precision,"min":min,"max":max}]})
+                    }
                 };
                 rows.push(row(&id, label, Value::Null, control));
             }
@@ -1388,7 +1464,11 @@ impl Properties {
                     } else {
                         0
                     };
-                    let floor = if field.min.is_some_and(|m| m > 0. && m < 0.01) { 3 } else { 2 };
+                    let floor = if field.min.is_some_and(|m| m > 0. && m < 0.01) {
+                        3
+                    } else {
+                        2
+                    };
                     let mut axis = json!({"binding":lease,"value":value,"unit":field.unit,"step":if fine {0.01} else {1.},"precision":floor.max(small)});
                     if let Some(min) = field.min {
                         axis["min"] = json!(min);

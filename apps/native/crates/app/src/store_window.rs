@@ -192,6 +192,9 @@ pub struct StoreWindow {
     /// The extension or repository an install, update or uninstall is running for.
     pub busy: Option<String>,
     pub message: Option<String>,
+    /// Shown as a page of the editor window, under its toolbar: the sidebar
+    /// keeps no room for window buttons.
+    pub embedded: bool,
     generation: u64,
     tx: async_channel::Sender<Reply>,
 }
@@ -223,6 +226,7 @@ impl StoreWindow {
             owner: None,
             busy: None,
             message: None,
+            embedded: false,
             generation: 0,
             tx,
         };
@@ -904,53 +908,6 @@ fn today() -> (i32, u32, u32) {
     pm_services::surfaces::store::civil_from_days(days)
 }
 
-/// Opens the Store, or brings it forward.
-pub fn open(services: Services, cx: &mut App) {
-    if let Some(window) = cx
-        .windows()
-        .into_iter()
-        .find(|w| w.downcast::<StoreWindow>().is_some())
-    {
-        let _ = window.update(cx, |_, w, _| w.activate());
-        return;
-    }
-    let t = pm_shell::tokens();
-    let (m, tokens) = (t.metrics, t.clone());
-    // As the Project Library: full-size content under a transparent title
-    // bar, the sidebar on the behind-window blur.
-    let background = if t.translucent() {
-        gpui::MacosWindowBackground::Transparent
-    } else {
-        gpui::MacosWindowBackground::Opaque
-    };
-    let _ = cx.open_window(
-        WindowOptions::new()
-            .macos_window_background(background)
-            .titlebar(Some(TitlebarOptions {
-                title: Some("Store".into()),
-                appears_transparent: true,
-                ..Default::default()
-            }))
-            .window_bounds(Some(WindowBounds::Windowed(Bounds::new(
-                point(px(m.toolbar), px(m.toolbar)),
-                size(
-                    px(m.settings_width + m.settings_sidebar),
-                    px(m.settings_height),
-                ),
-            )))),
-        |window, cx| {
-            if tokens.translucent() {
-                pm_shell::window_backdrop(window, &tokens);
-            }
-            cx.new(|cx| {
-                let mut store = StoreWindow::new(services, tokens, cx);
-                store.attach_search(window, cx);
-                store
-            })
-        },
-    );
-}
-
 impl StoreWindow {
     fn button(
         &self,
@@ -1625,7 +1582,7 @@ impl Render for StoreWindow {
             .gap(px(m.border))
             .w(px(m.settings_sidebar))
             .h_full()
-            .pt(px(m.toolbar))
+            .pt(px(if self.embedded { m.gap } else { m.toolbar }))
             .px(px(m.gap))
             .bg(pm_shell::view::tint(ground, ground_alpha))
             .border_r(px(m.border))
@@ -1700,26 +1657,12 @@ impl Render for StoreWindow {
                             .font_weight(FontWeight(t.typography.semibold_weight))
                             .child(heading),
                     )
-                    .children(self.search.clone().map(|field| {
-                        // The search well (the kit's, as Home's).
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(m.gap))
-                            .w(px(m.settings_sidebar))
-                            .h(px(m.control))
-                            .px(px(m.gap + m.border))
-                            .rounded(px(m.control_radius))
-                            .bg(pm_shell::kit::ink(c.text, t.translucency.hover))
-                            .child(pm_shell::symbol::symbol(
-                                "magnifyingglass",
-                                m.symbol_inline,
-                                pm_shell::symbol::Weight::Regular,
-                                c.muted,
-                                window,
-                            ))
-                            .child(div().flex_1().min_w(px(0.)).child(field))
-                    })),
+                    // The field draws its own well.
+                    .children(
+                        self.search
+                            .clone()
+                            .map(|field| div().w(px(m.settings_sidebar)).child(field)),
+                    ),
             )
             .child(body);
         div()

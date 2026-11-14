@@ -420,7 +420,14 @@ impl MetalRenderer {
         let layer = new_window_layer(transparent);
         layer.set_device(&device);
         layer.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
-        layer.set_maximum_drawable_count(3);
+        // PM_GPUI_DRAWABLES (2 or 3) measures what the third drawable costs
+        // in input-to-glass latency.
+        let drawables = std::env::var("PM_GPUI_DRAWABLES")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|v| (2..=3).contains(v))
+            .unwrap_or(3);
+        layer.set_maximum_drawable_count(drawables);
         // Allow texture reading for visual tests (captures screenshots without ScreenCaptureKit)
         layer.set_framebuffer_only(false);
 

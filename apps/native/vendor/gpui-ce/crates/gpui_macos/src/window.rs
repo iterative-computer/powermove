@@ -1061,7 +1061,14 @@ impl MacWindowState {
                         link = Retained::from_raw(raw).expect("CAMetalDisplayLink initialization");
                         self.renderer.set_display_link_bound(true);
                         let _: () = msg_send![&*link, setDelegate: view];
-                        let _: () = msg_send![&*link, setPreferredFrameLatency: 2.0_f32];
+                        // P-120: two frames of render-ahead. PM_GPUI_FRAME_LATENCY
+                        // (1.0-2.0) measures the input-to-glass cost of it.
+                        let latency = std::env::var("PM_GPUI_FRAME_LATENCY")
+                            .ok()
+                            .and_then(|v| v.parse::<f32>().ok())
+                            .filter(|v| (1.0..=2.0).contains(v))
+                            .unwrap_or(2.0);
+                        let _: () = msg_send![&*link, setPreferredFrameLatency: latency];
                     } else {
                         link = msg_send![view, displayLinkWithTarget: view, selector: sel!(pmDisplayLink:)];
                     }
@@ -3184,6 +3191,33 @@ unsafe extern "C" fn handle_key_equivalent(
     _: Sel,
     native_event: ObjcId,
 ) -> Bool {
+    // Powermove: while a native text view edits (a hosted field's editor is
+    // the window's first responder), a bare function key (arrows, Home/End,
+    // Page Up/Down) is the field's, not a key equivalent: AppKit offers such
+    // keys to every view's performKeyEquivalent: before the first responder,
+    // and a GPUI element listening for keys would take an arrow a number
+    // field steps with.
+    unsafe {
+        let window: ObjcId = msg_send![this, window];
+        if !window.is_null() {
+            let responder: ObjcId = msg_send![window, firstResponder];
+            let editing: Bool = if responder.is_null() {
+                Bool::new(false)
+            } else {
+                msg_send![responder, isKindOfClass: class!(NSTextView)]
+            };
+            let flags: NSUInteger = msg_send![native_event, modifierFlags];
+            const COMMAND: NSUInteger = 1 << 20;
+            const CONTROL: NSUInteger = 1 << 18;
+            const FUNCTION: NSUInteger = 1 << 23;
+            if editing.as_bool()
+                && flags & FUNCTION != 0
+                && flags & (COMMAND | CONTROL) == 0
+            {
+                return Bool::new(false);
+            }
+        }
+    }
     unsafe { handle_key_event(this, native_event, true) }
 }
 

@@ -559,6 +559,82 @@ fn dragging_a_number_field_scrubs_as_one_undo_step(cx: &mut TestAppContext) {
     assert_ne!(p.snapshot.root().unwrap().to_value(), edited);
     assert!(!p.history.can_undo, "the whole scrub was one undo step");
 }
+/// A scrub whose release never reaches the window (AppKit delivered it
+/// elsewhere, owner feedback W4/W5) ends at the next move with the button
+/// up, as one Undo step, and stops holding the window's pointer moves.
+#[gpui::test]
+fn a_scrub_whose_release_is_lost_ends_on_the_next_move(cx: &mut TestAppContext) {
+    let rig = rig("inspector", 1);
+    rig.kernel
+        .call(
+            PROJECT,
+            pm_kernel::Request::new(
+                pm_kernel::Caller::native(),
+                pm_kernel::SelectionCall::Layers {
+                    ids: vec!["l0".into()],
+                    add: false,
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    for (_, ticket) in rig.runtime.publish() {
+        let ticket = ticket.unwrap();
+        while ticket.try_take().is_none() {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+    let first = publication(&rig);
+    let (view, mut vcx) = window(cx, &rig, first, Default::default());
+    vcx.run_until_parked();
+    let name = view
+        .read_with(&vcx, |v, _| v.first_number())
+        .expect("a bound number field");
+    let at = bounds(&mut vcx, &name).center();
+    vcx.simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
+    for step in 1..=5 {
+        vcx.simulate_mouse_move(
+            at + point(px(step as f32 * 8.), px(0.)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        settle(cx, |_| false_after(10));
+    }
+    assert!(view.read_with(&vcx, |v, _| v.scrubbing()));
+    // No release; the pointer moves on with the button up.
+    vcx.simulate_mouse_move(at + point(px(60.), px(20.)), None, Modifiers::none());
+    assert!(
+        !view.read_with(&vcx, |v, _| v.scrubbing()),
+        "the scrub ended"
+    );
+    let check = rig.kernel.clone();
+    settle(cx, move |_| {
+        check.published(PROJECT).unwrap().history.can_undo
+    });
+    assert!(rig.kernel.published(PROJECT).unwrap().history.can_undo);
+    // Again, and this time the next thing is a press elsewhere: the stale
+    // scrub ends before that press is handled.
+    vcx.simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
+    for step in 1..=3 {
+        vcx.simulate_mouse_move(
+            at + point(px(step as f32 * 8.), px(0.)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        settle(cx, |_| false_after(10));
+    }
+    assert!(view.read_with(&vcx, |v, _| v.scrubbing()));
+    vcx.simulate_mouse_down(
+        at + point(px(0.), px(400.)),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    assert!(
+        !view.read_with(&vcx, |v, _| v.scrubbing()),
+        "the next press ended the scrub"
+    );
+}
 fn false_after(ms: u64) -> bool {
     std::thread::sleep(Duration::from_millis(ms));
     true
@@ -1096,4 +1172,80 @@ fn a_tooltip_never_repeats_the_text_in_view(cx: &mut TestAppContext) {
         [None, Some("Reset Effect".into()), None, Some("More".into())],
         "no tooltip repeats the view or stands over a value's menu; icons keep theirs"
     );
+}
+/// A section heading pressed closes its group in the next frame, before the
+/// panel's script has answered; the publication that agrees takes over, and
+/// expanding shows the open chevron at once while the content follows.
+#[gpui::test]
+fn a_disclosure_press_shows_in_the_next_frame(cx: &mut TestAppContext) {
+    let rig = rig("viewer", 1);
+    let _ = publication(&rig);
+    let tree = |open: bool| {
+        let mut ops = node_ops(
+            1,
+            0,
+            "div",
+            json!({"style":{"width":200,"height":200}}),
+            &[],
+        );
+        ops.extend(node_ops(
+            2,
+            1,
+            "div",
+            json!({"data-pm-component":"disclosure-group","role":"group"}),
+            &[],
+        ));
+        ops.extend(node_ops(
+            3,
+            2,
+            "button",
+            json!({"id":"heading","data-pm-component":"disclosure-button","aria-expanded":open,
+                "label":"Transform","style":{"width":120,"height":20}}),
+            &["click"],
+        ));
+        if open {
+            ops.extend(node_ops(
+                4,
+                2,
+                "div",
+                json!({"id":"content","style":{"width":120,"height":60}}),
+                &[],
+            ));
+        }
+        ops
+    };
+    let (view, mut vcx) = window(cx, &rig, synthetic(&rig, tree(true)), Default::default());
+    vcx.run_until_parked();
+    let at = bounds(&mut vcx, "heading").center();
+    assert!(vcx.debug_bounds("content").is_some());
+    vcx.simulate_click(at, Modifiers::none());
+    // The next frame: closed, with no publication in between.
+    vcx.update(|window, _| window.refresh());
+    vcx.run_until_parked();
+    assert!(!view.read_with(&vcx, |v, _| v.disclosure_open(3)));
+    assert!(
+        vcx.debug_bounds("content").is_none(),
+        "the group closed at once"
+    );
+    assert!(
+        events(&view, &mut vcx).contains(&(3, "click".to_owned())),
+        "the script still hears it"
+    );
+    // The script's own publication agrees: it shows, and the stand-in goes.
+    view.update(&mut vcx, |v, cx| {
+        v.publish(synthetic(&rig, tree(false)), cx)
+    });
+    settle(cx, |_| true);
+    vcx.run_until_parked();
+    assert!(view.read_with(&vcx, |v, _| v.disclosures.is_empty()));
+    assert!(!view.read_with(&vcx, |v, _| v.disclosure_open(3)));
+    // Opening: the chevron turns now; the content comes with the publication.
+    vcx.simulate_click(at, Modifiers::none());
+    vcx.run_until_parked();
+    assert!(view.read_with(&vcx, |v, _| v.disclosure_open(3)));
+    view.update(&mut vcx, |v, cx| v.publish(synthetic(&rig, tree(true)), cx));
+    settle(cx, |_| true);
+    vcx.run_until_parked();
+    assert!(vcx.debug_bounds("content").is_some());
+    assert!(view.read_with(&vcx, |v, _| v.disclosures.is_empty()));
 }
