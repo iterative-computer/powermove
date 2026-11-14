@@ -2537,8 +2537,14 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                             "source_stand_ins": t.source_stand_ins,
                             "skipped_targets": v.status.skipped_targets, "held_frames": v.status.held_frames,
                             "render_gpu_ms": render_gpu_ms,
-                            "picture": traced_picture
-                                .then(|| format!("{:016x}", f.submission.picture_hash())),
+                            "picture": traced_picture.then(|| {
+                                // PM_ENGINE_TRACE_PICTURES_DIR: the picture itself, a quarter of its size.
+                                if let Some(dir) = trace::pictures_dir() {
+                                    let name = format!("{:?}-{}-{}-{}.ppm", f.spec.moment, f.spec.time.get(), f.late_layers, f.stamp.sequence);
+                                    let _ = f.submission.write_picture(&dir.join(name), 4);
+                                }
+                                format!("{:016x}", f.submission.picture_hash())
+                            }),
                             // Traced runs only: the decode service's running
                             // counters and each memory client's weight, grant
                             // and reported use, so a native stall can be read
@@ -3465,7 +3471,10 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             {
                 panic!("injected frame failure");
             }
-            let picture_only = trace_pictures && spec.moment == Moment::Playing && !capture;
+            let picture_only = trace_pictures
+                && (spec.moment == Moment::Playing
+                    || spec.moment == Moment::Paused && trace::pictures_dir().is_some())
+                && !capture;
             // Whose frame a 3D refinement's progress belongs to.
             *progress_work.lock().unwrap() = Some((id, stamp));
             let result = provider

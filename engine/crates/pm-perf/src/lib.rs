@@ -172,6 +172,9 @@ counters! {
     /// Text runs found rendered.
     TextCacheHits = "cache.text.hits",
     TextCacheMisses = "cache.text.misses",
+    /// Glyph and path geometry the text coverage cache had / had to make.
+    TextCoverageHits = "cache.text_coverage.hits",
+    TextCoverageMisses = "cache.text_coverage.misses",
     /// Layer draws given back by the paused-frame draw reuse.
     DrawReuseHits = "cache.draw_reuse.hits",
     DrawReuseMisses = "cache.draw_reuse.misses",

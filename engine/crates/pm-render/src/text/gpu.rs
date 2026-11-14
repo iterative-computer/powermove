@@ -1502,6 +1502,9 @@ impl TextGpu {
             );
         }
         self.stats.painted += 1;
+        let (hits, misses) = self.cpu.coverage_cache().take_counts();
+        pm_perf::add(pm_perf::Counter::TextCoverageHits, hits);
+        pm_perf::add(pm_perf::Counter::TextCoverageMisses, misses);
         let view = raster.view.clone();
         self.insert(plan, precision, working, raster);
         self.raster_pool.trim(CACHE_BYTES);

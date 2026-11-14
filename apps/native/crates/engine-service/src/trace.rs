@@ -50,6 +50,14 @@ pub fn now() -> f64 {
     objc2_quartz_core::CACurrentMediaTime()
 }
 
+/// Diagnostic, traced viewers: `PM_ENGINE_TRACE_PICTURES_DIR`, where the
+/// pictures read back for the trace are also written (and paused frames read back).
+pub fn pictures_dir() -> Option<&'static std::path::Path> {
+    static DIR: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| std::env::var_os("PM_ENGINE_TRACE_PICTURES_DIR").map(Into::into))
+        .as_deref()
+}
+
 /// Where the viewer diagnostic trace goes, read once: `PM_ENGINE_TRACE`, or
 /// for a development bundle launched without a custom environment
 /// (`com.powermove.native.dev.*`) its own `PMEngineTrace` default; a shipped
