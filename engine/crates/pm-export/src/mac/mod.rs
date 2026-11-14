@@ -114,6 +114,7 @@ impl VideoToolboxSink {
             &self.checked,
         )?;
         if !problems.is_empty() {
+            keep_failed(&temp, &problems);
             return Err(Error::Verify(problems.join("; ")));
         }
         let mut report = report;
@@ -121,6 +122,22 @@ impl VideoToolboxSink {
         report.bytes = std::fs::metadata(&temp).map(|m| m.len()).unwrap_or(0);
         let path = self.output.commit()?;
         Ok(Delivered { path, report })
+    }
+}
+
+/// A development aid: with `PM_EXPORT_KEEP_FAILED` set to a folder, a file
+/// that failed its check is copied there (with what was found) before it is
+/// removed, so a failure that does not repeat can still be looked at.
+fn keep_failed(temp: &std::path::Path, problems: &[String]) {
+    let Some(folder) = std::env::var_os("PM_EXPORT_KEEP_FAILED") else {
+        return;
+    };
+    let folder = std::path::PathBuf::from(folder);
+    let name = temp.file_name().unwrap_or_default().to_string_lossy();
+    let kept = folder.join(name.trim_start_matches('.').to_string());
+    if std::fs::create_dir_all(&folder).is_ok() && std::fs::copy(temp, &kept).is_ok() {
+        let _ = std::fs::write(kept.with_extension("txt"), problems.join("\n"));
+        eprintln!("kept the failed file at {}", kept.display());
     }
 }
 
