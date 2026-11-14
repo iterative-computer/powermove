@@ -156,15 +156,22 @@ export function ProjectView(props: ProjectViewProps) {
   )
     throw new RangeError("Invalid native media grid layout");
   const [searchOpen, setSearchOpen] = useState(false);
-  const [query, setQuery] = useState("");
-  // The host set the filter (the status line's missing files clear the
-  // search): the field follows that query, and only a newer one. Answers to
-  // the person's own typing, however late, never replace what they typed.
+  // The field shows the query that filters the list: the model's, except
+  // for what was just typed and is not answered yet (an answer to an earlier
+  // keystroke never replaces a later one). A copy of its own could disagree
+  // with the filter, a placeholder over a filtered list once the panel was
+  // drawn again. A filter the host set (the status line's missing files
+  // clear the search) replaces what is typed, once per revision.
+  const [typed, setTyped] = useState<string | null>(null);
+  const query = typed ?? view?.query ?? "";
+  useLayoutEffect(() => {
+    if (typed !== null && view?.query === typed) setTyped(null);
+  }, [view?.query, typed]);
   const hostFilter = useRef(0);
   useLayoutEffect(() => {
     if (!view || view.host_filter <= hostFilter.current) return;
     hostFilter.current = view.host_filter;
-    setQuery(view.query);
+    setTyped(null);
   }, [view?.host_filter]);
   const [hovered, setHovered] = useState<string | null>(null);
   /** The page last asked for by the list's range (offset, limit, document). */
@@ -173,7 +180,7 @@ export function ProjectView(props: ProjectViewProps) {
   const [crumbFocus, setCrumbFocus] = useState(0);
   const document = view?.page.stamp.document;
   useLayoutEffect(() => {
-    setQuery("");
+    setTyped(null);
     setSearchOpen(false);
     setHovered(null);
     setRename("");
@@ -186,7 +193,7 @@ export function ProjectView(props: ProjectViewProps) {
     if (folder) setRename(itemName(folder));
   }, [view?.renaming]);
   const filter = (value: string, missingOnly = !!view?.missing_only) => {
-    setQuery(value);
+    setTyped(value);
     input({
       Filter: {
         query: value,
@@ -748,7 +755,7 @@ export function ProjectView(props: ProjectViewProps) {
             title="Search media"
             value={query}
             metadata={{
-              hostValue: hostFilter.current,
+              hostValue: Math.max(hostFilter.current, view.host_filter),
               placeholder: "Search",
               search: true,
             }}
