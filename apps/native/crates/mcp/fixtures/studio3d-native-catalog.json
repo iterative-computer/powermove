@@ -231,7 +231,7 @@
     },
     {
       "name": "export_video",
-      "description": "Render the current project to MP4 (default) or ProRes with its audio. Uses the production renderer and FFmpeg encoder; returns the actual file path and stage timings after encoding finishes. Exports without a save dialog to the host export folder (desktop: ~/Powermove), using a unique filename. A long export keeps running and this call returns {status:\"running\", jobId, progress} after about 20 minutes; call export_video again with only that jobId to keep waiting. Never start a second export meanwhile. Native Studio accepts studioQuality (draft/preview/production/final or a quality patch) for this export only. Saved composition quality is unchanged. Stills and deliveries converge toward the noise threshold up to the sample ceiling; timeLimitSeconds is a preview hint, not a delivery deadline. The preset motionBlurSamples field is saved but its shutter integration is pending. Every option of the Export sheet is available under the sheet's own names (format webm too): profile, codec, quality, scale with width and height, fps, dynamicRange, colorTag, timecode, audioCoding, useProxies, captionsBurn, captionsSidecar and dolbyVision; absent ones keep the output above. The result carries notes when the person would be told something with the file (sound clipped).",
+      "description": "Render the current project to MP4 (default) or ProRes with its audio. Uses the production renderer and FFmpeg encoder; returns the actual file path and stage timings after encoding finishes. Exports without a save dialog to the host export folder (desktop: ~/Powermove), using a unique filename. A long export keeps running and this call returns {status:\"running\", jobId, progress} after about 20 minutes; call export_video again with only that jobId to keep waiting. Never start a second export meanwhile. Native Studio accepts studioQuality (draft/preview/production/final or a quality patch) for this export only. Saved composition quality is unchanged. Stills and deliveries converge toward the noise threshold up to the sample ceiling; timeLimitSeconds is a preview hint, not a delivery deadline. The preset motionBlurSamples field is saved but its shutter integration is pending. Every option of the Export sheet is available under the sheet's own names (format webm too): profile, codec, quality, scale with width and height, fps, dynamicRange, colorTag, timecode, audioCoding, useProxies, captionsBurn, captionsSidecar and dolbyVision; absent ones keep the output above. replace true reuses the name, replacing the last export of it. The result carries notes when the person would be told something with the file (sound clipped).",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -382,6 +382,10 @@
           "dolbyVision": {
             "type": "boolean",
             "description": "HLG HEVC (an MP4 with dynamicRange hlg): keep the Dolby Vision 8.4 metadata macOS adds for displays that use it. Default true; players without it show the HLG picture either way."
+          },
+          "replace": {
+            "type": "boolean",
+            "description": "Export as name.extension in the export folder, replacing an earlier file of that name and its caption files once the export succeeded; the old files are kept in the folder's export archive. Default false: a unique filename, and a file already there is never replaced."
           },
           "jobId": {
             "type": "string",
