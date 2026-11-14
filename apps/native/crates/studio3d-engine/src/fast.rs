@@ -31,6 +31,7 @@ pub struct Raster {
     color: wgpu::RenderPipeline,
     depth: wgpu::RenderPipeline,
     background: wgpu::RenderPipeline,
+    flip: wgpu::RenderPipeline,
     meshes: Vec<Mesh>,
     maps: Option<TextureMaps>,
     texture: Option<wgpu::Texture>,
@@ -171,6 +172,39 @@ impl Raster {
             multiview_mask: None,
             cache: None,
         });
+        let flip_shader=device.create_shader_module(wgpu::ShaderModuleDescriptor { label:Some("Studio Fast row orientation"),source:wgpu::ShaderSource::Wgsl(r#"
+@group(0) @binding(0) var source:texture_2d<f32>;
+@vertex fn vs(@builtin(vertex_index) i:u32)->@builtin(position) vec4f {
+ let p=array<vec2f,3>(vec2f(-1.,-1.),vec2f(3.,-1.),vec2f(-1.,3.));return vec4f(p[i],0.,1.);
+}
+@fragment fn fs(@builtin(position) p:vec4f)->@location(0) vec4f {
+ let size=textureDimensions(source);return textureLoad(source,vec2i(i32(p.x),i32(size.y)-1-i32(p.y)),0);
+}"#.into()) });
+        let flip = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Studio Fast row orientation"),
+            layout: None,
+            vertex: wgpu::VertexState {
+                module: &flip_shader,
+                entry_point: Some("vs"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &flip_shader,
+                entry_point: Some("fs"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: Default::default(),
+            depth_stencil: None,
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         let color = make(false);
         let depth = make(true);
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -185,6 +219,7 @@ impl Raster {
             color,
             depth,
             background,
+            flip,
             meshes: vec![],
             maps: None,
             texture: None,
@@ -401,7 +436,9 @@ impl Raster {
             }
         }
         self.maps(input);
-        let camera = camera(input, request, flip_y);
+        // Orientation is a final pixel-row transport, never a camera reflection:
+        // reflecting projected Y changes the rasterizer's top-left edge rule.
+        let camera = camera(input, request, false);
         let mut lights = input.scene.gpu_lights();
         if lights.is_empty() {
             lights.push(bytemuck::Zeroable::zeroed());
@@ -492,10 +529,14 @@ impl Raster {
                 pass.draw(0..m.count, *instance..*instance + 1);
             }
         }
+        let scratch = flip_y.then(|| self.target(request, wgpu::TextureFormat::Rgba8Unorm));
         let mut outputs = Vec::new();
         for layer in layers {
             let texture = self.target(request, wgpu::TextureFormat::Rgba8Unorm);
-            let view = texture.create_view(&Default::default());
+            let view = scratch
+                .as_ref()
+                .unwrap_or(&texture)
+                .create_view(&Default::default());
             {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("Studio Fast layer"),
@@ -532,6 +573,33 @@ impl Raster {
                         pass.draw(0..m.count, *instance..*instance + 1);
                     }
                 }
+            }
+            if scratch.is_some() {
+                let output = texture.create_view(&Default::default());
+                let flip_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("Studio Fast row orientation"),
+                    layout: &self.flip.get_bind_group_layout(0),
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&view),
+                    }],
+                });
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Studio Fast row orientation"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &output,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    ..Default::default()
+                });
+                pass.set_pipeline(&self.flip);
+                pass.set_bind_group(0, &flip_group, &[]);
+                pass.draw(0..3, 0..1);
             }
             outputs.push(LayerTexture { layer, texture });
         }
