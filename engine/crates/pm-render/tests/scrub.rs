@@ -271,3 +271,50 @@ fn drawing_cached_uhd_frames() {
         r.scrub_stats()
     );
 }
+
+/// A layer dragged over a paused clip: every drag step draws the same frame
+/// of the clip, only moved. The converted frame is reused from step to step,
+/// even when it is larger than the converted-frame budget (a 6K source's one
+/// frame is), instead of being evicted after each render and converted again.
+#[test]
+fn a_dragged_layer_reuses_its_clips_converted_frame() {
+    let at = |x: f64| {
+        let v = layer(
+            "v",
+            "video",
+            json!({ "asset": "clip", "fit": "stretch", "w": 160, "h": 90, "trim": 0, "speed": 1 }),
+            x,
+            0.0,
+            2.0,
+        );
+        let mut doc = project(160, 90, 2.0, no_fill(), vec![v]);
+        asset(&mut doc, "clip", "video", "mp4", 160, 90, 2.0);
+        load(&doc)
+    };
+    let (_, resolver) = clip();
+    let request = RenderRequest::at_scale(Size::new(160, 90), 1.0, Precision::Float16);
+    let mut r = Renderer::headless().unwrap();
+    // A budget smaller than one converted frame of this clip.
+    r.set_converted_frame_budget(1);
+    draw(&mut r, &at(0.0), 0.5, &request, &resolver);
+    r.set_scrub(true);
+    r.set_preview_media(false, true);
+    draw(&mut r, &at(4.0), 0.5, &request, &resolver);
+    let scope = pm_perf::Scope::begin();
+    for step in 2..8 {
+        draw(&mut r, &at(4.0 * step as f64), 0.5, &request, &resolver);
+    }
+    let counters = scope.finish();
+    assert_eq!(
+        counters.get(pm_perf::Counter::MediaCacheMisses),
+        0,
+        "six drag steps converted the clip again: {}",
+        counters.to_json()
+    );
+    // Under critical memory pressure nothing is kept for the next step.
+    r.set_memory_pressure(true);
+    draw(&mut r, &at(40.0), 0.5, &request, &resolver);
+    let scope = pm_perf::Scope::begin();
+    draw(&mut r, &at(44.0), 0.5, &request, &resolver);
+    assert_eq!(scope.finish().get(pm_perf::Counter::MediaCacheMisses), 1);
+}
