@@ -37,6 +37,8 @@ struct Recorder {
     /// Model geometry a part pick loads, and the parts it focused.
     assets: RefCell<Option<Arc<dyn pm_scene3d::geometry::AssetGeometry>>>,
     parts: RefCell<Vec<(String, Option<u64>)>>,
+    /// An entity `frame` reads, as the app's host reads its controller.
+    lease: RefCell<Option<Entity<u8>>>,
 }
 /// The canvas editor without AppKit: typing is an event, as from NSTextView.
 #[derive(Default)]
@@ -114,7 +116,10 @@ impl Host for Recording {
     fn playing(&self, _: &App) -> bool {
         false
     }
-    fn frame(&self, bounds: Bounds<Pixels>, _: &App) -> Option<ViewFrame> {
+    fn frame(&self, bounds: Bounds<Pixels>, cx: &App) -> Option<ViewFrame> {
+        if let Some(lease) = self.0.lease.borrow().as_ref() {
+            let _ = lease.read(cx);
+        }
         Some(ViewFrame {
             origin: bounds.origin + point(px(20.), px(20.)),
             scale: 1.,
@@ -1678,6 +1683,26 @@ fn the_middle_button_and_space_pan_whatever_the_tool(cx: &mut TestAppContext) {
         .vcx
         .update(|window, cx| surface.update(cx, |g, cx| g.release_space(window, cx)));
     assert!(!panned, "no drag: the release plays");
+}
+#[gpui::test]
+fn releasing_space_inside_the_hosts_own_update_does_not_double_lease(cx: &mut TestAppContext) {
+    // `viewer.spaceUp` runs inside the controller's update, and the hover
+    // that follows reads the controller through `Host::frame`: it must wait
+    // until that update is over (two aborts on 2026-11-13).
+    let mut s = stage(cx);
+    let lease = s.vcx.update(|_, cx| cx.new(|_| 0u8));
+    *s.recorder.lease.borrow_mut() = Some(lease.clone());
+    let surface = s.surface.clone();
+    s.vcx
+        .update(|_, cx| surface.update(cx, |g, cx| g.arm_space(cx)));
+    let surface = s.surface.clone();
+    let panned = s.vcx.update(|window, cx| {
+        lease.update(cx, |_, cx| {
+            surface.update(cx, |g, cx| g.release_space(window, cx))
+        })
+    });
+    assert!(!panned, "no drag: the release plays");
+    s.vcx.run_until_parked();
 }
 // Viewer selection parity with the shipped viewer (viewer.ts onDown, dblclick).
 fn select(s: &Stage, ids: &[&str]) {

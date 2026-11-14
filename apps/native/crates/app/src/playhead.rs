@@ -111,11 +111,15 @@ impl Playhead {
         unsafe { self.trail.setColors(Some(&array)) };
     }
     /// Place the line (`line` pt wide, `tall` pt from `bottom` up, at `x` in
-    /// the parent) and the trail over the tracks below the ruler.
+    /// the parent) and the trail over the tracks below the ruler, right of
+    /// `tracks_left`. The trail's speed is `travel`, the head's time in points
+    /// (seconds × zoom), as v1: scrolling the view is not the head moving.
     #[allow(clippy::too_many_arguments)]
     pub fn place(
         &mut self,
         x: f64,
+        travel: f64,
+        tracks_left: f64,
         bottom: f64,
         line: f64,
         tall: f64,
@@ -138,7 +142,7 @@ impl Playhead {
             NSSize::new(d, d),
         ));
         let width = if moving && !t.accessibility.reduce_motion {
-            self.spring.step(x, Instant::now())
+            self.spring.step(travel, Instant::now())
         } else {
             self.spring.reset();
             0.
@@ -159,13 +163,31 @@ impl Playhead {
         let (start, end) = if width > 0. { (0., 1.) } else { (1., 0.) };
         self.trail.setStartPoint(NSPoint::new(start, 0.5));
         self.trail.setEndPoint(NSPoint::new(end, 0.5));
+        // The glow stays over the tracks, never across the layer names.
         let left = if width > 0. { x - span } else { x };
+        let (left, span) = (left.max(tracks_left), span - (tracks_left - left).max(0.));
+        if span < 0.5 {
+            self.trail.setHidden(true);
+            return;
+        }
         self.trail.setFrame(NSRect::new(
             NSPoint::new(left, bottom),
             NSSize::new(span, (tall - ruler).max(0.)),
         ));
         self.trail.setOpacity(1.);
         self.trail.setHidden(false);
+    }
+}
+impl Playhead {
+    /// Scrolled out of the tracks: the line goes, and its trail with it (the
+    /// trail is a sibling layer, so hiding the line alone left the glow
+    /// sliding over the layer names during playback).
+    pub fn hide(&mut self) {
+        unsafe {
+            let _: () = objc2::msg_send![&*self.line, setHidden: true];
+        }
+        self.trail.setHidden(true);
+        self.spring.reset();
     }
 }
 impl Drop for Playhead {

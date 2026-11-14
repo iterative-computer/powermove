@@ -812,6 +812,109 @@ fn import_media_takes_an_image_sequence_with_its_frame_rate() {
     );
     assert_eq!(rate["isError"], true, "{rate}");
 }
+/// An agent imports what a person imports with Import Media: a 10-bit DPX
+/// film scan, a TGA with alpha and a 16-bit Photoshop document, each drawn
+/// in the agent's own still.
+#[test]
+fn import_media_takes_dpx_tga_and_photoshop_documents() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = root.path().join("profile");
+    std::fs::create_dir_all(&profile).unwrap();
+    // Large enough (over 128 KiB) for the probe that reads beside the hash.
+    let (w, h) = (640u16, 360u16);
+    let pixels = usize::from(w) * usize::from(h);
+    // 10-bit codes 1000, 500, 100 from 16-bit samples that hold them exactly.
+    let raw = root.path().join("scan.rgb48");
+    let codes = [1000u16, 500, 100].map(|c| c << 6 | c >> 4);
+    std::fs::write(&raw, codes.map(u16::to_le_bytes).concat().repeat(pixels)).unwrap();
+    let scan = root.path().join("scan.dpx");
+    let ffmpeg = std::env::var_os("PM_FFMPEG_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::PathBuf::from(std::env::var("HOME").unwrap())
+                .join("Library/Caches/powermove-engine/ffmpeg/out")
+        })
+        .join("bin/ffmpeg");
+    let status = Command::new(ffmpeg)
+        .args([
+            "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb48le", "-s", "640x360",
+        ])
+        .arg("-i")
+        .arg(&raw)
+        .args(["-frames:v", "1", "-pix_fmt", "gbrp10le"])
+        .arg(&scan)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    // Teal at half alpha, top row first.
+    let mut tga = vec![0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    tga.extend(w.to_le_bytes());
+    tga.extend(h.to_le_bytes());
+    tga.extend([32, 0x28]);
+    tga.extend([170, 180, 20, 128].repeat(pixels));
+    let matte = root.path().join("matte.tga");
+    std::fs::write(&matte, tga).unwrap();
+    // Purple, 16 bits per sample.
+    let mut psd = b"8BPS\0\x01\0\0\0\0\0\0\0\x03".to_vec();
+    psd.extend(u32::from(h).to_be_bytes());
+    psd.extend(u32::from(w).to_be_bytes());
+    psd.extend([0, 16, 0, 3]);
+    psd.extend([0; 14]);
+    for v in [0x7f33u16, 0x2a11, 0xc8ee] {
+        psd.extend(v.to_be_bytes().repeat(pixels));
+    }
+    let plate = root.path().join("plate.psd");
+    std::fs::write(&plate, psd).unwrap();
+    let compiler = glsl_compiler();
+    let mut client = Client::with_env(&profile, None, &[("POWERMOVE_GLSL_COMPILER", &compiler)]);
+    client.rpc(
+        "initialize",
+        json!({"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1"}}),
+    );
+    for (path, want) in [
+        (&scan, [249, 125, 25]),
+        // Over the project's black.
+        (&matte, [10, 90, 85]),
+        (&plate, [127, 42, 200]),
+    ] {
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        client.tool(
+            "create_project",
+            json!({"name":format!("Synthetic {name}"),"width":640,"height":360,"fps":24,"duration":1}),
+        );
+        client.tool(
+            "start_session",
+            json!({"prompt":format!("Synthetic {name}")}),
+        );
+        let placed = client.tool("import_media_to_timeline", json!({"path":path,"at":0}));
+        assert_eq!(placed["status"], "imported", "{name}: {placed}");
+        let listed = client.tool("list_media", json!({"assetId":placed["assetId"]}));
+        let row = &listed["assets"][0];
+        assert_eq!(
+            (
+                row["kind"].as_str(),
+                row["width"].as_f64(),
+                row["height"].as_f64()
+            ),
+            (Some("image"), Some(640.0), Some(360.0)),
+            "{name}: {row}"
+        );
+        let frames = client.rpc(
+            "tools/call",
+            json!({"name":"render_frames","arguments":{"times":[0],"width":320}}),
+        );
+        assert_eq!(frames["isError"], false, "{name}: {frames}");
+        let still = base64::engine::general_purpose::STANDARD
+            .decode(frames["content"][1]["data"].as_str().unwrap())
+            .unwrap();
+        let got = centre_of_png(&still);
+        assert!(
+            got.iter().zip(want).all(|(g, w)| g.abs_diff(w) <= 1),
+            "{name}: {got:?} vs {want:?}"
+        );
+        client.tool("finish_session", json!({"commit":true}));
+    }
+}
 #[test]
 fn media_tools_measure_a_linked_original() {
     let root = tempfile::tempdir().unwrap();

@@ -377,7 +377,8 @@ fn video_facts(
                     level,
                     base_compatibility,
                 } => format!(
-                    "Dolby Vision profile {profile}.{base_compatibility} level {level} (base layer shown)"
+                    "{} profile {profile}.{base_compatibility} level {level} (base layer shown)",
+                    crate::probe::color::DOLBY_VISION
                 ),
             },
         ));

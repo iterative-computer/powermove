@@ -61,18 +61,20 @@ test("native supported focus order follows header, conversation and composer bar
   const { root, commits } = mount();
   const p = states.selected();
   p.snapshot.sendable = true;
-  await root.render(<AgentView publication={p} send={() => {}} />);
+  await root.render(
+    <AgentView publication={p} send={() => {}} menu={async () => null} />,
+  );
   const result = assertWire(commits);
   expect(
     result.focusOrder.map((id: number) => result.nodes[id].props.id),
   ).toEqual([
+    "agent-threads",
     "agent-new",
     "agent-presentation",
     "agent-conversation",
     "agent-composer-text",
     "agent-attach",
     "agent-send",
-    "agent-provider",
     "agent-model",
     "agent-access",
   ]);
@@ -404,14 +406,14 @@ test("all conversation item kinds preserve exact prose and expose explicit unsup
   const lines = root
     .inspect()
     .nodes.filter((n) => String(n.props.label ?? "").endsWith(", collapsed"));
+  // Reasoning alone has no header: it is its own row (v1).
   expect(lines.map((n) => n.props.label)).toEqual([
-    "1 step · 3.2 s, collapsed",
-    "1 step, collapsed",
+    "1 tool call · 1 failed, collapsed",
   ]);
   for (const line of lines) await root.drive(line.id, "click");
   await root.flush();
   expect(
-    root.inspect().nodes.some((n) => n.props.label === "Thought for 3 s"),
+    root.inspect().nodes.some((n) => n.text === "Thought for 3s"),
   ).toBe(true);
   expect(root.inspect().nodes.some((n) => n.text === "Failed")).toBe(true);
   expect(
@@ -512,4 +514,59 @@ test("answered and skipped cards collapse using masked model acknowledgements; r
   ).toBe(false);
   assertWire(commits);
   await root.dispose();
+});
+
+test("the thread, model and access triggers open the window's menu and their picks become model commands", async () => {
+  const { root } = mount();
+  const actions: Action[] = [];
+  const asked: { placeholder: string; labels: string[] }[] = [];
+  const answers = ["thread:other", "effort:high", "supervised"];
+  const p = fixture();
+  p.snapshot.threads = [
+    { id: p.snapshot.threadId, title: "Headline", busy: false, updatedAt: 2 },
+    { id: "other", title: "Badge", busy: true, updatedAt: 1 },
+  ];
+  p.snapshot.catalog.efforts = ["", "low", "high"];
+  await root.render(
+    <AgentView
+      publication={p}
+      send={(a) => actions.push(a)}
+      menu={async (request) => {
+        asked.push({
+          placeholder: request.placeholder,
+          labels: request.options.map((o) => o.label),
+        });
+        return answers.shift() ?? null;
+      }}
+    />,
+  );
+  const node = (id: string) =>
+    root.inspect().nodes.find((n) => n.props.id === id)!.id;
+  for (const id of ["agent-threads", "agent-model", "agent-access"]) {
+    await root.drive(node(id), "click");
+    await new Promise((resolve) => queueMicrotask(() => resolve(null)));
+  }
+  expect(asked.map((a) => a.placeholder)).toEqual([
+    "Search threads…",
+    "Search models",
+    "Search",
+  ]);
+  expect(asked[0].labels).toEqual([
+    "New Thread",
+    "Headline",
+    "Badge · Working…",
+    "Delete Thread…",
+  ]);
+  expect(asked[2].labels).toEqual([
+    "Composition only",
+    "Supervised",
+    "Auto",
+    "Full access",
+  ]);
+  expect(actions).toEqual([
+    { type: "switchThread", id: "other" },
+    { type: "setModel", model: p.snapshot.settings.model, effort: "high" },
+    { type: "setAccess", access: "supervised" },
+  ]);
+  root.dispose();
 });

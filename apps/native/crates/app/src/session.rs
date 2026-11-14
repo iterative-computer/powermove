@@ -395,6 +395,10 @@ impl pm_shell::integration::Integration for Bridge {
             v.builtins.viewer_place = None;
             v.sync_extension_panels(open);
             v.sync_parking(open, cx);
+            v.builtins.agent_docked = open.contains(&"agent");
+            if v.builtins.agent_docked {
+                v.builtins.agent_parked = false;
+            }
         });
     }
     fn shown_panels(&self, shown: &[&str], cx: &mut App) {
@@ -2606,6 +2610,10 @@ impl Controller {
             self.font_picked(family);
             return true;
         }
+        if let Some(index) = cmd.name.strip_prefix("agentPick:") {
+            self.agent_picked(index);
+            return true;
+        }
         match cmd.name.as_str() {
             "shortcuts" => {
                 let action = cmd.args.first().cloned().unwrap_or_default();
@@ -2865,7 +2873,8 @@ impl Controller {
                     }
                 }
             }
-            "settings" | "agent" => self.show_builtin(&cmd.name, window, cx),
+            "settings" => self.show_builtin(&cmd.name, window, cx),
+            "agent" => self.toggle_agent(window, cx),
             "bringWorkspace" => self.bring_workspace(window, cx),
             "quit" => cx.defer(crate::lifecycle::begin_quit),
             "closeWindow" | "closeTab" => self.request_close(crate::lifecycle::Intent::Window, cx),
