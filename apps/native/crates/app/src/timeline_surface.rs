@@ -1228,12 +1228,11 @@ impl TimelineSurface {
     fn time_at(&self, x: f64) -> f64 {
         self.view.scroll_time + (x - self.view.layer_column) / self.view.pps
     }
-    /// The plot: the graph region less `inset` top and bottom, so keys at the
-    /// value range's ends never sit on its edges. Values map into this rect.
+    /// The plot: under the graph's legend strip, clear of its foot (v1's
+    /// `top + 42`, `H - 16`), so keys at the value range's ends never clip.
+    /// Values map into this rect.
     fn graph_area(&self) -> Option<Rect> {
-        let inset = self.tokens.metrics.inset as f64;
-        self.graph_region()
-            .map(|r| Rect::new(r.x, r.y + inset, r.width, (r.height - 2. * inset).max(1.)))
+        self.graph_region().map(graph_render::plot)
     }
     /// The graph's whole region under the ruler (lower half in Dope Sheet and Graph).
     fn graph_region(&self) -> Option<Rect> {
@@ -1499,7 +1498,7 @@ impl TimelineSurface {
         area: Rect,
         cx: &mut Context<Self>,
     ) {
-        let ops = self.graph_ops(area).unwrap_or_default();
+        let ops = self.graph_ops(None).unwrap_or_default();
         let hit = |prefix: &str| {
             ops.iter()
                 .rev()
@@ -1556,10 +1555,17 @@ impl TimelineSurface {
             };
         }
     }
-    fn graph_ops(&self, area: Rect) -> Option<Vec<Op>> {
+    /// The graph drawn into its region; `playhead` marks each curve's value
+    /// there.
+    fn graph_ops(&self, playhead: Option<f64>) -> Option<Vec<Op>> {
         self.graph
             .as_ref()?
-            .prepare(self.viewport()?, area, &self.tokens)
+            .prepare(
+                self.viewport()?,
+                self.graph_region()?,
+                &self.tokens,
+                playhead,
+            )
             .ok()
     }
     fn sample(
@@ -2022,14 +2028,30 @@ impl TimelineSurface {
             && window.is_window_hovered()
             && self.bounds.contains(&window.mouse_position())
     }
+    /// Whether the graph covers `(x, y)` (surface points): the layer bars
+    /// under it are hidden there, so nothing may hover, trim or press them.
+    fn covered(&self, x: f64, y: f64) -> bool {
+        self.graph_region()
+            .is_some_and(|r| x >= r.x && y >= r.y && y <= r.y + r.height)
+    }
+    /// The layer bar at `(x, y)` and the edge under it, where a bar shows.
+    fn clip_at(&self, x: f64, y: f64) -> Option<(String, Option<Edge>)> {
+        if self.covered(x, y) {
+            return None;
+        }
+        self.frame
+            .as_ref()
+            .and_then(|f| f.hit_clip(x, y))
+            .map(|(id, edge)| (id.to_owned(), edge))
+    }
+    /// The layer bar hovered now (tests).
+    pub fn hovered_clip(&self) -> Option<String> {
+        self.hover_clip.as_ref().map(|(id, _)| id.clone())
+    }
     fn hover(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
         let (x, y) = self.local(position);
         self.skim_to(x, cx);
-        let hovered = self
-            .frame
-            .as_ref()
-            .and_then(|f| f.hit_clip(x, y))
-            .map(|(id, _)| (id.to_owned(), x));
+        let hovered = self.clip_at(x, y).map(|(id, _)| (id, x));
         // The grip only changes side at the strip's middle: repaint when the
         // clip or the side changes, not on every pointer move.
         let side = |h: &Option<(String, f64)>| {
@@ -2048,21 +2070,22 @@ impl TimelineSurface {
         }
         self.hover_clip = hovered;
         let m = self.tokens.metrics;
-        let cursor =
-            if (x - self.view.layer_column).abs() <= m.hit as f64 / 4. && y >= m.ruler as f64 {
-                CursorStyle::ResizeColumn
-            } else if let Some((id, Some(_))) = self.frame.as_ref().and_then(|f| f.hit_clip(x, y))
+        let cursor = if (x - self.view.layer_column).abs() <= m.hit as f64 / 4.
+            && y >= m.ruler as f64
+        {
+            CursorStyle::ResizeColumn
+        } else if let Some((id, Some(_))) = self.clip_at(x, y)
                 // A locked layer's ends offer no trim.
                 && !self.frame.as_ref().is_some_and(|f| {
                     f.ops.iter().any(|o| {
-                        o.id.strip_prefix("clip:") == Some(id) && o.detail["cursor"] == "notAllowed"
+                        o.id.strip_prefix("clip:") == Some(id.as_str()) && o.detail["cursor"] == "notAllowed"
                     })
                 })
-            {
-                CursorStyle::ResizeLeftRight
-            } else {
-                CursorStyle::Arrow
-            };
+        {
+            CursorStyle::ResizeLeftRight
+        } else {
+            CursorStyle::Arrow
+        };
         if cursor != self.cursor {
             self.cursor = cursor;
             cx.notify();
@@ -2087,9 +2110,7 @@ impl TimelineSurface {
     }
     #[cfg(test)]
     pub fn graph_ops_for_test(&self) -> Vec<Op> {
-        self.graph_area()
-            .and_then(|a| self.graph_ops(a))
-            .unwrap_or_default()
+        self.graph_ops(None).unwrap_or_default()
     }
     /// Points a second, the time at the time area's left edge, and the
     /// time area's width less the room Fit Selected Curves leaves.
@@ -2657,7 +2678,7 @@ impl Render for TimelineSurface {
         }
         let this = cx.entity().downgrade();
         let tokens = self.tokens.clone();
-        let graph = self.graph_area().and_then(|area| self.graph_ops(area));
+        let graph = self.graph_ops(Some(self.delegate.time(cx)));
         let region = self.graph_region();
         let column = self.view.layer_column;
         let decorations = self.decorations.clone();
@@ -2755,6 +2776,11 @@ impl Render for TimelineSurface {
                     return;
                 };
                 for clip in frame.clip_nodes() {
+                    // A bar the graph covers is hidden: no one can find or
+                    // press it there.
+                    if region.is_some_and(|r| clip.bounds.y >= r.y) {
+                        continue;
+                    }
                     let mut node = gpui::accesskit::Node::new(Role::ListBoxOption);
                     node.set_label(clip.label());
                     node.set_selected(clip.selected);
@@ -3352,11 +3378,84 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
                 (point_of(&op.detail["from"]), point_of(&op.detail["to"]))
             {
                 let mut path = PathBuilder::stroke(px(op.stroke as f32));
-                path.move_to(at(from.0, from.1));
-                path.line_to(at(to.0, to.1));
+                // `dash: [on, off]`: v1's dashed tangents.
+                let dash = op.detail["dash"]
+                    .as_array()
+                    .and_then(|d| Some((d.first()?.as_f64()?, d.get(1)?.as_f64()?)))
+                    .filter(|(on, off)| *on > 0. && *off >= 0.);
+                match dash {
+                    Some((on, off)) => {
+                        let (dx, dy) = (to.0 - from.0, to.1 - from.1);
+                        let length = dx.hypot(dy);
+                        let mut d = 0.;
+                        while d < length {
+                            let e = (d + on).min(length);
+                            let p = |f: f64| at(from.0 + dx * f / length, from.1 + dy * f / length);
+                            path.move_to(p(d));
+                            path.line_to(p(e));
+                            d = e + off;
+                        }
+                    }
+                    None => {
+                        path.move_to(at(from.0, from.1));
+                        path.line_to(at(to.0, to.1));
+                    }
+                }
                 if let Ok(path) = path.build() {
                     window.paint_path(path, color);
                 }
+            }
+        }
+        // A key in the graph (v1's `drawGraphVertex`): its interpolation's
+        // shape in the curve's colour, ringed in green when selected.
+        "graph-vertex" => {
+            let centre = area.center();
+            let r = f32::from(area.size.width) / 2.;
+            let kind = op.detail["kind"].as_str().unwrap_or("linear");
+            let outline = |radius: f32| {
+                let p = |x: f32, y: f32| centre + point(px(x), px(y));
+                match kind {
+                    "hold" => vec![
+                        p(-radius, -radius),
+                        p(radius, -radius),
+                        p(radius, radius),
+                        p(-radius, radius),
+                    ],
+                    "bezier" => vec![
+                        p(-radius, -radius),
+                        p(radius, -radius),
+                        p(-radius, radius),
+                        p(radius, radius),
+                    ],
+                    _ => vec![
+                        p(0., -radius - 1.),
+                        p(radius + 1., 0.),
+                        p(0., radius + 1.),
+                        p(-radius - 1., 0.),
+                    ],
+                }
+            };
+            if let Some(ring) = op.detail["ring"].as_u64() {
+                let corners = outline(r + 2.);
+                let mut path = PathBuilder::stroke(px(1.3));
+                path.move_to(corners[0]);
+                for c in &corners[1..] {
+                    path.line_to(*c);
+                }
+                path.close();
+                if let Ok(path) = path.build() {
+                    window.paint_path(path, rgb(ring as u32));
+                }
+            }
+            let corners = outline(r);
+            let mut path = PathBuilder::fill();
+            path.move_to(corners[0]);
+            for c in &corners[1..] {
+                path.line_to(*c);
+            }
+            path.close();
+            if let Ok(path) = path.build() {
+                window.paint_path(path, color);
             }
         }
         "curve" => {

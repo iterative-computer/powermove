@@ -199,7 +199,7 @@ fn malformed_geometry_and_nan_never_reach_native_painter() {
 }
 
 #[test]
-fn graph_curves_handles_selection_and_names_use_neutral_spec_marks() {
+fn graph_draws_v1s_ground_legend_axis_colours_key_shapes_and_playhead_values() {
     use pm_panel_timeline::graph_render::*;
     let t = tokens();
     let v = viewport(&t);
@@ -214,7 +214,8 @@ fn graph_curves_handles_selection_and_names_use_neutral_spec_marks() {
     let mut g = Graph::new(
         vec![Curve {
             id: "x".into(),
-            name: "X".into(),
+            name: "Position X".into(),
+            color: axis_color("position.x", 0),
             focused: true,
             segments: vec![Segment {
                 from: a,
@@ -242,32 +243,51 @@ fn graph_curves_handles_selection_and_names_use_neutral_spec_marks() {
                     },
                 )],
                 active_handle: Some(EaseSide::Out),
+                shape: KeyShape::Bezier,
             }],
         }],
         0.,
         1.,
     )
     .unwrap();
-    g.grid = vec![(0., "0".into()), (1., "1".into())];
     g.selection = Some(Rect::new(300., 250., 100., 80.));
-    let ops = g
-        .prepare(
-            v,
-            Rect::new(v.layer_column, 220., v.width - v.layer_column, 220.),
-            &t,
-        )
-        .unwrap();
+    let region = Rect::new(v.layer_column, 120., v.width - v.layer_column, 320.);
+    let ops = g.prepare(v, region, &t, Some(2.)).unwrap();
+    // The graph covers what is under it.
+    assert_eq!(ops[0].id, "graph-ground");
+    assert_eq!(ops[0].bounds, region);
     assert_eq!(
         ops.iter().find(|o| o.id == "curve:x").unwrap().color,
-        t.colors.text
+        0xf36870
+    );
+    let key = ops.iter().find(|o| o.id == "graph-key:key").unwrap();
+    assert_eq!(key.shape, "graph-vertex");
+    assert_eq!(key.detail["kind"], "bezier");
+    assert_eq!(key.detail["ring"], SELECTED_RING);
+    // Keys sit in the plot, never under the legend or on the graph's edge.
+    let plot = plot(region);
+    assert!(
+        key.bounds.y >= plot.y - VERTEX
+            && key.bounds.y + key.bounds.height <= plot.y + plot.height + VERTEX
     );
     assert_eq!(
         ops.iter()
-            .find(|o| o.id == "curve-name:x")
+            .find(|o| o.id == "graph-legend:Position X")
             .unwrap()
             .text
             .as_deref(),
-        Some("X")
+        Some("Position X")
+    );
+    assert!(
+        ops.iter().any(|o| o.id == "graph-now:x"),
+        "a dot where the playhead crosses"
+    );
+    assert_eq!(
+        ops.iter()
+            .find(|o| o.id.starts_with("graph-tangent:"))
+            .unwrap()
+            .detail["dash"],
+        serde_json::json!([2., 2.])
     );
     assert_eq!(
         ops.iter()
@@ -644,9 +664,16 @@ fn a_very_short_layer_keeps_a_visible_strip_at_any_zoom() {
     short.from = 3.;
     short.duration = 0.1;
     for pps in [4., 10., 100.] {
-        let v = Viewport { pps, ..viewport(&t) };
+        let v = Viewport {
+            pps,
+            ..viewport(&t)
+        };
         let f = scene_with(&t, short.clone()).prepare(v, &t).unwrap();
-        let strip = f.ops.iter().find(|o| o.id == "clip:short").expect("a strip");
+        let strip = f
+            .ops
+            .iter()
+            .find(|o| o.id == "clip:short")
+            .expect("a strip");
         assert!(strip.bounds.width >= 4., "{pps}: {}", strip.bounds.width);
         let start = v.layer_column + (3. - v.scroll_time) * pps;
         assert!((strip.bounds.x - (start + t.strip_gap() as f64 / 2.)).abs() < 1e-9);

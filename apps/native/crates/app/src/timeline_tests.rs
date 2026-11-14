@@ -455,6 +455,40 @@ fn dragging_a_graph_handle_shapes_the_curve_and_undo_restores_it(cx: &mut TestAp
     s.undo(cx);
     assert_eq!(ease(&s), before);
 }
+/// Chike's stray box: in the Graph view a layer bar hidden under the graph
+/// drew its hover outline and trim grip over the curves. A bar the graph
+/// covers is never hovered (nor trimmed); out of Graph view it is.
+#[gpui::test]
+fn a_bar_the_graph_covers_is_never_hovered(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    keyed(&mut s, cx, &[0.5, 1.5]);
+    let bar = s.at(0, 1.);
+    s.vcx.simulate_mouse_move(bar, None, Modifiers::none());
+    s.idle(cx);
+    assert!(
+        s.surface
+            .read_with(&s.vcx, |t, _| t.hovered_clip())
+            .is_some(),
+        "the bar hovers in the dope sheet"
+    );
+    let key = op_center(&mut s, "key:");
+    s.vcx.simulate_click(key, Modifiers::none());
+    s.idle(cx);
+    s.surface
+        .update(&mut s.vcx, |t, cx| t.command("graph", 0., None, false, cx));
+    s.idle(cx);
+    s.vcx
+        .simulate_mouse_move(bar + point(px(3.), px(0.)), None, Modifiers::none());
+    s.idle(cx);
+    assert_eq!(
+        s.surface.read_with(&s.vcx, |t, _| t.hovered_clip()),
+        None,
+        "a bar under the graph is hidden"
+    );
+    // And what is drawn there is the graph's own ground first.
+    let ops = s.surface.read_with(&s.vcx, |t, _| t.graph_ops_for_test());
+    assert_eq!(ops.first().map(|o| o.id.as_str()), Some("graph-ground"));
+}
 /// Window position of graph key `id`'s centre, as painted now.
 fn graph_key_at(s: &mut Stage, id: &str) -> Point<Pixels> {
     let origin = s.origin();
