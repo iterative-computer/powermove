@@ -2368,15 +2368,19 @@ impl SurfaceWindow {
     /// to one, and the editor shows where a release would dock it.
     fn drag_to(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         use crate::popover_drag::native;
-        let Some(drag) = self.drag.as_mut() else {
+        if self.drag.is_none() {
             return false;
-        };
+        }
         // A release AppKit delivered elsewhere still ends the drag here.
         if !pm_shell::left_button_held() {
             self.end_drag(window, cx);
             return true;
         }
-        let Some(origin) = drag.follow(native::pointer()) else {
+        let Some(origin) = self
+            .drag
+            .as_mut()
+            .and_then(|drag| drag.follow(native::pointer()))
+        else {
             return false;
         };
         let Some(me) = crate::platform::ns_window(window) else {

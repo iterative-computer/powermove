@@ -973,13 +973,13 @@ impl Editor {
             Some(Gesture::Panel(d)) => d.original,
             _ => self.layout.clone(),
         };
-        let point = point(px(at.0), px(at.1));
+        let pointer = point(px(at.0), px(at.1));
         self.gesture = Some(Gesture::Panel(PanelDrag {
             id: id.into(),
             stack: false,
-            start: point,
+            start: pointer,
             original,
-            at: point,
+            at: pointer,
             moved: true,
             preview,
         }));
