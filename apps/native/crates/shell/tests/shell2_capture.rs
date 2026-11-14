@@ -3,7 +3,7 @@
 //! mockup tab strip, on the real GPUI tree + P-HEADLESS Metal renderer.
 use gpui::{AppContext, HeadlessAppContext, px, size};
 use pm_design::{Accessibility, Scheme, Tokens};
-use pm_shell::layout::{DropTarget, Edge, Layout};
+use pm_shell::layout::{DropTarget, Layout};
 use std::sync::Arc;
 
 #[test]
@@ -67,7 +67,19 @@ fn drag_to_dock_preview_and_result_render() {
                 v.simulate_drop()
             })
             .unwrap();
-        assert_eq!(applied, Some(DropTarget::Edge(Edge::Bottom)));
+        // The bottom dock stands, so the original app's rule puts the panel
+        // into it, below the timeline (an edge strip only where no dock is).
+        let bottom_dock = window
+            .update(&mut cx, |v, _, _| v.layout.docks.iter().position(|d| d.id == "bottom"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            applied,
+            Some(DropTarget::Split {
+                dock: bottom_dock,
+                group: 1
+            })
+        );
         cx.run_until_parked();
         let after = cx.capture_screenshot(window.into()).unwrap();
         after

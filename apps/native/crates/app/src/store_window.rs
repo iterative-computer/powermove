@@ -1627,14 +1627,25 @@ impl Render for StoreWindow {
             Some((listing, load)) => self.detail_view(&listing, &load, cx),
             None => self.list(window, cx),
         };
+        // The original app's Store column: its shelves and pages centre in
+        // the sheet at a readable width however wide the window grows.
+        let centred = |inner: Div| {
+            div().flex().justify_center().child(
+                inner
+                    .flex_1()
+                    .min_w(px(0.))
+                    .max_w(px(m.store_column)),
+            )
+        };
+        let mut column = div().flex().flex_col();
         // A list page says what happened above its rows; a detail page
         // says it under its action (`detail_view`).
         if self.detail.is_none()
             && let Some(message) = self.message_line()
         {
-            body = body.child(message);
+            column = column.child(message);
         }
-        body = body.children(content);
+        body = body.child(centred(column.children(content)));
         let content = div()
             .flex_1()
             .min_w(px(0.))
@@ -1642,27 +1653,31 @@ impl Render for StoreWindow {
             .flex()
             .flex_col()
             .bg(rgb(c.panel))
+            // The heading and search stand over the same centred column.
             .child(
-                div()
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .justify_between()
-                    .gap(px(m.inset))
-                    .h(px(m.toolbar))
-                    .px(px(m.inset + m.gap))
-                    .child(
-                        div()
-                            .text_size(px(t.typography.heading))
-                            .font_weight(FontWeight(t.typography.semibold_weight))
-                            .child(heading),
-                    )
-                    // The field draws its own well.
-                    .children(
-                        self.search
-                            .clone()
-                            .map(|field| div().w(px(m.settings_sidebar)).child(field)),
-                    ),
+                centred(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(m.inset))
+                        .h(px(m.toolbar))
+                        .px(px(m.inset))
+                        .child(
+                            div()
+                                .text_size(px(t.typography.heading))
+                                .font_weight(FontWeight(t.typography.semibold_weight))
+                                .child(heading),
+                        )
+                        // The field draws its own well.
+                        .children(
+                            self.search
+                                .clone()
+                                .map(|field| div().w(px(m.settings_sidebar)).child(field)),
+                        ),
+                )
+                .flex_none()
+                .px(px(m.gap)),
             )
             .child(body);
         div()

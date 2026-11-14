@@ -26,6 +26,8 @@ pub(crate) struct Recorder {
     pub skimming: std::cell::Cell<bool>,
     /// How often the panel said the time under it moved (scroll, zoom, size).
     pub moved: std::cell::Cell<usize>,
+    /// Effects dropped from the Effects panel.
+    pub effect_drops: RefCell<Vec<crate::timeline_surface::EffectDrop>>,
 }
 pub(crate) struct Recording(pub Rc<Recorder>);
 impl Delegate for Recording {
@@ -47,6 +49,9 @@ impl Delegate for Recording {
     }
     fn view_moved(&self, _: &mut App) {
         self.0.moved.set(self.0.moved.get() + 1);
+    }
+    fn drop_effect(&self, drop: crate::timeline_surface::EffectDrop, _: &mut App) {
+        self.0.effect_drops.borrow_mut().push(drop);
     }
     fn skimming(&self, _: &App) -> bool {
         self.0.skimming.get()
@@ -322,6 +327,36 @@ fn marquee_selects_keys_without_seeking(cx: &mut TestAppContext) {
         .len();
     assert_eq!(selected, 2);
     assert!(s.recorder.seeks.borrow().is_empty());
+}
+/// v1: a marquee from empty track space over layer bars (no keys inside)
+/// selects the layers it touches, in Layers mode as in Tracks; a click on
+/// empty space clears them again.
+#[gpui::test]
+fn a_marquee_over_layer_bars_selects_their_layers(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    // Layer 0 spans 0-2 s, layer 1 0.5-2.5 s: from past layer 0's end on
+    // its row, across both bars.
+    let start = s.at(0, 3.);
+    let end = s.at(1, 1.5);
+    s.drag(cx, start, end, Modifiers::none());
+    let selected = |s: &Stage| {
+        let mut ids = s
+            .rig
+            .kernel
+            .published(PROJECT)
+            .unwrap()
+            .selection
+            .layers()
+            .to_vec();
+        ids.sort();
+        ids
+    };
+    assert_eq!(selected(&s), ["l0", "l1"]);
+    assert!(s.recorder.seeks.borrow().is_empty());
+    let empty = s.at(0, 4.);
+    s.vcx.simulate_click(empty, Modifiers::none());
+    s.idle(cx);
+    assert!(selected(&s).is_empty());
 }
 #[gpui::test]
 fn graph_view_drags_a_key_in_value_and_undo_restores_it(cx: &mut TestAppContext) {
@@ -1673,4 +1708,45 @@ fn option_dragging_a_clip_leaves_it_and_places_a_copy(cx: &mut TestAppContext) {
     s.drag(cx, from, to, Modifiers::none());
     assert_eq!(layers(&s).len(), 2);
     assert!(s.start_of("l1") > before);
+}
+
+/// An effect dragged from the Effects panel and released over a layer's bar
+/// goes to that layer (v1.2.0's timeline drop), whichever layer is selected.
+#[gpui::test]
+fn an_effect_dropped_on_a_layers_bar_goes_to_that_layer(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    let at = s.at(1, 0.5);
+    let row = s
+        .surface
+        .read_with(&s.vcx, |t, _| t.scene().unwrap())
+        .navigate_first(1)
+        .unwrap();
+    let pm_panel_timeline::RowId::Layer(layer) = pm_panel_timeline::v4::parse_row(&row).unwrap()
+    else {
+        panic!("row 1 is a layer: {row}");
+    };
+    s.vcx.update(|_, cx| {
+        let drag = crate::v4_view::PanelDrag::of(
+            crate::timeline_surface::EFFECTS_PANEL,
+            "Gaussian Blur",
+            Some("gaussianBlur"),
+        );
+        let view = cx.new(|_| drag.clone());
+        cx.start_drag(gpui::AnyDrag::new(drag, view));
+    });
+    s.vcx
+        .simulate_mouse_move(at, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    s.vcx
+        .simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    assert_eq!(
+        *s.recorder.effect_drops.borrow(),
+        [crate::timeline_surface::EffectDrop {
+            panel: crate::timeline_surface::EFFECTS_PANEL.into(),
+            definition: "gaussianBlur".into(),
+            label: "Gaussian Blur".into(),
+            layer: Some(layer),
+        }]
+    );
 }

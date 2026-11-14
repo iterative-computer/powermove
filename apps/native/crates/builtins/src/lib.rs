@@ -899,6 +899,35 @@ impl Builtins {
             background,
         )
     }
+    /// Adding the effect `definition` to `layer` at `time` as the Effects
+    /// panel `panel` adds one (its definitions, extensions' included): the
+    /// commands of one Undo step.
+    pub fn effect_commands(
+        &self,
+        panel: &str,
+        layer: &str,
+        definition: &str,
+        time: f64,
+    ) -> std::result::Result<Vec<pm_kernel::Command>, String> {
+        let backend = self
+            .backend(panel)
+            .map_err(|_| "The Effects panel closed.".to_owned())?;
+        let mut backend = backend.shared();
+        let caller = backend.caller;
+        let request = backend
+            .model
+            .as_mut()
+            .ok_or("Open a project first.")?
+            .add_effect_at(caller, layer, definition, time)
+            .map_err(|e| e.to_string())?;
+        match request.call {
+            pm_kernel::Call::Transact {
+                body: pm_kernel::WriteBody::Commands(commands),
+                ..
+            } => Ok(commands),
+            _ => Err("This effect can't be added here.".into()),
+        }
+    }
     /// What the Project panel is dragging (its `dragstart`): the items the
     /// timeline or the viewer places when it is dropped there.
     pub fn project_drag(&self) -> Option<pm_panel_media::Drag> {

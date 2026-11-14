@@ -196,6 +196,12 @@ pub struct Extensions {
     /// extension made one (`viewer.stage`, `viewer.ov`). The viewer keeps the
     /// pointer there.
     stage: Rc<std::cell::Cell<Option<layout::Rect>>>,
+    /// Where each panel was placed lately, as sent to the realm's page
+    /// (`Placements`): a panel shows only where it is now *and* where the
+    /// page may still be drawing it.
+    sent: Rc<RefCell<Placements>>,
+    /// A repaint is due once recent placements have settled.
+    settle_pending: bool,
     stage_used: bool,
     /// The viewer slot and composition frame last told to the realm.
     stage_sent: Option<Option<[i64; 8]>>,
@@ -264,6 +270,8 @@ impl Default for Extensions {
                 ..Default::default()
             }),
             stage: Rc::default(),
+            sent: Rc::default(),
+            settle_pending: false,
             stage_used: false,
             stage_sent: None,
             presented: None,
@@ -1709,6 +1717,19 @@ impl Controller {
         }
         self.ensure_page(id, cx);
         self.place_panels();
+        // Once the page has caught up, its panels show whole again.
+        if !self.extensions.settle_pending && self.extensions.sent.borrow().moving() {
+            self.extensions.settle_pending = true;
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(PLACEMENT_LAG + PLACEMENT_LAG / 4).await;
+                let _ = this.update(cx, |v, cx| {
+                    v.extensions.settle_pending = false;
+                    cx.notify();
+                });
+                cx.update(|cx| cx.refresh_windows());
+            })
+            .detach();
+        }
         Some(
             div()
                 .w_full()
@@ -1898,20 +1919,36 @@ impl Controller {
         let mut shell = self.host.borrow_mut();
         let bodies = shell.native_panels.clone();
         let stage = self.extensions.stage.clone();
+        let sent = self.extensions.sent.clone();
         shell.native_present = Some(Rc::new(move |width, height| {
             let viewport = Rect::new(0., 0., width, height);
             let bodies = bodies.borrow();
             let owners = owners.borrow();
+            let mut sent = sent.borrow_mut();
+            sent.prune(std::time::Instant::now());
             let mut dirty = false;
             for (key, page) in views.borrow().iter() {
                 let mut host = page.borrow_mut();
                 let stage = stage.get().filter(|_| key.is_empty());
+                let to_rect = |r: &layout::Rect| Rect::new(r.x as f64, r.y as f64, r.w as f64, r.h as f64);
+                // Each panel only within its own body: a page that has not
+                // yet moved a panel's content (a splitter drag) never shows
+                // it through a neighbour's body.
                 let regions = bodies
                     .iter()
                     .filter(|(id, _)| owners.get(id).map_or("", String::as_str) == key)
-                    .map(|(_, r)| r)
-                    .chain(stage.as_ref())
-                    .map(|r| Rect::new(r.x as f64, r.y as f64, r.w as f64, r.h as f64))
+                    .map(|(id, r)| {
+                        // Development builds: `PM_NATIVE_NO_PANEL_MASK` shows the
+                        // page through every body as before, for comparison.
+                        if cfg!(debug_assertions)
+                            && std::env::var_os("PM_NATIVE_NO_PANEL_MASK").is_some()
+                        {
+                            to_rect(r)
+                        } else {
+                            sent.mask(id, to_rect(r))
+                        }
+                    })
+                    .chain(stage.as_ref().map(to_rect))
                     .collect();
                 let _ = host.set_regions(regions);
                 dirty |= host.composition_dirty();
@@ -2051,6 +2088,11 @@ impl Controller {
             if !self.extensions.hidden.contains(id) && self.extensions.placed.get(id) != Some(rect)
             {
                 host.place_panel(id, Some([rect.x, rect.y, rect.w, rect.h]));
+                self.extensions.sent.borrow_mut().record(
+                    id,
+                    Rect::new(rect.x as f64, rect.y as f64, rect.w as f64, rect.h as f64),
+                    std::time::Instant::now(),
+                );
             }
         }
         self.extensions.placed = self
@@ -2144,8 +2186,84 @@ impl Controller {
     }
 }
 
+/// How long the realm's page may take to move a panel's content after the
+/// shell placed it (it hears through the realm, on a worker).
+pub(crate) const PLACEMENT_LAG: std::time::Duration = std::time::Duration::from_millis(250);
+/// The places each extension panel was sent lately. The page draws a panel
+/// where the last placement it applied says, which can lag the shell by a
+/// few frames; the shell does not hear which one. Masking each panel to its
+/// body now and every place sent within `PLACEMENT_LAG` (and the one before
+/// those) keeps its content inside its own body whichever the page drew.
+#[derive(Default)]
+pub(crate) struct Placements(BTreeMap<String, Vec<(std::time::Instant, Rect)>>);
+impl Placements {
+    pub fn record(&mut self, id: &str, rect: Rect, at: std::time::Instant) {
+        self.0.entry(id.to_owned()).or_default().push((at, rect));
+        self.prune(at);
+    }
+    /// Forgets places older than the lag, keeping the newest of those (the
+    /// page has drawn at least that one).
+    pub fn prune(&mut self, now: std::time::Instant) {
+        for places in self.0.values_mut() {
+            let old = places
+                .iter()
+                .rposition(|(t, _)| now.duration_since(*t) > PLACEMENT_LAG);
+            if let Some(i) = old {
+                places.drain(..i);
+            }
+        }
+    }
+    /// Where panel `id` may show: its body now, within every recent place.
+    pub fn mask(&self, id: &str, now: Rect) -> Rect {
+        self.0
+            .get(id)
+            .into_iter()
+            .flatten()
+            .fold(now, |r, (_, place)| r.intersection(*place))
+    }
+    /// A panel moved within the lag: its mask is still narrower than its body.
+    pub fn moving(&self) -> bool {
+        self.0.values().any(|places| places.len() > 1)
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    /// Chike's clip (2026-11-14): two stacked extension panels and a splitter
+    /// dragged between them. Each shows only within its own body, both while
+    /// the page still draws the old places and after it caught up.
+    #[test]
+    fn stacked_extension_panels_never_show_through_each_other() {
+        use super::{PLACEMENT_LAG, Placements, Rect};
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
+        let mut sent = Placements::default();
+        // Upper and lower panels, the splitter between them at y = 400.
+        let (upper, lower) = (Rect::new(0., 100., 300., 300.), Rect::new(0., 408., 300., 300.));
+        sent.record("upper", upper, t0);
+        sent.record("lower", lower, t0);
+        // Dragged down 120 pt: the upper grows, the lower shrinks from its top.
+        let t1 = t0 + Duration::from_millis(16);
+        let (upper2, lower2) = (Rect::new(0., 100., 300., 420.), Rect::new(0., 528., 300., 180.));
+        sent.record("upper", upper2, t1);
+        sent.record("lower", lower2, t1);
+        let (mu, ml) = (sent.mask("upper", upper2), sent.mask("lower", lower2));
+        // Neither shows outside its body now, nor where the page may still
+        // draw the other: the upper's new strip waits for its content.
+        assert_eq!(mu, upper);
+        assert_eq!(ml, lower2);
+        assert!(mu.intersection(lower2).h == 0. && ml.intersection(upper2).h == 0.);
+        assert!(sent.moving());
+        // Settled: each shows its whole body again.
+        let later = t1 + PLACEMENT_LAG + Duration::from_millis(1);
+        sent.prune(later);
+        assert_eq!(sent.mask("upper", upper2), upper2);
+        assert_eq!(sent.mask("lower", lower2), lower2);
+        assert!(!sent.moving());
+        // A panel never placed shows its body.
+        assert_eq!(sent.mask("other", lower), lower);
+    }
+
     /// What a window pins comes from one publication of the host: the
     /// definitions published while an extension was still loading stay a
     /// load in progress however far the host has moved on since, so a frame

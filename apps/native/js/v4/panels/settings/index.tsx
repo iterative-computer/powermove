@@ -946,21 +946,35 @@ export function SettingsPanel({ model, bindings }: SettingsPanelProps) {
               </text>
             </div>
           ) : (
-            // One section per page, as v1 and System Settings; a search lists
-            // every section with a match.
-            (model.query.trim()
-              ? model.visibleSections
-              : model.visibleSections.filter(
-                  (section) => section === model.active,
-                )
-            ).map((section) => (
-              <SectionContent
-                key={section}
-                section={section}
-                model={model}
-                bindings={bindings}
-              />
-            ))
+            // A readable form column centred in the sheet, as the original
+            // app's Settings: however wide the window, labels and their
+            // controls stay close enough to read as pairs.
+            <div style={{ display: "flex", justifyContent: "center" }}>
+              <div
+                style={{
+                  ...column,
+                  flexGrow: 1,
+                  flexShrink: 1,
+                  maxWidth: t("metrics.settings_column"),
+                }}
+              >
+                {/* One section per page, as v1 and System Settings; a search
+                    lists every section with a match. */}
+                {(model.query.trim()
+                  ? model.visibleSections
+                  : model.visibleSections.filter(
+                      (section) => section === model.active,
+                    )
+                ).map((section) => (
+                  <SectionContent
+                    key={section}
+                    section={section}
+                    model={model}
+                    bindings={bindings}
+                  />
+                ))}
+              </div>
+            </div>
           )}
         </scroll>
       </div>

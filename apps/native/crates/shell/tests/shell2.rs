@@ -70,23 +70,21 @@ fn drop_targets_cover_header_group_viewer_splits_and_edges() {
         .unwrap();
     assert_eq!(lower.target, DropTarget::Split { dock: 1, group: 1 });
     assert_eq!(lower.rect.y + lower.rect.h, viewer.y + viewer.h);
-    // Edge zones beat the panel underneath them.
+    // The panel under the pointer wins (the original app); every dock of
+    // this workspace stands, so no edge strip: just outside the left dock,
+    // the panel goes into it. Far outside is nothing.
     let left = l
-        .drop_target(&g, BOUNDS, BOUNDS.x + 2., BOUNDS.y + 200., &t)
+        .drop_target(&g, BOUNDS, BOUNDS.x - 5., 300., &t)
         .unwrap();
-    assert_eq!(left.target, DropTarget::Edge(Edge::Left));
-    let bottom = l
-        .drop_target(&g, BOUNDS, mid, BOUNDS.y + BOUNDS.h - 2., &t)
+    assert!(matches!(left.target, DropTarget::Split { dock: 0, .. }), "{left:?}");
+    assert!(l.drop_target(&g, BOUNDS, BOUNDS.x - 200., 300., &t).is_none());
+    let mut bare = l.clone();
+    bare.close_panel("timeline").unwrap();
+    let g = bare.geometry(BOUNDS, &t);
+    let bottom = bare
+        .drop_target(&g, BOUNDS, mid, BOUNDS.y + BOUNDS.h + 4., &t)
         .unwrap();
     assert_eq!(bottom.target, DropTarget::Edge(Edge::Bottom));
-    // Just outside the docking area is its edge (a hand overshoots); far
-    // outside is nothing.
-    assert_eq!(
-        l.drop_target(&g, BOUNDS, BOUNDS.x - 5., 300., &t)
-            .map(|p| p.target),
-        Some(DropTarget::Edge(Edge::Left))
-    );
-    assert!(l.drop_target(&g, BOUNDS, BOUNDS.x - 200., 300., &t).is_none());
 }
 
 #[test]
