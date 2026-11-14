@@ -54,6 +54,8 @@ pub struct Host {
     clock: crate::playback::PanelClock,
     /// The frame (ticks) Properties last followed while playing.
     followed: Option<i64>,
+    /// When Properties last followed while playing (`FOLLOW_EVERY` apart).
+    followed_at: Option<std::time::Instant>,
     headers: BTreeMap<String, Entity<crate::v4_view::HeaderView>>,
     pub(crate) ready: BTreeSet<String>,
     generations: BTreeMap<String, u64>,
@@ -484,14 +486,22 @@ impl Controller {
         let Some(frame) = crate::session::frame_start_at(self.rate, time) else {
             return;
         };
+        let now = std::time::Instant::now();
         if self.builtins.updating
             || self.builtins.followed == Some(frame)
             || !self.builtins.open.contains(PANEL)
             || !self.builtins.ready.contains(PANEL)
             || !follows_selection(self.published.as_deref())
+            || !follow_due(
+                self.builtins.followed,
+                self.builtins.followed_at,
+                frame,
+                now,
+            )
         {
             return;
         }
+        self.builtins.followed_at = Some(now);
         let Some(runtime) = self.builtins.runtime.clone() else {
             return;
         };
@@ -2623,9 +2633,31 @@ fn follows_selection(published: Option<&pm_kernel::Published>) -> bool {
     published.is_some_and(|p| !p.selection.layers().is_empty())
 }
 
+/// How often a playing Properties follows a selected layer: about ten times
+/// a second, as v1's inspector did (15 Hz). Each publication repaints the
+/// window, and with native controls hosted that present waits behind a
+/// control transaction: following every frame held Fable 5.5 at 36 s to
+/// 24 fps (drawable p95 52 ms) with an animated layer selected.
+const FOLLOW_EVERY: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Whether a playing Properties takes `frame` now: at most every
+/// `FOLLOW_EVERY`, except a jump (a seek or a loop wrap) of more than half a
+/// second, which shows at once. Pause, stop and selection changes publish
+/// through `update_builtins`, not here, so they are never held back.
+fn follow_due(
+    last_frame: Option<i64>,
+    last_at: Option<std::time::Instant>,
+    frame: i64,
+    now: std::time::Instant,
+) -> bool {
+    let jumped = last_frame
+        .is_none_or(|last| (frame - last).abs() > pm_protocol::common::TICKS_PER_SECOND / 2);
+    jumped || last_at.is_none_or(|at| now.duration_since(at) >= FOLLOW_EVERY)
+}
+
 #[cfg(test)]
 mod follow_selection_tests {
-    use super::follows_selection;
+    use super::{FOLLOW_EVERY, follow_due, follows_selection};
     use crate::v4_view_tests::{PROJECT, rig_project};
     use pm_kernel::{Caller, Request, SelectionCall};
     use std::time::{Duration, Instant};
@@ -2636,14 +2668,21 @@ mod follow_selection_tests {
     fn publications_while_playing(rig: &crate::v4_view_tests::Rig) -> usize {
         let _ = rig.runtime.take_publications();
         let mut published = 0;
-        for frame in 0..60 {
+        let tick = pm_protocol::common::TICKS_PER_SECOND / 30;
+        let start = Instant::now();
+        let (mut last_frame, mut last_at) = (None, None);
+        for frame in 0..60i64 {
             let p = rig.kernel.published(PROJECT);
-            if !follows_selection(p.as_deref()) {
+            let now = start + Duration::from_micros(33_333 * frame as u64);
+            if !follows_selection(p.as_deref())
+                || !follow_due(last_frame, last_at, frame * tick, now)
+            {
                 continue;
             }
+            (last_frame, last_at) = (Some(frame * tick), Some(now));
             let ticket = rig
                 .runtime
-                .follow_time("inspector", f64::from(frame) / 30., true)
+                .follow_time("inspector", frame as f64 / 30., true)
                 .expect("Properties is mounted")
                 .expect("follow_time");
             let deadline = Instant::now() + Duration::from_secs(20);
@@ -2690,11 +2729,38 @@ mod follow_selection_tests {
             .wait()
             .unwrap()
             .unwrap();
-        assert_eq!(
-            publications_while_playing(&rig),
-            60,
-            "a selected animated layer's values follow every frame"
+        let followed = publications_while_playing(&rig);
+        assert!(
+            (12..=20).contains(&followed),
+            "a selected animated layer follows ~10 times a second, not every frame: {followed}"
         );
     }
-}
 
+    /// Playing at 30 fps with a layer selected, Properties follows at most
+    /// every 100 ms (every fourth frame at 30 fps: 15 updates in 2 s), not every
+    /// frame; a seek shows at once.
+    #[::core::prelude::v1::test]
+    fn a_playing_selected_layer_follows_about_ten_times_a_second() {
+        let tick = pm_protocol::common::TICKS_PER_SECOND / 30;
+        let start = std::time::Instant::now();
+        let (mut last_frame, mut last_at, mut taken) = (None, None, 0);
+        for i in 0..60i64 {
+            let now = start + std::time::Duration::from_micros(33_333 * i as u64);
+            let frame = i * tick;
+            if follow_due(last_frame, last_at, frame, now) {
+                taken += 1;
+                (last_frame, last_at) = (Some(frame), Some(now));
+            }
+        }
+        assert!(
+            (12..=20).contains(&taken),
+            "2 s of playback took {taken} updates"
+        );
+        // A seek of more than half a second shows on the next frame.
+        let now = last_at.unwrap() + FOLLOW_EVERY / 4;
+        let seek = last_frame.unwrap() + 20 * tick;
+        let next = last_frame.unwrap() + tick;
+        assert!(follow_due(last_frame, last_at, seek, now));
+        assert!(!follow_due(last_frame, last_at, next, now));
+    }
+}
