@@ -227,6 +227,17 @@ impl TextField {
     pub fn value(&self) -> &str {
         &self.value
     }
+    /// The text as it stands in the editor, typed but not yet committed.
+    pub fn editing_text(&self) -> String {
+        self.slot.value()
+    }
+    /// Replaces the text and keeps the editor open (a number field's arrow
+    /// step: the person goes on stepping or typing).
+    pub fn replace_text(&mut self, value: &str, cx: &mut Context<Self>) {
+        self.slot.replace_value(value);
+        self.value = value.into();
+        cx.notify();
+    }
     pub fn begin_editing(&mut self, cx: &mut Context<Self>) {
         self.slot.begin_editing();
         cx.notify();
