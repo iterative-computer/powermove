@@ -336,6 +336,9 @@ const NAME_LEAST: usize = 3;
 const PPS: (f64, f64) = (4., 4000.);
 /// How far past the timeline's end the view may run, in points.
 const END_ROOM: f64 = 48.;
+/// The room a fitted view leaves after the composition's end (v1
+/// `frameView`), so the last strips' ends stand clear of the row scroller.
+const FIT_ROOM: f64 = 40.;
 impl TimelineSurface {
     pub fn new(
         kernel: KernelHandle,
@@ -591,7 +594,8 @@ impl TimelineSurface {
     pub fn fit_time(&mut self, cx: &mut Context<Self>) {
         let width = (f32::from(self.bounds.size.width) as f64 - self.view.layer_column).max(1.);
         if self.model.index.duration > 0. {
-            self.view.pps = (width / self.model.index.duration).clamp(PPS.0, PPS.1);
+            self.view.pps =
+                ((width - FIT_ROOM).max(1.) / self.model.index.duration).clamp(PPS.0, PPS.1);
             self.view.scroll_time = 0.;
             self.changed(true, cx);
         }
@@ -686,6 +690,18 @@ impl TimelineSurface {
         let length = crate::captions_panel::timecode(scene.duration, scene.fps);
         bar.ops(self.lit, &length, &self.tokens)
     }
+    /// The bar's part at `(x, y)`. A strip's trim zone beside the row
+    /// scroller's track wins over the track: a strip that runs to the view's
+    /// end is trimmed there (the thumb itself still wins).
+    fn bar_part(&self, x: f64, y: f64) -> Option<pm_panel_timeline::footer::Part> {
+        let part = self.bar()?.hit(x, y, &self.tokens)?;
+        let trims = self
+            .frame
+            .as_ref()
+            .and_then(|f| f.hit_clip(x, y))
+            .is_some_and(|(_, edge)| edge.is_some());
+        (!(trims && part == pm_panel_timeline::footer::Part::RowsTrack)).then_some(part)
+    }
     /// Lights the part of the bar under an idle pointer; true over the bar
     /// or the row thumb, where the tracks' hover and skimmer stand down.
     fn over_bar(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) -> bool {
@@ -694,7 +710,7 @@ impl TimelineSurface {
         let part = self
             .bar()
             .filter(|_| inside)
-            .and_then(|bar| bar.hit(x, y, &self.tokens));
+            .and_then(|_| self.bar_part(x, y));
         let over = part.is_some() || (inside && y >= f32::from(self.bounds.size.height) as f64);
         if over && self.cursor != CursorStyle::Arrow {
             self.cursor = CursorStyle::Arrow;
@@ -939,7 +955,7 @@ impl TimelineSurface {
         let duration = self.model.index.duration;
         if duration > 0. && self.bounds.size.width > px(0.) {
             let width = (f32::from(self.bounds.size.width) as f64 - self.view.layer_column).max(1.);
-            let fit = (width / duration).clamp(PPS.0, PPS.1);
+            let fit = ((width - FIT_ROOM).max(1.) / duration).clamp(PPS.0, PPS.1);
             // The view started at 0 and showed all of the old length.
             let whole = |d: f64| {
                 d > 0. && self.view.scroll_time.abs() < 1e-9 && width / self.view.pps >= d * 0.99
@@ -1365,7 +1381,7 @@ impl TimelineSurface {
     fn on_down(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
         let (x, y) = self.local(event.position);
         if let Some(bar) = self.bar()
-            && let Some(part) = bar.hit(x, y, &self.tokens)
+            && let Some(part) = self.bar_part(x, y)
         {
             self.set_skimmer(None, cx);
             self.press_bar(part, bar, x, y, event.click_count, cx);
