@@ -1445,14 +1445,18 @@ impl Controller {
                                     self.pick_media_folder(folder, cx)
                                 }
                                 // A drop on the panel: assets only, no layers. Option
-                                // separates a folder from a sequence, and no sequence
-                                // imports yet, so it changes nothing here.
-                                pm_panel_media::Effect::Import { files, folder, .. } => self
-                                    .import_to_panel(
-                                        files.into_iter().map(Into::into).collect(),
-                                        folder,
-                                        cx,
-                                    ),
+                                // keeps a dropped folder's files apart instead of
+                                // offering them as a sequence.
+                                pm_panel_media::Effect::Import {
+                                    files,
+                                    folder,
+                                    as_folder,
+                                } => self.import_to_panel(
+                                    files.into_iter().map(Into::into).collect(),
+                                    folder,
+                                    as_folder,
+                                    cx,
+                                ),
                                 pm_panel_media::Effect::Renditions { action, assets } => {
                                     self.renditions(action, assets, cx)
                                 }
@@ -1908,6 +1912,9 @@ impl crate::timeline_surface::Delegate for ControllerDelegate {
     fn time(&self, cx: &App) -> f64 {
         self.0.upgrade().map_or(0., |c| c.read(cx).time())
     }
+    fn drop_media(&self, drop: crate::timeline_surface::MediaDrop, cx: &mut App) {
+        let _ = self.0.update(cx, |v, cx| v.drop_media(drop, cx));
+    }
     fn skim(&self, seconds: Option<f64>, cx: &mut App) {
         let input = crate::skimming::input();
         let _ = self.0.update(cx, |v, _| v.skim(seconds, input));
@@ -2082,6 +2089,12 @@ impl crate::timeline_surface::Delegate for ControllerDelegate {
     }
 }
 impl crate::gizmo::Host for ControllerDelegate {
+    fn drop_project_items(&self, cx: &mut App) {
+        let _ = self.0.update(cx, |v, cx| {
+            let at = v.time();
+            v.place_project_items(at, Some(0), cx);
+        });
+    }
     fn time(&self, cx: &App) -> f64 {
         self.0.upgrade().map_or(0., |c| c.read(cx).time())
     }

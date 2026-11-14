@@ -134,6 +134,9 @@ enum ScrubOp {
 struct Capture {
     target: Id,
     button: u64,
+    /// Where the press was: an item that drags lifts once the pointer has
+    /// moved past the drag threshold from here.
+    origin: Point<Pixels>,
 }
 /// A scroller anchored at its end (`metadata.scrollAnchor: "end"`): the
 /// panel hears when the reader scrolls away from the end and back (a
@@ -193,6 +196,9 @@ pub struct SurfaceView {
     capture: Option<Capture>,
     scrub: Option<ScrubDrag>,
     scrub_ops: VecDeque<ScrubOp>,
+    /// The panel item being dragged (its `dragstart` ran): `dragend` goes to
+    /// it once the drag is over, wherever it was dropped.
+    dragging: Option<Id>,
     scrub_gesture: Option<u64>,
     scrub_busy: bool,
     scrub_shown: Option<(Id, f64)>,
@@ -269,6 +275,7 @@ impl SurfaceView {
             capture: None,
             scrub: None,
             scrub_ops: VecDeque::new(),
+            dragging: None,
             scrub_gesture: None,
             scrub_busy: false,
             scrub_shown: None,
@@ -1633,7 +1640,11 @@ impl SurfaceView {
     }
     fn press(&mut self, id: Id, event: &MouseDownEvent, cx: &mut Context<Self>) {
         let button = button_code(event.button);
-        self.capture = Some(Capture { target: id, button });
+        self.capture = Some(Capture {
+            target: id,
+            button,
+            origin: event.position,
+        });
         let detail = self.detail(
             event.position,
             Some(button),
@@ -1823,6 +1834,18 @@ impl SurfaceView {
                         let Some(capture) = v.capture else {
                             return;
                         };
+                        // A press on an item that drags (`onDragStart`) gives
+                        // the pointer up past the threshold: the move goes on
+                        // to the item, which lifts it (GPUI's drag).
+                        let threshold = v.table.tokens.metrics.drag_threshold;
+                        if v.prepared
+                            .node(capture.target)
+                            .is_some_and(|n| n.events.drag_start)
+                            && (event.position - capture.origin).magnitude() > threshold as f64
+                        {
+                            v.capture = None;
+                            return;
+                        }
                         cx.stop_propagation();
                         if v.prepared
                             .node(capture.target)
@@ -2532,15 +2555,66 @@ impl SurfaceView {
             return element;
         }
         // Finder drops reach targets that take files; the window's drop
-        // handler places anything landing elsewhere at the playhead.
+        // handler places anything landing elsewhere at the playhead. The
+        // panel's own items dragged onto them move there (into a bin).
         if events.file_drop {
             let target = rgb(self.table.tokens.colors.selected_fill);
+            let panel = self.publication.panel.clone();
+            let own = move |drag: &PanelDrag| drag.panel == panel;
+            let own_over = own.clone();
             element = element
                 .on_drag_over::<ExternalPaths>(move |style, _, _, _| style.bg(target))
                 .on_drop(cx.listener(move |v, paths: &ExternalPaths, window, cx| {
+                    cx.stop_propagation();
                     let detail = file_drop(paths.paths(), window.modifiers().alt);
                     v.send(id, "drop", detail, cx);
+                }))
+                .on_drag_over::<PanelDrag>(move |style, drag, _, _| {
+                    if own_over(drag) {
+                        style.bg(target)
+                    } else {
+                        style
+                    }
+                })
+                .on_drop(cx.listener(move |v, drag: &PanelDrag, window, cx| {
+                    if !own(drag) {
+                        return;
+                    }
+                    cx.stop_propagation();
+                    let detail = EventDetail {
+                        alt_key: Some(window.modifiers().alt),
+                        ..Default::default()
+                    };
+                    v.send(id, "dragover", detail.clone(), cx);
+                    v.send(id, "drop", detail, cx);
+                    v.end_drag(cx);
                 }));
+        }
+        // A panel item lifts after the drag threshold: the panel learns of
+        // it (`dragstart`), and the timeline, the viewer and the panel's own
+        // targets take it.
+        if events.drag_start {
+            let c = &self.table.tokens.colors;
+            let drag = PanelDrag {
+                panel: self.publication.panel.clone(),
+                label: node
+                    .ax
+                    .as_ref()
+                    .and_then(|ax| ax.label.clone())
+                    .unwrap_or_else(|| "Media".into()),
+                colors: (c.floating, c.separator, c.text),
+            };
+            let view = cx.entity().downgrade();
+            element = element.on_drag(drag, move |drag, _, _, cx| {
+                let view = view.clone();
+                cx.defer(move |cx| {
+                    let _ = view.update(cx, |v, cx| {
+                        v.dragging = Some(id);
+                        v.send(id, "dragstart", EventDetail::default(), cx);
+                    });
+                });
+                cx.new(|_| drag.clone())
+            });
         }
         if node.number.is_some() {
             element = element.cursor_col_resize().on_mouse_down(
@@ -3006,6 +3080,41 @@ impl SurfaceView {
         wrapper.into_any_element()
     }
 }
+/// A panel item being dragged (`onDragStart`), and the image under the
+/// pointer while it is: its name on the floating fill.
+#[derive(Clone, Debug)]
+pub struct PanelDrag {
+    /// The panel it came from (`Publication::panel`).
+    pub panel: String,
+    pub label: SharedString,
+    /// Floating fill, its edge, text.
+    colors: (u32, u32, u32),
+}
+impl Render for PanelDrag {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let (fill, edge, text) = self.colors;
+        div()
+            .px(px(8.))
+            .py(px(4.))
+            .rounded(px(6.))
+            .bg(rgb(fill))
+            .border(px(1.))
+            .border_color(rgb(edge))
+            .text_color(rgb(text))
+            .text_size(px(12.))
+            .whitespace_nowrap()
+            .child(self.label.clone())
+    }
+}
+impl SurfaceView {
+    /// The item drag is over (dropped anywhere, or let go): the panel
+    /// clears its drag state.
+    pub fn end_drag(&mut self, cx: &mut Context<Self>) {
+        if let Some(id) = self.dragging.take() {
+            self.send(id, "dragend", EventDetail::default(), cx);
+        }
+    }
+}
 /// A file drop as the panel's JS reads it (`public.file-url`, as on AppKit).
 fn file_drop(paths: &[std::path::PathBuf], alt: bool) -> EventDetail {
     const FILES: &str = "public.file-url";
@@ -3026,6 +3135,13 @@ fn file_drop(paths: &[std::path::PathBuf], alt: bool) -> EventDetail {
 
 impl Render for SurfaceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // A drag let go over nothing that took it ends here.
+        if self.dragging.is_some() && !cx.has_active_drag() {
+            let view = cx.entity().downgrade();
+            cx.defer(move |cx| {
+                let _ = view.update(cx, |v, cx| v.end_drag(cx));
+            });
+        }
         #[cfg(test)]
         {
             self.renders += 1;
