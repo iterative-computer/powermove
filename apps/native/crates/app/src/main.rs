@@ -59,6 +59,8 @@ mod mcp_services;
 mod media;
 mod media_import;
 mod media_refresh;
+mod media_thumbs;
+mod quick_look;
 mod media_sequence;
 #[cfg(debug_assertions)]
 mod memory_review;
@@ -70,6 +72,7 @@ mod panel_bridge;
 #[cfg(all(test, target_os = "macos"))]
 mod panel_capture_tests;
 mod panel_library;
+mod ghost;
 mod panels;
 #[cfg(test)]
 mod parity_tests;

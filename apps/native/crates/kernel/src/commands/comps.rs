@@ -13,6 +13,12 @@ use pm_model::{Map, Value};
 use super::{Cx, layers, track, values};
 use crate::error::CommandError;
 
+/// In the project's `exportDefaults`: `true` once the person chose the
+/// export frame rate (in the Export sheet or Settings ▸ Project). Without
+/// it the Export sheet opens on the composition's own rate. Old readers
+/// drop the key on read (v1 rebuilds `exportDefaults` from its known keys).
+pub const EXPORT_RATE_CHOSEN: &str = "fpsChosen";
+
 /// The editable fields of `set_composition` (`None` leaves a field alone).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct CompPatch {
@@ -389,10 +395,22 @@ fn set_composition(cx: &mut Cx<'_>, p: &CompPatch) -> Result<(), CommandError> {
         )?;
     }
     if let Some(fps) = p.fps {
-        cx.set(
-            at("fps"),
-            n(values::clamp(values::finite(fps, "fps")?, 1.0, 240.0)),
-        )?;
+        let previous = cx.fps(None);
+        let next = values::clamp(values::finite(fps, "fps")?, 1.0, 240.0);
+        cx.set(at("fps"), n(next))?;
+        // The export frame rate follows the composition's while nobody chose
+        // it (v1 kept the rate the project was created with: a 24 fps
+        // project exported at 30).
+        let defaults = cx.value_at(&["exportDefaults".into()]);
+        if p.export_defaults.is_none()
+            && let Some(Value::Object(d)) = &defaults
+            && d.get(EXPORT_RATE_CHOSEN).and_then(Value::as_bool) != Some(true)
+            && d.get("fps")
+                .and_then(Value::as_f64)
+                .is_some_and(|f| (f - previous).abs() < 1e-9)
+        {
+            cx.set(vec!["exportDefaults".into(), "fps".into()], n(next))?;
+        }
     }
     if let Some(d) = p.duration {
         let dur = 0.1f64.max(values::finite(d, "duration")?);

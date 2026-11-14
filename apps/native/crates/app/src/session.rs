@@ -48,6 +48,8 @@ pub struct Controller {
     pub viewer: Option<Viewer>,
     pub media: MediaCatalog,
     pub(crate) media_refresh: crate::media_refresh::Refresh,
+    /// The Project panel grid's thumbnails.
+    pub(crate) thumbs: crate::media_thumbs::Thumbs,
     /// What the media resolver found; `media` adds the renditions.
     pub(crate) media_base: MediaCatalog,
     /// A media resolution for this session has landed: only then do missing
@@ -64,6 +66,12 @@ pub struct Controller {
     /// The project an open is reading, shown until it lands or fails, and
     /// then until the panels have drawn it (`settling`).
     pub opening_name: Option<String>,
+    /// Ghost loading: the opening composition's aspect (from the library's
+    /// index, when it says), the panels showing their ghost, and when each
+    /// panel's real content replaced its ghost (it fades in).
+    pub(crate) ghost_aspect: Option<f32>,
+    pub(crate) ghosted: std::collections::HashSet<String>,
+    pub(crate) revealed: std::collections::HashMap<String, std::time::Instant>,
     /// The project whose panels haven't published since it landed.
     pub settling: Option<String>,
     /// `PM_NATIVE_MAIN_TRACE` milestones of the current open.
@@ -172,6 +180,9 @@ pub struct Controller {
     /// This window's slot in `mcp`: the project it shows is its own.
     pub window_key: u64,
     pub close_pending: bool,
+    /// The project that opens here once this window's project has closed
+    /// (one project per window: an open replaces the one shown).
+    pub(crate) replace_with: Option<crate::entry::Pending>,
     /// A change could not be written to the recovery data and no save has
     /// succeeded since: said in a sheet once, and in the subtitle until then.
     unprotected: bool,
@@ -351,6 +362,9 @@ impl pm_shell::integration::Integration for Bridge {
     fn checked(&self, cx: &App) -> std::collections::BTreeSet<String> {
         self.0.read(cx).checked_commands(cx)
     }
+    fn recent(&self, cx: &App) -> Vec<(String, String)> {
+        self.0.read(cx).recent.clone()
+    }
     fn disabled(&self, cx: &App) -> std::collections::BTreeSet<String> {
         self.0.read(cx).unavailable_commands()
     }
@@ -362,8 +376,20 @@ impl pm_shell::integration::Integration for Bridge {
         cx: &mut App,
     ) -> Option<AnyElement> {
         self.0.update(cx, |v, cx| {
-            panels::opening(v, id, bounds)
-                .or_else(|| v.extension_panel(id, bounds, cx))
+            if let Some(ghost) = panels::opening(v, id, bounds) {
+                if v.ghosted.insert(id.to_owned()) && v.ghosted.len() == 1 {
+                    // The first ghost frame of this open (PM_NATIVE_MAIN_TRACE).
+                    v.open_timer.mark("ghost", serde_json::json!({ "panel": id }));
+                }
+                return Some(ghost);
+            }
+            // The ghost gave way: the real content fades in over it.
+            if v.ghosted.remove(id) {
+                v.open_timer.mark("panel_ready", serde_json::json!({ "panel": id }));
+                v.revealed.insert(id.to_owned(), std::time::Instant::now());
+            }
+            let content = v
+                .extension_panel(id, bounds, cx)
                 .or_else(|| panels::scopes(v, id, cx))
                 .or_else(|| crate::perf_panel::panel(v, id, cx))
                 .or_else(|| crate::mixer_panel::panel(v, id, bounds, cx))
@@ -373,7 +399,18 @@ impl pm_shell::integration::Integration for Bridge {
                 .or_else(|| crate::notes_panel::panel(v, id, bounds, w, cx))
                 .or_else(|| crate::workspaces::panel(v, id, bounds, cx))
                 .or_else(|| crate::generated_panel::panel(v, id, bounds, w, cx))
-                .or_else(|| v.builtin_panel(id, bounds, w, cx))
+                .or_else(|| v.builtin_panel(id, bounds, w, cx))?;
+            let Some(at) = v.revealed.get(id).copied() else {
+                return Some(content);
+            };
+            let tokens = v.host.borrow().tokens.clone();
+            let shown = crate::ghost::reveal(at.elapsed(), &tokens);
+            if shown >= 1. {
+                v.revealed.remove(id);
+                return Some(content);
+            }
+            w.request_animation_frame();
+            Some(div().size_full().opacity(shown).child(content).into_any_element())
         })
     }
     fn home(&self, w: &mut Window, cx: &mut App) -> Option<AnyElement> {
@@ -754,6 +791,7 @@ impl Controller {
             viewer: None,
             media: MediaCatalog::default(),
             media_refresh: Default::default(),
+            thumbs: Default::default(),
             media_base: MediaCatalog::default(),
             media_resolved: false,
             pro_media,
@@ -761,6 +799,9 @@ impl Controller {
             opening: false,
             busy: None,
             opening_name: None,
+            ghost_aspect: None,
+            ghosted: Default::default(),
+            revealed: Default::default(),
             settling: None,
             open_timer: Default::default(),
             after_open: Default::default(),
@@ -827,6 +868,7 @@ impl Controller {
             poster_revision: None,
             window_key: 0,
             close_pending: false,
+            replace_with: None,
             unprotected: false,
             closing_note: None,
             close_window: None,
@@ -862,8 +904,15 @@ impl Controller {
             })
             .detach();
         match opening {
-            Some(crate::entry::Pending::File(path)) => self.open_file(path, cx),
-            Some(crate::entry::Pending::Library(project)) => self.open_named(
+            Some(pending) => self.apply_pending(pending, cx),
+            None => self.reopen_restored(cx),
+        }
+    }
+    /// Opens `pending` in this window, which shows no project.
+    pub(crate) fn apply_pending(&mut self, pending: crate::entry::Pending, cx: &mut Context<Self>) {
+        match pending {
+            crate::entry::Pending::File(path) => self.open_file(path, cx),
+            crate::entry::Pending::Library(project) => self.open_named(
                 SessionSource::Library {
                     profile: self.profile.clone(),
                     project,
@@ -871,17 +920,100 @@ impl Controller {
                 None,
                 cx,
             ),
-            Some(crate::entry::Pending::Session(session)) => {
+            crate::entry::Pending::Session(session) => {
                 // Gone before this window took it: nothing to show.
                 if self.kernel.published(&session.project).is_some() {
                     self.adopt(session, pm_kernel::locks::OpenDecision::Writable, false, cx);
                     self.mcp.activate_window(self.window_key);
                 }
             }
-            Some(crate::entry::Pending::Adopt { reply, name, file }) => {
+            crate::entry::Pending::Adopt { reply, name, file } => {
                 self.adopt_reply(*reply, name, file, cx)
             }
-            None => self.reopen_restored(cx),
+        }
+    }
+    /// A project that was to open here and won't (its replacement was
+    /// cancelled): one the kernel already opened for this window closes
+    /// again; nothing of it is lost (it was only opened).
+    pub(crate) fn dispose_pending(&mut self, pending: crate::entry::Pending, cx: &mut Context<Self>) {
+        let session = match pending {
+            crate::entry::Pending::Session(session) => Some(session),
+            crate::entry::Pending::Adopt { reply, .. } => match *reply {
+                ShellReply::Opened { session, .. } => Some(session),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(session) = session {
+            let closing = self.kernel.shell(ShellCall::Close(session));
+            cx.spawn(async move |_, _| drop(closing.await)).detach();
+        }
+    }
+    /// Ghost loading: the editor's ghost from now until each panel is ready
+    /// (`panels::opening`), the project's name in the bar with “Opening…”
+    /// under it. Called again for the same open, it keeps its clock.
+    pub(crate) fn begin_ghost(&mut self, name: &str, aspect: Option<f32>, cx: &mut Context<Self>) {
+        if self.opening_name.as_deref() != Some(name) {
+            self.ghosted.clear();
+            self.revealed.clear();
+            self.ghost_aspect = aspect;
+            self.open_timer.begin();
+            self.open_timer.mark("chosen", serde_json::json!({}));
+        } else if aspect.is_some() {
+            self.ghost_aspect = aspect;
+        }
+        self.opening_name = Some(name.to_owned());
+        self.home = false;
+        self.host
+            .borrow()
+            .set_document_metadata(name, "Opening…", false, None);
+        cx.notify();
+    }
+    /// An open that ended without a project: the ghost goes, Home is back.
+    pub(crate) fn end_ghost(&mut self, cx: &mut Context<Self>) {
+        self.opening_name = None;
+        self.ghosted.clear();
+        self.revealed.clear();
+        self.ghost_aspect = None;
+        self.host
+            .borrow()
+            .set_document_metadata("Untitled", "", false, None);
+        cx.notify();
+    }
+    /// One project per window: `next` opens in place of the project shown.
+    /// That project closes first as any close does (an unsaved one asks
+    /// Save, Don't Save or Cancel); Cancel keeps it and `next` does not open.
+    pub(crate) fn replace_project(
+        &mut self,
+        next: crate::entry::Pending,
+        cx: &mut Context<Self>,
+    ) {
+        match crate::lifecycle::open_plan(
+            self.session.is_some(),
+            self.opening,
+            self.close_pending || self.replace_with.is_some(),
+        ) {
+            crate::lifecycle::OpenPlan::Here => {
+                self.hide_home(cx);
+                self.apply_pending(next, cx);
+                return;
+            }
+            crate::lifecycle::OpenPlan::Refuse => {
+                self.dispose_pending(next, cx);
+                self.message = "Finish closing this project first.".into();
+                cx.notify();
+                return;
+            }
+            crate::lifecycle::OpenPlan::AfterClose => {}
+        }
+        self.replace_with = Some(next);
+        self.request_close(crate::lifecycle::Intent::Project, cx);
+        // Refused (busy, saving, an operation in progress): it says why,
+        // and the other project doesn't open.
+        if !self.close_pending
+            && let Some(next) = self.replace_with.take()
+        {
+            self.dispose_pending(next, cx);
         }
     }
     /// A window restored at launch reopens its project when that project has
@@ -999,6 +1131,31 @@ impl Controller {
             self.apply_viewer_options();
             self.rebuild_popout_viewer();
             self.seek(time);
+        } else if self.viewer.is_some() && published_rate(&p) != self.rate {
+            // The composition's frame rate changed (Project Settings): the
+            // viewer is bound again on the new frame grid, so stepping,
+            // playing and snapping follow at once, where the playhead was;
+            // a run in progress carries on at its speed.
+            let time = self.time();
+            let playing = self
+                .running()
+                .then(|| {
+                    self.viewer
+                        .as_ref()
+                        .and_then(|v| v.status().clock)
+                        .map(|c| c.rate)
+                        .filter(|rate| *rate != PlaybackRate::STOPPED)
+                        .unwrap_or(PlaybackRate::NORMAL)
+                });
+            self.published = Some(p.clone());
+            self.builtins.natives.published.replace(Some(p.clone()));
+            self.bind_composition();
+            self.apply_viewer_options();
+            self.rebuild_popout_viewer();
+            self.seek(time);
+            if let Some(rate) = playing {
+                self.transport(TransportCommand::Play { rate });
+            }
         }
         self.refresh_media(cx);
         // Raster override answers are for one revision; frames ask afresh.
@@ -1519,13 +1676,15 @@ impl Controller {
             self.message = "Finish the active edit or recovery decision first".into();
             return;
         }
-        // A window's project is never replaced by an open: the file joins
-        // the window's tabs and the project shown stays as it is.
+        // One project per window: an open replaces the project shown, which
+        // closes first as any close does (asking about unsaved work).
         if self.session.is_some() {
             match source {
                 SessionSource::File(path) => {
-                    let leader = self.shell_window_id(cx);
-                    crate::entry::open_in_new_tab(crate::entry::Pending::File(path), leader, cx);
+                    self.replace_project(crate::entry::Pending::File(path), cx)
+                }
+                SessionSource::Library { project, .. } => {
+                    self.replace_project(crate::entry::Pending::Library(project), cx)
                 }
                 _ => self.message = "Close this project before opening another here.".into(),
             }
@@ -1602,16 +1761,10 @@ impl Controller {
         cx: &mut Context<Self>,
     ) {
         // This window shows a project (or is opening one): the opened one
-        // joins its tabs, and Home gives way to the project behind it.
+        // replaces it once it has closed (one project per window).
         if self.session.is_some() || self.opening {
-            let leader = self.shell_window_id(cx);
             let reply = Box::new(reply);
-            crate::entry::open_in_new_tab(
-                crate::entry::Pending::Adopt { reply, name, file },
-                leader,
-                cx,
-            );
-            self.hide_home(cx);
+            self.replace_project(crate::entry::Pending::Adopt { reply, name, file }, cx);
             return;
         }
         let Some(operation) = self.mcp.try_operation() else {
@@ -1657,9 +1810,7 @@ impl Controller {
             || format!("Opening “{name}”…"),
             |note| format!("{note} Opening “{name}”…"),
         );
-        self.opening_name = Some(name.clone());
-        self.open_timer.begin();
-        cx.notify();
+        self.begin_ghost(&name, None, cx);
         cx.spawn(async move |this, cx| {
             let _operation = operation;
             let mut result = pending.await;
@@ -1718,9 +1869,11 @@ impl Controller {
                 if v.settling.is_none() {
                     v.opening_name = None;
                     v.busy = None;
-                    // No project arrived; its open failure says why.
+                    // No project arrived; its open failure says why. The
+                    // ghost gives way to it (and to Home).
                     if !matches!(&result, Some(Ok(ShellReply::Opened { .. }))) {
                         v.after_open.fail();
+                        v.end_ghost(cx);
                     }
                 }
                 match result {
@@ -1828,8 +1981,7 @@ impl Controller {
             };
             if answer.recv().await.ok().flatten() == Some(true) {
                 let _ = this.update(cx, |v, cx| {
-                    let leader = v.shell_window_id(cx);
-                    crate::entry::open_in_new_tab(crate::entry::Pending::Library(newest), leader, cx);
+                    v.replace_project(crate::entry::Pending::Library(newest), cx);
                 });
             }
         })
@@ -2237,6 +2389,7 @@ impl Controller {
         self.keyframes = 0;
         self.session = Some(session);
         self.media_refresh.reset();
+        self.thumbs.reset();
         self.media = MediaCatalog::default();
         self.media_base = MediaCatalog::default();
         self.media_resolved = false;
@@ -2360,10 +2513,11 @@ impl Controller {
             return;
         }
         if self.session.is_some() {
-            // This window still shows its own project.
+            // This window still shows its own project; an agent's project
+            // opens in a window of its own (one project per window), never
+            // in place of the one the person is working on.
             self.mcp.bind_window(self.window_key, self.session.clone());
-            let leader = self.shell_window_id(cx);
-            crate::entry::open_in_new_tab(crate::entry::Pending::Session(session), leader, cx);
+            crate::entry::open_in_new_window(crate::entry::Pending::Session(session), cx);
             return;
         }
         self.adopt(session, pm_kernel::locks::OpenDecision::Writable, false, cx);
@@ -2416,6 +2570,7 @@ impl Controller {
                     .as_ref()
                     .is_some_and(|s| matches!(s.destination, SessionDestination::File(_)))
             });
+        let started = crate::diag::enabled().then(std::time::Instant::now);
         cx.spawn(async move |this, cx| {
             let result = if file_save {
                 // The save panel already confirmed replacing an existing file.
@@ -2437,6 +2592,13 @@ impl Controller {
             } else {
                 kernel.shell(ShellCall::Save(session)).await
             };
+            if let Some(started) = started {
+                crate::diag::line(serde_json::json!({
+                    "save": (started.elapsed().as_secs_f64() * 1000.).round(),
+                    "file": file_save,
+                    "ok": matches!(&result, Some(Ok(ShellReply::Saved { .. }))),
+                }));
+            }
             let _ = this.update(cx, |v, cx| {
                 v.save_pending = false;
                 let close = v.close_after_save.take();
@@ -2980,10 +3142,39 @@ impl Controller {
             "agent" => self.toggle_agent(window, cx),
             "bringWorkspace" => self.bring_workspace(window, cx),
             "quit" => cx.defer(crate::lifecycle::begin_quit),
-            "closeWindow" | "closeTab" => {
+            // ⌘W: a page showing (Settings, the Store) closes back to the
+            // project; else the project closes and the window shows Home;
+            // with no project the window closes.
+            "closeTab" | "closeProject" if self.pages.shown.is_some() => {
+                if let Some(id) = self.pages.shown.clone() {
+                    self.close_tab_page(&id, cx);
+                }
+            }
+            "closeTab" | "closeProject" if self.session.is_some() => {
+                gpui_macos::feel::note_now("tab.close");
+                self.request_close(crate::lifecycle::Intent::Project, cx)
+            }
+            "closeWindow" | "closeTab" | "closeProject" => {
                 gpui_macos::feel::note_now("tab.close");
                 self.request_close(crate::lifecycle::Intent::Window, cx)
             }
+            // The project name's menu.
+            name if name.starts_with("openRecentProject:") => {
+                let id = name["openRecentProject:".len()..].to_owned();
+                self.replace_project(crate::entry::Pending::Library(id), cx);
+            }
+            // Rename Project… is the Name row of Settings › Project.
+            "renameProject" => {
+                self.builtins.settings_page = Some("project".into());
+                self.show_builtin("settings", window, cx);
+            }
+            "revealProject" => match self.path.clone() {
+                Some(path) => crate::platform::reveal(&path),
+                None => {
+                    self.message = "This project is kept in your library, not in a file of its own.".into();
+                    cx.notify();
+                }
+            },
             "cancel" | "deselect" if self.importing.is_some() => {
                 if let Some(cancel) = &self.importing {
                     cancel.store(true, std::sync::atomic::Ordering::Release);
@@ -3537,6 +3728,14 @@ pub const SAVING: &str = "Saving…";
 /// The open composition's duration in seconds as the publication has it
 /// now (Project Settings, the Properties field and agents change it under a
 /// bound viewer), at least a millisecond.
+/// The frame rate of the composition shown, as it is now.
+pub fn published_rate(p: &Published) -> pm_time::Rate {
+    p.snapshot.root().map_or(pm_time::Rate::FPS_30, |root| {
+        composition_rate(
+            pm_kernel::model::comp_node(root, Some(&p.snapshot.render_comp())).unwrap_or(root),
+        )
+    })
+}
 pub fn composition_duration(p: &Published) -> f64 {
     p.snapshot
         .root()

@@ -795,7 +795,13 @@ impl StoreWindow {
     }
     fn on_key(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         if event.keystroke.key == "escape" {
-            self.back(cx);
+            // Esc steps back from a listing; on a list page the Store, a
+            // page of the window, closes back to the project.
+            if self.detail.is_none() && self.embedded {
+                pm_shell::send_menu_command("closeTab");
+            } else {
+                self.back(cx);
+            }
         }
     }
 }

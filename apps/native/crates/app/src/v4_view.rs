@@ -55,6 +55,13 @@ impl Outline {
                 true
             })
     }
+    /// A layer name pressed: the surface may lift it into a reorder (the
+    /// row still takes the click).
+    fn press_layer(&self, layer: &str, at: Point<Pixels>, cx: &mut App) {
+        if let Some(surface) = self.surface.borrow().as_ref().and_then(|s| s.upgrade()) {
+            surface.update(cx, |s, _| s.press_layer_row(layer.into(), at));
+        }
+    }
     pub fn set_scene(&self, scene: Option<Arc<pm_panel_timeline::render::Scene>>) {
         *self.scene.borrow_mut() = scene;
     }
@@ -205,6 +212,8 @@ pub struct SurfaceView {
     /// The panel item being dragged (its `dragstart` ran): `dragend` goes to
     /// it once the drag is over, wherever it was dropped.
     dragging: Option<Id>,
+    /// Each virtual list's width last told to its panel.
+    list_widths: HashMap<Id, f32>,
     scrub_gesture: Option<u64>,
     scrub_busy: bool,
     scrub_shown: Option<(Id, f64)>,
@@ -284,6 +293,7 @@ impl SurfaceView {
             scrub: None,
             scrub_ops: VecDeque::new(),
             dragging: None,
+            list_widths: HashMap::new(),
             scrub_gesture: None,
             scrub_busy: false,
             scrub_shown: None,
@@ -1749,6 +1759,24 @@ impl SurfaceView {
             ..modified(modifiers)
         }
     }
+    /// The nearest focusable node holding `id` (itself first) takes the
+    /// keyboard, as a click focuses it on the web and in AppKit. Text fields
+    /// and native controls keep their own focus handling.
+    fn focus_pressed(&self, id: Id, window: &mut Window, cx: &mut App) {
+        let mut at = Some(id);
+        while let Some(node) = at {
+            if self.fields.contains_key(&node) || self.controls.contains_key(&node) {
+                return;
+            }
+            if let Some(focus) = self.focus.get(&node) {
+                if !focus.is_focused(window) {
+                    focus.focus(window, cx);
+                }
+                return;
+            }
+            at = self.prepared.node(node).and_then(|n| n.parent);
+        }
+    }
     fn press(&mut self, id: Id, event: &MouseDownEvent, cx: &mut Context<Self>) {
         let button = button_code(event.button);
         self.capture = Some(Capture {
@@ -2078,12 +2106,9 @@ impl SurfaceView {
             };
             let mut slot = slot.id(("v4-control", id));
             if let Some(focus) = self.focus.get(&id) {
-                let t = &self.table.tokens;
-                let (ring, color, radius) = (
-                    px(t.metrics.border * 2.),
-                    rgb(t.colors.focus),
-                    px(t.metrics.control_radius),
-                );
+                // No focus ring on a control's slot (owner decision,
+                // 2026-11-14): a field keeps its own caret and selection.
+                let radius = px(self.table.tokens.metrics.control_radius);
                 let tab = node.tab_index.unwrap_or(0);
                 let handle = &focus.clone().tab_stop(tab >= 0).tab_index(tab.max(0));
                 let control = control.clone();
@@ -2091,7 +2116,6 @@ impl SurfaceView {
                     .track_focus(handle)
                     .tab_index(tab.max(0))
                     .rounded(radius)
-                    .focus_visible_style(move |s| s.ring(ring).ring_color(color))
                     .on_key_down(move |event: &KeyDownEvent, _, cx| {
                         let m = &event.keystroke.modifiers;
                         if m.platform || m.control || m.alt {
@@ -2236,25 +2260,36 @@ impl SurfaceView {
         }
         if let Some(geometry) = node.virtual_window {
             element = element.on_scroll_wheel(cx.listener(move |_, _, window, cx| {
-                cx.defer_in(window, move |v, _, cx| {
-                    let Some(scroll) = v.scrolls.get(&id) else {
-                        return;
-                    };
-                    let offset = -f32::from(scroll.offset().y) as f64;
-                    let height = f32::from(scroll.bounds().size.height) as f64;
-                    if let Ok(range) = geometry.visible(offset, height) {
-                        v.send(
-                            id,
-                            "rangechange",
-                            EventDetail {
-                                range: Some(range),
-                                ..Default::default()
-                            },
-                            cx,
-                        );
-                    }
-                });
+                cx.defer_in(window, move |v, _, cx| v.range_change(id, geometry, cx));
             }));
+            // A list laid out from its width (a grid's columns) hears of a
+            // new width as soon as a frame lays it out (measured after
+            // layout: a panel maximized or resized draws nothing more until
+            // something else does, so a check while rendering saw the size
+            // before and the grid kept its old columns).
+            let known = self.list_widths.get(&id).copied();
+            let view = cx.entity().downgrade();
+            element = element.child(
+                canvas(
+                    move |bounds, _, cx| {
+                        let width = f32::from(bounds.size.width);
+                        if width > 0. && known != Some(width) {
+                            let view = view.clone();
+                            cx.defer(move |cx| {
+                                let _ = view.update(cx, |v, cx| {
+                                    if v.list_widths.get(&id) != Some(&width) {
+                                        v.list_widths.insert(id, width);
+                                        v.range_change(id, geometry, cx);
+                                    }
+                                });
+                            });
+                        }
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full(),
+            );
         }
         // A floating surface springs in when it appears and out while its
         // panel keeps it for the exit (`pmKit.closing`): opacity, and a
@@ -2268,8 +2303,8 @@ impl SurfaceView {
         }
         element = self.accessible(element, node);
         if let Some(focus) = self.focus.get(&id) {
-            let t = &self.table.tokens;
-            let (ring, color) = (px(t.metrics.border * 2.), rgb(t.colors.focus));
+            // No focus ring (owner decision, 2026-11-14): buttons and
+            // toggles show none, before or after a click.
             // A tracked handle carries its own tab settings (the element's
             // are ignored): `tabIndex` -1 stays focusable but out of the Tab
             // order, as on the web (a segmented control's other segments).
@@ -2277,8 +2312,7 @@ impl SurfaceView {
             let focus = &focus.clone().tab_stop(tab >= 0).tab_index(tab.max(0));
             element = element
                 .track_focus(focus)
-                .tab_index(tab.max(0))
-                .focus_visible_style(move |s| s.ring(ring).ring_color(color));
+                .tab_index(tab.max(0));
         }
         element = self.interactive(element, node, cx);
         element = self.decorate(element, node, window);
@@ -2365,6 +2399,18 @@ impl SurfaceView {
                     if let Some(text) = &c.text {
                         children.push(text.clone().into_any_element());
                     }
+                }
+                _ if node.fixed_items => {
+                    let size = node.virtual_window.map_or(0., |g| g.item_size) as f32;
+                    children.push(
+                        div()
+                            .flex_none()
+                            .h(px(size))
+                            .flex()
+                            .flex_col()
+                            .child(self.element(*child, window, cx, skip))
+                            .into_any_element(),
+                    );
                 }
                 _ => children.push(self.element(*child, window, cx, skip)),
             }
@@ -2742,6 +2788,13 @@ impl SurfaceView {
                 }),
             );
         }
+        if let Some(layer) = node.timeline_layer_drag.clone() {
+            let outline = self.natives.outline.clone();
+            element =
+                element.on_mouse_down(MouseButton::Left, move |event: &MouseDownEvent, _, cx| {
+                    outline.press_layer(&layer, event.position, cx)
+                });
+        }
         if let Some((layer, path)) = node.timeline_scrub.clone() {
             let outline = self.natives.outline.clone();
             element = element.cursor_col_resize().on_mouse_down(
@@ -2756,7 +2809,12 @@ impl SurfaceView {
         if events.pointer() {
             element = element.on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |v, event: &MouseDownEvent, _, cx| {
+                cx.listener(move |v, event: &MouseDownEvent, window, cx| {
+                    // Stopping here also stops GPUI's own focus transfer:
+                    // the press gives the keyboard to the item it lands in.
+                    if !window.default_prevented() {
+                        v.focus_pressed(id, window, cx);
+                    }
                     v.press(id, event, cx);
                     cx.stop_propagation();
                 }),
@@ -3136,6 +3194,21 @@ impl SurfaceView {
                 window,
             ));
         }
+        // A picture the host made (a Project thumbnail): it fills the node,
+        // cropped to its shape; until it exists the node shows its fill.
+        if let Some(path) = node
+            .resource
+            .as_ref()
+            .and_then(|key| crate::media_thumbs::resolve(key))
+        {
+            element = element.child(
+                img(path)
+                    .absolute()
+                    .inset_0()
+                    .size_full()
+                    .object_fit(ObjectFit::Cover),
+            );
+        }
         if let Some(text) = &node.text {
             element = element.child(text.clone());
         }
@@ -3285,6 +3358,32 @@ impl Render for PanelDrag {
     }
 }
 impl SurfaceView {
+    /// A virtual list's visible rows and width (`rangechange`).
+    fn range_change(
+        &mut self,
+        id: Id,
+        geometry: pm_builtins::virtualization::Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(scroll) = self.scrolls.get(&id) else {
+            return;
+        };
+        let offset = -f32::from(scroll.offset().y) as f64;
+        let bounds = scroll.bounds();
+        let height = f32::from(bounds.size.height) as f64;
+        if let Ok(range) = geometry.visible(offset, height) {
+            self.send(
+                id,
+                "rangechange",
+                EventDetail {
+                    range: Some(range),
+                    width: Some(f32::from(bounds.size.width) as f64),
+                    ..Default::default()
+                },
+                cx,
+            );
+        }
+    }
     /// The item drag is over (dropped anywhere, or let go): the panel
     /// clears its drag state.
     pub fn end_drag(&mut self, cx: &mut Context<Self>) {
