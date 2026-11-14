@@ -531,3 +531,84 @@ fn a_nudge_moves_a_3d_layer_in_scene_units() {
     assert_eq!(value(&kernel, "position.x"), Some(0.4));
     assert_eq!(value(&kernel, "position.y"), Some(1.));
 }
+
+/// Properties' Parent and Track Matte pop-ups list their rows when they
+/// open (`host_rows`), read on the main thread from the publication: the
+/// same layers the kernel's relation questions allow, asked one layer at a
+/// time, and the selection a layer belongs to is parented as one.
+#[test]
+fn host_rows_list_the_layers_a_layer_can_follow() {
+    let parented = |id: &str, parent: &str| {
+        layer(id, "solid", 0., 0., 0., "#ffffff", "")
+            .replace(r#""parent":null"#, &format!(r#""parent":"{parent}""#))
+    };
+    let (_actor, kernel) = open(&[
+        layer("a", "solid", 0., 0., 0., "#ffffff", ""),
+        parented("b", "a"),
+        parented("c", "b"),
+        layer("d", "audio", 0., 0., 0., "#ffffff", ""),
+        layer("e", "solid", 0., 0., 0., "#ffffff", ""),
+    ]);
+    let ids = |rows: Vec<serde_json::Value>| -> Vec<Option<String>> {
+        rows.iter()
+            .map(|r| r["v"].as_str().map(str::to_owned))
+            .collect()
+    };
+    let parents = |p: &Published, layer: &str| {
+        ids(host_rows(
+            p,
+            &serde_json::json!({"source": "layer-parents", "layer": layer}),
+        )
+        .unwrap())
+    };
+    let s = |v: &str| Some(v.to_owned());
+    let p = select(&kernel, &[]);
+    // Not itself, not audio, nothing that would make a cycle.
+    assert_eq!(parents(&p, "a"), [None, s("e")]);
+    assert_eq!(parents(&p, "c"), [None, s("a"), s("b"), s("e")]);
+    // A selected layer is parented with the rest of its selection.
+    let p = select(&kernel, &["b", "c"]);
+    assert_eq!(parents(&p, "c"), [None, s("a"), s("e")]);
+    // The same answers as asking the kernel layer by layer.
+    let facts = Facts::read(&p, None).unwrap();
+    let children: Vec<&LayerInfo> = facts
+        .layers
+        .iter()
+        .filter(|l| l.id == "b" || l.id == "c")
+        .collect();
+    let slow: Vec<Option<String>> = std::iter::once(None)
+        .chain(
+            parent_candidates(&p, &facts, &children)
+                .iter()
+                .map(|l| s(&l.id)),
+        )
+        .collect();
+    assert_eq!(parents(&p, "c"), slow);
+    for layer in ["a", "b", "c", "e"] {
+        let mattes = ids(host_rows(
+            &p,
+            &serde_json::json!({"source": "layer-mattes", "layer": layer}),
+        )
+        .unwrap());
+        let mut mirror = pm_kernel::QueryMirror::new(&p);
+        let slow: Vec<Option<String>> = std::iter::once(None)
+            .chain(
+                facts
+                    .layers
+                    .iter()
+                    .filter(|l| relation(&mut mirror, &p, "validMatteSource", layer, ("id", &l.id)))
+                    .map(|l| s(&l.id)),
+            )
+            .collect();
+        assert_eq!(mattes, slow, "Track Matte rows for {layer}");
+    }
+    // An unknown source or layer lists nothing.
+    assert!(host_rows(&p, &serde_json::json!({"source": "nope", "layer": "a"})).is_none());
+    assert!(
+        host_rows(
+            &p,
+            &serde_json::json!({"source": "layer-mattes", "layer": "zz"})
+        )
+        .is_none()
+    );
+}
