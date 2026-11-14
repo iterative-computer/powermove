@@ -221,6 +221,16 @@ with insertion mode Auto, also on buffers the app makes. Preserving it on untouc
 footage would rest on that undocumented key and needs a real HDR10+ source to prove the
 whole path (decode, render of an untouched clip, encode); neither is in place.
 
+### HAP
+
+HAP clips import through the bundled FFmpeg's own HAP decoder (no encoder is built, and
+none is needed to read). HAP export is not offered. Writing the MOV is simple
+(AVAssetWriter passes `Hap1` samples through, and FFmpeg reads them back exactly), but each
+flavour needs its own texture encoder at UHD speed (BC1, BC3, and scaled YCoCg in BC3 for
+HAP Q), plus Snappy and chunked sections, and an export branch that bypasses VideoToolbox,
+with its own file check. HAP Alpha cannot keep alpha exact: a BC3 (or BC4) alpha block
+holds at most eight alpha values per 4×4 pixels, so a soft edge changes.
+
 ## Open items
 
 - The GPU encoder-input pass (pm-render) is not part of this lane; `convert.rs` is
