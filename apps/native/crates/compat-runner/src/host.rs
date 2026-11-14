@@ -741,6 +741,11 @@ fn trace(value: Value) {
     if let Some(start) = *ON {
         let mut value = value;
         value["s"] = json!((start.elapsed().as_secs_f64() * 1000.).round() / 1000.);
+        value["w"] = json!(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis() as u64)
+        );
         eprintln!("PM_EXT {value}");
     }
 }
@@ -2281,6 +2286,7 @@ impl Owner {
             });
             return;
         }
+        trace(json!({"extensions": "realm"}));
         let live = self.realm.as_ref().unwrap();
         let compiler = match SvelteCompiler::new(&live.pool, 256 * 1024 * 1024, 8 * 1024 * 1024) {
             Ok(compiler) => compiler,
@@ -2295,7 +2301,15 @@ impl Owner {
         };
         self.confined.clear();
         trace(json!({"extensions": "compile", "found": found.len()}));
-        self.records = found.iter().map(|f| self.compile(&compiler, f)).collect();
+        self.records = found
+            .iter()
+            .map(|f| {
+                let started = std::time::Instant::now();
+                let record = self.compile(&compiler, f);
+                trace(json!({"compiled": f.id, "ms": started.elapsed().as_millis() as u64}));
+                record
+            })
+            .collect();
         compiler.realm().close();
         trace(json!({"extensions": "compiled"}));
         self.sync_stores();
@@ -2304,6 +2318,7 @@ impl Owner {
         let records = self.realm_plan();
         self.replay_window();
         self.load(&records, "boot", "");
+        trace(json!({"extensions": "load-asked"}));
     }
     /// Asks the realm for a load pass (`boot`, or `update` with its
     /// arguments) of `records`, with the values their manifests declare
