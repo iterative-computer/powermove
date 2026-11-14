@@ -299,6 +299,10 @@ impl Prepared {
             {
                 anchors.push(id);
             }
+            // A control that opens a menu: the menu hangs from where it is.
+            if node.props.contains_key("aria-haspopup") {
+                anchors.push(node.id);
+            }
             has_keydown |= view.events.key_down;
             nodes.insert(node.id, view);
         }

@@ -19,6 +19,34 @@ fn canonical_of_file(path: &std::path::Path) -> Value {
     canonical_project(project_of(&c.document).clone())
 }
 
+/// `project` as V2 opens a file written by the old app: a v1 video asset
+/// keeps the video reading v1 showed with `videoColor: "electron"`. Every
+/// video asset of a PMV3 or JSON file is a v1 one; in a PMV4 file, one with
+/// no `timing` and no Interpret Footage choice.
+fn as_opened(project: &Value, legacy_container: bool) -> Value {
+    let mut project = project.clone();
+    let assets = project
+        .as_object_mut()
+        .and_then(|p| p.get_mut("assets"))
+        .and_then(Value::as_object_mut);
+    for (_, asset) in assets.into_iter().flat_map(|a| a.iter_mut()) {
+        let Some(asset) = asset.as_object_mut() else {
+            continue;
+        };
+        let chosen = asset
+            .get("interpret")
+            .and_then(Value::as_object)
+            .is_some_and(|i| !i.is_empty());
+        if asset.get("kind").and_then(Value::as_str) == Some("video")
+            && asset.get("videoColor").is_none()
+            && (legacy_container || asset.get("timing").is_none() && !chosen)
+        {
+            asset.insert("videoColor", Value::from("electron"));
+        }
+    }
+    project
+}
+
 fn media_bytes(path: &std::path::Path) -> Vec<(String, Vec<u8>)> {
     let bytes = read(path);
     let c = pm_model::container::read_container_bytes(&bytes, ReadOptions { verify_media: true })
@@ -67,10 +95,14 @@ fn container_fixtures_round_trip_through_pmv4() {
         let file = std::fs::File::open(&out).unwrap();
         let saved = read_container(&file, ReadOptions { verify_media: true }).unwrap();
         assert_eq!(saved.format, ContainerFormat::Pmv4, "{name}");
-        // The project is the same, member for member.
+        // The project is the same, member for member, but for the v1 video
+        // reading kept on its v1 video assets.
         assert_eq!(
             to_canonical_string(&canonical_of_file(&out)),
-            to_canonical_string(&canonical_of_file(&source)),
+            to_canonical_string(&as_opened(
+                &canonical_of_file(&source),
+                format != ContainerFormat::Pmv4
+            )),
             "{name}: project"
         );
         // Media bytes survive. Only media of assets the project (or its

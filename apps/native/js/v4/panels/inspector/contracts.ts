@@ -177,7 +177,13 @@ export type NativeRequest =
   | { type: "new-layer-menu"; anchor: number; items: (string | null)[] }
   | { type: "row-menu"; anchor: number; row: string; items: MenuItem[] }
   | { type: "animator-menu"; anchor: number; items: AnimatorPreset[] }
-  | { type: "font-menu"; anchor: number; row: string }
+  | {
+      type: "font-menu";
+      anchor: number;
+      row: string;
+      /** The family shown, checked and in view when the picker opens. */
+      current?: string;
+    }
   | { type: "fill-popover"; anchor: number; row: string }
   | { type: "point-pad"; anchor: number; row: string }
   | { type: "parent-pick"; anchor: number; row: string }

@@ -905,6 +905,97 @@ fn an_interpretation_reads_a_generated_proxy_as_it_reads_the_original() {
     assert!(apart(original, proxy) < CODEC, "{proxy:?} {original:?}");
 }
 
+/// An untagged 1280×720 FFV1 clip of four saturated bands (R′G′B′ codes
+/// converted by FFmpeg to 4:2:0 Y′CbCr without any colour tag): HD, so the
+/// native reading takes Rec.709 and a v1 project's Electron reading Rec.601.
+fn untagged_hd_clip(dir: &Path) -> PathBuf {
+    let (w, h) = (1280usize, 720usize);
+    let colours = [
+        [200u8, 40, 40],
+        [40, 200, 40],
+        [40, 40, 200],
+        [180, 160, 60],
+    ];
+    let mut row = Vec::with_capacity(w * 3);
+    for x in 0..w {
+        row.extend(colours[x * 4 / w]);
+    }
+    let input = dir.join("hd.rgb");
+    std::fs::write(&input, row.repeat(h * 4)).unwrap();
+    let output = dir.join("untagged-hd.mkv");
+    let ffmpeg = PathBuf::from(
+        std::env::var_os("PM_FFMPEG_DIR").expect("source engine/env.sh before this test"),
+    )
+    .join("bin/ffmpeg");
+    let status = std::process::Command::new(ffmpeg)
+        .args(["-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24"])
+        .args(["-s", "1280x720", "-r", "25", "-i"])
+        .arg(&input)
+        .args(["-c:v", "ffv1", "-pix_fmt", "yuv420p"])
+        .arg(&output)
+        .status()
+        .unwrap();
+    assert!(status.success(), "ffmpeg wrote the clip");
+    output
+}
+
+/// A v1 project's asset carries Electron's video reading (`videoColor:
+/// "electron"`): its generated proxy, tagged with the native reading, is read
+/// as the original is read, with and without an Interpret Footage choice.
+#[test]
+fn a_proxy_of_an_asset_read_as_in_powermove_1_reads_as_its_original() {
+    let dir = tempfile::tempdir().unwrap();
+    let (w, h) = (64u32, 36u32);
+    let mut r = Renderer::headless().unwrap();
+    let clip = untagged_hd_clip(dir.path());
+    let proxy = proxy_of(dir.path(), &clip);
+    let bands = |r: &mut Renderer, from: &Path, marked: bool, interpret: Option<Value>| {
+        let (mut doc, mut res) = document(from, (w, h), 25.0, interpret);
+        if marked {
+            doc["assets"]["clip"]["videoColor"] = json!("electron");
+        }
+        if from != clip {
+            res.originals.insert("clip".into(), clip.clone());
+        }
+        let pixels = render(r, &doc, (w, h), 0.01, &res);
+        let at = |band: usize| {
+            let o = ((h as usize / 2) * w as usize + band * 16 + 8) * 4;
+            [pixels[o], pixels[o + 1], pixels[o + 2]].map(f64::from)
+        };
+        [at(0), at(1), at(2), at(3)]
+    };
+    let apart = |a: [[f64; 3]; 4], b: [[f64; 3]; 4]| {
+        a.iter()
+            .flatten()
+            .zip(b.iter().flatten())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0., f64::max)
+    };
+    // ProRes Proxy on flat bands (and the 8-bit upload of the v1 reading).
+    const CODEC: f64 = 0.012;
+    let native = bands(&mut r, &clip, false, None);
+    let v1 = bands(&mut r, &clip, true, None);
+    assert!(
+        apart(native, v1) > 0.03,
+        "the clip reads differently as in v1: {native:?} {v1:?}"
+    );
+    for interpret in [None, Some(json!({ "matrix": "bt709" })), None] {
+        for marked in [true, false] {
+            let original = bands(&mut r, &clip, marked, interpret.clone());
+            let copy = bands(&mut r, &proxy, marked, interpret.clone());
+            let d = apart(original, copy);
+            eprintln!("marked {marked}, {interpret:?}: proxy {d:.4} from the original");
+            assert!(
+                d < CODEC,
+                "marked {marked}, {interpret:?}: proxy {copy:?}, original {original:?}"
+            );
+        }
+    }
+    // A matrix chosen by the person wins over the v1 reading.
+    let chosen = bands(&mut r, &clip, true, Some(json!({ "matrix": "bt709" })));
+    assert!(apart(chosen, native) < 2e-5, "{chosen:?} {native:?}");
+}
+
 #[test]
 fn a_conformed_rate_shows_frame_n_at_n_over_rate() {
     let Some(path) = formats("video/vfr.mp4") else {

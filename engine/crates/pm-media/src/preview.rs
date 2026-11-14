@@ -43,6 +43,10 @@ enum Source {
         sequence: image::sequence::ImageSequence,
         fps: f64,
     },
+    /// A sequence read in place (the manifest its asset retains): frame n
+    /// is number `first + n`, read when asked; a number with no file is an
+    /// error naming it, never another frame.
+    InPlace(image::sequence::Manifest),
     Video {
         source: Arc<MediaSource>,
     },
@@ -96,7 +100,12 @@ impl PreviewReader {
         let signature = stamp(path)?;
         let mut head = [0; 512];
         let n = std::fs::File::open(path)?.read(&mut head)?;
-        let source = if image::sniff(&head[..n]) != image::ImageFormat::Other {
+        let source = if head[..n].starts_with(image::sequence::MANIFEST_MAGIC) {
+            Source::InPlace(
+                image::sequence::Manifest::read(path)?
+                    .ok_or_else(|| MediaError::invalid("image sequence: unknown format"))?,
+            )
+        } else if image::sniff(&head[..n]) != image::ImageFormat::Other {
             let timing = match image::sniff(&head[..n]) {
                 image::ImageFormat::Png
                 | image::ImageFormat::Gif
@@ -176,6 +185,7 @@ impl PreviewReader {
             Source::Still => 0.0,
             Source::Animation(t) => t.duration(),
             Source::Sequence { sequence, fps } => sequence.frames.len() as f64 / fps,
+            Source::InPlace(m) => m.frames() as f64 * f64::from(m.rate[1]) / f64::from(m.rate[0]),
             Source::Video { source, .. } => {
                 source.duration_as(self.timing) as f64 / pm_time::TICKS_PER_SECOND as f64
             }
@@ -221,6 +231,18 @@ impl PreviewReader {
                     (((seconds + 1e-7) * fps).floor() as usize).min(sequence.frames.len() - 1);
                 let path = sequence.available_file(index).expect("clamped");
                 image::read(path, &self.pool).map(PreviewFrame::Image)
+            }
+            Source::InPlace(m) => {
+                let fps = m.rate().map_or(30.0, |r| r.to_f64());
+                let number = m.number_at(seconds, fps);
+                let path = m.file(number);
+                if !path.is_file() {
+                    let file = path.file_name().unwrap_or_default().to_string_lossy();
+                    return Err(MediaError::invalid(format!(
+                        "frame {number} of the image sequence is missing: {file}"
+                    )));
+                }
+                image::read(&path, &self.pool).map(PreviewFrame::Image)
             }
             Source::Video { source } => {
                 let ticks = seconds * pm_time::TICKS_PER_SECOND as f64;

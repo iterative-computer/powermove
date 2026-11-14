@@ -211,3 +211,64 @@ fn an_agent_relinks_the_lut_of_an_existing_effect() {
         .unwrap();
     assert_eq!(f.fx()[0], before);
 }
+
+/// What an agent writes to a grading tool stays within what its controls
+/// offer: a number within the range, one of the options, a whole count. Each
+/// route an agent writes by is refused with a sentence, and nothing changes.
+#[test]
+fn an_agent_writes_grading_values_the_controls_can_hold() {
+    let f = Fixture::new();
+    let refused = |commands: Vec<Value>| -> String {
+        let project = f.host.lock().unwrap().read_document(&f.id).unwrap();
+        let state = pm_kernel::state::StateSnapshot::seeded();
+        match pm_mcp::commands::plan_with_definitions(&project, &[], &commands, 0., Some(&state)) {
+            Ok(_) => panic!("{commands:?} was accepted"),
+            Err(e) => format!("{e:?}"),
+        }
+    };
+    let add = |p: Value, effect: &str| json!({"type":"add_effect","target":"clip","effect":effect,"parameters":p});
+    let message = refused(vec![add(json!({"exposure":1024}), "colorWheels")]);
+    assert!(
+        message.contains("Exposure takes values from -8 to 8, not 1024."),
+        "{message}"
+    );
+    // Representable in f64, an infinity at GPU precision.
+    refused(vec![add(json!({"gainMaster":1e39}), "colorWheels")]);
+    // A channel's keys too.
+    refused(vec![add(
+        json!({"gainMaster":{"v":1,"kf":[{"t":0,"v":1},{"t":1,"v":9}],"expr":null}}),
+        "colorWheels",
+    )]);
+    let message = refused(vec![add(json!({"count":2.5}), "colorCurves")]);
+    assert!(message.contains("whole number"), "{message}");
+    let message = refused(vec![add(json!({"channel":7}), "colorCurves")]);
+    assert!(message.contains("one of"), "{message}");
+    refused(vec![add(json!({"inputSpace":99}), "applyColorLut")]);
+
+    let wheels = f.agent(vec![add(
+        json!({"exposure":2,"gainMaster":1.5}),
+        "colorWheels",
+    )])[0]["effectId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let path = format!("{wheels}.exposure");
+    refused(vec![
+        json!({"type":"set_property","target":"clip","path":path,"value":9,"mode":"static"}),
+    ]);
+    refused(vec![
+        json!({"type":"replace_keyframes","target":"clip","path":path,
+        "keyframes":[{"time":0,"value":0},{"time":1,"value":-1e39}]}),
+    ]);
+    f.agent(vec![
+        json!({"type":"set_property","target":"clip","path":path,"value":-8,"mode":"static"}),
+        json!({"type":"replace_keyframes","target":"clip","path":format!("{wheels}.saturation"),
+            "keyframes":[{"time":0,"value":0},{"time":1,"value":200}]}),
+    ]);
+    let fx = f.fx();
+    assert_eq!(fx[0]["p"]["exposure"]["v"], -8);
+    assert_eq!(fx.len(), 1, "nothing else was added");
+    // Other effects keep main's free values.
+    f.agent(vec![add(json!({"amount":5000}), "blur")]);
+    assert_eq!(f.fx()[1]["p"]["amount"]["v"], 5000);
+}

@@ -24,6 +24,9 @@ fn origin(o: &Origin) -> FactOrigin {
         },
         Origin::Default { rule } => FactOrigin::Default { rule: rule.clone() },
         Origin::Override => FactOrigin::Override,
+        Origin::PowermoveOne { .. } => FactOrigin::Default {
+            rule: "As Powermove 1 showed it".into(),
+        },
     }
 }
 

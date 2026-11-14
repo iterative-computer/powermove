@@ -17,6 +17,15 @@ const open = async file => {
   return {document, media};
 };
 const original = await open(originalPath), untouched = await open(untouchedPath), edited = await open(editedPath), replayed = await open(historyPath);
+// V2 keeps a v1 video asset's reading with `videoColor: "electron"` (added
+// when it opens an asset without `timing`); main does not read that member.
+// It is the one member V2 adds: take it out where the original lacks it.
+for (const saved of [untouched, edited, replayed]) {
+  for (const [id, asset] of Object.entries(saved.document.proj.assets ?? {})) {
+    const before = original.document.proj.assets?.[id];
+    if (asset.videoColor === 'electron' && before && !('videoColor' in before)) delete asset.videoColor;
+  }
+}
 const {PM, hydrate} = await hydrator();
 /** Paths at which two JSON values differ (for readable failures). */
 const paths = (a, b, at = '', out = []) => {

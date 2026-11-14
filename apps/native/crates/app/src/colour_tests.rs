@@ -86,14 +86,19 @@ fn published(k: &KernelHandle) -> Arc<Published> {
 
 #[test]
 fn panel_settings_choose_what_the_engine_counts() {
-    let config = scope_config(true, true);
+    let config = scope_config(true, true, true);
     assert_eq!(config.signal, ScopeSignal::Pq);
     assert_eq!(config.matrix, ScopeMatrix::Rec2020);
-    let config = scope_config(false, false);
+    assert_eq!(config.stage, ScopeStage::Output);
+    let config = scope_config(false, false, false);
     assert_eq!(config.signal, ScopeSignal::Display);
     assert_eq!(config.matrix, ScopeMatrix::Rec709);
-    let more = more_menu(false, false, true);
-    assert_eq!(more.len(), 5);
+    assert_eq!(config.stage, ScopeStage::Picture);
+    let more = more_menu(false, false, false, true);
+    assert_eq!(more.len(), 8);
+    assert_eq!(more[6]["label"], "Read: Picture");
+    assert_eq!(more[6]["checked"], true);
+    assert_eq!(more[7]["checked"], false);
     assert_eq!(more[0]["checked"], true);
     assert_eq!(more[1]["checked"], false);
     assert_eq!(more[4]["disabled"], true);
@@ -337,4 +342,111 @@ fn a_malformed_cube_never_reaches_the_kernel() {
     let path = dir.path().join("Broken.cube");
     std::fs::write(&path, "LUT_3D_SIZE 2\n0 0 0\n").unwrap();
     assert!(retain_lut(dir.path(), &path).is_err());
+}
+
+/// Import CDL… puts the correction on the layer's Color Wheels (adding one
+/// when there is none) in one Undo step; Export CDL… reads the same
+/// correction back at the playhead, and refuses a grade a CDL can't hold.
+#[test]
+fn a_cdl_is_imported_onto_color_wheels_and_exported_back() {
+    let (_dir, actor, _session) = fixture();
+    let k = actor.handle();
+    let cdl = pm_color::cdl::parse(
+        r#"<ColorCorrection id="shot"><SOPNode><Slope>1.1 0.98 0.9</Slope>
+        <Offset>-0.02 0 0.015</Offset><Power>0.95 1 1.05</Power></SOPNode>
+        <SatNode><Saturation>1.2</Saturation></SatNode></ColorCorrection>"#,
+    )
+    .unwrap();
+    let run = |label: &str, commands: Vec<Command>| {
+        let p = published(&k);
+        let ack = k
+            .call_blocking("test", transact(&p, label, commands))
+            .unwrap();
+        assert!(
+            !matches!(ack.reply, pm_kernel::Reply::Throw(_)),
+            "{:?}",
+            ack.reply
+        );
+    };
+    let same = |a: &pm_color::cdl::Cdl, b: &pm_color::cdl::Cdl| {
+        for c in 0..3 {
+            assert!((a.slope[c] - b.slope[c]).abs() < 1e-9, "{a:?} {b:?}");
+            assert!((a.offset[c] - b.offset[c]).abs() < 1e-9, "{a:?} {b:?}");
+            assert!((a.power[c] - b.power[c]).abs() < 1e-9, "{a:?} {b:?}");
+        }
+        assert!((a.saturation - b.saturation).abs() < 1e-9);
+    };
+    assert_eq!(
+        layer_cdl(&published(&k), "solid", 0.).unwrap_err(),
+        "The layer has no Color Wheels to export as a CDL."
+    );
+    // No Color Wheels yet: one is added, holding the correction.
+    run(
+        "Import CDL",
+        cdl_commands(&published(&k), "solid", &cdl, 0.).unwrap(),
+    );
+    let effects = effects_of(&k, "solid");
+    assert_eq!(effects.len(), 1);
+    assert_eq!(effects[0]["type"], "colorWheels");
+    assert_eq!(effects[0]["p"]["gainRed"]["v"], 1.1);
+    let back = layer_cdl(&published(&k), "solid", 0.).unwrap();
+    same(&back, &cdl);
+    assert!(back.id.is_some(), "named after the layer");
+    // A second import sets the same Color Wheels.
+    let other = pm_color::cdl::Cdl {
+        slope: [0.9, 1., 1.2],
+        ..Default::default()
+    };
+    run(
+        "Import CDL",
+        cdl_commands(&published(&k), "solid", &other, 0.).unwrap(),
+    );
+    assert_eq!(effects_of(&k, "solid").len(), 1, "no second Color Wheels");
+    same(&layer_cdl(&published(&k), "solid", 0.).unwrap(), &other);
+    let wheels = effects_of(&k, "solid")[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // A keyed control is read at the playhead, between its keys.
+    let key = |value: f64, time: f64| -> Command {
+        let mut set = pm_kernel::commands::properties::SetProperty::new(
+            "solid",
+            &format!("{wheels}.gainRed"),
+            Value::from(value),
+            time,
+        );
+        set.mode = pm_kernel::commands::properties::KeyMode::Keyframe;
+        pm_kernel::PropertyCommand::Set(set).into()
+    };
+    run("Key", vec![key(1., 0.), key(2., 1.)]);
+    let between = layer_cdl(&published(&k), "solid", 0.5).unwrap();
+    assert!((between.slope[0] - 1.5).abs() < 1e-9, "{between:?}");
+    // Exposure is not a CDL's: export says so.
+    run(
+        "Exposure",
+        vec![
+            pm_kernel::PropertyCommand::Set(pm_kernel::commands::properties::SetProperty::new(
+                "solid",
+                &format!("{wheels}.exposure"),
+                Value::from(1.),
+                0.,
+            ))
+            .into(),
+        ],
+    );
+    let error = layer_cdl(&published(&k), "solid", 0.).unwrap_err();
+    assert!(error.contains("set Exposure to 0"), "{error}");
+    // A correction the wheels can't hold is refused before any edit.
+    let error = cdl_commands(
+        &published(&k),
+        "solid",
+        &pm_color::cdl::Cdl {
+            slope: [9., 1., 1.],
+            ..Default::default()
+        },
+        0.,
+    )
+    .unwrap_err();
+    assert!(error.contains("outside what Color Wheels hold"), "{error}");
+    actor.shutdown();
 }

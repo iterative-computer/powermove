@@ -92,17 +92,35 @@ fn begin_panel(
 
 /// An open sheet that takes `.cube` files.
 pub fn lut_file(window: &NSWindow) -> async_channel::Receiver<Option<PathBuf>> {
+    typed_file(window, "Choose a .cube or .3dl LUT", &["cube", "3dl"])
+}
+
+/// Import CDL…'s open panel: an ASC CDL file.
+pub fn cdl_file(window: &NSWindow) -> async_channel::Receiver<Option<PathBuf>> {
+    typed_file(
+        window,
+        "Choose an ASC CDL (.cc, .cdl or .ccc)",
+        &["cc", "cdl", "ccc"],
+    )
+}
+
+/// An open panel for one file of `types`, with `message`.
+fn typed_file(
+    window: &NSWindow,
+    message: &str,
+    types: &[&str],
+) -> async_channel::Receiver<Option<PathBuf>> {
     let (tx, rx) = async_channel::bounded(1);
     let mtm = MainThreadMarker::new().unwrap();
     let panel = NSOpenPanel::openPanel(mtm);
     panel.setCanChooseDirectories(false);
     panel.setAllowsMultipleSelection(false);
-    panel.setMessage(Some(&NSString::from_str("Choose a .cube or .3dl LUT")));
+    panel.setMessage(Some(&NSString::from_str(message)));
+    let types: Vec<_> = types.iter().map(|t| NSString::from_str(t)).collect();
     #[allow(deprecated)]
-    panel.setAllowedFileTypes(Some(&objc2_foundation::NSArray::from_retained_slice(&[
-        NSString::from_str("cube"),
-        NSString::from_str("3dl"),
-    ])));
+    panel.setAllowedFileTypes(Some(&objc2_foundation::NSArray::from_retained_slice(
+        &types,
+    )));
     let retained = panel.clone();
     let done = block2::RcBlock::new(move |result: NSModalResponse| {
         let path = (result == NSModalResponseOK)
