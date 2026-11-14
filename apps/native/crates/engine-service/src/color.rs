@@ -118,6 +118,28 @@ mod tests {
             None,
             "the encoded mode rolls off itself"
         );
+        // ...from the peaks a delivery's tone holds to, and not at all when
+        // the content is within the master.
+        let hlg = Mastering::Hlg {
+            source_peak: 0.,
+            target_peak: 0.,
+        };
+        assert_eq!(view.mastering(encoded), encoded);
+        assert_eq!(
+            view.mastering(hlg),
+            Mastering::Hlg {
+                source_peak: 4000.,
+                target_peak: 1000.
+            }
+        );
+        assert_eq!(
+            held.mastering(encoded),
+            Mastering::Pq {
+                source_peak: 1000.,
+                target_peak: 1000.
+            }
+        );
+        assert_eq!(held.mastering(Mastering::Edr), Mastering::Edr);
     }
     #[test]
     fn published_ciede2000_reference_pair() {
@@ -214,6 +236,18 @@ impl HdrView {
                 mastering_peak,
             }
         })
+    }
+
+    /// The PQ and HLG views' output: their own shader rolls off from the
+    /// peaks an HDR delivery's tone holds to (`OutputTone::for_target`), and
+    /// rolls nothing off when the content is within the master.
+    pub fn mastering(self, mastering: Mastering) -> Mastering {
+        let (source, target) =
+            pm_render::OutputTone::for_target(self.source_peak, self.mastering_peak, true)
+                .map_or((self.mastering_peak, self.mastering_peak), |t| {
+                    (t.source_peak, t.target_peak)
+                });
+        mastering.with_peaks(source, target)
     }
 
     /// The final pass's tone, as for a delivery: SDR for the SDR view, and the

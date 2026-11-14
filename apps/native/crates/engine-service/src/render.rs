@@ -1890,9 +1890,7 @@ impl Engine {
         let command = self.queue.new_command_buffer().to_owned();
         let mut params = overlays.params();
         params.output = hdr
-            .map_or(self.mastering, |v| {
-                self.mastering.with_peaks(v.source_peak, v.mastering_peak)
-            })
+            .map_or(self.mastering, |v| v.mastering(self.mastering))
             .params()?;
         // What the delivery holds, for the range overlay: an HDR project's
         // master in Rec. 2020, or SDR white in Rec. 709 (an SDR project, or
