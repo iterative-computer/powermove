@@ -1538,4 +1538,31 @@ mod tests {
         );
         actor.shutdown();
     }
+    /// Undo with an edit left open (a move whose drag never sent its end):
+    /// the move is what is undone, and the next edit is a step of its own.
+    #[test]
+    fn undo_after_an_edit_left_open_undoes_that_edit() {
+        let (_dir, actor, _session) = fixture();
+        let k = actor.handle();
+        k.call_blocking(
+            "test",
+            Request::new(
+                Caller::native(),
+                GestureCall::Begin {
+                    label: "Move".into(),
+                },
+            ),
+        )
+        .unwrap();
+        edit(&k);
+        for call in crate::session::undo_calls(true) {
+            k.call_blocking("test", Request::new(Caller::native(), call))
+                .unwrap();
+        }
+        let p = k.published("test").unwrap();
+        assert!(p.entry.is_none(), "no edit is left open");
+        assert!(!p.history.can_undo, "the move was undone");
+        assert!(p.history.can_redo, "and can be redone");
+        actor.shutdown();
+    }
 }
