@@ -682,6 +682,7 @@ impl McpSession {
                     replace,
                     expected_fingerprint: args["expectedFingerprint"].as_str().map(str::to_owned),
                     writer: self.writer,
+                    sequence: args["sequence"]["fps"].as_f64(),
                 })?;
                 // Media Undo is separate from run grouping, like manage_media.
                 session.external_actions = true;
@@ -693,6 +694,9 @@ impl McpSession {
                 let mut result = json!({"status":imported.status,"assetId":imported.asset,
                     "name":imported.name,"persisted":true,"fingerprint":imported.fingerprint,
                     "storage":"copied","revision":imported.revision});
+                if let Some(note) = &imported.note {
+                    result["missing"] = json!(note);
+                }
                 if name == "import_media_to_timeline" {
                     let at = args["at"].as_f64().unwrap_or(0.);
                     match crate::media::layer_for(&project, &imported, at) {

@@ -148,6 +148,39 @@ fn export_folder(profile: &std::path::Path, home: Option<std::ffi::OsString>) ->
     }
 }
 
+/// Whether this is a lane's development bundle (its Info.plist carries
+/// `PMLaneProfile`, which the lane tooling writes) launched without
+/// `--profile`, as macOS reopens apps at login: it then quits at once.
+fn lane_bundle_without_profile(args: &[std::ffi::OsString], info_plist: Option<&str>) -> bool {
+    !args.iter().any(|a| a == "--profile")
+        && info_plist.is_some_and(|plist| plist.contains("<key>PMLaneProfile</key>"))
+}
+
+#[cfg(test)]
+mod lane_bundle_tests {
+    /// A lane bundle reopened at login (no arguments) quits; launched by
+    /// its lane (with --profile) it runs; an ordinary bundle always runs.
+    #[test]
+    fn a_lane_bundle_runs_only_with_its_profile() {
+        let lane = "<dict><key>CFBundleIdentifier</key><string>com.powermove.native.dev.media</string>\
+            <key>PMLaneProfile</key><string>/lane/profile</string></dict>";
+        let plain =
+            "<dict><key>CFBundleIdentifier</key><string>com.powermove.native</string></dict>";
+        let args = |a: &[&str]| a.iter().map(std::ffi::OsString::from).collect::<Vec<_>>();
+        assert!(super::lane_bundle_without_profile(&args(&[]), Some(lane)));
+        assert!(super::lane_bundle_without_profile(
+            &args(&["project.pmv"]),
+            Some(lane)
+        ));
+        assert!(!super::lane_bundle_without_profile(
+            &args(&["--profile", "/lane/profile", "--draw-occluded", "1"]),
+            Some(lane)
+        ));
+        assert!(!super::lane_bundle_without_profile(&args(&[]), Some(plain)));
+        assert!(!super::lane_bundle_without_profile(&args(&[]), None));
+    }
+}
+
 fn main() -> Result<()> {
     diag::mark_start();
     let args: Vec<_> = std::env::args_os().skip(1).collect();
@@ -157,6 +190,17 @@ fn main() -> Result<()> {
         || args.iter().any(|a| a == "--powermove-mcp")
         || args.first().is_some_and(|a| a == "--studio3d-estimate-probe");
     if !headless {
+        // A lane's development bundle runs only when a lane launches it with
+        // its profile; macOS reopening it at login, without its arguments,
+        // must not start it on another profile or put it on screen.
+        let info_plist = std::env::current_exe()
+            .ok()
+            .and_then(|exe| Some(exe.parent()?.parent()?.join("Info.plist")))
+            .and_then(|plist| std::fs::read_to_string(plist).ok());
+        if lane_bundle_without_profile(&args, info_plist.as_deref()) {
+            eprintln!("A lane bundle is launched only by its lane, with --profile; quitting.");
+            return Ok(());
+        }
         platform::route_sigterm();
     }
     if args.first().is_some_and(|a| a == "--studio3d-estimate-probe") {
