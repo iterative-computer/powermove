@@ -2150,6 +2150,13 @@ impl TimelineSurface {
                 }
             }
             Gesture::Pressed(press) => {
+                if let Some(Spec::Property { layer, path }) = press.spec {
+                    self.delegate.run(
+                        "timeline.propertyEdit",
+                        vec![serde_json::json!({"type":"propertyEdit","layer":layer,"path":path})],
+                        cx,
+                    );
+                }
                 if let Some(job) = press.release {
                     self.queue.push_back(job);
                 }

@@ -2052,3 +2052,115 @@ fn an_effect_dropped_on_a_layers_bar_goes_to_that_layer(cx: &mut TestAppContext)
         }]
     );
 }
+
+fn axis_project() -> String {
+    let mut project: serde_json::Value =
+        serde_json::from_str(&crate::v4_view_tests::project_json(1)).unwrap();
+    let properties = project["layers"][0]["p"].as_object_mut().unwrap();
+    for (from, to) in [
+        ("x", "position.x"),
+        ("y", "position.y"),
+        ("sx", "scale.x"),
+        ("sy", "scale.y"),
+    ] {
+        let value = properties.remove(from).unwrap();
+        properties.insert(to.into(), value);
+    }
+    project.to_string()
+}
+
+/// v1 axisValueIndex/dragPropertyValue: a joined row edits only its grabbed axis.
+#[gpui::test]
+fn joined_position_value_columns_scrub_one_axis_and_undo(cx: &mut TestAppContext) {
+    for path in ["position.x", "position.y"] {
+        let mut s = stage_project(cx, axis_project());
+        let values = |s: &Stage| {
+            s.surface.read_with(&s.vcx, |t, _| {
+                ["position.x", "position.y"].map(|p| {
+                    t.model()
+                        .index
+                        .channel("l0", p)
+                        .unwrap()
+                        .value
+                        .as_f64()
+                        .unwrap()
+                })
+            })
+        };
+        let before = values(&s);
+        let at = s.at(0, 0.5);
+        s.surface.update(&mut s.vcx, |t, _| {
+            t.press_property("l0".into(), path.into(), at)
+        });
+        s.vcx.simulate_mouse_move(
+            at + point(px(20.), px(0.)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        s.idle(cx);
+        s.vcx
+            .simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+        s.idle(cx);
+        let after = values(&s);
+        let axis = usize::from(path == "position.y");
+        assert_eq!(after[axis], before[axis] + 10.);
+        assert_eq!(after[1 - axis], before[1 - axis]);
+        assert!(s.recorder.reports.borrow().is_empty());
+        s.undo(cx);
+        assert_eq!(values(&s), before);
+    }
+}
+
+#[gpui::test]
+fn clicking_an_axis_value_opens_its_editor_without_an_edit(cx: &mut TestAppContext) {
+    let mut s = stage_project(cx, axis_project());
+    let at = s.at(0, 0.5);
+    s.surface.update(&mut s.vcx, |t, _| {
+        t.press_property("l0".into(), "position.y".into(), at)
+    });
+    s.vcx
+        .simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    assert_eq!(&*s.recorder.commands.borrow(), &["timeline.propertyEdit"]);
+    assert!(s.recorder.reports.borrow().is_empty());
+}
+
+#[gpui::test]
+fn scale_axis_columns_follow_the_linked_ratio_and_undo(cx: &mut TestAppContext) {
+    for linked in [false, true] {
+        let mut project: serde_json::Value = serde_json::from_str(&axis_project()).unwrap();
+        project["layers"][0]["scaleLinked"] = serde_json::json!(linked);
+        project["layers"][0]["p"]["scale.y"]["v"] = serde_json::json!(50.);
+        let mut s = stage_project(cx, project.to_string());
+        let value = |s: &Stage, path| {
+            s.surface.read_with(&s.vcx, |t, _| {
+                t.model()
+                    .index
+                    .channel("l0", path)
+                    .unwrap()
+                    .value
+                    .as_f64()
+                    .unwrap()
+            })
+        };
+        let at = s.at(0, 0.5);
+        s.surface.update(&mut s.vcx, |t, _| {
+            t.press_property("l0".into(), "scale.x".into(), at)
+        });
+        s.vcx.simulate_mouse_move(
+            at + point(px(20.), px(0.)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        s.idle(cx);
+        s.vcx
+            .simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+        s.idle(cx);
+        assert_eq!(value(&s, "scale.x"), 110.);
+        assert!((value(&s, "scale.y") - if linked { 55. } else { 50. }).abs() < 1e-9);
+        assert!(s.recorder.reports.borrow().is_empty());
+        s.undo(cx);
+        assert_eq!(value(&s, "scale.x"), 100.);
+        assert_eq!(value(&s, "scale.y"), 50.);
+    }
+}

@@ -2378,3 +2378,34 @@ fn async_disposal_cancels_owned_drag_without_blocking_in_drop() {
     assert_eq!(index.layer("a").unwrap().from, 1.);
     assert!(p.entry.is_none());
 }
+
+#[test]
+fn scale_axis_scrub_adjusts_selected_paired_keys_without_keying_the_playhead() {
+    let mut v = fixture();
+    layer_mut(&mut v, 0).insert("scaleLinked", Value::Bool(true));
+    let (_actor, mut c) = client_with(v);
+    select_keys(&mut c, &["sx", "sy"]);
+    block_on(c.begin_drag(DragKind::Property {
+        targets: vec![("a".into(), "scale.x".into())],
+        time: 2.,
+    }))
+    .unwrap();
+    block_on(c.drag(DragSample {
+        value_delta: 5.,
+        ..sample(0.)
+    }))
+    .unwrap();
+    for axis in ["scale.x", "scale.y"] {
+        let ch = c.model.index.channel("a", axis).unwrap();
+        assert_eq!(ch.keys.len(), 1);
+        assert_eq!(ch.keys[0].value, Value::Number(105.));
+        assert_eq!(ch.keys[0].time, 0.125);
+    }
+    block_on(c.finish_drag(false)).unwrap();
+    for axis in ["scale.x", "scale.y"] {
+        assert_eq!(
+            c.model.index.channel("a", axis).unwrap().keys[0].value,
+            Value::Number(100.)
+        );
+    }
+}

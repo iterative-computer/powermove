@@ -201,6 +201,10 @@ export const states: Record<string, () => TimelineFrame> = {
         previous: true,
         next: true,
         readout: "100, 100 %",
+        axes: [
+          { path: "scale.x", readout: "100" },
+          { path: "scale.y", readout: "100" },
+        ],
         scaleLinked: true,
       }),
     }),

@@ -2865,6 +2865,23 @@ impl Controller {
             return true;
         }
         match cmd.name.as_str() {
+            "timeline.propertyEdit" => {
+                let Some(runtime) = self.builtins.runtime.clone() else {
+                    return false;
+                };
+                let Some(action) = cmd.args.first().cloned() else {
+                    return false;
+                };
+                let Ok(ticket) = runtime.timeline_action(action) else {
+                    return false;
+                };
+                cx.spawn(async move |this, cx| {
+                    let _ = ticket.await;
+                    let _ = this.update(cx, |v, cx| v.drain_builtins(cx));
+                })
+                .detach();
+                return true;
+            }
             "shortcuts" => {
                 let action = cmd.args.first().cloned().unwrap_or_default();
                 self.shortcuts_action(&action, window, cx);

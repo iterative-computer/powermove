@@ -337,6 +337,25 @@ impl Backend {
                     at_key &= state.key_at_playhead;
                 }
                 row["readout"] = json!(values.join(", "));
+                row["axes"] = json!(
+                    channels
+                        .iter()
+                        .zip(values.iter())
+                        .map(|(channel, value)| {
+                            let mut axis = json!({"path":channel.path,"readout":value});
+                            if self.native.timeline_editor
+                                == Some(TimelineEditor::Property(
+                                    layer.clone(),
+                                    channel.path.clone(),
+                                ))
+                            {
+                                axis["editor"] =
+                                    json!({"value":value,"binding":editor_field.clone()});
+                            }
+                            axis
+                        })
+                        .collect::<Vec<_>>()
+                );
                 row["animated"] = json!(animated);
                 row["keyAtPlayhead"] = json!(at_key);
                 row["previous"] = json!(
@@ -926,6 +945,7 @@ fn property_label(path: &str) -> String {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum TimelineEditor {
     Name(String),
+    Property(String, String),
     Time,
 }
 pub(crate) enum NativeCommand {
@@ -950,6 +970,17 @@ impl Backend {
                 self.native.timeline_editor = Some(TimelineEditor::Name(id));
                 done(Value::Null)
             }
+            Some("propertyEdit") => {
+                let layer = args["layer"].as_str().ok_or("layer")?.to_owned();
+                let path = args["path"].as_str().ok_or("path")?.to_owned();
+                self.native.ensure_timeline()?;
+                let client = self.native.timeline.as_ref().ok_or("Timeline closed")?;
+                let l = client.model.index.layer(&layer).ok_or("layer")?;
+                if !l.effectively_locked && client.model.index.channel(&layer, &path).is_some() {
+                    self.native.timeline_editor = Some(TimelineEditor::Property(layer, path));
+                }
+                done(Value::Null)
+            }
             Some("timeEdit") => {
                 self.native.timeline_editor = Some(TimelineEditor::Time);
                 done(Value::Null)
@@ -966,6 +997,15 @@ impl Backend {
                         let id = v4::row_id(&RowId::Layer(id));
                         Ok(NativeCommand::Timeline(
                             json!({"type":"setName","id":id,"name":value}),
+                        ))
+                    }
+                    Some(TimelineEditor::Property(layer, path)) => {
+                        let value: f64 = value.trim().parse().map_err(|_| "Enter a number")?;
+                        if !value.is_finite() {
+                            return Err("Enter a finite number".into());
+                        }
+                        Ok(NativeCommand::Timeline(
+                            json!({"type":"propertyValue","layer":layer,"path":path,"value":value}),
                         ))
                     }
                     Some(TimelineEditor::Time) => {

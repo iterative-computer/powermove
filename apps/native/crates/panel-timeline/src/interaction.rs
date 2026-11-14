@@ -1034,6 +1034,7 @@ pub struct Drag {
     pub key_snap: Option<crate::snap::GroupLock>,
     track_snap: Option<bool>,
     pub property_values: std::collections::HashMap<(String, String), f64>,
+    selected_property_keys: std::collections::HashSet<String>,
     property_keys: std::collections::HashMap<(String, String), Vec<(String, f64)>>,
 }
 impl Drag {
@@ -1169,18 +1170,30 @@ impl Drag {
             for (l, c) in targets {
                 let layer = index.layer(l).unwrap();
                 let channel = index.channel(l, c).unwrap();
-                if !channel
-                    .keys
-                    .iter()
-                    .any(|k| (layer.from + k.time - time).abs() < 0.5 / index.fps)
-                {
+                let paired = match c.as_str() {
+                    "scale.x" => index.channel(l, "scale.y"),
+                    "scale.y" => index.channel(l, "scale.x"),
+                    _ => None,
+                };
+                let at_key = |channel: &crate::Channel| {
+                    channel
+                        .keys
+                        .iter()
+                        .any(|k| (layer.from + k.time - time).abs() < 0.5 / index.fps)
+                };
+                if !at_key(channel) && !paired.is_some_and(at_key) {
                     let keys: Vec<_> = channel
                         .keys
                         .iter()
                         .filter(|k| model.selection.keys().contains(&k.id))
                         .filter_map(|k| k.value.as_f64().map(|v| (k.id.clone(), v)))
                         .collect();
-                    if !keys.is_empty() {
+                    let paired_selected = paired.is_some_and(|p| {
+                        p.keys.iter().any(|k| {
+                            model.selection.keys().contains(&k.id) && k.value.as_f64().is_some()
+                        })
+                    });
+                    if !keys.is_empty() || paired_selected {
                         property_keys.insert((l.clone(), c.clone()), keys);
                     }
                 }
@@ -1207,6 +1220,7 @@ impl Drag {
             key_snap: None,
             track_snap,
             property_values: Default::default(),
+            selected_property_keys: model.selection.keys().iter().cloned().collect(),
             property_keys,
         })
     }
@@ -1538,6 +1552,33 @@ impl Drag {
                                 .into(),
                             );
                         }
+                        if self.start.layer(l).is_some_and(|layer| layer.scale_linked) {
+                            let paired = match c.as_str() {
+                                "scale.x" => Some("scale.y"),
+                                "scale.y" => Some("scale.x"),
+                                _ => None,
+                            };
+                            if let Some(paired) = paired {
+                                if let Some(channel) = self.start.channel(l, paired) {
+                                    for key in &channel.keys {
+                                        if self.selected_property_keys.contains(&key.id) {
+                                            if let Some(start) = key.value.as_f64() {
+                                                out.push(
+                                                    KeyframeCommand::Edit {
+                                                        key_id: key.id.clone(),
+                                                        time: None,
+                                                        value: Some(Value::Number(
+                                                            start + sample.value_delta,
+                                                        )),
+                                                    }
+                                                    .into(),
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         continue;
                     }
                     let channel = self.start.channel(l, c).unwrap();
@@ -1554,6 +1595,38 @@ impl Drag {
                         })
                         .ok_or(ModelError::MissingHost("evaluated property baseline"))?;
                     let value = baseline + sample.value_delta;
+                    if matches!(c.as_str(), "scale.x" | "scale.y")
+                        && targets
+                            .iter()
+                            .filter(|(layer, path)| {
+                                layer == l && matches!(path.as_str(), "scale.x" | "scale.y")
+                            })
+                            .count()
+                            == 1
+                    {
+                        let paired = if c == "scale.x" { "scale.y" } else { "scale.x" };
+                        let other = self
+                            .property_values
+                            .get(&(l.clone(), paired.into()))
+                            .copied()
+                            .or_else(|| self.start.channel(l, paired)?.value.as_f64())
+                            .ok_or(ModelError::InvalidNumber)?;
+                        let mut model = TimelineModel::default();
+                        model.index = self.start.clone();
+                        for call in model
+                            .scale_value(l, c, value, *time, baseline, other)?
+                            .calls
+                        {
+                            if let Call::Transact {
+                                body: WriteBody::Commands(commands),
+                                ..
+                            } = call
+                            {
+                                out.extend(commands);
+                            }
+                        }
+                        continue;
+                    }
                     out.push(
                         PropertyCommand::Set(SetProperty::new(l, c, Value::Number(value), *time))
                             .into(),

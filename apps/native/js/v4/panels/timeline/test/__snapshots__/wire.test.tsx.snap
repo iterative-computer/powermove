@@ -5026,8 +5026,15 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "alignItems": "center",
                                   "display": "flex",
                                   "flexDirection": "row",
+                                  "flexShrink": 0,
+                                  "gap": {
+                                    "token": "metrics.gap",
+                                  },
                                   "paddingRight": {
                                     "token": "metrics.gap",
+                                  },
+                                  "width": {
+                                    "token": "metrics.value_column",
                                   },
                                 },
                               },
@@ -22654,6 +22661,80 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             {
                               "children": [
                                 {
+                                  "children": [
+                                    {
+                                      "props": {},
+                                      "text": "100",
+                                      "type": "text",
+                                    },
+                                  ],
+                                  "props": {
+                                    "id": "timeline:value:property:scale:scale.x",
+                                    "label": "Scale x, 100",
+                                    "metadata": {
+                                      "timelineScrub": {
+                                        "layer": "headline",
+                                        "path": "scale.x",
+                                      },
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.text",
+                                      },
+                                      "flexBasis": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "flexGrow": 1,
+                                      "fontSize": {
+                                        "token": "typography.body",
+                                      },
+                                      "fontVariantNumeric": "tabular-nums",
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "overflow": "hidden",
+                                    },
+                                  },
+                                  "type": "text",
+                                },
+                                {
+                                  "children": [
+                                    {
+                                      "props": {},
+                                      "text": "100",
+                                      "type": "text",
+                                    },
+                                  ],
+                                  "props": {
+                                    "id": "timeline:value:property:scale:scale.y",
+                                    "label": "Scale y, 100",
+                                    "metadata": {
+                                      "timelineScrub": {
+                                        "layer": "headline",
+                                        "path": "scale.y",
+                                      },
+                                    },
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.text",
+                                      },
+                                      "flexBasis": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "flexGrow": 1,
+                                      "fontSize": {
+                                        "token": "typography.body",
+                                      },
+                                      "fontVariantNumeric": "tabular-nums",
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "overflow": "hidden",
+                                    },
+                                  },
+                                  "type": "text",
+                                },
+                                {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
                                     "disabled": false,
@@ -22682,43 +22763,21 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   },
                                   "type": "button",
                                 },
-                                {
-                                  "children": [
-                                    {
-                                      "props": {},
-                                      "text": "100, 100 %",
-                                      "type": "text",
-                                    },
-                                  ],
-                                  "props": {
-                                    "label": "Scale, 100 by 100 percent, animated, keyframe at playhead",
-                                    "metadata": {
-                                      "designTodo": "T5",
-                                      "timelineScrub": {
-                                        "layer": "headline",
-                                        "path": "scale",
-                                      },
-                                    },
-                                    "style": {
-                                      "color": {
-                                        "token": "colors.text",
-                                      },
-                                      "fontSize": {
-                                        "token": "typography.body",
-                                      },
-                                      "fontVariantNumeric": "tabular-nums",
-                                    },
-                                  },
-                                  "type": "text",
-                                },
                               ],
                               "props": {
                                 "style": {
                                   "alignItems": "center",
                                   "display": "flex",
                                   "flexDirection": "row",
+                                  "flexShrink": 0,
+                                  "gap": {
+                                    "token": "metrics.gap",
+                                  },
                                   "paddingRight": {
                                     "token": "metrics.gap",
+                                  },
+                                  "width": {
+                                    "token": "metrics.value_column",
                                   },
                                 },
                               },
