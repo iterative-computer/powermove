@@ -2186,6 +2186,10 @@ fn navigating_3d_moves_only_the_editor_view_and_view_camera_returns(cx: &mut Tes
     };
     let before = document(&s);
     assert!(!s.surface.read_with(&s.vcx, |g, _| g.studio_free()));
+    // In the 3D view (the editor view; camera view moves the camera itself).
+    s.surface
+        .update(&mut s.vcx, |g, cx| g.studio_setting("look", "free", cx));
+    cx.run_until_parked();
     // A trackpad's two-finger scroll orbits.
     let at = s.point_of([320., 180.]);
     s.vcx.simulate_event(gpui::ScrollWheelEvent {
@@ -2196,7 +2200,7 @@ fn navigating_3d_moves_only_the_editor_view_and_view_camera_returns(cx: &mut Tes
     });
     cx.run_until_parked();
     let orbited = s.surface.read_with(&s.vcx, |g, _| g.studio_free_pose());
-    assert!(orbited.is_some(), "the first navigation leaves the shot");
+    assert!(orbited.is_some(), "the editor view moved");
     assert!(s.surface.read_with(&s.vcx, |g, _| g.studio_free()));
     // ⇧ pans and a wheel dollies; the Hand tool's drag orbits too.
     for (delta, m) in [
@@ -2418,6 +2422,7 @@ fn dump_light_overlays(cx: &mut TestAppContext) {
     });
     refresh_3d(&mut s, cx);
     dump(&mut s, cx, "overlay-shot-light-selected");
+    in_3d(&mut s, cx);
     let at = s.point_of([320., 180.]);
     s.vcx.simulate_event(gpui::ScrollWheelEvent {
         position: at,
@@ -2479,6 +2484,7 @@ fn lights_handles_and_the_camera_fit_the_overlay_budget(cx: &mut TestAppContext)
     settle(cx, move |_| {
         kernel.published(PROJECT).unwrap().selection.layers() == ["key".to_string()]
     });
+    in_3d(&mut s, cx);
     let at = s.point_of([320., 180.]);
     s.vcx.simulate_event(gpui::ScrollWheelEvent {
         position: at,
@@ -2577,13 +2583,8 @@ fn cancelling_a_flight_restores_the_view_and_writes_nothing(cx: &mut TestAppCont
 #[gpui::test]
 fn flying_the_editor_view_never_writes_the_project(cx: &mut TestAppContext) {
     let mut s = studio_stage(cx);
-    let at = s.point_of([320., 180.]);
-    s.vcx.simulate_event(gpui::ScrollWheelEvent {
-        position: at,
-        delta: gpui::ScrollDelta::Pixels(point(px(30.), px(0.))),
-        modifiers: Modifiers::none(),
-        touch_phase: gpui::TouchPhase::Moved,
-    });
+    s.surface
+        .update(&mut s.vcx, |g, cx| g.studio_setting("look", "free", cx));
     cx.run_until_parked();
     let doc = |s: &Stage| s.rig.kernel.published(PROJECT).unwrap().snapshot.root().unwrap().to_value();
     let before = doc(&s);
@@ -2604,4 +2605,152 @@ fn fly_needs_a_3d_composition(cx: &mut TestAppContext) {
     let mut s = stage(cx);
     s.surface.update(&mut s.vcx, |g, cx| g.studio_setting("fly", "", cx));
     assert!(!s.surface.read_with(&s.vcx, |g, _| g.studio_flying()));
+}
+
+// ── Blender's default 3D navigation ─────────────────────────────────────
+fn in_3d(s: &mut Stage, cx: &mut TestAppContext) {
+    s.surface
+        .update(&mut s.vcx, |g, cx| g.studio_setting("look", "free", cx));
+    cx.run_until_parked();
+}
+fn scroll(s: &mut Stage, cx: &mut TestAppContext, delta: gpui::ScrollDelta, m: Modifiers) {
+    let at = s.point_of([320., 180.]);
+    s.vcx.simulate_event(gpui::ScrollWheelEvent {
+        position: at,
+        delta,
+        modifiers: m,
+        touch_phase: gpui::TouchPhase::Moved,
+    });
+    cx.run_until_parked();
+}
+fn view(s: &Stage) -> pm_scene3d::navigation::Pose {
+    s.surface
+        .read_with(&s.vcx, |g, _| g.studio_free_pose())
+        .expect("an editor view")
+}
+fn reach(p: pm_scene3d::navigation::Pose) -> f64 {
+    pm_scene3d::navigation::length(pm_scene3d::navigation::sub(p.position, p.target))
+}
+fn applied(s: &Stage) -> usize {
+    s.rig.kernel.published(PROJECT).unwrap().history.applied
+}
+fn ctrl() -> Modifiers {
+    Modifiers {
+        control: true,
+        ..Default::default()
+    }
+}
+/// A mouse wheel notch zooms 1.2× toward the view centre; ⌃+wheel pans
+/// sideways and ⇧+wheel up and down, keeping the distance (Blender).
+#[gpui::test]
+fn the_mouse_wheel_zooms_in_blenders_steps_and_pans_with_ctrl_or_shift(cx: &mut TestAppContext) {
+    let mut s = studio_stage(cx);
+    in_3d(&mut s, cx);
+    let h = applied(&s);
+    let a = view(&s);
+    scroll(&mut s, cx, gpui::ScrollDelta::Lines(point(0., 1.)), Modifiers::none());
+    let b = view(&s);
+    assert!((reach(a) / reach(b) - 1.2).abs() < 1e-6, "{} {}", reach(a), reach(b));
+    assert_eq!(b.target, a.target, "toward the view centre");
+    scroll(&mut s, cx, gpui::ScrollDelta::Lines(point(0., 1.)), ctrl());
+    let c = view(&s);
+    assert!((reach(c) - reach(b)).abs() < 1e-6 && c.target != b.target);
+    assert!((c.target[1] - b.target[1]).abs() < 1e-6, "⌃: sideways only");
+    scroll(&mut s, cx, gpui::ScrollDelta::Lines(point(0., 1.)), Modifiers::shift());
+    let d = view(&s);
+    assert!(d.target[1] != c.target[1], "⇧: up and down");
+    // The shot never moved.
+    assert_eq!(applied(&s), h);
+}
+/// A trackpad's two-finger scroll orbits, ⇧ pans, ⌃ zooms; a pinch zooms.
+#[gpui::test]
+fn the_trackpad_orbits_pans_with_shift_and_zooms_with_ctrl_or_a_pinch(cx: &mut TestAppContext) {
+    let mut s = studio_stage(cx);
+    in_3d(&mut s, cx);
+    let a = view(&s);
+    scroll(&mut s, cx, gpui::ScrollDelta::Pixels(point(px(40.), px(0.))), Modifiers::none());
+    let b = view(&s);
+    assert!(b.target == a.target && (reach(b) - reach(a)).abs() < 1e-6 && b.position != a.position, "orbit");
+    scroll(&mut s, cx, gpui::ScrollDelta::Pixels(point(px(20.), px(10.))), Modifiers::shift());
+    let c = view(&s);
+    assert!(c.target != b.target && (reach(c) - reach(b)).abs() < 1e-6, "pan");
+    scroll(&mut s, cx, gpui::ScrollDelta::Pixels(point(px(0.), px(30.))), ctrl());
+    let d = view(&s);
+    assert!(d.target == c.target && reach(d) < reach(c), "zoom in");
+    s.surface.update(&mut s.vcx, |g, cx| {
+        g.studio_pinch(0.1, cx);
+    });
+    assert!(reach(view(&s)) < reach(d), "pinching out zooms in");
+}
+/// Middle drag orbits, ⇧ pans, ⌃ zooms (Blender's middle mouse).
+#[gpui::test]
+fn the_middle_button_orbits_pans_and_zooms(cx: &mut TestAppContext) {
+    let mut s = studio_stage(cx);
+    in_3d(&mut s, cx);
+    let mut drag = |s: &mut Stage, m: Modifiers| {
+        let from = s.point_of([300., 180.]);
+        let to = from + point(px(30.), px(40.));
+        s.vcx.simulate_mouse_down(from, MouseButton::Middle, m);
+        s.vcx.simulate_mouse_move(to, MouseButton::Middle, m);
+        s.vcx.simulate_mouse_up(to, MouseButton::Middle, m);
+        cx.run_until_parked();
+        view(s)
+    };
+    let a = view(&s);
+    let b = drag(&mut s, Modifiers::none());
+    assert!(b.target == a.target && b.position != a.position, "orbit");
+    let c = drag(&mut s, Modifiers::shift());
+    assert!(c.target != b.target, "pan");
+    let d = drag(&mut s, ctrl());
+    assert!(d.target == c.target && (reach(d) - reach(c)).abs() > 1e-6, "zoom");
+    assert!(s.recorder.navigation.borrow().is_empty(), "the 2D view never panned");
+}
+/// In camera view every navigation moves the camera itself (Blender's Lock
+/// Camera to View, as Fly does): a burst of wheel notches is one undo step,
+/// stored once the wheel rests, and the viewer keeps looking through it.
+#[gpui::test]
+fn navigating_in_camera_view_moves_the_camera_as_one_undo_step(cx: &mut TestAppContext) {
+    let mut s = studio_stage(cx);
+    let h = applied(&s);
+    let before = stored(&s, "cam");
+    let num = |v: &serde_json::Value| v.as_f64().or(v["v"].as_f64()).unwrap();
+    scroll(&mut s, cx, gpui::ScrollDelta::Lines(point(0., 1.)), Modifiers::none());
+    scroll(&mut s, cx, gpui::ScrollDelta::Lines(point(0., 1.)), Modifiers::none());
+    assert!(!s.surface.read_with(&s.vcx, |g, _| g.studio_free()), "still the camera's framing");
+    cx.executor().advance_clock(std::time::Duration::from_millis(500));
+    let kernel = s.rig.kernel.clone();
+    settle(cx, move |_| kernel.published(PROJECT).unwrap().history.applied > h);
+    assert_eq!(applied(&s), h + 1, "one step");
+    let after = stored(&s, "cam");
+    // Two notches from z = 6 toward its target at 0: 6 / 1.44.
+    let z = num(&after["p"]["position.z"]);
+    assert!((z - 6. / 1.44).abs() < 1e-6, "{after}");
+    assert!(!s.surface.read_with(&s.vcx, |g, _| g.studio_free()));
+    undo_3d(&mut s, cx);
+    assert_eq!(stored(&s, "cam")["p"]["position.z"], before["p"]["position.z"]);
+}
+/// The numpad views (number row too): Front looks down −Z from +Z, orbit
+/// steps undo each other, + zooms one notch.
+#[gpui::test]
+fn numpad_view_keys_set_the_editor_view(cx: &mut TestAppContext) {
+    let mut s = studio_stage(cx);
+    in_3d(&mut s, cx);
+    let h = applied(&s);
+    let key = |s: &mut Stage, v: &str| {
+        let v = v.to_string();
+        s.surface
+            .update(&mut s.vcx, move |g, cx| g.studio_setting("nav", &v, cx));
+    };
+    key(&mut s, "front");
+    let f = view(&s);
+    let dir = pm_scene3d::navigation::normalize(pm_scene3d::navigation::sub(f.position, f.target));
+    assert!((dir[2] - 1.).abs() < 1e-9, "{dir:?}");
+    key(&mut s, "orbit-right");
+    assert!(view(&s).position != f.position);
+    key(&mut s, "orbit-left");
+    let back = view(&s);
+    assert!((0..3).all(|i| (back.position[i] - f.position[i]).abs() < 1e-9));
+    key(&mut s, "zoom-in");
+    assert!((reach(f) / reach(view(&s)) - 1.2).abs() < 1e-6);
+    assert_eq!(applied(&s), h, "the 3D view writes nothing");
 }

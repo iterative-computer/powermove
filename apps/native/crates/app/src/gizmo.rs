@@ -942,6 +942,10 @@ impl GizmoSurface {
     }
     /// Panning with the middle button, whatever the tool.
     fn on_middle(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
+        // A 3D composition's middle button navigates the scene (Blender).
+        if self.studio.active() {
+            return;
+        }
         self.panning = Some(event.position);
         self.set_cursor(CursorStyle::ClosedHand, cx);
     }

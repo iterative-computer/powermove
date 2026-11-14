@@ -4311,6 +4311,21 @@ fn chord(e: &NSEvent) -> String {
         124 => "right".into(),
         125 => "down".into(),
         126 => "up".into(),
+        // The keypad names its own keys (Blender's numpad views), so the
+        // number row stays free for its own bindings.
+        82 => "numpad0".into(),
+        83 => "numpad1".into(),
+        84 => "numpad2".into(),
+        85 => "numpad3".into(),
+        86 => "numpad4".into(),
+        87 => "numpad5".into(),
+        88 => "numpad6".into(),
+        89 => "numpad7".into(),
+        91 => "numpad8".into(),
+        92 => "numpad9".into(),
+        65 => "numpad.".into(),
+        69 => "numpad+".into(),
+        78 => "numpad-".into(),
         _ => e
             .charactersIgnoringModifiers()
             .map(|s| s.to_string().to_lowercase())

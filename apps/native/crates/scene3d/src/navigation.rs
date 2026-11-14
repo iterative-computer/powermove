@@ -164,6 +164,70 @@ pub fn dolly(start: Pose, delta: f64, lens: Lens) -> Pose {
         }
     }
 }
+/// Blender's zoom step: one wheel notch (or numpad + / −) brings the view
+/// 1.2 times closer, toward the view centre.
+pub const ZOOM_STEP: f64 = 1.2;
+/// Blender's numpad orbit step (Preferences ▸ Navigation ▸ Rotation Angle).
+pub const ORBIT_STEP: f64 = 15.;
+/// `notches` steps closer (negative: further), toward the view centre.
+pub fn zoom_step(start: Pose, notches: f64, lens: Lens) -> Pose {
+    let factor = ZOOM_STEP.powf(notches.clamp(-20., 20.));
+    match lens {
+        Lens::Orthographic { .. } => Pose {
+            zoom: (start.zoom * factor).clamp(0.01, 1000.),
+            ..start
+        },
+        Lens::Perspective { near, far, .. } => {
+            let mut o = sub(start.position, start.target);
+            if length(o) < 1e-9 {
+                o = [0., 0., 1.];
+            }
+            let d = (length(o).max(0.05) / factor)
+                .min(far * 0.8)
+                .max(near * 2.)
+                .max(0.05);
+            Pose {
+                position: add(start.target, mul(normalize(o), d)),
+                ..start
+            }
+        }
+    }
+}
+/// Turntable orbit by degrees around the view centre: `yaw` about world
+/// vertical (positive turns the view to the right), `pitch` up and down
+/// (positive looks from higher up).
+pub fn orbit_by(start: Pose, yaw: f64, pitch: f64) -> Pose {
+    orbit(start, yaw.to_radians() / 0.008, pitch.to_radians() / 0.008)
+}
+/// Blender's numpad views, from the side they look at (Blender is Z-up; this
+/// scene is Y-up with the shot looking down −Z: Front looks down −Z).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Side {
+    Front,
+    Back,
+    Right,
+    Left,
+    Top,
+    Bottom,
+}
+/// Looking at the view centre from `side`, as far away as before.
+pub fn side_view(start: Pose, side: Side) -> Pose {
+    let d = length(sub(start.position, start.target)).max(0.05);
+    // Straight up or down has no heading: a hair off, as orbit's own limit.
+    let (s, c) = (0.01f64.sin(), 0.01f64.cos());
+    let dir = match side {
+        Side::Front => [0., 0., 1.],
+        Side::Back => [0., 0., -1.],
+        Side::Right => [1., 0., 0.],
+        Side::Left => [-1., 0., 0.],
+        Side::Top => [0., c, s],
+        Side::Bottom => [0., -c, s],
+    };
+    Pose {
+        position: add(start.target, mul(dir, d)),
+        ..start
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Bounds {
     pub min: Vec3,

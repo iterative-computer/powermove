@@ -95,9 +95,22 @@ pub fn tools() -> Vec<Item> {
 /// in the bar's order (command `studio.view`, arguments `[group, value]`).
 /// Empty labels are separators.
 pub fn view3d() -> Vec<Item> {
+    let keymap = crate::keymap::current();
     [
         ("Camera", "look", "camera"),
         ("Free View", "look", "free"),
+        ("", "", ""),
+        // Blender's numpad views (the number row stands in, as Emulate
+        // Numpad), Frame Selected (numpad .) and Align Camera to View.
+        ("Front", "nav", "front"),
+        ("Back", "nav", "back"),
+        ("Right", "nav", "right"),
+        ("Left", "nav", "left"),
+        ("Top", "nav", "top"),
+        ("Bottom", "nav", "bottom"),
+        ("Opposite Side", "nav", "opposite"),
+        ("Frame Selected", "nav", "selected"),
+        ("Align Camera to View", "nav", "camera-to-view"),
         ("", "", ""),
         ("Move", "tool", "move"),
         ("Rotate", "tool", "rotate"),
@@ -126,11 +139,8 @@ pub fn view3d() -> Vec<Item> {
         if label.is_empty() {
             Item::command("", "", "")
         } else {
-            Item {
-                args: vec![json!(group), json!(value)],
-                // Blender's Fly navigation keeps Blender's Shift+`.
-                ..Item::command(label, "studio.view", if *group == "fly" { "shift+`" } else { "" })
-            }
+            // Each shows the key the shipped keymap gives it, if any.
+            Item::registered(&keymap, label, "studio.view", json!([group, value]))
         }
     })
     .collect()
