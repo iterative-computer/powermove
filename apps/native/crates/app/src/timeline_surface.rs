@@ -2813,6 +2813,7 @@ impl Render for TimelineSurface {
         let column = self.view.layer_column;
         let decorations = self.decorations.clone();
         let hover_clip = self.hover_clip.clone();
+        let skimmer = self.skimmer_at();
         let marquee = match &self.gesture {
             Gesture::Marquee { origin, at, .. } => Some(Bounds::from_corners(
                 point(origin.x.min(at.x), origin.y.min(at.y)),
@@ -3018,9 +3019,61 @@ impl Render for TimelineSurface {
                             });
                             let started = crate::diag::enabled().then(std::time::Instant::now);
                             let cull = Cull::new(bounds.size);
+                            // The skimmer's timecode stands in the ruler: a time
+                            // label it would cut through is left out, not
+                            // half-covered (it is the time under the pointer).
+                            let chip = skimmer.as_ref().map(|(x, code)| {
+                                let m = tokens.metrics;
+                                let run = TextRun {
+                                    len: code.len(),
+                                    font: window.text_style().font(),
+                                    color: rgb_to_hsla(rgba((tokens.colors.text << 8) | 0xff)),
+                                    background_color: None,
+                                    underline: None,
+                                    strikethrough: None,
+                                    letter_spacing: None,
+                                };
+                                let text = window.text_system().shape_line(
+                                    code.clone().into(),
+                                    px(tokens.typography.minimum),
+                                    &[run],
+                                );
+                                let left = x + (m.border * 2.) as f64;
+                                let gutter = (m.gap + m.border * 2.) as f64;
+                                (left, left + f32::from(text.width) as f64 + gutter)
+                            });
                             for op in frame.ops.iter().filter(|op| !op.id.starts_with("toggle:")) {
                                 if cull.skip(op) {
                                     continue;
+                                }
+                                if let Some((left, right)) = chip
+                                    && op.id.starts_with("time:")
+                                    && op.bounds.x < right
+                                    && op.bounds.x + op.bounds.width > left
+                                {
+                                    // The label is centred in its step: its
+                                    // text, not its box, decides.
+                                    let text = op.text.clone().unwrap_or_default();
+                                    let run = TextRun {
+                                        len: text.len(),
+                                        font: window.text_style().font(),
+                                        color: rgb_to_hsla(rgba((tokens.colors.muted << 8) | 0xff)),
+                                        background_color: None,
+                                        underline: None,
+                                        strikethrough: None,
+                                        letter_spacing: None,
+                                    };
+                                    let half = f32::from(
+                                        window
+                                            .text_system()
+                                            .shape_line(text.into(), px(op.font_size as f32), &[run])
+                                            .width,
+                                    ) as f64
+                                        / 2.;
+                                    let centre = op.bounds.x + op.bounds.width / 2.;
+                                    if centre - half < right && centre + half > left {
+                                        continue;
+                                    }
                                 }
                                 // The time grid and the markers' lines run
                                 // on through the graph: it reads the same time.
@@ -3231,15 +3284,13 @@ impl TimelineSurface {
     }
     /// The skimmer: a hairline of text ink across the ruler and tracks
     /// (the playhead is the accent), with its timecode on the ruler.
-    fn skimmer_marks(&self) -> Vec<AnyElement> {
-        let Some(at) = self.skimmer else {
-            return vec![];
-        };
-        let t = &self.tokens;
+    /// The skimmer's x in the panel and its timecode, while it shows.
+    fn skimmer_at(&self) -> Option<(f64, String)> {
+        let at = self.skimmer?;
         let x = self.view.layer_column + (at - self.view.scroll_time) * self.view.pps;
         let width = f32::from(self.bounds.size.width) as f64;
         if x < self.view.layer_column || x > width {
-            return vec![];
+            return None;
         }
         let fps = self.model.index.fps.max(1.);
         let frames = (at * fps).round().max(0.) as u64;
@@ -3252,6 +3303,13 @@ impl TimelineSurface {
             sec % 60,
             frames % nominal
         );
+        Some((x, code))
+    }
+    fn skimmer_marks(&self) -> Vec<AnyElement> {
+        let Some((x, code)) = self.skimmer_at() else {
+            return vec![];
+        };
+        let t = &self.tokens;
         let ink = (t.colors.text << 8) | 0x99;
         let line = div()
             .id("timeline-skimmer")
