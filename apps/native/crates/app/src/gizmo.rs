@@ -718,13 +718,34 @@ impl GizmoSurface {
                         ui("studioLook"),
                         ui("studioAxes"),
                         (ui("studioLightKind"), ui("studioLightAdd"), ui("studioLightAim")),
+                        // The viewer's 2D/3D choice is remembered per composition.
+                        {
+                            let comp = p.snapshot.render_comp();
+                            let kept = p
+                                .ui_state
+                                .viewer
+                                .get("studioLookByComp")
+                                .and_then(|m| m.get(&comp))
+                                .and_then(pm_model::Value::as_str)
+                                .map(str::to_owned);
+                            (comp, kept)
+                        },
                     ))
                 })
                 .await;
             let _ = this.update(cx, |s, cx| {
                 if s.latest == ticket {
-                    let (poses, scene, selected, tool, look, axes, (kind, add, aim)) =
-                        read.unwrap_or((vec![], None, vec![], None, None, None, (None, None, None)));
+                    let (poses, scene, selected, tool, look, axes, (kind, add, aim), (comp, kept)) =
+                        read.unwrap_or((
+                            vec![],
+                            None,
+                            vec![],
+                            None,
+                            None,
+                            None,
+                            (None, None, None),
+                            (String::new(), None),
+                        ));
                     s.studio.light_aim = aim.unwrap_or_else(|| "reflect".into());
                     s.studio.object_axes = axes.as_deref() == Some("object");
                     s.studio.light_kind = kind.unwrap_or_default();
@@ -741,15 +762,36 @@ impl GizmoSurface {
                     let had = s.studio.scene.is_some();
                     let published = look.as_deref() == Some("free");
                     // A look this viewer wrote holds until it is published.
-                    let free_look = match s.studio.look_pending {
+                    let mut free_look = match s.studio.look_pending {
                         Some(mine) if mine != published => mine,
                         _ => {
                             s.studio.look_pending = None;
                             published
                         }
                     };
+                    // Another composition: its own 2D/3D choice (2D unless it
+                    // was left in 3D), from its own shot.
+                    let mut adopt = None;
+                    if s.studio.comp.as_deref() != Some(comp.as_str()) {
+                        if s.studio.comp.is_some() && !s.studio.busy() {
+                            let want = kept.as_deref() == Some("free");
+                            s.studio.free = None;
+                            if want != free_look {
+                                free_look = want;
+                                s.studio.look_pending = Some(want);
+                                adopt = Some(want);
+                            }
+                        }
+                        s.studio.comp = Some(comp);
+                    }
                     let changed_look = free_look != s.studio.free_look;
                     s.studio.scene = scene.map(Arc::new);
+                    if let Some(want) = adopt {
+                        if want && s.studio.free.is_none() {
+                            s.studio.free = s.studio.scene.as_ref().map(|sc| sc.shot);
+                        }
+                        s.studio_ui("studioLook", if want { "free" } else { "camera" }, cx);
+                    }
                     s.studio.selected = selected;
                     s.studio.tool = studio3d::Tool::parse(tool.as_deref());
                     if !s.studio.busy() {

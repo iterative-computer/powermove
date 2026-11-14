@@ -490,9 +490,12 @@ test("a 3D composition adds no toolbar; away from the shot one top-left control 
   ])
     expect(nodes.some((n) => n.props.id === id)).toBe(false);
   await root.dispose();
+  // Focus has no bar (no 2D | 3D): one control returns.
+  const focused = at("free");
+  focused.host.presentation = "Focus";
   const { root: free } = recorder();
   await free.render(
-    <ViewerPanel state={at("free")} actions={{ ...actions, drive }} />,
+    <ViewerPanel state={focused} actions={{ ...actions, drive }} />,
   );
   nodes = free.inspect().nodes;
   const ret = nodes.find((n) => n.props.id === "viewer.studio.viewCamera")!;
@@ -538,5 +541,45 @@ test("a 3D composition's bar has one preview pop-up: Fast by default, before RGB
   const { root: flat } = recorder();
   await flat.render(<ViewerPanel state={fixture()} actions={{ ...actions, drive }} />);
   expect(flat.inspect().nodes.some((n) => n.props.id === "viewer.studio.tier")).toBe(false);
+  await flat.dispose();
+});
+
+test("2D | 3D leads the bar: it switches the shot and the scene, and dims 3D without a scene", async () => {
+  const seen: [string, unknown][] = [];
+  const drive = (id: string, v?: unknown) => void seen.push([id, v]);
+  const segment = (nodes: { props: Record<string, unknown> }[], label: string) =>
+    nodes.find((n) => n.props.role === "radio" && n.props.label === label)!;
+  const s = fixture();
+  s.model!.studio = { tier: "fast", tool: "move", look: "camera" };
+  const { root } = recorder();
+  await root.render(<ViewerPanel state={s} actions={{ ...actions, drive }} />);
+  let nodes = root.inspect().nodes;
+  const ids = nodes.map((n) => String(n.props.id));
+  expect(ids.indexOf("viewer.dimension")).toBeGreaterThanOrEqual(0);
+  expect(ids.indexOf("viewer.dimension")).toBeLessThan(ids.indexOf("viewer.channels"));
+  expect(segment(nodes, "2D").props["aria-checked"]).toBe(true);
+  expect(segment(nodes, "3D").props.disabled).toBeFalsy();
+  await root.drive((segment(nodes, "3D") as unknown as { id: number }).id, "click", {});
+  await root.dispose();
+  // In the scene: 3D is on, and the bar replaces the floating View camera.
+  s.model!.studio = { tier: "fast", tool: "move", look: "free" };
+  const { root: scene } = recorder();
+  await scene.render(<ViewerPanel state={s} actions={{ ...actions, drive }} />);
+  nodes = scene.inspect().nodes;
+  expect(segment(nodes, "3D").props["aria-checked"]).toBe(true);
+  expect(nodes.some((n) => n.props.id === "viewer.studio.viewCamera")).toBe(false);
+  await scene.drive((segment(nodes, "2D") as unknown as { id: number }).id, "click", {});
+  expect(seen).toEqual([
+    ["viewer.studio.look", "free"],
+    ["viewer.studio.look", "camera"],
+  ]);
+  await scene.dispose();
+  // No 3D layers: 3D stays visible, dimmed, and says why.
+  const { root: flat } = recorder();
+  await flat.render(<ViewerPanel state={fixture()} actions={{ ...actions, drive }} />);
+  nodes = flat.inspect().nodes;
+  const three = segment(nodes, "3D");
+  expect(three.props.disabled).toBe(true);
+  expect(String(three.props.title)).toContain("Add a 3D layer to view the scene");
   await flat.dispose();
 });

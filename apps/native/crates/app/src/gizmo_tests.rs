@@ -2215,6 +2215,61 @@ fn navigating_3d_moves_only_the_editor_view_and_view_camera_returns(cx: &mut Tes
     });
     assert_eq!(document(&s), before);
 }
+/// View ▸ 2D / 3D (3) switches between the composition as shot and the
+/// scene's editor view, and remembers the choice for this composition.
+#[gpui::test]
+fn two_d_three_d_toggles_the_look_and_remembers_it_per_composition(cx: &mut TestAppContext) {
+    let mut s = studio_stage(cx);
+    assert!(!s.surface.read_with(&s.vcx, |g, _| g.studio_free()));
+    let kept = |s: &Stage| {
+        let p = s.rig.kernel.published(PROJECT).unwrap();
+        let comp = p.snapshot.render_comp();
+        p.ui_state
+            .viewer
+            .get("studioLookByComp")
+            .and_then(|m| m.get(&comp))
+            .and_then(pm_model::Value::as_str)
+            .map(str::to_owned)
+    };
+    s.surface
+        .update(&mut s.vcx, |g, cx| g.studio_setting("look", "toggle", cx));
+    let surface = s.surface.clone();
+    settle(cx, move |cx| {
+        surface.update(cx, |g, cx| {
+            g.refresh(cx);
+            g.studio_free()
+        })
+    });
+    let kernel = s.rig.kernel.clone();
+    settle(cx, move |_| {
+        let p = kernel.published(PROJECT).unwrap();
+        p.ui_state
+            .viewer
+            .get("studioLook")
+            .and_then(pm_model::Value::as_str)
+            == Some("free")
+    });
+    assert_eq!(kept(&s).as_deref(), Some("free"));
+    s.surface
+        .update(&mut s.vcx, |g, cx| g.studio_setting("look", "toggle", cx));
+    let surface = s.surface.clone();
+    settle(cx, move |cx| {
+        surface.update(cx, |g, cx| {
+            g.refresh(cx);
+            !g.studio_free()
+        })
+    });
+    let kernel = s.rig.kernel.clone();
+    settle(cx, move |_| {
+        let p = kernel.published(PROJECT).unwrap();
+        p.ui_state
+            .viewer
+            .get("studioLook")
+            .and_then(pm_model::Value::as_str)
+            == Some("camera")
+    });
+    assert_eq!(kept(&s).as_deref(), Some("camera"));
+}
 /// A light's marker selects it and drags it in the view plane (Electron's
 /// light markers); its target stays, and Undo restores the position.
 #[gpui::test]
