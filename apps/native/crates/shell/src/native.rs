@@ -2641,6 +2641,36 @@ impl Host {
                     command,
                     args,
                     class,
+                } if opens_in_place(&command)
+                    && self.menu_state.borrow().is_some()
+                    && self.palette.try_borrow_mut().is_ok() =>
+                {
+                    // The palette opens inside this key press, before the
+                    // next key is read: what is typed right after ⌘K lands
+                    // in its search field, not in the editor (the trip
+                    // through the editor's command queue took a turn).
+                    let _ = (args, class);
+                    let state = self.menu_state.borrow().clone().unwrap_or_default();
+                    // Development builds: key press to an open, accepting palette.
+                    let pressed = self.events.get(&token).map(|e| e.timestamp());
+                    self.open_palette(&state);
+                    if cfg!(debug_assertions)
+                        && std::env::var_os("PM_NATIVE_PALETTE_TRACE").is_some()
+                        && let Some(pressed) = pressed
+                    {
+                        let now = objc2_foundation::NSProcessInfo::processInfo().systemUptime();
+                        eprintln!("palette.key_to_open {:.2} ms", (now - pressed) * 1000.);
+                    }
+                    self.events.remove(&token);
+                    // Done: keys queued behind it go on (to the palette, now key).
+                    let next = self.resolver.resolve(token, true);
+                    self.effects(next);
+                }
+                Effect::Dispatch {
+                    token,
+                    command,
+                    args,
+                    class,
                 } => {
                     let _ = self.sender.try_send(Command {
                         name: command,
@@ -5414,6 +5444,7 @@ impl Popup {
             self.hide();
             return;
         }
+        let started = std::time::Instant::now();
         self.row_focus = false;
         self.model.open = true;
         self.model.search(String::new());
@@ -5468,7 +5499,16 @@ impl Popup {
         // Only while the app is active, never over other apps (P-CHILD).
         gpui_macos::child_window::show(&self.window, true);
         self.window.makeFirstResponder(Some(&self.search));
-        animate(&self.window, true, &self.tokens, &mut self.spring);
+        animate_as(&self.window, true, true, &self.tokens, &mut self.spring);
+        // Development builds: what an open costs (`PM_NATIVE_PALETTE_TRACE`).
+        if cfg!(debug_assertions) && std::env::var_os("PM_NATIVE_PALETTE_TRACE").is_some() {
+            eprintln!(
+                "palette.open {:.2} ms, {} rows, fade {:.0} ms",
+                started.elapsed().as_secs_f64() * 1000.,
+                self.rows.len(),
+                self.tokens.motion.menu_fade * 1000.
+            );
+        }
     }
     fn hide(&mut self) {
         self.model.open = false;
@@ -5486,7 +5526,7 @@ impl Popup {
         self.dismiss = None;
         self.rest();
         gpui_macos::child_window::forget(&self.window);
-        let duration = animate(&self.window, false, &self.tokens, &mut self.spring);
+        let duration = animate_as(&self.window, false, true, &self.tokens, &mut self.spring);
         unsafe {
             let _: () = msg_send![&*self.window,performSelector:sel!(orderOut:),withObject:std::ptr::null::<AnyObject>(),afterDelay:duration];
         }
@@ -5571,13 +5611,33 @@ impl Popup {
         }
     }
 }
+/// A command the shell carries out inside the key press that asked for it
+/// (see `Host::effects`): the command palette, so typing straight after its
+/// shortcut is never lost.
+pub fn opens_in_place(command: &str) -> bool {
+    command == "palette"
+}
 fn animate(
     w: &NSWindow,
     enter: bool,
     t: &Tokens,
     state: &mut Option<(std::time::Instant, pm_design::motion::Analytic)>,
 ) -> f64 {
-    let duration = if t.accessibility.reduce_motion {
+    animate_as(w, enter, false, t, state)
+}
+/// `menu`: the command palette and pop-up menus. They fade in and out over
+/// `motion.menu_fade`, eased, with no spring: there at once, as Spotlight
+/// and the system's menus, and never in the way of typing.
+fn animate_as(
+    w: &NSWindow,
+    enter: bool,
+    menu: bool,
+    t: &Tokens,
+    state: &mut Option<(std::time::Instant, pm_design::motion::Analytic)>,
+) -> f64 {
+    let duration = if menu {
+        t.motion.menu_fade
+    } else if t.accessibility.reduce_motion {
         t.motion.reduced
     } else if enter {
         t.motion.enter
@@ -5599,9 +5659,16 @@ fn animate(
                 let _: () = msg_send![a,setFromValue:f];
                 let _: () = msg_send![a,setToValue:to];
                 let _: () = msg_send![a,setDuration:duration];
+                if menu {
+                    let curve = NSString::from_str(if enter { "easeOut" } else { "easeIn" });
+                    let timing: *mut AnyObject = msg_send![objc2::class!(CAMediaTimingFunction),functionWithName:&*curve];
+                    let _: () = msg_send![a,setTimingFunction:timing];
+                    // No spring: a scale left from an earlier open goes too.
+                    let _: () = msg_send![&*layer,removeAnimationForKey:&*NSString::from_str("pm.shell.scale")];
+                }
                 layer.setOpacity(if enter { 1. } else { 0. });
                 let _: () = msg_send![&*layer,addAnimation:a,forKey:&*NSString::from_str("pm.shell.opacity")];
-                if enter && !t.accessibility.reduce_motion {
+                if enter && !menu && !t.accessibility.reduce_motion {
                     let allocated: *mut AnyObject =
                         msg_send![objc2::class!(CASpringAnimation), alloc];
                     let spring: *mut AnyObject = msg_send![allocated,initWithPerceptualDuration:t.motion.enter,bounce:t.motion.bounce];

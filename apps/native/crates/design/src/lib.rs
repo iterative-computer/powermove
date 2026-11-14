@@ -446,6 +446,10 @@ pub struct Motion {
     /// How long a status note (`Exported …`) holds before the status line
     /// returns (s); errors stay until replaced.
     pub note_hold: f64,
+    /// The command palette's and pop-up menus' fade in and out (s): short,
+    /// eased, no spring, so a menu reads as there at once (as Spotlight's
+    /// and the system's menus) and never delays typing.
+    pub menu_fade: f64,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Surface {
@@ -868,6 +872,7 @@ impl Tokens {
                 tooltip_delay: 0.38,
                 tooltip_warm: 0.6,
                 note_hold: 2.2,
+                menu_fade: 0.1,
             },
             translucency: {
                 // The translucent shell is a heavy tint of the window colour

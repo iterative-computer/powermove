@@ -362,6 +362,7 @@ const ROLES: &[(&str, &str)] = &[
     ("motion.enter", "Spring response for appearing surfaces (s)"),
     ("motion.bounce", "Spring bounce for appearing surfaces"),
     ("motion.exit", "Fade-out for dismissed surfaces (s)"),
+    ("motion.menu_fade", "Palette and pop-up menu fade in and out (s)"),
     ("motion.reduced", "Cross-fade used under Reduce Motion (s)"),
     (
         "motion.start_scale",
