@@ -890,6 +890,9 @@ fn denied_or_locked_keychain_needs_fresh_consent_then_final_delta_without_source
         ));
     }
     assert_eq!(denied.reads, 1);
+    // A fresh click must actually call the backend again, even after failure.
+    assert!(resume_with_secret_consent(&config, &mut denied, |_| Ok(())).is_err());
+    assert_eq!(denied.reads, 2);
     assert!(!config.native_profile.join("secret-locators.json").exists());
     let mut consent = SyntheticSecrets {
         reads: 0,
@@ -1407,4 +1410,23 @@ fn a_family_moved_behind_a_link_is_read_through_it() {
             .unwrap()
             .is_dir()
     );
+}
+
+#[test]
+fn keychain_status_copy_explains_the_next_step_without_private_data() {
+    use pm_first_launch::secrets::{KeychainError, LEGACY_ACCOUNT, LEGACY_SERVICE};
+    assert_eq!(LEGACY_SERVICE, "Powermove Safe Storage");
+    assert_eq!(LEGACY_ACCOUNT, "Powermove Key");
+    for (status, expected) in [
+        (-25300, "wasn’t found"),
+        (-25308, "couldn’t show"),
+        (-25293, "declined or cancelled"),
+        (-128, "declined or cancelled"),
+        (-25291, "unavailable"),
+        (-1, "couldn’t read"),
+    ] {
+        let error = KeychainError(status);
+        assert!(error.message().contains(expected));
+        assert!(error.to_string().contains(&format!("OSStatus {status}")));
+    }
 }

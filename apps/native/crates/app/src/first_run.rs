@@ -5,13 +5,17 @@
 //! Decisions: the app shares `pm_first_launch::default_paths` with the coordinator;
 //! a clean outcome goes straight to the editor, because the normal path takes no
 //! click; a later launch shows no gate unless merging runs past a second.
+use crate::extension_transfer::Update;
 use anyhow::Result;
 use pm_first_launch::{
     Config, DeltaPrepared, Event, KeychainDenied, Launch, LowDisk, Outcome, ProfileRefused,
     onboarding_completed,
     secrets::MacKeychain,
     source_access::{self, Activity, Choice as FolderChoice},
-    surfaces::migration::{Failure, Gate, Model, Report, bytes},
+    surfaces::{
+        extensions::{Gate as ExtensionGate, Model as Extensions, Place},
+        migration::{Failure, Gate, Model, Report, bytes},
+    },
 };
 use pm_kernel::locks::{ElectronOwner, electron_owner};
 use pm_services::surface_backing::onboarding::{Choice as Chosen, Onboarding, Step as Onboard};
@@ -96,7 +100,7 @@ pub enum Finished {
     Paused,
     LowDisk(LowDisk),
     ProfileRefused(String),
-    Denied,
+    Denied(String),
     Failed(Failure, String),
 }
 #[derive(Debug)]
@@ -105,6 +109,8 @@ pub enum Message {
     Finished(Finished),
     /// The waiting original app has gone; the copy can start.
     ElectronClosed,
+    /// Bringing in the original app's extensions (N004–N006).
+    Extensions(Update),
 }
 /// Leaving the gate for the editor. `Enter` happens at most once per attempt.
 #[derive(Debug)]
@@ -125,6 +131,12 @@ pub enum Effect {
     SkipFolder,
     /// Open the library and the editor, applying the choices if there are any.
     Enter(Option<serde_json::Value>),
+    /// Look for original-app extensions the library doesn't have (read-only).
+    ScanExtensions,
+    /// Bring In Extensions: copy and check them on a worker.
+    RunExtensions,
+    /// Not Now: remember it, so later launches don't ask again.
+    DeclineExtensions,
 }
 #[derive(Debug)]
 struct Choices {
@@ -144,6 +156,8 @@ pub struct Flow {
     entry: Entry,
     /// Onboarding's choices, kept so a failed attach can be tried again.
     chosen: Option<serde_json::Value>,
+    /// The original app's extensions on offer, before the library opens.
+    extensions: Option<Extensions>,
 }
 impl Flow {
     pub fn new(plan: Plan) -> Self {
@@ -166,6 +180,7 @@ impl Flow {
             consent_run: false,
             entry: Entry::Waiting,
             chosen: None,
+            extensions: None,
             plan,
         }
     }
@@ -178,12 +193,24 @@ impl Flow {
             self.onboarding = Some(Onboarding::new(true));
             return vec![];
         }
+        // An existing library and an original app with extensions it may not
+        // have yet: look first (nothing shows unless there's something to
+        // offer). After Not Now, only Settings › Storage asks.
+        let declined = |c: &Config| {
+            pm_first_launch::extension_transfer::declined(&c.native_profile).unwrap_or(false)
+        };
+        if crate::extension_transfer::eligible(self.plan.config.as_ref())
+            .is_some_and(|c| !declined(&c))
+        {
+            return vec![Effect::ScanExtensions];
+        }
         self.enter()
     }
     /// Whether this launch has a Welcome window to show.
     pub fn visible(&self) -> bool {
         self.plan.launch == Launch::Migrate
             || self.onboarding.is_some()
+            || self.extensions.is_some()
             || matches!(
                 self.entry,
                 Entry::Failed { .. } | Entry::Entering { updating: true }
@@ -231,6 +258,56 @@ impl Flow {
                 vec![Effect::Run(Run::Ordinary)]
             }
             Message::Finished(finished) => self.finished(finished),
+            Message::Extensions(update) => self.extensions_update(update),
+        }
+    }
+    fn extensions_update(&mut self, update: Update) -> Vec<Effect> {
+        match update {
+            // Only while startup still waits: never after the library opened.
+            Update::Scanned(scan) if matches!(self.entry, Entry::Waiting) => match scan {
+                Ok(scan) if scan.should_offer() && self.extensions.is_none() => {
+                    self.extensions = Some(Extensions::offer(scan, Place::Startup));
+                    vec![]
+                }
+                Ok(_) => self.enter(),
+                // Unreadable: say nothing and open; Settings can try again.
+                Err(error) => {
+                    eprintln!("Looking for the original app’s extensions stopped: {error}");
+                    self.enter()
+                }
+            },
+            Update::Scanned(_) => vec![],
+            Update::Progress(progress) => {
+                if let Some(model) = self.extensions.as_mut() {
+                    model.progress(progress);
+                }
+                vec![]
+            }
+            Update::Finished(result) => {
+                if let Some(model) = self.extensions.as_mut() {
+                    model.finished(result);
+                }
+                vec![]
+            }
+        }
+    }
+    /// N004–N006. Declining never blocks the library: Not Now opens it.
+    fn extensions_action(&mut self, id: &str) -> Vec<Effect> {
+        let Some(model) = self.extensions.as_mut() else {
+            return vec![];
+        };
+        match (model.gate, id) {
+            (ExtensionGate::Offer, "bring_in") | (ExtensionGate::Failed, "try_again") => {
+                model.start();
+                vec![Effect::RunExtensions]
+            }
+            (ExtensionGate::Offer, "not_now") => {
+                let mut effects = vec![Effect::DeclineExtensions];
+                effects.extend(self.enter());
+                effects
+            }
+            (ExtensionGate::Done | ExtensionGate::Failed, "open_native") => self.enter(),
+            _ => vec![],
         }
     }
     fn finished(&mut self, finished: Finished) -> Vec<Effect> {
@@ -296,7 +373,8 @@ impl Flow {
                 self.model.gate = Gate::ProfileRefused;
                 vec![]
             }
-            Finished::Denied => {
+            Finished::Denied(reason) => {
+                self.model.keychain_error = Some(reason);
                 self.model.gate = Gate::Denied;
                 vec![]
             }
@@ -378,6 +456,9 @@ impl Flow {
         if self.onboarding.is_some() {
             return self.onboarding_action(id);
         }
+        if self.extensions.is_some() {
+            return self.extensions_action(id);
+        }
         match id {
             "quit" => vec![Effect::Quit],
             "pause" => {
@@ -398,6 +479,8 @@ impl Flow {
                 vec![Effect::Run(Run::Ordinary)]
             }
             "resume_with_secret_consent" => {
+                self.model.keychain_error = None;
+                self.details = None;
                 self.model.gate = Gate::WaitingForMacos;
                 self.consent_run = true;
                 vec![Effect::Run(Run::WithConsent)]
@@ -610,7 +693,10 @@ impl Flow {
                 ..Frame::default()
             },
             (_, Some(onboarding)) => self.onboarding_frame(onboarding),
-            (Entry::Waiting, None) => self.migration_frame(),
+            (Entry::Waiting, None) => match &self.extensions {
+                Some(extensions) => crate::extension_transfer::frame(extensions),
+                None => self.migration_frame(),
+            },
         }
     }
 }
@@ -649,6 +735,16 @@ pub fn spawn_run(
     activity: Arc<Activity>,
     tx: async_channel::Sender<Message>,
 ) {
+    spawn_run_with_keychain(config, run, pause, activity, tx, None);
+}
+fn spawn_run_with_keychain(
+    config: Config,
+    run: Run,
+    pause: Arc<AtomicBool>,
+    activity: Arc<Activity>,
+    tx: async_channel::Sender<Message>,
+    keychain: Option<MacKeychain>,
+) {
     let native = config.native_profile.clone();
     std::thread::spawn(move || {
         // Originals in folders macOS protects are opened only after the person
@@ -665,10 +761,10 @@ pub fn spawn_run(
             Run::Ordinary => pm_first_launch::run(&config, hook),
             Run::SkipConsent => pm_first_launch::skip_secret_consent(&config, hook),
             Run::Folders(choice) => pm_first_launch::run_with_folder_access(&config, choice, hook),
-            // Constructed only here, after the person's click for this request.
+            // Each attempt owns a fresh backend after the person’s click.
             Run::WithConsent => pm_first_launch::resume_with_secret_consent(
                 &config,
-                &mut MacKeychain::after_user_consent(),
+                &mut keychain.unwrap_or_else(MacKeychain::after_user_consent),
                 hook,
             ),
         };
@@ -705,8 +801,22 @@ fn classify(result: Result<Outcome>) -> Finished {
     if let Some(low) = error.downcast_ref::<LowDisk>() {
         return Finished::LowDisk(*low);
     }
-    if error.downcast_ref::<KeychainDenied>().is_some() {
-        return Finished::Denied;
+    if error.downcast_ref::<KeychainDenied>().is_some()
+        || error
+            .downcast_ref::<pm_first_launch::secrets::KeychainError>()
+            .is_some()
+    {
+        // The underlying backend error carries only a status and safe copy.
+        eprintln!("PM_KEYCHAIN consent failed: {error:#}");
+        return Finished::Denied(
+            error
+                .downcast_ref::<pm_first_launch::secrets::KeychainError>()
+                .map_or(
+                    "macOS couldn’t read the sign-in key. Try again, or continue and sign in here.",
+                    |e| e.message(),
+                )
+                .into(),
+        );
     }
     let details = format!("{error:#}");
     if error.downcast_ref::<ProfileRefused>().is_some() {
@@ -882,11 +992,18 @@ impl Driver {
                     let driver = self.clone();
                     move |id, cx| driver.step(|flow| flow.action(id), cx)
                 });
-                let opened =
-                    pm_shell::welcome_view::open_welcome(pm_shell::tokens(), frame, on_action, cx);
+                let opened = pm_shell::welcome_view::open_welcome(
+                    pm_shell::tokens(),
+                    frame,
+                    on_action.clone(),
+                    cx,
+                );
                 match opened {
                     Ok(handle) => {
                         *self.window.borrow_mut() = Some(handle);
+                        if self.flow.borrow().extensions.is_some() {
+                            crate::extension_transfer::review(on_action.clone(), cx);
+                        }
                         // A development review walks to a step: the steps it
                         // names (`--review-onboarding begin,continue`), never
                         // the last one, which finishes and writes.
@@ -933,13 +1050,47 @@ impl Driver {
                 Effect::Run(run) => {
                     self.pause.store(false, Ordering::Release);
                     if let Some(config) = self.library.plan.config.clone() {
-                        spawn_run(
-                            config,
-                            run,
-                            self.pause.clone(),
-                            self.activity.clone(),
-                            self.tx.clone(),
-                        );
+                        if run == Run::WithConsent {
+                            let (request, requested) = async_channel::bounded(1);
+                            let (reply, response) = std::sync::mpsc::sync_channel(1);
+                            let window = *self.window.borrow();
+                            // The worker asks only after validation and the durable
+                            // AccessStarted checkpoint. This task runs on main.
+                            cx.spawn(async move |cx| {
+                                if requested.recv().await.is_ok() {
+                                    let result = cx.update(|cx| {
+                                        cx.activate(true);
+                                        if let Some(window) = window {
+                                            let _ =
+                                                window.update(cx, |_, window, _| window.activate());
+                                        }
+                                        MacKeychain::read_on_main_thread()
+                                    });
+                                    let _ = reply.send(result);
+                                }
+                            })
+                            .detach();
+                            let access = MacKeychain::with_legacy_reader(move || {
+                                request.send_blocking(())?;
+                                response.recv()?
+                            });
+                            spawn_run_with_keychain(
+                                config,
+                                run,
+                                self.pause.clone(),
+                                self.activity.clone(),
+                                self.tx.clone(),
+                                Some(access),
+                            );
+                        } else {
+                            spawn_run(
+                                config,
+                                run,
+                                self.pause.clone(),
+                                self.activity.clone(),
+                                self.tx.clone(),
+                            );
+                        }
                         self.poll(cx);
                     }
                 }
@@ -955,8 +1106,42 @@ impl Driver {
                     crate::migration_report::open(self.library.plan.profile.clone(), cx)
                 }
                 Effect::Enter(choices) => self.enter(choices, cx),
+                Effect::ScanExtensions => self.extensions(false),
+                Effect::RunExtensions => self.extensions(true),
+                // One small file, written before the library opens.
+                Effect::DeclineExtensions => {
+                    crate::extension_transfer::decline(&self.library.plan.profile)
+                }
             }
         }
+    }
+    /// The extension scan or transfer on its own thread, reporting to the flow.
+    fn extensions(&self, run: bool) {
+        let Some(config) = crate::extension_transfer::eligible(self.library.plan.config.as_ref())
+        else {
+            // The original app went away meanwhile: nothing to offer, so open.
+            let update = if run {
+                Update::Finished(Err("The original app’s folder is no longer there.".into()))
+            } else {
+                Update::Scanned(Ok(Default::default()))
+            };
+            let _ = self.tx.try_send(Message::Extensions(update));
+            return;
+        };
+        let (tx, rx) = async_channel::unbounded();
+        if run {
+            crate::extension_transfer::spawn_run(config, tx);
+        } else {
+            crate::extension_transfer::spawn_scan(config, tx);
+        }
+        let forward = self.tx.clone();
+        std::thread::spawn(move || {
+            while let Ok(update) = rx.recv_blocking() {
+                if forward.send_blocking(Message::Extensions(update)).is_err() {
+                    return;
+                }
+            }
+        });
     }
     /// Four times a second while the worker runs: its bytes and any folder prompt.
     fn poll(&self, cx: &mut gpui::App) {

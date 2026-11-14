@@ -84,6 +84,8 @@ fn the_default_profile_is_the_one_the_coordinator_writes() {
 fn an_override_never_reaches_the_real_profiles() {
     let (_temp, home) = home();
     let isolated = home.join("isolated");
+    source(&home.join(APPLICATION_SUPPORT));
+    write(&isolated.join("store/projects.json"), &json!([]));
     let plan = Plan::resolve(
         Some(isolated.clone()),
         None,
@@ -264,14 +266,24 @@ fn a_denied_keychain_offers_a_fresh_click_and_carrying_on_without() {
     flow.action("resume_with_secret_consent");
     assert_eq!(flow.frame().status.as_deref(), Some("Waiting for macOS…"));
     assert!(flow.frame().buttons.iter().all(|b| !b.enabled));
-    assert!(flow.message(Message::Finished(Finished::Denied)).is_empty());
+    assert!(
+        flow.message(Message::Finished(Finished::Denied(
+            pm_first_launch::secrets::KeychainError(-25300)
+                .message()
+                .into()
+        )))
+        .is_empty()
+    );
     let denied = flow.frame();
+    assert!(denied.line.contains("wasn’t found"));
     titled(&denied, "Keychain Access Wasn’t Allowed");
     assert_eq!(denied.default_action(), Some("skip_secret_consent"));
     assert_eq!(
         flow.action("resume_with_secret_consent"),
         vec![Effect::Run(Run::WithConsent)]
     );
+    assert!(flow.model.keychain_error.is_none());
+    assert!(!flow.frame().line.contains("wasn’t found"));
 }
 #[test]
 fn a_running_original_app_waits_and_the_copy_starts_when_it_quits() {
@@ -409,7 +421,15 @@ fn a_finished_launch_opens_without_a_gate_and_brings_later_changes_in() {
     assert_eq!(later.launch, Launch::Later);
     assert!(!later.onboard);
     let mut flow = Flow::new(later.clone());
-    assert_eq!(flow.start(), vec![Effect::Enter(None)]);
+    // The original app is there, so startup looks for extensions first:
+    // none, so it opens without a window.
+    assert_eq!(flow.start(), vec![Effect::ScanExtensions]);
+    assert!(!flow.visible());
+    let scanned = crate::extension_transfer::scan(later.config.as_ref().unwrap());
+    assert_eq!(
+        flow.message(Message::Extensions(Update::Scanned(scanned))),
+        vec![Effect::Enter(None)]
+    );
     assert!(!flow.visible());
     assert!(!later_store(&later, |_| panic!("nothing changed")).unwrap());
     write(&support.join("Powermove/store/theme.json"), &json!("light"));
@@ -631,4 +651,189 @@ fn protected_folders_are_explained_then_a_waiting_prompt_can_be_skipped() {
         flow.action("skip_folders"),
         vec![Effect::Run(Run::Folders(FolderChoice::Skip))]
     );
+}
+
+/// An existing library (made here, not copied) beside an original app that has
+/// extensions it doesn't: Chike's case. `pong` loads, `figma-layer-import` is
+/// an empty folder, `broken` is copied but can't load.
+fn existing_library_with_original_extensions(home: &Path) -> (Plan, PathBuf) {
+    let support = home.join(APPLICATION_SUPPORT);
+    let original = support.join("Powermove");
+    write(&original.join("store/projects.json"), &json!([]));
+    let extension = |id: &str, source: &str| {
+        write(
+            &original.join(format!("extensions/{id}/manifest.json")),
+            &json!({"id":id,"name":id,"version":"1.0.0","apiVersion":3,"entry":"index.ts"}),
+        );
+        fs::write(original.join(format!("extensions/{id}/index.ts")), source).unwrap();
+    };
+    extension("pong", "export default function activate() {}");
+    extension("broken", "export default function activate( {");
+    fs::create_dir_all(original.join("extensions/figma-layer-import")).unwrap();
+    let native = pm_first_launch::default_paths(&support).native_profile;
+    write(
+        &native.join("store/projects.json"),
+        &json!([{"id":"mine","name":"Made here"}]),
+    );
+    write(&native.join("onboarding-v1.json"), &json!({"version":1}));
+    let plan = plan(home);
+    assert_eq!(
+        plan.launch,
+        Launch::Fresh,
+        "an existing library, not a copy"
+    );
+    assert!(!plan.onboard);
+    (plan, native)
+}
+fn scan_into(flow: &mut Flow) -> Vec<Effect> {
+    let config = flow.plan.config.clone().unwrap();
+    let scanned = crate::extension_transfer::scan(&config);
+    flow.message(Message::Extensions(Update::Scanned(scanned)))
+}
+#[test]
+fn not_now_opens_the_library_and_later_launches_do_not_ask_again() {
+    let (_temp, home) = home();
+    let (plan, native) = existing_library_with_original_extensions(&home);
+    let mut flow = Flow::new(plan.clone());
+    assert_eq!(flow.start(), vec![Effect::ScanExtensions]);
+    assert!(!flow.visible(), "nothing shows while it looks");
+    assert!(scan_into(&mut flow).is_empty());
+    assert!(flow.visible());
+    let frame = flow.frame();
+    assert_eq!(frame.surface, "N004");
+    titled(&frame, "Bring In Your Extensions");
+    assert!(frame.line.contains("2 extensions"), "{}", frame.line);
+    assert!(
+        frame
+            .rows
+            .iter()
+            .any(|r| r.text.starts_with("figma-layer-import: ")),
+        "{:?}",
+        frame.rows
+    );
+    let labels: Vec<_> = frame.buttons.iter().map(|b| b.label.as_str()).collect();
+    assert_eq!(labels, ["Not Now", "Bring In Extensions"]);
+    // Not Now: remembered, and the library opens at once.
+    assert_eq!(
+        flow.action("not_now"),
+        vec![Effect::DeclineExtensions, Effect::Enter(None)]
+    );
+    crate::extension_transfer::decline(&native);
+    assert!(!native.join("extensions/pong").exists(), "nothing copied");
+    // Relaunch: no scan, no window, straight in.
+    let mut again = Flow::new(plan.clone());
+    assert_eq!(again.start(), vec![Effect::Enter(None)]);
+    assert!(!again.visible());
+    // Settings › Storage still offers them, with its button.
+    let report = crate::storage::measure(
+        &native,
+        plan.config.as_ref().map(|c| c.electron_profile.as_path()),
+    );
+    assert_eq!(report.original.unwrap().extensions, Some((2, 2)));
+}
+#[test]
+fn bring_in_copies_only_extensions_and_summarises_each_with_its_reason() {
+    let (_temp, home) = home();
+    let (plan, native) = existing_library_with_original_extensions(&home);
+    let config = plan.config.clone().unwrap();
+    let library = fs::read(native.join("store/projects.json")).unwrap();
+    let onboarding = fs::read(native.join("onboarding-v1.json")).unwrap();
+    let mut flow = Flow::new(plan.clone());
+    flow.start();
+    scan_into(&mut flow);
+    assert_eq!(flow.action("bring_in"), vec![Effect::RunExtensions]);
+    assert_eq!(flow.frame().surface, "N005");
+    assert!(
+        flow.frame().buttons.is_empty(),
+        "nothing to press while it runs"
+    );
+    // A second press while it runs does nothing.
+    assert!(flow.action("bring_in").is_empty());
+    let (tx, rx) = async_channel::unbounded();
+    crate::extension_transfer::spawn_run(config.clone(), tx);
+    let mut saw_progress = false;
+    while let Ok(update) = rx.recv_blocking() {
+        let end = matches!(update, Update::Finished(_));
+        saw_progress |= matches!(update, Update::Progress(_));
+        assert!(flow.message(Message::Extensions(update)).is_empty());
+        if !end && saw_progress {
+            assert_eq!(flow.frame().steps.len(), 1, "one bar while it runs");
+        }
+        if end {
+            break;
+        }
+    }
+    assert!(saw_progress);
+    let frame = flow.frame();
+    assert_eq!(frame.surface, "N006");
+    titled(&frame, "Your Extensions Are In");
+    assert!(
+        frame.line.starts_with("1 brought in and 1 couldn’t load."),
+        "{}",
+        frame.line
+    );
+    let texts: Vec<_> = frame.rows.iter().map(|r| r.text.as_str()).collect();
+    assert!(
+        texts[0].starts_with("broken: It was copied but couldn’t load"),
+        "{texts:?}"
+    );
+    assert!(
+        texts.iter().any(|t| t.starts_with("figma-layer-import: ")),
+        "{texts:?}"
+    );
+    assert!(
+        texts
+            .iter()
+            .any(|t| *t == "pong: New in the original app. It loads."),
+        "{texts:?}"
+    );
+    assert!(native.join("extensions/pong/manifest.json").is_file());
+    // Projects and settings are exactly as they were.
+    assert_eq!(
+        fs::read(native.join("store/projects.json")).unwrap(),
+        library
+    );
+    assert_eq!(
+        fs::read(native.join("onboarding-v1.json")).unwrap(),
+        onboarding
+    );
+    assert_eq!(flow.action("open_native"), vec![Effect::Enter(None)]);
+    // The next launch looks again and finds nothing new: straight in.
+    let mut again = Flow::new(plan);
+    assert_eq!(again.start(), vec![Effect::ScanExtensions]);
+    assert_eq!(scan_into(&mut again), vec![Effect::Enter(None)]);
+}
+
+#[test]
+fn existing_isolated_library_can_only_offer_extensions_with_an_explicit_source() {
+    let (_temp, home) = home();
+    let (default, native) = existing_library_with_original_extensions(&home);
+    let source = default.config.unwrap().electron_profile;
+    let isolated = Plan::resolve(
+        Some(native.clone()),
+        Some(source),
+        Some(home.into_os_string()),
+    )
+    .unwrap();
+    assert_eq!(isolated.launch, Launch::Fresh);
+    assert!(!isolated.onboard);
+    let mut flow = Flow::new(isolated);
+    assert_eq!(flow.start(), vec![Effect::ScanExtensions]);
+    assert!(scan_into(&mut flow).is_empty());
+    assert_eq!(flow.frame().surface, "N004");
+    assert!(!native.join("migration.json").exists());
+    assert_eq!(
+        flow.action("not_now"),
+        vec![Effect::DeclineExtensions, Effect::Enter(None)]
+    );
+}
+
+#[test]
+fn keychain_error_survives_the_consent_context() {
+    let error =
+        anyhow::Error::new(pm_first_launch::secrets::KeychainError(-25308)).context(KeychainDenied);
+    let Finished::Denied(reason) = classify(Err(error)) else {
+        panic!("expected a Keychain reason")
+    };
+    assert!(reason.contains("couldn’t show"));
 }
