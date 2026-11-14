@@ -406,18 +406,19 @@ fn a_plain_drag_on_the_work_area_bar_moves_it(cx: &mut TestAppContext) {
     let before = s
         .surface
         .read_with(&s.vcx, |t, _| t.scene().unwrap().work_area);
+    // It ends at the composition's end: move it back a second.
     let strip = origin.y + px(3.);
     s.drag(
         cx,
         point(x_of(4.), strip),
-        point(x_of(5.), strip),
+        point(x_of(3.), strip),
         Modifiers::none(),
     );
     let after = s
         .surface
         .read_with(&s.vcx, |t, _| t.scene().unwrap().work_area);
     assert!(
-        (after.0 - before.0 - 1.).abs() < 0.05,
+        (before.0 - after.0 - 1.).abs() < 0.05,
         "{before:?} {after:?}"
     );
     assert!((after.1 - after.0 - (before.1 - before.0)).abs() < 0.05);
