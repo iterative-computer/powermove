@@ -321,6 +321,21 @@ impl TextDelegate {
         if unsafe { msg_send![view, hasMarkedText] } {
             return false;
         }
+        // A number field steps with Up and Down (Shift: ten steps), as a
+        // spin field does; the host owns the value and its step.
+        if self.ivars().kind == TextKind::DenseNumber {
+            let key = match command {
+                c if c == objc2::sel!(moveUp:) => Some("up"),
+                c if c == objc2::sel!(moveDown:) => Some("down"),
+                c if c == objc2::sel!(moveUpAndModifySelection:) => Some("shiftUp"),
+                c if c == objc2::sel!(moveDownAndModifySelection:) => Some("shiftDown"),
+                _ => None,
+            };
+            if let Some(key) = key {
+                self.ivars().emit(TextEvent::Key(key));
+                return true;
+            }
+        }
         if self.ivars().kind == TextKind::Canvas {
             let key = match command {
                 c if c == objc2::sel!(cancelOperation:) => Some("commit"),
