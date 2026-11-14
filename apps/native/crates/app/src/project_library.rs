@@ -42,6 +42,25 @@ const ACCOUNT_MENU: [(&str, &str); 3] = [
     ("Account Settings…", "settings"),
     ("Sign Out", "cloudSignOut"),
 ];
+/// Home's two layouts, for the owner to compare (development switch
+/// `homeLayout:a|b`): A has no column, its navigation in the sheet's header;
+/// B keeps a narrow navigation column that folds away (⌃⌘S).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Variant {
+    A,
+    B,
+}
+impl Variant {
+    fn from_key(key: &str) -> Self {
+        if key == "a" { Self::A } else { Self::B }
+    }
+    fn key(self) -> &'static str {
+        match self {
+            Self::A => "a",
+            Self::B => "b",
+        }
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Menu {
     Sort,
@@ -107,6 +126,11 @@ pub struct ProjectLibrary {
     editor: Option<objc2::rc::Retained<objc2_app_kit::NSWindow>>,
     /// v1's `projectsView`.
     pub layout: Layout,
+    pub variant: Variant,
+    /// Layout B's navigation column shows (⌃⌘S folds it away).
+    column: bool,
+    /// The grid/list switch: the system's segmented control.
+    view_switch: Option<Entity<NativeControl>>,
     search: Option<Entity<pm_shell::text::TextField>>,
     /// New Project, the system's glass button: the header's one raised
     /// action. The rest of the header is drawn.
@@ -170,6 +194,8 @@ impl ProjectLibrary {
         controller.query.section = Section::from_key(&setting("projectsSection"));
         controller.query.sort = Sort::from_key(&setting("projectsSort"));
         let layout = Layout::from_key(&setting("projectsView"));
+        let variant = Variant::from_key(&setting("homeLayout"));
+        let column = setting("homeColumn") != "hidden";
         Self {
             controller,
             sink,
@@ -190,6 +216,9 @@ impl ProjectLibrary {
             grid: (0, 0),
             editor,
             layout,
+            variant,
+            column,
+            view_switch: None,
             search: None,
             new_project: None,
             active: None,
@@ -468,6 +497,22 @@ impl ProjectLibrary {
     fn set_layout(&mut self, layout: Layout, cx: &mut Context<Self>) {
         self.layout = layout;
         self.persist("projectsView", layout.key());
+        if let Some(switch) = &self.view_switch {
+            let index = json!(usize::from(layout == Layout::List));
+            switch.update(cx, |s, cx| s.update(&index, &view_options(), false, cx));
+        }
+        cx.notify();
+    }
+    /// Development builds: which of the two layouts Home shows.
+    pub fn set_variant(&mut self, variant: Variant, cx: &mut Context<Self>) {
+        self.variant = variant;
+        self.persist("homeLayout", variant.key());
+        cx.notify();
+    }
+    /// Layout B: shows or folds away the navigation column.
+    pub fn toggle_column(&mut self, cx: &mut Context<Self>) {
+        self.column = !self.column;
+        self.persist("homeColumn", if self.column { "shown" } else { "hidden" });
         cx.notify();
     }
     fn set_text(&mut self, text: String, cx: &mut Context<Self>) {
@@ -493,6 +538,18 @@ impl ProjectLibrary {
         );
     }
     fn on_key(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        // ⌃⌘S folds the navigation column away and back, as in the Finder.
+        let m = event.keystroke.modifiers;
+        if self.variant == Variant::B
+            && event.keystroke.key == "s"
+            && m.control
+            && m.platform
+            && !m.alt
+            && !m.shift
+        {
+            self.toggle_column(cx);
+            return;
+        }
         let columns = match self.layout {
             Layout::Grid => self.columns.max(1) as isize,
             Layout::List => 1,
@@ -624,6 +681,13 @@ const CARD: f32 = 240.;
 /// A card's round "more" button.
 const MORE: f32 = 24.;
 const CARD_LEAST: f32 = 160.;
+/// The grid/list switch's segments: a symbol each, the name as its tip.
+fn view_options() -> Vec<Value> {
+    vec![
+        json!({"label": "Grid", "symbol": "square.grid.2x2"}),
+        json!({"label": "List", "symbol": "list.bullet"}),
+    ]
+}
 impl ProjectLibrary {
     fn motion(&mut self) -> &mut pm_shell::motion::Motion<u64> {
         &mut self.motion
@@ -1180,13 +1244,31 @@ impl ProjectLibrary {
                         .when(fills, |picture| picture.rounded(px(inner)))
                         .opacity(fade.clamp(0., 1.)),
                 ),
-                None => page.bg(rgb(c.panel)).child(
-                    div()
-                        .text_role(t, Text::Caption)
-                        .font_features(kit::tabular())
-                        .text_color(ink(c.text, tr.faint))
-                        .children(row.dimensions().map(|(w, h)| format!("{w} × {h}"))),
-                ),
+                // No poster yet (never opened in this app, no v1 picture):
+                // the composition's blank canvas in its own shape, as an
+                // empty viewer shows it. Its size is in the facts below.
+                None => {
+                    let dark = t.scheme == pm_design::Scheme::Dark;
+                    let canvas = div()
+                        .rounded(px(t.radius.sm))
+                        .bg(rgb(c.viewer))
+                        .shadow(vec![BoxShadow {
+                            color: ink(if dark { 0xffffff } else { 0x000000 }, 0.08).into(),
+                            offset: point(px(0.), px(0.)),
+                            blur_radius: px(0.),
+                            spread_radius: px(0.5),
+                            inset: true,
+                        }]);
+                    let canvas = if aspect > 16. / 9. {
+                        canvas.w(relative(0.62))
+                    } else {
+                        canvas.h(relative(0.62))
+                    };
+                    page.bg(ink(c.text, tr.hover)).child(canvas.map(|mut d| {
+                        d.style().aspect_ratio = Some(aspect.clamp(0.25, 4.));
+                        d
+                    }))
+                }
             });
         // Under the pointer: a round "more" button at the page's top
         // trailing corner, on a scrim so it reads over any poster. It opens
@@ -1409,6 +1491,7 @@ impl Render for ProjectLibrary {
             .and_then(serde_json::Value::as_str)
             .filter(|_| account.get("signedIn") == Some(&serde_json::Value::Bool(true)))
             .map(str::to_owned);
+        let signed_in = identity.is_some();
         let anchor = |menu: Menu| {
             let anchors = self.anchors.clone();
             canvas(
@@ -1420,13 +1503,17 @@ impl Render for ProjectLibrary {
             .absolute()
             .size_full()
         };
+        // Layout B's column: as narrow as Settings', quiet rows with no
+        // counts, on the window's ground (no material of its own).
+        let column = self.variant == Variant::B && self.column;
+        let column_width = if column { m.settings_sidebar } else { 0. };
         let sidebar = div()
             .id("home-sidebar")
             .flex()
             .flex_col()
             .flex_none()
             .gap(px(t.space.hair))
-            .w(px(m.sidebar))
+            .w(px(m.settings_sidebar))
             .h_full()
             .px(px(m.dock_gap))
             .pt(px(t.space.sm))
@@ -1438,7 +1525,7 @@ impl Render for ProjectLibrary {
                     &kit,
                     "home-recents",
                     ("clock", "Recents".into()),
-                    Some(live.min(12)),
+                    None,
                     section != Section::Deleted,
                 )
                 .on_click(cx.listener(|v, _, _, cx| v.set_section(Section::Recents, cx))),
@@ -1448,7 +1535,7 @@ impl Render for ProjectLibrary {
                     &kit,
                     "home-trash",
                     ("trash", "Trash".into()),
-                    Some(trash),
+                    None,
                     section == Section::Deleted,
                 )
                 .on_click(cx.listener(|v, _, _, cx| v.set_section(Section::Deleted, cx))),
@@ -1529,7 +1616,10 @@ impl Render for ProjectLibrary {
             .detach();
             self.new_project = Some(new_project);
         }
-        let sheet = (f32::from(window.viewport_size().width) - m.sidebar - m.dock_gap).max(0.);
+        let sheet = (f32::from(window.viewport_size().width)
+            - if column { column_width } else { m.dock_gap }
+            - m.dock_gap)
+            .max(0.);
         let search_width = SEARCH_MAX.min(sheet - SEARCH_ROOM).max(CARD_LEAST);
         let search_key = kit::key("home-search");
         let search = kit.track_hover(
@@ -1594,6 +1684,38 @@ impl Render for ProjectLibrary {
                     side()
                         .justify_end()
                         .gap(px(t.space.sm))
+                        // Layout A: the column's places are header actions,
+                        // where a Mac app keeps them: the Store, the account.
+                        .when(self.variant == Variant::A, |d| {
+                            d.child(
+                                Self::header_action(&kit, "home-store", "basket", "Store", "Store")
+                                    .on_click(cx.listener(|v, _, _, cx| {
+                                        (v.sink)(Outbound::Command("store"), cx)
+                                    })),
+                            )
+                            .child(if signed_in {
+                                Self::header_action(
+                                    &kit,
+                                    "home-account",
+                                    "person.crop.circle",
+                                    "Account",
+                                    "Account",
+                                )
+                                .child(anchor(Menu::Account))
+                                .on_click(cx.listener(|v, _, _, cx| v.toggle_menu(Menu::Account, cx)))
+                            } else {
+                                Self::header_action(
+                                    &kit,
+                                    "home-account",
+                                    "person.crop.circle",
+                                    "Sign In",
+                                    "Sign In",
+                                )
+                                .on_click(cx.listener(|v, _, _, cx| {
+                                    (v.sink)(Outbound::Command("cloudSignIn"), cx)
+                                }))
+                            })
+                        })
                         .child(
                             Self::header_action(&kit, "home-open", "folder", "Open…", "Open… ⌘O")
                                 .on_click(cx.listener(|v, _, _, cx| {
@@ -1618,6 +1740,41 @@ impl Render for ProjectLibrary {
                             .into_any_element(),
                         }),
                 );
+        if self.view_switch.is_none() && pm_shell::text::available(window) {
+            let tokens = t.clone();
+            let index = json!(usize::from(self.layout == Layout::List));
+            let switch = cx.new(|cx| {
+                NativeControl::new(
+                    ControlSpec {
+                        kind: Kind::Segmented,
+                        label: "Project layout",
+                        identifier: "home.layout",
+                        value: &index,
+                        options: view_options(),
+                        disabled: false,
+                        default: false,
+                        destructive: false,
+                        inline: false,
+                        quiet: false,
+                        tint: None,
+                        symbol: None,
+                        glass: true,
+                        well: false,
+                    },
+                    &tokens,
+                    window,
+                    cx,
+                )
+            });
+            cx.subscribe(&switch, |v: &mut Self, _, value: &Value, cx| {
+                let layout = if value.as_u64() == Some(1) { Layout::List } else { Layout::Grid };
+                if layout != v.layout {
+                    v.set_layout(layout, cx);
+                }
+            })
+            .detach();
+            self.view_switch = Some(switch);
+        }
         let list = self.layout == Layout::List;
         let cell = |id: &'static str, symbol: &str, label: &'static str, on: bool| {
             div()
@@ -1733,8 +1890,53 @@ impl Render for ProjectLibrary {
                     t.radius.md,
                 ),
             )
+            // Layout A: Trash is a quiet action beside the sort (back to
+            // Recents from there); B keeps both in its column.
+            .when(self.variant == Variant::A, |d| {
+                let deleted = section == Section::Deleted;
+                d.child(
+                    kit.wash(
+                        div()
+                            .id("home-trash")
+                            .debug_selector(|| "home-trash".into())
+                            .flex()
+                            .flex_none()
+                            .items_center()
+                            .gap(px(t.space.sm))
+                            .h(px(m.control))
+                            .px(px(t.space.md + t.space.hair))
+                            .rounded(px(t.radius.md))
+                            .role(Role::Button)
+                            .aria_label(if deleted {
+                                "Back to Recents".to_owned()
+                            } else {
+                                format!("Trash, {trash}")
+                            })
+                            .text_role(&t, Text::Body)
+                            .text_color(rgb(c.muted))
+                            .child(kit.symbol(
+                                if deleted { "clock" } else { "trash" },
+                                m.symbol_toolbar,
+                                Weight::Regular,
+                                c.muted,
+                            ))
+                            .child(if deleted { "Recents" } else { "Trash" })
+                            .on_click(cx.listener(move |v, _, _, cx| {
+                                v.set_section(
+                                    if deleted { Section::Recents } else { Section::Deleted },
+                                    cx,
+                                )
+                            })),
+                        kit::key("home-trash"),
+                        t.radius.md,
+                    ),
+                )
+            })
             .child(div().flex_none().w(px(t.space.md)))
-            .child(view_switch);
+            .child(match &self.view_switch {
+                Some(switch) => switch.clone().into_any_element(),
+                None => view_switch.into_any_element(),
+            });
         let header = div()
             .flex()
             .flex_col()
@@ -1945,6 +2147,7 @@ impl Render for ProjectLibrary {
         let content = div()
             .flex_1()
             .min_w(px(0.))
+            .when(!column, |d| d.ml(px(m.dock_gap)))
             .mr(px(m.dock_gap))
             .mb(px(m.dock_gap))
             .flex()
@@ -1966,7 +2169,7 @@ impl Render for ProjectLibrary {
             .font_family(pm_design::TEXT_FONT)
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key))
-            .child(sidebar)
+            .when(column, |d| d.child(sidebar))
             .child(content)
             .children(menu)
             .child(kit.settle())

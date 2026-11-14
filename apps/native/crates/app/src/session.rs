@@ -3101,6 +3101,9 @@ impl Controller {
             "settings" => self.show_builtin(&cmd.name, window, cx),
             "agent" => self.toggle_agent(window, cx),
             "bringWorkspace" => self.bring_workspace(window, cx),
+            // An open is over: Home's card of this project shows how it
+            // stands, without opening it again (`write_poster`).
+            "writePoster" => self.write_poster(cx),
             "quit" => cx.defer(crate::lifecycle::begin_quit),
             // ⌘W: a page showing (Settings, the Store) closes back to the
             // project; else the project closes and the window shows Home;

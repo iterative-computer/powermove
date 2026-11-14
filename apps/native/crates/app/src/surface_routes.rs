@@ -118,6 +118,25 @@ impl Controller {
             command if command.starts_with("reviewModifiers:") => {
                 crate::panel_bridge::hold_review_modifier(&command["reviewModifiers:".len()..]);
             }
+            // Development builds: Home's two layouts for the owner to compare
+            // (`homeLayout:a`, `homeLayout:b`), and layout B's column folded.
+            #[cfg(debug_assertions)]
+            command if command.starts_with("homeLayout:") => {
+                let variant = match &command["homeLayout:".len()..] {
+                    "a" => crate::project_library::Variant::A,
+                    _ => crate::project_library::Variant::B,
+                };
+                if let Some(library) = self.library(cx) {
+                    library.update(cx, |home, cx| home.set_variant(variant, cx));
+                }
+                self.show_home(cx)
+            }
+            #[cfg(debug_assertions)]
+            "homeColumn" => {
+                if let Some(library) = self.library(cx) {
+                    library.update(cx, |home, cx| home.toggle_column(cx));
+                }
+            }
             // Development builds: the control kit in every state, on Home.
             #[cfg(debug_assertions)]
             "reviewKit" => {

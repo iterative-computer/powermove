@@ -345,6 +345,11 @@ impl Controller {
             if shown && std::mem::take(&mut self.workspace_after_open) {
                 self.host.borrow().send_command("bringWorkspace", vec![]);
             }
+            // A project opened here has a poster for Home from now on, even
+            // if it is never saved in this app (a save renders a new one).
+            if shown {
+                self.host.borrow().send_command("writePoster", vec![]);
+            }
         }
     }
     /// A surface extension's first commit landed; its panel can render and its
