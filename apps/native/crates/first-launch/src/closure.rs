@@ -161,7 +161,7 @@ fn inventory_pass(
                 .as_ref()
                 .or(disk.owned_path.as_ref())
                 .is_some_and(|path| {
-                    pm_native_migrate::library_media::is_resident(path).unwrap_or(false)
+                    pm_native_migrate::library_media::is_present(path)
                         && std::fs::symlink_metadata(path)
                             .is_ok_and(|m| m.is_file() && m.len() == disk.size)
                 })
@@ -413,7 +413,7 @@ fn add(
         }
         if r.before != Availability::Original
             && let Some(path) = &r.source_path
-            && pm_native_migrate::library_media::is_resident(path)?
+            && pm_native_migrate::library_media::is_present(path)
         {
             let expected = r
                 .fingerprint

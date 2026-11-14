@@ -13,10 +13,18 @@ use std::{
     path::{Path, PathBuf},
 };
 
+/// A file to link: absolute, regular, of the recorded size. iCloud-only
+/// (dataless) files count: linking never reads them; opening downloads them.
 pub(crate) fn valid_file(path: &Path, size: u64) -> bool {
-    path.is_absolute()
-        && crate::library_media::is_resident(path).unwrap_or(false)
-        && fs::symlink_metadata(path).is_ok_and(|m| m.is_file() && m.len() == size)
+    path.is_absolute() && fs::symlink_metadata(path).is_ok_and(|m| m.is_file() && m.len() == size)
+}
+/// The byte length a v2 fingerprint records (`v2:<size>:<hash>`).
+fn fingerprint_size(r: &Reference) -> Option<u64> {
+    r.fingerprint
+        .as_deref()
+        .and_then(|f| f.strip_prefix("v2:"))
+        .and_then(|f| f.split(':').next())
+        .and_then(|s| s.parse().ok())
 }
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct LinkedFolder {
@@ -347,23 +355,20 @@ pub fn link_many_with_disk(
             && let Some(path) = &r.source_path
         {
             // With no index/blob, v2 fingerprints carry the recorded byte length.
-            let size = r
-                .fingerprint
-                .as_deref()
-                .and_then(|f| f.strip_prefix("v2:"))
-                .and_then(|f| f.split(':').next())
-                .and_then(|s| s.parse().ok())
-                .or_else(|| {
-                    // Older originals carry a full hash but no recorded size.
-                    // Preserve their availability without reading their bytes;
-                    // adoption verifies that recorded hash before publication.
-                    r.original_blake3.as_ref().and_then(|_| {
+            let size = fingerprint_size(r).or_else(|| {
+                // Older originals carry a full hash but no recorded size, and
+                // agent attachments carry neither: the original app opens
+                // them by path. Link what's there without reading its bytes;
+                // adoption verifies a recorded hash before publication.
+                (r.original_blake3.is_some() || r.fingerprint.is_none())
+                    .then(|| {
                         fs::symlink_metadata(path)
                             .ok()
                             .filter(|m| m.is_file())
                             .map(|m| m.len())
                     })
-                });
+                    .flatten()
+            });
             if let Some(size) = size
                 && valid_file(path, size)
             {
@@ -457,12 +462,21 @@ pub fn link_many_with_disk(
                     .is_none_or(|revision| revision == &key.revision)
             })
             .cloned();
-        let original_available = stored.as_ref().is_some_and(|k| {
-            !r.is_proxy()
-                || r.source_path
-                    .as_ref()
-                    .is_some_and(|p| k.path.as_ref() == Some(p))
-        });
+        // A proxy reference's key holds the proxy; its original is the file
+        // at its source path, available when it's there at its recorded size.
+        let original_on_disk = r.is_proxy()
+            && !r.unreached
+            && r.source_path
+                .as_ref()
+                .zip(fingerprint_size(r))
+                .is_some_and(|(p, size)| valid_file(p, size));
+        let original_available = original_on_disk
+            || stored.as_ref().is_some_and(|k| {
+                !r.is_proxy()
+                    || r.source_path
+                        .as_ref()
+                        .is_some_and(|p| k.path.as_ref() == Some(p))
+            });
         let status = if stored.is_some() {
             if !original_available {
                 Status::ProxyOnly

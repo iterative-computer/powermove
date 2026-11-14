@@ -271,6 +271,9 @@ pub fn spawn(spec: ProcessSpec, mut machine: Machine, initial: Vec<Value>) -> Ha
         let mut eof = false;
         let mut initial = Effects {
             outgoing: initial,
+            // Exec receives its prompt in argv, but reads non-terminal stdin
+            // to EOF before starting. It has no streaming input protocol.
+            close_stdin: matches!(&machine, Machine::CodexExec { .. }),
             ..Effects::default()
         };
         if let Machine::Codex(c) = &mut machine {

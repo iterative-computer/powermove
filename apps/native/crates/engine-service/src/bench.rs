@@ -7,6 +7,8 @@
 //! `--from=SECONDS` starts the run there instead of at the start;
 //! `--loop=SECONDS` loops that much of it for the whole run;
 //! `--quality=full|half|quarter` pins the resolution (Auto by default);
+//! `--media=FILE` adds an asset-id to source-path JSON map (linked media);
+//! `--playback-only` reports playback and skips the seek/skim phases;
 //! `--skim=SPEED` sets the skim sweep's media seconds per second (1);
 //! `--fill=DIR` first renders the played range into a disk render cache in
 //! `DIR` (Render Selection's child) and reports its bytes and read cost.
@@ -208,7 +210,13 @@ pub fn run() -> anyhow::Result<()> {
         (1. ..=240.).contains(&hz) && (1. ..=300.).contains(&seconds),
         "invalid duration/rate"
     );
-    let (snapshot, media, duration, rate, _store) = scene()?;
+    let (snapshot, mut media, duration, rate, _store) = scene()?;
+    let media_paths = arg("media", "");
+    if !media_paths.is_empty() {
+        let paths: std::collections::BTreeMap<String, std::path::PathBuf> =
+            serde_json::from_slice(&std::fs::read(media_paths)?)?;
+        media.originals.extend(paths);
+    }
     // The font registry answers on this thread, as the app's main thread does.
     let mut font_service = pm_text::host::FontService::new().map_err(anyhow::Error::msg)?;
     let fonts = pm_text::host::FontBroker::new();
@@ -341,6 +349,21 @@ pub fn run() -> anyhow::Result<()> {
     let status = viewer.status();
     viewer.command(TransportCommand::Pause)?;
     costs.sort_by(f64::total_cmp);
+    if std::env::args().any(|a| a == "--playback-only") {
+        diag_mark("playback_end", &service);
+        println!(
+            "{}",
+            json!({
+                "phase": "playback", "frames": costs.len(),
+                "fps": costs.len() as f64 / seconds,
+                "p50_ms": percentile(&costs, 0.5), "p95_ms": percentile(&costs, 0.95),
+                "max_ms": costs.last(), "stand_ins": stand_ins,
+                "lowest_quality": lowest_quality, "gpu_failures": failures,
+                "diag": *DIAG.lock().unwrap(),
+            })
+        );
+        return Ok(());
+    }
     // Seeks: input to a completed frame at the new time, as the viewer scrubs.
     // Gate: the resolution the quality setting asks for when stopped.
     let requested = match arg("quality", "auto").as_str() {

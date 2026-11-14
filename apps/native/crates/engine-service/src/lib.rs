@@ -2423,6 +2423,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                         serde_json::json!({
                             "interval": r.map(|r| r.interval), "ahead": r.map(|r| r.ahead),
                             "stand_ins": f.submission.stand_ins, "late_layers": f.late_layers,
+                            "source_stand_ins": t.source_stand_ins,
                             "skipped_targets": v.status.skipped_targets, "held_frames": v.status.held_frames,
                             "render_gpu_ms": render_gpu_ms,
                             "picture": traced_picture

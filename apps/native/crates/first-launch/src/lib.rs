@@ -909,17 +909,23 @@ fn summary(native: &Path, state: &State, pass: &Pass) -> Outcome {
         history_refusals: state.history_refusals.len(),
         missing_projects: state.missing_projects.len(),
         blocked_owners: pass.blocked_owners.len(),
+        // Files, not references: undo history and every project that uses
+        // one repeat the same media.
         proxy_only: pass
             .closure
             .iter()
             .filter(|e| e.status == migration::Status::ProxyOnly)
-            .count(),
+            .map(media_file)
+            .collect::<BTreeSet<_>>()
+            .len(),
         already_offline: pass
             .closure
             .iter()
             .filter(|e| e.status == migration::Status::AlreadyOffline)
             .filter(&mut offline)
-            .count(),
+            .map(media_file)
+            .collect::<BTreeSet<_>>()
+            .len(),
         // Files, not references: undo history repeats the same original.
         not_reached: pass
             .closure
@@ -929,6 +935,13 @@ fn summary(native: &Path, state: &State, pass: &Pass) -> Outcome {
             .collect::<BTreeSet<_>>()
             .len(),
     }
+}
+/// One media file: its path when it has one, else its media key.
+fn media_file(e: &migration::ClosureEntry) -> String {
+    e.reference.source_path.as_ref().map_or_else(
+        || e.reference.key.clone(),
+        |p| p.to_string_lossy().into_owned(),
+    )
 }
 fn bootstrap(
     cp: &Checkpoint,
