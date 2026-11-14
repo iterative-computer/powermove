@@ -584,6 +584,16 @@ fn strip_view(
         }
     });
     let locked = strip.as_ref().is_some_and(|s| s.locked);
+    // The unlit channel (meter, rail, clip light): a visible channel on paper,
+    // a quiet one in the dark (v1), as steps of the one ink.
+    let channel = pm_shell::kit::ink(
+        c.text,
+        if t.scheme == pm_design::Scheme::Light {
+            t.translucency.selected
+        } else {
+            t.translucency.hover
+        },
+    );
     let ink = if quiet.is_some() { c.muted } else { c.text };
     let tabular = || FontFeatures(std::sync::Arc::new(vec![("tnum".into(), 1)]));
 
@@ -676,7 +686,7 @@ fn strip_view(
             .relative()
             .w(px(m.gap))
             .h_full()
-            .bg(rgb(c.field))
+            .bg(channel)
             .child(
                 div()
                     .absolute()
@@ -727,7 +737,7 @@ fn strip_view(
         .h_full()
         .flex()
         .justify_center()
-        .child(div().w(px(2.)).h_full().bg(rgb(c.separator)))
+        .child(div().w(px(m.border * 2.)).h_full().bg(channel))
         .child(
             div()
                 .absolute()
@@ -810,7 +820,7 @@ fn strip_view(
         })
         .size(px(m.status_dot))
         .rounded_full()
-        .bg(rgb(if clipped { c.danger } else { c.field }))
+        .bg(if clipped { rgb(c.danger) } else { channel })
         .tooltip(pm_shell::view::tooltip(
             t,
             if clipped {
