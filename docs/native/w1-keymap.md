@@ -224,7 +224,7 @@ These are dispatch paths in addition to the registry. CommandOrControl denotes t
 | M006 | CommandOrControl+, | settings | Settings… | `v1.2.0:apps/desktop/src/main/menu.ts:L91` |
 | M007 | CommandOrControl+Alt+N | newProject | New Project | `v1.2.0:apps/desktop/src/main/menu.ts:L104` |
 | M008 | CommandOrControl+O | open | Open Project… | `v1.2.0:apps/desktop/src/main/menu.ts:L112` |
-| M009 | CommandOrControl+W | closeTab | Close Tab | `v1.2.0:apps/desktop/src/main/menu.ts:L114` |
+| M009 | CommandOrControl+W | closeTab | Close Project | `v1.2.0:apps/desktop/src/main/menu.ts:L114` |
 | M010 | CommandOrControl+S | save | Save Project | `v1.2.0:apps/desktop/src/main/menu.ts:L116` |
 | M011 | CommandOrControl+Shift+S | saveAs | Save Project As… | `v1.2.0:apps/desktop/src/main/menu.ts:L117` |
 | M012 | CommandOrControl+I | import | Import Media… | `v1.2.0:apps/desktop/src/main/menu.ts:L119` |
@@ -244,8 +244,6 @@ These are dispatch paths in addition to the registry. CommandOrControl denotes t
 | M026 | CommandOrControl+N | newComposition | New Composition… | `v1.2.0:apps/desktop/src/main/menu.ts:L157` |
 | M027 | CommandOrControl+Alt+K | compositionSettings | Composition Settings… | `v1.2.0:apps/desktop/src/main/menu.ts:L158` |
 | M028 | CommandOrControl+Shift+C | precompose | Pre-compose… | `v1.2.0:apps/desktop/src/main/menu.ts:L160` |
-| M029 | Control+Tab | nextTab | Show Next Tab | `v1.2.0:apps/desktop/src/main/menu.ts:L171` |
-| M030 | Control+Shift+Tab | previousTab | Show Previous Tab | `v1.2.0:apps/desktop/src/main/menu.ts:L172` |
 | M031 | CommandOrControl+Shift+N | newWindow | New Window | `v1.2.0:apps/desktop/src/main/menu.ts:L108` |
 | M032 | CommandOrControl+Shift+W | closeWindow | Close Window | `v1.2.0:apps/desktop/src/main/menu.ts:L128` |
 | M033 | Command+H | hide | Hide | `v1.2.0:apps/desktop/src/main/menu.ts:L95` |

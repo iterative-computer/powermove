@@ -560,6 +560,11 @@ impl Editor {
                 .as_ref()
                 .map(|i| i.checked(cx))
                 .unwrap_or_default(),
+            recent: self
+                .integration
+                .as_ref()
+                .map(|i| i.recent(cx))
+                .unwrap_or_default(),
         }
     }
     fn dock_visible(&self, id: &str) -> bool {
@@ -1061,7 +1066,8 @@ impl Editor {
             "layout:define" => self.define_workspace(&cmd.args),
             "settings" => crate::open_settings(cx),
             "newWindow" => crate::open_editor(cx),
-            "newTab" => crate::open_editor_tab(cx, self.window_id),
+            // One project per window: a new tab is a new window.
+            "newTab" => crate::open_editor(cx),
             "deselect" | "cancel" => {
                 if self.gesture.is_some() {
                     self.cancel_gesture(cx);
