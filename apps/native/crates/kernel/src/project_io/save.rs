@@ -78,7 +78,7 @@ use pm_model::{Document, JsString, Map, Value};
 use sha2::{Digest, Sha256};
 
 use super::durable::{self, BackupPolicy, FileVersion, Publish, TempFile, hex, lstat_file};
-use super::envelope::{self, DocumentParts};
+use super::envelope::{self, DocumentParts, HistoryPart};
 use super::{MediaEntry, MediaSource, MediaTable};
 use crate::error::{ProjectIoError, io_err};
 use crate::history::HistorySnapshot;
@@ -145,6 +145,12 @@ pub struct SaveOptions {
     pub compact_min_dead_bytes: Option<u64>,
     #[doc(hidden)]
     pub fault: Option<WriteFault>,
+    /// Tests: write the history as `to_saved()` builds it and judge it with
+    /// the file guard's full replay (the writer before step texts), to
+    /// prove the two write the same bytes.
+    #[cfg(any(test, feature = "save-reference"))]
+    #[doc(hidden)]
+    pub reference_writer: bool,
     #[doc(hidden)]
     pub hooks: durable::PublishHooks,
     /// The profile folder of the instance that saves: a save's record names
@@ -620,6 +626,7 @@ impl SavePlan {
     }
 
     fn attempt(&self, fault: Option<WriteFault>) -> Result<SaveReceipt, ProjectIoError> {
+        let mut lap = Lap::new();
         self.validate()?;
         let dest = &self.destination;
         // A save of the project (its lock held), not an export to a path
@@ -674,6 +681,7 @@ impl SavePlan {
             }
             source = Some(file);
         }
+        lap.mark("prior version checked and index read");
         let available: HashMap<&JsString, &Record> =
             index.iter().flatten().map(|r| (&r.id, r)).collect();
         let mut reused: Vec<Record> = Vec::new();
@@ -755,6 +763,7 @@ impl SavePlan {
                 SaveLayout::Compacted,
             )
         };
+        lap.mark(if layout == SaveLayout::Compacted { "new file created" } else { "previous file cloned and hashed" });
         let tmp_err = |e: io::Error| io_err(&temp.path, e);
         let limit = match fault {
             Some(WriteFault::DiskFullAfter(n) | WriteFault::DiskFullOnce(n)) => Some(n),
@@ -801,17 +810,43 @@ impl SavePlan {
         }
         drop(source);
         durable::check_version(dest, previous, false)?;
+        lap.mark("kept media copied");
 
         // The document record.
-        let history = match &self.history {
-            HistoryToWrite::Session(snapshot) => snapshot.to_saved(),
-            HistoryToWrite::Raw(value) => value.clone(),
+        // Each session step is written from text it made once; a raw
+        // preserved history is written as read.
+        #[cfg(any(test, feature = "save-reference"))]
+        let reference = match (&self.history, self.options.reference_writer) {
+            (HistoryToWrite::Session(snapshot), true) => Some(snapshot.to_saved()),
+            _ => None,
         };
+        #[cfg(not(any(test, feature = "save-reference")))]
+        let reference: Option<Value> = None;
+        let (history, guard) = match (&self.history, &reference) {
+            (_, Some(value)) => (
+                HistoryPart::Value(value),
+                file_guard::GuardHistory::Value(value),
+            ),
+            (HistoryToWrite::Session(snapshot), None) => (
+                HistoryPart::Session(snapshot),
+                file_guard::GuardHistory::Session {
+                    snapshot,
+                    state_token: self.state_token,
+                    outside_writes: self.outside_writes,
+                },
+            ),
+            (HistoryToWrite::Raw(value), None) => (
+                HistoryPart::Value(value),
+                file_guard::GuardHistory::Value(value),
+            ),
+        };
+        lap.mark("history exported");
         // Freeze the requirement alongside this exact document/history revision.
         // Old shipped readers ignore it; the transition refusal is specified in
         // docs/native/file-guard.md. Never advertise a new container version that
         // our own production reader cannot reopen.
-        let extra = file_guard::save_extra(self.document.root(), &history, &self.extra);
+        let extra = file_guard::save_extra(self.document.root(), guard, &self.extra);
+        lap.mark("file guard");
         let doc_offset = out.offset;
         let mut sink = DocSink {
             out: &mut out,
@@ -823,7 +858,7 @@ impl SavePlan {
             &DocumentParts {
                 root: self.document.root(),
                 had_comps: self.had_comps,
-                history: &history,
+                history,
                 workspace: self.workspace.as_ref(),
                 extra: &extra,
             },
@@ -834,7 +869,7 @@ impl SavePlan {
         }
         let doc_len = sink.len;
         let doc_sha = hex(&sink.hasher.finalize());
-        drop(history);
+        lap.mark("document written");
         if !(2..=u32::MAX as u64).contains(&doc_len) {
             return Err(ProjectIoError::Invalid(
                 "Invalid project document size".into(),
@@ -887,7 +922,9 @@ impl SavePlan {
         }
         #[cfg(not(unix))]
         let _ = kept_mode;
+        lap.mark("new media, index and footer written");
         durable::sync_file(&file).map_err(tmp_err)?;
+        lap.mark("synced");
 
         self.verify(
             &file,
@@ -898,6 +935,7 @@ impl SavePlan {
             &mut buf,
         )?;
         drop(file);
+        lap.mark("verified");
         if fault == Some(WriteFault::FailBeforePublish) {
             return Err(ProjectIoError::Invalid(
                 "Injected failure before publishing".into(),
@@ -937,6 +975,7 @@ impl SavePlan {
             }
         }
         let mut published = published?;
+        lap.mark("published");
         let unfinalized = published.unfinalized.take();
         let backup = published.backup.take().or(backup);
 
@@ -1058,6 +1097,45 @@ impl SavePlan {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+#[path = "history_text_tests.rs"]
+mod history_text_tests;
+
+/// Byte-equality checks of a real project copy against the writer that
+/// rebuilt the whole history (`examples/save_timing.rs --compare`).
+#[cfg(feature = "save-reference")]
+#[doc(hidden)]
+impl SavePlan {
+    /// This plan, written by the reference writer or by step texts.
+    pub fn with_reference_writer(&self, on: bool) -> SavePlan {
+        let mut plan = self.clone();
+        plan.options.reference_writer = on;
+        plan
+    }
+    /// This plan saved to `twin` instead, which holds a copy of what the
+    /// destination holds now (or nothing).
+    pub fn retargeted(&self, twin: &Path) -> SavePlan {
+        let mut plan = self.clone();
+        plan.replace_existing = twin.exists();
+        plan.destination = twin.to_owned();
+        plan.publish = None;
+        plan
+    }
+}
+
+/// Phase times of one save attempt on stderr (`PM_SAVE_TRACE=1`).
+struct Lap(Option<std::time::Instant>);
+impl Lap {
+    fn new() -> Self {
+        Self(std::env::var_os("PM_SAVE_TRACE").map(|_| std::time::Instant::now()))
+    }
+    fn mark(&mut self, phase: &str) {
+        if let Some(at) = self.0.replace(std::time::Instant::now()) {
+            eprintln!("PM_SAVE {phase}: {:.0} ms", at.elapsed().as_secs_f64() * 1000.);
+        }
     }
 }
 
