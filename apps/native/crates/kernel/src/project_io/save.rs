@@ -814,37 +814,26 @@ impl SavePlan {
 
         // The document record.
         // A session's steps are written in the packed history form from text
-        // each made once. A history kept as read is packed too: `pack` keeps
-        // every member and `unpackHistory` gives it back whole; the guard
-        // judges it as read.
+        // each made once. A history kept as read (nothing recorded since the
+        // open) is written exactly as read, as an untouched save must.
         #[cfg(any(test, feature = "save-reference"))]
         let reference = match (&self.history, self.options.reference_writer) {
             (HistoryToWrite::Session(snapshot), Some(ReferenceWriter::Unpacked)) => {
-                Some((snapshot.to_saved(), None))
+                Some(snapshot.to_saved())
             }
             (HistoryToWrite::Session(snapshot), Some(ReferenceWriter::Packed)) => {
-                Some((crate::history::pack(snapshot.to_saved()), None))
-            }
-            (HistoryToWrite::Raw(value), Some(ReferenceWriter::Unpacked)) => {
-                Some((value.clone(), None))
-            }
-            (HistoryToWrite::Raw(value), Some(ReferenceWriter::Packed)) => {
-                Some((crate::history::pack(value.clone()), Some(value)))
+                Some(crate::history::pack(snapshot.to_saved()))
             }
             _ => None,
         };
         #[cfg(not(any(test, feature = "save-reference")))]
-        let reference: Option<(Value, Option<&Value>)> = None;
-        let raw_packed = match (&self.history, &reference) {
-            (HistoryToWrite::Raw(value), None) => Some(crate::history::pack(value.clone())),
-            _ => None,
-        };
-        let (history, guard) = match (&self.history, &reference, &raw_packed) {
-            (_, Some((value, raw)), _) => (
+        let reference: Option<Value> = None;
+        let (history, guard) = match (&self.history, &reference) {
+            (_, Some(value)) => (
                 HistoryPart::Value(value),
-                file_guard::GuardHistory::Value(raw.unwrap_or(value)),
+                file_guard::GuardHistory::Value(value),
             ),
-            (HistoryToWrite::Session(snapshot), None, _) => (
+            (HistoryToWrite::Session(snapshot), None) => (
                 HistoryPart::Session(snapshot),
                 file_guard::GuardHistory::Session {
                     snapshot,
@@ -852,11 +841,7 @@ impl SavePlan {
                     outside_writes: self.outside_writes,
                 },
             ),
-            (HistoryToWrite::Raw(value), None, Some(packed)) => (
-                HistoryPart::Value(packed),
-                file_guard::GuardHistory::Value(value),
-            ),
-            (HistoryToWrite::Raw(value), None, None) => (
+            (HistoryToWrite::Raw(value), None) => (
                 HistoryPart::Value(value),
                 file_guard::GuardHistory::Value(value),
             ),
