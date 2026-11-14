@@ -39,8 +39,10 @@ fn full_quad(w: u32, h: u32) -> [f32; 9] {
 /// draws at the 1:1 export's size at any viewer zoom or playback scale.
 /// The clip position (`u_m` against `u_res`) is the same either way. Owner
 /// bound steps (`u_pixelScale`) handle density themselves. Extension shaders
-/// instead receive Electron's physical output pixels: their glyph grid and
-/// texel-sized kernels must match Electron at the same output resolution.
+/// in final output (`raster_space`) instead receive Electron's physical
+/// output pixels: their glyph grid and texel-sized kernels match Electron at
+/// the same output resolution. In viewer frames they follow the built-in
+/// contract, so a reduced-resolution frame is the full picture sampled down.
 fn effect_space(
     step: &EffectStep,
     out: (u32, u32),

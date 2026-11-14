@@ -785,3 +785,44 @@ fn gain_map_stills_read_as_hdr_or_as_their_sdr_base() {
         "an HDR HEIC is HDR without a map"
     );
 }
+
+/// An AVIF tagged PQ or HLG in its `colr nclx` box reads as BT.2100 light,
+/// as a PNG cICP does (pm-render stills
+/// `pq_and_hlg_stills_keep_their_light_in_an_hdr_project` measures that
+/// reading's light).
+#[test]
+fn avif_nclx_pq_and_hlg_read_as_hdr() {
+    let Some(home) = std::env::var_os("HOME") else {
+        return;
+    };
+    let source = PathBuf::from(home)
+        .join("Library/Caches/powermove-engine/media-corpus/formats/image/avif-10bit.avif");
+    let Ok(bytes) = std::fs::read(&source) else {
+        eprintln!("avif-10bit.avif missing: run the format corpus (skipped)");
+        return;
+    };
+    let at = bytes.windows(8).position(|w| w == b"colrnclx").unwrap() + 8;
+    let dir = TempDir::new().unwrap();
+    let pool = FramePool::new(0);
+    for (code, transfer) in [(16u8, Transfer::Pq), (18, Transfer::Hlg)] {
+        let mut tagged = bytes.clone();
+        tagged[at..at + 6].copy_from_slice(&[0, 9, 0, code, 0, 9]);
+        let path = dir.path().join(format!("hdr-{code}.avif"));
+        std::fs::write(&path, &tagged).unwrap();
+        let still = image::read(&path, &pool).unwrap();
+        assert_eq!(
+            still.color.cicp.map(|c| [c[0], c[1], c[2]]),
+            Some([9, code, 9])
+        );
+        let read = pm_media::interpret::interpret_still(
+            &still.color,
+            false,
+            &pm_media::interpret::Interpretation::default(),
+        );
+        assert_eq!(read.reading.transfer.value, transfer, "transfer {code}");
+        assert_eq!(
+            read.reading.primaries.value,
+            pm_protocol::color::Primaries::Bt2020
+        );
+    }
+}
