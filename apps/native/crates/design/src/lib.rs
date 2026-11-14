@@ -231,6 +231,9 @@ pub struct Metrics {
     pub sidebar: f32,
     pub border: f32,
     pub min_panel: f32,
+    /// How far a dock divider's grab reaches into the panels on each side
+    /// of its gap: the gap alone is too thin to find by hand.
+    pub splitter_reach: f32,
     pub min_center: f32,
     pub keyboard_step: f32,
     pub drag_threshold: f32,
@@ -731,6 +734,7 @@ impl Tokens {
                 sidebar: 224.,
                 border: 1.,
                 min_panel: 72.,
+                splitter_reach: 4.,
                 min_center: 180.,
                 keyboard_step: 10.,
                 drag_threshold: 3.,

@@ -139,6 +139,7 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `metrics.sheet_width` | Default sheet width | 480 | 480 | 480 | 480 |
 | `metrics.sheet_width_wide` | Width of wide sheets: Export, Expression | 600 | 600 | 600 | 600 |
 | `metrics.sidebar` | Sidebar width of Home and Settings | 224 | 224 | 224 | 224 |
+| `metrics.splitter_reach` | How far a dock divider's grab reaches into the panels beside its gap | 4 | 4 | 4 | 4 |
 | `metrics.status` | Status bar height | 24 | 24 | 24 | 24 |
 | `metrics.status_dot` | Attention dot and drop insertion-line end circle | 6 | 6 | 6 | 6 |
 | `metrics.symbol_action` | SF Symbol size of a surface's one primary action glyph | 20 | 20 | 20 | 20 |

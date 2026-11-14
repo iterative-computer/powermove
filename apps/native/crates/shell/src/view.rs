@@ -1842,13 +1842,16 @@ impl Render for Editor {
                 .elevated(&t, pm_design::Elevation::Panel)
                 .overflow_hidden();
             if body_native {
+                // A native body (an extension's web page) takes the pointer
+                // where it shows, so it stops short of the dividers' grab.
+                let edge = m.border.max(m.splitter_reach);
                 native_bodies.push((
                     id.to_string(),
                     Rect {
-                        x: p.rect.x + m.border,
+                        x: p.rect.x + edge,
                         y: p.rect.y + m.header,
-                        w: (p.rect.w - m.border * 2.).max(0.),
-                        h: (p.rect.h - m.header - m.border).max(0.),
+                        w: (p.rect.w - edge * 2.).max(0.),
+                        h: (p.rect.h - m.header - edge).max(0.),
                     },
                 ));
             } else if self
@@ -2234,8 +2237,9 @@ impl Render for Editor {
             let key_divider = d.clone();
             // As in Final Cut and After Effects, the splitter is the gap
             // itself: nothing is drawn on it, the resize cursor says it can
-            // be dragged, along its whole length and a little past each side.
-            let reach = m.border * 2.;
+            // be dragged, along its whole length and a few points into the
+            // panels on each side (the gap alone was too thin to find).
+            let reach = m.splitter_reach;
             let hit = if d.horizontal {
                 Rect {
                     y: d.rect.y - reach,
@@ -2281,6 +2285,10 @@ impl Render for Editor {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, e: &MouseDownEvent, window, cx| {
+                            // The grab reaches over the panels' edges: the
+                            // header or body under it must not also take the
+                            // press (a header would start a panel drag).
+                            cx.stop_propagation();
                             this.split_focus = Some(divd.clone());
                             if let Some(h) = &this.host {
                                 h.borrow_mut().splitter_focus = true;
@@ -2960,6 +2968,107 @@ mod tests {
     /// A splitter shows the resize cursor under the pointer, along its whole
     /// length and a little past each side of the gap, and keeps it for the
     /// whole drag, wherever the pointer goes (owner feedback W1).
+    #[gpui::test]
+    fn every_divider_grabs_along_its_whole_length_in_every_workspace(cx: &mut TestAppContext) {
+        use gpui::{CursorStyle, Modifiers, point, px, size};
+        let tokens = Tokens::new(pm_design::Scheme::Dark, Default::default());
+        let m = tokens.metrics;
+        let (view, cx) = cx.add_window_view(|_, cx| Editor::new(tokens, None, cx));
+        cx.update(|window, _| window.activate());
+        let none = Modifiers::none();
+        let reach = m.splitter_reach;
+        // Where a divider grabs: its gap and `reach` into each side.
+        let grab = |d: &crate::layout::Divider| {
+            let r = d.rect;
+            if d.horizontal {
+                crate::layout::Rect {
+                    y: r.y - reach,
+                    h: r.h + 2. * reach,
+                    ..r
+                }
+            } else {
+                crate::layout::Rect {
+                    x: r.x - reach,
+                    w: r.w + 2. * reach,
+                    ..r
+                }
+            }
+        };
+        let mut checked = 0;
+        for (w, h) in [(1024., 640.), (1440., 900.), (2560., 1440.)] {
+            cx.simulate_resize(size(px(w), px(h)));
+            for id in crate::workspace::BUILTIN {
+                view.update(cx, |v, cx| {
+                    let record = v.workspaces.get(id).cloned().expect(id);
+                    v.activate_record(record);
+                    cx.notify();
+                });
+                cx.run_until_parked();
+                let dividers = view.read_with(cx, |v, _| v.geometry.dividers.clone());
+                for (i, d) in dividers.iter().enumerate() {
+                    let wanted = if d.horizontal {
+                        CursorStyle::ResizeUpDown
+                    } else {
+                        CursorStyle::ResizeLeftRight
+                    };
+                    let r = d.rect;
+                    let (length, thick) = if d.horizontal { (r.w, r.h) } else { (r.h, r.w) };
+                    // Along its whole length, across its whole grab: the
+                    // gap's centre and just inside each outer edge.
+                    let mut at = 1.;
+                    while at <= length - 1. {
+                        for across in [-reach + 0.5, thick / 2., thick + reach - 0.5] {
+                            let (x, y) = if d.horizontal {
+                                (r.x + at, r.y + across)
+                            } else {
+                                (r.x + across, r.y + at)
+                            };
+                            // Where two dividers' grabs cross, either answers.
+                            let crossing = dividers
+                                .iter()
+                                .enumerate()
+                                .any(|(j, o)| j != i && grab(o).contains(x, y));
+                            if crossing {
+                                continue;
+                            }
+                            cx.simulate_mouse_move(point(px(x), px(y)), None, none);
+                            assert_eq!(
+                                cx.cursor_style(),
+                                wanted,
+                                "{id} at {w}x{h}: {d:?} at {x},{y}"
+                            );
+                            checked += 1;
+                        }
+                        at += 12.;
+                    }
+                    // A press at the grab's outer edge, mid-length, starts
+                    // resizing this divider (not a panel drag or a click).
+                    let (x, y) = if d.horizontal {
+                        (r.x + length / 2., r.y + thick + reach - 0.5)
+                    } else {
+                        (r.x + thick + reach - 0.5, r.y + length / 2.)
+                    };
+                    if dividers
+                        .iter()
+                        .enumerate()
+                        .any(|(j, o)| j != i && grab(o).contains(x, y))
+                    {
+                        continue;
+                    }
+                    cx.simulate_mouse_move(point(px(x), px(y)), None, none);
+                    cx.simulate_mouse_down(point(px(x), px(y)), gpui::MouseButton::Left, none);
+                    let pressed = view.read_with(cx, |v, _| match &v.gesture {
+                        Some(super::Gesture::Resize(g, ..)) => g.rect == d.rect,
+                        _ => false,
+                    });
+                    cx.simulate_mouse_up(point(px(x), px(y)), gpui::MouseButton::Left, none);
+                    assert!(pressed, "{id} at {w}x{h}: a press did not grab {d:?}");
+                }
+            }
+        }
+        assert!(checked > 1000, "{checked} points");
+    }
+
     #[gpui::test]
     fn splitters_show_the_resize_cursor_and_keep_it_while_dragging(cx: &mut TestAppContext) {
         use gpui::{CursorStyle, Modifiers, MouseButton, point, px};

@@ -163,6 +163,7 @@ const ROLES: &[(&str, &str)] = &[
         "Separator thickness (Increase Contrast doubles it)",
     ),
     ("metrics.min_panel", "Smallest panel extent"),
+    ("metrics.splitter_reach", "How far a dock divider's grab reaches into the panels beside its gap"),
     ("metrics.min_center", "Smallest viewer extent"),
     ("metrics.keyboard_step", "Splitter arrow-key step"),
     (
