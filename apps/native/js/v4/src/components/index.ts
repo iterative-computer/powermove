@@ -372,9 +372,12 @@ export function DisclosureGroup(
     /** The section's own action, at the trailing edge of its heading row
      * (Refresh Fonts, Add Mask). */
     accessory?: ComponentChildren;
+    /** What stands before the title, on the row-label inset (a grade's
+     * enable checkbox, as Final Cut's inspector leads an effect with it). */
+    leading?: ComponentChildren;
   },
 ) {
-  const { children, open, onChange, accessory, ...rest } = props;
+  const { children, open, onChange, accessory, leading, ...rest } = props;
   const id = useId();
   // A section heading is a label, a step under its panel's title, on a row
   // of its own.
@@ -398,17 +401,35 @@ export function DisclosureGroup(
       fontWeight: token("typography.semibold_weight"),
       height: token("metrics.row"),
       minHeight: token("metrics.row"),
-      ...(accessory ? { flexGrow: 1 } : {}),
+      ...(accessory || leading ? { flexGrow: 1 } : {}),
+      // The title follows what leads it by a gap, not a second inset.
+      ...(leading ? { paddingLeft: token("metrics.gap") } : {}),
     },
   );
   return kit("disclosure-group", "div", {
     ...rest,
     role: "group",
     children: [
-      accessory
+      accessory || leading
         ? h("div", { "data-pm-slot": "heading" }, [
+            leading
+              ? h(
+                  "div",
+                  {
+                    style: {
+                      display: "flex",
+                      flexDirection: "row",
+                      alignItems: "center",
+                      paddingLeft: token("metrics.inset"),
+                    },
+                  },
+                  leading,
+                )
+              : null,
             button,
-            h("div", { "data-pm-slot": "accessory" }, accessory),
+            accessory
+              ? h("div", { "data-pm-slot": "accessory" }, accessory)
+              : null,
           ])
         : button,
       open ? h("div", { id }, children) : null,
