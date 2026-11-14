@@ -270,13 +270,25 @@ impl SurfaceView {
             // mounted in. A reopened window (the Agent popover closes and
             // opens again with the same view) mounts its own, or its
             // pop-ups, buttons and composer would be missing.
+            // Their text carries over: once typed, a field's text lives in
+            // the editor, not in the published value.
+            let texts: Vec<(Id, String)> = self
+                .fields
+                .iter()
+                .map(|(id, f)| (*id, f.read(cx).value().to_owned()))
+                .collect();
             self.controls.clear();
             self.fields.clear();
             self.leases.clear();
             self.option_sets.clear();
             self.subscriptions.clear();
-            cx.defer_in(window, |v, window, cx| {
+            cx.defer_in(window, move |v, window, cx| {
                 v.reconcile(window, cx);
+                for (id, text) in texts {
+                    if let Some(field) = v.fields.get(&id) {
+                        field.update(cx, |f, cx| f.set_value(&text, cx));
+                    }
+                }
                 cx.notify();
             });
         }

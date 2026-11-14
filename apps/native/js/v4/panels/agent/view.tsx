@@ -1722,11 +1722,14 @@ function Composer({
   n,
   send,
   menu,
+  shown,
 }: {
   s: Snapshot;
   n: NativeFacts;
   send: Send;
   menu?: Menu;
+  /** Counts the panel's showings (each change of presentation). */
+  shown: number;
 }) {
   const working = s.runId !== null;
   const available = n.connection === "connected";
@@ -1893,6 +1896,10 @@ function Composer({
           </text>
         ) : (
           <Field
+            // A fresh editor each time the panel is shown somewhere new, so
+            // it starts from the draft as it is now (typed text lives in the
+            // editor, not in the value the host last saw).
+            key={`composer-${shown}`}
             multiline
             id="agent-composer-text"
             label="Message Powermove agent"
@@ -2136,6 +2143,14 @@ export function AgentView({
   const [typed, setTyped] = useState<Record<string, string>>({});
   const [away, setAway] = useState(false);
   const [jumps, setJumps] = useState(0);
+  // Each change of where the panel is shown (the popover opening, a dock)
+  // counts as a new showing.
+  const presentation = useRef({ at: n.presentation, count: 0 });
+  if (presentation.current.at !== n.presentation)
+    presentation.current = {
+      at: n.presentation,
+      count: presentation.current.count + 1,
+    };
   if (!n.visible) return null;
   const local: Local = {
     open,
@@ -2279,7 +2294,15 @@ export function AgentView({
           />
         </div>
       )}
-      {!setup && <Composer s={s} n={n} send={send} menu={menu} />}
+      {!setup && (
+        <Composer
+          s={s}
+          n={n}
+          send={send}
+          menu={menu}
+          shown={presentation.current.count}
+        />
+      )}
     </div>
   );
 }
