@@ -1439,6 +1439,30 @@ impl DocumentStore {
             && self.file.envelope.wrapped)
             .then(|| self.file.version.clone())
             .flatten();
+        if unchanged.is_none()
+            && matches!(target, SaveTarget::InPlace)
+            && std::env::var_os("PM_SAVE_TRACE").is_some()
+        {
+            eprintln!(
+                "PM_SAVE writes: unsaved {} (dirty {}, outside writes {}/{}), history steps {}, workspace {}, followed {}, format {:?}",
+                self.needs_save(),
+                self.is_dirty(),
+                self.outside_writes,
+                self.saved_outside_writes,
+                if history_steps == self.saved_steps {
+                    "as saved"
+                } else {
+                    "changed"
+                },
+                if self.file.envelope.workspace == self.saved_workspace {
+                    "as saved"
+                } else {
+                    "changed"
+                },
+                self.file_followed,
+                self.file.format,
+            );
+        }
         // The writers a test compares always write.
         #[cfg(any(test, feature = "save-reference"))]
         let unchanged = unchanged.filter(|_| options.reference_writer.is_none());

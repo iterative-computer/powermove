@@ -680,11 +680,21 @@ impl SavePlan {
         let version = self.unchanged.as_ref()?;
         let now = lstat_file(&self.destination).ok().flatten()?;
         if !now.same_file(&version.stat) || version.path != self.destination {
+            if std::env::var_os("PM_SAVE_TRACE").is_some() {
+                eprintln!("PM_SAVE writes: the file changed since it was read or written");
+            }
             return None;
         }
+        let trace = std::env::var_os("PM_SAVE_TRACE").is_some();
         if !version.stat_proves_content() {
             let read = FileVersion::read(&self.destination).ok().flatten()?;
-            if !read.stat.same_file(&version.stat) || read.hash != version.hash {
+            let same = read.stat.same_file(&version.stat) && read.hash == version.hash;
+            if trace {
+                eprintln!(
+                    "PM_SAVE stat taken within the timestamps' tick: bytes read, same: {same}"
+                );
+            }
+            if !same {
                 return None;
             }
             version.proven_at(read.stat_taken_ns());
@@ -696,6 +706,9 @@ impl SavePlan {
             _ => false,
         };
         if !self.media.iter().all(in_file) {
+            if trace {
+                eprintln!("PM_SAVE writes: media held outside the file");
+            }
             return None;
         }
         Some(SaveReceipt {
