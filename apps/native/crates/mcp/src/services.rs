@@ -132,11 +132,12 @@ impl VideoOptions {
             .iter()
             .filter_map(|k| a.get(*k).map(|v| ((*k).to_owned(), v.clone())))
             .collect();
+        // A custom size is scale "custom" with both dimensions; a dimension
+        // without it would export at the composition's size.
         let sized = sheet.contains_key("width") || sheet.contains_key("height");
         let custom = sheet.get("scale").and_then(Value::as_str) == Some("custom");
-        if (sized || custom) && !(custom || !sheet.contains_key("scale"))
-            || (sized || custom) && !(sheet.contains_key("width") && sheet.contains_key("height"))
-        {
+        let both = sheet.contains_key("width") && sheet.contains_key("height");
+        if (sized || custom) && !(custom && both) {
             return Err(Error::invalid(
                 "A custom size takes scale \"custom\" with both width and height.",
             ));
