@@ -930,6 +930,11 @@ impl SurfaceView {
             .filter(|(key, _)| key.as_str() == semantic || key.ends_with(semantic))
             .min_by_key(|(key, _)| key.len())
             .map(|(_, id)| *id);
+        // A value committed to a field goes where typing and Return send it
+        // (a bound field writes through its lease, not a JS listener).
+        if let (Some(id), "change", Some(value)) = (id, event, value.clone()) {
+            return self.change(id, value, cx);
+        }
         if let Some(id) = id {
             let detail = EventDetail {
                 value,
