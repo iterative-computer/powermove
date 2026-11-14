@@ -7,6 +7,9 @@ pub struct Choice {
     pub category: String,
     /// `Some` keeps the check column; `Some(true)` shows the mark.
     pub checked: Option<bool>,
+    /// A font family the row's title is drawn in (a font picker previews
+    /// each face in its own row).
+    pub font: Option<String>,
 }
 impl Choice {
     pub fn new(label: impl Into<String>, command: impl Into<String>) -> Self {
@@ -24,6 +27,10 @@ impl Choice {
         self.checked = Some(on);
         self
     }
+    pub fn in_font(mut self, family: impl Into<String>) -> Self {
+        self.font = Some(family.into());
+        self
+    }
 }
 /// What a menu's rows are doing: nothing is lit when it opens. The keyboard
 /// lights a row (an arrow, or the best match of a typed query); the pointer
@@ -37,6 +44,10 @@ pub struct Picker {
     /// The row under the pointer, a place in `filtered`.
     pub hover: Option<usize>,
     pub open: bool,
+    /// The most rows listed at once (a font picker over every installed
+    /// family); the search narrows the rest. Keys and the pointer reach
+    /// only listed rows.
+    pub page: Option<usize>,
 }
 /// Match quality of `query` against `text` (lower is better), `None` if absent.
 /// Label prefix, then a word start, then any substring, then an in-order
@@ -68,6 +79,18 @@ impl Picker {
     /// its best match does, and its rows run best match first; ties keep
     /// their original order.
     pub fn filtered(&self) -> Vec<usize> {
+        let mut rows = self.matches();
+        if let Some(page) = self.page {
+            rows.truncate(page);
+        }
+        rows
+    }
+    /// Matching rows past the page, not listed.
+    pub fn unlisted(&self) -> usize {
+        self.page
+            .map_or(0, |page| self.matches().len().saturating_sub(page))
+    }
+    fn matches(&self) -> Vec<usize> {
         let query = self.query.to_lowercase();
         let mut ranked: Vec<(u32, usize)> = self
             .choices

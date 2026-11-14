@@ -14,8 +14,13 @@ type MediaProbeInputs = (
     BTreeMap<String, std::path::PathBuf>,
     BTreeMap<String, std::path::PathBuf>,
 );
+/// Rows the font picker lists at once; typing narrows the rest.
+const FONT_PAGE: usize = 80;
 #[derive(Default)]
 pub struct Host {
+    /// The font picker's open request: the panel's runtime and the request
+    /// it answers when a face is chosen (or nothing).
+    pub font_pick: Option<(Arc<Builtins>, u64)>,
     project: Option<String>,
     document: Option<u64>,
     application: bool,
@@ -462,6 +467,70 @@ impl Controller {
             || views
                 .into_iter()
                 .any(|view| view.update(cx, |view, cx| view.cancel_gesture(cx)))
+    }
+    /// The font picker (v1's): our menu under the field that opened it, a
+    /// search over every installed family, each row in its own face, the
+    /// current one checked and in view. An agent's pick is claimed by label
+    /// as for every panel menu, so no menu is left on screen for it.
+    fn font_menu(
+        &mut self,
+        runtime: &Arc<Builtins>,
+        request: &pm_builtins::PlatformRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let families = crate::colour_panel::font_families();
+        let current = request.input["current"].as_str().unwrap_or_default();
+        if let Some(previous) = self.builtins.font_pick.take() {
+            previous.0.platform_reply(previous.1, Ok(Value::Null));
+        }
+        let options: Vec<Value> = families.iter().map(|f| json!({"label": f})).collect();
+        if let Some(choice) = pm_shell::agent_menu::claim(
+            &pm_shell::agent_menu_windows(&self.host.borrow().window),
+            &options,
+        ) {
+            let family = choice.and_then(|i| families.get(i)).cloned();
+            runtime.platform_reply(request.id, Ok(json!(family)));
+            return;
+        }
+        let anchor = request.input["anchor"].as_u64().and_then(|id| {
+            let view = self.builtins.views.get(&request.panel)?;
+            let b = view.read(cx).anchor_bounds(id)?;
+            Some(pm_shell::layout::Rect {
+                x: f32::from(b.origin.x),
+                y: f32::from(b.origin.y),
+                w: f32::from(b.size.width),
+                h: f32::from(b.size.height),
+            })
+        });
+        let choices = families
+            .iter()
+            .map(|f| {
+                pm_shell::transient::Choice::new(f.clone(), format!("fontPick:{f}"))
+                    .checked(f == current)
+                    .in_font(f.clone())
+            })
+            .collect();
+        self.builtins.font_pick = Some((runtime.clone(), request.id));
+        let _ = window;
+        self.host.borrow_mut().open_menu(
+            choices,
+            anchor,
+            Some(FONT_PAGE),
+            Some("fontPick:".into()),
+            "Search fonts",
+        );
+    }
+    /// The font picker's answer: a family, or none when it closed unchosen.
+    pub fn font_picked(&mut self, family: &str) {
+        if let Some((runtime, id)) = self.builtins.font_pick.take() {
+            let value = if family.is_empty() {
+                Value::Null
+            } else {
+                json!(family)
+            };
+            runtime.platform_reply(id, Ok(value));
+        }
     }
     pub fn update_builtins(&mut self, cx: &mut Context<Self>) {
         self.sync_keymap();
@@ -1402,13 +1471,7 @@ impl Controller {
                     continue;
                 }
                 "fontMenu" => {
-                    let families = crate::colour_panel::font_families();
-                    let options: Vec<_> = families.iter().map(|f| json!({"label": f})).collect();
-                    let runtime = runtime.clone();
-                    crate::v4_native::menu(window, &options, cx, move |index, _| {
-                        let family = index.and_then(|i| families.get(i)).cloned();
-                        runtime.platform_reply(request.id, Ok(json!(family)));
-                    });
+                    self.font_menu(&runtime, &request, window, cx);
                     continue;
                 }
                 "project.menu" => {
