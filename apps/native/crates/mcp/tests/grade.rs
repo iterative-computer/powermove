@@ -272,3 +272,32 @@ fn an_agent_writes_grading_values_the_controls_can_hold() {
     f.agent(vec![add(json!({"amount":5000}), "blur")]);
     assert_eq!(f.fx()[1]["p"]["amount"]["v"], 5000);
 }
+
+/// An agent adds a Color Space Transform as the Colour panel's Add does, with
+/// its conversion and method, and is refused a method that does not exist.
+#[test]
+fn an_agent_adds_a_color_space_transform() {
+    let f = Fixture::new();
+    let id = f.agent(vec![json!({"type":"add_effect","target":"clip","effect":"colorSpaceTransform",
+        "parameters":{"inputGamut":6,"inputTransfer":10,"toneMapping":2,"sourcePeak":4000,"gamutMapping":2}})])
+        [0]["effectId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let fx = &f.fx()[0];
+    assert_eq!(fx["type"], "colorSpaceTransform");
+    assert_eq!(fx["p"]["inputTransfer"]["v"], 10);
+    assert_eq!(fx["p"]["sourcePeak"]["v"], 4000);
+    let project = f.host.lock().unwrap().read_document(&f.id).unwrap();
+    let state = pm_kernel::state::StateSnapshot::seeded();
+    let refused = pm_mcp::commands::plan_with_definitions(
+        &project,
+        &[],
+        &[
+            json!({"type":"set_property","target":"clip","path":format!("{id}.toneMapping"),"value":9,"mode":"static"}),
+        ],
+        0.,
+        Some(&state),
+    );
+    assert!(format!("{:?}", refused.err()).contains("one of"));
+}
