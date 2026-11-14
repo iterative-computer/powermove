@@ -675,3 +675,21 @@ pub fn glyphs(chord: &str) -> String {
     s.push_str(&k);
     s
 }
+
+/// WebKit owns DOM editing, just as AppKit's text editor owns native fields.
+pub(crate) fn owns_text_edit(is_text_view: bool, class_name: &str) -> bool {
+    is_text_view || class_name.contains("WK") || class_name.contains("Web")
+}
+
+#[cfg(test)]
+mod edit_responder_tests {
+    #[test]
+    fn edit_commands_reach_native_fields_and_extension_dom_inputs() {
+        for class in ["WKWebView", "WKContentView", "WebHTMLView"] {
+            assert!(super::owns_text_edit(false, class), "{class}");
+        }
+        assert!(super::owns_text_edit(true, "NSTextView"));
+        assert!(!super::owns_text_edit(false, "GPUIView"));
+        assert!(!super::owns_text_edit(false, "NSButton"));
+    }
+}
