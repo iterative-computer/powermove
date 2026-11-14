@@ -1126,6 +1126,13 @@ impl TimelineSurface {
         };
         (at, index, ruler + top - self.view.scroll_y)
     }
+    fn media_moved(&mut self, bounds: Bounds<Pixels>, at: Point<Pixels>, cx: &mut Context<Self>) {
+        let over = bounds.contains(&at).then_some(at);
+        if over != self.media_over {
+            self.media_over = over;
+            cx.notify();
+        }
+    }
     fn drop_media(&mut self, what: Dropped, position: Point<Pixels>, cx: &mut Context<Self>) {
         self.media_over = None;
         let (at, index, _) = self.media_slot(position);
@@ -2627,15 +2634,15 @@ impl Render for TimelineSurface {
             )
             // Finder files and Project items dropped here land at the time
             // and place in the stack under the pointer (v1.2.0's timeline).
+            // GPUI tells every listener of a drag's moves: the line shows
+            // only while the pointer is over the timeline.
             .on_drag_move(cx.listener(|s, event: &DragMoveEvent<ExternalPaths>, _, cx| {
-                s.media_over = Some(event.event.position);
-                cx.notify();
+                s.media_moved(event.bounds, event.event.position, cx);
             }))
             .on_drag_move(cx.listener(
                 |s, event: &DragMoveEvent<crate::v4_view::PanelDrag>, _, cx| {
                     if event.drag(cx).panel == pm_builtins::PROJECT_PANEL {
-                        s.media_over = Some(event.event.position);
-                        cx.notify();
+                        s.media_moved(event.bounds, event.event.position, cx);
                     }
                 },
             ))
