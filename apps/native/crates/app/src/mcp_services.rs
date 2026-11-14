@@ -339,6 +339,7 @@ impl EngineJobs {
         Ok(Arc::new(pm_engine_service::resources::ResourceSnapshot {
             generation,
             definitions: crate::extensions::definitions(&value),
+            unavailable: crate::extensions::unavailable(&host.publication()),
             ..Default::default()
         }))
     }

@@ -364,9 +364,11 @@ fn pinned(
     } else {
         vec![]
     };
+    let unavailable = unavailable(publication);
     if definitions == current.definitions
         && pending == current.pending
         && loading == current.loading
+        && unavailable == current.unavailable
     {
         return None;
     }
@@ -375,8 +377,26 @@ fn pinned(
         definitions,
         pending,
         loading,
+        unavailable,
         ..Default::default()
     })
+}
+/// The installed extensions that provide nothing now, with why, as the
+/// viewer and jobs name them beside the effects they would provide.
+pub(crate) fn unavailable(
+    publication: &pm_compat_runner::host::Publication,
+) -> Vec<pm_engine_service::resources::Unavailable> {
+    publication
+        .unavailable
+        .iter()
+        .map(
+            |(id, name, why)| pm_engine_service::resources::Unavailable {
+                id: id.clone(),
+                name: name.clone(),
+                why: why.clone(),
+            },
+        )
+        .collect()
 }
 /// Effect types the engine draws without any extension.
 fn builtin_effects() -> &'static BTreeSet<String> {

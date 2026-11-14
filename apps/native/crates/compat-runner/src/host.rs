@@ -265,7 +265,48 @@ impl Published {
                 },
             loading: self.starting.iter().cloned().chain(realm).collect(),
             contributions: self.contributions.clone(),
+            unavailable: self.records.values().filter_map(unavailable).collect(),
         }
+    }
+}
+/// An installed extension that provides nothing now, as (id, name, why),
+/// with `why` read after its name; `None` while it runs or loads.
+fn unavailable(record: &Value) -> Option<(String, String, String)> {
+    let id = record["id"].as_str()?;
+    let name = record["manifest"]["name"].as_str().unwrap_or(id);
+    let health = &record["health"];
+    let why = match health["state"].as_str().unwrap_or("ok") {
+        // A D11 Stop: off for this run, whatever the saved preference.
+        _ if record["enabled"] == false && health["error"] == "Stopped responding" => {
+            "is off until Powermove restarts"
+        }
+        _ if record["enabled"] == false => "is turned off",
+        "disabled" => "is turned off",
+        "runtime-error" => "stopped working",
+        "activation-error" => "couldn't start",
+        "build-error" | "manifest-error" => "couldn't be loaded",
+        "needs-trust" => "needs your permission to run",
+        "needs-update" => "needs an update",
+        "needs-setup" => "needs setting up",
+        "replaced" => "is replaced by another extension",
+        _ => return None,
+    };
+    Some((id.to_owned(), name.to_owned(), why.to_owned()))
+}
+/// What a job told its extensions did not finish starting hears: who.
+fn not_finished(loading: &[(String, String)]) -> String {
+    let mut names: Vec<&str> = vec![];
+    for (_, name) in loading {
+        if !names.contains(&name.as_str()) {
+            names.push(name);
+        }
+    }
+    let head = "Extensions did not finish starting";
+    match names.as_slice() {
+        [] => head.to_owned(),
+        [one] => format!("{head}: {one} is still loading"),
+        [a, b] => format!("{head}: {a} and {b} are still loading"),
+        [a, b, rest @ ..] => format!("{head}: {a}, {b} and {} more are still loading", rest.len()),
     }
 }
 /// One moment of what a host publishes. A reader takes everything it pins
@@ -284,6 +325,10 @@ pub struct Publication {
     /// The extensions still loading, as (id, name): the realm's load pass's
     /// and the Store helpers starting. Empty once settled.
     pub loading: Vec<(String, String)>,
+    /// Installed extensions that provide nothing now, as (id, name, why):
+    /// `why` reads after the name ("is turned off"). They are named beside
+    /// the effects they would provide.
+    pub unavailable: Vec<(String, String, String)>,
 }
 
 struct Shared {
@@ -840,12 +885,12 @@ impl ExtensionHost {
     ) -> Result<(u64, Arc<Value>)> {
         const POLL: Duration = Duration::from_millis(50);
         let deadline = std::time::Instant::now() + timeout;
-        let unfinished = |what: &str| -> Result<()> {
+        let unfinished = |loading: &[(String, String)]| -> Result<()> {
             if stop() {
                 return Err(Error::Host(WAIT_STOPPED.into()));
             }
             if std::time::Instant::now() >= deadline {
-                return Err(Error::Host(what.into()));
+                return Err(Error::Host(not_finished(loading)));
             }
             Ok(())
         };
@@ -859,9 +904,7 @@ impl ExtensionHost {
         loop {
             match rx.recv_timeout(POLL) {
                 Ok(()) => break,
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    unfinished("Extensions did not finish starting")?
-                }
+                Err(mpsc::RecvTimeoutError::Timeout) => unfinished(&self.publication().loading)?,
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     return Err(Error::Host("The extension host stopped".into()));
                 }
@@ -876,7 +919,7 @@ impl ExtensionHost {
             if published.ready && published.publication().settled {
                 break;
             }
-            unfinished("Extensions did not finish starting")?;
+            unfinished(&published.publication().loading)?;
             published = self.shared.changed.wait_timeout(published, POLL).unwrap().0;
         }
         // The cancel may have come as the load settled.
@@ -4242,6 +4285,74 @@ mod tests {
             "{toasts:?}"
         );
     }
+    /// An installed extension that provides nothing now is published with
+    /// why, for the frames and exports that need what it would provide.
+    #[test]
+    fn an_installed_extension_that_provides_nothing_is_published_with_why() {
+        let root = tempfile::tempdir().unwrap();
+        let extensions = root.path().join("extensions");
+        let ok =
+            "export default function(api){api.commands.register({id:'x.run',label:'Run',run(){}})}";
+        extension(&extensions, "synthetic-off", &[("index.ts", ok)]);
+        extension(
+            &extensions,
+            "synthetic-broken",
+            &[(
+                "index.ts",
+                "export default function(){throw new Error('no')}",
+            )],
+        );
+        let fixture = Fixture::start(root);
+        fixture.until("activation", |host| {
+            host.publication().settled && host.is_ready()
+        });
+        let entry = fixture
+            .kernel
+            .state()
+            .extensions
+            .get("synthetic-off")
+            .unwrap()
+            .clone();
+        fixture
+            .kernel
+            .state_transaction(StateTransaction {
+                expected_revision: None,
+                ops: vec![StateOp::Extension(pm_kernel::state::ExtensionEntry {
+                    enabled: false,
+                    ..entry
+                })],
+            })
+            .wait()
+            .unwrap()
+            .unwrap();
+        let named = |id: &str, why: &str| (id.to_owned(), id.to_owned(), why.to_owned());
+        let want = vec![
+            named("synthetic-broken", "couldn't start"),
+            named("synthetic-off", "is turned off"),
+        ];
+        fixture.until("named", |host| host.publication().unavailable == want);
+    }
+    /// A job that waits for extensions that never finish loading is told
+    /// which ones.
+    #[test]
+    fn a_wait_that_runs_out_names_who_is_still_loading() {
+        let root = tempfile::tempdir().unwrap();
+        extension(
+            &root.path().join("extensions"),
+            "synthetic-slow",
+            &[(
+                "index.ts",
+                "export default function(api){api.readiness.hold()}",
+            )],
+        );
+        let fixture = Fixture::start(root);
+        let error = fixture
+            .host
+            .wait_contributions(Duration::from_millis(1500), &|| false)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("synthetic-slow is still loading"), "{error}");
+    }
     #[test]
     fn a_hung_activation_is_stopped_and_the_realm_comes_back_without_it() {
         let root = tempfile::tempdir().unwrap();
@@ -4280,6 +4391,15 @@ mod tests {
                 })
         });
         assert_eq!(fixture.health("synthetic-good"), "ok");
+        // What frames and exports that need it are told: who, and why.
+        assert_eq!(
+            fixture.host.publication().unavailable,
+            vec![(
+                "synthetic-hangs".to_owned(),
+                "synthetic-hangs".to_owned(),
+                "is off until Powermove restarts".to_owned()
+            )]
+        );
         // D11 Stop is for this run: the saved preference stays on, and the
         // stop keeps the culprit out of the rebuilt realm.
         let entry = |fixture: &Fixture| {
