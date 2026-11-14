@@ -1,5 +1,5 @@
 import type { ComponentChildren } from "preact";
-import { useLayoutEffect, useState } from "preact/hooks";
+import { useLayoutEffect, useRef, useState } from "preact/hooks";
 import * as UI from "../../src/components";
 import type { SurfaceEvent } from "../../src/protocol";
 import type {
@@ -58,11 +58,6 @@ const effortCopy: Record<string, string> = {
   max: "Max",
   ultra: "Ultra",
 };
-/** Full access needs a consent alert the host doesn't have yet. */
-const accessChoices = (current: keyof typeof copy) =>
-  (Object.keys(copy) as (keyof typeof copy)[]).filter(
-    (v) => v !== "full" || current === "full",
-  );
 export function elapsed(ms: number) {
   const seconds = Math.floor(Math.max(0, ms) / 1000);
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
@@ -176,32 +171,60 @@ function Rows({
 }
 const num = (value: unknown) =>
   typeof value === "number" && Number.isFinite(value) ? value : undefined;
-/** `3.2 s` under a minute, `m:ss` after. */
-function span(ms: number) {
-  return ms < 60_000 ? `${(ms / 1000).toFixed(1)} s` : elapsed(ms);
+/** v1's duration words: "<1s", "4s", "1m 12s", "1h 3m". */
+export function duration(ms: number) {
+  if (!Number.isFinite(ms) || ms < 0) return "";
+  const seconds = Math.round(ms / 1000);
+  if (seconds < 1) return "<1s";
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ${seconds % 60}s`;
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
 }
-/** A step's symbol (SF Symbols), by what the tool does. */
+/** A reasoning stretch's chip: its opening sentence, on one line (v1). */
+export function thoughtLead(text: string) {
+  const flat = text.replace(/\*\*/g, "").replace(/\s+/g, " ").trim();
+  const sentence = flat.match(/^.{12,}?[.!?](\s|$)/)?.[0]?.trim();
+  return sentence && sentence.length < flat.length ? sentence : flat;
+}
+const span = (v: Row["value"]) => {
+  const start = num(v.startedAt);
+  const end = num(v.endedAt);
+  return start !== undefined && end !== undefined ? end - start : undefined;
+};
+/** A step's symbol (SF Symbols), by the family of what it did (v1 families). */
 function stepSymbol(v: Row["value"]) {
   if (v.kind === "thought") return "brain";
   if (v.kind === "task") return "person.2";
-  const name = `${str(v.toolName)} ${str(v.label)}`.toLowerCase();
+  const name = str(v.toolName).toLowerCase().split("__").at(-1) ?? "";
   const by: [RegExp, string][] = [
-    [/command|shell|bash|\brun\b/, "terminal"],
-    [/edit|patch|write|file_?change/, "pencil"],
-    [/search|web/, "magnifyingglass"],
-    [/frame|media|video|render/, "film"],
-    [/read|file/, "doc.text"],
-    [/sleep|wait/, "clock"],
-    [/agent|delegate|task/, "person.2"],
-    [/image|photo/, "photo"],
-    [/computer|click|screen/, "cursorarrow.rays"],
+    [/^(probe_media|sample_media_frames|media_contact_sheet)$/, "film"],
+    [/^(media_waveform|transcribe_media|generate_captions)$/, "waveform"],
+    [/^(delegate_task|task_status|task_cancel|agent|task)/, "person.2"],
+    [
+      /panel|workspace|project_state|render_frames|apply_commands|edit_video|rollback|check_project/,
+      "square.on.square",
+    ],
+    [
+      /^(web|search|browse|fetch|grep|glob|find|ls$|list)|url/,
+      "magnifyingglass",
+    ],
+    [/^(bash|command|shell|terminal|exec|run|process)/, "terminal"],
+    [
+      /^(edit|write|create|patch|apply|delete|move|multiedit)|file_change/,
+      "pencil",
+    ],
+    [/^(read|view|cat)/, "doc.text"],
+    [/^(compact|wait)/, "clock"],
+    [/^(image|render|draw|screenshot)/, "photo"],
+    [/^computer/, "cursorarrow.rays"],
   ];
-  return (
-    by.find(([pattern]) => pattern.test(name))?.[1] ?? "wrench.and.screwdriver"
-  );
+  return by.find(([p]) => p.test(name))?.[1] ?? "wrench.and.screwdriver";
 }
-/** One turn's steps: a quiet line, `{n} steps · {elapsed}`, open while the
- * turn runs and folded once it is done (the person may open it). */
+/** One stretch of a turn's work, in v1's grammar: a quiet header ("4 tool
+ * calls · 1 failed · 21s"), then a row per step. Open while the turn runs
+ * (or a subagent failed) and folded once it is done; the person may open it.
+ * Reasoning alone needs no header: its row is its own disclosure. */
 function Work({
   rows,
   live,
@@ -215,7 +238,20 @@ function Work({
   send: (a: Action) => void;
 }) {
   const [chosen, choose] = useState<boolean | null>(null);
-  const open = chosen ?? live;
+  const tools = rows.filter((r) => r.value.kind !== "thought");
+  const failed = tools.filter((r) => r.value.status === "error").length;
+  const open =
+    chosen ??
+    (live ||
+      tools.some((r) => r.value.kind === "task" && r.value.status === "error"));
+  if (!tools.length)
+    return (
+      <>
+        {rows.map((row) => (
+          <Step key={row.id} row={row} n={n} send={send} />
+        ))}
+      </>
+    );
   const starts = rows
     .map((r) => num(r.value.startedAt))
     .filter((v) => v !== undefined);
@@ -223,12 +259,16 @@ function Work({
     .map((r) => num(r.value.endedAt))
     .filter((v) => v !== undefined);
   const took =
-    starts.length && ends.length
-      ? Math.max(0, Math.max(...ends) - Math.min(...starts))
-      : undefined;
-  const label = `${rows.length} ${rows.length === 1 ? "step" : "steps"}${
-    took === undefined ? "" : ` · ${span(took)}`
-  }`;
+    !live && starts.length && ends.length
+      ? duration(Math.max(...ends) - Math.min(...starts))
+      : "";
+  const label = [
+    `${tools.length} tool ${tools.length === 1 ? "call" : "calls"}`,
+    !live && failed ? `${failed} failed` : "",
+    took,
+  ]
+    .filter(Boolean)
+    .join(" · ");
   return (
     <div
       role="group"
@@ -269,10 +309,15 @@ const glyph = (color: ReturnType<typeof t>) => ({
 const STATE: Record<string, string> = {
   error: "Failed",
   stopped: "Stopped",
+  cancelled: "Stopped",
   waiting: "Waiting",
   continued: "Continued",
 };
-/** One step: tool symbol, label, trailing state; it discloses its result. */
+/** One step, as v1's tool rows: the glyph (a spinner while it runs), what it
+ * was ("Run", "Edit", "Thought for 4s") and a hairline chip with what it was
+ * done to (the command, the files, the query, the media; a thought's first
+ * sentence), cut in the middle; then its state or its time. Opening it shows
+ * the whole of it: the full argument and the output, or the error. */
 function Step({
   row,
   n,
@@ -286,22 +331,39 @@ function Step({
   const v = row.value;
   const thought = v.kind === "thought";
   const status = str(v.status);
+  const running = thought ? v.live === true : status === "running";
+  const took = span(v);
   const label = thought
-    ? v.live === true
-      ? "Thinking…"
-      : num(v.endedAt) !== undefined && num(v.startedAt) !== undefined
-        ? `Thought for ${Math.max(1, Math.round(((v.endedAt as number) - (v.startedAt as number)) / 1000))} s`
+    ? running
+      ? "Thinking"
+      : took !== undefined
+        ? `Thought for ${duration(took)}`
         : "Thought"
     : str(v.title) || str(v.label) || str(v.toolName) || str(v.text);
+  // What it worked on: the media or layer by its name in the project, else
+  // the provider's argument, never only the tool's own id.
+  const detail = str(v.detail);
+  const argument = thought
+    ? ""
+    : str(v.subjectName) ||
+      (detail && detail !== str(v.toolName) ? detail : "");
+  const chip = (thought ? thoughtLead(str(v.label)) : argument)
+    .replace(/\s+/g, " ")
+    .trim();
   const result = thought
     ? str(v.label)
-    : [str(v.detail), str(v.output)].filter(Boolean).join("\n\n");
-  const state = STATE[status];
+    : [argument, str(v.output)].filter(Boolean).join("\n\n");
+  const state =
+    STATE[status] ?? STATE[str((v.task as { status?: unknown })?.status)];
+  const after =
+    state ?? (!running && took !== undefined && !thought ? duration(took) : "");
+  const open = row.open && !!result;
+  const task = v.kind === "task" || v.toolName === "delegate_task";
   return (
     <div style={{ display: "flex", flexDirection: "column" }}>
       <UI.ListItem
         id={row.id}
-        label={label}
+        label={[label, chip, state].filter(Boolean).join(", ")}
         onSelect={() => {
           if (result)
             send({ type: "disclose", id: row.commandId, open: !row.open });
@@ -309,10 +371,41 @@ function Step({
         state={{ hover: n.hoverRow === row.id }}
         style={line(body.color)}
       >
-        <div metadata={{ symbol: stepSymbol(v) }} style={glyph(muted.color)} />
-        <text style={{ ...body, flexShrink: 1 }}>{label}</text>
+        {running && !thought ? (
+          <UI.ProgressRow label={`${label} is running`}>{[]}</UI.ProgressRow>
+        ) : (
+          <div
+            metadata={{ symbol: stepSymbol(v) }}
+            style={glyph(muted.color)}
+          />
+        )}
+        <text style={{ ...body, flexShrink: 0 }}>{label}</text>
+        {chip && !(open && thought) && (
+          <div
+            data-pm-variant={thought ? undefined : "code"}
+            style={{
+              flexShrink: 1,
+              borderWidth: t("metrics.border"),
+              borderColor: t("colors.separator"),
+              borderRadius: t("metrics.inner_radius"),
+              paddingLeft: t("metrics.inner_radius"),
+              paddingRight: t("metrics.inner_radius"),
+            }}
+          >
+            <text
+              style={{
+                ...muted,
+                fontSize: t("typography.minimum"),
+                whiteSpace: "nowrap",
+                textOverflow: "middle",
+              }}
+            >
+              {chip}
+            </text>
+          </div>
+        )}
         <div style={{ flexGrow: 1 }} />
-        {state && (
+        {after && (
           <div
             metadata={
               status === "error" ? { symbol: "xmark.circle.fill" } : undefined
@@ -328,11 +421,11 @@ function Step({
                   : muted
               }
             >
-              {state}
+              {after}
             </text>
           </div>
         )}
-        {status === "running" && !thought && (
+        {running && task && (
           <UI.ToolbarItem
             label={`Stop ${label}`}
             onClick={() => send({ type: "stopTask", id: row.commandId })}
@@ -342,15 +435,22 @@ function Step({
           </UI.ToolbarItem>
         )}
       </UI.ListItem>
-      {row.open && result && (
+      {open && (
         <div
+          data-pm-variant={thought ? undefined : "code"}
           style={{
             background: t("colors.field"),
             borderRadius: t("metrics.control_radius"),
             padding: t("metrics.text_padding"),
           }}
         >
-          <text style={body}>{result}</text>
+          <text
+            style={
+              thought ? body : { ...body, fontSize: t("typography.minimum") }
+            }
+          >
+            {result}
+          </text>
         </div>
       )}
     </div>
@@ -623,18 +723,139 @@ function Message({
 }
 /** A saved choice the catalog no longer lists stays visible rather than blank. */
 function pairs(entries: [string, string][], current: string) {
-  const options = entries.map(([v, label]) => ({ v, label }));
   return entries.some(([v]) => v === current)
-    ? options
-    : [...options, { v: current, label: current }];
+    ? entries
+    : [...entries, [current, current] as [string, string]];
+}
+/** One row of the window's field menu (the kit's searchable menu). */
+export interface MenuOption {
+  label: string;
+  value: string;
+  checked?: boolean;
+  /** The section it is listed under. */
+  category?: string;
+}
+/** Opens the field menu under `anchor` (a node id); answers the chosen
+ * value, or null when it closed unchosen. */
+export type Menu = (request: {
+  anchor: number;
+  placeholder: string;
+  options: MenuOption[];
+}) => Promise<unknown>;
+/** v1's access modes, in v1's order (legacy/assistant/spatial.ts). */
+const ACCESS: Access[] = ["editor", "supervised", "auto", "full"];
+/** v1's slash commands' copy (slash-commands.ts). */
+const SLASH: Record<string, string> = {
+  new: "/new",
+  model: "/model",
+  effort: "/effort",
+  provider: "/provider",
+  attach: "/attach",
+  settings: "/settings",
+  stop: "/stop",
+};
+/** A choice the menu shows for one slash command or one of its values. */
+function slashLabel(s: Snapshot, id: string, value: string | null) {
+  if (value === null) return SLASH[id] ?? `/${id}`;
+  const command = id.slice(0, id.length - value.length - 1);
+  const list =
+    command === "model"
+      ? s.catalog.models
+      : command === "provider"
+        ? s.catalog.providers
+        : [];
+  const label =
+    command === "effort"
+      ? (effortCopy[value] ?? value)
+      : (list.find(([v]) => v === value)?.[1] ?? value);
+  return `/${command} ${label}`;
+}
+/** A borderless trigger in a bar or header that opens the window's menu:
+ * its value, then the pop-up chevron (as a bar NSPopUpButton). */
+function Trigger({
+  id,
+  label,
+  text,
+  disabled,
+  open,
+  widest,
+}: {
+  id: string;
+  label: string;
+  text: string;
+  disabled?: boolean;
+  open: (anchor: number) => void;
+  /** The most it may take (the header's thread title, `m.value_column`). */
+  widest?: ReturnType<typeof t>;
+}) {
+  return (
+    <UI.ToolbarItem
+      id={id}
+      label={label}
+      aria-haspopup="menu"
+      disabled={disabled}
+      onClick={(event) => {
+        if (!disabled) open(Number(event.currentTarget));
+      }}
+      style={{
+        ...line(body.color),
+        flexShrink: 1,
+        ...(widest ? { maxWidth: widest } : {}),
+      }}
+    >
+      <text
+        style={{
+          ...body,
+          flexShrink: 1,
+          whiteSpace: "nowrap",
+          textOverflow: "ellipsis",
+        }}
+      >
+        {text}
+      </text>
+      <div
+        metadata={{ symbol: "chevron.up.chevron.down" }}
+        style={glyph(muted.color)}
+      />
+    </UI.ToolbarItem>
+  );
 }
 export function AgentView({
   publication: { snapshot: s, native: n },
   send,
+  menu,
 }: {
   publication: Publication;
   send: (action: Action) => void;
+  menu?: Menu;
 }) {
+  // The slash menu opens once per draft that asks for it; closing it
+  // unchosen leaves the draft as typed.
+  const slashOpened = useRef<string | null>(null);
+  const slashDraft =
+    s.slash.visible && s.slash.choices.length ? s.draft.text : null;
+  useLayoutEffect(() => {
+    if (slashDraft === null) {
+      slashOpened.current = null;
+      return;
+    }
+    if (!menu || slashOpened.current === slashDraft) return;
+    slashOpened.current = slashDraft;
+    const composer = composerNode.current;
+    if (composer === null) return;
+    void menu({
+      anchor: composer,
+      placeholder: "Search commands",
+      options: s.slash.choices.map((c) => ({
+        label: slashLabel(s, c.id, c.value),
+        value: c.id,
+      })),
+    }).then((id) => {
+      if (typeof id === "string") send({ type: "chooseSlash", id });
+    });
+  }, [slashDraft]);
+  const composerNode = useRef<number | null>(null);
+  const composerFocused = useRef(false);
   if (!n.visible) return null;
   const working = s.runId !== null;
   const available = n.connection === "connected";
@@ -651,6 +872,15 @@ export function AgentView({
       : "Create, research, and build with your project.";
   const popover = n.presentation === "popover";
   const ground = t(popover ? "colors.floating" : "colors.panel");
+  // The model pop-up reads "{model} · {effort}" (agent-panel.md §3).
+  const modelName =
+    pairs(s.catalog.models, s.settings.model).find(
+      ([v]) => v === s.settings.model,
+    )?.[1] || "Default";
+  const modelText =
+    s.catalog.efforts.length > 1 && s.settings.effort
+      ? `${modelName} · ${effortCopy[s.settings.effort] ?? s.settings.effort}`
+      : modelName;
   return (
     <div
       id="agent-panel"
@@ -687,30 +917,65 @@ export function AgentView({
           paddingRight: t("metrics.inset"),
         }}
       >
-        <text style={title}>Agent</text>
+        <text style={{ ...title, flexShrink: 0 }}>Agent</text>
         <div
           style={{
-            ...keep,
+            flexShrink: 1,
             display: "flex",
             flexDirection: "row",
             alignItems: "center",
           }}
         >
-          <UI.ToolbarItem
+          <Trigger
             id="agent-threads"
-            label={
-              s.threadTitle
-                ? `Switch thread, ${s.threadTitle}`
-                : "Switch thread"
-            }
-            title={
-              s.threadTitle
-                ? `Switch thread, ${s.threadTitle}`
-                : "Switch thread"
-            }
-            disabled
-            metadata={{ apiGap: "threadPicker", symbol: "chevron.down" }}
-            style={{ symbolSize: t("metrics.symbol_inline") }}
+            label={`Switch thread, ${s.threadTitle || "New thread"}`}
+            // Docked, the header shares the dock's tab row: the trigger
+            // names the list, and the tab keeps its name.
+            text={popover ? s.threadTitle || "New thread" : "Threads"}
+            widest={t("metrics.value_column")}
+            disabled={!menu}
+            open={(anchor) => {
+              const threads = s.threads ?? [];
+              const current = threads.find((t) => t.id === s.threadId);
+              void menu?.({
+                anchor,
+                placeholder: "Search threads…",
+                options: [
+                  ...(s.composerDisabled
+                    ? []
+                    : [{ label: "New Thread", value: "new" }]),
+                  ...threads.map((t) => ({
+                    label: t.busy ? `${t.title} · Working…` : t.title,
+                    value: `thread:${t.id}`,
+                    checked: t.id === s.threadId,
+                    category: "Threads",
+                  })),
+                  // Apart from the list, last: the one destructive row.
+                  ...(current
+                    ? [
+                        {
+                          label: "Delete Thread…",
+                          value: `delete:${current.id}`,
+                          category: "This Thread",
+                        },
+                      ]
+                    : []),
+                ],
+              }).then((choice) => {
+                if (choice === "new") send({ type: "newThread" });
+                else if (
+                  typeof choice === "string" &&
+                  choice.startsWith("thread:")
+                ) {
+                  const id = choice.slice(7);
+                  if (id !== s.threadId) send({ type: "switchThread", id });
+                } else if (
+                  typeof choice === "string" &&
+                  choice.startsWith("delete:")
+                )
+                  send({ type: "deleteThread", id: choice.slice(7) });
+              });
+            }}
           />
           <UI.ToolbarItem
             disabled={s.composerDisabled}
@@ -908,6 +1173,14 @@ export function AgentView({
               state={{ keyboardFocus: n.keyboardFocus === "composer" }}
               tabIndex={0}
               onInput={(event) => {
+                // The slash menu hangs from the composer, and shows only while
+                // it is focused: typing in it says it is (the host reports
+                // no focus of its own for a hosted editor).
+                composerNode.current = Number(event.currentTarget);
+                if (!composerFocused.current) {
+                  composerFocused.current = true;
+                  send({ type: "focus", focused: true });
+                }
                 const text = String(event.value ?? "");
                 send({
                   type: "draft",
@@ -991,100 +1264,95 @@ export function AgentView({
           style={{
             display: "flex",
             flexDirection: "row",
-            // A narrow dock wraps the access choice under the model, as v1;
-            // a pop-up truncates only when it alone is wider than the tray.
-            flexWrap: "wrap",
+            // One row at any width: the model's words give way first, then
+            // the access mode's (they truncate, never wrap).
             alignItems: "center",
-            minHeight: t("metrics.hit"),
+            justifyContent: "space-between",
+            gap: t("metrics.gap"),
+            height: t("metrics.hit"),
             paddingTop: t("metrics.pill_inset"),
           }}
         >
-          <UI.PopUpButton
-            data-pm-variant="quiet"
-            style={shrink}
-            id="agent-provider"
-            label="Agent provider"
-            value={s.settings.provider}
-            binding={n.bindings.model}
-            disabled={working || s.composerDisabled}
-            onChange={(e) =>
-              send({ type: "setProvider", provider: String(e.value) })
-            }
-            options={pairs(s.catalog.providers, s.settings.provider)}
-          />
-          <UI.PopUpButton
-            data-pm-variant="quiet"
-            style={shrink}
+          <Trigger
             id="agent-model"
-            label="Model"
-            value={s.settings.model}
-            binding={n.bindings.model}
-            disabled={working || s.composerDisabled}
-            onChange={(e) =>
-              send({
-                type: "setModel",
-                model: String(e.value),
-                effort: s.settings.effort,
-              })
-            }
-            options={pairs(s.catalog.models, s.settings.model)}
+            label={`Model and reasoning effort, ${modelText}`}
+            text={modelText}
+            disabled={!menu || working || s.composerDisabled}
+            open={(anchor) => {
+              void menu?.({
+                anchor,
+                placeholder: "Search models",
+                options: [
+                  ...pairs(s.catalog.providers, s.settings.provider).map(
+                    ([v, label]) => ({
+                      label,
+                      value: `provider:${v}`,
+                      checked: v === s.settings.provider,
+                      category: "Provider",
+                    }),
+                  ),
+                  ...pairs(s.catalog.models, s.settings.model).map(
+                    ([v, label]) => ({
+                      label,
+                      value: `model:${v}`,
+                      checked: v === s.settings.model,
+                      category: "Model",
+                    }),
+                  ),
+                  ...(s.catalog.efforts.length > 1
+                    ? s.catalog.efforts.map((v) => ({
+                        label: effortCopy[v] ?? v,
+                        value: `effort:${v}`,
+                        checked: v === s.settings.effort,
+                        category: "Reasoning Effort",
+                      }))
+                    : []),
+                ],
+              }).then((choice) => {
+                if (typeof choice !== "string") return;
+                const [kind, value] = [
+                  choice.slice(0, choice.indexOf(":")),
+                  choice.slice(choice.indexOf(":") + 1),
+                ];
+                if (kind === "provider")
+                  send({ type: "setProvider", provider: value });
+                else if (kind === "model")
+                  send({
+                    type: "setModel",
+                    model: value,
+                    effort: s.settings.effort,
+                  });
+                else if (kind === "effort")
+                  send({
+                    type: "setModel",
+                    model: s.settings.model,
+                    effort: value,
+                  });
+              });
+            }}
           />
-          {s.catalog.efforts.length > 1 && (
-            <UI.PopUpButton
-              data-pm-variant="quiet"
-              style={shrink}
-              id="agent-effort"
-              label="Reasoning effort"
-              value={s.settings.effort}
-              binding={n.bindings.model}
-              disabled={working || s.composerDisabled}
-              onChange={(e) =>
-                send({
-                  type: "setModel",
-                  model: s.settings.model,
-                  effort: String(e.value),
-                })
-              }
-              options={s.catalog.efforts.map((v) => ({
-                v,
-                label: effortCopy[v] ?? v,
-              }))}
-            />
-          )}
-          <div style={{ flexGrow: 1 }} />
-          <UI.PopUpButton
-            data-pm-variant="quiet"
-            style={shrink}
+          <Trigger
             id="agent-access"
             label={`Agent access, ${copy[s.settings.access]}`}
-            value={s.settings.access}
-            binding={n.bindings.access}
-            disabled={working || s.composerDisabled}
-            metadata={{ apiGap: "accessMenu" }}
-            onChange={(e) =>
-              send({ type: "setAccess", access: e.value as Access })
-            }
-            options={accessChoices(s.settings.access).map((v) => ({
-              v,
-              label: copy[v],
-            }))}
+            text={copy[s.settings.access]}
+            disabled={!menu || working || s.composerDisabled}
+            open={(anchor) => {
+              void menu?.({
+                anchor,
+                placeholder: "Search",
+                options: ACCESS.map((v) => ({
+                  label: copy[v],
+                  value: v,
+                  checked: v === s.settings.access,
+                  category: "How should agent actions be approved?",
+                })),
+              }).then((choice) => {
+                if (typeof choice === "string" && choice !== s.settings.access)
+                  send({ type: "setAccess", access: choice as Access });
+              });
+            }}
           />
         </div>
-        {s.slash.visible && (
-          <Placeholder gap="composer" label="Shortcuts">
-            {s.slash.choices.slice(0, 6).map((c) =>
-              n.slashCopy[c.id] ? (
-                <UI.ToolbarItem
-                  key={c.id}
-                  label={n.slashCopy[c.id].label}
-                  onClick={() => send({ type: "chooseSlash", id: c.id })}
-                >
-                  {n.slashCopy[c.id].description}
-                </UI.ToolbarItem>
-              ) : null,
-            )}
-          </Placeholder>
-        )}
       </div>
     </div>
   );
@@ -1093,9 +1361,11 @@ export function AgentView({
 export function AgentPanel({
   model,
   onError,
+  menu,
 }: {
   model: AgentModel;
   onError: (error: unknown) => void;
+  menu?: Menu;
 }) {
   const [publication, setPublication] = useState(() => model.inspect());
   useLayoutEffect(() => {
@@ -1113,6 +1383,7 @@ export function AgentPanel({
   return (
     <AgentView
       publication={publication}
+      menu={menu}
       send={(action) => {
         void model.dispatch(action).catch(onError);
       }}

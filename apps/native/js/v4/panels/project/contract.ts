@@ -76,6 +76,8 @@ export interface Row {
             play_original?: boolean;
             poster: string | null;
             progress?: { completed: number; total: number } | null;
+            /** HDR video: "HLG", "HDR10", "Dolby Vision 8.4". */
+            hdr?: string;
           },
         ];
       }

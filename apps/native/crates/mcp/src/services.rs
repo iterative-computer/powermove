@@ -182,6 +182,9 @@ pub struct MediaImport {
     pub replace: Option<String>,
     pub expected_fingerprint: Option<String>,
     pub writer: u32,
+    /// An image sequence (`path` its folder or one of its files) at this
+    /// frame rate, as File ▸ Import Image Sequence imports it.
+    pub sequence: Option<f64>,
 }
 #[derive(Clone, Debug)]
 pub struct ImportedMedia {
@@ -195,6 +198,8 @@ pub struct ImportedMedia {
     pub has_audio: bool,
     pub fingerprint: String,
     pub revision: u64,
+    /// What else the import found (an image sequence's missing frames).
+    pub note: Option<String>,
 }
 pub trait MediaImporter: Send + Sync {
     fn import(&self, request: &MediaImport) -> Result<ImportedMedia>;

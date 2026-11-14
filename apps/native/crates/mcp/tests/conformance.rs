@@ -135,7 +135,16 @@ fn captured_installed_stdio_pairs_replay_with_owner_3d_contract() {
                         .unwrap();
                 let mut tools = main["tools"].as_array().unwrap().clone();
                 let projects: Value = serde_json::from_str(include_str!("../fixtures/project-native-catalog.json")).unwrap();
-                for replacement in studio["tools"].as_array().unwrap().iter().chain(projects["tools"].as_array().unwrap()) {
+                let media: Value =
+                    serde_json::from_str(include_str!("../fixtures/media-native-catalog.json"))
+                        .unwrap();
+                for replacement in studio["tools"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .chain(projects["tools"].as_array().unwrap())
+                    .chain(media["tools"].as_array().unwrap())
+                {
                     *tools
                         .iter_mut()
                         .find(|t| t["name"] == replacement["name"])

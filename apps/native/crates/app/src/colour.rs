@@ -322,7 +322,7 @@ pub fn layer_cdl(p: &Published, layer: &str, time: f64) -> Result<pm_color::cdl:
         .unwrap_or(Value::Null);
     let open = p.snapshot.open_comp().map(|c| c.as_str().to_owned());
     let mut mirror = pm_kernel::QueryMirror::new(p);
-    let mut queries = mirror.queries();
+    let queries = mirror.queries();
     let mut failed = None;
     let mut cdl = pm_color::cdl::from_wheels(|key| {
         let raw = params.get(key).cloned().unwrap_or(Value::Null);
@@ -409,6 +409,8 @@ pub struct Scopes {
     latest: Option<Arc<ScopeFrame>>,
     /// The project's defaults were applied to this document.
     defaults: Option<u64>,
+    /// A frame counted for an agent's request (`count_scopes_once`).
+    pub(crate) requested: Option<Result<Arc<ScopeFrame>, String>>,
 }
 
 /// What the panel's settings ask the engine to count.
@@ -791,9 +793,45 @@ impl Controller {
         .detach();
     }
 
-    /// What the Scopes panel last counted, summarised for an agent.
-    pub(crate) fn scope_reading(&self) -> Option<serde_json::Value> {
-        self.scopes.latest.as_deref().map(scope_summary)
+    /// Counts the viewer's current frame once for an agent, whether or not
+    /// the Scopes panel shows: with the panel's settings when it has them,
+    /// the project's defaults otherwise (an HDR project on Rec. 2020 PQ).
+    /// The answer lands in `scopes.requested`; the panel's own tap is taken
+    /// again at its next paint. `false` when no viewer draws.
+    pub(crate) fn count_scopes_once(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(viewer) = &self.viewer else {
+            return false;
+        };
+        let config = match &self.scopes.view {
+            Some(view) => {
+                let s = view.read(cx);
+                scope_config(s.rec2020, s.extended, s.output)
+            }
+            None => scope_config(self.project_hdr, self.project_hdr, false),
+        };
+        let (frames, inbox) = async_channel::bounded(1);
+        if viewer.scopes(Some((config, frames))).is_err() || viewer.capture_next().is_err() {
+            return false;
+        }
+        self.scopes.tapped = None;
+        self.scopes.requested = None;
+        cx.spawn(async move |this, cx| {
+            let result = inbox
+                .recv()
+                .await
+                .unwrap_or_else(|_| Err("no frame".into()));
+            this.update(cx, |v, cx| {
+                v.scopes.requested = Some(result.map(Arc::new));
+                // The panel takes its own tap again; with no panel, none stays.
+                if let Some(viewer) = &v.viewer {
+                    viewer.scopes(None).ok();
+                }
+                v.tap_scopes(cx);
+            })
+            .ok();
+        })
+        .detach();
+        true
     }
 
     /// The Scopes panel's content, and its tap on the viewer.

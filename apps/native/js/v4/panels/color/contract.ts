@@ -13,6 +13,7 @@ export const PANEL_TITLE = "Color";
 export const WHEELS = "colorWheels";
 export const CURVES = "colorCurves";
 export const LUT = "applyColorLut";
+export const CST = "colorSpaceTransform";
 /** Color Curves' Channel choice, in its option order. */
 export const CURVE_CHANNELS = ["Master", "Red", "Green", "Blue"];
 /** The app command that asks for a `.cube` or `.3dl` file and applies it. */
@@ -146,6 +147,10 @@ export const ACTIONS: { action: string; agent: string[] }[] = [
     // Adds Apply Color LUT, or relinks the one whose file is missing.
     action: "Load LUT…",
     agent: ["import_media", "apply_commands", "add_effect", "set_effect"],
+  },
+  {
+    action: "Add Color Space Transform",
+    agent: ["apply_commands", "add_effect"],
   },
   {
     action: "Import CDL…",

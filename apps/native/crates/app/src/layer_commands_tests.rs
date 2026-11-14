@@ -349,8 +349,9 @@ fn every_seeded_effect_adds_through_the_kernel_and_draws_in_the_viewer_path() {
     assert!(plain.iter().any(|p| p[0] > 0.1), "the fixture draws");
     let state = kernel.state();
     let seeded = state.registries.get("effects").unwrap();
-    // 43 shipped definitions plus Color Wheels and Color Curves.
-    assert_eq!(seeded.len(), 45);
+    // 43 shipped definitions plus Color Wheels, Color Curves and Color Space
+    // Transform (whose defaults are an identity too).
+    assert_eq!(seeded.len(), 46);
     let mut changed = Vec::new();
     for entry in seeded {
         let p = kernel.published("synthetic").unwrap();

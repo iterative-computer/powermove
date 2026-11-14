@@ -506,3 +506,161 @@ fn openexr_tiled_zip_and_dwaa() {
     let d = image::read(&dwaa, &pool).unwrap();
     assert_eq!(d.frame.format.planes[0].format, PlaneFormat::Rgba16Float);
 }
+
+/// A 4×2 RGBA test picture: every sample distinct, alpha varied.
+fn picture(x: usize, y: usize) -> [u8; 4] {
+    let i = (y * 4 + x) as u8;
+    [10 + i * 29, 200 - i * 23, 3 + i * 31, 255 - i * 17]
+}
+
+/// A Truevision TGA of [`picture`], 32-bit BGRA: uncompressed with the
+/// default bottom-left origin, or run-length encoded with a top-left origin.
+fn tga(rle: bool) -> Vec<u8> {
+    let (w, h) = (4usize, 2usize);
+    let mut out = vec![0u8; 18];
+    out[2] = if rle { 10 } else { 2 };
+    out[12..14].copy_from_slice(&(w as u16).to_le_bytes());
+    out[14..16].copy_from_slice(&(h as u16).to_le_bytes());
+    out[16] = 32;
+    out[17] = 8 | if rle { 0x20 } else { 0 };
+    let rows: Vec<usize> = if rle {
+        (0..h).collect()
+    } else {
+        (0..h).rev().collect()
+    };
+    for y in rows {
+        if rle {
+            // A raw packet of the first two pixels, then each of the rest
+            // as a repeat packet of one.
+            out.push(1);
+            for x in 0..2 {
+                let [r, g, b, a] = picture(x, y);
+                out.extend_from_slice(&[b, g, r, a]);
+            }
+            for x in 2..w {
+                let [r, g, b, a] = picture(x, y);
+                out.push(0x80);
+                out.extend_from_slice(&[b, g, r, a]);
+            }
+        } else {
+            for x in 0..w {
+                let [r, g, b, a] = picture(x, y);
+                out.extend_from_slice(&[b, g, r, a]);
+            }
+        }
+    }
+    out.extend_from_slice(&[0; 8]);
+    out.extend_from_slice(b"TRUEVISION-XFILE.\0");
+    out
+}
+
+/// A flattened Photoshop document of [`picture`]'s RGB at 8 or 16 bits
+/// (16-bit samples carry the 8-bit code in the high byte and a distinct low
+/// byte), uncompressed.
+fn psd(bits: u16) -> Vec<u8> {
+    let (w, h) = (4usize, 2usize);
+    let mut out = b"8BPS".to_vec();
+    out.extend_from_slice(&1u16.to_be_bytes());
+    out.extend_from_slice(&[0; 6]);
+    out.extend_from_slice(&3u16.to_be_bytes());
+    out.extend_from_slice(&(h as u32).to_be_bytes());
+    out.extend_from_slice(&(w as u32).to_be_bytes());
+    out.extend_from_slice(&bits.to_be_bytes());
+    out.extend_from_slice(&3u16.to_be_bytes()); // RGB
+    out.extend_from_slice(&[0; 12]); // no color mode data, resources or layers
+    out.extend_from_slice(&0u16.to_be_bytes()); // raw image data
+    for c in 0..3 {
+        for y in 0..h {
+            for x in 0..w {
+                let v = picture(x, y)[c];
+                if bits == 16 {
+                    out.extend_from_slice(&psd16(v, x, y).to_be_bytes());
+                } else {
+                    out.push(v);
+                }
+            }
+        }
+    }
+    out
+}
+
+fn psd16(v: u8, x: usize, y: usize) -> u16 {
+    u16::from(v) << 8 | (37 + 53 * (y * 4 + x)) as u16
+}
+
+#[test]
+fn tga_and_psd_are_recognized_and_read_exactly() {
+    let dir = tempfile::Builder::new()
+        .prefix("pm-media-images-")
+        .tempdir()
+        .unwrap();
+    let pool = FramePool::new(0);
+    for (name, bytes) in [("flat.tga", tga(false)), ("rle.tga", tga(true))] {
+        assert_eq!(image::sniff(&bytes), ImageFormat::Tga, "{name}");
+        let p = tmp(&dir, name);
+        std::fs::write(&p, &bytes).unwrap();
+        let s = image::read(&p, &pool).unwrap();
+        assert_eq!(
+            (s.format, s.bit_depth, s.float),
+            (ImageFormat::Tga, 8, false)
+        );
+        assert_eq!(s.color.alpha, AlphaMode::Straight, "{name}");
+        for y in 0..2 {
+            for x in 0..4 {
+                assert_eq!(px8(&s.frame, x, y), picture(x, y), "{name} ({x}, {y})");
+            }
+        }
+    }
+    for bits in [8u16, 16] {
+        let name = format!("rgb{bits}.psd");
+        let bytes = psd(bits);
+        assert_eq!(image::sniff(&bytes), ImageFormat::Psd, "{name}");
+        let p = tmp(&dir, &name);
+        std::fs::write(&p, &bytes).unwrap();
+        let s = image::read(&p, &pool).unwrap();
+        assert_eq!(
+            (s.format, s.bit_depth, s.float),
+            (ImageFormat::Psd, bits as u8, false),
+            "{name}"
+        );
+        let samples = bytes_of(&s.frame, bits);
+        for y in 0..2 {
+            for x in 0..4 {
+                let i = (y * 4 + x) * 4;
+                let want: Vec<u16> = (0..3)
+                    .map(|c| {
+                        let v = picture(x, y)[c];
+                        if bits == 16 {
+                            psd16(v, x, y)
+                        } else {
+                            u16::from(v)
+                        }
+                    })
+                    .collect();
+                assert_eq!(&samples[i..i + 3], &want[..], "{name} ({x}, {y})");
+            }
+        }
+    }
+    // Other files with small first bytes are not taken for TGA: MPEG-TS,
+    // a QuickTime `mdat` atom, an MP3 frame, a truncated header.
+    for head in [
+        &b"\x47\x40\x00\x10\x00\x00\xb0\x0d\x00\x01\xc1\x00\x00\x00\x01\xf0\x00\x2a"[..],
+        &b"\x00\x01\x0a\x00mdat\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"[..],
+        &b"\xff\xfb\x90\x64\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"[..],
+        &tga(false)[..17],
+    ] {
+        assert_eq!(image::sniff(head), ImageFormat::Other, "{head:?}");
+    }
+}
+
+/// The single RGBA plane's samples, widened to u16.
+fn bytes_of(f: &DecodedFrame, bits: u16) -> Vec<u16> {
+    let b = bytes(f);
+    if bits == 16 {
+        b.chunks_exact(2)
+            .map(|s| u16::from_ne_bytes([s[0], s[1]]))
+            .collect()
+    } else {
+        b.into_iter().map(u16::from).collect()
+    }
+}

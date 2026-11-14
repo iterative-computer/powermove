@@ -112,6 +112,7 @@ export function meta(row: Row): string {
         : a.kind === "model"
           ? null
           : a.format?.toUpperCase(),
+      runtime.hdr ?? null,
       a.kind === "audio" ? null : dimensions(a),
       a.duration === null ? null : clock(a.duration),
       a.kind === "model" && a.triangles !== null ? `${a.triangles} tris` : null,
