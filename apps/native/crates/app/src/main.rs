@@ -96,6 +96,7 @@ mod shuttle;
 mod skimming;
 mod smoke;
 mod storage;
+mod pages;
 mod store_window;
 #[cfg(test)]
 mod store_window_tests;

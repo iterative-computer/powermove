@@ -1248,24 +1248,26 @@ impl Controller {
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(120.);
-        match self.engine.viewer(pm_engine_service::ViewerConfig {
-            snapshot: p.snapshot.clone(),
-            composition: comp,
-            media: self.media.clone(),
-            output: popout.initial_output(),
-            layer: Some(popout.layer.clone()),
-            rate: self.rate,
-            end: Some((crate::session::composition_duration(&p) * pm_protocol::common::TICKS_PER_SECOND as f64) as i64),
-            audio: false,
-        }) {
-            Ok(viewer) => {
-                // The popout follows the window's extensions from here on,
-                // as the editor's viewer does.
-                if let Err(e) = self.resource_feed.attach(&viewer) {
-                    self.message = e.to_string();
-                }
-                popout.bind(viewer, hz)
-            }
+        // The popout follows the window's extensions from its first frame,
+        // as the editor's viewer does.
+        let fed = self.engine.viewer_fed(
+            pm_engine_service::ViewerConfig {
+                snapshot: p.snapshot.clone(),
+                composition: comp,
+                media: self.media.clone(),
+                output: popout.initial_output(),
+                layer: Some(popout.layer.clone()),
+                rate: self.rate,
+                end: Some(
+                    (crate::session::composition_duration(&p)
+                        * pm_protocol::common::TICKS_PER_SECOND as f64) as i64,
+                ),
+                audio: false,
+            },
+            &self.resource_feed,
+        );
+        match fed {
+            Ok(viewer) => popout.bind(viewer, hz),
             Err(e) => self.message = format!("Popout viewer failed: {e}"),
         }
         self.apply_viewer_options();

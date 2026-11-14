@@ -40,6 +40,27 @@ mod settings;
 pub mod speech;
 mod timeline_easing;
 pub mod virtualization;
+/// Opt-in panel timings (`PM_NATIVE_MAIN_TRACE=1`).
+pub(crate) fn tracing() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PM_NATIVE_MAIN_TRACE").as_deref() == Ok("1"))
+}
+/// `PM_PANEL {json}` on stderr while tracing, with wall-clock `w` (ms) to
+/// line up with the app's lines.
+pub(crate) fn trace(mut value: Value) {
+    if tracing() {
+        value["w"] = json!(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis() as u64)
+        );
+        eprintln!("PM_PANEL {value}");
+    }
+}
+pub(crate) fn ms(d: std::time::Duration) -> f64 {
+    (d.as_secs_f64() * 10_000.).round() / 10.
+}
+
 use data::Backend;
 use pm_kernel::KernelHandle;
 use pm_runtime_v8::*;
@@ -1637,6 +1658,7 @@ impl Builtins {
         detail: EventDetail,
         semantic: Option<String>,
     ) -> Result<Ticket<Evaluation>> {
+        trace(json!({"panel": panel, "dispatch": event}));
         let entry = self.broker.entry(panel).ok_or(Error::Closed)?;
         let mut entry = entry.shared();
         let entry = &mut *entry;
@@ -2075,17 +2097,24 @@ impl EngineProxy for Broker {
                 Ok(Value::Null)
             }
             "surface.commit" => {
+                let started = std::time::Instant::now();
                 let commit = serde_json::from_value(input.clone())
                     .map_err(|e| Error::Host(e.to_string()))?;
                 match entry.surface.apply(commit) {
                     Ok(_) => {
+                        let applied = started.elapsed();
                         entry.interaction.reconcile(&entry.surface);
+                        let surface = Arc::new(entry.surface.clone());
+                        if tracing() {
+                            trace(json!({"panel": panel, "commit_ms": ms(applied),
+                                "publish_ms": ms(started.elapsed()), "input_bytes": input.to_string().len()}));
+                        }
                         self.publications.shared().insert(
                             panel.into(),
                             Publication {
                                 panel: panel.into(),
                                 generation: generation.number,
-                                surface: Arc::new(entry.surface.clone()),
+                                surface,
                             },
                         );
                         (self.wake)();

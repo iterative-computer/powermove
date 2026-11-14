@@ -209,7 +209,58 @@ pub trait View: 'static + Sized {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement;
 }
 
+/// Powermove P-DRAW-TRACE: opt-in per-frame trace (PM_DRAW_TRACE=1).
+pub(crate) fn draw_trace_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("PM_DRAW_TRACE").is_some())
+}
+thread_local! {
+    /// The views rendered in the frame being drawn, while tracing.
+    pub(crate) static RENDERED: std::cell::RefCell<Vec<&'static str>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+thread_local! {
+    /// Exclusive time per view type and phase (layout, prepaint, paint) in
+    /// the frame being drawn, while tracing.
+    pub(crate) static VIEW_TIMES: std::cell::RefCell<(Vec<f64>, Vec<(&'static str, [f64; 3])>)> =
+        const { std::cell::RefCell::new((Vec::new(), Vec::new())) };
+}
+/// Times one view's phase, less the views nested in it (PM_DRAW_TRACE).
+pub(crate) struct ViewTimer(Option<(&'static str, usize, std::time::Instant)>);
+impl ViewTimer {
+    pub(crate) fn start(name: &'static str, phase: usize) -> Self {
+        if !draw_trace_enabled() {
+            return Self(None);
+        }
+        VIEW_TIMES.with_borrow_mut(|(stack, _)| stack.push(0.));
+        Self(Some((name, phase, std::time::Instant::now())))
+    }
+}
+impl Drop for ViewTimer {
+    fn drop(&mut self) {
+        let Some((name, phase, started)) = self.0 else { return };
+        let total = started.elapsed().as_secs_f64() * 1000.;
+        VIEW_TIMES.with_borrow_mut(|(stack, times)| {
+            let nested = stack.pop().unwrap_or(0.);
+            if let Some(parent) = stack.last_mut() {
+                *parent += total;
+            }
+            let short = name.rsplit("::").next().unwrap_or(name).trim_end_matches('>');
+            match times.iter_mut().find(|(n, _)| *n == short) {
+                Some((_, t)) => t[phase] += total - nested,
+                None => {
+                    let mut t = [0.; 3];
+                    t[phase] = total - nested;
+                    times.push((short, t));
+                }
+            }
+        });
+    }
+}
 fn render_view<V: View>(view: V, window: &mut Window, cx: &mut App) -> AnyElement {
+    if draw_trace_enabled() {
+        RENDERED.with_borrow_mut(|r| r.push(std::any::type_name::<V>()));
+    }
     #[cfg(all(
         feature = "hot-patching",
         debug_assertions,
@@ -390,6 +441,7 @@ impl<V: View> Element for ViewElement<V> {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
+        let _timer = ViewTimer::start(std::any::type_name::<V>(), 0);
         let entity_id = self.entity_id;
         let request_layout = |window: &mut Window| {
             let caching_disabled = window.is_inspector_picking(cx);
@@ -470,6 +522,7 @@ impl<V: View> Element for ViewElement<V> {
         window: &mut Window,
         cx: &mut App,
     ) -> Option<AnyElement> {
+        let _timer = ViewTimer::start(std::any::type_name::<V>(), 1);
         if let Some(entity_id) = self.entity_id {
             // Stateful path.
             window.set_view_id(entity_id);
@@ -585,6 +638,7 @@ impl<V: View> Element for ViewElement<V> {
         window: &mut Window,
         cx: &mut App,
     ) {
+        let _timer = ViewTimer::start(std::any::type_name::<V>(), 2);
         if let Some(entity_id) = self.entity_id {
             // Stateful path.
             window.with_rendered_view(entity_id, |window| {

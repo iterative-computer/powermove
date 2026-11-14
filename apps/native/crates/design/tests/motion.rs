@@ -118,16 +118,42 @@ fn reduce_motion_snaps_places_and_cross_fades_opacity() {
 }
 
 #[test]
-fn a_stall_never_makes_a_value_jump() {
-    let spring = Spring::new(420., 31.);
-    let mut a = Animated::new([0.], spring, 0.05);
-    a.animate_to([100.], spring);
-    a.step(2.);
-    assert!(a.value[0] < 5., "a 2 s hitch steps as one short frame");
+fn a_stall_catches_up_a_quarter_second_at_most() {
+    // A slow frame moves a value by the time it took (motion ends on time),
+    // but a long stall moves it no further than a quarter second would.
+    let spring = Spring::new(30., 11.);
+    let mut stalled = Animated::new([0.], spring, 0.05);
+    stalled.animate_to([100.], spring);
+    stalled.step(2.);
+    let mut quarter = Animated::new([0.], spring, 0.05);
+    quarter.animate_to([100.], spring);
+    quarter.step(0.25);
+    assert_eq!(stalled.value, quarter.value, "a 2 s hitch steps as 0.25 s");
+    assert!(stalled.value[0] < 100., "it doesn't arrive in one hitch");
     let mut clock = Clock::default();
     let now = std::time::Instant::now();
     assert_eq!(clock.tick(now), 0.);
     assert!(clock.tick(now + std::time::Duration::from_millis(8)) > 0.);
     clock.rest();
     assert_eq!(clock.tick(now + std::time::Duration::from_secs(5)), 0.);
+}
+
+#[test]
+fn slow_frames_end_motion_on_time_not_in_more_frames() {
+    // A heavy surface drawn at 6 Hz settles in about the same time as at
+    // 120 Hz, in far fewer frames (each frame moves by the time it took).
+    let t = Tokens::new(Scheme::Dark, Accessibility::default());
+    let spring = t.spring(Preset::Layout);
+    let mut fast = Animated::unit(0.);
+    fast.to(1., spring);
+    let (_, fast_frames) = run(&mut fast, 120., 5.);
+    let mut slow = Animated::unit(0.);
+    slow.to(1., spring);
+    let (peak, slow_frames) = run(&mut slow, 6., 5.);
+    let (fast_s, slow_s) = (fast_frames as f32 / 120., slow_frames as f32 / 6.);
+    assert!(slow_s <= fast_s + 0.34, "{fast_s} s at 120 Hz, {slow_s} s at 6 Hz");
+    assert!(slow_frames <= 6, "{slow_frames} frames at 6 Hz");
+    // Still stable: no wild overshoot from the long steps.
+    assert!(peak < 1.2, "{peak}");
+    assert_eq!(slow.get(), 1.);
 }

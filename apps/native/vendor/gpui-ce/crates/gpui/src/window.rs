@@ -1861,6 +1861,8 @@ impl Window {
 
                 let pending_next_frame_callbacks = next_frame_callbacks.take();
                 if !pending_next_frame_callbacks.is_empty() {
+                    let started = crate::view::draw_trace_enabled().then(Instant::now);
+                    let count = pending_next_frame_callbacks.len();
                     handle
                         .update(&mut cx, |_, window, cx| {
                             for callback in pending_next_frame_callbacks {
@@ -1868,6 +1870,12 @@ impl Window {
                             }
                         })
                         .log_err();
+                    if let Some(started) = started {
+                        eprintln!(
+                            "PM_FRAME {{\"callbacks\":{count},\"ms\":{:.2}}}",
+                            started.elapsed().as_secs_f64() * 1000.
+                        );
+                    }
                 }
 
                 // Keep presenting if input was recently arriving at a high rate (>= 60fps).
@@ -3499,6 +3507,7 @@ impl Window {
     }
 
     fn draw_roots(&mut self, cx: &mut App) {
+        use crate::view::draw_trace_enabled;
         self.invalidator.set_phase(DrawPhase::Prepaint);
         self.tooltip_bounds.take();
 
@@ -3527,12 +3536,15 @@ impl Window {
         // stretches to fill the viewport unless explicitly sized, window roots
         // fill the window when their size is `auto`.
         let scale_factor = self.scale_factor();
+        // Powermove P-DRAW-TRACE: opt-in per-frame phase times (PM_DRAW_TRACE=1).
+        let trace = draw_trace_enabled().then(|| (std::time::Instant::now(), self.dirty_views.len()));
         let mut root_element = self.root.as_ref().unwrap().clone().into_any_element();
         let root_layout_id = root_element.request_layout(self, cx);
         self.layout_engine
             .as_mut()
             .unwrap()
             .stretch_auto_size_to_fill(root_layout_id, root_size, scale_factor);
+        let layout_at = trace.map(|_| std::time::Instant::now());
         root_element.prepaint_as_root(Point::default(), root_size.into(), self, cx);
 
         #[cfg(any(feature = "inspector", debug_assertions))]
@@ -3565,6 +3577,7 @@ impl Window {
 
         self.mouse_hit_test = self.next_frame.hit_test(self.mouse_position);
 
+        let prepaint_at = trace.map(|_| std::time::Instant::now());
         // Now actually paint the elements.
         self.invalidator.set_phase(DrawPhase::Paint);
         root_element.paint(self, cx);
@@ -3585,6 +3598,7 @@ impl Window {
         #[cfg(any(feature = "inspector", debug_assertions))]
         self.paint_inspector_hitbox(cx);
 
+        let paint_at = trace.map(|_| std::time::Instant::now());
         // a11y may have been activated/deactivated halfway through the frame
         let a11y_active_start_of_frame = self.a11y.is_active();
         self.a11y.sync_active_flag();
@@ -3614,6 +3628,31 @@ impl Window {
                 );
                 self.platform_window.a11y_tree_update(tree_update);
             }
+        }
+        if let (Some((start, dirty)), Some(layout), Some(prepaint), Some(paint)) =
+            (trace, layout_at, prepaint_at, paint_at)
+        {
+            let ms = |a: std::time::Instant, b: std::time::Instant| (b - a).as_secs_f64() * 1000.;
+            let now = std::time::Instant::now();
+            let rendered = crate::view::RENDERED.with_borrow_mut(std::mem::take);
+            let rendered: Vec<String> = rendered
+                .iter()
+                .map(|t| t.rsplit("::").next().unwrap_or(t).trim_end_matches('>').to_owned())
+                .collect();
+            let times = crate::view::VIEW_TIMES.with_borrow_mut(|(_, t)| std::mem::take(t));
+            let times: Vec<String> = times
+                .iter()
+                .map(|(n, t)| format!("{n}:{:.2}/{:.2}/{:.2}", t[0], t[1], t[2]))
+                .collect();
+            eprintln!(
+                "PM_DRAW {{\"times\":\"{}\",\"views\":\"{}\",\"dirty\":{dirty},\"layout\":{:.2},\"prepaint\":{:.2},\"paint\":{:.2},\"a11y\":{:.2},\"a11y_on\":{a11y_active_start_of_frame}}}",
+                times.join(" "),
+                rendered.join(" "),
+                ms(start, layout),
+                ms(layout, prepaint),
+                ms(prepaint, paint),
+                ms(paint, now)
+            );
         }
     }
 

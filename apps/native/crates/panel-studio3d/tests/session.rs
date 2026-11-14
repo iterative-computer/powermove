@@ -611,3 +611,52 @@ fn disposed_gesture_from_a_reopened_document_preserves_the_new_lease() {
     );
     assert!(after.entry.is_some());
 }
+/// Properties with nothing selected asks for the 3D Scene summary on every
+/// publication: a composition with no 3D layer answers from the document
+/// tree, and one with a 3D layer still summarises it.
+#[test]
+fn scene_summary_needs_a_3d_layer() {
+    let (a, mut s) = fixture();
+    call(
+        &a,
+        Call::Transact {
+            label: None,
+            body: WriteBody::Commands(vec![
+                pm_kernel::LayerCommand::Add(Box::new(pm_kernel::commands::layers::AddLayer {
+                    id: "flat".into(),
+                    layer_type: "solid".into(),
+                    comp: None,
+                    name: None,
+                    from: None,
+                    duration: None,
+                    content: Default::default(),
+                    properties: Default::default(),
+                    color: None,
+                    index: None,
+                    parent: None,
+                    blend: None,
+                    motion_blur: None,
+                    visible: None,
+                    shy: None,
+                    collapsed: None,
+                    time: 0.,
+                }))
+                .into(),
+            ]),
+            expected_revision: None,
+        },
+    );
+    let p = a.handle().published("p").unwrap();
+    assert!(
+        pm_panel_studio3d::properties::scene_summary(&p)
+            .unwrap()
+            .is_none()
+    );
+    drive(&mut s, "add", json!("point"));
+    let p = a.handle().published("p").unwrap();
+    let summary = pm_panel_studio3d::properties::scene_summary(&p)
+        .unwrap()
+        .expect("a 3D scene");
+    assert_eq!(summary["lights"], 1);
+    assert_eq!(summary["models"], 0);
+}

@@ -420,6 +420,7 @@ function Field({
           {...bound}
           value={control.value}
           options={control.options}
+          rows={control.rows}
         />
       );
     case "font":

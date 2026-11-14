@@ -237,11 +237,14 @@ impl Backend {
         if self.native.properties.originals != self.native.originals {
             self.native.properties.originals = self.native.originals.clone();
         }
-        self.native.properties.snapshot(
+        let started = std::time::Instant::now();
+        let snapshot = self.native.properties.snapshot(
             self.model.as_mut().ok_or("No open project")?,
             time,
             playing,
-        )
+        );
+        crate::trace(json!({"properties": "sections", "ms": crate::ms(started.elapsed())}));
+        snapshot
     }
     pub(crate) fn timeline_frame(&mut self, request: &Value) -> Result<Value, String> {
         self.sync()?;
@@ -1157,8 +1160,21 @@ impl Backend {
             plan.settings.as_ref(),
             pm_panel_studio3d::properties::export_quality(&wire(&comp.to_value()), choice),
         ) {
-            let (w, h, frames) = (settings.size.width, settings.size.height, plan.frames.max(1));
-            let render_scale=if options.opaque.get("studioReducedSize").and_then(Value::as_bool)==Some(true){0.75}else{1.};
+            let (w, h, frames) = (
+                settings.size.width,
+                settings.size.height,
+                plan.frames.max(1),
+            );
+            let render_scale = if options
+                .opaque
+                .get("studioReducedSize")
+                .and_then(Value::as_bool)
+                == Some(true)
+            {
+                0.75
+            } else {
+                1.
+            };
             let key = format!("{w}x{h}x{frames}@{}:{render_scale}", p.revision());
             let status = self.native.facts["studioExportEstimate"]["status"]
                 .as_str()
@@ -1208,7 +1224,9 @@ impl Backend {
             }
             // The estimate on its own, for the sheet's Render Time row: the
             // measured range, "measuring…", or the static guess.
-            let summary = self.native.export["project"]["summary"].as_str().unwrap_or("");
+            let summary = self.native.export["project"]["summary"]
+                .as_str()
+                .unwrap_or("");
             if let Some((_, time)) = summary
                 .split(" · 3D ")
                 .nth(1)
@@ -1217,8 +1235,13 @@ impl Backend {
                 let measuring = time.ends_with("measuring…");
                 let measured = !measuring && from_viewer;
                 self.native.export["project"]["studio"]["estimate"] = json!(time);
-                self.native.export["project"]["studio"]["state"] =
-                    json!(if measuring { "measuring" } else if measured { "measured" } else { "guess" });
+                self.native.export["project"]["studio"]["state"] = json!(if measuring {
+                    "measuring"
+                } else if measured {
+                    "measured"
+                } else {
+                    "guess"
+                });
                 self.native.export["project"]["studio"]["preset"] = json!(preset);
             }
         }
@@ -1298,6 +1321,18 @@ impl Backend {
         }
     }
     pub(crate) fn native_command(
+        &mut self,
+        command: &str,
+        args: &Value,
+    ) -> Result<NativeCommand, String> {
+        let started = std::time::Instant::now();
+        let result = self.native_command_timed(command, args);
+        crate::trace(
+            json!({"panel": self.panel_id, "command": command, "ms": crate::ms(started.elapsed())}),
+        );
+        result
+    }
+    fn native_command_timed(
         &mut self,
         command: &str,
         args: &Value,

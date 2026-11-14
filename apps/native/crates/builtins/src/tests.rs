@@ -949,7 +949,9 @@ fn the_export_sheet_opens_on_the_projects_output() {
         let mut export = backend(realm, "export");
         let snapshot = export.export_snapshot().unwrap();
         // Absent is SDR (options leave the default out).
-        let range = snapshot["options"]["dynamicRange"].as_str().unwrap_or("sdr");
+        let range = snapshot["options"]["dynamicRange"]
+            .as_str()
+            .unwrap_or("sdr");
         (json!(range), snapshot["project"]["hdr"].clone())
     };
     assert_eq!(opened("export-sdr"), (json!("sdr"), json!(false)));
@@ -4181,7 +4183,9 @@ fn storage_rows_show_without_a_project_and_a_new_measurement_republishes() {
     let after = backend.settings_snapshot().unwrap();
     assert_ne!(after["revision"], before["revision"]);
     // A removal is a destructive row action: it reaches the app as itself.
-    assert!(super::settings::destructive_for_test("storage.delete.backups"));
+    assert!(super::settings::destructive_for_test(
+        "storage.delete.backups"
+    ));
 }
 #[test]
 fn mods_show_in_finder_and_delete_reach_the_app_only_for_what_this_mac_installed() {
@@ -4379,17 +4383,20 @@ fn the_color_panel_lists_the_grade_and_writes_through_its_controls() {
                 .map(str::to_owned)
         })
         .collect();
+    // Every grade in the order it applies, each under its own name (an
+    // extension's included), and the panel's Add actions.
     for label in [
         "Amount",
         "Input Space",
         "Color Wheels",
         "Lift",
         "Temperature",
-        "Curves",
+        "Add Curve",
         "Load LUT…",
-        "Color Space Transform",
-        "More",
+        "Add Color Space Transform",
+        "Synthetic Look",
         "Strength",
+        "Remove Color Wheels",
     ] {
         assert!(
             labels.iter().any(|l| l == label),
@@ -4901,7 +4908,9 @@ fn properties_list_an_imported_models_parts_with_their_own_values() {
         r#"{"asset":{"version":"2.0"},"materials":[{"name":"Aluminium","pbrMetallicRoughness":{"metallicFactor":1,"roughnessFactor":0.4}},{"name":"Glass"}]}"#,
     )
     .unwrap();
-    run(json!({"operation":"add_object","id":"model","object":{"source":{"assetId":"a1"},"useSourceMaterials":true}}));
+    run(
+        json!({"operation":"add_object","id":"model","object":{"source":{"assetId":"a1"},"useSourceMaterials":true}}),
+    );
     let mut presenter = properties::Properties::default();
     presenter.originals.insert("a1".into(), file);
     let publish = |presenter: &mut properties::Properties| {
@@ -4932,8 +4941,13 @@ fn properties_list_an_imported_models_parts_with_their_own_values() {
     assert_eq!(titles, ["Aluminium", "Glass"]);
     let rough = row(&p, "3d.part.0.roughness").expect("the file's roughness");
     assert_eq!(rough["control"]["axes"][0]["value"], 0.4);
-    assert!(row(&p, "3d.part.1.map.color").is_some(), "a layer can be the part's colour");
-    run(json!({"operation":"set_material_properties","target":"model","materialIndex":0,"patch":{"roughness":0.1}}));
+    assert!(
+        row(&p, "3d.part.1.map.color").is_some(),
+        "a layer can be the part's colour"
+    );
+    run(
+        json!({"operation":"set_material_properties","target":"model","materialIndex":0,"patch":{"roughness":0.1}}),
+    );
     let p = publish(&mut presenter);
     let rough = row(&p, "mi.0.roughness").expect("an override is a channel row");
     assert_eq!(rough["control"]["axes"][0]["value"], 0.1);
@@ -5028,4 +5042,91 @@ fn properties_follow_the_playhead_while_playing() {
     }
     assert!(panels.follow_time("not-open", 1., true).is_none());
     assert!(panels.take_errors().is_empty());
+}
+
+/// Properties' Parent and Track Matte rows carry only what the closed
+/// pop-up shows (None and the current layer) and the source the host lists
+/// the rest from when the menu opens: no list of every layer is built,
+/// copied or sent with each publication.
+#[test]
+fn parent_and_track_matte_rows_carry_only_the_current_layer() {
+    let actor = KernelActor::spawn(KernelConfig::default());
+    let mut layers = vec![];
+    for i in 0..300 {
+        let parent = if i == 1 { r#""a0""# } else { "null" };
+        layers.push(format!(
+            r##"{{"id":"a{i}","type":"solid","name":"Layer {i}","from":0,"dur":10,"on":true,"parent":{parent},
+            "d":{{"w":10,"h":10,"color":"#ffffff"}},"p":{{"opacity":{{"v":100,"kf":[]}}}},"fx":[]}}"##
+        ));
+    }
+    let project = format!(
+        r##"{{"id":"synthetic","name":"Synthetic","compId":"c","w":64,"h":36,"fps":30,"dur":10,"bg":"#000000",
+        "assets":{{}},"comps":{{}},"layers":[{}]}}"##,
+        layers.join(",")
+    );
+    let kernel = actor.handle();
+    kernel
+        .open(
+            "synthetic",
+            OpenSource::Untitled(pm_model::json::parse(&project).unwrap()),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    kernel
+        .call(
+            "synthetic",
+            Request::new(
+                Caller::native(),
+                SelectionCall::Layers {
+                    ids: vec!["a1".into()],
+                    add: false,
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    let identity = pm_surface::host_api::Identity {
+        realm: "inspector".into(),
+        generation: 1,
+        project: "synthetic".into(),
+    };
+    let mut backend = data::Backend::new(kernel.clone(), identity, "inspector", false).unwrap();
+    let snapshot = backend.inspector_snapshot().unwrap();
+    let row = |id: &str| {
+        snapshot["sections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|s| s["rows"].as_array().unwrap())
+            .find(|r| r["id"] == id)
+            .cloned()
+            .unwrap_or_else(|| panic!("{id} row"))
+    };
+    let parent = row("layer.parent");
+    assert_eq!(parent["control"]["value"], "a0");
+    assert_eq!(
+        parent["control"]["options"],
+        json!([{"v":null,"label":"None"},{"v":"a0","label":"Layer 0"}])
+    );
+    assert_eq!(
+        parent["control"]["rows"],
+        json!({"source":"layer-parents","layer":"a1"})
+    );
+    let matte = row("layer.matteSource");
+    assert_eq!(
+        matte["control"]["options"],
+        json!([{"v":null,"label":"None"}])
+    );
+    assert_eq!(
+        matte["control"]["rows"],
+        json!({"source":"layer-mattes","layer":"a1"})
+    );
+    // The whole projection stays small with 300 layers.
+    assert!(
+        snapshot.to_string().len() < 20_000,
+        "{}",
+        snapshot.to_string().len()
+    );
 }

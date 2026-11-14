@@ -9,10 +9,11 @@
 //!   extension realm through [`CompatStore::set_sink`], one batch at a time,
 //!   and the realm's answers come back through [`CompatStore::answer_all`],
 //!   which redraws the viewers. A paused frame waits for its answers
-//!   (`CompatPending`); a playing or scrubbing frame draws a late layer from
-//!   its nearest answer (plan 3.6.4: "a late override reuses its last-good
-//!   surface") and is redrawn exact when the answer lands. The viewer never
-//!   blocks on JavaScript, and never stops showing frames for it.
+//!   (`CompatPending`); a playing or scrubbing frame never does: it draws a
+//!   late layer from its nearest answer (plan 3.6.4: "a late override reuses
+//!   its last-good surface"), or without the override when the layer has no
+//!   answer yet, and is redrawn exact when the answer lands. The viewer
+//!   never blocks on JavaScript, and never stops showing frames for it.
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet, VecDeque};
 use std::sync::mpsc::{Sender, channel};
@@ -269,8 +270,9 @@ enum Late {
     /// Wait for it: the frame fails with `CompatPending` (paused frames, exact).
     #[default]
     Wait,
-    /// Draw its nearest answer, or hold the picture when it has none
-    /// (playing and scrubbing: a late layer is never left out).
+    /// Draw its nearest answer, or the layer without its override when it
+    /// has none (playing and scrubbing: playback never freezes for an
+    /// extension; the frame is marked late and redrawn exact).
     Nearest,
 }
 
@@ -311,9 +313,6 @@ struct Answers {
     per_need: Option<Duration>,
     /// Override layers in the last look-ahead frame, and the last frame it asked.
     layers: usize,
-    /// Override layers in the last frame the look-ahead looked at (zero when
-    /// it had none).
-    ahead_layers: usize,
     /// The last frame the look-ahead asked for, and the scale it asked at:
     /// answers at another scale cover nothing (a windowed raster stands in
     /// only at its own scale).
@@ -454,6 +453,24 @@ impl Answers {
         times
             .range(..=ticks)
             .rev()
+            .filter_map(|(_, key)| Some((key, self.map.get(key)?)))
+            .find(|(key, answer)| stands_in(key, answer, scale, crop))
+            .map(|(_, answer)| answer)
+    }
+    /// A late layer with no answered frame at or before `ticks` that stands
+    /// in: its nearest answered frame after it that does (playback starting
+    /// before the layer's first answer, a seek back).
+    fn nearest_after(
+        &self,
+        composition: &str,
+        layer: &str,
+        ticks: i64,
+        scale: f64,
+        crop: Option<PixelRect>,
+    ) -> Option<&CompatAnswer> {
+        self.by_layer
+            .get(&(composition.to_owned(), layer.to_owned()))?
+            .range(ticks..)
             .filter_map(|(_, key)| Some((key, self.map.get(key)?)))
             .find(|(key, answer)| stands_in(key, answer, scale, crop))
             .map(|(_, answer)| answer)
@@ -681,7 +698,6 @@ impl CompatStore {
         let mut answers = self.answers.lock().unwrap();
         let scale = needs.first().map_or(0, |need| need.scale.to_bits());
         answers.horizon = Some((at + (frames - 1) * step, scale));
-        answers.ahead_layers = needs.len();
         if !needs.is_empty() {
             answers.layers = needs.len();
         }
@@ -722,11 +738,6 @@ impl CompatStore {
     /// The realm's measured time per need, the batch in flight (its age and
     /// size), the needs waiting behind it and the override layers of the
     /// last look-ahead frame: a traced viewer's after-frame row.
-    /// Whether the frames ahead of the playhead draw layers only an
-    /// extension draws (as the look-ahead last found them).
-    pub(crate) fn overrides_ahead(&self) -> bool {
-        self.answers.lock().unwrap().ahead_layers > 0
-    }
     pub(crate) fn trace(&self) -> serde_json::Value {
         let answers = self.answers.lock().unwrap();
         serde_json::json!({
@@ -742,8 +753,8 @@ impl CompatStore {
         self.answers.lock().unwrap().frame
     }
     /// The frame about to be drawn: playing and scrubbed frames draw late
-    /// layers from their nearest answer (holding the picture when there is
-    /// none), paused frames wait.
+    /// layers from their nearest answer (or without the override when there
+    /// is none), paused frames wait.
     pub(crate) fn begin_frame(&self, moment: crate::policy::Moment) {
         let mut answers = self.answers.lock().unwrap();
         answers.late = match moment {
@@ -922,19 +933,19 @@ impl CompatRasters for CompatStore {
             return CompatAnswer::Failed(message.clone());
         }
         // Not answered yet, or the realm couldn't answer this time (asked
-        // again after its backoff): never drawn without the layer. A paused
-        // frame waits (the viewer says what for after a few seconds); a
-        // playing or scrubbed one draws the layer's nearest answer, or holds
-        // the previous picture until one arrives.
+        // again after its backoff). A paused frame waits (the viewer says
+        // what for after a few seconds). A playing or scrubbed one never
+        // does: it draws the layer's nearest earlier answer, else its nearest
+        // later one, else the layer without its override, and is redrawn
+        // exact when the answer lands.
         if answers.late == Late::Wait {
             return CompatAnswer::Missing;
         }
-        let Some(stand_in) = answers
+        let stand_in = answers
             .nearest(composition, layer, ticks, scale, crop)
+            .or_else(|| answers.nearest_after(composition, layer, ticks, scale, crop))
             .cloned()
-        else {
-            return CompatAnswer::Missing;
-        };
+            .unwrap_or(CompatAnswer::Native);
         answers.stood_in.push(CompatNeed {
             composition: composition.into(),
             layer: layer.into(),
@@ -1339,8 +1350,8 @@ mod tests {
     }
     /// A raster holding only its need's crop window stands in only for a
     /// frame at its scale whose crop it holds: anything else would sample its
-    /// transparent rest, so that frame holds as for no answer (review: panning
-    /// across a crop bucket showed holes).
+    /// transparent rest (review: panning across a crop bucket showed holes),
+    /// so that frame draws the layer without its override, as for no answer.
     #[test]
     fn a_windowed_answer_stands_in_only_for_crops_it_holds() {
         use crate::policy::Moment;
@@ -1375,27 +1386,24 @@ mod tests {
         store.begin_frame(Moment::Playing);
         assert_eq!(byte_of(ask(crop(20, 10, 40, 30), 1.)), Some(7));
         assert_eq!(byte_of(ask(crop(25, 12, 30, 20), 1.)), Some(7));
-        // A crop the window ends inside of at the raster's edge is held too.
+        // A crop the window ends inside of at the raster's edge is not held.
         assert!(matches!(
             ask(crop(60, 40, 256, 256), 1.),
-            CompatAnswer::Missing
+            CompatAnswer::Native
         ));
         assert!(matches!(
             ask(crop(10, 10, 40, 30), 1.),
-            CompatAnswer::Missing
+            CompatAnswer::Native
         ));
-        assert!(matches!(ask(None, 1.), CompatAnswer::Missing));
+        assert!(matches!(ask(None, 1.), CompatAnswer::Native));
         assert!(matches!(
             ask(crop(20, 10, 40, 30), 2.),
-            CompatAnswer::Missing
+            CompatAnswer::Native
         ));
         // A coarser frame (playback at half resolution) draws the finer
         // window when its crop, taken to the window's pixels, lies inside.
         assert_eq!(byte_of(ask(crop(10, 5, 20, 15), 0.5)), Some(7));
-        assert!(matches!(
-            ask(crop(5, 5, 20, 15), 0.5),
-            CompatAnswer::Missing
-        ));
+        assert!(matches!(ask(crop(5, 5, 20, 15), 0.5), CompatAnswer::Native));
         store.end_frame();
         // A whole raster stands in for any crop and scale, as before.
         let mut whole = at("x", 1.2);
@@ -1406,7 +1414,7 @@ mod tests {
         store.end_frame();
     }
     #[test]
-    fn a_playing_frame_draws_a_late_layer_from_its_nearest_answer() {
+    fn a_playing_frame_never_waits_for_an_extension_layer() {
         use crate::policy::Moment;
         let store = CompatStore::default();
         store.set_state(true, 7, 1);
@@ -1423,15 +1431,13 @@ mod tests {
         assert_eq!(byte_of(answer_at(&store, "x", 2.0)), Some(20));
         let late = store.end_frame();
         assert_eq!(late.len(), 2, "the exact frame is not late");
-        // Before its first answer there is nothing earlier: the frame holds.
+        // Playback never freezes for an extension. Before a layer's first
+        // answer the nearest later one stands in; a layer never answered is
+        // drawn without its override. Both are late: redrawn exact.
         store.begin_frame(Moment::Playing);
-        assert!(matches!(answer_at(&store, "x", 0.5), CompatAnswer::Missing));
-        store.end_frame();
-        // A layer never answered is never left out: playing and scrubbing
-        // hold the picture until it is answered.
-        store.begin_frame(Moment::Playing);
-        assert!(matches!(answer_at(&store, "y", 1.), CompatAnswer::Missing));
-        assert!(store.end_frame().is_empty());
+        assert_eq!(byte_of(answer_at(&store, "x", 0.5)), Some(10));
+        assert!(matches!(answer_at(&store, "y", 1.), CompatAnswer::Native));
+        assert_eq!(store.end_frame().len(), 2);
         // One the realm keeps failing to answer draws its nearest answer.
         store.answer_all(
             7,
@@ -1452,8 +1458,8 @@ mod tests {
         assert_eq!(byte_of(answer_at(&store, "x", 1.5)), Some(10));
         assert_eq!(store.end_frame().len(), 1);
         store.begin_frame(Moment::Scrub);
-        assert!(matches!(answer_at(&store, "y", 1.), CompatAnswer::Missing));
-        assert!(store.end_frame().is_empty());
+        assert!(matches!(answer_at(&store, "y", 1.), CompatAnswer::Native));
+        assert_eq!(store.end_frame().len(), 1);
         // A failed override still fails its layer, playing or not.
         store.answer_all(7, 1, vec![(at("x", 3.), Reply::Failed("boom".into()))]);
         store.begin_frame(Moment::Playing);
@@ -1462,14 +1468,15 @@ mod tests {
             CompatAnswer::Failed(_)
         ));
         store.end_frame();
-        // After an edit no earlier revision's answer stands in, playing or
-        // paused: the frame holds until this revision's answer lands.
+        // After an edit no earlier revision's answer stands in: a paused
+        // frame waits for this revision's answer, a playing one draws the
+        // layer without its override meanwhile.
         store.set_state(true, 8, 1);
         store.begin_frame(Moment::Paused);
         assert!(matches!(answer_at(&store, "x", 1.), CompatAnswer::Missing));
         store.end_frame();
         store.begin_frame(Moment::Playing);
-        assert!(matches!(answer_at(&store, "x", 1.), CompatAnswer::Missing));
+        assert!(matches!(answer_at(&store, "x", 1.), CompatAnswer::Native));
         store.end_frame();
         store.answer_all(8, 1, vec![(at("x", 1.), draw(30))]);
         store.begin_frame(Moment::Playing);
@@ -1477,8 +1484,11 @@ mod tests {
         store.end_frame();
         // New wrappers neither.
         store.set_state(true, 8, 2);
-        store.begin_frame(Moment::Scrub);
+        store.begin_frame(Moment::Paused);
         assert!(matches!(answer_at(&store, "x", 1.), CompatAnswer::Missing));
+        store.end_frame();
+        store.begin_frame(Moment::Scrub);
+        assert!(matches!(answer_at(&store, "x", 1.), CompatAnswer::Native));
         store.end_frame();
     }
     #[test]

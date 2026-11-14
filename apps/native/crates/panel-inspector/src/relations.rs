@@ -24,6 +24,7 @@ impl Inspector {
             .filter(|id| self.layer(id).is_ok_and(|l| text(&l, "type") != "audio"))
             .collect())
     }
+    #[allow(dead_code)]
     fn relation_query(
         &mut self,
         op: &str,
@@ -50,6 +51,9 @@ impl Inspector {
             .as_bool()
             .ok_or(InspectorError::InvalidInput)
     }
+    /// The layers `layer` (with the selection it belongs to) can be parented
+    /// to: no audio, none of the children, no cycle. Read from the layer list
+    /// itself; no layer is copied to read its type.
     pub fn parent_candidates(&mut self, layer: &str) -> Result<Vec<String>, InspectorError> {
         let children = self.parenting_layers(layer)?;
         let root = self
@@ -57,25 +61,31 @@ impl Inspector {
             .snapshot
             .root()
             .ok_or(InspectorError::InvalidInput)?;
-        let ids = pm_kernel::model::list_layers(root, None)
-            .into_iter()
-            .map(|l| l.id)
-            .collect::<Vec<_>>();
+        let locs = children
+            .iter()
+            .map(|child| {
+                pm_kernel::model::find_layer(root, child)
+                    .ok_or_else(|| InspectorError::MissingLayer(child.clone()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let layers = pm_kernel::model::list_layers(root, None);
         let mut out = Vec::new();
-        for id in ids {
-            if text(&self.layer(&id)?, "type") == "audio" || children.contains(&id) {
+        'candidates: for info in layers {
+            if info.kind == "audio" || children.contains(&info.id) {
                 continue;
             }
-            let mut cyclic = false;
-            for child in &children {
-                if self.relation_query("wouldCycle", child, "parent", id.clone().into())? {
-                    cyclic = true;
-                    break;
+            for loc in &locs {
+                if relation_at(
+                    &mut self.mirror,
+                    loc,
+                    "wouldCycle",
+                    "parent",
+                    info.id.clone().into(),
+                )? {
+                    continue 'candidates;
                 }
             }
-            if !cyclic {
-                out.push(id);
-            }
+            out.push(info.id);
         }
         Ok(out)
     }
@@ -85,17 +95,29 @@ impl Inspector {
             .snapshot
             .root()
             .ok_or(InspectorError::InvalidInput)?;
-        let ids = pm_kernel::model::list_layers(root, None)
-            .into_iter()
-            .map(|l| l.id)
-            .collect::<Vec<_>>();
+        let loc = pm_kernel::model::find_layer(root, layer)
+            .ok_or_else(|| InspectorError::MissingLayer(layer.into()))?;
         let mut out = Vec::new();
-        for id in ids {
-            if self.relation_query("validMatteSource", layer, "id", id.clone().into())? {
-                out.push(id);
+        for info in pm_kernel::model::list_layers(root, None) {
+            if relation_at(
+                &mut self.mirror,
+                &loc,
+                "validMatteSource",
+                "id",
+                info.id.clone().into(),
+            )? {
+                out.push(info.id);
             }
         }
         Ok(out)
+    }
+    /// A layer's name without copying the layer (a pop-up's current row).
+    pub fn layer_name(&self, id: &str) -> Option<String> {
+        let name = self.layer_node(id).ok()?.get("name")?;
+        match name.kind() {
+            pm_model::NodeKind::String(s) => Some(s.to_string_lossy()),
+            _ => None,
+        }
     }
     /// Captures the exact raw selection (including selected members), matching
     /// LayerOptions parenting, which intentionally differs from shared edits.
@@ -225,4 +247,26 @@ impl Inspector {
             .map(|p| (PropertyId::new(layer, format!("{effect}.{}", p.key)), p))
             .collect())
     }
+}
+
+/// A kernel relation question about the layer at `loc` (resolved once by the
+/// caller, not once per candidate).
+fn relation_at(
+    mirror: &mut pm_kernel::QueryMirror,
+    loc: &pm_kernel::model::LayerLoc,
+    op: &str,
+    key: &str,
+    value: Value,
+) -> Result<bool, InspectorError> {
+    let mut request = object([
+        ("op", op.into()),
+        ("layer", (loc.index as f64).into()),
+        ("comp", loc.comp_id.clone().unwrap_or_default().into()),
+    ]);
+    request.as_object_mut().expect("object").insert(key, value);
+    mirror
+        .queries()
+        .query(&request)?
+        .as_bool()
+        .ok_or(InspectorError::InvalidInput)
 }
