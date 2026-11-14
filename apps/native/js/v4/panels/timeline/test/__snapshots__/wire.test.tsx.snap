@@ -1336,6 +1336,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   ],
                                   "props": {
                                     "id": "timeline:name:layer:headline",
+                                    "metadata": {
+                                      "timelineLayerDrag": {
+                                        "layer": "headline",
+                                      },
+                                    },
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -1402,42 +1407,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "title": "Parent: None · Drag to a layer",
                                   },
                                   "type": "button",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -2189,6 +2158,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   ],
                                   "props": {
                                     "id": "timeline:name:layer:headline",
+                                    "metadata": {
+                                      "timelineLayerDrag": {
+                                        "layer": "headline",
+                                      },
+                                    },
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -2253,64 +2227,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "tabIndex": -1,
                                     "title": "Parent: None · Drag to a layer",
-                                  },
-                                  "type": "button",
-                                },
-                                {
-                                  "props": {
-                                    "aria-pressed": false,
-                                    "data-pm-component": "toolbar-item",
-                                    "id": "timeline:shy:layer:headline",
-                                    "label": "Toggle Shy",
-                                    "metadata": {
-                                      "designTodo": "T1",
-                                      "requiredSymbol": "face.dashed",
-                                    },
-                                    "style": {
-                                      "color": {
-                                        "token": "colors.secondary",
-                                      },
-                                      "minHeight": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "symbolSize": {
-                                        "token": "metrics.symbol_panel",
-                                      },
-                                    },
-                                    "tabIndex": -1,
-                                    "title": "Toggle Shy",
-                                  },
-                                  "type": "button",
-                                },
-                                {
-                                  "props": {
-                                    "aria-pressed": false,
-                                    "data-pm-component": "toolbar-item",
-                                    "id": "timeline:solo:layer:headline",
-                                    "label": "Toggle Solo",
-                                    "metadata": {
-                                      "designTodo": "T1",
-                                      "requiredSymbol": "s.circle",
-                                    },
-                                    "style": {
-                                      "color": {
-                                        "token": "colors.secondary",
-                                      },
-                                      "minHeight": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "symbolSize": {
-                                        "token": "metrics.symbol_panel",
-                                      },
-                                    },
-                                    "tabIndex": -1,
-                                    "title": "Toggle Solo",
                                   },
                                   "type": "button",
                                 },
@@ -3077,6 +2993,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   ],
                                   "props": {
                                     "id": "timeline:name:layer:headline",
+                                    "metadata": {
+                                      "timelineLayerDrag": {
+                                        "layer": "headline",
+                                      },
+                                    },
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -3141,64 +3062,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "tabIndex": -1,
                                     "title": "Parent: None · Drag to a layer",
-                                  },
-                                  "type": "button",
-                                },
-                                {
-                                  "props": {
-                                    "aria-pressed": false,
-                                    "data-pm-component": "toolbar-item",
-                                    "id": "timeline:shy:layer:headline",
-                                    "label": "Toggle Shy",
-                                    "metadata": {
-                                      "designTodo": "T1",
-                                      "requiredSymbol": "face.dashed",
-                                    },
-                                    "style": {
-                                      "color": {
-                                        "token": "colors.secondary",
-                                      },
-                                      "minHeight": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "symbolSize": {
-                                        "token": "metrics.symbol_panel",
-                                      },
-                                    },
-                                    "tabIndex": -1,
-                                    "title": "Toggle Shy",
-                                  },
-                                  "type": "button",
-                                },
-                                {
-                                  "props": {
-                                    "aria-pressed": false,
-                                    "data-pm-component": "toolbar-item",
-                                    "id": "timeline:solo:layer:headline",
-                                    "label": "Toggle Solo",
-                                    "metadata": {
-                                      "designTodo": "T1",
-                                      "requiredSymbol": "s.circle",
-                                    },
-                                    "style": {
-                                      "color": {
-                                        "token": "colors.secondary",
-                                      },
-                                      "minHeight": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "symbolSize": {
-                                        "token": "metrics.symbol_panel",
-                                      },
-                                    },
-                                    "tabIndex": -1,
-                                    "title": "Toggle Solo",
                                   },
                                   "type": "button",
                                 },
@@ -3965,6 +3828,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   ],
                                   "props": {
                                     "id": "timeline:name:layer:headline",
+                                    "metadata": {
+                                      "timelineLayerDrag": {
+                                        "layer": "headline",
+                                      },
+                                    },
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -4029,64 +3897,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "tabIndex": -1,
                                     "title": "Parent: None · Drag to a layer",
-                                  },
-                                  "type": "button",
-                                },
-                                {
-                                  "props": {
-                                    "aria-pressed": false,
-                                    "data-pm-component": "toolbar-item",
-                                    "id": "timeline:shy:layer:headline",
-                                    "label": "Toggle Shy",
-                                    "metadata": {
-                                      "designTodo": "T1",
-                                      "requiredSymbol": "face.dashed",
-                                    },
-                                    "style": {
-                                      "color": {
-                                        "token": "colors.secondary",
-                                      },
-                                      "minHeight": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "symbolSize": {
-                                        "token": "metrics.symbol_panel",
-                                      },
-                                    },
-                                    "tabIndex": -1,
-                                    "title": "Toggle Shy",
-                                  },
-                                  "type": "button",
-                                },
-                                {
-                                  "props": {
-                                    "aria-pressed": false,
-                                    "data-pm-component": "toolbar-item",
-                                    "id": "timeline:solo:layer:headline",
-                                    "label": "Toggle Solo",
-                                    "metadata": {
-                                      "designTodo": "T1",
-                                      "requiredSymbol": "s.circle",
-                                    },
-                                    "style": {
-                                      "color": {
-                                        "token": "colors.secondary",
-                                      },
-                                      "minHeight": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "symbolSize": {
-                                        "token": "metrics.symbol_panel",
-                                      },
-                                    },
-                                    "tabIndex": -1,
-                                    "title": "Toggle Solo",
                                   },
                                   "type": "button",
                                 },
@@ -4850,6 +4660,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   ],
                                   "props": {
                                     "id": "timeline:name:layer:headline",
+                                    "metadata": {
+                                      "timelineLayerDrag": {
+                                        "layer": "headline",
+                                      },
+                                    },
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -4916,42 +4731,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "title": "Parent: None · Drag to a layer",
                                   },
                                   "type": "button",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -5945,6 +5724,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   ],
                                   "props": {
                                     "id": "timeline:name:layer:headline",
+                                    "metadata": {
+                                      "timelineLayerDrag": {
+                                        "layer": "headline",
+                                      },
+                                    },
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -6011,42 +5795,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "title": "Parent: None · Drag to a layer",
                                   },
                                   "type": "button",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -6850,6 +6598,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   ],
                                   "props": {
                                     "id": "timeline:name:layer:headline",
+                                    "metadata": {
+                                      "timelineLayerDrag": {
+                                        "layer": "headline",
+                                      },
+                                    },
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -6914,64 +6667,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "tabIndex": -1,
                                     "title": "Parent: None · Drag to a layer",
-                                  },
-                                  "type": "button",
-                                },
-                                {
-                                  "props": {
-                                    "aria-pressed": false,
-                                    "data-pm-component": "toolbar-item",
-                                    "id": "timeline:shy:layer:headline",
-                                    "label": "Toggle Shy",
-                                    "metadata": {
-                                      "designTodo": "T1",
-                                      "requiredSymbol": "face.dashed",
-                                    },
-                                    "style": {
-                                      "color": {
-                                        "token": "colors.secondary",
-                                      },
-                                      "minHeight": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "symbolSize": {
-                                        "token": "metrics.symbol_panel",
-                                      },
-                                    },
-                                    "tabIndex": -1,
-                                    "title": "Toggle Shy",
-                                  },
-                                  "type": "button",
-                                },
-                                {
-                                  "props": {
-                                    "aria-pressed": false,
-                                    "data-pm-component": "toolbar-item",
-                                    "id": "timeline:solo:layer:headline",
-                                    "label": "Toggle Solo",
-                                    "metadata": {
-                                      "designTodo": "T1",
-                                      "requiredSymbol": "s.circle",
-                                    },
-                                    "style": {
-                                      "color": {
-                                        "token": "colors.secondary",
-                                      },
-                                      "minHeight": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "symbolSize": {
-                                        "token": "metrics.symbol_panel",
-                                      },
-                                    },
-                                    "tabIndex": -1,
-                                    "title": "Toggle Solo",
                                   },
                                   "type": "button",
                                 },
@@ -7744,6 +7439,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   ],
                                   "props": {
                                     "id": "timeline:name:layer:headline",
+                                    "metadata": {
+                                      "timelineLayerDrag": {
+                                        "layer": "headline",
+                                      },
+                                    },
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -7810,42 +7510,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "title": "Parent: None · Drag to a layer",
                                   },
                                   "type": "button",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -8062,6 +7726,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   ],
                                   "props": {
                                     "id": "timeline:name:layer:kicker",
+                                    "metadata": {
+                                      "timelineLayerDrag": {
+                                        "layer": "kicker",
+                                      },
+                                    },
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -8128,42 +7797,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "title": "Parent: None · Drag to a layer",
                                   },
                                   "type": "button",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -8926,6 +8559,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   ],
                                   "props": {
                                     "id": "timeline:name:layer:headline",
+                                    "metadata": {
+                                      "timelineLayerDrag": {
+                                        "layer": "headline",
+                                      },
+                                    },
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -8992,42 +8630,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "title": "Parent: None · Drag to a layer",
                                   },
                                   "type": "button",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -9779,6 +9381,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   ],
                                   "props": {
                                     "id": "timeline:name:layer:row-29990",
+                                    "metadata": {
+                                      "timelineLayerDrag": {
+                                        "layer": "row-29990",
+                                      },
+                                    },
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -9845,42 +9452,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "title": "Parent: None · Drag to a layer",
                                   },
                                   "type": "button",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -10094,6 +9665,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   ],
                                   "props": {
                                     "id": "timeline:name:layer:row-29991",
+                                    "metadata": {
+                                      "timelineLayerDrag": {
+                                        "layer": "row-29991",
+                                      },
+                                    },
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -10160,42 +9736,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "title": "Parent: None · Drag to a layer",
                                   },
                                   "type": "button",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -10409,6 +9949,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   ],
                                   "props": {
                                     "id": "timeline:name:layer:row-29992",
+                                    "metadata": {
+                                      "timelineLayerDrag": {
+                                        "layer": "row-29992",
+                                      },
+                                    },
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -10475,42 +10020,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "title": "Parent: None · Drag to a layer",
                                   },
                                   "type": "button",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -10724,6 +10233,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   ],
                                   "props": {
                                     "id": "timeline:name:layer:row-29993",
+                                    "metadata": {
+                                      "timelineLayerDrag": {
+                                        "layer": "row-29993",
+                                      },
+                                    },
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -10790,42 +10304,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "title": "Parent: None · Drag to a layer",
                                   },
                                   "type": "button",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -11039,6 +10517,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   ],
                                   "props": {
                                     "id": "timeline:name:layer:row-29994",
+                                    "metadata": {
+                                      "timelineLayerDrag": {
+                                        "layer": "row-29994",
+                                      },
+                                    },
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -11105,42 +10588,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "title": "Parent: None · Drag to a layer",
                                   },
                                   "type": "button",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -11354,6 +10801,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   ],
                                   "props": {
                                     "id": "timeline:name:layer:row-29995",
+                                    "metadata": {
+                                      "timelineLayerDrag": {
+                                        "layer": "row-29995",
+                                      },
+                                    },
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -11420,42 +10872,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "title": "Parent: None · Drag to a layer",
                                   },
                                   "type": "button",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -11669,6 +11085,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   ],
                                   "props": {
                                     "id": "timeline:name:layer:row-29996",
+                                    "metadata": {
+                                      "timelineLayerDrag": {
+                                        "layer": "row-29996",
+                                      },
+                                    },
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -11735,42 +11156,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "title": "Parent: None · Drag to a layer",
                                   },
                                   "type": "button",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -11984,6 +11369,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   ],
                                   "props": {
                                     "id": "timeline:name:layer:row-29997",
+                                    "metadata": {
+                                      "timelineLayerDrag": {
+                                        "layer": "row-29997",
+                                      },
+                                    },
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -12050,42 +11440,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "title": "Parent: None · Drag to a layer",
                                   },
                                   "type": "button",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -12299,6 +11653,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   ],
                                   "props": {
                                     "id": "timeline:name:layer:row-29998",
+                                    "metadata": {
+                                      "timelineLayerDrag": {
+                                        "layer": "row-29998",
+                                      },
+                                    },
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -12365,42 +11724,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "title": "Parent: None · Drag to a layer",
                                   },
                                   "type": "button",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -12614,6 +11937,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   ],
                                   "props": {
                                     "id": "timeline:name:layer:row-29999",
+                                    "metadata": {
+                                      "timelineLayerDrag": {
+                                        "layer": "row-29999",
+                                      },
+                                    },
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -12680,42 +12008,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "title": "Parent: None · Drag to a layer",
                                   },
                                   "type": "button",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -12929,6 +12221,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   ],
                                   "props": {
                                     "id": "timeline:name:layer:row-30000",
+                                    "metadata": {
+                                      "timelineLayerDrag": {
+                                        "layer": "row-30000",
+                                      },
+                                    },
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -12995,42 +12292,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "title": "Parent: None · Drag to a layer",
                                   },
                                   "type": "button",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -13244,6 +12505,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   ],
                                   "props": {
                                     "id": "timeline:name:layer:row-30001",
+                                    "metadata": {
+                                      "timelineLayerDrag": {
+                                        "layer": "row-30001",
+                                      },
+                                    },
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -13310,42 +12576,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "title": "Parent: None · Drag to a layer",
                                   },
                                   "type": "button",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -13559,6 +12789,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   ],
                                   "props": {
                                     "id": "timeline:name:layer:row-30002",
+                                    "metadata": {
+                                      "timelineLayerDrag": {
+                                        "layer": "row-30002",
+                                      },
+                                    },
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -13625,42 +12860,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "title": "Parent: None · Drag to a layer",
                                   },
                                   "type": "button",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -13874,6 +13073,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   ],
                                   "props": {
                                     "id": "timeline:name:layer:row-30003",
+                                    "metadata": {
+                                      "timelineLayerDrag": {
+                                        "layer": "row-30003",
+                                      },
+                                    },
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -13940,42 +13144,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "title": "Parent: None · Drag to a layer",
                                   },
                                   "type": "button",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -14189,6 +13357,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   ],
                                   "props": {
                                     "id": "timeline:name:layer:row-30004",
+                                    "metadata": {
+                                      "timelineLayerDrag": {
+                                        "layer": "row-30004",
+                                      },
+                                    },
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -14255,42 +13428,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "title": "Parent: None · Drag to a layer",
                                   },
                                   "type": "button",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -14504,6 +13641,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   ],
                                   "props": {
                                     "id": "timeline:name:layer:row-30005",
+                                    "metadata": {
+                                      "timelineLayerDrag": {
+                                        "layer": "row-30005",
+                                      },
+                                    },
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -14570,42 +13712,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "title": "Parent: None · Drag to a layer",
                                   },
                                   "type": "button",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -14819,6 +13925,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   ],
                                   "props": {
                                     "id": "timeline:name:layer:row-30006",
+                                    "metadata": {
+                                      "timelineLayerDrag": {
+                                        "layer": "row-30006",
+                                      },
+                                    },
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -14885,42 +13996,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "title": "Parent: None · Drag to a layer",
                                   },
                                   "type": "button",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -15134,6 +14209,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   ],
                                   "props": {
                                     "id": "timeline:name:layer:row-30007",
+                                    "metadata": {
+                                      "timelineLayerDrag": {
+                                        "layer": "row-30007",
+                                      },
+                                    },
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -15200,42 +14280,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "title": "Parent: None · Drag to a layer",
                                   },
                                   "type": "button",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -15449,6 +14493,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   ],
                                   "props": {
                                     "id": "timeline:name:layer:row-30008",
+                                    "metadata": {
+                                      "timelineLayerDrag": {
+                                        "layer": "row-30008",
+                                      },
+                                    },
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -15515,42 +14564,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "title": "Parent: None · Drag to a layer",
                                   },
                                   "type": "button",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -15764,6 +14777,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   ],
                                   "props": {
                                     "id": "timeline:name:layer:row-30009",
+                                    "metadata": {
+                                      "timelineLayerDrag": {
+                                        "layer": "row-30009",
+                                      },
+                                    },
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -15830,42 +14848,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "title": "Parent: None · Drag to a layer",
                                   },
                                   "type": "button",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -16079,6 +15061,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   ],
                                   "props": {
                                     "id": "timeline:name:layer:row-30010",
+                                    "metadata": {
+                                      "timelineLayerDrag": {
+                                        "layer": "row-30010",
+                                      },
+                                    },
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -16145,42 +15132,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "title": "Parent: None · Drag to a layer",
                                   },
                                   "type": "button",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -16394,6 +15345,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   ],
                                   "props": {
                                     "id": "timeline:name:layer:row-30011",
+                                    "metadata": {
+                                      "timelineLayerDrag": {
+                                        "layer": "row-30011",
+                                      },
+                                    },
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -16460,42 +15416,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "title": "Parent: None · Drag to a layer",
                                   },
                                   "type": "button",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -16709,6 +15629,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   ],
                                   "props": {
                                     "id": "timeline:name:layer:row-30012",
+                                    "metadata": {
+                                      "timelineLayerDrag": {
+                                        "layer": "row-30012",
+                                      },
+                                    },
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -16775,42 +15700,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "title": "Parent: None · Drag to a layer",
                                   },
                                   "type": "button",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -17024,6 +15913,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   ],
                                   "props": {
                                     "id": "timeline:name:layer:row-30013",
+                                    "metadata": {
+                                      "timelineLayerDrag": {
+                                        "layer": "row-30013",
+                                      },
+                                    },
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -17090,42 +15984,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "title": "Parent: None · Drag to a layer",
                                   },
                                   "type": "button",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -17339,6 +16197,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   ],
                                   "props": {
                                     "id": "timeline:name:layer:row-30014",
+                                    "metadata": {
+                                      "timelineLayerDrag": {
+                                        "layer": "row-30014",
+                                      },
+                                    },
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -17405,42 +16268,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "title": "Parent: None · Drag to a layer",
                                   },
                                   "type": "button",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -17654,6 +16481,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   ],
                                   "props": {
                                     "id": "timeline:name:layer:row-30015",
+                                    "metadata": {
+                                      "timelineLayerDrag": {
+                                        "layer": "row-30015",
+                                      },
+                                    },
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -17720,42 +16552,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "title": "Parent: None · Drag to a layer",
                                   },
                                   "type": "button",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -17969,6 +16765,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   ],
                                   "props": {
                                     "id": "timeline:name:layer:row-30016",
+                                    "metadata": {
+                                      "timelineLayerDrag": {
+                                        "layer": "row-30016",
+                                      },
+                                    },
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -18035,42 +16836,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "title": "Parent: None · Drag to a layer",
                                   },
                                   "type": "button",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -18284,6 +17049,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   ],
                                   "props": {
                                     "id": "timeline:name:layer:row-30017",
+                                    "metadata": {
+                                      "timelineLayerDrag": {
+                                        "layer": "row-30017",
+                                      },
+                                    },
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -18350,42 +17120,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "title": "Parent: None · Drag to a layer",
                                   },
                                   "type": "button",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -18599,6 +17333,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   ],
                                   "props": {
                                     "id": "timeline:name:layer:row-30018",
+                                    "metadata": {
+                                      "timelineLayerDrag": {
+                                        "layer": "row-30018",
+                                      },
+                                    },
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -18665,42 +17404,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "title": "Parent: None · Drag to a layer",
                                   },
                                   "type": "button",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -18914,6 +17617,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   ],
                                   "props": {
                                     "id": "timeline:name:layer:row-30019",
+                                    "metadata": {
+                                      "timelineLayerDrag": {
+                                        "layer": "row-30019",
+                                      },
+                                    },
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -18980,42 +17688,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "title": "Parent: None · Drag to a layer",
                                   },
                                   "type": "button",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -19797,6 +18469,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   ],
                                   "props": {
                                     "id": "timeline:name:layer:headline",
+                                    "metadata": {
+                                      "timelineLayerDrag": {
+                                        "layer": "headline",
+                                      },
+                                    },
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -19863,42 +18540,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "title": "Parent: None · Drag to a layer",
                                   },
                                   "type": "button",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -20680,6 +19321,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   ],
                                   "props": {
                                     "id": "timeline:name:layer:headline",
+                                    "metadata": {
+                                      "timelineLayerDrag": {
+                                        "layer": "headline",
+                                      },
+                                    },
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -20746,42 +19392,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "title": "Parent: None · Drag to a layer",
                                   },
                                   "type": "button",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -22283,6 +20893,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   ],
                                   "props": {
                                     "id": "timeline:name:layer:headline",
+                                    "metadata": {
+                                      "timelineLayerDrag": {
+                                        "layer": "headline",
+                                      },
+                                    },
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -22349,42 +20964,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "title": "Parent: None · Drag to a layer",
                                   },
                                   "type": "button",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
                                 },
                                 {
                                   "props": {
@@ -23300,42 +21879,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "title": "Parent: None · Drag to a layer",
                                   },
                                   "type": "button",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
                                 },
                                 {
                                   "props": {

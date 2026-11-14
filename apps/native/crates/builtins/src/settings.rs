@@ -7,7 +7,7 @@ use crate::{
 use pm_agents::{Provider, account::State};
 use pm_kernel::{
     Call, Request, WriteBody,
-    commands::comps::{CompCommand, CompPatch},
+    commands::comps::{CompCommand, CompPatch, EXPORT_RATE_CHOSEN},
 };
 use serde_json::{Value, json};
 
@@ -382,7 +382,17 @@ impl Backend {
             .get("exportDefaults")
             .map(|n| wire(&n.to_value()))
             .unwrap_or(Value::Null);
-        pm_promedia::export_panel::normalize_defaults(&stored, fps)
+        let mut defaults = pm_promedia::export_panel::normalize_defaults(&stored, fps);
+        // The frame rate is the composition's unless the person chose one:
+        // a stored rate nobody chose is the one the project was created at
+        // (v1 never moved it with the composition's).
+        if stored[EXPORT_RATE_CHOSEN].as_bool() == Some(true) {
+            defaults[EXPORT_RATE_CHOSEN] = json!(true);
+        } else {
+            defaults["fps"] =
+                pm_promedia::export_panel::normalize_defaults(&Value::Null, fps)["fps"].clone();
+        }
+        defaults
     }
     fn export_default_rows(
         &mut self,
@@ -767,9 +777,15 @@ impl Backend {
                         let mut defaults = self.export_defaults(root, fps);
                         defaults[*field] = value.clone();
                         // Only values a row offers, or a boolean for a switch.
-                        let checked = pm_promedia::export_panel::normalize_defaults(&defaults, fps);
+                        let mut checked =
+                            pm_promedia::export_panel::normalize_defaults(&defaults, fps);
                         if checked[*field] != *value {
                             return Err("Invalid export setting".into());
+                        }
+                        // Setting the frame rate here is choosing it; another
+                        // row keeps whether it was chosen.
+                        if *field == "fps" || defaults[EXPORT_RATE_CHOSEN] == json!(true) {
+                            checked[EXPORT_RATE_CHOSEN] = json!(true);
                         }
                         patch.export_defaults = Some(
                             pm_model::json::parse(&checked.to_string())

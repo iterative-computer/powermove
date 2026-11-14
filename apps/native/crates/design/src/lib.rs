@@ -237,6 +237,29 @@ pub struct Metrics {
     pub min_center: f32,
     pub keyboard_step: f32,
     pub drag_threshold: f32,
+    /// How far a panel's header or tab travels before it is dragged (the
+    /// original app's 5 pt).
+    pub panel_drag_threshold: f32,
+    /// The least height of a docked panel (the original app's 88 pt floor).
+    pub panel_least: f32,
+    /// A side column's narrowest and widest (the original app's 200–760 pt).
+    pub column_least: f32,
+    pub column_most: f32,
+    /// The timeline's dock is at least this tall and leaves this much above it.
+    pub band_least: f32,
+    pub band_room: f32,
+    /// Drop strips along the docking area's edges where no dock stands yet:
+    /// the side ones' width and the bottom one's height.
+    pub edge_strip: f32,
+    pub edge_strip_bottom: f32,
+    /// How far outside a dock a dragged panel still drops into it.
+    pub dock_reach: f32,
+    /// How far a splitter between two panels moves before it resizes.
+    pub splitter_dead_zone: f32,
+    /// The glow that follows the pointer along a splitter: its length and
+    /// thickness.
+    pub splitter_glow: f32,
+    pub splitter_glow_width: f32,
     pub window_width: f32,
     pub window_height: f32,
     pub min_width: f32,
@@ -248,6 +271,14 @@ pub struct Metrics {
     pub settings_width: f32,
     pub settings_height: f32,
     pub settings_sidebar: f32,
+    /// Greatest width of the Settings form column, its side insets
+    /// included: the group cards stay a readable 640 pt and centre in the
+    /// sheet however wide the window (the original app's 608 pt column with
+    /// cards hanging 14 pt past it).
+    pub settings_column: f32,
+    /// Greatest width of the Store's content column (the original app's
+    /// 960 pt), centred in its sheet.
+    pub store_column: f32,
     pub menu_inset: f32,
     pub menu_row: f32,
     /// Inner radius for a control nested in a control (segment in a segmented control).
@@ -438,6 +469,10 @@ pub struct Motion {
     /// How long a status note (`Exported …`) holds before the status line
     /// returns (s); errors stay until replaced.
     pub note_hold: f64,
+    /// The command palette's and pop-up menus' fade in and out (s): short,
+    /// eased, no spring, so a menu reads as there at once (as Spotlight's
+    /// and the system's menus) and never delays typing.
+    pub menu_fade: f64,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Surface {
@@ -738,6 +773,18 @@ impl Tokens {
                 min_center: 180.,
                 keyboard_step: 10.,
                 drag_threshold: 3.,
+                panel_drag_threshold: 5.,
+                panel_least: 88.,
+                column_least: 200.,
+                column_most: 760.,
+                band_least: 120.,
+                band_room: 160.,
+                edge_strip: 96.,
+                edge_strip_bottom: 56.,
+                dock_reach: 28.,
+                splitter_dead_zone: 2.,
+                splitter_glow: 180.,
+                splitter_glow_width: 4.,
                 window_width: 1440.,
                 window_height: 900.,
                 min_width: 980.,
@@ -749,6 +796,8 @@ impl Tokens {
                 settings_width: 760.,
                 settings_height: 520.,
                 settings_sidebar: 200.,
+                settings_column: 680.,
+                store_column: 960.,
                 menu_inset: 12.,
                 menu_row: 30.,
                 inner_radius: radius.sm,
@@ -858,6 +907,7 @@ impl Tokens {
                 tooltip_delay: 0.38,
                 tooltip_warm: 0.6,
                 note_hold: 2.2,
+                menu_fade: 0.1,
             },
             translucency: {
                 // The translucent shell is a heavy tint of the window colour
