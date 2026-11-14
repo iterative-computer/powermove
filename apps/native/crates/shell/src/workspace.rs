@@ -288,6 +288,8 @@ pub fn layout(record: &Value) -> Layout {
                     g.tabs.push(id.to_owned());
                     if flag("active") {
                         g.active = g.tabs.len() - 1;
+                        // The shown tab says whether the stack is folded.
+                        g.collapsed = flag("collapsed") && id != VIEWER;
                     }
                 }
                 _ => groups.push(Group {
@@ -298,6 +300,7 @@ pub fn layout(record: &Value) -> Layout {
                     } else {
                         size(fields.and_then(|o| o.get("size")))
                     },
+                    collapsed: flag("collapsed") && id != VIEWER,
                 }),
             }
         }
@@ -328,6 +331,7 @@ pub fn layout(record: &Value) -> Layout {
             tabs: vec![VIEWER.into()],
             active: 0,
             size: None,
+            collapsed: false,
         };
         match docks.iter().position(|d| d.id == "center") {
             Some(i) => docks[i].groups.insert(0, viewer),
@@ -423,8 +427,12 @@ pub fn write(layout: &Layout, record: &Value) -> Value {
             for g in &d.groups {
                 for (i, id) in g.tabs.iter().enumerate() {
                     let mut s = old_spec(id);
-                    for k in ["flex", "size", "tabbed", "active"] {
+                    for k in ["flex", "size", "tabbed", "active", "collapsed"] {
                         s.remove(k);
+                    }
+                    // Folded, as the original app keeps it: on the shown tab.
+                    if g.collapsed && i == g.active {
+                        s.insert("collapsed".into(), true.into());
                     }
                     s.insert("id".into(), id.clone().into());
                     if i == 0 {

@@ -213,7 +213,7 @@ impl Session {
             "labels"
         };
         let value = json!({"ticket":self.ticket.to_string(),"project":self.project,"visible":has_3d&&!source,"layout":layout,"overlay":overlay,"tools":self.tools,"freePose":self.free_pose,
-            "quality":quality,"qualityStored":quality,"tier":p.ui_state.viewer.get("studioTier").and_then(pm_model::Value::as_str).unwrap_or("live"),"orthographic":orthographic,"allowed":{"move":view::allow_transform(&p,"move").is_ok(),"rotate":view::allow_transform(&p,"rotate").is_ok(),"scale":view::allow_transform(&p,"scale").is_ok()},"inspector":inspector,
+            "quality":quality,"qualityStored":quality,"tier":p.ui_state.viewer.get("studioTier").and_then(pm_model::Value::as_str).unwrap_or("fast"),"orthographic":orthographic,"allowed":{"move":view::allow_transform(&p,"move").is_ok(),"rotate":view::allow_transform(&p,"rotate").is_ok(),"scale":view::allow_transform(&p,"scale").is_ok()},"inspector":inspector,
             "lightPanel":if self.tools.light {light::projection(&p,time,&self.light_settings)?}else{Value::Null},"disclosures":p.ui_state.viewer.get("studioDisclosures").map(from_model).transpose()?.unwrap_or(json!({})),"finishes":pm_scene3d::service::presets(),"add":view::add_menu(),"shots":view::shots()});
         self.published = Some(p);
         Ok(value)
@@ -371,8 +371,8 @@ impl Session {
         if id == "tier" {
             let value = arg
                 .as_str()
-                .filter(|s| ["live", "refine", "final"].contains(s))
-                .ok_or_else(|| invalid("Studio tier must be live, refine or final"))?;
+                .filter(|s| ["fast", "live", "refine", "final"].contains(s))
+                .ok_or_else(|| invalid("Studio tier must be fast, live, refine or final"))?;
             let mut ui = p.ui_state.clone();
             ui.viewer
                 .as_object_mut()

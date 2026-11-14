@@ -85,7 +85,9 @@ impl Preview {
         if let Ok(value) = std::env::var("PM_NATIVE_STUDIO_TIER") {
             return Self::parse(&value);
         }
-        Ok(Self::Live)
+        // The viewer previews with the Fast raster until someone picks Full
+        // or Quality; exports never read this (always Full).
+        Ok(Self::Fast)
     }
     pub fn parse(value: &str) -> Result<Self, String> {
         match value {

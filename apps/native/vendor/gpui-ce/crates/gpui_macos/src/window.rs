@@ -335,6 +335,30 @@ unsafe fn build_classes() {
                 sel!(hitTest:),
                 composition_hit_test as unsafe extern "C" fn(_, _, _) -> _,
             );
+            // Powermove: the drawing view takes file drags itself (with the
+            // window's handlers), so a drop under it reaches GPUI's targets
+            // whatever else the window holds. Registered on the window alone,
+            // drops stopped reaching it once a web view shared the window.
+            decl.add_method(
+                sel!(draggingEntered:),
+                dragging_entered as unsafe extern "C" fn(_, _, _) -> NSDragOperation,
+            );
+            decl.add_method(
+                sel!(draggingUpdated:),
+                dragging_updated as unsafe extern "C" fn(_, _, _) -> NSDragOperation,
+            );
+            decl.add_method(
+                sel!(draggingExited:),
+                dragging_exited as unsafe extern "C" fn(_, _, _),
+            );
+            decl.add_method(
+                sel!(performDragOperation:),
+                perform_drag_operation as unsafe extern "C" fn(_, _, _) -> _,
+            );
+            decl.add_method(
+                sel!(concludeDragOperation:),
+                conclude_drag_operation as unsafe extern "C" fn(_, _, _),
+            );
             decl.add_method(
                 sel!(accessibilityHitTest:),
                 composition_accessibility_hit_test as unsafe extern "C" fn(_, _, _) -> _,
@@ -1401,6 +1425,7 @@ impl MacWindow {
             let content_bounds: Objc2NSRect = msg_send![content_view, bounds];
             let native_view: ObjcId = msg_send![native_view, initWithFrame: content_bounds];
             assert!(!native_view.is_null());
+            let () = msg_send![native_view, registerForDraggedTypes: dragged_types];
 
             let state = Arc::new(Mutex::new(MacWindowState {
                 handle,
@@ -4274,9 +4299,18 @@ fn screen_point_to_gpui_point(this: &Objc2Object, position: Objc2NSPoint) -> Poi
     point(px(window_x as f32), px(window_y as f32))
 }
 
+/// `this` is the window, or its drawing view (which takes drags too).
 fn is_drag_from_this_window(this: &Objc2Object, dragging_info: ObjcId) -> bool {
     let source: ObjcId = unsafe { msg_send![dragging_info, draggingSource] };
-    std::ptr::eq(source as *const Objc2Object, this as *const Objc2Object)
+    if std::ptr::eq(source as *const Objc2Object, this as *const Objc2Object) {
+        return true;
+    }
+    let is_view: bool = unsafe { msg_send![this, isKindOfClass: class!(NSView)] };
+    if !is_view {
+        return false;
+    }
+    let window: ObjcId = unsafe { msg_send![this, window] };
+    !window.is_null() && std::ptr::eq(source as *const Objc2Object, window as *const Objc2Object)
 }
 
 unsafe extern "C" fn dragging_entered(

@@ -14,6 +14,7 @@ import {
   percent,
   resolutionTitle,
   resolutions,
+  studioTiers,
   zoomPresets,
   zoomTitle,
   type ViewerSnapshot,
@@ -164,8 +165,30 @@ export function ViewerPanel({
   // full screen, in the ViewerOverlay capsule (viewer-chrome.md §2 Overlay),
   // so keyboard focus follows them across presentations (design review D5).
   const channels = state.host.channels ?? "viewer.showRGB";
+  const tier = m.studio?.tier ?? "fast";
+  const tierLabel = studioTiers.find((t) => t.v === tier)?.label ?? "Fast";
   const popups = (
     <>
+      {m.studio && !source ? (
+        <PopUpButton
+          id="viewer.studio.tier"
+          data-pm-variant="inline"
+          binding="viewer.studio.tier"
+          label={`3D preview, ${tierLabel}`}
+          title={
+            "3D Preview\nFast draws the scene instantly while you work. Rendered and Quality trace light. Exports always render in full."
+          }
+          value={tier}
+          options={studioTiers}
+          style={popupStyle}
+          onChange={(event) => {
+            if (studioTiers.some((t) => t.v === event.value))
+              actions.drive("viewer.studio.tier", String(event.value));
+          }}
+        >
+          {tierLabel}
+        </PopUpButton>
+      ) : null}
       <PopUpButton
         id="viewer.channels"
         data-pm-variant="inline"

@@ -2692,6 +2692,7 @@ impl SurfaceView {
                     .as_ref()
                     .and_then(|ax| ax.label.clone())
                     .unwrap_or_else(|| "Media".into()),
+                item: node.drag_item.clone(),
                 colors: (c.floating, c.separator, c.text),
             };
             let view = cx.entity().downgrade();
@@ -3224,8 +3225,22 @@ pub struct PanelDrag {
     /// The panel it came from (`Publication::panel`).
     pub panel: String,
     pub label: SharedString,
+    /// What is dragged, when the row says (an Effects row: its effect id).
+    pub item: Option<SharedString>,
     /// Floating fill, its edge, text.
     colors: (u32, u32, u32),
+}
+#[cfg(test)]
+impl PanelDrag {
+    /// A drag from `panel`'s row named `label`, carrying `item`.
+    pub(crate) fn of(panel: &str, label: &str, item: Option<&str>) -> Self {
+        Self {
+            panel: panel.into(),
+            label: label.to_owned().into(),
+            item: item.map(|i| i.to_owned().into()),
+            colors: (0, 0, 0),
+        }
+    }
 }
 impl Render for PanelDrag {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {

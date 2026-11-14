@@ -345,7 +345,7 @@ impl GizmoSurface {
         const TOOLS: &[&str] = &["move", "rotate", "scale", "orbit", "pan", "zoom", "light"];
         const AXES_: &[&str] = &["scene", "object"];
         const VIEWS: &[&str] = &["1", "2", "4"];
-        const TIERS: &[&str] = &["live", "refine"];
+        const TIERS: &[&str] = &["fast", "live", "refine"];
         let (key, allowed) = match group {
             "frame" => return self.studio_frame(cx),
             "look" => ("studioLook", LOOKS),
