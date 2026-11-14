@@ -36,6 +36,14 @@ pub fn run(work: Option<[f64; 2]>, duration: f64, from: f64, looping: bool) -> R
         stop: (from < end - frame && end < duration - frame).then_some(end),
     }
 }
+/// The open composition's stored work area in `p`.
+pub fn work_area(p: &pm_kernel::Published) -> Option<[f64; 2]> {
+    let root = p.snapshot.root()?;
+    let comp = pm_kernel::model::comp_node(root, Some(&p.snapshot.render_comp()))?;
+    let work = comp.get("work")?;
+    let number = |i| work.at(i).and_then(|n| n.to_value().as_f64());
+    Some([number(0)?, number(1)?])
+}
 fn ticks(seconds: f64) -> Ticks {
     Ticks::new((seconds * TICKS_PER_SECOND as f64).round() as i64).unwrap_or(Ticks::ZERO)
 }
@@ -121,20 +129,15 @@ impl Controller {
         self.viewer.as_ref().is_some_and(|v| v.running())
     }
     /// The open composition's stored work area.
-    fn work_area(&self) -> Option<[f64; 2]> {
-        let p = self.published.as_ref()?;
-        let root = p.snapshot.root()?;
-        let comp = pm_kernel::model::comp_node(root, Some(&p.snapshot.render_comp()))?;
-        let work = comp.get("work")?;
-        let number = |i| work.at(i).and_then(|n| n.to_value().as_f64());
-        Some([number(0)?, number(1)?])
+    pub(crate) fn work_area(&self) -> Option<[f64; 2]> {
+        work_area(self.published.as_deref()?)
     }
     /// Before a run starts (or as Loop changes during one): its loop in the
     /// engine, and where it stops.
     pub fn shape_run(&mut self) {
         let run = run(
             self.work_area(),
-            self.duration,
+            self.duration(),
             self.time(),
             self.playback.looping,
         );
@@ -276,6 +279,45 @@ mod tests {
             t.clock.media_at(again + 2_500_000),
             7 * TICKS_PER_SECOND / 2
         );
+    }
+
+    /// A new project's duration changed from 10 s to 90 s: the run the next
+    /// Space shapes reads the composition as it is now, not as it was bound.
+    #[test]
+    fn a_run_reads_the_duration_the_composition_has_now() {
+        use pm_kernel::{Call, Caller, KernelActor, KernelConfig, OpenSource, Request};
+        let actor = KernelActor::spawn(KernelConfig::default());
+        let kernel = actor.handle();
+        let project = pm_model::json::parse(&crate::v4_view_tests::project_json(1)).unwrap();
+        kernel
+            .open("p", OpenSource::Untitled(project))
+            .wait()
+            .unwrap()
+            .unwrap();
+        let shape = |kernel: &pm_kernel::KernelHandle| {
+            let p = kernel.published("p").unwrap();
+            let duration = crate::session::composition_duration(&p);
+            (duration, run(work_area(&p), duration, 12., true).repeat)
+        };
+        assert_eq!(shape(&kernel), (10., Some([0., 10.])));
+        let revision = kernel.published("p").unwrap().revision();
+        let request = Request::new(
+            Caller::native(),
+            Call::Transact {
+                label: Some("Duration".into()),
+                expected_revision: Some(revision),
+                body: pm_kernel::WriteBody::Commands(vec![pm_kernel::Command::Comp(
+                    pm_kernel::CompCommand::Set {
+                        patch: Box::new(pm_kernel::commands::comps::CompPatch {
+                            duration: Some(90.),
+                            ..Default::default()
+                        }),
+                    },
+                )]),
+            },
+        );
+        kernel.call("p", request).wait().unwrap().unwrap();
+        assert_eq!(shape(&kernel), (90., Some([0., 90.])));
     }
 
     #[test]

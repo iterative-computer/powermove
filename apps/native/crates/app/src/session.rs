@@ -146,7 +146,6 @@ pub struct Controller {
     pub(crate) playback_wake: Option<async_channel::Sender<()>>,
     pub errors: crate::error_log::Shared,
     pub rate: pm_time::Rate,
-    pub duration: f64,
     pub dimensions: [f64; 2],
     /// Composition background (`bg`); `None` when transparent.
     pub background: Option<u32>,
@@ -780,7 +779,6 @@ impl Controller {
             playback_wake: None,
             errors: crate::error_log::shared(cx),
             rate: pm_time::Rate::FPS_30,
-            duration: 1.,
             dimensions: [1920., 1080.],
             background: None,
             keyframes: 0,
@@ -1043,7 +1041,13 @@ impl Controller {
                 .as_deref()
                 .filter(|_| p.history.can_redo),
         );
+        let shape = (self.duration(), self.work_area());
         self.published = Some(p);
+        // A run in progress follows a changed duration or work area at once
+        // (its loop, or where it stops), as the timeline does.
+        if shape != (self.duration(), self.work_area()) && self.running() {
+            self.shape_run();
+        }
         // A changed Views setting splits the viewer now, not at the next
         // frame (a paused viewer has none): read from the publication just stored.
         self.sync_studio_panes(cx);
@@ -1389,7 +1393,7 @@ impl Controller {
     pub fn seek_at(&mut self, seconds: f64, input: f64) {
         let mut target = None;
         if let Some(v) = &self.viewer
-            && let Some(time) = frame_start_at(self.rate, seconds.clamp(0., self.duration))
+            && let Some(time) = frame_start_at(self.rate, seconds.clamp(0., self.duration()))
         {
             target = Some(time as f64 / TICKS_PER_SECOND as f64);
             if let Err(e) = v.scrub_at(Ticks::new(time).unwrap_or(Ticks::ZERO), input) {
@@ -2213,7 +2217,6 @@ impl Controller {
                 .and_then(crate::node_number)
                 .unwrap_or(default)
         };
-        self.duration = number("dur", 1.).max(0.001);
         self.dimensions = composition_size(number("w", 1920.), number("h", 1080.));
         self.rate = composition_rate(composition);
         let media = self.media.clone();
@@ -2234,7 +2237,7 @@ impl Controller {
             },
             layer: Some(self.host.borrow().viewer_layer()),
             rate: self.rate,
-            end: Some((self.duration * TICKS_PER_SECOND as f64) as i64),
+            end: Some((self.duration() * TICKS_PER_SECOND as f64) as i64),
             audio: true,
         };
         let placed = match &old {
@@ -3364,7 +3367,7 @@ impl Controller {
                         return true;
                     }
                     "gotoEnd" => {
-                        self.seek((self.duration - 1. / self.rate.to_f64()).max(0.));
+                        self.seek((self.duration() - 1. / self.rate.to_f64()).max(0.));
                         return true;
                     }
                     _ => return false,
@@ -3373,7 +3376,7 @@ impl Controller {
                 // last frame it lands on that frame.
                 if let TransportCommand::Step { frames } = command {
                     let frame = 1. / self.rate.to_f64();
-                    let last = (self.duration - frame).max(0.);
+                    let last = (self.duration() - frame).max(0.);
                     let target = self.time() + f64::from(frames) * frame;
                     if target < -frame / 2. || target > last + frame / 2. {
                         self.end_run();
@@ -3435,6 +3438,27 @@ fn open_failure(error: &KernelFailure) -> crate::surfaces::documents::OpenFailur
 pub const SAVING: &str = "Saving…";
 /// `fpsRational`, else the stored float snapped to its exact rate: a project
 /// saved at 29.97 plays on the 30000/1001 grid the engine draws.
+/// The open composition's duration in seconds as the publication has it
+/// now (Project Settings, the Properties field and agents change it under a
+/// bound viewer), at least a millisecond.
+pub fn composition_duration(p: &Published) -> f64 {
+    p.snapshot
+        .root()
+        .and_then(|root| {
+            pm_kernel::model::comp_node(root, Some(&p.snapshot.render_comp()))
+                .unwrap_or(root)
+                .get("dur")
+        })
+        .and_then(crate::node_number)
+        .unwrap_or(1.)
+        .max(0.001)
+}
+impl Controller {
+    /// The open composition's duration now ([`composition_duration`]).
+    pub fn duration(&self) -> f64 {
+        self.published.as_deref().map_or(1., composition_duration)
+    }
+}
 fn composition_rate(composition: &pm_model::Node) -> pm_time::Rate {
     let rational = composition.get("fpsRational").map(|n| n.to_value());
     pm_model::ingest::IngestRate::from_document(
