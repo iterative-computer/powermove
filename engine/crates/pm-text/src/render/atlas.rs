@@ -58,15 +58,10 @@ pub struct Atlas {
 /// The whole-pixel device rect an item's coverage must hold: its ink, one
 /// pixel of antialiasing, limited to what can reach the visible target
 /// (the target grown by the item's blur radius).
-fn cell_rect(scene: &TextScene, bounds: Rect, blur: f64) -> Option<(i64, i64, i64, i64, bool)> {
+fn cell_rect(region: Rect, bounds: Rect, blur: f64) -> Option<(i64, i64, i64, i64, bool)> {
     let r = bounds.inflate(1.0, 1.0);
     let reach = f64::from(blur_radius(blur));
-    let visible = Rect::new(
-        -reach,
-        -reach,
-        f64::from(scene.width) + reach,
-        f64::from(scene.height) + reach,
-    );
+    let visible = region.inflate(reach, reach);
     let clipped = r.intersect(visible);
     if clipped.width() <= 0.0 || clipped.height() <= 0.0 {
         return None;
@@ -82,6 +77,16 @@ fn cell_rect(scene: &TextScene, bounds: Rect, blur: f64) -> Option<(i64, i64, i6
 /// Packs the coverage items of `scene` into pages no larger than
 /// `max_page` px a side (shelves in item order).
 pub fn pack(scene: &TextScene, max_page: u32) -> Atlas {
+    pack_region(
+        scene,
+        max_page,
+        Rect::new(0., 0., scene.width as f64, scene.height as f64),
+    )
+}
+
+/// Packs only coverage that can reach `region`, keeping the scene's original
+/// device coordinates and item indices. Per-item blur expands the requested ROI.
+pub fn pack_region(scene: &TextScene, max_page: u32, region: Rect) -> Atlas {
     let mut atlas = Atlas::default();
     let mut page: Option<usize> = None;
     let (mut shelf_x, mut shelf_y, mut shelf_h) = (0u32, 0u32, 0u32);
@@ -91,7 +96,7 @@ pub fn pack(scene: &TextScene, max_page: u32) -> Atlas {
         .iter()
         .enumerate()
         .filter(|(_, it)| matches!(it.content, ItemContent::Coverage { .. }))
-        .filter_map(|(i, it)| cell_rect(scene, it.bounds, it.blur).map(|r| (i, r)))
+        .filter_map(|(i, it)| cell_rect(region, it.bounds, it.blur).map(|r| (i, r)))
         .collect();
     let widest = rects
         .iter()
@@ -260,5 +265,35 @@ mod tests {
         let atlas = pack(&scene, 4096);
         assert_eq!(atlas.cells[0].device_x, 0);
         assert!(atlas.cells[0].clip);
+    }
+}
+
+#[cfg(test)]
+mod region_tests {
+    use super::*;
+    use crate::render::scene::{fill_path, rounded_rect};
+    #[test]
+    fn raster_region_packing_bounds_large_glyph_coverage_without_rebasing_the_grid() {
+        let scene = TextScene {
+            width: 8192,
+            height: 8192,
+            items: vec![
+                fill_path(
+                    rounded_rect(0., 0., 8000., 8000., 7.),
+                    Affine::IDENTITY,
+                    [1., 1., 1., 1.],
+                    1.,
+                )
+                .unwrap(),
+            ],
+        };
+        let region = Rect::new(3000., 2000., 4280., 2720.);
+        let atlas = pack_region(&scene, 2048, region);
+        assert_eq!(atlas.cells.len(), 1);
+        assert_eq!(
+            (atlas.cells[0].device_x, atlas.cells[0].device_y),
+            (3000, 2000)
+        );
+        assert_eq!((atlas.cells[0].width, atlas.cells[0].height), (1280, 720));
     }
 }

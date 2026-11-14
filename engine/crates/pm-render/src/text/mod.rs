@@ -471,6 +471,26 @@ impl TextPlan {
         }
     }
 
+    pub(crate) fn retain_rect(&mut self, r: pm_vector::render::scene::PixelRect) {
+        let crop = [
+            r.x as u32,
+            r.y as u32,
+            r.x as u32 + r.width,
+            r.y as u32 + r.height,
+        ];
+        if crop != self.crop {
+            // The parent key includes font generation. Retaining it in the
+            // new digest prevents a font replacement reusing old raster pixels.
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            self.key.hash(&mut h);
+            crop.hash(&mut h);
+            let a = h.finish();
+            0x726f695f74657874u64.hash(&mut h);
+            self.key = [a, h.finish()];
+            self.crop = crop;
+        }
+    }
+
     pub fn width(&self) -> u32 {
         self.crop[2] - self.crop[0]
     }
