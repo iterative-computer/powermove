@@ -2543,7 +2543,8 @@ impl SurfaceWindow {
         };
         let panel = self.panel.clone();
         cx.update_window(editor, |root, w, cx| -> Option<bool> {
-            let content = native::content(&crate::platform::ns_window(w)?);
+            let native_window = crate::platform::ns_window(w)?;
+            let content = native::content(&native_window);
             let at = in_editor(native::pointer(), content);
             let shell = root.downcast::<pm_shell::view::Editor>().ok()?;
             Some(shell.update(cx, |e, cx| e.drag_from_outside(&panel, at, cx)))
