@@ -181,6 +181,12 @@ fn stat_version(path: &Path) -> Option<FileVersion> {
     FileVersion::of(path)
 }
 
+/// One look at the file as the caches key it ([`cache_stamp`]): what a
+/// read of a sequence's file is checked against before and after.
+pub(crate) fn stat_stamp(path: &Path) -> Option<(u64, u128)> {
+    stat_version(path).map(cache_stamp)
+}
+
 /// A version as the caches key it: the length, and the rest in one number
 /// (device, inode and status-change time over the modification time), so
 /// replacement and same-size edits stay observable even if a caller
@@ -217,6 +223,8 @@ struct StillFacts {
     planar: bool,
     /// Deeper than 8 bits per sample (or float).
     deep: bool,
+    /// Its pixels, width and height.
+    size: (usize, usize),
 }
 
 impl StillFacts {
@@ -242,6 +250,7 @@ impl StillFacts {
             float: still.float,
             planar: still.frame.format.layout == pm_media::frame::Layout::Planar,
             deep: still.float || still.bit_depth > 8,
+            size: (still.frame.format.width, still.frame.format.height),
         }
     }
 }
@@ -369,17 +378,30 @@ pub(crate) enum StoredCodes {
     YCbCr(pm_protocol::color::Range),
 }
 
-/// [`StoredCodes`] of `path`; `None` when the file is offline or has no
+/// What a converted copy needs of its original: how it stores its codes,
+/// its colour tags and its codec (Electron's reading depends on it).
+#[derive(Clone, Debug)]
+pub(crate) struct OriginalFacts {
+    pub codes: StoredCodes,
+    pub color: pm_media::probe::color::ColorInfo,
+    pub codec: String,
+}
+
+/// [`OriginalFacts`] of `path`; `None` when the file is offline or has no
 /// video. Read once per file stamp.
-pub(crate) fn stored_codes(path: &Path) -> Option<StoredCodes> {
-    static CACHE: StampCache<Option<StoredCodes>> = OnceLock::new();
+pub(crate) fn original_facts(path: &Path) -> Option<OriginalFacts> {
+    static CACHE: StampCache<Option<OriginalFacts>> = OnceLock::new();
     per_stamp(&CACHE, path, || {
         let source = MediaSource::open(path).ok()?;
         let video = source.probe.video.as_ref()?;
-        Some(if video.codec.is_rgb() {
-            StoredCodes::Rgb
-        } else {
-            StoredCodes::YCbCr(video.color.interpreted.range)
+        Some(OriginalFacts {
+            codes: if video.codec.is_rgb() {
+                StoredCodes::Rgb
+            } else {
+                StoredCodes::YCbCr(video.color.interpreted.range)
+            },
+            color: video.color.clone(),
+            codec: video.codec.codec.clone(),
         })
     })
     .flatten()
@@ -394,22 +416,98 @@ fn offline(path: &Path) -> String {
 /// classes ([`crate::stills::check`]). Decoded once per size and
 /// modification time; each interpretation is then resolved from its facts.
 fn still_facts(path: &Path) -> Result<StillFacts, ProbeIssue> {
-    static CACHE: StampCache<Result<StillFacts, ProbeIssue>> = OnceLock::new();
-    per_stamp(&CACHE, path, || {
+    still_facts_from(path, None)
+}
+
+static STILL_FACTS: StampCache<Result<StillFacts, ProbeIssue>> = OnceLock::new();
+
+/// [`still_facts`] taken from `decoded`, the whole still a worker just read
+/// at this stamp, so that it is not decoded a second time for its facts.
+fn still_facts_from(
+    path: &Path,
+    decoded: Option<&pm_media::image::StillImage>,
+) -> Result<StillFacts, ProbeIssue> {
+    per_stamp(&STILL_FACTS, path, || {
         if let Ok(Some(a)) = pm_media::image::animation(path)
             && a.frames > 1
         {
             return Err(ProbeIssue::Unsupported(Feature::ImageSequence));
         }
         crate::stills::rejected(path).map_err(ProbeIssue::Unreadable)?;
-        let pool = FramePool::new(0);
-        pm_perf::bump(pm_perf::Counter::StillDecodes);
-        let still = pm_media::image::read(path, &pool)
-            .map_err(|e| ProbeIssue::Unreadable(format!("{}: {e}", path.display())))?;
-        crate::stills::check(path, &still).map_err(ProbeIssue::Unsupported)?;
-        Ok(StillFacts::of(&still))
+        let read;
+        let still = match decoded {
+            Some(still) => still,
+            None => {
+                pm_perf::bump(pm_perf::Counter::StillDecodes);
+                read = pm_media::image::read(path, &FramePool::new(0))
+                    .map_err(|e| ProbeIssue::Unreadable(format!("{}: {e}", path.display())))?;
+                &read
+            }
+        };
+        crate::stills::check(path, still).map_err(ProbeIssue::Unsupported)?;
+        Ok(StillFacts::of(still))
     })
     .unwrap_or_else(|| Err(ProbeIssue::Unreadable(offline(path))))
+}
+
+/// Whether `path` at its stamp was found unreadable as a still (truncated,
+/// corrupt, not permitted): an image sequence draws that frame's card.
+pub(crate) fn still_unreadable(path: &Path) -> bool {
+    matches!(
+        known_still_facts(path),
+        Some(Err(ProbeIssue::Unreadable(_)))
+    )
+}
+
+/// Files whose read failed at a stamp (the decode failed, or the file kept
+/// changing while it was read): an image sequence shows that frame's card
+/// until the file changes again.
+static DECODE_FAILED: OnceLock<Mutex<HashMap<PathBuf, (u64, u128)>>> = OnceLock::new();
+
+/// Notes that reading `path` as it is now failed.
+pub(crate) fn note_decode_failed(path: &Path) {
+    if let Some(now) = stat_stamp(path) {
+        let mut failed = DECODE_FAILED.get_or_init(Mutex::default).lock().unwrap();
+        if failed.len() >= 4096 {
+            failed.clear();
+        }
+        failed.insert(path.to_path_buf(), now);
+    }
+}
+
+/// Whether reading `path` at its stamp failed ([`note_decode_failed`]).
+pub(crate) fn decode_failed(path: &Path) -> bool {
+    let Some(now) = stamp(path) else {
+        return false;
+    };
+    DECODE_FAILED
+        .get()
+        .is_some_and(|failed| failed.lock().unwrap().get(path) == Some(&now))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Runs while a sequence's file is read (a test's concurrent writer).
+    pub(crate) static DURING_READ: std::cell::RefCell<Option<Box<dyn FnMut(&Path)>>> =
+        const { std::cell::RefCell::new(None) };
+    /// Fails the next still decodes (a decode failing after good facts).
+    pub(crate) static FAIL_DECODE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The pixel size of the still at `path` at its stamp, once it was read.
+pub(crate) fn still_size(path: &Path) -> Option<(usize, usize)> {
+    known_still_facts(path)?.ok().map(|f| f.size)
+}
+
+/// The facts of `path` at its stamp when they were read already.
+fn known_still_facts(path: &Path) -> Option<Result<StillFacts, ProbeIssue>> {
+    let (len, modified) = stamp(path)?;
+    STILL_FACTS
+        .get()?
+        .lock()
+        .unwrap()
+        .get(&(path.to_path_buf(), len, modified))
+        .cloned()
 }
 
 /// Whether an image file can be drawn: readable, not animated, in a tested
@@ -633,15 +731,23 @@ fn packed(
     })
 }
 
-/// The shipped `sequencePlaybackTime`: select an available CFR slot,
-/// clamp to its ends, then seek one millisecond inside it. Container video
-/// instead selects directly from native source timestamps.
-pub fn sequence_playback_time(record: &pm_model::Node, time: f64) -> Option<f64> {
+/// The shipped `sequencePlaybackTime`: select an available CFR slot
+/// ([`pm_media::image::sequence::sequence_slot`], the rule a sequence's
+/// files follow), clamp to its ends, then seek one millisecond inside it.
+/// `rate` is Interpret Footage's frame rate, which replaces the sequence's
+/// own. Container video instead selects directly from native source
+/// timestamps.
+pub fn sequence_playback_time(
+    record: &pm_model::Node,
+    time: f64,
+    rate: Option<pm_time::Rate>,
+) -> Option<f64> {
     use pm_eval::node;
     let sequence = node::member(Some(record), "imageSequence")?;
     let number =
         |name| node::member(Some(sequence), name).map(|v| node::js_value_opt(Some(v)).to_number());
     let (fps, frames) = (number("fps")?, number("frames")?);
+    let fps = rate.map_or(fps, |r| r.to_f64());
     if !fps.is_finite()
         || !(1.0..=240.0).contains(&fps)
         || !frames.is_finite()
@@ -650,27 +756,48 @@ pub fn sequence_playback_time(record: &pm_model::Node, time: f64) -> Option<f64>
     {
         return None;
     }
-    let index = crate::js::max(
-        0.0,
-        crate::js::min(frames - 1.0, ((time + 1e-7) * fps).floor()),
-    );
+    let index = pm_media::image::sequence::sequence_slot(time, fps, frames as u64) as f64;
     Some(index / fps + 0.001)
 }
 
-/// Numbered/animated imports today persist a WebM rendition, even when
-/// their document format is GIF or PNG. An EBML header identifies the
-/// rendition independently of path extensions and original metadata.
-/// The native video probe validates readability and indexability before
-/// a valid rendition can use the video path.
+/// Numbered/animated imports of earlier builds persist a WebM rendition,
+/// even when their document format is GIF or PNG; a sequence's proxy or
+/// optimized media is a QuickTime movie. An EBML header or a QuickTime atom
+/// identifies the rendition independently of path extensions and original
+/// metadata. The native video probe validates readability and indexability
+/// before a valid rendition can use the video path.
 pub fn sequence_rendition(path: &Path) -> Result<bool, String> {
     static CACHE: StampCache<Result<bool, String>> = OnceLock::new();
     per_stamp(&CACHE, path, || {
         use std::io::Read;
-        let mut magic = [0; 4];
-        std::fs::File::open(path)
-            .and_then(|mut f| f.read_exact(&mut magic))
+        let mut magic = [0; 12];
+        let mut file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let read = file
+            .read(&mut magic)
             .map_err(|e| format!("{}: {e}", path.display()))?;
-        if magic == [0x1a, 0x45, 0xdf, 0xa3] {
+        // AVIF and HEIF stills are ISO files too: those are originals.
+        let still = matches!(
+            &magic[8..],
+            b"avif"
+                | b"avis"
+                | b"mif1"
+                | b"mif2"
+                | b"msf1"
+                | b"heic"
+                | b"heix"
+                | b"heim"
+                | b"heis"
+                | b"hevc"
+                | b"hevx"
+                | b"hevm"
+                | b"hevs"
+        );
+        let quicktime = read == magic.len()
+            && match &magic[4..8] {
+                b"ftyp" => !still,
+                atom => matches!(atom, b"moov" | b"mdat" | b"wide" | b"free"),
+            };
+        if magic[..4] == [0x1a, 0x45, 0xdf, 0xa3] || quicktime {
             MediaSource::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
             return Ok(true);
         }
@@ -681,6 +808,21 @@ pub fn sequence_rendition(path: &Path) -> Result<bool, String> {
         Ok(false)
     })
     .unwrap_or_else(|| Err(offline(path)))
+}
+
+/// The image sequence `path` reads in place (the manifest a sequence asset
+/// retains, [`pm_media::image::sequence::Manifest`]), or None for any other
+/// file. Its frames are stills: each is drawn through the still path at its
+/// own depth, with its alpha, tags and profile.
+pub fn native_sequence(path: &Path) -> Option<Arc<pm_media::image::sequence::Manifest>> {
+    static CACHE: StampCache<Option<Arc<pm_media::image::sequence::Manifest>>> = OnceLock::new();
+    per_stamp(&CACHE, path, || {
+        pm_media::image::sequence::Manifest::read(path)
+            .ok()
+            .flatten()
+            .map(Arc::new)
+    })
+    .flatten()
 }
 
 /// Whether a video file can be drawn: it opens and indexes and the renderer
@@ -808,11 +950,19 @@ fn video_color(
     // The file's reading is the source monitor's (`frame_reading`, with its
     // image-sequence rule); Interpret Footage members replace their fields,
     // and the host's per-file override replaces it all.
-    let file = if interp.electron_color {
+    let mut file = if interp.electron_color {
         pm_media::probe::color::electron_frame_reading(&v.color, &v.codec.codec, sequence)
     } else {
         pm_media::probe::color::frame_reading(&v.color, sequence)
     };
+    // A proxy or optimized copy reads as its original does.
+    if let Some(original) = interp.original {
+        file.primaries = original.primaries;
+        file.transfer = original.transfer;
+        if let Some(matrix) = original.matrix {
+            file.matrix = matrix;
+        }
+    }
     let mut desc = reading.color;
     if interp.transfer.is_none() {
         desc.transfer = file.transfer;
@@ -1175,6 +1325,24 @@ struct FrameKey {
 /// headless renders, and the viewer before the host grants a lease.
 pub const DEFAULT_FRAME_CACHE: usize = 64 << 20;
 
+/// The video frame cache's and the still look-ahead's parts of one decoded
+/// frame allowance: half each while a playing frame reads stills ahead,
+/// otherwise the stills keep a small part for a still about to enter.
+fn still_share(lease: MediaLease, look_ahead: bool) -> (MediaLease, usize) {
+    let stills = if look_ahead {
+        lease.frame_cache / 2
+    } else {
+        stills::MAX_READY_BYTES.min(lease.frame_cache / 2)
+    };
+    (
+        MediaLease {
+            frame_cache: lease.frame_cache - stills,
+            ..lease
+        },
+        stills,
+    )
+}
+
 /// Media state kept across frames: decoded and converted stills, video
 /// sources and sessions, and the last converted frame of each source.
 pub struct MediaCache {
@@ -1182,6 +1350,13 @@ pub struct MediaCache {
     service: Arc<DecodeService>,
     lease: Mutex<MediaLease>,
     idle_media: bool,
+    /// A playing frame reads stills ahead: the still look-ahead holds half
+    /// of the decoded frame allowance ([`still_share`]).
+    look_ahead: bool,
+    /// Sequence files found unreadable as they were drawn ([`MediaCache::landed`]).
+    unreadable: u64,
+    /// Consecutive reads of each sequence file that it changed during.
+    unstable: HashMap<PathBuf, u32>,
     background: Option<prewarm::BackgroundPrepare>,
     /// Display frames decode on workers (docs/engine/scrub.md); export
     /// frames decode here, on the caller's thread.
@@ -1267,6 +1442,9 @@ impl MediaCache {
                 decoders: 32 << 20,
             }),
             idle_media: false,
+            look_ahead: false,
+            unreadable: 0,
+            unstable: HashMap::new(),
             background: None,
             scrub: false,
             playback: None,
@@ -1357,6 +1535,20 @@ impl MediaCache {
             return Ok(t.clone());
         }
         pm_perf::bump(pm_perf::Counter::MediaCacheMisses);
+        #[cfg(test)]
+        if FAIL_DECODE.with(|f| f.get()) {
+            return Err(MediaFailure::Failed(format!(
+                "{}: test decode failure",
+                path.display()
+            )));
+        }
+        let ask = stills::StillAsk {
+            edge,
+            interpreted: interpret.is_some(),
+        };
+        // A worker decoding this still now (a playing sequence's next file)
+        // finishes sooner than a second decode started beside it.
+        self.stills.finish_pending(path, (len, modified), ask);
         let issue = |i: ProbeIssue| match i {
             ProbeIssue::Unsupported(f) => MediaFailure::Unsupported(f),
             ProbeIssue::Unreadable(m) => MediaFailure::Failed(m),
@@ -1365,25 +1557,35 @@ impl MediaCache {
             |e: pm_media::MediaError| MediaFailure::Failed(format!("{}: {e}", path.display()));
         let none = Interpretation::default();
         let interp = interpret.unwrap_or(&none);
+        // A still seen for the first time is decoded once: its facts are
+        // read from that decode (a worker's decode gave them otherwise).
+        let mut whole = None;
+        if known_still_facts(path).is_none() {
+            pm_perf::bump(pm_perf::Counter::StillDecodes);
+            whole = pm_media::image::read(path, &self.pool).ok();
+            let _ = still_facts_from(path, whole.as_ref());
+        }
         probe_interpreted_image(path, interp).map_err(issue)?;
         let facts = still_facts(path).map_err(issue)?;
-        let ask = stills::StillAsk {
-            edge,
-            interpreted: interpret.is_some(),
-        };
         let preview = edge.filter(|_| facts.previewed(ask.interpreted));
-        // Decoded ahead by the worker as this frame reads it, or here.
+        // Decoded ahead by a worker as this frame reads it, or here.
         let mut still = match self.stills.take(path, (len, modified), ask, preview) {
             Some(still) => still,
-            None => {
-                pm_perf::bump(pm_perf::Counter::StillDecodes);
-                match preview {
-                    Some(edge) => pm_media::image::imageio::read_preview(path, &self.pool, edge)
-                        .or_else(|_| pm_media::image::read(path, &self.pool)),
-                    None => pm_media::image::read(path, &self.pool),
+            None => match (preview, whole) {
+                (None, Some(whole)) => whole,
+                (Some(edge), whole) => {
+                    pm_media::image::imageio::read_preview(path, &self.pool, edge).or_else(|e| {
+                        whole
+                            .ok_or(e)
+                            .or_else(|_| pm_media::image::read(path, &self.pool))
+                    })
                 }
-                .map_err(failed)?
-            }
+                .map_err(failed)?,
+                (None, None) => {
+                    pm_perf::bump(pm_perf::Counter::StillDecodes);
+                    pm_media::image::read(path, &self.pool).map_err(failed)?
+                }
+            },
         };
         let mut read = interpreted_image_color(&still, interp).map_err(issue)?;
         if self.hdr_light {
@@ -2129,9 +2331,40 @@ impl MediaCache {
             .find_map(|(target, revision)| (&target.texture == texture).then_some(*revision))
     }
 
-    /// Changes whenever a display frame a scrub asked for has decoded.
+    /// Changes whenever a display frame a scrub asked for has decoded, and
+    /// whenever a sequence's file is found unreadable as it is drawn.
     pub fn landed(&self) -> u64 {
-        self.viewer.landed()
+        self.viewer.landed() + self.unreadable
+    }
+
+    /// Forgets everything read of `path` (it changed while it was read):
+    /// its converted textures and its facts at any stamp.
+    pub(crate) fn forget_still(&mut self, path: &Path) {
+        self.images.retain(|key, _| key.path != path);
+        self.image_seen.retain(|key, _| key.path != path);
+        if let Some(facts) = STILL_FACTS.get() {
+            facts.lock().unwrap().retain(|(p, _, _), _| p != path);
+        }
+        self.recount();
+    }
+
+    /// Notes a read of sequence file `path` that it changed during (`true`)
+    /// or not; answers how many such reads came in a row.
+    pub(crate) fn unstable_read(&mut self, path: &Path, changed: bool) -> u32 {
+        if !changed {
+            self.unstable.remove(path);
+            return 0;
+        }
+        let n = self.unstable.entry(path.to_path_buf()).or_default();
+        *n += 1;
+        *n
+    }
+
+    /// A sequence's file was found unreadable as it was drawn: the frame is
+    /// a stand-in and is drawn again (with the file's card) once this lands.
+    pub(crate) fn unreadable_found(&mut self) {
+        self.unreadable += 1;
+        self.stand_ins.push(0);
     }
 
     /// The display decode workers' counters.
@@ -2149,19 +2382,43 @@ impl MediaCache {
     /// service: the frame cache evicts down to `lease.frame_cache` at once
     /// and idle decoders close past `lease.decoders`. Returns what the
     /// service holds afterwards.
-    pub fn apply_lease(&self, lease: MediaLease) -> MediaUsage {
+    pub fn apply_lease(&mut self, lease: MediaLease) -> MediaUsage {
         *self.lease.lock().unwrap() = lease;
-        self.service.apply_lease(lease)
+        self.apply_shares()
     }
 
-    /// What the decode service holds (frame cache, decoders, sessions).
+    /// Divides the decoded frame allowance between the video frame cache
+    /// and the stills decoded ahead: together they hold at most the lease.
+    fn apply_shares(&mut self) -> MediaUsage {
+        let lease = *self.lease.lock().unwrap();
+        let (frames, stills) = still_share(lease, self.look_ahead);
+        self.stills.set_limit(stills);
+        self.service.apply_lease(frames);
+        self.media_usage()
+    }
+
+    /// What the decode service holds (frame cache, decoders, sessions),
+    /// with the stills decoded ahead counted as frames.
     pub fn media_usage(&self) -> MediaUsage {
-        self.service.usage()
+        let mut usage = self.service.usage();
+        usage.frame_cache += self.stills.held();
+        usage
     }
 
-    pub(crate) fn begin_frame(&mut self) {
+    /// Starts a frame; `look_ahead`: a playing frame that reads ahead.
+    /// When play stops, the stills decoded ahead are given back.
+    pub(crate) fn begin_frame(&mut self, look_ahead: bool) {
+        if look_ahead != self.look_ahead {
+            self.look_ahead = look_ahead;
+            if !look_ahead {
+                self.stills.clear();
+            }
+            if !self.idle_media {
+                self.apply_shares();
+            }
+        }
         if self.idle_media {
-            self.service.apply_lease(*self.lease.lock().unwrap());
+            self.apply_shares();
             self.idle_media = false;
         }
         self.frame_epoch = self.frame_epoch.wrapping_add(1);
@@ -2178,6 +2435,8 @@ impl MediaCache {
 
     /// Queue-owned GPU references remain valid; this only drops cache handles.
     pub fn release_idle_frames(&mut self) {
+        self.stills.clear();
+        self.stills.set_limit(0);
         self.frames.clear();
         self.retired_frames.clear();
         self.free_frames.clear();
@@ -2236,6 +2495,33 @@ impl MediaCache {
 #[cfg(test)]
 #[path = "media/source_storage_tests.rs"]
 mod source_storage_tests;
+
+#[cfg(test)]
+mod still_share_tests {
+    use super::*;
+
+    /// The video frame cache and the stills decoded ahead share one
+    /// decoded frame allowance: their parts sum to it, playing or not.
+    #[test]
+    fn stills_ahead_and_video_frames_share_one_allowance() {
+        let lease = MediaLease {
+            frame_cache: 512 << 20,
+            decoders: 64 << 20,
+        };
+        for look_ahead in [false, true] {
+            let (frames, stills) = still_share(lease, look_ahead);
+            assert_eq!(frames.frame_cache + stills, lease.frame_cache);
+            assert_eq!(frames.decoders, lease.decoders);
+        }
+        assert_eq!(still_share(lease, true).1, 256 << 20);
+        assert_eq!(still_share(lease, false).1, stills::MAX_READY_BYTES);
+        let none = MediaLease {
+            frame_cache: 0,
+            decoders: 0,
+        };
+        assert_eq!(still_share(none, true), (none, 0));
+    }
+}
 
 #[cfg(test)]
 mod stamp_frame_tests {

@@ -63,6 +63,9 @@ pub struct Counts<'a> {
     /// The counters hold BT.2100 PQ, not display code values.
     pub extended: bool,
     pub rec2020: bool,
+    /// The counters read the delivered picture (Output), not the graded one
+    /// before delivery (Picture).
+    pub output: bool,
     pub columns: usize,
     pub levels: usize,
     pub vector_bins: usize,
@@ -308,7 +311,8 @@ pub fn reading(c: &Counts, kind: Kind) -> Reading {
     let bins = 0..c.luma_histogram.len();
     Reading {
         stage: format!(
-            "Output · {}",
+            "{} · {}",
+            if c.output { "Output" } else { "Picture" },
             if c.rec2020 { "Rec. 2020" } else { "Rec. 709" }
         ),
         limits,
@@ -338,6 +342,9 @@ pub struct ScopesView {
     pub rec2020: bool,
     /// The extended range: PQ, with absolute light on the axis.
     pub extended: bool,
+    /// What the scopes read: the delivered picture (Output) or the graded
+    /// one before delivery (Picture).
+    pub output: bool,
     image: Option<Arc<RenderImage>>,
     reading: Option<Reading>,
     error: Option<SharedString>,
@@ -355,6 +362,7 @@ impl ScopesView {
             kind: Kind::default(),
             rec2020: false,
             extended: false,
+            output: false,
             image: None,
             reading: None,
             error: None,
@@ -555,6 +563,7 @@ mod tests {
         Counts {
             extended: false,
             rec2020: false,
+            output: false,
             columns: 4,
             levels: 8,
             vector_bins: 4,
@@ -670,13 +679,14 @@ mod tests {
         let hist = [0u32; 8];
         let mut view = counts(&empty, [&empty; 3], &vector, [&hist; 3], &luma);
         let quiet = reading(&view, Kind::Waveform);
-        assert_eq!(quiet.stage, "Output · Rec. 709");
+        assert_eq!(quiet.stage, "Picture · Rec. 709");
         assert!(quiet.limits.is_empty());
         assert_eq!((quiet.peak, quiet.minimum), (85, 14));
         view.over = 8;
         view.under = 1;
         view.outside = 2;
         view.rec2020 = true;
+        view.output = true;
         let loud = reading(&view, Kind::Waveform);
         assert_eq!(loud.stage, "Output · Rec. 2020");
         assert_eq!(loud.limits, ["Under 3.1 %", "Over 25.0 %"]);

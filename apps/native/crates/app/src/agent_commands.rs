@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 
 /// Commands only the agent runs (a person has the same through a key, a
 /// toggle or a sheet): id, label, menu, and its arguments.
-pub const AGENT: [(&str, &str, &str, &str); 7] = [
+pub const AGENT: [(&str, &str, &str, &str); 9] = [
     ("transport.play", "Play", "Playback", ""),
     ("transport.pause", "Pause", "Playback", ""),
     (
@@ -43,6 +43,18 @@ pub const AGENT: [(&str, &str, &str, &str); 7] = [
         "Composition",
         "[{name?, w?, h?, fps?, dur?, background?}]",
     ),
+    (
+        "color.importCdlFile",
+        "Import a CDL onto the Selected Layer's Color Wheels",
+        "Color",
+        "[path of a .cc, .cdl or .ccc]",
+    ),
+    (
+        "color.exportCdlFile",
+        "Export the Selected Layer's Color Wheels as a CDL",
+        "Color",
+        "[path of a new .cc or .cdl]",
+    ),
 ];
 
 /// What a command refused here is, and the agent's way to it: `Some(tool)`
@@ -68,6 +80,8 @@ pub fn refused(command: &str) -> Option<Option<&'static str>> {
         "keyframeValue" | "scaleKeyframes" => Some("replace_keyframes (apply_commands)"),
         "keyframeVelocity" => Some("set_easing (apply_commands)"),
         "viewer.applyLut" => Some("manage_media"),
+        "color.importCdl" => Some("run_command color.importCdlFile"),
+        "color.exportCdl" => Some("run_command color.exportCdlFile"),
         "store" => Some("store_search"),
         _ => return None,
     })

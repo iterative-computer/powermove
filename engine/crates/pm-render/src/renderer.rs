@@ -305,6 +305,7 @@ fn build_options(
         preview: preview_window(comp, request),
         origin: request.origin,
         final_output: request.output_kind == crate::OutputKind::Final,
+        read_ahead: request.read_ahead && !request.export,
     }
 }
 
@@ -1590,7 +1591,7 @@ impl Renderer {
     /// Renderers that never get a share keep
     /// [`crate::media::DEFAULT_FRAME_CACHE`].
     pub fn apply_media_lease(
-        &self,
+        &mut self,
         lease: pm_media::decode::service::MediaLease,
     ) -> pm_media::decode::service::MediaUsage {
         self.media.apply_lease(lease)
@@ -2221,7 +2222,8 @@ impl Renderer {
         // cache returns within its bound; 3D meshes and maps no recent 3D
         // frame drew are released.
         self.pool.begin_frame();
-        self.media.begin_frame();
+        self.media
+            .begin_frame(request.read_ahead && !request.export);
         self.media.retire_cold_sessions();
         self.vector.begin_frame();
         self.scene3d.begin_frame();

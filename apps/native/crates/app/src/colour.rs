@@ -5,7 +5,7 @@ use crate::session::Controller;
 use gpui::{AppContext, Context, Entity, prelude::*};
 use pm_kernel::{Call, Caller, Command, Published, Request, WriteBody};
 use pm_model::{Map, Value};
-use pm_render::scopes::{ScopeConfig, ScopeFrame, ScopeMatrix, ScopeSignal};
+use pm_render::scopes::{ScopeConfig, ScopeFrame, ScopeMatrix, ScopeSignal, ScopeStage};
 use pm_shell::scopes::{
     Counts, INVALID_FRAME, Kind, Menu, READ_FAILED, ScopesView, raster, reading,
 };
@@ -236,6 +236,138 @@ pub fn lut_commands(
     ])
 }
 
+/// The first Color Wheels on `layer`, by effect id.
+fn color_wheels(p: &Published, layer: &str) -> Option<String> {
+    let root = p.snapshot.root()?;
+    let at = pm_kernel::model::find_layer(root, layer)?;
+    let effects = pm_kernel::model::layer_at(root, &at)?.get("fx")?.to_value();
+    effects.as_array()?.iter().find_map(|effect| {
+        (effect.get("type")?.as_str()? == "colorWheels")
+            .then(|| effect.get("id")?.as_str().map(str::to_owned))
+            .flatten()
+    })
+}
+
+/// Import CDL: `cdl` onto `layer`'s first Color Wheels at the playhead (as a
+/// value typed into each control: a key where the control is animated), or
+/// on a new Color Wheels, in one Undo step. Balance, exposure and contrast
+/// are left as they are; lift becomes 0, as a CDL has none.
+pub fn cdl_commands(
+    p: &Published,
+    layer: &str,
+    cdl: &pm_color::cdl::Cdl,
+    time: f64,
+) -> Result<Vec<Command>, String> {
+    use pm_kernel::commands::effects::{AddEffect, EffectCommand, saved_builtin_definition};
+    use pm_kernel::commands::properties::{KeyMode, SetProperty};
+    let values = pm_color::cdl::to_wheels(cdl)?;
+    Ok(match color_wheels(p, layer) {
+        Some(effect) => values
+            .into_iter()
+            .map(|(key, value)| {
+                let mut set =
+                    SetProperty::new(layer, &format!("{effect}.{key}"), Value::from(value), time);
+                set.mode = KeyMode::Auto;
+                pm_kernel::PropertyCommand::Set(set).into()
+            })
+            .collect(),
+        None => {
+            let mut parameters = Map::new();
+            for (key, value) in values {
+                parameters.insert(key.as_str(), Value::from(value));
+            }
+            vec![
+                EffectCommand::Add(Box::new(AddEffect {
+                    layer_id: layer.to_owned(),
+                    effect_id: pm_kernel::new_id("f"),
+                    definition: saved_builtin_definition(
+                        &p.snapshot.document,
+                        "colorWheels",
+                        None,
+                        0.,
+                        0.,
+                    )
+                    .map_err(|e| e.to_string())?,
+                    parameters,
+                    inputs: None,
+                    open: true,
+                    enabled: true,
+                    enabled_animation: None,
+                    index: None,
+                }))
+                .into(),
+            ]
+        }
+    })
+}
+
+/// Export CDL: the correction `layer`'s first Color Wheels grades with at
+/// `time` (keys and expressions evaluated as the renderer does), named after
+/// the layer.
+pub fn layer_cdl(p: &Published, layer: &str, time: f64) -> Result<pm_color::cdl::Cdl, String> {
+    let effect =
+        color_wheels(p, layer).ok_or("The layer has no Color Wheels to export as a CDL.")?;
+    let root = p.snapshot.root().ok_or("No project is open.")?;
+    let at = pm_kernel::model::find_layer(root, layer).ok_or("The layer is gone.")?;
+    let node = pm_kernel::model::layer_at(root, &at).ok_or("The layer is gone.")?;
+    let fx = node.get("fx").map(|f| f.to_value()).unwrap_or(Value::Null);
+    let params = fx
+        .as_array()
+        .and_then(|list| {
+            list.iter()
+                .find(|e| e.get("id").and_then(Value::as_str) == Some(&effect))
+        })
+        .and_then(|e| e.get("p"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let open = p.snapshot.open_comp().map(|c| c.as_str().to_owned());
+    let mut mirror = pm_kernel::QueryMirror::new(p);
+    let mut queries = mirror.queries();
+    let mut failed = None;
+    let mut cdl = pm_color::cdl::from_wheels(|key| {
+        let raw = params.get(key).cloned().unwrap_or(Value::Null);
+        let animated = raw
+            .get("kf")
+            .and_then(Value::as_array)
+            .is_some_and(|k| !k.is_empty())
+            || raw.get("expr").and_then(Value::as_str).is_some();
+        let value = if animated {
+            let mut q = Map::new();
+            q.insert("op", Value::from("evP"));
+            q.insert(
+                "comp",
+                at.comp_id
+                    .clone()
+                    .or(open.clone())
+                    .map_or(Value::Null, Value::from),
+            );
+            q.insert("open", open.clone().map_or(Value::Null, Value::from));
+            q.insert("layer", Value::Number(at.index as f64));
+            q.insert("t", Value::Number(time));
+            q.insert("key", Value::from(format!("{effect}.{key}")));
+            q.insert("prop", raw);
+            queries
+                .query(&Value::Object(q))
+                .ok()
+                .and_then(|v| v.as_f64())
+        } else {
+            raw.get("v").and_then(Value::as_f64)
+        };
+        value.unwrap_or_else(|| {
+            failed = Some(key.to_owned());
+            0.
+        })
+    })?;
+    if let Some(key) = failed {
+        return Err(format!("The Color Wheels’ {key} can’t be read."));
+    }
+    cdl.id = node
+        .get("name")
+        .and_then(|n| n.to_value().as_str().map(str::to_owned))
+        .filter(|name| !name.is_empty());
+    Ok(cdl)
+}
+
 /// Worker: validates the LUT and keeps a copy that outlives the original.
 pub(crate) fn retain_lut(profile: &Path, path: &Path) -> Result<PathBuf, String> {
     let unreadable = |reason: String| format!("This LUT couldn’t be read. {reason}");
@@ -280,8 +412,13 @@ pub struct Scopes {
 }
 
 /// What the panel's settings ask the engine to count.
-fn scope_config(rec2020: bool, extended: bool) -> ScopeConfig {
+fn scope_config(rec2020: bool, extended: bool, output: bool) -> ScopeConfig {
     ScopeConfig {
+        stage: if output {
+            ScopeStage::Output
+        } else {
+            ScopeStage::Picture
+        },
         signal: if extended {
             ScopeSignal::Pq
         } else {
@@ -297,7 +434,7 @@ fn scope_config(rec2020: bool, extended: bool) -> ScopeConfig {
 }
 
 /// The More menu, as AppKit rows.
-fn more_menu(rec2020: bool, extended: bool, depth8: bool) -> Vec<serde_json::Value> {
+fn more_menu(rec2020: bool, extended: bool, output: bool, depth8: bool) -> Vec<serde_json::Value> {
     use serde_json::json;
     let mut range = json!({ "label": "Range: Extended", "checked": extended });
     if depth8 {
@@ -310,6 +447,11 @@ fn more_menu(rec2020: bool, extended: bool, depth8: bool) -> Vec<serde_json::Val
         json!({ "separator": true }),
         json!({ "label": "Range: Standard", "checked": !extended }),
         range,
+        json!({ "separator": true }),
+        json!({ "label": "Read: Picture", "checked": !output,
+            "tooltip": "The graded picture, before delivery: light above white is counted as Over." }),
+        json!({ "label": "Read: Output", "checked": output,
+            "tooltip": "What a delivered file holds: the project’s output tone, then the range’s limits." }),
     ]
 }
 
@@ -317,6 +459,7 @@ fn counts(frame: &ScopeFrame) -> Counts<'_> {
     Counts {
         extended: frame.config.signal == ScopeSignal::Pq,
         rec2020: frame.config.matrix == ScopeMatrix::Rec2020,
+        output: frame.config.stage == ScopeStage::Output,
         columns: frame.config.columns as usize,
         levels: frame.config.levels as usize,
         vector_bins: frame.config.vector_bins as usize,
@@ -443,6 +586,120 @@ impl Controller {
         .detach();
     }
 
+    /// Import CDL…: a `.cc`, `.cdl` or `.ccc` onto the selected layer's
+    /// Color Wheels. `path` is the agent's file; a person picks one.
+    pub fn import_cdl(&mut self, path: Option<PathBuf>, cx: &mut Context<Self>) {
+        let Some(layer) = self.selected.clone() else {
+            self.message = "Select a layer to import a CDL onto".into();
+            cx.notify();
+            return;
+        };
+        let picked = match path {
+            Some(path) => {
+                let (tx, rx) = async_channel::bounded(1);
+                let _ = tx.try_send(Some(path));
+                rx
+            }
+            None => crate::platform::cdl_file(&self.host.borrow().window),
+        };
+        cx.spawn(async move |this, cx| {
+            let Ok(Some(path)) = picked.recv().await else {
+                return;
+            };
+            let read = cx
+                .background_spawn(async move {
+                    let text = std::fs::read_to_string(&path)
+                        .map_err(|e| format!("The CDL can’t be read: {e}."))?;
+                    pm_color::cdl::parse(&text)
+                })
+                .await;
+            let start = this.update(cx, |v, cx| {
+                let p = v.published.clone()?;
+                match read.and_then(|cdl| cdl_commands(&p, &layer, &cdl, v.time())) {
+                    Ok(commands) => {
+                        v.message = String::new();
+                        Some(
+                            v.kernel
+                                .call(&p.project, transact(&p, "Import CDL", commands)),
+                        )
+                    }
+                    Err(message) => {
+                        v.message = message;
+                        cx.notify();
+                        None
+                    }
+                }
+            });
+            if let Ok(Some(pending)) = start {
+                let result = pending.await;
+                this.update(cx, |v, cx| {
+                    if let Some(Err(e)) = result {
+                        v.message = e.to_string();
+                    }
+                    v.refresh(cx);
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    /// Export CDL…: the selected layer's Color Wheels at the playhead as a
+    /// `.cc` (or `.cdl` by its name). `path` is the agent's file, which must
+    /// not exist yet; a person names one in a save panel.
+    pub fn export_cdl(&mut self, path: Option<PathBuf>, cx: &mut Context<Self>) {
+        let (Some(layer), Some(p)) = (self.selected.clone(), self.published.clone()) else {
+            self.message = "Select a layer to export its CDL".into();
+            cx.notify();
+            return;
+        };
+        let cdl = match layer_cdl(&p, &layer, self.time()) {
+            Ok(cdl) => cdl,
+            Err(message) => {
+                self.message = message;
+                cx.notify();
+                return;
+            }
+        };
+        let agent = path.is_some();
+        let picked = match path {
+            Some(path) => {
+                let (tx, rx) = async_channel::bounded(1);
+                let _ = tx.try_send(Some(path));
+                rx
+            }
+            None => {
+                let name = format!("{}.cc", cdl.id.as_deref().unwrap_or("Grade"));
+                crate::platform::paths_named(&self.host.borrow().window, true, &name)
+            }
+        };
+        cx.spawn(async move |this, cx| {
+            let Ok(Some(path)) = picked.recv().await else {
+                return;
+            };
+            let written = cx
+                .background_spawn(async move {
+                    if agent && path.exists() {
+                        return Err("A file is already there; choose another name.".to_owned());
+                    }
+                    let name = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    let text = pm_color::cdl::write(&cdl, pm_color::cdl::Layout::of(&name));
+                    std::fs::write(&path, text)
+                        .map_err(|e| format!("The CDL can’t be written: {e}."))
+                })
+                .await;
+            this.update(cx, |v, cx| {
+                v.message = written.err().unwrap_or_default();
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// The Scopes panel's content, and its tap on the viewer.
     pub fn scopes_panel(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let view = self.scopes_view(cx);
@@ -493,9 +750,9 @@ impl Controller {
         let Some(view) = self.scopes.view.clone() else {
             return;
         };
-        let (kind, rec2020, extended) = {
+        let (kind, rec2020, extended, output) = {
             let view = view.read(cx);
-            (view.kind, view.rec2020, view.extended)
+            (view.kind, view.rec2020, view.extended, view.output)
         };
         let this = cx.entity().downgrade();
         match menu {
@@ -522,19 +779,22 @@ impl Controller {
                     .and_then(|p| p.snapshot.root())
                     .and_then(|root| root.get("colorDepth"))
                     .is_some_and(|d| d.to_value().as_f64() == Some(8.));
-                let options = more_menu(rec2020, extended, depth8);
+                let options = more_menu(rec2020, extended, output, depth8);
                 crate::v4_native::menu(window, &options, cx, move |chosen, cx| {
-                    let (rec2020, extended) = match chosen {
-                        Some(0) => (false, extended),
-                        Some(1) => (true, extended),
-                        Some(3) => (rec2020, false),
-                        Some(4) => (rec2020, true),
+                    let (rec2020, extended, output) = match chosen {
+                        Some(0) => (false, extended, output),
+                        Some(1) => (true, extended, output),
+                        Some(3) => (rec2020, false, output),
+                        Some(4) => (rec2020, true, output),
+                        Some(6) => (rec2020, extended, false),
+                        Some(7) => (rec2020, extended, true),
                         _ => return,
                     };
                     this.update(cx, |v, cx| {
                         view.update(cx, |view, _| {
                             view.rec2020 = rec2020;
                             view.extended = extended;
+                            view.output = output;
                         });
                         v.tap_scopes(cx);
                     })
@@ -550,7 +810,7 @@ impl Controller {
             return;
         };
         let settings = view.read(cx);
-        let config = scope_config(settings.rec2020, settings.extended);
+        let config = scope_config(settings.rec2020, settings.extended, settings.output);
         let wanted = (viewer.identity(), config);
         if self.scopes.tapped == Some(wanted) {
             return;

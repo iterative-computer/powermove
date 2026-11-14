@@ -18,6 +18,7 @@ pub mod qos;
 mod render;
 pub mod render_cache;
 pub mod resources;
+pub mod sequence_watch;
 mod scopes;
 mod settle;
 pub use scopes::ScopeResult;
@@ -610,6 +611,7 @@ impl State {
     /// override answers go) only if no other view shows it by then.
     fn remove_view(&mut self, id: u64) {
         if let Some(view) = self.views.remove(&id) {
+            sequence_watch::global().track(&watch_owner(self, id), []);
             let doc = view.stamp.doc_id;
             if !self.views.values().any(|v| v.stamp.doc_id == doc) {
                 self.retired_documents.insert(doc);
@@ -621,6 +623,11 @@ type ScopeTap = (
     pm_render::scopes::ScopeConfig,
     async_channel::Sender<ScopeResult>,
 );
+/// The sequence watch's owner name of view `id` of the service holding
+/// `state`.
+fn watch_owner(state: &State, id: u64) -> String {
+    format!("view {:p} {id}", state as *const State)
+}
 struct Shared {
     state: Mutex<State>,
     memory: Mutex<memory::CacheUsage>,
@@ -780,6 +787,11 @@ impl Viewer {
     /// Relink/asset resolver changes retire cached pixels even at one revision.
     pub fn media(&self, media: MediaCatalog) -> Result<()> {
         let mut state = self.shared.state.lock().unwrap();
+        // Its originals' sequences are watched whichever file it shows.
+        sequence_watch::global().track(
+            &watch_owner(&state, self.id),
+            media.originals.values().cloned(),
+        );
         state.content += 1;
         let content = state.content;
         let v = state
@@ -1365,6 +1377,21 @@ impl EngineService {
                 true
             })
         });
+        // A sequence's files rendered again (seen by the sequence watch, off
+        // this thread): every viewer draws again, and its engine retires
+        // the pictures it cached of the earlier files.
+        let sequences = Arc::downgrade(&shared);
+        sequence_watch::global().listen(move |_| {
+            sequences.upgrade().is_some_and(|shared| {
+                let mut state = shared.state.lock().unwrap();
+                for v in state.views.values_mut() {
+                    v.dirty = true;
+                }
+                drop(state);
+                shared.wake.try_send(()).ok();
+                true
+            })
+        });
         // Answers that land redraw their document's viewers that wait for
         // them (the worker knows which: `View::answers`); overrides that
         // start or stop answering redraw every viewer of the document.
@@ -1491,6 +1518,10 @@ impl EngineService {
         };
         let (paths, paused_paths) = viewer_media(&config.media, MediaMode::default());
         let proxied = config.media.proxied(MediaMode::default());
+        sequence_watch::global().track(
+            &watch_owner(&state, id),
+            config.media.originals.values().cloned(),
+        );
         state.views.insert(
             id,
             View {
