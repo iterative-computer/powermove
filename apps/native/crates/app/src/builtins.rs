@@ -1268,6 +1268,11 @@ impl Controller {
                     cx.new(|cx| {
                         cx.observe(&owner, |_, _, cx| cx.notify()).detach();
                         let keys = PopoverKeys::new(cx);
+                        // A sheet's Return and Escape reach it before
+                        // anything inside is clicked.
+                        if panel == "export" {
+                            keys.claim(window, cx);
+                        }
                         if panel == "agent" {
                             // Its own keys reach it from the first moment,
                             // before anything inside is clicked.
@@ -2343,12 +2348,12 @@ impl Render for SurfaceWindow {
         let size = window.viewport_size();
         let panel = self.panel.clone();
         let popover = self.panel == "agent";
-        if popover {
+        // Export is a sheet: no title bar band (its window fits its content).
+        let sheet = self.panel == "export";
+        if popover || sheet {
             // A focused control that went away leaves nothing focused.
             self.keys.claim(window, cx);
         }
-        // Export is a sheet: no title bar band (its window fits its content).
-        let sheet = self.panel == "export";
         let (mut fill, mut band) = (0, 0.);
         let (head, body) = self.owner.update(cx, |v, cx| {
             let (header, colour, titlebar) = {
@@ -2399,6 +2404,22 @@ impl Render for SurfaceWindow {
                         });
                     }
                 }))
+            })
+            .when(sheet, |d| {
+                // Nothing inside focused: the sheet's keys go to its panel
+                // (Return presses Export, Escape cancels), as on any sheet.
+                d.track_focus(&self.keys.focus).on_key_down(cx.listener(
+                    |this, e: &KeyDownEvent, window, cx| {
+                        if !this.keys.focus.is_focused(window) {
+                            return;
+                        }
+                        let panel = this.panel.clone();
+                        let view = this.owner.read(cx).builtins.views.get(&panel).cloned();
+                        if let Some(view) = view {
+                            view.update(cx, |v, cx| v.root_key_down(e, window, cx));
+                        }
+                    },
+                ))
             })
             .size_full()
             .overflow_hidden()

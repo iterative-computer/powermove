@@ -510,7 +510,7 @@ impl Controller {
             secrets::PROMPT,
             vec![
                 Button::new("Continue", true).default(),
-                Button::new("Not Now", false),
+                Button::new("Not Now", false).cancel(),
             ],
         )
         .sheet(&self.host.borrow().window);

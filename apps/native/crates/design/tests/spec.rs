@@ -163,6 +163,7 @@ const ROLES: &[(&str, &str)] = &[
         "Separator thickness (Increase Contrast doubles it)",
     ),
     ("metrics.min_panel", "Smallest panel extent"),
+    ("metrics.splitter_reach", "How far a dock divider's grab reaches into the panels beside its gap"),
     ("metrics.min_center", "Smallest viewer extent"),
     ("metrics.keyboard_step", "Splitter arrow-key step"),
     (
@@ -210,8 +211,10 @@ const ROLES: &[(&str, &str)] = &[
     ("metrics.grade_wheel", "A colour wheel's least diameter"),
     ("metrics.grade_wheel_max", "A colour wheel's greatest diameter in a wide panel"),
     ("metrics.grade_pair", "Least width of two colour wheels side by side on their plates"),
+    ("metrics.grade_field", "A colour wheel's master field under the wheel"),
     ("metrics.curve_editor", "The curve editor's least graph height"),
     ("metrics.curve_editor_max", "The curve editor's greatest graph height in a wide panel"),
+    ("metrics.curve_editor_wide", "The curve editor's greatest width in a wide panel"),
     ("metrics.layer_column", "Timeline layer list column width"),
     ("metrics.clip_radius", "Timeline clip bar corner radius"),
     ("metrics.playhead", "Playhead line width"),

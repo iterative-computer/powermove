@@ -2768,6 +2768,26 @@ impl SurfaceView {
             .find(|(_, h)| h.is_focused(window))
             .map(|(id, _)| *id)
     }
+    /// A key its window's root took while nothing in the panel was focused
+    /// (a sheet just opened): the panel's root hears it as its own keys,
+    /// so Return presses a sheet's default button and Escape cancels it.
+    pub(crate) fn root_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let root = self
+            .publication
+            .surface
+            .node(0)
+            .and_then(|n| n.children.first().copied());
+        if let Some(root) = root
+            && self.prepared.has_keydown
+        {
+            self.key_down(root, event, window, cx);
+        }
+    }
     fn key_down(
         &mut self,
         root: Id,
