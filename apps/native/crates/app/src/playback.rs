@@ -303,10 +303,12 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                         let _:()=msg_send![&*layers.timecode,setForegroundColor:&*cg!(colors.text)];
                         if let Some(p)=&playhead { p.style(&host.tokens, scale); }
                         let geometry=v.builtins.timeline_place;
+                        let seconds=head_time.get()as f64/pm_protocol::common::TICKS_PER_SECOND as f64;
+                        // Playing, the timeline pages to keep its head in sight (v1).
+                        if playing && let Some(t)=&v.builtins.timeline { t.update(cx,|t,cx|t.follow_playhead(seconds,cx)); }
                         let (pps,scroll_time,column)=v.builtins.timeline.as_ref().map_or((100.,0.,0.),|t|t.read(cx).time_mapping());
                         // The playhead ends where the tracks do, above the bottom bar.
                         let bar=v.builtins.timeline.as_ref().map_or(0.,|t|t.read(cx).bar_height()) as f32;
-                        let seconds=head_time.get()as f64/pm_protocol::common::TICKS_PER_SECOND as f64;
                         let offset=column+(seconds-scroll_time)*pps;
                         // A clear ground over the translucent header. The time is this
                         // layer's paused too: the panel hears play start and stop only
@@ -343,7 +345,12 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                             let foot=bar.max(metrics.inset);
                             let tall=(r.h-y-foot).max(0.) as f64;
                             if let Some(p)=&mut playhead {
-                                if head_shown { p.place(r.x as f64+offset,seconds*pps,r.x as f64+column,height-(r.y+r.h-foot)as f64,metrics.playhead as f64,tall,metrics.ruler as f64,playing,&host.tokens); }
+                                if head_shown {
+                                    p.place(r.x as f64+offset,seconds*pps,r.x as f64+column,height-(r.y+r.h-foot)as f64,metrics.playhead as f64,tall,metrics.ruler as f64,playing,&host.tokens);
+                                    // The Value Graph's readouts ride on the head (v1).
+                                    let marks=v.builtins.timeline.as_ref().map(|t|t.read(cx).graph_marks(seconds)).unwrap_or_default();
+                                    p.marks(&marks,height,scale,&host.tokens);
+                                }
                                 else { p.hide(); }
                             }
                         }

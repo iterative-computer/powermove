@@ -1418,6 +1418,8 @@ fn strip_state(c: &Clip) -> pm_design::StripState {
         StripState::Rest
     }
 }
+/// How far either side of a layer's in or out point a press trims it.
+const TRIM_REACH: f64 = 5.;
 /// The least width a strip is drawn at, in points (v1's 4 px).
 const MIN_STRIP: f64 = 4.;
 /// Paints clip `c` and gives back its strip's box on screen (none when the
@@ -1439,14 +1441,20 @@ fn paint_clip(
     // clip at least 4 px wide).
     let gap = t.strip_gap() as f64;
     let start = v.x(c.from) + gap / 2.;
-    let r = span(
-        start,
-        (v.x(c.from + c.duration) - gap / 2.).max(start + MIN_STRIP),
-        y + gap,
-        h - 2. * gap,
-        v,
-    )?;
+    let end = (v.x(c.from + c.duration) - gap / 2.).max(start + MIN_STRIP);
+    // `r` is the strip's part in view: what sits inside it (its name, marks,
+    // waveform) stays in sight.
+    let r = span(start, end, y + gap, h - 2. * gap, v)?;
     let radius = t.strip_radius(r.height as f32) as f64;
+    // The body runs on past the view's edges by more than its corner, so a
+    // strip that goes on out of view is cut straight by the tracks, never
+    // rounded at the edge as if it ended there (where it has no trim).
+    let reach = radius + gap + 2. * m.border as f64;
+    let (x0, x1) = (
+        start.max(v.layer_column - reach),
+        end.min(v.width + reach),
+    );
+    let body = Rect::new(x0, r.y, x1 - x0, r.height);
     // Media Offline (docs/native/design/media-offline.md): the viewer's
     // ground with the danger hatch, as the engine's card.
     let offline = c.media == Media::Offline;
@@ -1466,7 +1474,7 @@ fn paint_clip(
     } else {
         0.
     };
-    let mut o = Op::new(format!("clip:{}", c.id), "clip", r, fill);
+    let mut o = Op::new(format!("clip:{}", c.id), "clip", body, fill);
     o.radius = radius;
     o.opacity = material.opacity as f64;
     o.detail = json!({
@@ -1489,7 +1497,7 @@ fn paint_clip(
         let mut o = Op::new(
             format!("clip-hatch:{}", c.id),
             "stripes-45",
-            r,
+            body,
             colors.danger,
         );
         o.opacity = t.translucency.offline_hatch as f64 * strength;
@@ -2055,7 +2063,7 @@ impl Frame {
             })
             .collect()
     }
-    pub fn hit_clip(&self, x: f64, y: f64) -> Option<(&str, Option<Edge>)> {
+    pub fn hit_clip<'a>(&'a self, x: f64, y: f64) -> Option<(&'a str, Option<Edge>)> {
         if y < 0.
             || y >= self.viewport.height
             || x < self.viewport.layer_column
@@ -2063,23 +2071,35 @@ impl Frame {
         {
             return None;
         }
-        self.ops.iter().rev().find_map(|o| {
-            if !o.id.starts_with("clip:")
-                || !o.bounds.contains(x, y)
-                || o.clip.is_some_and(|clip| !clip.contains(x, y))
-            {
+        let hit = |o: &'a Op, inside: bool| {
+            if !o.id.starts_with("clip:") || o.clip.is_some_and(|clip| !clip.contains(x, y)) {
                 return None;
             }
             let edges = o.detail["sourceEdges"].as_array()?;
-            let edge = if (x - edges[0].as_f64()?).abs() <= 5. {
+            let edge = if (x - edges[0].as_f64()?).abs() <= TRIM_REACH {
                 Some(Edge::In)
-            } else if (x - edges[1].as_f64()?).abs() <= 5. {
+            } else if (x - edges[1].as_f64()?).abs() <= TRIM_REACH {
                 Some(Edge::Out)
             } else {
                 None
             };
-            Some((&o.id[5..], edge))
-        })
+            let b = o.bounds;
+            let level = y >= b.y && y < b.y + b.height;
+            let found = if inside {
+                b.contains(x, y)
+            } else {
+                level && edge.is_some()
+            };
+            found.then(|| (&o.id[5..], edge))
+        };
+        // The strip under the point first (two that meet: each trims its own
+        // end); else a trim zone, which reaches past a strip's drawn end to
+        // its layer's edge and beyond, over the strip's height.
+        self.ops
+            .iter()
+            .rev()
+            .find_map(|o| hit(o, true))
+            .or_else(|| self.ops.iter().rev().find_map(|o| hit(o, false)))
     }
 }
 
