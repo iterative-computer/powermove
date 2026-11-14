@@ -642,7 +642,7 @@ struct ChildDouble {
     fail: bool,
 }
 impl ExportChild for ChildDouble {
-    fn video(&self, r: &VideoExportRequest) -> Result<PathBuf> {
+    fn video(&self, r: &VideoExportRequest) -> Result<pm_mcp::services::VideoDelivered> {
         self.requests.lock().unwrap().push(r.clone());
         if self.fail {
             return Err(Error::unavailable(
@@ -660,7 +660,7 @@ impl ExportChild for ChildDouble {
             .create_new(true)
             .open(&path)?;
         file.write_all(b"synthetic encoded output; no pixel correctness claim")?;
-        Ok(path)
+        Ok(path.into())
     }
 }
 #[test]

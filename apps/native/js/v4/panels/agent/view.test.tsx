@@ -1,7 +1,14 @@
 import { test, expect } from "bun:test";
 import type { ComponentChild } from "preact";
 import { createRoot, type Commit } from "../../src";
-import { AgentPanel, AgentView, composerKey, elapsed } from "./view";
+import {
+  AgentPanel,
+  AgentView,
+  composerKey,
+  elapsed,
+  type Menu,
+  type MenuOption,
+} from "./view";
 import { fixture, state, states, withRows } from "./fixtures";
 import type { Action, AgentModel, Publication, Row } from "./contract";
 
@@ -74,7 +81,9 @@ test("focus order follows the thread bar, conversation and composer as the origi
   const p = states.selected();
   p.snapshot.sendable = true;
   p.snapshot.catalog.efforts = ["", "high"];
-  await root.render(<AgentView publication={p} send={() => {}} />);
+  await root.render(
+    <AgentView publication={p} menu={async () => null} send={() => {}} />,
+  );
   const result = assertWire(commits);
   const ids = result.focusOrder
     .map((id: number) => result.nodes[id].props.id)
@@ -82,6 +91,7 @@ test("focus order follows the thread bar, conversation and composer as the origi
   expect(ids).toEqual([
     "agent-threads",
     "agent-new",
+    "agent-presentation",
     "agent-conversation",
     "agent-composer-text",
     "agent-attach",
@@ -162,7 +172,16 @@ test("an empty thread offers the original's suggestions; one fills the composer"
   ]);
   root.dispose();
 });
-test("the thread picker lists threads with their state and switches by id", async () => {
+/** The window's field menu, answering with `answer` and keeping requests. */
+function fieldMenu(answer: (options: MenuOption[]) => unknown) {
+  const asked: { placeholder: string; options: MenuOption[] }[] = [];
+  const menu: Menu = async (request) => {
+    asked.push(request);
+    return answer(request.options);
+  };
+  return { menu, asked };
+}
+test("the thread picker lists threads with their state, switches, and offers New and Delete", async () => {
   const { root, commits } = mount();
   const actions: Action[] = [];
   const p = fixture();
@@ -176,21 +195,78 @@ test("the thread picker lists threads with their state and switches by id", asyn
     },
     { id: "older", title: "Make the headline", busy: true, updatedAt: 0 },
   ];
+  let pick = "thread:older";
+  const { menu, asked } = fieldMenu(() => pick);
   await root.render(
-    <AgentView publication={p} send={(a) => actions.push(a)} />,
+    <AgentView publication={p} menu={menu} send={(a) => actions.push(a)} />,
   );
   const picker = byId(root, "agent-threads");
-  const menu = (picker.props.metadata as any).pmKit.menu;
-  expect(menu.map((o: any) => [o.label, o.detail])).toEqual([
-    ["Ask which title to add", "Current"],
-    ["Make the headline", "Working…"],
+  expect(
+    picker.text +
+      root
+        .inspect()
+        .nodes.filter((n) => n.text)
+        .map((n) => n.text)
+        .join("|"),
+  ).toContain("Ask which title to add");
+  await root.drive(picker.id, "click");
+  await Promise.resolve();
+  expect(asked[0]!.options.map((o) => o.label)).toEqual([
+    "New Thread",
+    "Ask which title to add · Current",
+    "Make the headline · Working…",
+    "Delete Thread…",
   ]);
-  expect((picker.props.metadata as any).pmKit.display).toBe(
-    "Ask which title to add",
-  );
-  await root.drive(picker.id, "change", { value: "older" });
-  expect(actions).toEqual([{ type: "switchThread", id: "older" }]);
+  pick = "delete:thread";
+  await root.drive(picker.id, "click");
+  await Promise.resolve();
+  expect(actions).toEqual([
+    { type: "switchThread", id: "older" },
+    { type: "deleteThread", id: "thread" },
+  ]);
   assertWire(commits);
+  root.dispose();
+});
+test("run choices and access open the window's menu; picks reach the model", async () => {
+  const { root } = mount();
+  const actions: Action[] = [];
+  const p = fixture();
+  p.snapshot.catalog = {
+    models: [
+      ["gpt-6", "GPT-6"],
+      ["gpt-6-mini", "GPT-6 mini"],
+    ],
+    providers: [
+      ["chatgpt", "ChatGPT"],
+      ["claude", "Claude"],
+    ],
+    efforts: ["", "high"],
+  };
+  p.snapshot.settings.model = "gpt-6";
+  const answers: Record<string, string> = {
+    "Search providers": "claude",
+    "Search models": "gpt-6-mini",
+    Search: "auto",
+  };
+  const asked: string[] = [];
+  const menu: Menu = async (r) => {
+    asked.push(r.placeholder);
+    return r.options.some((o) => o.value === "auto")
+      ? "auto"
+      : answers[r.placeholder];
+  };
+  await root.render(
+    <AgentView publication={p} menu={menu} send={(a) => actions.push(a)} />,
+  );
+  for (const id of ["agent-provider", "agent-model", "agent-access"]) {
+    await root.drive(byId(root, id).id, "click");
+    await Promise.resolve();
+  }
+  expect(actions).toEqual([
+    { type: "setProvider", provider: "claude" },
+    { type: "setModel", model: "gpt-6-mini", effort: "High" },
+    { type: "setAccess", access: "auto" },
+  ]);
   root.dispose();
 });
 const turn = (): Row[] => [
@@ -258,9 +334,10 @@ test("a finished turn folds its work behind “Worked for”, and its tool group
   expect(has(root, "1 tool call, <1s")).toBe(false);
   await root.drive(byLabel(root, "Worked for 20s").id, "click");
   expect(has(root, "1 tool call, <1s")).toBe(true);
-  expect(has(root, "Get project state get_project_state")).toBe(false);
+  expect(has(root, "Get project state")).toBe(false);
   await root.drive(byLabel(root, "1 tool call, <1s").id, "click");
-  expect(has(root, "Get project state get_project_state")).toBe(true);
+  // The chip names what it worked on, never only the tool's own id.
+  expect(has(root, "Get project state")).toBe(true);
   // Inline Markdown becomes styled runs of one native text.
   const runs = root
     .inspect()
@@ -495,36 +572,47 @@ test("a live run keeps its conversation and Stop after its account signs out", a
   expect(actions).toEqual([{ type: "stop" }]);
   root.dispose();
 });
-test("shortcuts read as the original's menu; /new and /attach run as the composer's own buttons", async () => {
-  const { root, commits } = mount();
+test("typing / opens the original's shortcuts in the window's menu; a pick reaches the model", async () => {
+  const { root } = mount();
   const actions: Action[] = [];
+  const asked: MenuOption[][] = [];
+  const menu: Menu = async (r) => {
+    asked.push(r.options);
+    return "new";
+  };
   const p = state({
-    draft: { text: "/", selection: [1, 1], armed: null },
-    slash: {
-      visible: true,
-      index: 0,
-      choices: [
-        { id: "new", value: null },
-        { id: "attach", value: null },
-        { id: "settings", value: null },
-      ],
-    },
+    draft: { text: "", selection: [0, 0], armed: null },
   });
   await root.render(
-    <AgentView publication={p} send={(a) => actions.push(a)} />,
+    <AgentView publication={p} menu={menu} send={(a) => actions.push(a)} />,
   );
-  expect(has(root, "/new")).toBe(true);
-  expect(
-    root.inspect().nodes.some((n) => n.text === "Start a new conversation"),
-  ).toBe(true);
-  await root.drive(byLabel(root, "/new").id, "click");
-  await root.drive(byLabel(root, "/settings").id, "click");
-  expect(actions).toEqual([
-    { type: "draft", text: "", selection: [0, 0], base: "/" },
-    { type: "newThread" },
-    { type: "chooseSlash", id: "settings" },
+  // Typing says the composer is focused, and gives the menu its anchor.
+  await root.drive(byId(root, "agent-composer-text").id, "input", {
+    value: "/",
+  });
+  p.snapshot.draft = { text: "/", selection: [1, 1], armed: null };
+  p.snapshot.slash = {
+    visible: true,
+    index: 0,
+    choices: [
+      { id: "new", value: null },
+      { id: "settings", value: null },
+    ],
+  };
+  await root.render(
+    <AgentView
+      publication={{ ...p }}
+      menu={menu}
+      send={(a) => actions.push(a)}
+    />,
+  );
+  await Promise.resolve();
+  expect(asked[0]!.map((o) => o.label)).toEqual([
+    "/new — Start a new conversation",
+    "/settings — Open agent connections",
   ]);
-  assertWire(commits);
+  expect(actions.slice(-1)).toEqual([{ type: "chooseSlash", id: "new" }]);
+  expect(actions).toContainEqual({ type: "focus", focused: true });
   root.dispose();
 });
 test("a run the person stopped reads plainly, with Try Again", async () => {

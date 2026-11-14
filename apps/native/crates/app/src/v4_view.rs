@@ -86,17 +86,22 @@ impl Outline {
 /// The only pointer the host models. Multi-touch reaches panels as gestures.
 const POINTER: u64 = 1;
 
+#[path = "v4_grade.rs"]
+mod grade;
+
 /// A press on a number field: a click edits, a drag scrubs (language.md §9).
+/// A press on a grading control (`grade`) drags it through the same gesture.
 struct ScrubDrag {
     id: Id,
     start: Point<Pixels>,
     number: crate::v4_compile::NumberFacts,
     binding: Option<SharedString>,
     active: bool,
+    grade: Option<grade::GradeDrag>,
 }
 enum ScrubOp {
     Begin,
-    Value(SharedString, f64),
+    Value(SharedString, Value),
     Finish(bool),
 }
 #[derive(Clone, Copy)]
@@ -104,14 +109,12 @@ struct Capture {
     target: Id,
     button: u64,
 }
-/// A scroller that follows its end: new content keeps it at the end while
-/// the reader is there; scrolling up lets them read, and the panel hears it
-/// (a `scroll` event, `{away}`) so it can offer the way back.
+/// A scroller anchored at its end (`metadata.scrollAnchor: "end"`): the
+/// panel hears when the reader scrolls away from the end and back (a
+/// `scroll` event, `{away}`) so it can offer the way back, and a new
+/// `metadata.scrollToken` takes it there.
 #[derive(Default)]
 struct Follow {
-    on: bool,
-    /// `data-pm-follow-token`: a new value goes back to the end (the
-    /// panel's Scroll to Latest).
     token: Value,
     away: bool,
 }
@@ -149,8 +152,7 @@ pub struct SurfaceView {
     anchors: Rc<RefCell<HashMap<Id, Bounds<Pixels>>>>,
     /// The height a sheet's body wants, measured as it is laid out.
     sheet_fit: Rc<std::cell::Cell<f32>>,
-    /// Scrollers that follow their end (`data-pm-follow="end"`: a
-    /// conversation), by node.
+    /// End-anchored scrollers' tokens and whether the reader is away, by node.
     follow: RefCell<HashMap<Id, Follow>>,
     /// While an agent tool draws (`agent::probe`), controls record where they
     /// were drawn so a panel point maps to the control under it.
@@ -162,6 +164,7 @@ pub struct SurfaceView {
     scrub_gesture: Option<u64>,
     scrub_busy: bool,
     scrub_shown: Option<(Id, f64)>,
+    grade_drawn: grade::Drawn,
     move_busy: bool,
     /// Last label of each `role="status"` node; `None` until the first frame,
     /// so a panel's opening state is not read out.
@@ -233,6 +236,7 @@ impl SurfaceView {
             scrub_gesture: None,
             scrub_busy: false,
             scrub_shown: None,
+            grade_drawn: Default::default(),
             move_busy: false,
             statuses: None,
             queued_move: None,
@@ -936,8 +940,31 @@ impl SurfaceView {
     #[cfg(debug_assertions)]
     pub fn review_send(&mut self, semantic: &str, event: &str, cx: &mut Context<Self>) {
         // `semantic=<json>` carries a value (a pop-up's choice, a switch's state).
+        // A link carries spaces and quotes percent-encoded (`="Make%20it%20so"`).
+        let decode = |value: &str| {
+            let bytes = value.as_bytes();
+            let mut out = Vec::with_capacity(bytes.len());
+            let mut i = 0;
+            while i < bytes.len() {
+                let hex = bytes
+                    .get(i + 1..i + 3)
+                    .and_then(|h| std::str::from_utf8(h).ok())
+                    .and_then(|h| u8::from_str_radix(h, 16).ok());
+                match (bytes[i], hex) {
+                    (b'%', Some(byte)) => {
+                        out.push(byte);
+                        i += 3;
+                    }
+                    (byte, _) => {
+                        out.push(byte);
+                        i += 1;
+                    }
+                }
+            }
+            String::from_utf8_lossy(&out).into_owned()
+        };
         let (semantic, value) = match semantic.split_once('=') {
-            Some((semantic, value)) => (semantic, serde_json::from_str(value).ok()),
+            Some((semantic, value)) => (semantic, serde_json::from_str(&decode(value)).ok()),
             None => (semantic, None),
         };
         let id = self
@@ -1249,6 +1276,10 @@ impl SurfaceView {
         })
         .detach();
     }
+    /// Where an anchor node was last drawn (window points).
+    pub fn anchor_bounds(&self, id: Id) -> Option<Bounds<Pixels>> {
+        self.anchors.borrow().get(&id).copied()
+    }
     pub fn change(&mut self, id: Id, value: Value, cx: &mut Context<Self>) {
         let Some(node) = self.publication.surface.node(id) else {
             return;
@@ -1379,9 +1410,13 @@ impl SurfaceView {
             number,
             binding: node.binding.clone().filter(|_| !node.local_change),
             active: false,
+            grade: None,
         });
     }
     fn scrub_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        if self.scrub.as_ref().is_some_and(|d| d.grade.is_some()) {
+            return self.grade_move(event, cx);
+        }
         let threshold = self.table.tokens.metrics.drag_threshold;
         let Some(drag) = &mut self.scrub else {
             return;
@@ -1413,7 +1448,8 @@ impl SurfaceView {
         self.scrub_shown = Some((id, value));
         match drag.binding.clone() {
             Some(binding) => {
-                self.scrub_ops.push_back(ScrubOp::Value(binding, value));
+                self.scrub_ops
+                    .push_back(ScrubOp::Value(binding, json!(value)));
                 self.scrub_pump(cx);
             }
             None => self.change(id, json!(value), cx),
@@ -1433,6 +1469,11 @@ impl SurfaceView {
                 self.scrub_ops.push_back(ScrubOp::Finish(commit));
                 self.scrub_pump(cx);
             }
+            if drag.grade.is_some() {
+                cx.notify();
+            }
+        } else if drag.grade.is_some() {
+            // A press on a grading control that never moved changes nothing.
         } else if let Some(field) = self.fields.get(&drag.id) {
             field.update(cx, |f, cx| f.begin_editing(cx));
         }
@@ -1469,7 +1510,7 @@ impl SurfaceView {
                     let pending = match (op, gesture) {
                         (ScrubOp::Begin, _) => runtime.scrub_begin(&panel),
                         (ScrubOp::Value(handle, value), Some(gesture)) => {
-                            runtime.scrub_step(&panel, &handle, gesture, json!(value))
+                            runtime.scrub_step(&panel, &handle, gesture, value)
                         }
                         (ScrubOp::Finish(commit), Some(gesture)) => {
                             runtime.scrub_finish(&panel, gesture, commit)
@@ -1709,28 +1750,41 @@ impl SurfaceView {
                 element.flex_1()
             };
             element = element.min_h(px(0.)).track_scroll(scroll);
+            // `metadata.scrollAnchor: "end"` (a conversation): a scroller that
+            // was at its end stays there as content grows; once scrolled up,
+            // it stays where the person left it.
+            let follows = self
+                .publication
+                .surface
+                .node(id)
+                .and_then(|n| n.props.get("metadata"))
+                .and_then(|m| m.get("scrollAnchor"))
+                .and_then(|a| a.as_str())
+                == Some("end");
+            if follows && scroll.offset().y <= -scroll.max_offset().y + px(1.) {
+                scroll.scroll_to_bottom();
+            }
             if node.scroll_y {
                 element = element.overflow_y_scroll();
             }
-            let props = self.publication.surface.node(id).map(|n| &n.props);
-            if props.and_then(|p| p.get("data-pm-follow")).and_then(Value::as_str) == Some("end") {
-                let token = props
-                    .and_then(|p| p.get("data-pm-follow-token"))
+            if follows {
+                // `metadata.scrollToken`: a new value goes back to the end
+                // (the panel's Scroll to Latest).
+                let token = self
+                    .publication
+                    .surface
+                    .node(id)
+                    .and_then(|n| n.props.get("metadata"))
+                    .and_then(|m| m.get("scrollToken"))
                     .cloned()
                     .unwrap_or(Value::Null);
                 let mut follow = self.follow.borrow_mut();
                 let f = follow.entry(id).or_insert_with(|| Follow {
-                    on: true,
                     token: token.clone(),
                     away: false,
                 });
                 if f.token != token {
                     f.token = token;
-                    f.on = true;
-                }
-                if f.on {
-                    // Applied when the scroller is laid out, after this
-                    // frame's content has its height.
                     scroll.scroll_to_bottom();
                 }
                 element = element.on_scroll_wheel(cx.listener(move |_, _, window, cx| {
@@ -1744,7 +1798,6 @@ impl SurfaceView {
                         let changed = {
                             let mut follow = v.follow.borrow_mut();
                             let f = follow.entry(id).or_default();
-                            f.on = !away;
                             std::mem::replace(&mut f.away, away) != away
                         };
                         let listens = v
@@ -1818,6 +1871,19 @@ impl SurfaceView {
         }
         element = self.interactive(element, node, cx);
         element = self.decorate(element, node, window);
+        if let Some(drawing) = self.grade_canvas(id, &node.kit, node.disabled) {
+            element = element.relative().child(drawing);
+            if !node.disabled {
+                element = element.on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |v, event: &MouseDownEvent, window, cx| {
+                        window.prevent_default();
+                        v.grade_press(id, event, cx);
+                        cx.stop_propagation();
+                    }),
+                );
+            }
+        }
         let mut children: Vec<AnyElement> = vec![];
         // A disabled field mounts no editor; it still shows its value, dimmed.
         if let Some(text) = self.disabled_field_text(node) {
@@ -2298,11 +2364,7 @@ impl SurfaceView {
         // A tooltip says what is not already in view: one that repeats the
         // text the element shows (an effect's name, a row's label) only
         // covers its neighbours.
-        if let Some(title) = node
-            .title
-            .clone()
-            .filter(|title| title.trim() != self.shown_text(node.id, 3).trim())
-        {
+        if let Some(title) = self.tooltip_title(node.id) {
             let tokens = self.table.tokens.clone();
             element = element.tooltip(move |_, cx| {
                 let (title, tokens) = (title.clone(), tokens.clone());
@@ -2415,27 +2477,31 @@ impl SurfaceView {
                 }
                 element = element.child(chip);
             }
-            Kit::Progress(value) => {
+            Kit::Progress(None) => {
+                let tokens = t.clone();
+                element = element.child(if t.accessibility.reduce_motion {
+                    pm_shell::welcome_view::spinner(0., &tokens).into_any_element()
+                } else {
+                    div()
+                        .flex_none()
+                        .with_animation(
+                            "progress",
+                            Animation::new(std::time::Duration::from_secs(1)).repeat(),
+                            move |this, turn| {
+                                this.child(pm_shell::welcome_view::spinner(turn as f64, &tokens))
+                            },
+                        )
+                        .into_any_element()
+                });
+            }
+            Kit::Progress(Some(value)) => {
                 let track = div()
                     .h(px(t.metrics.inner_radius))
                     .w_full()
                     .rounded(px(t.metrics.inner_radius / 2.))
                     .overflow_hidden()
-                    .bg(rgb(t.colors.field));
-                let track = match value {
-                    Some(value) => {
-                        track.child(div().h_full().w(relative(*value)).bg(rgb(t.colors.accent)))
-                    }
-                    None => track.child(
-                        div().size_full().bg(rgb(t.colors.muted)).with_animation(
-                            "progress",
-                            Animation::new(std::time::Duration::from_secs(1))
-                                .repeat()
-                                .with_easing(pulsating_between(0.3, 1.)),
-                            |this, delta| this.opacity(delta),
-                        ),
-                    ),
-                };
+                    .bg(rgb(t.colors.field))
+                    .child(div().h_full().w(relative(*value)).bg(rgb(t.colors.accent)));
                 element = element.child(track);
             }
             Kit::Gizmo {
@@ -2470,6 +2536,8 @@ impl SurfaceView {
                     ));
                 }
             }
+            // Drawn with their own canvas (`grade_canvas`).
+            Kit::Wheel { .. } | Kit::Curve { .. } => {}
             Kit::Disclosure(open) => {
                 let group: SharedString = format!("disclosure-{}", node.id).into();
                 element = element.group(group.clone()).child(
@@ -2903,6 +2971,43 @@ impl HeaderView {
     }
 }
 impl SurfaceView {
+    /// The tooltip a node shows, if any: never one that repeats what is in
+    /// view (its own words, the label of the row it sits in), and none on a
+    /// control that opens a menu and shows its value (its menu says the rest,
+    /// and a tooltip would stand over the open menu).
+    pub(crate) fn tooltip_title(&self, id: Id) -> Option<SharedString> {
+        let node = self.prepared.node(id)?;
+        let shown = self.shown_text(id, 3);
+        let props = self.publication.surface.node(id).map(|n| &n.props);
+        let menu_value = props.is_some_and(|p| p.contains_key("aria-haspopup"))
+            && (!shown.trim().is_empty()
+                || props.is_some_and(|p| p.get("value").is_some_and(|v| !v.is_null())));
+        node.title
+            .clone()
+            .filter(|title| title.trim() != shown.trim())
+            .filter(|title| self.row_label(id).as_deref() != Some(title.trim()))
+            .filter(|_| !menu_value)
+    }
+    /// The label of the row (kit `InspectorRow`) a node sits in, which the
+    /// row shows beside it.
+    fn row_label(&self, id: Id) -> Option<String> {
+        let mut at = self.prepared.node(id)?.parent;
+        while let Some(parent) = at {
+            let node = self.prepared.node(parent)?;
+            if node.component == Some(Component::InspectorRow) {
+                return self
+                    .publication
+                    .surface
+                    .node(parent)?
+                    .props
+                    .get("label")
+                    .and_then(Value::as_str)
+                    .map(|l| l.trim().to_owned());
+            }
+            at = node.parent;
+        }
+        None
+    }
     /// The words a node shows: its own text and its descendants' (to
     /// `depth` levels), in order, without controls' values.
     pub(crate) fn shown_text(&self, id: Id, depth: usize) -> String {

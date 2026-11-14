@@ -1,8 +1,9 @@
 import { expect, test } from "bun:test";
-import { fixture, snapshot } from "./fixture";
+import { fixture, numberRow, snapshot } from "./fixture";
 import { InspectorPanel } from "../view";
 import { Probe } from "./probe";
 import { mountInspector } from "../index";
+import { sectionRows } from "../contracts";
 
 test("all four host projections subscribe and each binding is acknowledged before editing", async () => {
   let release!: () => void;
@@ -22,10 +23,17 @@ test("all four host projections subscribe and each binding is acknowledged befor
   for (let i = 0; i < 20 && !release; i++) await Promise.resolve();
   const p = new Probe();
   try {
-    await p.render(<InspectorPanel session={f.session} />);
-    expect(p.node("value:opacity:0").props.disabled).toBe(true);
+    // While its binding registers the row is not shown at all (never a
+    // frame of disabled fields); once acknowledged it shows, editable.
+    expect(f.session.ready("opacity")).toBe(false);
+    expect(
+      f.session
+        .inspect()
+        .sections.some((s) => sectionRows(s).some((r) => r.id === "opacity")),
+    ).toBe(false);
     release();
     await start;
+    await p.render(<InspectorPanel session={f.session} />);
     await p.flush();
     expect(p.node("value:opacity:0").props.disabled).toBe(false);
     expect(f.model.updates.map(([query]) => query)).toEqual([
@@ -298,4 +306,55 @@ test("fenced startup retires native generation without another surface mutation"
   expect(commits).toBe(1);
   expect(retired).toEqual([1]);
   expect(f.session.ready("opacity")).toBe(false);
+});
+
+test("a layer switch shows the previous layer until the new one is bound, never its fields disabled", async () => {
+  let hold: (() => void) | null = null;
+  let holding = false;
+  const f = fixture(snapshot(), async (request) => {
+    if (holding && request.operation.type === "binding.register")
+      await new Promise<void>((resolve) => {
+        hold = resolve;
+      });
+    return {
+      ...request,
+      accepted: true,
+      revision: request.expectedRevision,
+      value: null,
+    };
+  });
+  await f.session.start();
+  const p = new Probe();
+  try {
+    await p.render(<InspectorPanel session={f.session} />);
+    expect(p.node("value:opacity:0").props.disabled).toBe(false);
+    // Another layer is selected: its row binds through a held registration.
+    const next = snapshot();
+    next.target = {
+      ...next.target,
+      key: "b",
+      first: { ...(next.target as any).first, id: "b", name: "Badge" },
+    } as any;
+    next.sections[0].rows = [numberRow("scale", "Scale")];
+    f.model.value = next;
+    holding = true;
+    f.publish("selection");
+    for (let i = 0; i < 20 && !hold; i++) await Promise.resolve();
+    expect(hold).not.toBeNull();
+    await p.flush();
+    // Meanwhile the panel still shows the previous layer, editable.
+    expect(p.node("value:opacity:0").props.disabled).toBe(false);
+    expect(() => p.node("value:scale:0")).toThrow();
+    holding = false;
+    hold!();
+    await f.session.settled();
+    await p.flush();
+    // Then straight to the new layer, bound: no frame between.
+    expect(p.node("value:scale:0").props.disabled).toBe(false);
+    expect(() => p.node("value:opacity:0")).toThrow();
+    expect(f.session.ready("opacity")).toBe(false);
+  } finally {
+    await p.dispose();
+    await f.session.dispose();
+  }
 });

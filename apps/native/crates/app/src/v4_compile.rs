@@ -142,6 +142,18 @@ pub enum Kit {
     },
     Secure,
     Disclosure(bool),
+    /// A colour wheel: its red, green and blue, where they are neutral, and
+    /// the limits of one channel.
+    Wheel {
+        rgb: [f64; 3],
+        neutral: f64,
+        range: [f64; 2],
+    },
+    /// A curve editor: `[count, x0, y0, …]` and its channel's ink.
+    Curve {
+        values: Vec<f64>,
+        channel: usize,
+    },
 }
 #[derive(Clone, Debug)]
 pub struct NodeView {
@@ -236,7 +248,7 @@ impl Rich {
         })
     }
 }
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct NumberFacts {
     pub value: f64,
     pub step: f64,
@@ -330,6 +342,10 @@ impl Prepared {
             {
                 anchors.push(id);
             }
+            // A control that opens a menu: the menu hangs from where it is.
+            if node.props.contains_key("aria-haspopup") {
+                anchors.push(node.id);
+            }
             has_keydown |= view.events.key_down;
             nodes.insert(node.id, view);
         }
@@ -389,6 +405,13 @@ fn compile(
     }
     let hidden = style.get("display").and_then(Value::as_str) == Some("none");
     let mut sheet = StyleRefinement::default().flex().flex_col().min_w(px(0.));
+    // `data-pm-variant="code"`: a command, a path, a tool's output, in the
+    // monospaced face the app's code editors draw. "SF Mono" is no installed
+    // family (text resolution falls back to the proportional face); the
+    // editors fall back to Menlo, so code reads the same everywhere.
+    if variant(node) == Some("code") {
+        sheet = sheet.font_family("Menlo");
+    }
     if node.id == 0 || node.parent == Some(0) {
         sheet = sheet.size_full();
     }
@@ -472,6 +495,12 @@ fn compile(
             Some(Component::List | Component::Tree) => sheet.flex_1(),
             // Sections stand a gap apart; the heading is a row of its own.
             Some(Component::DisclosureGroup) => sheet.w_full().mt(px(t.metrics.gap)),
+            // Indeterminate: a small spinner leads the label, as AppKit's
+            // spinning indicator beside "Checking…"; determinate: a bar
+            // under it.
+            Some(Component::ProgressRow) if node.props.get("aria-valuenow").is_none() => {
+                sheet.flex_row().items_center().gap(px(t.metrics.gap))
+            }
             Some(Component::ProgressRow) => sheet.gap(px(t.metrics.inner_radius)).justify_center(),
             Some(Component::Banner) => sheet
                 .flex_row()
@@ -708,15 +737,7 @@ fn compile(
     }
     let selected = node.props.get("aria-selected") == Some(&Value::Bool(true))
         || node.props.get("state").and_then(|s| s.get("selected")) == Some(&Value::Bool(true));
-    // A tab that marks its selection with a rule of its own (the Timeline's
-    // composition tabs, as v1) takes no selected ground.
-    let ruled = node
-        .props
-        .get("metadata")
-        .and_then(|m| m.get("selectionMark"))
-        .and_then(Value::as_str)
-        == Some("rule");
-    if selected && !ruled {
+    if selected {
         compiled.sheet = compiled.sheet.bg(rgb(t.colors.selected_fill));
     }
     let header_id = node.props.get("id").and_then(Value::as_str);
@@ -895,6 +916,13 @@ fn number_facts(node: &Node) -> NumberFacts {
             .map(|n| n.min(9) as u32),
     }
 }
+/// A list of numbers (a grouped control's values); anything else is none.
+fn numbers(value: Option<&Value>) -> Vec<f64> {
+    value
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_f64).collect())
+        .unwrap_or_default()
+}
 fn kit(node: &Node, component: Option<Component>, panel: &Panel, table: &TokenTable) -> Kit {
     let t = &table.tokens;
     let decoration = panel.decorations.get(&node.id);
@@ -960,6 +988,33 @@ fn kit(node: &Node, component: Option<Component>, panel: &Panel, table: &TokenTa
             },
         },
         Some(Component::SecureField) => Kit::Secure,
+        Some(Component::ColorWheel) => {
+            let numbers = numbers(value);
+            let option = |key: &str| {
+                node.props
+                    .get("metadata")
+                    .and_then(|m| m.get("pmKit"))
+                    .and_then(|k| k.get(key))
+                    .and_then(Value::as_f64)
+            };
+            let neutral = option("neutral").unwrap_or(0.);
+            Kit::Wheel {
+                rgb: std::array::from_fn(|i| numbers.get(i).copied().unwrap_or(neutral)),
+                neutral,
+                range: [option("min").unwrap_or(-1.), option("max").unwrap_or(1.)],
+            }
+        }
+        Some(Component::CurveEditor) => Kit::Curve {
+            values: numbers(value),
+            channel: node
+                .props
+                .get("metadata")
+                .and_then(|m| m.get("pmKit"))
+                .and_then(|k| k.get("channel"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+                .min(3) as usize,
+        },
         Some(Component::DisclosureButton) => {
             Kit::Disclosure(node.props.get("aria-expanded") == Some(&Value::Bool(true)))
         }
@@ -1190,12 +1245,6 @@ fn apply(mut e: StyleRefinement, style: &pm_surface::Props, table: &TokenTable) 
                     };
                 }
             }
-            // Source text, paths and tool arguments (the agent's chips).
-            "fontFamily" => {
-                if s == Some("mono") {
-                    e = e.font_family(pm_design::MONO_FONT);
-                }
-            }
             "fontVariantNumeric" => {
                 if s == Some("tabular-nums") {
                     e = e.font_features(FontFeatures(Arc::new(vec![("tnum".into(), 1)])));
@@ -1204,6 +1253,9 @@ fn apply(mut e: StyleRefinement, style: &pm_surface::Props, table: &TokenTable) 
             "textOverflow" => {
                 if s == Some("ellipsis") {
                     e = e.text_ellipsis().overflow_hidden();
+                } else if s == Some("middle") {
+                    // A command or a path keeps its start and its end.
+                    e = e.text_ellipsis_middle().overflow_hidden();
                 }
             }
             "textAlign" => {

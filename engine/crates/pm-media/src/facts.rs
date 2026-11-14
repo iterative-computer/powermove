@@ -24,6 +24,9 @@ fn origin(o: &Origin) -> FactOrigin {
         },
         Origin::Default { rule } => FactOrigin::Default { rule: rule.clone() },
         Origin::Override => FactOrigin::Override,
+        Origin::PowermoveOne { .. } => FactOrigin::Default {
+            rule: "As Powermove 1 showed it".into(),
+        },
     }
 }
 
@@ -374,7 +377,8 @@ fn video_facts(
                     level,
                     base_compatibility,
                 } => format!(
-                    "Dolby Vision profile {profile}.{base_compatibility} level {level} (base layer shown)"
+                    "{} profile {profile}.{base_compatibility} level {level} (base layer shown)",
+                    crate::probe::color::DOLBY_VISION
                 ),
             },
         ));

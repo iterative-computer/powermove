@@ -252,6 +252,15 @@ fn for_session_within(
                 continue;
             }
         };
+        // A sequence read in place whose folder moved is offline, as a moved
+        // file is: the person relinks it by choosing one of its files.
+        if pm_media::image::sequence::Manifest::read(&resolved)
+            .ok()
+            .flatten()
+            .is_some_and(|sequence| !sequence.present())
+        {
+            continue;
+        }
         // Proxy bytes never stand in for an original (plan §6), whether the
         // asset says so or the first launch found the original gone.
         if pm_builtins::delivery::embedded_proxy(snapshot, &id) || media.is_proxy_only(&id) {
@@ -444,6 +453,44 @@ mod tests {
         let resolved = for_session(&snapshot(), &media, None, &cache).unwrap();
         assert_eq!(resolved.failed, ["b"]);
         assert!(resolved.catalog.originals.contains_key("a"));
+    }
+
+    /// A sequence read in place whose folder was moved or renamed is
+    /// offline, as a moved file is; one missing number leaves it online
+    /// (that frame shows Media Offline).
+    #[test]
+    fn a_sequence_whose_folder_moved_is_offline_until_relinked() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = directory.path().join("media-cache");
+        let frames = directory.path().join("renders");
+        fs::create_dir(&frames).unwrap();
+        for n in 1..=3 {
+            fs::write(frames.join(format!("shot.{n:04}.png")), b"frame").unwrap();
+        }
+        let manifest = pm_media::image::sequence::Manifest {
+            powermove_image_sequence: 1,
+            dir: frames.clone(),
+            prefix: "shot.".into(),
+            suffix: ".png".into(),
+            padding: 4,
+            first: 1,
+            last: 3,
+            rate: [24, 1],
+        };
+        let bytes = manifest.to_bytes();
+        let media = table(&[("a", &bytes)]);
+        let online = |media: &MediaTable| {
+            for_session(&snapshot(), media, None, &cache)
+                .unwrap()
+                .catalog
+                .originals
+                .contains_key("a")
+        };
+        assert!(online(&media));
+        fs::remove_file(frames.join("shot.0002.png")).unwrap();
+        assert!(online(&media), "one missing number is that frame's card");
+        fs::rename(&frames, directory.path().join("renders v2")).unwrap();
+        assert!(!online(&media), "a moved folder is offline");
     }
 
     #[test]

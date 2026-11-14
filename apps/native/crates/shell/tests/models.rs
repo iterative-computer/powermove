@@ -423,3 +423,38 @@ fn composition_tab_enters_fields_but_declines_back_to_focus_navigation() {
     );
     assert_eq!(resolver.resolve(90, false), [Effect::Replay(90)]);
 }
+
+/// A long list (the font picker over every installed family) lists a page:
+/// keys and Return reach only listed rows, the rest are counted, and the
+/// search finds a family past the first page.
+#[test]
+fn picker_pages_a_long_list_and_the_search_reaches_past_it() {
+    let families: Vec<String> = (0..200).map(|i| format!("Family {i:03}")).collect();
+    let mut p = Picker {
+        open: true,
+        page: Some(80),
+        choices: families
+            .iter()
+            .map(|f| Choice::new(f.clone(), format!("fontPick:{f}")).in_font(f.clone()))
+            .collect(),
+        ..Default::default()
+    };
+    assert_eq!(p.filtered().len(), 80);
+    assert_eq!(p.unlisted(), 120);
+    p.navigate("end");
+    assert_eq!(
+        p.lit(),
+        Some(79),
+        "the last listed row, not the last family"
+    );
+    p.navigate("down");
+    assert_eq!(p.lit(), Some(0), "wraps within the page");
+    p.search("Family 15".into());
+    assert_eq!(p.unlisted(), 0);
+    assert!(p.filtered().len() <= 80);
+    assert_eq!(
+        p.navigate("enter").as_deref(),
+        Some("fontPick:Family 150"),
+        "a family past the first page is one search away"
+    );
+}

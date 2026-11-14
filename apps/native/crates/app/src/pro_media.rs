@@ -29,7 +29,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
 /// A generated rendition of an original.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Rendition {
     Proxy,
     Optimized,
@@ -251,6 +251,19 @@ struct File {
     /// forgotten.
     #[serde(default)]
     attached: bool,
+    /// A generated rendition of an image sequence: the sequence pipeline it
+    /// was encoded with (`pm_proxy::SEQUENCE_PIPELINE`; 0 for any other,
+    /// and for an earlier build's sequence renditions).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    sequence: u32,
+    /// A generated rendition: the `pm_proxy::ProxyRecipe::VERSION` it was
+    /// encoded with (0 for an attached file, and for an earlier build's).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    recipe: u32,
+}
+
+fn is_zero(v: &u32) -> bool {
+    *v == 0
 }
 
 /// What one content has.
@@ -318,9 +331,54 @@ struct Index {
     assets: BTreeMap<String, BTreeMap<String, String>>,
     /// Always Play Original: project → assets.
     play_original: BTreeMap<String, BTreeSet<String>>,
+    /// Generated renditions retired because an earlier pipeline made them
+    /// (project, asset, kind): made again when the asset is identified.
+    regenerate: BTreeSet<(String, String, Rendition)>,
 }
 
 impl Index {
+    /// Retires every generated rendition of an image sequence that an
+    /// earlier sequence pipeline or proxy recipe made (its alpha or PQ white may be wrong),
+    /// including an earlier build's association of a sequence by its
+    /// manifest object (`obj:`), and notes the assets that had one so they
+    /// are made again. Attached files are never touched.
+    fn retire_earlier_sequences(&mut self, objects: &Path) {
+        let is_sequence = |content: &str| {
+            content.starts_with("seq:")
+                || content.strip_prefix("obj:").is_some_and(|name| {
+                    matches!(
+                        pm_media::image::sequence::Manifest::read(&objects.join(name)),
+                        Ok(Some(_))
+                    )
+                })
+        };
+        let mut retired = Vec::new();
+        for (content, record) in &mut self.contents {
+            for kind in [Rendition::Proxy, Rendition::Optimized] {
+                let slot = record.slot(kind);
+                if slot.as_ref().is_some_and(|f| {
+                    !f.attached
+                        && (f.sequence != pm_proxy::SEQUENCE_PIPELINE
+                            || f.recipe != pm_proxy::ProxyRecipe::VERSION)
+                }) && is_sequence(content)
+                {
+                    retired.push((content.clone(), kind, slot.take().unwrap()));
+                }
+            }
+        }
+        self.contents
+            .retain(|_, r| r.proxy.is_some() || r.optimized.is_some());
+        for (content, kind, file) in retired {
+            self.retire_file(&file);
+            for (project, assets) in &self.assets {
+                for (asset, _) in assets.iter().filter(|(_, c)| **c == content) {
+                    self.regenerate
+                        .insert((project.clone(), asset.clone(), kind));
+                }
+            }
+        }
+    }
+
     /// Records naming `path` as a proxy or optimized file.
     fn references(&self, path: &Path) -> usize {
         self.contents
@@ -430,6 +488,12 @@ struct State {
     /// Runtime facts, independent of the saved project and user proxy intent.
     preview_checked: HashSet<String>,
     preview_large: HashSet<String>,
+    /// Contents whose generated movie renditions from before the proxy
+    /// recipe that tags colour were checked this run ([`earlier_recipe`]).
+    recipe_checked: HashSet<String>,
+    /// Originals the sequence watch follows, with the (project, asset)s
+    /// that use each.
+    watched: HashMap<PathBuf, BTreeSet<(String, String)>>,
 }
 
 type IoJob = Box<dyn FnOnce(&Arc<Inner>) + Send>;
@@ -497,15 +561,67 @@ fn measure(storage: &Storage) -> Usage {
     }
 }
 
-fn load(profile: &Path) -> Index {
-    std::fs::read(index_path(profile))
+fn load(profile: &Path, objects: &Path) -> Index {
+    let mut index = std::fs::read(index_path(profile))
         .ok()
         .and_then(|b| serde_json::from_slice::<Index>(&b).ok())
         .filter(|i| i.version == INDEX_VERSION)
         .unwrap_or(Index {
             version: INDEX_VERSION,
             ..Default::default()
-        })
+        });
+    index.retire_earlier_sequences(objects);
+    index
+}
+
+/// Retires the generated movie renditions of `content` that a proxy recipe
+/// before colour tagging (`pm_proxy::ProxyRecipe::VERSION` 4) made, when they
+/// can be wrong, and returns their kinds to be made again. A copy is read as
+/// its original reads (`pm_render::footage::for_copy`), so the copy of a
+/// Y′CbCr original, which holds the original's codes, reads right whatever
+/// its tags said, and is kept. The copy of an R′G′B′ original was converted
+/// to Y′CbCr by the earlier generator, with a matrix it chose (Rec. 709 or
+/// BT.2020, or swscale's Rec. 601 for the packed and paletted layouts it did
+/// not know were R′G′B′), often left untagged by VideoToolbox, while the copy
+/// keeps its own matrix: retired. Attached files and sequences (retired at
+/// load) are never touched. Checked once per content per run; runs on the
+/// file worker.
+fn earlier_recipe(inner: &Inner, content: &str, original: &Path) -> Vec<Rendition> {
+    let stale = |state: &State| -> Vec<Rendition> {
+        let Some(record) = state.index.contents.get(content) else {
+            return vec![];
+        };
+        [Rendition::Proxy, Rendition::Optimized]
+            .into_iter()
+            .filter(|kind| {
+                record.get(*kind).is_some_and(|f| {
+                    !f.attached
+                        && f.sequence == 0
+                        && !content.starts_with("seq:")
+                        && f.recipe < pm_proxy::ProxyRecipe::VERSION
+                })
+            })
+            .collect()
+    };
+    {
+        let mut state = inner.state.lock().unwrap();
+        if stale(&state).is_empty() || !state.recipe_checked.insert(content.to_owned()) {
+            return vec![];
+        }
+    }
+    let rgb = pm_media::probe::probe(original)
+        .ok()
+        .and_then(|p| p.probe.video.map(|v| v.codec.is_rgb()))
+        == Some(true);
+    if !rgb {
+        return vec![];
+    }
+    let mut state = inner.state.lock().unwrap();
+    let kinds = stale(&state);
+    for kind in &kinds {
+        state.index.take(content, *kind);
+    }
+    kinds
 }
 
 /// The FFmpeg pair pm-proxy encodes with.
@@ -539,6 +655,34 @@ fn failure(code: TaskFailureCode, diagnostic: impl Into<String>) -> TaskFailure 
     }
 }
 
+/// An original's picture: width, height, bit depth and frames. A sequence
+/// read in place answers from its first frame on disk and its numbering.
+fn picture(path: &Path) -> Option<(u32, u32, u8, u64)> {
+    if let Ok(Some(sequence)) = pm_media::image::sequence::Manifest::read(path) {
+        let first = (sequence.first..=sequence.last)
+            .map(|n| sequence.file(n))
+            .find(|f| f.is_file())?;
+        let still = pm_media::image::read(&first, &pm_media::pool::FramePool::new(0)).ok()?;
+        let format = still.frame.format;
+        return Some((
+            format.width as u32,
+            format.height as u32,
+            still.bit_depth,
+            sequence.frames(),
+        ));
+    }
+    let v = pm_media::probe::probe(path).ok()?.probe.video?;
+    Some((v.width, v.height, v.codec.bit_depth, v.frames as u64))
+}
+
+/// A failed generation in the task's words: a missing file names itself.
+fn reason(error: &pm_proxy::ProxyError) -> String {
+    match error {
+        pm_proxy::ProxyError::Io(e) if e.kind() == std::io::ErrorKind::NotFound => e.to_string(),
+        error => error.to_string(),
+    }
+}
+
 fn classify(error: &pm_proxy::ProxyError) -> TaskFailureCode {
     use pm_proxy::ProxyError as E;
     match error {
@@ -555,6 +699,9 @@ fn classify(error: &pm_proxy::ProxyError) -> TaskFailureCode {
 /// audio layout and colour interpretation (a proxy plays its own audio
 /// and shows its own colour).
 fn attach_check(original: &Path, file: &Path) -> Result<(), String> {
+    if let Ok(Some(sequence)) = pm_media::image::sequence::Manifest::read(original) {
+        return attach_check_sequence(&sequence, file);
+    }
     let a = pm_media::probe::probe(original).map_err(|_| "The original can't be read.")?;
     let b =
         pm_media::probe::probe(file).map_err(|_| "This file isn't a video Powermove can read.")?;
@@ -617,6 +764,51 @@ fn attach_check(original: &Path, file: &Path) -> Result<(), String> {
     let (ca, cb) = (&va.color.interpreted, &vb.color.interpreted);
     if ca.primaries != cb.primaries || ca.transfer != cb.transfer {
         return refuse("Its colour is different.");
+    }
+    Ok(())
+}
+
+/// [`attach_check`] for an image sequence read in place: one frame per
+/// file at its rate, from its first number, in its shape and with its
+/// transparency.
+fn attach_check_sequence(
+    sequence: &pm_media::image::sequence::Manifest,
+    file: &Path,
+) -> Result<(), String> {
+    let unreadable = "This file isn't a video Powermove can read.";
+    let b = pm_media::probe::probe(file).map_err(|_| unreadable)?;
+    let vb = b.probe.video.as_ref().ok_or(unreadable)?;
+    let refuse = |why: &str| Err(format!("This file doesn’t match the original. {why}"));
+    if vb.frames as u64 != sequence.frames() {
+        return refuse("Check its length.");
+    }
+    let [num, den] = sequence.rate.map(i64::from);
+    if let Some(rb) = &vb.nominal_rate
+        && (rb.rate.num(), rb.rate.den()) != (num, den)
+    {
+        return refuse("Check its frame rate.");
+    }
+    if b.probe.start_us.unwrap_or(0).abs() > 500_000 * den / num {
+        return refuse("Check its start.");
+    }
+    let Some(first) = (sequence.first..=sequence.last)
+        .map(|n| sequence.file(n))
+        .find(|f| f.is_file())
+    else {
+        return Err("The original can't be read.".into());
+    };
+    let still = pm_media::image::read(&first, &pm_media::pool::FramePool::new(0))
+        .map_err(|_| "The original can't be read.")?;
+    let (w, h) = (still.frame.format.width, still.frame.format.height);
+    let (n, d) = vb.pixel_aspect;
+    let aspect = vb.width as f64 * n.max(1) as f64 / (vb.height.max(1) as f64 * d.max(1) as f64);
+    let original = w as f64 / h.max(1) as f64;
+    if (aspect - original).abs() > 0.01 * original {
+        return refuse("Check its shape.");
+    }
+    let alpha = still.color.alpha != pm_protocol::color::AlphaMode::Opaque;
+    if alpha && vb.alpha.is_none() {
+        return refuse("The original has transparency; this file doesn’t.");
     }
     Ok(())
 }
@@ -728,6 +920,9 @@ impl Inner {
     /// or the BLAKE3 of a linked file (hashed once per file state). Call on
     /// a worker: it may read the whole file.
     fn content_of(&self, path: &Path, stop: &AtomicBool) -> std::io::Result<String> {
+        if let Some(content) = self.sequence_content(path, stop)? {
+            return Ok(content);
+        }
         if path.parent() == Some(self.objects.as_path())
             && let Some(name) = path.file_name()
         {
@@ -752,6 +947,63 @@ impl Inner {
         state.index.stamps.retain(|(s, _)| s.path != source.path);
         state.index.stamps.push((source, content.clone()));
         Ok(content)
+    }
+
+    /// A sequence read in place is its frames: `seq:` and the aggregate of
+    /// their bytes and rate (`pm_proxy::sequence_identity`, the key of its
+    /// proxies), read again whenever a frame's stamp changes. A frame
+    /// rendered again is another content, with no rendition yet. A missing
+    /// frame fails, naming it: no rendition stands in for the sequence.
+    fn sequence_content(&self, path: &Path, stop: &AtomicBool) -> std::io::Result<Option<String>> {
+        let Ok(Some(sequence)) = pm_media::image::sequence::Manifest::read(path) else {
+            return Ok(None);
+        };
+        // A missing frame: no identity, and no rendition stands in.
+        for number in sequence.first..=sequence.last {
+            let file = sequence.file(number);
+            if !file.is_file() {
+                let name = file.file_name().unwrap_or_default().to_string_lossy();
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("frame {number} of the image sequence is missing: {name}"),
+                ));
+            }
+        }
+        // The member generation the sequence watch and the render cache
+        // follow (length, modification and change times, inode, device):
+        // the frames are hashed again whenever it moves.
+        let stamp = Source {
+            path: path.to_path_buf(),
+            len: sequence.frames(),
+            modified: u128::from(pm_engine_service::sequence_watch::generation(&sequence)),
+        };
+        if let Some((_, content)) = self
+            .state
+            .lock()
+            .unwrap()
+            .index
+            .stamps
+            .iter()
+            .find(|(s, _)| *s == stamp)
+        {
+            return Ok(Some(content.clone()));
+        }
+        let identity = pm_proxy::sequence_identity(path, stop)
+            .map_err(|e| match e {
+                pm_proxy::ProxyError::Io(e) => e,
+                pm_proxy::ProxyError::Cancelled => {
+                    std::io::Error::new(std::io::ErrorKind::Interrupted, "stopped")
+                }
+                e => std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()),
+            })?
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "not a sequence")
+            })?;
+        let content = format!("seq:{identity}");
+        let mut state = self.state.lock().unwrap();
+        state.index.stamps.retain(|(s, _)| s.path != stamp.path);
+        state.index.stamps.push((stamp, content.clone()));
+        Ok(Some(content))
     }
 
     /// Notes `asset`'s content for `project` and its original's path.
@@ -913,6 +1165,8 @@ impl Inner {
             File {
                 path: file.to_path_buf(),
                 attached: true,
+                sequence: 0,
+                recipe: 0,
             },
         );
         state.present.insert(file.to_path_buf());
@@ -1043,9 +1297,7 @@ impl Inner {
         };
         let before_source = Source::of(&source)
             .ok_or_else(|| failure(TaskFailureCode::SourceOffline, "source offline"))?;
-        if let Ok(probed) = pm_media::probe::probe(&source)
-            && let Some(frames) = probed.probe.video.map(|v| v.frames as u64)
-        {
+        if let Some((_, _, _, frames)) = picture(&source) {
             let _ = self.tasks.lock().unwrap().progress(ticket, 0, frames);
         }
         let (ffmpeg, ffprobe) = ffmpeg()
@@ -1053,7 +1305,10 @@ impl Inner {
         let content = self
             .content_of(&source, &self.stop)
             .map_err(|e| failure(TaskFailureCode::SourceOffline, e.to_string()))?;
-        let hash = match content.strip_prefix("b3:") {
+        let hash = match content
+            .strip_prefix("b3:")
+            .or_else(|| content.strip_prefix("seq:"))
+        {
             Some(hash) => hash.to_owned(),
             None => hash_file(&source, &self.stop)
                 .map_err(|e| failure(TaskFailureCode::SourceOffline, e.to_string()))?,
@@ -1120,7 +1375,7 @@ impl Inner {
                 on_progress: &on_progress,
             },
         })
-        .map_err(|e| failure(classify(&e), e.to_string()))?;
+        .map_err(|e| failure(classify(&e), reason(&e)))?;
         // A file changed while encoding is not this rendition's source.
         if Source::of(&source).as_ref() != Some(&before_source) {
             return Err(failure(TaskFailureCode::Unknown, "the source changed"));
@@ -1128,6 +1383,8 @@ impl Inner {
         let made = File {
             path: generated.stored.path,
             attached: false,
+            sequence: generated.stored.recipe.sequence.unwrap_or(0),
+            recipe: generated.stored.recipe.version,
         };
         self.publish(&content, kind, before.as_ref(), made);
         self.save();
@@ -1168,6 +1425,193 @@ fn storage_root(profile: &Path, prefs: &Preferences) -> PathBuf {
         .unwrap_or_else(|| profile.join("Media Storage"))
 }
 
+impl Inner {
+    /// [`ProMedia::identify`] on the file thread. `all`: `originals` are all
+    /// of `project`'s (the watch follows exactly these), else some of them
+    /// again (a sequence whose files changed).
+    fn identify(self: &Arc<Self>, project: &str, originals: &[(String, PathBuf)], all: bool) {
+        let inner = self;
+        let project = project.to_owned();
+        inner.watch(&project, originals, all);
+        let originals = originals.to_vec();
+        let mut changed = inner.refresh_present();
+        let stop = AtomicBool::new(false);
+        let mut previews = Vec::new();
+        let mut renew: Vec<(Rendition, Original)> = Vec::new();
+        for (asset, path) in &originals {
+            let content = inner.content_of(path, &stop);
+            if content.is_err()
+                && matches!(pm_media::image::sequence::Manifest::read(path), Ok(Some(_)))
+            {
+                // A sequence with a frame missing now: its earlier
+                // content's renditions are not its picture.
+                changed |= inner.state.lock().unwrap().known.remove(path).is_some();
+            }
+            if let Ok(content) = content {
+                // Its file (or a sequence's frame) rendered again: the
+                // proxy and optimized media made of the earlier bytes
+                // are made again of these.
+                {
+                    let state = inner.state.lock().unwrap();
+                    let earlier = state
+                        .index
+                        .assets
+                        .get(&project)
+                        .and_then(|a| a.get(asset))
+                        .filter(|earlier| **earlier != content)
+                        .and_then(|earlier| state.index.contents.get(earlier));
+                    for (kind, title) in [
+                        (Rendition::Proxy, "Update proxy"),
+                        (Rendition::Optimized, "Update optimized media"),
+                    ] {
+                        if earlier
+                            .and_then(|r| r.get(kind))
+                            .is_some_and(|f| !f.attached)
+                        {
+                            renew.push((kind, (asset.clone(), title.into(), path.clone())));
+                        }
+                    }
+                }
+                // A movie rendition an earlier proxy recipe made of an
+                // R′G′B′ original: its matrix may be wrong; made again.
+                for kind in earlier_recipe(inner, &content, path) {
+                    let title = match kind {
+                        Rendition::Proxy => "Update proxy",
+                        Rendition::Optimized => "Update optimized media",
+                    };
+                    renew.push((kind, (asset.clone(), title.into(), path.clone())));
+                    changed = true;
+                }
+                // Retired at load: an earlier sequence pipeline made it.
+                {
+                    let mut state = inner.state.lock().unwrap();
+                    for (kind, title) in [
+                        (Rendition::Proxy, "Update proxy"),
+                        (Rendition::Optimized, "Update optimized media"),
+                    ] {
+                        let key = (project.clone(), asset.clone(), kind);
+                        if state.index.regenerate.remove(&key) {
+                            renew.push((kind, (asset.clone(), title.into(), path.clone())));
+                            changed = true;
+                        }
+                    }
+                }
+                changed |= inner.note(&project, asset, path, &content);
+                let unchecked = !inner
+                    .state
+                    .lock()
+                    .unwrap()
+                    .preview_checked
+                    .contains(&content);
+                if unchecked {
+                    let large = picture(path).is_some_and(|(w, h, ..)| w > 1920 || h > 1080);
+                    let mut state = inner.state.lock().unwrap();
+                    state.preview_checked.insert(content.clone());
+                    if large {
+                        state.preview_large.insert(content.clone());
+                        changed = true;
+                    }
+                }
+                let state = inner.state.lock().unwrap();
+                let original_only = state
+                    .index
+                    .play_original
+                    .get(&project)
+                    .is_some_and(|ids| ids.contains(asset));
+                let ready = state
+                    .index
+                    .contents
+                    .get(&content)
+                    .and_then(|r| r.proxy.as_ref())
+                    .is_some_and(|proxy| state.present.contains(&proxy.path));
+                if state.preview_large.contains(&content) && !original_only && !ready {
+                    previews.push((asset.clone(), "Prepare HD preview".into(), path.clone()));
+                }
+            }
+        }
+        changed |= inner.refresh_present();
+        if changed {
+            inner.save();
+            let _ = inner.events.try_send(Event::Renditions);
+        }
+        if !previews.is_empty() {
+            // This derived preview does not change Create Proxies on
+            // Import, or any authored proxy/export preference.
+            let prefs = Preferences {
+                size: ProxySize::P1080,
+                format: ProxyFormat::ProResProxy,
+                ..inner.preferences()
+            };
+            let _ = inner.create(&project, Rendition::Proxy, &prefs, previews);
+        }
+        for kind in [Rendition::Proxy, Rendition::Optimized] {
+            let again: Vec<Original> = renew
+                .iter()
+                .filter(|(k, _)| *k == kind)
+                .map(|(_, original)| original.clone())
+                .collect();
+            if !again.is_empty() {
+                let _ = inner.create(&project, kind, &inner.preferences(), again);
+            }
+        }
+    }
+
+    /// Follows `project`'s originals with the sequence watch: when a
+    /// sequence's files change, its renditions are withdrawn and it is
+    /// identified again ([`Inner::sequences_changed`]).
+    fn watch(self: &Arc<Self>, project: &str, originals: &[(String, PathBuf)], all: bool) {
+        let files: Vec<PathBuf> = {
+            let mut state = self.state.lock().unwrap();
+            if all {
+                for owners in state.watched.values_mut() {
+                    owners.retain(|(p, _)| p != project);
+                }
+            }
+            for (asset, path) in originals {
+                state
+                    .watched
+                    .entry(path.clone())
+                    .or_default()
+                    .insert((project.to_owned(), asset.clone()));
+            }
+            state.watched.retain(|_, owners| !owners.is_empty());
+            state.watched.keys().cloned().collect()
+        };
+        pm_engine_service::sequence_watch::global()
+            .track(&format!("pro media {:p}", Arc::as_ptr(self)), files);
+    }
+
+    /// The sequence watch saw these sequences' files change: their
+    /// proxies and optimized media are withdrawn now (the catalog follows),
+    /// and they are identified again on the file thread, which makes the
+    /// renditions again from the new files.
+    fn sequences_changed(self: &Arc<Self>, changed: &[PathBuf]) {
+        let mut again: BTreeMap<String, Vec<(String, PathBuf)>> = BTreeMap::new();
+        {
+            let mut state = self.state.lock().unwrap();
+            for path in changed {
+                let Some(owners) = state.watched.get(path).cloned() else {
+                    continue;
+                };
+                state.known.remove(path);
+                for (project, asset) in owners {
+                    again
+                        .entry(project)
+                        .or_default()
+                        .push((asset, path.clone()));
+                }
+            }
+        }
+        if again.is_empty() {
+            return;
+        }
+        let _ = self.events.try_send(Event::Renditions);
+        for (project, originals) in again {
+            self.io(move |inner| inner.identify(&project, &originals, false));
+        }
+    }
+}
+
 impl ProMedia {
     pub fn new(profile: PathBuf, objects: PathBuf, interactive: Arc<AtomicBool>) -> Self {
         let (events, event_receiver) = async_channel::unbounded();
@@ -1175,16 +1619,18 @@ impl ProMedia {
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
             .unwrap_or_default();
-        Self {
+        let media = Self {
             inner: Arc::new(Inner {
                 state: Mutex::new(State {
-                    index: load(&profile),
+                    index: load(&profile, &objects),
                     known: HashMap::new(),
                     present: HashSet::new(),
                     jobs: BTreeMap::new(),
                     waiting: None,
                     preview_checked: HashSet::new(),
+                    recipe_checked: HashSet::new(),
                     preview_large: HashSet::new(),
+                    watched: HashMap::new(),
                 }),
                 profile,
                 objects,
@@ -1200,7 +1646,15 @@ impl ProMedia {
                 wake: Mutex::new(None),
             }),
             event_receiver,
-        }
+        };
+        let inner = Arc::downgrade(&media.inner);
+        pm_engine_service::sequence_watch::global().listen(move |changed| {
+            inner.upgrade().is_some_and(|inner| {
+                inner.sequences_changed(changed);
+                true
+            })
+        });
+        media
     }
 
     /// Runs `job` on the file thread and hands its answer back.
@@ -1288,64 +1742,8 @@ impl ProMedia {
     /// their content (hashing a linked file once per state), and which
     /// rendition files exist. `Renditions` follows when anything changed.
     pub fn identify(&self, project: String, originals: Vec<(String, PathBuf)>) {
-        self.inner.io(move |inner| {
-            let mut changed = inner.refresh_present();
-            let stop = AtomicBool::new(false);
-            let mut previews = Vec::new();
-            for (asset, path) in &originals {
-                if let Ok(content) = inner.content_of(path, &stop) {
-                    changed |= inner.note(&project, asset, path, &content);
-                    let unchecked = !inner
-                        .state
-                        .lock()
-                        .unwrap()
-                        .preview_checked
-                        .contains(&content);
-                    if unchecked {
-                        let large = pm_media::probe::probe(path)
-                            .ok()
-                            .and_then(|p| p.probe.video)
-                            .is_some_and(|v| v.width > 1920 || v.height > 1080);
-                        let mut state = inner.state.lock().unwrap();
-                        state.preview_checked.insert(content.clone());
-                        if large {
-                            state.preview_large.insert(content.clone());
-                            changed = true;
-                        }
-                    }
-                    let state = inner.state.lock().unwrap();
-                    let original_only = state
-                        .index
-                        .play_original
-                        .get(&project)
-                        .is_some_and(|ids| ids.contains(asset));
-                    let ready = state
-                        .index
-                        .contents
-                        .get(&content)
-                        .and_then(|r| r.proxy.as_ref())
-                        .is_some_and(|proxy| state.present.contains(&proxy.path));
-                    if state.preview_large.contains(&content) && !original_only && !ready {
-                        previews.push((asset.clone(), "Prepare HD preview".into(), path.clone()));
-                    }
-                }
-            }
-            changed |= inner.refresh_present();
-            if changed {
-                inner.save();
-                let _ = inner.events.try_send(Event::Renditions);
-            }
-            if !previews.is_empty() {
-                // This derived preview does not change Create Proxies on
-                // Import, or any authored proxy/export preference.
-                let prefs = Preferences {
-                    size: ProxySize::P1080,
-                    format: ProxyFormat::ProResProxy,
-                    ..inner.preferences()
-                };
-                let _ = inner.create(&project, Rendition::Proxy, &prefs, previews);
-            }
-        });
+        self.inner
+            .io(move |inner| inner.identify(&project, &originals, true));
     }
 
     /// Adds `project`'s renditions to `media` from memory: proxies (an
@@ -1535,12 +1933,8 @@ impl ProMedia {
             let wanted: Vec<_> = assets
                 .into_iter()
                 .filter(|(_, _, path)| {
-                    pm_media::probe::probe(path)
-                        .ok()
-                        .and_then(|p| p.probe.video)
-                        .is_some_and(|v| {
-                            prefs.creates_on_import(v.width, v.height, v.codec.bit_depth)
-                        })
+                    picture(path)
+                        .is_some_and(|(w, h, depth, _)| prefs.creates_on_import(w, h, depth))
                 })
                 .collect();
             if !wanted.is_empty() {
@@ -2062,6 +2456,8 @@ mod tests {
             File {
                 path: path.to_path_buf(),
                 attached: false,
+                sequence: 0,
+                recipe: 0,
             },
         )
     }
@@ -2114,6 +2510,8 @@ mod tests {
             File {
                 path: proxy.clone(),
                 attached: true,
+                sequence: 0,
+                recipe: 0,
             },
         );
         media.clear("none".into(), vec![]).recv_blocking().unwrap();
@@ -2203,6 +2601,8 @@ mod tests {
         let mine = File {
             path: files[0].clone(),
             attached: true,
+            sequence: 0,
+            recipe: 0,
         };
         let inner = &media.inner;
         inner
@@ -2231,7 +2631,7 @@ mod tests {
     fn clip(dir: &Path, name: &str, args: &[&str]) -> PathBuf {
         let (ffmpeg, _) = ffmpeg().expect("FFmpeg");
         let out = dir.join(name);
-        let status = std::process::Command::new(ffmpeg)
+        let status = std::process::Command::new(&ffmpeg)
             .args(["-hide_banner", "-loglevel", "error", "-y"])
             .args(args)
             .arg(&out)
@@ -2242,6 +2642,627 @@ mod tests {
     }
 
     /// Attach refuses a file that is not the same picture and sound.
+    /// An image sequence read in place larger than HD gets its automatic
+    /// HD preview, made from its own files, which Automatic mode plays.
+    #[test]
+    fn a_large_image_sequence_gets_its_hd_preview_from_its_files() {
+        let Some((ffmpeg, _)) = ffmpeg() else {
+            eprintln!("NOT RUN: no FFmpeg pair (PM_FFMPEG_DIR/bin)");
+            return;
+        };
+        // A shared build machine's free space is not this test's subject.
+        pm_proxy::set_test_disk_reserve(Some(1 << 30));
+        let (dir, media) = service();
+        let frames = dir.path().join("renders");
+        let frames_dir = frames.clone();
+        std::fs::create_dir(&frames).unwrap();
+        let made = std::process::Command::new(&ffmpeg)
+            .args([
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=2048x1152:rate=24",
+            ])
+            .args([
+                "-frames:v",
+                "4",
+                "-start_number",
+                "1",
+                "-pix_fmt",
+                "rgb48be",
+            ])
+            .arg(frames.join("shot.%04d.png"))
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let sequence = pm_media::image::sequence::Manifest {
+            powermove_image_sequence: 1,
+            dir: frames,
+            prefix: "shot.".into(),
+            suffix: ".png".into(),
+            padding: 4,
+            first: 1,
+            last: 4,
+            rate: [24, 1],
+        };
+        // Retained as the media cache keeps an asset's original.
+        let original = media.inner.objects.join("retained.png");
+        std::fs::write(&original, sequence.to_bytes()).unwrap();
+        // Waits for every queued task, then answers the catalog the viewer
+        // reads.
+        let finish = || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            let tasks = loop {
+                let tasks = media.inner.tasks.lock().unwrap().snapshot(WINDOW);
+                if !tasks.is_empty() && tasks.iter().all(|t| t.state.terminal()) {
+                    break tasks;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the HD preview never finished: {:?}, large {:?}",
+                    tasks
+                        .iter()
+                        .map(|t| (&t.title, t.state, t.completed, t.total))
+                        .collect::<Vec<_>>(),
+                    media.inner.state.lock().unwrap().preview_large
+                );
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            };
+            assert!(
+                tasks.iter().all(|t| t.state == TaskState::Completed),
+                "{:?}",
+                tasks
+                    .iter()
+                    .map(|t| (&t.title, t.state, t.diagnostic_for_log()))
+                    .collect::<Vec<_>>()
+            );
+            settle(&media);
+            let mut catalog = MediaCatalog::default();
+            catalog.originals.insert("a".into(), original.clone());
+            media.decorate("p", &mut catalog, &["a".into()]);
+            catalog
+        };
+        identify(&media, "p", &[("a", &original)]);
+        let catalog = finish();
+        assert!(catalog.automatic_proxies.contains("a"));
+        let proxy = pm_media::probe::probe(&catalog.proxies["a"]).unwrap();
+        let video = proxy.probe.video.unwrap();
+        assert_eq!((video.frames, video.height), (4, 1080));
+        let first = catalog.proxies["a"].clone();
+
+        // A 3D app renders frame 2 again (a flat grey): the old preview is
+        // not the sequence any more. The viewer stops using it and a new
+        // one is made that shows the new frame.
+        let rendered = std::process::Command::new(&ffmpeg)
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
+            .arg("color=c=0x808080:size=2048x1152")
+            .args(["-frames:v", "1", "-pix_fmt", "rgb48be"])
+            .arg(frames_dir.join("shot.0002.png"))
+            .status()
+            .unwrap();
+        assert!(rendered.success());
+        identify(&media, "p", &[("a", &original)]);
+        let catalog = finish();
+        let second = catalog.proxies.get("a").cloned();
+        assert!(
+            second.as_ref().is_some_and(|p| *p != first),
+            "the preview of the earlier frames is used: {second:?}"
+        );
+        let grey = std::process::Command::new(&ffmpeg)
+            .args(["-v", "error", "-i"])
+            .arg(second.unwrap())
+            .args(["-vf", "select=eq(n\\,1)", "-frames:v", "1"])
+            .args(["-f", "rawvideo", "-pix_fmt", "gray", "-"])
+            .output()
+            .unwrap();
+        let spread = grey
+            .stdout
+            .iter()
+            .map(|&v| i32::from(v))
+            .fold((255, 0), |(lo, hi), v| (lo.min(v), hi.max(v)));
+        assert!(
+            spread.0 > 110 && spread.1 < 150,
+            "frame 2 of the new preview is not the grey file: {spread:?}"
+        );
+
+        // A frame deleted: no preview stands in for the sequence.
+        std::fs::remove_file(frames_dir.join("shot.0003.png")).unwrap();
+        identify(&media, "p", &[("a", &original)]);
+        let mut catalog = MediaCatalog::default();
+        catalog.originals.insert("a".into(), original.clone());
+        media.decorate("p", &mut catalog, &["a".into()]);
+        assert_eq!(catalog.proxies.get("a"), None);
+    }
+
+    /// Waits for every queued media task and asserts each completed.
+    fn finish_tasks(media: &ProMedia) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
+        loop {
+            let tasks = media.inner.tasks.lock().unwrap().snapshot(WINDOW);
+            if !tasks.is_empty() && tasks.iter().all(|t| t.state.terminal()) {
+                assert!(
+                    tasks.iter().all(|t| t.state == TaskState::Completed),
+                    "{:?}",
+                    tasks
+                        .iter()
+                        .map(|t| (&t.title, t.state, t.diagnostic_for_log()))
+                        .collect::<Vec<_>>()
+                );
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "tasks never finished");
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        settle(media);
+    }
+
+    /// Four opaque 320×180 16-bit frames numbered from 11, at 24 fps,
+    /// retained as the media cache keeps an asset's original.
+    fn small_sequence(objects: &Path, folder: &Path) -> PathBuf {
+        std::fs::create_dir_all(folder).unwrap();
+        let made = std::process::Command::new(ffmpeg().unwrap().0)
+            .args([
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=320x180:rate=24",
+            ])
+            .args([
+                "-frames:v",
+                "4",
+                "-start_number",
+                "11",
+                "-pix_fmt",
+                "rgb48be",
+            ])
+            .arg(folder.join("shot.%04d.png"))
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let sequence = pm_media::image::sequence::Manifest {
+            powermove_image_sequence: 1,
+            dir: folder.to_path_buf(),
+            prefix: "shot.".into(),
+            suffix: ".png".into(),
+            padding: 4,
+            first: 11,
+            last: 14,
+            rate: [24, 1],
+        };
+        let original = objects.join("retained-sequence");
+        std::fs::write(&original, sequence.to_bytes()).unwrap();
+        original
+    }
+
+    /// A project stays open while a 3D app renders one of its sequence's
+    /// frames again: with no other call (the project is not reopened, its
+    /// media not refreshed), the sequence watch sees the files change, the
+    /// proxy of the earlier frames is withdrawn from the catalog the viewer
+    /// and draft exports read, and a new proxy is made from the new frames.
+    #[test]
+    fn an_open_project_follows_a_sequence_rendered_again() {
+        if ffmpeg().is_none() {
+            eprintln!("NOT RUN: no FFmpeg pair (PM_FFMPEG_DIR/bin)");
+            return;
+        }
+        pm_proxy::set_test_disk_reserve(Some(1 << 30));
+        let (dir, media) = service();
+        let objects = crate::media::objects_dir(&dir.path().join("profile"));
+        let folder = dir.path().join("renders");
+        let original = small_sequence(&objects, &folder);
+        // What the app does when it resolves the project's media.
+        identify(&media, "p", &[("a", &original)]);
+        let prefs = media.preferences();
+        media
+            .create(
+                "p",
+                Rendition::Proxy,
+                &prefs,
+                vec![("a".into(), "shot".into(), original.clone())],
+            )
+            .unwrap();
+        finish_tasks(&media);
+        let catalog = || {
+            let mut catalog = MediaCatalog::default();
+            catalog.originals.insert("a".into(), original.clone());
+            media.decorate("p", &mut catalog, &["a".into()]);
+            catalog
+        };
+        let first = catalog().proxies["a"].clone();
+        assert_eq!(catalog().export_paths(true).paths["a"], first);
+
+        // Frame 12 rendered again (written beside, renamed over).
+        let staged = folder.join("render.tmp.png");
+        let made = std::process::Command::new(ffmpeg().unwrap().0)
+            .args([
+                "-v",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=0x808080:size=320x180",
+            ])
+            .args(["-frames:v", "1", "-pix_fmt", "rgb48be"])
+            .arg(&staged)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        std::fs::rename(&staged, folder.join("shot.0012.png")).unwrap();
+
+        // Withdrawn while the new frames are identified, then made again.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let mut withdrawn = false;
+        let second = loop {
+            let now = catalog();
+            match now.proxies.get("a") {
+                None => withdrawn = true,
+                Some(p) if *p != first && p.is_file() => break p.clone(),
+                Some(_) => {}
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the proxy of the earlier frames is still used"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        assert!(
+            withdrawn,
+            "the earlier proxy was not withdrawn while identifying"
+        );
+        let draft = catalog().export_paths(true);
+        assert_eq!(
+            draft.paths["a"], second,
+            "a draft export reads the earlier proxy"
+        );
+        // Its second frame is the grey file.
+        let grey = std::process::Command::new(ffmpeg().unwrap().0)
+            .args(["-v", "error", "-i"])
+            .arg(&second)
+            .args(["-vf", "select=eq(n\\,1)", "-frames:v", "1"])
+            .args(["-f", "rawvideo", "-pix_fmt", "gray", "-"])
+            .output()
+            .unwrap();
+        let (lo, hi) = grey
+            .stdout
+            .iter()
+            .fold((255u8, 0u8), |(lo, hi), &v| (lo.min(v), hi.max(v)));
+        assert!(lo > 110 && hi < 150, "frame 2 of the new proxy: {lo}..{hi}");
+    }
+
+    /// A sequence proxy an earlier build made (before its associated alpha
+    /// and PQ reference white were corrected) is never used again: the
+    /// index forgets and deletes it when it loads, the same proxy is made
+    /// again from the frames when the project identifies its media, and a
+    /// proxy the person attached is left as it is.
+    #[test]
+    fn a_sequence_proxy_an_earlier_build_made_is_made_again() {
+        if ffmpeg().is_none() {
+            eprintln!("NOT RUN: no FFmpeg pair (PM_FFMPEG_DIR/bin)");
+            return;
+        }
+        pm_proxy::set_test_disk_reserve(Some(1 << 30));
+        let (dir, media) = service();
+        let profile = dir.path().join("profile");
+        let objects = crate::media::objects_dir(&profile);
+        let original = small_sequence(&objects, &dir.path().join("renders"));
+        identify(&media, "p", &[("a", &original)]);
+        let prefs = media.preferences();
+        media
+            .create(
+                "p",
+                Rendition::Proxy,
+                &prefs,
+                vec![("a".into(), "shot".into(), original.clone())],
+            )
+            .unwrap();
+        finish_tasks(&media);
+        let catalog = |media: &ProMedia| {
+            let mut catalog = MediaCatalog::default();
+            catalog.originals.insert("a".into(), original.clone());
+            media.decorate("p", &mut catalog, &["a".into(), "b".into()]);
+            catalog
+        };
+        let current = catalog(&media).proxies["a"].clone();
+        let content = media.inner.state.lock().unwrap().known[&original].clone();
+        let hash = content.strip_prefix("seq:").unwrap().to_owned();
+        drop(media);
+
+        // The earlier build's store entry (a recipe without the sequence
+        // pipeline) and its index record, as that build wrote them.
+        let store =
+            pm_proxy::ProxyStore::open(current.parent().unwrap().parent().unwrap()).unwrap();
+        let record: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(current.with_extension("json")).unwrap())
+                .unwrap();
+        let recipe: pm_proxy::ProxyRecipe =
+            serde_json::from_value(record["recipe"].clone()).unwrap();
+        assert_eq!(recipe.sequence, Some(pm_proxy::SEQUENCE_PIPELINE));
+        let earlier_recipe = pm_proxy::ProxyRecipe {
+            sequence: None,
+            ..recipe.clone()
+        };
+        let staged = tempfile::NamedTempFile::new_in(store.root()).unwrap();
+        std::fs::copy(&current, staged.path()).unwrap();
+        let earlier = store.commit(&hash, &earlier_recipe, staged).unwrap().path;
+        store.remove(&hash, &recipe).unwrap();
+        let attached = dir.path().join("mine.mov");
+        std::fs::copy(&earlier, &attached).unwrap();
+        let index = index_path(&profile);
+        let mut saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&index).unwrap()).unwrap();
+        saved["contents"][&content]["proxy"] = serde_json::json!({"path": earlier});
+        let other = format!("seq:{}", "f".repeat(64));
+        saved["contents"][&other]["proxy"] =
+            serde_json::json!({"path": attached, "attached": true});
+        saved["assets"]["p"]["b"] = serde_json::json!(other);
+        // A proxy of the current sequence pipeline made under the proxy
+        // recipe before (colour tags read from the original): retired too.
+        let older_recipe = dir.path().join("older-recipe.mov");
+        std::fs::copy(&earlier, &older_recipe).unwrap();
+        let third = format!("seq:{}", "e".repeat(64));
+        saved["contents"][&third]["proxy"] = serde_json::json!({
+            "path": older_recipe,
+            "sequence": pm_proxy::SEQUENCE_PIPELINE,
+            "recipe": pm_proxy::ProxyRecipe::VERSION - 1,
+        });
+        saved["assets"]["p"]["c"] = serde_json::json!(third);
+        // (Hashed-file stamps hold u128 times a JSON value can't carry.)
+        saved["stamps"] = serde_json::json!([]);
+        std::fs::write(&index, serde_json::to_vec(&saved).unwrap()).unwrap();
+
+        // The next launch.
+        let media = ProMedia::new(profile.clone(), objects, Arc::new(AtomicBool::new(false)));
+        let opened = catalog(&media);
+        assert_eq!(
+            opened.proxies.get("a"),
+            None,
+            "the earlier build's proxy is used"
+        );
+        assert!(!earlier.exists(), "the earlier build's proxy is kept");
+        assert!(
+            !older_recipe.exists(),
+            "a proxy of the earlier recipe is kept"
+        );
+        assert!(
+            media
+                .inner
+                .state
+                .lock()
+                .unwrap()
+                .index
+                .regenerate
+                .contains(&("p".to_owned(), "c".to_owned(), Rendition::Proxy)),
+            "it is not made again"
+        );
+        assert_eq!(
+            media.inner.state.lock().unwrap().index.contents[&other]
+                .proxy
+                .as_ref()
+                .map(|f| &f.path),
+            Some(&attached),
+            "an attached proxy is forgotten"
+        );
+        identify(&media, "p", &[("a", &original)]);
+        finish_tasks(&media);
+        let again = catalog(&media).proxies["a"].clone();
+        assert!(again.is_file() && again != earlier);
+        let record: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(again.with_extension("json")).unwrap()).unwrap();
+        assert_eq!(
+            record["recipe"]["sequence"],
+            serde_json::json!(pm_proxy::SEQUENCE_PIPELINE)
+        );
+        assert!(attached.is_file());
+    }
+
+    /// Movie proxies an earlier build made (before the recipe that tags
+    /// colour): the proxy of an R′G′B′ original, whose Y′CbCr matrix the
+    /// earlier generator chose, is retired and made again when the project
+    /// identifies its media; the proxy of a Y′CbCr original holds the
+    /// original's codes, reads right as its original reads, and is kept; a
+    /// proxy the person attached is never touched.
+    #[test]
+    fn a_movie_proxy_an_earlier_recipe_made_of_rgb_footage_is_made_again() {
+        let Some((ffmpeg, _)) = ffmpeg() else {
+            eprintln!("NOT RUN: no FFmpeg pair (PM_FFMPEG_DIR/bin)");
+            return;
+        };
+        pm_proxy::set_test_disk_reserve(Some(1 << 30));
+        let (dir, media) = service();
+        let profile = dir.path().join("profile");
+        let objects = crate::media::objects_dir(&profile);
+        let clip = |name: &str, codec: &[&str], frames: &str| {
+            let path = dir.path().join(name);
+            let made = std::process::Command::new(&ffmpeg)
+                .args([
+                    "-v",
+                    "error",
+                    "-y",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "testsrc2=size=64x36:rate=25",
+                ])
+                .args(["-frames:v", frames])
+                .args(codec)
+                .arg(&path)
+                .status()
+                .unwrap();
+            assert!(made.success(), "ffmpeg wrote {name}");
+            path
+        };
+        let rgb = clip("graphics.mov", &["-c:v", "qtrle", "-pix_fmt", "rgb24"], "4");
+        let ycbcr = clip("camera.mkv", &["-c:v", "ffv1", "-pix_fmt", "yuv420p"], "4");
+        let mine = clip("titles.mov", &["-c:v", "qtrle", "-pix_fmt", "argb"], "5");
+        let assets = [
+            ("r", rgb.as_path()),
+            ("y", ycbcr.as_path()),
+            ("m", mine.as_path()),
+        ];
+        identify(&media, "p", &assets);
+        let prefs = media.preferences();
+        media
+            .create(
+                "p",
+                Rendition::Proxy,
+                &prefs,
+                vec![
+                    ("r".into(), "graphics".into(), rgb.clone()),
+                    ("y".into(), "camera".into(), ycbcr.clone()),
+                ],
+            )
+            .unwrap();
+        finish_tasks(&media);
+        let content =
+            |media: &ProMedia, path: &Path| media.inner.state.lock().unwrap().known[path].clone();
+        let (r, y, m) = (
+            content(&media, &rgb),
+            content(&media, &ycbcr),
+            content(&media, &mine),
+        );
+        let proxy = |media: &ProMedia, content: &str| {
+            media.inner.state.lock().unwrap().index.contents[content]
+                .proxy
+                .clone()
+                .unwrap()
+        };
+        let (r_proxy, y_proxy) = (proxy(&media, &r).path, proxy(&media, &y).path);
+        drop(media);
+
+        // As the earlier build recorded them: generated files with no recipe,
+        // and the person's own proxy of the third clip.
+        let attached = dir.path().join("mine-proxy.mov");
+        std::fs::copy(&r_proxy, &attached).unwrap();
+        let index = index_path(&profile);
+        let mut saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&index).unwrap()).unwrap();
+        for c in [&r, &y] {
+            saved["contents"][c]["proxy"]
+                .as_object_mut()
+                .unwrap()
+                .remove("recipe");
+        }
+        saved["contents"][&m]["proxy"] = serde_json::json!({"path": attached, "attached": true});
+        saved["stamps"] = serde_json::json!([]);
+        std::fs::write(&index, serde_json::to_vec(&saved).unwrap()).unwrap();
+
+        // The next launch identifies the project's media.
+        let media = ProMedia::new(profile.clone(), objects, Arc::new(AtomicBool::new(false)));
+        identify(&media, "p", &assets);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while media
+            .inner
+            .tasks
+            .lock()
+            .unwrap()
+            .snapshot(WINDOW)
+            .is_empty()
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the R′G′B′ clip's proxy is not made again"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        finish_tasks(&media);
+        let remade = proxy(&media, &r);
+        assert_eq!(
+            remade.recipe,
+            pm_proxy::ProxyRecipe::VERSION,
+            "the R′G′B′ clip's proxy is made again"
+        );
+        assert!(remade.path.is_file());
+        let kept = proxy(&media, &y);
+        assert_eq!(
+            (kept.recipe, &kept.path),
+            (0, &y_proxy),
+            "the Y′CbCr clip's proxy is kept"
+        );
+        assert!(y_proxy.is_file());
+        let own = proxy(&media, &m);
+        assert!(own.attached && own.path == attached && attached.is_file());
+        // Checked once: identifying again keeps the Y′CbCr proxy as it is.
+        identify(&media, "p", &assets);
+        finish_tasks(&media);
+        assert_eq!(proxy(&media, &y).recipe, 0);
+    }
+
+    #[test]
+    fn a_sequence_takes_a_proxy_of_its_frames_at_its_rate() {
+        if ffmpeg().is_none() {
+            eprintln!("NOT RUN: no FFmpeg pair (PM_FFMPEG_DIR/bin)");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let frames = d.join("renders");
+        std::fs::create_dir(&frames).unwrap();
+        // Four opaque 320×180 frames, numbered from 11.
+        let made = std::process::Command::new(ffmpeg().unwrap().0)
+            .args([
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=320x180:rate=24",
+            ])
+            .args([
+                "-frames:v",
+                "4",
+                "-start_number",
+                "11",
+                "-pix_fmt",
+                "rgb48be",
+            ])
+            .arg(frames.join("shot.%04d.png"))
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let sequence = pm_media::image::sequence::Manifest {
+            powermove_image_sequence: 1,
+            dir: frames,
+            prefix: "shot.".into(),
+            suffix: ".png".into(),
+            padding: 4,
+            first: 11,
+            last: 14,
+            rate: [24, 1],
+        };
+        let original = d.join("retained");
+        std::fs::write(&original, sequence.to_bytes()).unwrap();
+        let movie = |name: &str, rate: &str, frames: &str| {
+            clip(
+                d,
+                name,
+                &[
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    &format!("testsrc2=size=160x90:rate={rate}"),
+                    "-frames:v",
+                    frames,
+                    "-c:v",
+                    "prores_videotoolbox",
+                ],
+            )
+        };
+        attach_check(&original, &movie("proxy.mov", "24", "4")).unwrap();
+        assert_eq!(
+            attach_check(&original, &movie("short.mov", "24", "3")).unwrap_err(),
+            "This file doesn’t match the original. Check its length."
+        );
+        assert_eq!(
+            attach_check(&original, &movie("fast.mov", "30", "4")).unwrap_err(),
+            "This file doesn’t match the original. Check its frame rate."
+        );
+    }
+
     #[test]
     fn attach_checks_alpha_audio_start_and_colour() {
         if ffmpeg().is_none() {

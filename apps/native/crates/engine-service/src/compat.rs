@@ -510,8 +510,11 @@ fn process_started() -> u128 {
 pub struct CompatStore {
     answers: Mutex<Answers>,
     sink: Mutex<Option<CompatSink>>,
-    /// Redraws the viewers when answers land.
+    /// Redraws the viewers that wait for answers when answers land.
     redraw: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// Redraws every viewer of the document when overrides start or stop
+    /// answering: each of its pictures is another one.
+    rewrapped: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     /// Redraws again when each unavailable need's backoff ends.
     wakes: Wakes,
     /// The code the wrappers come from (`set_code`); 0 while unknown.
@@ -561,7 +564,7 @@ impl CompatStore {
         let changed = answers.producing != producing;
         answers.producing = producing;
         drop(answers);
-        if changed && let Some(redraw) = self.redraw.lock().unwrap().clone() {
+        if changed && let Some(redraw) = self.rewrapped.lock().unwrap().clone() {
             redraw();
         }
     }
@@ -577,6 +580,9 @@ impl CompatStore {
     }
     pub(crate) fn set_redraw(&self, redraw: Arc<dyn Fn() + Send + Sync>) {
         *self.redraw.lock().unwrap() = Some(redraw);
+    }
+    pub(crate) fn set_rewrapped(&self, redraw: Arc<dyn Fn() + Send + Sync>) {
+        *self.rewrapped.lock().unwrap() = Some(redraw);
     }
     /// One frame of the open composition, in ticks (0: don't ask ahead).
     pub fn set_frame(&self, ticks: i64) {
@@ -689,6 +695,19 @@ impl CompatStore {
         } else {
             self.answers.lock().unwrap().in_flight = None;
         }
+    }
+    /// The realm's measured time per need, the batch in flight (its age and
+    /// size), the needs waiting behind it and the override layers of the
+    /// last look-ahead frame: a traced viewer's after-frame row.
+    pub(crate) fn trace(&self) -> serde_json::Value {
+        let answers = self.answers.lock().unwrap();
+        serde_json::json!({
+            "per_need_ms": answers.per_need.map(|d| d.as_secs_f64() * 1e3),
+            "in_flight_ms": answers.in_flight.map(|(at, _)| at.elapsed().as_secs_f64() * 1e3),
+            "in_flight": answers.in_flight.map(|(_, n)| n),
+            "queued": answers.queued.len(),
+            "layers": answers.layers,
+        })
     }
     /// One frame of the open composition, in ticks.
     pub(crate) fn frame_ticks(&self) -> i64 {
@@ -816,10 +835,14 @@ impl CompatStore {
 #[derive(Default)]
 pub struct CompatStores {
     stores: Mutex<HashMap<u64, Arc<CompatStore>>>,
-    redraw: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    redraw: Mutex<Option<Arc<Redrawn>>>,
 }
+/// What a document's store asks of its viewers (`doc_id`; `true`: its
+/// overrides started or stopped answering, so every picture of it is
+/// drawn again; `false`: answers landed, for the pictures waiting on them).
+pub(crate) type Redrawn = dyn Fn(u64, bool) + Send + Sync;
 impl CompatStores {
-    pub(crate) fn set_redraw(&self, redraw: Arc<dyn Fn() + Send + Sync>) {
+    pub(crate) fn set_redraw(&self, redraw: Arc<Redrawn>) {
         *self.redraw.lock().unwrap() = Some(redraw);
     }
     /// The document's store, made on first use.
@@ -831,7 +854,9 @@ impl CompatStores {
             .or_insert_with(|| {
                 let store = Arc::new(CompatStore::default());
                 if let Some(redraw) = self.redraw.lock().unwrap().clone() {
-                    store.set_redraw(redraw);
+                    let answers = redraw.clone();
+                    store.set_redraw(Arc::new(move || answers(doc_id, false)));
+                    store.set_rewrapped(Arc::new(move || redraw(doc_id, true)));
                 }
                 store
             })
@@ -891,6 +916,38 @@ impl CompatRasters for CompatStore {
             crop,
         });
         stand_in
+    }
+}
+
+/// A document's answers as a renderer beside the viewer's reads them (a
+/// paused viewer's settled picture, `crate::settle`): the exact answer or
+/// none, whatever the frame the viewer's own renderer is drawing lets
+/// stand in.
+pub(crate) struct ExactAnswers(pub Arc<CompatStore>);
+impl CompatRasters for ExactAnswers {
+    fn producing(&self, source: CompatSource) -> bool {
+        self.0.producing(source)
+    }
+    fn answer(
+        &self,
+        composition: &str,
+        layer: &str,
+        time: f64,
+        scale: f64,
+        source: CompatSource,
+        crop: Option<PixelRect>,
+    ) -> CompatAnswer {
+        if source != CompatSource::RasterOverride {
+            return CompatAnswer::Native;
+        }
+        let ticks = pm_render::compat::ticks_of(time).get();
+        let answers = self.0.answers.lock().unwrap();
+        let key = key(composition, layer, ticks, scale, crop);
+        match (answers.map.get(&key), answers.failed.get(&key)) {
+            (Some(answer), _) => answer.clone(),
+            (None, Some(message)) => CompatAnswer::Failed(message.clone()),
+            (None, None) => CompatAnswer::Missing,
+        }
     }
 }
 

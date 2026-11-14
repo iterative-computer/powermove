@@ -315,18 +315,21 @@ const UNAVAILABLE: &str = "Agent provider or native action service is unavailabl
 pub fn admit(action: &Value, connected: bool, live: bool) -> Result<(), String> {
     let allowed = match action["type"].as_str() {
         Some(
-            "draft" | "focus" | "newThread" | "switchThread" | "disclose" | "removeAttachment"
-            | "setProvider" | "setModel" | "chooseAnswer" | "typeAnswer" | "keepResult"
-            | "openSettings",
+            "draft" | "focus" | "newThread" | "switchThread" | "deleteThread" | "disclose"
+            | "removeAttachment" | "setProvider" | "setModel" | "chooseAnswer" | "typeAnswer"
+            | "keepResult" | "openSettings",
         ) => true,
-        Some("stop") => true,
+        Some("stop" | "stopTask") => true,
         Some("answer") => connected || live,
         Some("submit") => connected,
-        Some("setAccess") => matches!(
-            action["access"].as_str(),
-            Some("editor" | "supervised" | "auto")
-        ),
-        Some("shell") => matches!(action["action"].as_str(), Some("open" | "close")),
+        // Full access needs a connected provider and asks the window first
+        // (`agent.consent`), as v1's consent.
+        Some("setAccess") => match action["access"].as_str() {
+            Some("editor" | "supervised" | "auto") => true,
+            Some("full") => connected,
+            _ => false,
+        },
+        Some("shell") => matches!(action["action"].as_str(), Some("open" | "close" | "pin")),
         Some("key") => {
             connected
                 || action["key"]["key"] != "Enter"
@@ -335,16 +338,8 @@ pub fn admit(action: &Value, connected: bool, live: bool) -> Result<(), String> 
         }
         Some("retry") => connected,
         Some("connect") => true,
-        // Shortcuts the panel or this host carries out (/attach goes through
-        // the file picker, as the attach button does).
-        Some("chooseSlash") => action["id"].as_str().is_some_and(|id| {
-            matches!(
-                id,
-                "settings" | "stop" | "new" | "attach" | "model" | "effort" | "provider"
-            ) || ["model-", "effort-", "provider-"]
-                .iter()
-                .any(|p| id.starts_with(p))
-        }),
+        // The model checks the command; /new, /model, /stop … need no account.
+        Some("chooseSlash") => true,
         _ => false,
     };
     if allowed {
@@ -617,8 +612,9 @@ pub(crate) fn ensure_worker(
 fn deliver(shared: SharedAgent, link: Arc<AgentLink>, kernel: KernelHandle, application: bool) {
     let mut store = KernelStore::new(kernel, application);
     let mut closed: Option<Instant> = None;
+    let mut published = Instant::now();
     loop {
-        let (changed, failed, done) = {
+        let (changed, failed, done, running) = {
             let mut guard = shared.shared();
             let state = &mut *guard;
             if link.closing.load(Ordering::Acquire) && closed.is_none() {
@@ -645,11 +641,13 @@ fn deliver(shared: SharedAgent, link: Arc<AgentLink>, kernel: KernelHandle, appl
                 || tasks
                 || failed
                 || saved != state.panel.save_error;
-            (changed, failed, done)
+            (changed, failed, done, !state.runs.is_empty())
         };
-        if changed {
+        // A quiet run still moves its "Working · m:ss" line: once a second.
+        if changed || running && published.elapsed() >= Duration::from_secs(1) {
             link.touch();
             link.publish();
+            published = Instant::now();
         }
         if done {
             return;
@@ -699,16 +697,18 @@ mod tests {
         }
     }
     #[test]
-    fn a_connected_provider_admits_runs_but_never_computer_access() {
+    fn a_connected_provider_admits_runs_and_asks_for_computer_access() {
         for action in [
             json!({"type":"submit"}),
             json!({"type":"answer"}),
             json!({"type":"stop"}),
             json!({"type":"key","key":{"key":"Enter"}}),
+            // The model turns this into the window's consent alert.
+            json!({"type":"setAccess","access":"full"}),
         ] {
             assert!(admit(&action, true, false).is_ok());
         }
-        assert!(admit(&json!({"type":"setAccess","access":"full"}), true, false).is_err());
+        assert!(admit(&json!({"type":"setAccess","access":"root"}), true, false).is_err());
         // Signed out mid-run: the run still takes its answers.
         assert!(admit(&json!({"type":"answer"}), false, true).is_ok());
     }

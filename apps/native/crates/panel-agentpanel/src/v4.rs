@@ -101,25 +101,25 @@ impl Window {
         let selection = session.draft.text_selection();
         value["draft"] = json!({"text":text,"selection":[selection.start,selection.end],"armed":session.draft.armed()});
         value["rows"] = json!({"count":count,"range":[range.start,range.end],"items":items});
+        let mut threads = panel.summaries();
         value["threadTitle"] = json!(
-            panel
-                .summaries()
-                .into_iter()
+            threads
+                .iter()
                 .find(|s| s.id == self.thread)
-                .map(|s| s.title)
+                .map(|s| s.title.clone())
                 .unwrap_or_default()
+        );
+        // The thread picker's list, the latest first (v1 ThreadPicker).
+        threads.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        value["threads"] = json!(
+            threads
+                .iter()
+                .map(|t| json!({"id":t.id,"title":t.title,"busy":t.busy,"updatedAt":t.updated_at}))
+                .collect::<Vec<_>>()
         );
         value["elapsedMs"] = json!(session.elapsed_ms(now));
         // What the run is doing before its first step lands.
         value["activity"] = json!(session.activity);
-        // The thread picker's rows, newest first as the archive keeps them.
-        value["threads"] = json!(
-            panel
-                .summaries()
-                .into_iter()
-                .map(|t| json!({"id":t.id,"title":t.title,"busy":t.busy,"updatedAt":t.updated_at}))
-                .collect::<Vec<_>>()
-        );
         value["stopping"] = json!(session.run.as_ref().is_some_and(|r| r.stopping));
         value["showJump"] = json!(session.follow.show_jump);
         let access = match session.settings.access {
@@ -239,41 +239,6 @@ fn control_id(panel: &Panel, thread: &str, id: &str) -> Result<String> {
     }
     Ok(raw.into())
 }
-/// A shortcut's effect the panel's own model can carry out at once (/new,
-/// /provider …), so it never waits on a host that has no runner for it.
-fn settle(
-    panel: &mut Panel,
-    thread: &str,
-    effect: Option<Effect>,
-    context: &Context<'_>,
-) -> Result<Option<Effect>> {
-    use crate::model::EffectKind;
-    let Some(effect) = effect else {
-        return Ok(None);
-    };
-    match &effect.kind {
-        EffectKind::NewThread => {
-            panel.new_thread(context.new_thread, context.now)?;
-            Ok(None)
-        }
-        EffectKind::SelectProvider(name) => {
-            let provider = match name.as_str() {
-                "chatgpt" => Provider::Chatgpt,
-                "claude" => Provider::Claude,
-                "compatible" => Provider::Compatible,
-                _ => return Err(Error::Invalid("provider")),
-            };
-            panel.set_provider(
-                thread,
-                provider,
-                String::new(),
-                (context.catalogs)(provider),
-            )?;
-            Ok(None)
-        }
-        _ => Ok(Some(effect)),
-    }
-}
 fn retry_turn(
     panel: &mut Panel,
     thread: &str,
@@ -379,7 +344,7 @@ pub fn dispatch(
                     panel.draft_mut(thread)?.insert_text(&text, now, true);
                 }
             }
-            settle(panel, thread, outcome.effect, &context)?
+            outcome.effect
         }
         "openSettings" => Some(panel.host_settings(thread)?),
         "submit" => Some(panel.submit(thread, context.run, context.request, now)?),
@@ -392,6 +357,8 @@ pub fn dispatch(
             panel.switch(string(action, "id")?)?;
             None
         }
+        // Asks first: the host's confirmation, then the host archives it.
+        "deleteThread" => panel.archive_thread(string(action, "id")?, "", false, now)?,
         "disclose" => {
             let id = string(action, "id")?;
             let open = boolean(action, "open")?;
@@ -417,10 +384,7 @@ pub fn dispatch(
             }
             None
         }
-        "chooseSlash" => {
-            let effect = panel.choose_slash(thread, string(action, "id")?, now)?;
-            settle(panel, thread, effect, &context)?
-        }
+        "chooseSlash" => panel.choose_slash(thread, string(action, "id")?, now)?,
         "removeAttachment" => {
             panel
                 .draft_mut(thread)?
@@ -715,24 +679,6 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(matches!(e.kind, EffectKind::Shell(ShellAction::Close)));
-    }
-    #[test]
-    fn shortcuts_the_panel_owns_run_at_once_instead_of_waiting_on_a_host() {
-        let mut p = panel();
-        act(&mut p, json!({"type":"focus","focused":true})).unwrap();
-        p.draft_mut("thread").unwrap().insert_text("keep", 1, false);
-        act(
-            &mut p,
-            json!({"type":"draft","text":"/new","selection":[4,4]}),
-        )
-        .unwrap();
-        // No NewThread effect reaches a host that has no runner for it.
-        assert!(
-            act(&mut p, json!({"type":"chooseSlash","id":"new"}))
-                .unwrap()
-                .is_none()
-        );
-        assert_eq!(p.session(p.active_id()).unwrap().draft.text(), "");
     }
     #[test]
     fn try_again_sends_the_failed_turns_request_and_keeps_the_composer_draft() {

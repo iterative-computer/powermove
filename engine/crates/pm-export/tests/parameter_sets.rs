@@ -222,6 +222,7 @@ fn hevc_states_hlg() {
             white_nits: 203,
             peak_nits: 1000,
             metadata: None,
+            dolby_vision: true,
         },
     );
 }

@@ -217,6 +217,7 @@ pub fn run() -> anyhow::Result<()> {
                 scale: 1.,
                 decode_deadline: None,
                 exact: false,
+                settled: false,
             };
             h.preview(&scene, spec(0, Moment::Paused))?;
             samples.push(sample("frame0", h, audio.as_ref(), start));

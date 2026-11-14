@@ -91,6 +91,11 @@ pub struct Colors {
     pub scope_green: u32,
     /// Blue channel scope trace; data colour drawn with dark-scheme viewer tokens.
     pub scope_blue: u32,
+    /// A colour channel's ink on panels, per appearance: a red, green or
+    /// blue curve and channel values in the Color panel.
+    pub channel_red: u32,
+    pub channel_green: u32,
+    pub channel_blue: u32,
     /// Clip and layer label fills. Text on them is `text`.
     pub labels: Labels,
 }
@@ -268,6 +273,10 @@ pub struct Metrics {
     pub ruler: f32,
     /// The viewer's rulers: a band along the top and the leading edge.
     pub viewer_ruler: f32,
+    /// A colour wheel's diameter (Lift, Gamma, Gain, Offset).
+    pub grade_wheel: f32,
+    /// The curve editor's graph height.
+    pub curve_editor: f32,
     pub layer_column: f32,
     /// Timeline clip bar corners (v1–3's `chrome.timeline.clipRadius`).
     pub clip_radius: f32,
@@ -337,6 +346,10 @@ pub struct Metrics {
     pub drag_opacity: f32,
     /// Opacity of `colors.media_badge` fills over media.
     pub media_badge_opacity: f32,
+    /// The leading room a person's own message leaves free in the Agent
+    /// conversation, so it reads as theirs (at most 84 % of the popover's
+    /// content).
+    pub message_inset: f32,
     /// Mixer channel strip width.
     pub channel_strip: f32,
     /// Mixer fader knob height.
@@ -596,6 +609,21 @@ impl Colors {
             scope_red: 0xff6b62,
             scope_green: 0x4fd58a,
             scope_blue: 0x6ba6ff,
+            channel_red: if dark {
+                oklch(0.72, 0.15, 25.)
+            } else {
+                oklch(0.53, 0.17, 27.)
+            },
+            channel_green: if dark {
+                oklch(0.78, 0.14, 150.)
+            } else {
+                oklch(0.52, 0.13, 150.)
+            },
+            channel_blue: if dark {
+                oklch(0.74, 0.13, 255.)
+            } else {
+                oklch(0.52, 0.16, 262.)
+            },
             labels: LABELS[usize::from(!dark)],
         }
     }
@@ -721,6 +749,8 @@ impl Tokens {
                 property_row: 22.,
                 ruler: 24.,
                 viewer_ruler: 16.,
+                grade_wheel: 112.,
+                curve_editor: 200.,
                 layer_column: 320.,
                 clip_radius: radius.sm,
                 playhead: 1.,
@@ -764,6 +794,7 @@ impl Tokens {
                 },
                 drag_opacity: 0.5,
                 media_badge_opacity: 0.55,
+                message_inset: 52.,
                 channel_strip: 72.,
                 fader_knob: 14.,
                 welcome_width: 900.,

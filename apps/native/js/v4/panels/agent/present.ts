@@ -339,8 +339,24 @@ function groupedToolRow(work: Step[]): ToolsRow {
         id: str(v.id),
         label: THREAD_LABELS[name] ?? settledLabel(v),
         status: str(v.status),
-        detail: str(thread.title) || str(v.detail),
-        output: typeof v.output === "string" ? v.output : "",
+        // What it worked on: the media or layer by its name in the project
+        // (the host names it), else the provider's argument, never only the
+        // tool's own id.
+        detail:
+          str(thread.title) ||
+          str(v.subjectName) ||
+          (str(v.detail) && str(v.detail) !== str(v.toolName)
+            ? str(v.detail)
+            : ""),
+        // Opened: the whole argument, then the output or the error.
+        output: [
+          str(v.detail) && str(v.detail) !== str(v.toolName)
+            ? str(v.detail)
+            : "",
+          typeof v.output === "string" ? v.output : "",
+        ]
+          .filter(Boolean)
+          .join("\n\n"),
         family: toolFamily(v.toolName),
         span: each,
         ...(task ? { task, progress: str(task.progress) } : {}),

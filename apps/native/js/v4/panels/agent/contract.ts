@@ -23,6 +23,8 @@ export interface Snapshot {
   projectId: string;
   threadId: string;
   threadTitle?: string;
+  /** Every thread of this project, the latest first (the thread picker). */
+  threads?: ThreadSummary[];
   runId: string | null;
   phase: string;
   sendable: boolean;
@@ -34,8 +36,6 @@ export interface Snapshot {
   elapsedMs: number | null;
   /** What the run is doing before its first step lands. */
   activity?: string;
-  /** The thread picker's rows. */
-  threads?: ThreadSummary[];
   showJump: boolean;
   draft: { text: string; selection: [number, number]; armed: string | null };
   attachments: {
@@ -119,6 +119,7 @@ export type Action =
   | {
       type:
         | "switchThread"
+        | "deleteThread"
         | "removeAttachment"
         | "openAttachment"
         | "openVisual"

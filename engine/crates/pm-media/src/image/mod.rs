@@ -60,6 +60,10 @@ pub enum ImageFormat {
     WebP,
     Exr,
     Dpx,
+    /// Truevision TGA, read by ImageIO.
+    Tga,
+    /// A Photoshop document's flattened image (PSD, PSB), read by ImageIO.
+    Psd,
     Heif,
     Avif,
     Svg,
@@ -86,6 +90,8 @@ pub fn sniff(head: &[u8]) -> ImageFormat {
         ImageFormat::Exr
     } else if at(0, b"SDPX") || at(0, b"XPDS") {
         ImageFormat::Dpx
+    } else if at(0, b"8BPS\0\x01") || at(0, b"8BPS\0\x02") {
+        ImageFormat::Psd
     } else if at(4, b"ftyp") {
         // Only image brands: MOV and MP4 movies carry `ftyp` too.
         let size = head
@@ -112,9 +118,33 @@ pub fn sniff(head: &[u8]) -> ImageFormat {
         }
     } else if svg::sniff(head) {
         ImageFormat::Svg
+    } else if tga(head) {
+        ImageFormat::Tga
     } else {
         ImageFormat::Other
     }
+}
+
+/// A Truevision TGA header. The format has no signature (the TGA 2.0
+/// footer is at the end of the file), so all 18 header bytes must describe
+/// an image: a color map exactly when the type is paletted, a depth its
+/// type takes, attribute bits a depth can carry, a size, and the reserved
+/// interleave bits clear. Other media's first bytes fail it.
+fn tga(head: &[u8]) -> bool {
+    let Some(h) = head.get(..18) else {
+        return false;
+    };
+    let le = |i: usize| u16::from_le_bytes([h[i], h[i + 1]]);
+    let no_map = h[1] == 0 && h[3..8] == [0; 5];
+    let image = match h[2] {
+        1 | 9 => h[1] == 1 && le(5) > 0 && matches!(h[7], 15 | 16 | 24 | 32) && h[16] == 8,
+        2 | 10 => no_map && matches!(h[16], 15 | 16 | 24 | 32),
+        3 | 11 => no_map && matches!(h[16], 8 | 16),
+        _ => false,
+    };
+    let attribute = h[17] & 0x0f;
+    let attributes = attribute == 0 || matches!(h[16], 16 | 32) && attribute <= 8;
+    image && attributes && h[17] & 0xc0 == 0 && le(12) > 0 && le(14) > 0
 }
 
 /// How a still's values relate to light and to its alpha: the file's own
@@ -221,7 +251,9 @@ pub fn read(path: &Path, pool: &FramePool) -> Result<StillImage> {
         ImageFormat::Svg => svg::read(path, pool),
         ImageFormat::Dpx => ffmpeg_still(path, pool),
         ImageFormat::Avif => avif::read(path, pool),
-        ImageFormat::Heif | ImageFormat::Other => imageio::read_frame(path, 0, pool, format),
+        ImageFormat::Heif | ImageFormat::Tga | ImageFormat::Psd | ImageFormat::Other => {
+            imageio::read_frame(path, 0, pool, format)
+        }
         // The `image` crate reads RGB and gray TIFFs only: it fails on
         // palette, YCbCr, and Lab, and turns CMYK into RGB without its
         // profile. ImageIO converts those through their profile.

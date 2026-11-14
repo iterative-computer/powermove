@@ -982,6 +982,33 @@ impl History {
 /// One saved history entry: its label, forward and backward operations
 /// (canonicalized against `open_comp` when saved before compositions), and
 /// their bytes.
+/// The asset records a saved patch at `path` restores, as opening reads
+/// them: an Undo or Redo of an edit made before (a v1 project's history)
+/// never brings a v1 video asset back without its v1 video reading
+/// (`videoColor`, `project_io::adopt_electron_asset`). `None` when the
+/// patch holds no asset record.
+fn restored_assets(path: &[PathPart], value: &Value) -> Option<Value> {
+    let key = |part: &PathPart, name: &str| matches!(part, PathPart::Key(k) if k == name);
+    // Only these paths hold asset records; nothing else is copied.
+    let shape = match path {
+        [] => 0,
+        [assets] if key(assets, "assets") => 1,
+        [assets, _] if key(assets, "assets") => 2,
+        _ => return None,
+    };
+    let mut value = value.clone();
+    match shape {
+        0 => crate::project_io::adopt_electron_rendering(&mut value, false),
+        1 => {
+            for (_, asset) in value.as_object_mut()?.iter_mut() {
+                crate::project_io::adopt_electron_asset(asset, false);
+            }
+        }
+        _ => crate::project_io::adopt_electron_asset(&mut value, false),
+    }
+    Some(value)
+}
+
 fn import_entry(
     entry: &Value,
     root_relative: bool,
@@ -1022,6 +1049,9 @@ fn import_entry(
                 if !valid_path(op.path()) {
                     return Err(format!("a {side} patch has an invalid path"));
                 }
+                let restored = source
+                    .get("value")
+                    .and_then(|v| restored_assets(op.path(), v));
                 let normalized = op.to_value();
                 let mut members: Vec<_> = normalized.as_object().unwrap().iter().collect();
                 members.sort_by_key(|(a, _)| *a);
@@ -1036,7 +1066,7 @@ fn import_entry(
                     pm_model::json::write_canonical(&Value::String(key.clone()), &mut text);
                     text.push(':');
                     let value = if key.as_str() == Some("value") {
-                        source.get("value").unwrap_or(value)
+                        restored.as_ref().or(source.get("value")).unwrap_or(value)
                     } else {
                         value
                     };
@@ -1079,6 +1109,14 @@ fn import_entry(
         let (f, b) = canonicalize_patches(&leaves(&forward)?, &leaves(&backward)?, open_comp);
         forward = f.into_iter().map(Op::Leaf).collect();
         backward = b.into_iter().map(Op::Leaf).collect();
+    }
+    for op in forward.iter_mut().chain(backward.iter_mut()) {
+        if let Op::Leaf(patch) = op
+            && let Some(value) = patch.value.as_ref()
+            && let Some(restored) = restored_assets(&patch.path, value)
+        {
+            patch.value = Some(restored);
+        }
     }
     let forward = StoredOps::from(forward);
     let backward = StoredOps::from(backward);
@@ -1210,6 +1248,62 @@ pub fn pack(saved: Value) -> Value {
 mod tests {
     use super::*;
     use pm_model::json::parse;
+
+    /// A v1 project's history whose last edit deleted a v1 video asset: an
+    /// Undo restores the asset as opening reads it, with the v1 video
+    /// reading (`videoColor`), in both saved path forms, and Redo/Undo keep
+    /// it; an asset a native import made (`timing`) comes back untouched.
+    #[test]
+    fn an_undo_restores_a_v1_video_asset_with_its_v1_reading() {
+        let project = parse(
+            r##"{"id":"P","compId":"C","compName":"Main","w":64,"h":36,"fps":30,"dur":2,
+            "bg":"#000000","layers":[],"comps":{},"assets":{"still":{"id":"still","kind":"image"}}}"##,
+        )
+        .unwrap();
+        let asset = |id: &str, timing: bool| {
+            let timing = if timing { r#","timing":2"# } else { "" };
+            format!(r#"{{"id":"{id}","kind":"video","name":"{id}.mov","dur":4{timing}}}"#)
+        };
+        for paths in [r#""paths":[]"#, r#""paths":"composition""#] {
+            let saved = parse(&format!(
+                r#"{{"version":1,{paths},"index":0,"entries":[{{"label":"Delete Media",
+                "forward":[{{"path":["assets","v1"],"exists":false}},{{"path":["assets","new"],"exists":false}}],
+                "backward":[{{"path":["assets","v1"],"exists":true,"value":{}}},
+                            {{"path":["assets","new"],"exists":true,"value":{}}}]}}]}}"#,
+                asset("v1", false),
+                asset("new", true),
+            ))
+            .unwrap();
+            let history = History::import(&saved, Some("C")).unwrap();
+            let mut store = crate::DocumentStore::adopt(
+                pm_model::Document::new(Some(crate::model::to_canonical(project.clone())), 1),
+                history,
+            );
+            let reading = |store: &crate::DocumentStore, id: &str| {
+                let doc = store.snapshot().document.to_value().unwrap();
+                doc.get("assets").and_then(|a| a.get(id)).map(|a| {
+                    a.get("videoColor")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+            };
+            store.undo().unwrap();
+            assert_eq!(
+                reading(&store, "v1"),
+                Some(Some("electron".into())),
+                "{paths}"
+            );
+            assert_eq!(reading(&store, "new"), Some(None), "{paths}");
+            store.redo().unwrap();
+            assert_eq!(reading(&store, "v1"), None);
+            store.undo().unwrap();
+            assert_eq!(
+                reading(&store, "v1"),
+                Some(Some("electron".into())),
+                "{paths}"
+            );
+        }
+    }
 
     fn record(h: &mut History, label: &str) -> u64 {
         let p = Patch::set(vec![PathPart::from("x")], Value::Number(1.0));

@@ -8,6 +8,8 @@ use std::time::Instant;
 
 mod chrome;
 mod footage;
+#[cfg(test)]
+mod image_budget_tests;
 mod layer_raster;
 mod media_prepare;
 mod material_capture;
@@ -15,6 +17,8 @@ pub use material_capture::{MaterialCaptureRequest,MaterialPixels,MaterialCapture
 mod source;
 mod source_video;
 pub use footage::FrameFootage;
+#[cfg(test)]
+mod still_wait_tests;
 pub use layer_raster::{LayerPixels, LayerRaster};
 pub use media_prepare::MediaPreparation;
 
@@ -305,6 +309,7 @@ fn build_options(
         preview: preview_window(comp, request),
         origin: request.origin,
         final_output: request.output_kind == crate::OutputKind::Final,
+        read_ahead: request.read_ahead && !request.export,
     }
 }
 
@@ -1268,6 +1273,19 @@ impl Renderer {
             .collect(&self.device, &self.queue, false);
     }
 
+    /// Draws the following frames in time slices (`crate::slices`): a
+    /// renderer drawing behind interactive ones never holds the GPU for
+    /// longer than a slice, and gives way when its gate says so. `None`:
+    /// each frame is one submission.
+    pub fn set_slices(&mut self, slices: Option<crate::slices::Slices>) {
+        self.effects.slices = slices;
+    }
+
+    /// The slices of the frames drawn since they were set.
+    pub fn slices_mut(&mut self) -> Option<&mut crate::slices::Slices> {
+        self.effects.slices.as_mut()
+    }
+
     /// Records `bracket` around every following frame's commands (`None`:
     /// nothing).
     pub fn set_bracket(&mut self, bracket: Option<Arc<dyn CommandBracket>>) {
@@ -1370,9 +1388,14 @@ impl Renderer {
         self.pool.created()
     }
 
-    /// Nominal texel bytes retained by image mip pyramids.
+    /// Nominal texel bytes retained by image mip pyramids, with the stills
+    /// only their kept views still own (the media cache has let them go and
+    /// no longer counts them).
     pub fn pyramid_bytes(&self) -> u64 {
         self.pyramids.bytes()
+            + self
+                .pyramids
+                .orphaned_bytes(|texture| self.media.holds_image(texture))
     }
 
     /// Nominal texel bytes of still and converted-video textures.
@@ -1383,6 +1406,7 @@ impl Renderer {
     pub fn image_cache_bytes(&self) -> u64 {
         self.media.image_bytes()
     }
+
 
     /// Explicit viewer opt-in, for stills and for video: a copy at the
     /// view's resolution instead of the source's. CLI exact/reference and
@@ -1396,11 +1420,26 @@ impl Renderer {
     /// Drops the stills kept at their full size (`MediaCache::release_whole_images`).
     pub fn release_whole_stills(&mut self) {
         self.media.release_whole_images();
-        // Kept bind groups hold their views (and textures) alive.
+        // Kept bind groups and kept pyramids (the views of a still's own
+        // mip chain) hold their textures alive: they go with the stills.
         self.binds.clear();
+        self.pyramids.clear();
     }
     pub fn set_image_cache_budget(&mut self, bytes: u64) {
         self.media.trim_images(bytes);
+        let media = &self.media;
+        self.pyramids
+            .retain_own(|texture| media.holds_image(texture));
+    }
+    /// Critical memory pressure: after each frame is submitted, its stills
+    /// too go down to the image budget.
+    pub fn set_memory_pressure(&mut self, critical: bool) {
+        self.media.set_image_pressure(critical);
+    }
+    /// The last frame's own stills exceeded the image budget: their bytes
+    /// and the budget (an over-budget frame, kept while it drew).
+    pub fn image_over_budget(&self) -> Option<(u64, u64)> {
+        self.media.image_over_budget()
     }
     pub fn set_converted_frame_budget(&mut self, bytes: u64) {
         self.media.trim_frames(bytes);
@@ -1497,6 +1536,13 @@ impl Renderer {
         self.media.playback = deadline;
     }
 
+    /// Viewer frames: a frame that waits for a still being read stops
+    /// waiting once `interrupt` moves past the value it carries (the frame
+    /// is superseded or its viewer closed). `None` outside viewer frames.
+    pub fn set_interrupt(&mut self, interrupt: Option<crate::media::Interrupt>) {
+        self.media.interrupt = interrupt;
+    }
+
     /// Viewer frames: a layer this renderer cannot draw becomes a
     /// [`LayerFailure`] and the rest of the frame is drawn. Exports never set
     /// this: a delivered file refuses to omit a layer.
@@ -1567,7 +1613,7 @@ impl Renderer {
     /// Renderers that never get a share keep
     /// [`crate::media::DEFAULT_FRAME_CACHE`].
     pub fn apply_media_lease(
-        &self,
+        &mut self,
         lease: pm_media::decode::service::MediaLease,
     ) -> pm_media::decode::service::MediaUsage {
         self.media.apply_lease(lease)
@@ -2187,6 +2233,13 @@ impl Renderer {
         if !build.compat_missing.is_empty() {
             return Err(RenderError::CompatPending(build.compat_missing));
         }
+        // A still an earlier frame gave up waiting for is still being read:
+        // held before any of the frame is drawn, so a retry costs a plan.
+        if !request.export
+            && media_prepare::any_still(&plan, &mut |path| self.media.still_held(path))
+        {
+            return Err(RenderError::MediaPending);
+        }
         let footage = self.footage_of(&plan, w, h);
         let region = request.region.map(|r| Region {
             x: r.x,
@@ -2198,7 +2251,8 @@ impl Renderer {
         // cache returns within its bound; 3D meshes and maps no recent 3D
         // frame drew are released.
         self.pool.begin_frame();
-        self.media.begin_frame();
+        self.media
+            .begin_frame(request.read_ahead && !request.export);
         self.media.retire_cold_sessions();
         self.vector.begin_frame();
         self.scene3d.begin_frame();
@@ -2229,6 +2283,9 @@ impl Renderer {
         self.effects.fallback.pending.clear();
         self.effects.fallback.fatal = None;
         self.effects.fallback.blocked = false;
+        if let Some(slices) = &mut self.effects.slices {
+            slices.begin_frame();
+        }
         let (legend, taken, unsupported, exec_failures, timer, pending) = {
             self.effects.uniforms.reset();
             self.binds.begin_frame();
@@ -2320,11 +2377,15 @@ impl Renderer {
                 exec.unsupported = unsupported;
             }
             let held = exec.effects.watchdog.take_held();
-            let complete = exec.unsupported.is_empty()
+            // A frame that gave way never reaches the caller's target.
+            let abandoned = exec.effects.slices.as_ref().is_some_and(|s| s.stopped());
+            let complete = !exec.media.still_pending
+                && exec.unsupported.is_empty()
                 && exec.fallback_pending.is_empty()
                 && exec.effects.fallback.pending.is_empty()
                 && exec.effects.fallback.fatal.is_none()
-                && !held;
+                && !held
+                && !abandoned;
             if complete && pooled_gl_rows.is_some() {
                 exec.finish_color(
                     &mut encoder,
@@ -2382,15 +2443,35 @@ impl Renderer {
             copy.record(&mut encoder, &target.texture);
         }
         self.effects.uniforms.flush(&self.queue);
-        self.queue.submit([encoder.finish()]);
+        // The last slice of a frame drawn in slices is admitted and waited
+        // for as the ones before it: the frame is done when this returns.
+        if let Some(slices) = &mut self.effects.slices {
+            slices.admit();
+        }
+        let last = self.queue.submit([encoder.finish()]);
         self.effects.watchdog.submitted(&self.queue);
+        let abandoned = if let Some(slices) = &mut self.effects.slices {
+            let (device, queue, watchdog) = (&self.device, &self.queue, &mut self.effects.watchdog);
+            slices.submitted(device, last, || {
+                if watchdog.frames_in_flight() > 0 {
+                    watchdog.collect(device, queue, false);
+                }
+            });
+            slices.stopped()
+        } else {
+            false
+        };
         self.binds.end_frame();
         for t in taken {
             self.pool.give(t);
         }
         let mut scene3d_meta = crate::scene3d::metadata::collect(&plan, &self.scene3d);
         if prefix {
-            if unsupported.is_empty() && pending.is_empty() {
+            if unsupported.is_empty()
+                && pending.is_empty()
+                && !abandoned
+                && !self.media.still_pending
+            {
                 self.prefix.remember(std::mem::take(&mut plan.draws));
             } else {
                 self.prefix.clear(&mut self.pool);
@@ -2417,6 +2498,9 @@ impl Renderer {
             }
             out
         };
+        if abandoned {
+            return Err(RenderError::Abandoned);
+        }
         if !unsupported.is_empty() {
             return Err(RenderError::Unsupported(unsupported));
         }
@@ -2441,6 +2525,9 @@ impl Renderer {
             return Err(RenderError::ShaderFallbackPending(
                 pending.iter().map(|r| (**r).clone()).collect(),
             ));
+        }
+        if self.media.still_pending {
+            return Err(RenderError::MediaPending);
         }
         Ok(Rendered {
             scene3d_meta,
@@ -2479,6 +2566,7 @@ impl Renderer {
                 }])
             }
             crate::media::MediaFailure::Failed(m) => RenderError::Media(m),
+            crate::media::MediaFailure::Pending => RenderError::MediaPending,
         })
     }
 

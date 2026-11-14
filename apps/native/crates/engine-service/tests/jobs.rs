@@ -481,6 +481,105 @@ fn going_without_offline_clips_never_drops_sound_the_export_would_hear() {
         assert_eq!(error.code, pm_protocol::error::ErrorCode::ExportFailed);
     }
 }
+/// A stereo 16-bit WAV of a full-scale 440 Hz square, `seconds` long.
+fn loud_wav(path: &Path, seconds: u32) {
+    let rate = 48_000u32;
+    let frames = rate * seconds;
+    let mut bytes = Vec::with_capacity(44 + frames as usize * 4);
+    let data = frames * 4;
+    bytes.extend_from_slice(b"RIFF");
+    bytes.extend_from_slice(&(36 + data).to_le_bytes());
+    bytes.extend_from_slice(b"WAVEfmt ");
+    bytes.extend_from_slice(&16u32.to_le_bytes());
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&2u16.to_le_bytes());
+    bytes.extend_from_slice(&rate.to_le_bytes());
+    bytes.extend_from_slice(&(rate * 4).to_le_bytes());
+    bytes.extend_from_slice(&4u16.to_le_bytes());
+    bytes.extend_from_slice(&16u16.to_le_bytes());
+    bytes.extend_from_slice(b"data");
+    bytes.extend_from_slice(&data.to_le_bytes());
+    for i in 0..frames {
+        let v: i16 = if (i * 440 / rate) % 2 == 0 {
+            i16::MAX
+        } else {
+            i16::MIN + 1
+        };
+        bytes.extend_from_slice(&v.to_le_bytes());
+        bytes.extend_from_slice(&v.to_le_bytes());
+    }
+    std::fs::write(path, bytes).unwrap();
+}
+
+/// A finished export whose mixed sound went over full scale tells the
+/// person so with its file: clipped in 24-bit PCM, kept in a float track;
+/// and the check of the written file reports its progress on the way.
+#[test]
+fn a_finished_export_says_its_sound_was_clipped_or_kept() {
+    let dir = tempfile::tempdir().unwrap();
+    let wav = dir.path().join("loud.wav");
+    loud_wav(&wav, 1);
+    let mut project: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/shapes.json")).unwrap();
+    let mut layer = project["layers"][0].clone();
+    layer["id"] = "Lloud".into();
+    layer["type"] = "audio".into();
+    layer["name"] = "Loud".into();
+    // Four times full scale: 12 dB over.
+    layer["d"] = serde_json::json!({"asset":"Aloud","gain":4,"trim":0,"fadeIn":0,"fadeOut":0});
+    project["layers"].as_array_mut().unwrap().push(layer);
+    project["assets"] =
+        serde_json::json!({"Aloud":{"name":"loud.wav","type":"audio","format":"wav","dur":1}});
+    for (coding, word) in [
+        (None, "Audio clipped:"),
+        (
+            Some(pm_protocol::priority::AudioCoding::PcmFloat),
+            "Audio over full scale:",
+        ),
+    ] {
+        let mut request = request_for(
+            &project.to_string(),
+            dir.path().join(format!("loud-{word}.mov")),
+            1,
+        );
+        request.originals.insert("Aloud".into(), wav.clone());
+        let JobSpec::Export { settings, .. } = &mut request.spec else {
+            unreachable!()
+        };
+        settings.format = ExportFormat::ProRes {
+            profile: pm_protocol::priority::ProResProfile::Hq,
+        };
+        settings.color = OutputColor::Rec709QuickTime {
+            candidate: pm_protocol::color::QuickTimeTag::Cicp1_13_1,
+        };
+        settings.alpha = AlphaOutput::None;
+        settings.audio = true;
+        settings.delivery.audio_coding = coding;
+        // Every status until the end: the written file's check is reported
+        // as it reads the file.
+        let handle =
+            ExportHandle::start(Path::new(env!("CARGO_BIN_EXE_pm-engine-service")), request)
+                .unwrap();
+        let mut status = handle.status();
+        let mut checked = vec![];
+        while !matches!(
+            status.state,
+            JobState::Done | JobState::Failed | JobState::Cancelled
+        ) {
+            status = handle.next_status(&status);
+            checked.extend(status.checking);
+        }
+        let status = handle.wait().unwrap();
+        assert!(!checked.is_empty(), "no check progress");
+        assert_eq!(status.state, JobState::Done, "{status:?}");
+        assert!(
+            status.notes.iter().any(|n| n.starts_with(word)),
+            "{word} {:?}",
+            status.notes
+        );
+    }
+}
+
 /// The fixture's first layer with an effect no installed extension provides.
 fn with_uninstalled_effect(on: bool) -> String {
     let mut project: serde_json::Value =
@@ -803,6 +902,7 @@ fn a_child_message_the_parent_cannot_use_fails_the_export_at_once() {
         error: None,
         preview: None,
         checking: None,
+        notes: vec![],
     })
     .unwrap();
     another["type"] = "status".into();
@@ -824,6 +924,185 @@ fn a_child_message_the_parent_cannot_use_fails_the_export_at_once() {
         assert!(started.elapsed() < Duration::from_secs(10), "{line}");
         assert_eq!(status.state, JobState::Failed, "{line}: {status:?}");
         let message = status.error.unwrap().message;
+        eprintln!("MESSAGE {message}");
         assert!(message.contains(reason), "{line}: {message}");
+    }
+}
+
+/// File `n`'s colour in a coded sequence: far apart in 8 bits, so a lossy
+/// 4:2:0 delivery still names its frame.
+fn sequence_colour(n: u16) -> [u16; 3] {
+    [n * 9_000, 60_000 - n * 9_000, 20_000 + n * 5_000]
+}
+/// Six 16-bit frames `shot.0001.png`… read in place at 15 fps (the small
+/// file a sequence asset retains), and the fixture with one layer of it
+/// filling the frame.
+fn with_sequence(dir: &Path) -> (String, MediaCatalog) {
+    for n in 1..=6u16 {
+        let mut bytes = Vec::new();
+        for _ in 0..320 * 180 {
+            for code in sequence_colour(n) {
+                bytes.extend_from_slice(&code.to_be_bytes());
+            }
+        }
+        let file = std::fs::File::create(dir.join(format!("shot.{n:04}.png"))).unwrap();
+        let mut encoder = png::Encoder::new(file, 320, 180);
+        encoder.set_color(png::ColorType::Rgb);
+        encoder.set_depth(png::BitDepth::Sixteen);
+        let mut writer = encoder.write_header().unwrap();
+        writer.write_image_data(&bytes).unwrap();
+    }
+    let manifest = pm_media::image::sequence::Manifest {
+        powermove_image_sequence: 1,
+        dir: dir.into(),
+        prefix: "shot.".into(),
+        suffix: ".png".into(),
+        padding: 4,
+        first: 1,
+        last: 6,
+        rate: [15, 1],
+    };
+    let retained = dir.join("retained");
+    std::fs::write(&retained, manifest.to_bytes()).unwrap();
+    let mut project: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/shapes.json")).unwrap();
+    project["assets"] = serde_json::json!({"seq": {
+        "id": "seq", "name": "shot.[0001-0006].png", "kind": "video", "format": "png",
+        "w": 320, "h": 180, "dur": 0.4, "fps": 15, "hasAudio": false, "persisted": true,
+        "imageSequence": {"fps": 15, "frames": 6, "first": 1, "last": 6}
+    }});
+    let mut layer = project["layers"][0].clone();
+    layer["id"] = "Lseq".into();
+    layer["type"] = "video".into();
+    layer["dur"] = 0.4.into();
+    layer["p"]["position.x"]["v"] = 320.into();
+    layer["p"]["position.y"]["v"] = 180.into();
+    layer["p"]["opacity"]["v"] = 100.into();
+    layer["d"] = serde_json::json!({"asset": "seq", "w": 640, "h": 360, "fit": "stretch"});
+    project["layers"] = serde_json::json!([layer]);
+    let mut media = MediaCatalog::default();
+    media.originals.insert("seq".into(), retained);
+    (project.to_string(), media)
+}
+/// The centre pixel of every frame of a delivered movie, as 16-bit RGB.
+fn centres(movie: &Path) -> Vec<[u16; 3]> {
+    let ffmpeg =
+        std::path::PathBuf::from(std::env::var_os("PM_FFMPEG_DIR").unwrap()).join("bin/ffmpeg");
+    let out = std::process::Command::new(ffmpeg)
+        .args(["-v", "error", "-i"])
+        .arg(movie)
+        .args(["-f", "rawvideo", "-pix_fmt", "rgb48le", "-"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let frame = 320 * 180 * 6;
+    out.stdout
+        .chunks_exact(frame)
+        .map(|f| {
+            let at = (90 * 320 + 160) * 6;
+            [0, 2, 4].map(|c| u16::from_le_bytes([f[at + c], f[at + c + 1]]))
+        })
+        .collect()
+}
+/// An image sequence read in place exports through the export route as H.264
+/// and ProRes with each of its files at its own times (15 fps into 30: file
+/// n on frames 2(n-1) and 2(n-1)+1); a file deleted from its folder fails
+/// the export naming it, and no movie is published.
+/// A file of an image sequence that is there but cannot be read (a bad
+/// copy) stops the export naming that file, as a damaged frame of a movie
+/// does; nothing stands in for it and no movie is published.
+#[test]
+fn a_damaged_file_of_an_image_sequence_stops_the_export_naming_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let frames = dir.path().join("frames");
+    std::fs::create_dir(&frames).unwrap();
+    let (project, media) = with_sequence(&frames);
+    std::fs::write(frames.join("shot.0004.png"), vec![0x5a; 4096]).unwrap();
+    let destination = dir.path().join("damaged.mov");
+    let mut request = request_for(&project, destination.clone(), 1);
+    request.originals = media.originals.clone();
+    let JobSpec::Export { settings, .. } = &mut request.spec else {
+        unreachable!()
+    };
+    settings.format = ExportFormat::ProRes {
+        profile: pm_protocol::priority::ProResProfile::Hq,
+    };
+    settings.color = OutputColor::Rec709QuickTime {
+        candidate: pm_protocol::color::QuickTimeTag::Cicp1_13_1,
+    };
+    settings.alpha = AlphaOutput::None;
+    settings.range.end = Ticks::new(Ticks::from_whole_seconds(2).get() / 5).unwrap();
+    let status = finish(request);
+    assert_eq!(status.state, JobState::Failed, "{status:?}");
+    let message = status.error.unwrap().message;
+    for part in ["couldn't be exported", "damaged", "shot.0004.png"] {
+        assert!(message.contains(part), "{part} in: {message}");
+    }
+    assert!(!message.contains("cannot render this yet"), "{message}");
+    assert!(!destination.exists());
+}
+#[test]
+fn an_image_sequence_read_in_place_exports_its_frames_at_their_times() {
+    use pm_protocol::{color::QuickTimeTag, priority::ProResProfile};
+    let dir = tempfile::tempdir().unwrap();
+    let frames = dir.path().join("frames");
+    std::fs::create_dir(&frames).unwrap();
+    let (project, media) = with_sequence(&frames);
+    let video = OutputColor::Rec709QuickTime {
+        candidate: QuickTimeTag::Cicp1_13_1,
+    };
+    let formats = [
+        ("h264.mp4", ExportFormat::H264),
+        (
+            "prores.mov",
+            ExportFormat::ProRes {
+                profile: ProResProfile::Hq,
+            },
+        ),
+    ];
+    let request = |name: &str, format: ExportFormat| {
+        let mut request = request_for(&project, dir.path().join(name), 1);
+        request.originals = media.originals.clone();
+        let JobSpec::Export { settings, .. } = &mut request.spec else {
+            unreachable!()
+        };
+        settings.format = format;
+        settings.color = video;
+        settings.alpha = AlphaOutput::None;
+        settings.range.end = Ticks::new(Ticks::from_whole_seconds(2).get() / 5).unwrap();
+        request
+    };
+    for (name, format) in formats {
+        let status = finish(request(name, format));
+        assert_eq!(status.state, JobState::Done, "{name}: {status:?}");
+        let shown = centres(&dir.path().join(name));
+        assert_eq!(shown.len(), 12, "{name}");
+        for (k, got) in shown.iter().enumerate() {
+            let want = sequence_colour(k as u16 / 2 + 1);
+            for c in 0..3 {
+                assert!(
+                    (i32::from(got[c]) - i32::from(want[c])).abs() < 2_000,
+                    "{name} frame {k}: {got:?}, file {} is {want:?}",
+                    k / 2 + 1
+                );
+            }
+        }
+    }
+    std::fs::remove_file(frames.join("shot.0004.png")).unwrap();
+    for (name, format) in formats {
+        let name = format!("missing-{name}");
+        let status = finish(request(&name, format));
+        assert_eq!(status.state, JobState::Failed, "{name}: {status:?}");
+        assert_eq!(
+            status.error.unwrap().message,
+            "Frame 4 of an image sequence is missing: shot.0004.png. Render it into the \
+             sequence’s folder, or relink the sequence.",
+            "{name}"
+        );
+        assert!(!dir.path().join(&name).exists(), "{name}");
     }
 }

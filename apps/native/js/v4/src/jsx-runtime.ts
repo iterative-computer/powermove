@@ -44,16 +44,14 @@ export interface SurfaceProps {
   "aria-valuenow"?: number;
   "data-pm-component"?: string;
   "data-pm-slot"?: string;
-  /** How the native host presents this element: a borderless bar pop-up, or a
-   * row whose selection spans its whole band. */
-  "data-pm-variant"?: "inline" | "band";
+  /** How the native host presents this element: a borderless bar pop-up
+   * (inline, or quiet: no wash), a row whose selection spans its whole band,
+   * or code (a command, path or tool output, in the monospaced face). */
+  "data-pm-variant"?: "inline" | "quiet" | "band" | "code";
   /** Files dropped from Finder land on this target. */
   "data-pm-drop"?: "files";
-  /** A scroller that follows its end while the reader is there (a
-   * conversation); it reports `scroll` `{away}` when they leave or return. */
-  "data-pm-follow"?: "end";
-  /** A new value takes a following scroller back to its end. */
-  "data-pm-follow-token"?: string | number;
+  /** An end-anchored scroller (`metadata.scrollAnchor: "end"`) reports
+   * `{away}` when the reader leaves its end or returns. */
   onScroll?: (event: SurfaceEvent) => void;
   "data-pm-system-placement"?: "system";
   "data-pm-dismiss-outside"?: boolean;

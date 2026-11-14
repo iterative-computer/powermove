@@ -1,5 +1,5 @@
 {
-  "source": "b81b94c66, with the native Studio additions of bd30e2037",
+  "source": "b81b94c66, with the native Studio additions of bd30e2037; imported-model picking and light operations of 4df973fdb",
   "tools": [
     {
       "name": "get_3d_scene",
@@ -10,13 +10,22 @@
         "properties": {
           "target": {
             "type": "string"
+          },
+          "pick": {
+            "type": "array",
+            "description": "Optional [x, y] in composition pixels: returns pick {layerId, materialIndex, slotName, point, distance} for the imported-model part under that point through the shot camera (the material slot edit_3d's materialIndex addresses), or null.",
+            "items": {
+              "type": "number"
+            },
+            "minItems": 2,
+            "maxItems": 2
           }
         }
       }
     },
     {
       "name": "edit_3d",
-      "description": "Create and edit individual 3D model, light and camera layers in the normal timeline. Each add operation makes a separate layer; there is no scene container. Operations: create (optional scene, name), add_object (object with source primitive box/roundedBox (radius = edge radius)/sphere/plane/cylinder/cone/torus/capsule/icosahedron, imported assetId, indexed mesh, lathe profile or extrude outline), add_light (sun/point/spot/area — area lights are softboxes with width/height), add_camera, update_object, update_light, remove, duplicate, set_camera, set_environment, and the Studio product-film operations: apply_material {target, preset: anodized/brushed/polished/gold/glass/frosted/lacquer/soft-touch/ceramic/rubber/screen, p?}, light_highlight {at:[x,y,z] world point on the product, normal:[x,y,z], size?, intensity?, distance?} (places a softbox whose reflection lands on that point as the camera sees it), shot {shot: turntable/push_in/orbit/hero_tilt/rack_focus, target?, start?, duration?, degrees?, amount?, from?, to?} (writes keyframes), set_studio {on, color?} (seamless backdrop with a shadow-catching floor), explode {target: model group, amount?, start?, duration?} (parts move out from the centre as keyframes), drop_to_floor {target}, place_on {target, on_target}, auto_studio (camera framing every model, key/fill/rim softboxes and the studio set), soften {target: softbox, amount: scale factor}. Updates, remove and duplicate address the actual layer by id or target. patch.p values can be plain numbers/colors/bools or existing animation channels. Objects have p x/y/z, rx/ry/rz in degrees, sx/sy/sz; material.p color/roughness/metalness/emissive/emissiveIntensity/opacity/clearcoat/clearcoatRoughness/transmission/ior/specular/sheen/iridescence/dispersion/droplets/anisotropy (-1..1, brushed metal)/subsurface (scene units light travels inside; wax, soap, skin), material.screen (a composition ID that plays on the surface as a live screen; emissiveIntensity sets its brightness) and maps of durable image asset IDs (color/normal/roughness/metalness/emissive/ao). Material maps replace the entire map set. The model background is transparent by default. Lights support intensity, color, position, target and shadows. All edits are validated, undoable and revision guarded. Animate with apply_commands set_property/replace_keyframes on the actual layer: position.x/y/z, rotation.x/y/rotation (degrees), scale.x/y/z (percent), m.KEY, light.KEY, camera.KEY, environment.KEY. Use get_3d_scene and render_frames to verify. Never write raw project JSON. Native Studio also supports set_world {world or patch}, add_fog {fog}, update_fog {target,patch}, add_terrain {terrain}, update_terrain {target,patch}, add_scatter {scatter}, update_scatter {target,patch}, set_material_options {target,patch} and set_render_quality {preset: draft/preview/production/final or patch}. Environment settings use ordinary world.KEY, fog.KEY, terrain.KEY, terrain.regionN.KEY, scatter.KEY and materialOptions.KEY channels. Scene data and commands are available; native renderer translation for new environment nodes remains in progress. Text/shape layers support set_extrusion {target,patch:{enabled,depth,bevelStyle:none/angular/concave/convex,bevelDepth,holeBevelDepth,quality:draft/standard/high}}. Four surfaces front/bevel/side/back support set_surface_material_properties {target,surface,patch:{color,opacity,roughness,metallic,emissionColor,emissionIntensity,ambientResponse}} and set_surface_material_map {target,surface,slot,map}; null clears an override. Animate geo.KEY and ms.SURFACE.KEY using ordinary properties.",
+      "description": "Create and edit individual 3D model, light and camera layers in the normal timeline. Each add operation makes a separate layer; there is no scene container. Operations: create (optional scene, name), add_object (object with source primitive box/roundedBox (radius = edge radius)/sphere/plane/cylinder/cone/torus/capsule/icosahedron, imported assetId, indexed mesh, lathe profile or extrude outline), add_light (sun/point/spot/area — area lights are softboxes with width/height), add_camera, update_object, update_light, remove, duplicate, set_camera, set_environment, and the Studio product-film operations: apply_material {target, preset: anodized/brushed/polished/gold/glass/frosted/lacquer/soft-touch/ceramic/rubber/screen, p?}, light_highlight {at:[x,y,z] world point on the product, normal:[x,y,z], size?, intensity?, distance?} (places a softbox whose reflection lands on that point as the camera sees it), shot {shot: turntable/push_in/orbit/hero_tilt/rack_focus, target?, start?, duration?, degrees?, amount?, from?, to?} (writes keyframes), set_studio {on, color?} (seamless backdrop with a shadow-catching floor), explode {target: model group, amount?, start?, duration?} (parts move out from the centre as keyframes), drop_to_floor {target}, place_on {target, on_target}, auto_studio (camera framing every model, key/fill/rim softboxes and the studio set), soften {target: softbox, amount: scale factor}, light_preset {preset: rim_left/rim_right/top/edge_card/strip, target?: model (default the first), intensity?, color? or temperature? (kelvin)} (area lights placed for that model as the current camera sees it: rim strips behind and beside it, a top softbox, an edge-highlight card beside it toward the camera for thin chamfer and lens-ring highlights), and aim_light {target: light, at: model ID or [x,y,z]}. Updates, remove and duplicate address the actual layer by id or target. patch.p values can be plain numbers/colors/bools or existing animation channels. Objects have p x/y/z, rx/ry/rz in degrees, sx/sy/sz as factors (1 = 100%; 1.188 = 118.8%). add_object with an imported glTF/GLB assetId accepts keepRealWorldScale:true to preserve metre dimensions and the source origin, using the current World metersPerUnit (default 0.1). Default import fitting is unchanged. Apply object transforms after this import option; material.p color/roughness/metalness/emissive/emissiveIntensity/opacity/clearcoat/clearcoatRoughness/transmission/ior/specular/sheen/iridescence/dispersion/droplets/anisotropy (-1..1, brushed metal)/subsurface (scene units light travels inside; wax, soap, skin), material.screen (a composition ID that plays on the surface as a live screen; emissiveIntensity sets its brightness) and maps of durable image asset IDs (color/normal/roughness/metalness/emissive/ao). Material maps replace the entire map set. The model background is transparent by default. Lights support intensity, color, position, target and shadows. All edits are validated, undoable and revision guarded. Animate with apply_commands set_property/replace_keyframes on the actual layer: position.x/y/z, rotation.x/y/rotation (degrees), scale.x/y/z (percent), m.KEY, light.KEY, camera.KEY, environment.KEY. Use get_3d_scene and render_frames to verify. Never write raw project JSON. Native Studio also supports set_world {world or patch}, add_fog {fog}, update_fog {target,patch}, add_terrain {terrain}, update_terrain {target,patch}, add_scatter {scatter}, update_scatter {target,patch}, set_material_options {target,patch} and set_render_quality {preset: draft/preview/production/final or patch}. Environment settings use ordinary world.KEY, fog.KEY, terrain.KEY, terrain.regionN.KEY, scatter.KEY and materialOptions.KEY channels. Scene data and commands are available; native renderer translation for new environment nodes remains in progress. Imported models (glTF/GLB/FBX) take per-part materials: get_3d_scene lists each model asset's materialSlots [{index,name}]; set_material_properties {target, materialIndex, patch:{color,metallic,roughness,clearcoat,clearcoatRoughness,transmission,ior,emissionColor,emissionIntensity,iridescence,opacity}} overrides one slot in the project (null restores the part's own value; omit materialIndex for every part), and set_material_map {target, materialIndex, slot:color/normal/roughness/metalness/emissive/ao, map: image asset ID, {layerId} or {compositionId}} paints it (a layer as the material). Overrides are mi.INDEX.KEY channels. Text/shape layers support set_extrusion {target,patch:{enabled,depth,bevelStyle:none/angular/concave/convex,bevelDepth,holeBevelDepth,quality:draft/standard/high}}. Four surfaces front/bevel/side/back support set_surface_material_properties {target,surface,patch:{color,opacity,roughness,metallic,emissionColor,emissionIntensity,ambientResponse}} and set_surface_material_map {target,surface,slot,map}; null clears an override. Animate geo.KEY and ms.SURFACE.KEY using ordinary properties.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -43,6 +52,8 @@
               "place_on",
               "auto_studio",
               "soften",
+              "aim_light",
+              "light_preset",
               "set_world",
               "add_fog",
               "update_fog",
@@ -68,6 +79,9 @@
           "name": {
             "type": "string",
             "maxLength": 160
+          },
+          "keepRealWorldScale": {
+            "type": "boolean"
           },
           "object": {
             "type": "object"
@@ -176,7 +190,8 @@
           "materialIndex": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 3
+            "maximum": 9999,
+            "description": "Extruded surface map slot (0-3), or an imported model's material slot (get_3d_scene materialSlots)."
           },
           "slot": {
             "type": "string",
@@ -201,6 +216,12 @@
                 "type": "null"
               }
             ]
+          },
+          "temperature": {
+            "type": "number"
+          },
+          "side": {
+            "type": "string"
           }
         },
         "required": [
@@ -210,7 +231,7 @@
     },
     {
       "name": "export_video",
-      "description": "Render the current project to MP4 (default) or ProRes with its audio. Uses the production renderer and FFmpeg encoder; returns the actual file path and stage timings after encoding finishes. Exports without a save dialog to the host export folder (desktop: ~/Powermove), using a unique filename. A long export keeps running and this call returns {status:\"running\", jobId, progress} after about 20 minutes; call export_video again with only that jobId to keep waiting. Never start a second export meanwhile. Native Studio accepts studioQuality (draft/preview/production/final or a quality patch) for this export only. Saved composition quality is unchanged. Stills and deliveries converge toward the noise threshold up to the sample ceiling; timeLimitSeconds is a preview hint, not a delivery deadline. The preset motionBlurSamples field is saved but its shutter integration is pending.",
+      "description": "Render the current project to MP4 (default) or ProRes with its audio. Uses the production renderer and FFmpeg encoder; returns the actual file path and stage timings after encoding finishes. Exports without a save dialog to the host export folder (desktop: ~/Powermove), using a unique filename. A long export keeps running and this call returns {status:\"running\", jobId, progress} after about 20 minutes; call export_video again with only that jobId to keep waiting. Never start a second export meanwhile. Native Studio accepts studioQuality (draft/preview/production/final or a quality patch) for this export only. Saved composition quality is unchanged. Stills and deliveries converge toward the noise threshold up to the sample ceiling; timeLimitSeconds is a preview hint, not a delivery deadline. The preset motionBlurSamples field is saved but its shutter integration is pending. Every option of the Export sheet is available under the sheet's own names (format webm too): profile, codec, quality, scale with width and height, fps, dynamicRange, colorTag, timecode, audioCoding, useProxies, captionsBurn, captionsSidecar and dolbyVision; absent ones keep the output above. The result carries notes when the person would be told something with the file (sound clipped).",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -224,7 +245,8 @@
             "type": "string",
             "enum": [
               "mp4",
-              "prores"
+              "prores",
+              "webm"
             ]
           },
           "range": {
@@ -242,6 +264,124 @@
           },
           "alpha": {
             "type": "boolean"
+          },
+          "profile": {
+            "type": "string",
+            "enum": [
+              "422proxy",
+              "422lt",
+              "422",
+              "422hq",
+              "4444",
+              "4444xq"
+            ],
+            "description": "ProRes flavour (format prores). Default 4444."
+          },
+          "codec": {
+            "type": "string",
+            "enum": [
+              "h264",
+              "hevc"
+            ],
+            "description": "MP4 codec: H.264, or 10-bit HEVC. Default h264."
+          },
+          "quality": {
+            "type": "string",
+            "enum": [
+              "draft",
+              "high",
+              "max"
+            ],
+            "description": "MP4 and WebM data rate: draft 4, high 16, max 40 Mbps. Default high."
+          },
+          "scale": {
+            "oneOf": [
+              {
+                "type": "number",
+                "enum": [
+                  0.5,
+                  1,
+                  2
+                ]
+              },
+              {
+                "type": "string",
+                "enum": [
+                  "custom"
+                ]
+              }
+            ],
+            "description": "Output size as a fraction of the composition's, or custom with width and height. Default 1."
+          },
+          "width": {
+            "type": "integer",
+            "minimum": 16,
+            "maximum": 8192,
+            "description": "Output width in pixels with scale custom."
+          },
+          "height": {
+            "type": "integer",
+            "minimum": 16,
+            "maximum": 8192,
+            "description": "Output height in pixels with scale custom."
+          },
+          "fps": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "maximum": 240,
+            "description": "Frame rate of the file, such as 23.976, 25 or 29.97. Default the composition's."
+          },
+          "dynamicRange": {
+            "type": "string",
+            "enum": [
+              "sdr",
+              "pq",
+              "hlg"
+            ],
+            "description": "SDR, or HDR as PQ or HLG (projects that keep HDR light; HEVC or ProRes). Default sdr."
+          },
+          "colorTag": {
+            "type": "string",
+            "enum": [
+              "rec709QuickTime",
+              "rec709"
+            ],
+            "description": "The label of an SDR ProRes or MP4: Rec.709 as QuickTime and Safari read it (1-13-1, the default), or broadcast Rec.709 (1-1-1). The picture's codes are the same."
+          },
+          "timecode": {
+            "type": "string",
+            "pattern": "^$|^[0-9]{2}:[0-5][0-9]:[0-5][0-9][:;][0-9]{2}$",
+            "description": "Start timecode of a ProRes file, HH:MM:SS:FF (;FF for drop-frame). Default the composition's own time."
+          },
+          "audioCoding": {
+            "type": "string",
+            "enum": [
+              "pcm24",
+              "pcm16",
+              "pcmFloat"
+            ],
+            "description": "Sound of a ProRes file: 24-bit, 16-bit or 32-bit float PCM. Default pcm24."
+          },
+          "useProxies": {
+            "type": "boolean",
+            "description": "Read proxy media where it exists, for a quick draft. Default false: originals."
+          },
+          "captionsBurn": {
+            "type": "boolean",
+            "description": "Draw the composition's captions into the picture. Default false."
+          },
+          "captionsSidecar": {
+            "type": "string",
+            "enum": [
+              "none",
+              "srt",
+              "vtt"
+            ],
+            "description": "Caption files beside the video (Film.srt, or Film.en.srt with several captions layers). Default none."
+          },
+          "dolbyVision": {
+            "type": "boolean",
+            "description": "HLG HEVC (an MP4 with dynamicRange hlg): keep the Dolby Vision 8.4 metadata macOS adds for displays that use it. Default true; players without it show the HLG picture either way."
           },
           "jobId": {
             "type": "string",

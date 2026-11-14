@@ -5,7 +5,7 @@
  * and draws it with the native kit and pm-design tokens.
  */
 import type { ComponentChildren } from "preact";
-import { useLayoutEffect, useState } from "preact/hooks";
+import { useLayoutEffect, useRef, useState } from "preact/hooks";
 import * as UI from "../../src/components";
 import type { Json, SurfaceEvent } from "../../src/protocol";
 import type {
@@ -55,9 +55,6 @@ type Obj = Record<string, Json>;
 const obj = (v: unknown): Obj =>
   v && typeof v === "object" && !Array.isArray(v) ? (v as Obj) : {};
 
-/** The system's fixed-width face, for source text, paths and tool arguments. */
-const MONO = "mono";
-
 const column: Style = { display: "flex", flexDirection: "column" };
 const row: Style = {
   display: "flex",
@@ -92,8 +89,9 @@ const strong: Style = {
   fontSize: t("typography.title"),
   fontWeight: t("typography.semibold_weight"),
 };
+/** A hairline chip in the code face (`data-pm-variant="code"`), cut in the
+ * middle so a path keeps its start and its file name. */
 const chip: Style = {
-  fontFamily: MONO,
   fontSize: t("typography.minimum"),
   color: t("colors.secondary"),
   background: t("colors.fill"),
@@ -103,7 +101,7 @@ const chip: Style = {
   paddingLeft: t("metrics.gap"),
   paddingRight: t("metrics.gap"),
   whiteSpace: "nowrap",
-  textOverflow: "ellipsis",
+  textOverflow: "middle",
   ...shrink,
 };
 /** A card in the conversation: questions, errors, results. */
@@ -214,8 +212,8 @@ function ProseBlock({
           }}
         >
           <text
+            data-pm-variant="code"
             style={{
-              fontFamily: MONO,
               fontSize: t("typography.minimum"),
               color: t("colors.text"),
               lineHeight: t("typography.dense_leading"),
@@ -230,68 +228,174 @@ function ProseBlock({
   }
 }
 
-// ── Header: the thread bar ───────────────────────────────────────────────
+// ── Menus and the thread bar ────────────────────────────────────────────
 
-function Header({ s, n, send }: { s: Snapshot; n: NativeFacts; send: Send }) {
-  const threads = s.threads ?? [];
-  const now = Date.now();
+/** One row of the window's field menu (the kit's searchable menu). */
+export interface MenuOption {
+  label: string;
+  value: string;
+  checked?: boolean;
+  /** The section it is listed under. */
+  category?: string;
+}
+/** Opens the field menu under `anchor` (a node id); answers the chosen
+ * value, or null when it closed unchosen. */
+export type Menu = (request: {
+  anchor: number;
+  placeholder: string;
+  options: MenuOption[];
+}) => Promise<unknown>;
+/** A borderless trigger in a bar or header that opens the window's menu:
+ * its value, then the pop-up chevron (as a bar NSPopUpButton). */
+function Trigger({
+  id,
+  label,
+  text,
+  disabled,
+  open,
+  tone = "colors.secondary",
+}: {
+  id: string;
+  label: string;
+  text: string;
+  disabled?: boolean;
+  open: (anchor: number) => void;
+  tone?: string;
+}) {
+  return (
+    <UI.ToolbarItem
+      id={id}
+      label={label}
+      aria-haspopup="menu"
+      disabled={disabled}
+      onClick={(event) => {
+        if (!disabled) open(Number(event.currentTarget));
+      }}
+      style={{
+        ...row,
+        ...shrink,
+        gap: t("metrics.pill_inset"),
+        paddingLeft: t("metrics.gap"),
+        paddingRight: t("metrics.gap"),
+        borderRadius: t("metrics.inner_radius"),
+        color: t(tone),
+      }}
+    >
+      <text
+        style={{
+          ...quiet,
+          ...shrink,
+          color: t(tone),
+          whiteSpace: "nowrap",
+          textOverflow: "ellipsis",
+        }}
+      >
+        {text}
+      </text>
+      <div
+        metadata={{ symbol: "chevron.up.chevron.down" }}
+        style={{
+          color: t("colors.muted"),
+          symbolSize: t("metrics.symbol_inline"),
+          flexShrink: 0,
+        }}
+      />
+    </UI.ToolbarItem>
+  );
+}
+function Header({
+  s,
+  n,
+  send,
+  menu,
+}: {
+  s: Snapshot;
+  n: NativeFacts;
+  send: Send;
+  menu?: Menu;
+}) {
+  const popover = n.presentation === "popover";
   const title = s.threadTitle || "New thread";
-  const options = threads.length
-    ? threads.map((thread) => ({
-        v: thread.id,
-        label: thread.title || "New thread",
-        detail: thread.busy
-          ? "Working…"
-          : thread.id === s.threadId
-            ? "Current"
-            : relativeOpened(thread.updatedAt, now),
-      }))
-    : [{ v: s.threadId, label: title, detail: "Current" }];
   // Switching while a change is applied would leave it half done.
   const blocked = s.composerDisabled;
   return (
+    // The header slot: the popover draws it on its own ground; docked, it
+    // shares the dock's tab row.
     <div
       id="agent-header"
+      data-pm-slot="header"
       role="group"
       label="Agent threads"
       style={{
         ...row,
         flexShrink: 0,
-        gap: t("metrics.gap"),
+        gap: t("metrics.pill_inset"),
         height: t("metrics.header"),
-        paddingLeft: t("metrics.text_padding"),
-        paddingRight: t("metrics.text_padding"),
+        paddingLeft: t("metrics.gap"),
+        paddingRight: t("metrics.gap"),
       }}
     >
-      <UI.PopUpButton
+      <Trigger
         id="agent-threads"
-        data-pm-variant="inline"
         label={
           blocked
             ? "Finish applying the current change to switch threads"
-            : "Switch thread"
+            : `Switch thread, ${title}`
         }
-        title={
-          blocked
-            ? "Finish applying the current change to switch threads"
-            : "Switch thread"
-        }
-        value={s.threadId}
-        display={title}
-        binding={n.bindings.model}
-        disabled={blocked}
-        options={options}
-        onChange={(e) => {
-          const id = String(e.value);
-          if (id && id !== s.threadId) send({ type: "switchThread", id });
+        // Docked, the trigger names the list and the tab keeps its name.
+        text={popover ? title : "Threads"}
+        tone="colors.text"
+        disabled={!menu}
+        open={(anchor) => {
+          const threads = s.threads ?? [];
+          const current = threads.find((t) => t.id === s.threadId);
+          const now = Date.now();
+          void menu?.({
+            anchor,
+            placeholder: "Search threads…",
+            options: [
+              ...(blocked ? [] : [{ label: "New Thread", value: "new" }]),
+              ...threads.map((t) => ({
+                // Each thread says where it stands, as the original's list.
+                label: `${t.title || "New thread"} · ${
+                  t.busy
+                    ? "Working…"
+                    : t.id === s.threadId
+                      ? "Current"
+                      : relativeOpened(t.updatedAt, now)
+                }`,
+                value: `thread:${t.id}`,
+                checked: t.id === s.threadId,
+                category: "Threads",
+              })),
+              // Apart from the list, last: the one destructive row.
+              ...(current
+                ? [
+                    {
+                      label: "Delete Thread…",
+                      value: `delete:${current.id}`,
+                      category: "This Thread",
+                    },
+                  ]
+                : []),
+            ],
+          }).then((choice) => {
+            if (typeof choice !== "string") return;
+            if (choice === "new") send({ type: "newThread" });
+            else if (choice.startsWith("thread:")) {
+              const id = choice.slice(7);
+              if (id !== s.threadId && !blocked)
+                send({ type: "switchThread", id });
+            } else if (choice.startsWith("delete:"))
+              send({ type: "deleteThread", id: choice.slice(7) });
+          });
         }}
-        style={{ ...shrink, color: t("colors.secondary") }}
       />
       <div style={{ flexGrow: 1 }} />
       <UI.ToolbarItem
         id="agent-new"
-        label="New thread"
-        title="New thread"
+        label="New Thread"
+        title="New Thread"
         disabled={blocked}
         metadata={{ symbol: "plus" }}
         style={{ flexShrink: 0, symbolSize: t("metrics.symbol_panel") }}
@@ -299,6 +403,16 @@ function Header({ s, n, send }: { s: Snapshot; n: NativeFacts; send: Send }) {
           if (!blocked) send({ type: "newThread" });
         }}
       />
+      {popover && (
+        <UI.ToolbarItem
+          id="agent-presentation"
+          label="Pin to Workspace"
+          title="Pin to Workspace"
+          metadata={{ symbol: "pin" }}
+          style={{ flexShrink: 0, symbolSize: t("metrics.symbol_panel") }}
+          onClick={() => send({ type: "shell", action: "pin" })}
+        />
+      )}
     </div>
   );
 }
@@ -590,8 +704,8 @@ function ErrorNotice({
             }}
           >
             <text
+              data-pm-variant="code"
               style={{
-                fontFamily: MONO,
                 fontSize: t("typography.minimum"),
                 color: t("colors.secondary"),
                 lineHeight: t("typography.dense_leading"),
@@ -665,7 +779,7 @@ function UserMessage({
         {files.length > 0 && (
           <div style={{ ...row, flexWrap: "wrap", gap: t("metrics.gap") }}>
             {files.map((f, i) => (
-              <text key={i} style={chip}>
+              <text key={i} data-pm-variant="code" style={chip}>
                 {str(obj(f).name) || "File"}
               </text>
             ))}
@@ -1001,7 +1115,7 @@ function Tools({
           }}
         >
           {r.files.map((f) => (
-            <text key={f} style={chip}>
+            <text key={f} data-pm-variant="code" style={chip}>
               {f}
             </text>
           ))}
@@ -1108,14 +1222,19 @@ function ToolLine({
         : d.span);
   const line = (
     <>
-      <div
-        metadata={{ symbol: open ? "chevron.down" : symbol }}
-        style={{
-          color: t(d.status === "error" ? "colors.danger" : "colors.muted"),
-          symbolSize: t("metrics.symbol_inline"),
-          flexShrink: 0,
-        }}
-      />
+      {running && !open ? (
+        // A small spinner while the call runs (the kit's indeterminate row).
+        <UI.ProgressRow label={`${d.label} is running`}>{[]}</UI.ProgressRow>
+      ) : (
+        <div
+          metadata={{ symbol: open ? "chevron.down" : symbol }}
+          style={{
+            color: t(d.status === "error" ? "colors.danger" : "colors.muted"),
+            symbolSize: t("metrics.symbol_inline"),
+            flexShrink: 0,
+          }}
+        />
+      )}
       <text style={{ ...quiet, color: t("colors.text"), flexShrink: 0 }}>
         {d.label}
       </text>
@@ -1207,8 +1326,8 @@ function ToolLine({
             <Prose text={d.output} style={faint} />
           ) : (
             <text
+              data-pm-variant="code"
               style={{
-                fontFamily: MONO,
                 fontSize: t("typography.minimum"),
                 color: t("colors.secondary"),
                 lineHeight: t("typography.dense_leading"),
@@ -1563,13 +1682,27 @@ function Conversation({
 // ── Composer ─────────────────────────────────────────────────────────────
 
 /** A saved choice the catalog no longer lists stays visible rather than blank. */
+/** The catalog's name for a value (the value itself when unlisted). */
+function named(entries: [string, string][], current: string) {
+  return entries.find(([v]) => v === current)?.[1] || current || "Default";
+}
 function pairs(entries: [string, string][], current: string) {
   const options = entries.map(([v, label]) => ({ v, label }));
   return entries.some(([v]) => v === current)
     ? options
     : [...options, { v: current, label: current }];
 }
-function Composer({ s, n, send }: { s: Snapshot; n: NativeFacts; send: Send }) {
+function Composer({
+  s,
+  n,
+  send,
+  menu,
+}: {
+  s: Snapshot;
+  n: NativeFacts;
+  send: Send;
+  menu?: Menu;
+}) {
   const working = s.runId !== null;
   const available = n.connection === "connected";
   const disabled = !available || s.composerDisabled;
@@ -1580,20 +1713,33 @@ function Composer({ s, n, send }: { s: Snapshot; n: NativeFacts; send: Send }) {
       : "Describe a change…";
   const hasDraft = s.draft.text.trim().length > 0 || s.attachments.length > 0;
   const sendLabel = working ? "Send direction" : "Send";
-  const slash = s.slash.visible ? s.slash.choices.slice(0, 8) : [];
-  const choose = (id: string, value: string | null) => {
-    // Shortcuts the host carries out as the composer's own buttons do.
-    const clear = () =>
-      send({ type: "draft", text: "", selection: [0, 0], base: s.draft.text });
-    if (id === "attach") {
-      clear();
-      send({ type: "attach" });
-    } else if (id === "new") {
-      clear();
-      send({ type: "newThread" });
-    } else send({ type: "chooseSlash", id });
-    void value;
-  };
+  // The shortcuts menu hangs from the composer, once per draft that asks
+  // for it (the window's searchable menu); closing it unchosen leaves the
+  // draft as typed.
+  const composerNode = useRef<number | null>(null);
+  const focused = useRef(false);
+  const opened = useRef<string | null>(null);
+  const slashDraft =
+    s.slash.visible && s.slash.choices.length ? s.draft.text : null;
+  useLayoutEffect(() => {
+    if (slashDraft === null) {
+      opened.current = null;
+      return;
+    }
+    if (!menu || opened.current === slashDraft || composerNode.current === null)
+      return;
+    opened.current = slashDraft;
+    void menu({
+      anchor: composerNode.current,
+      placeholder: "Search commands",
+      options: s.slash.choices.map((c) => {
+        const copy = n.slashCopy[c.id] ?? slashCopy(c.id, c.value, s);
+        return { label: `${copy.label} — ${copy.description}`, value: c.id };
+      }),
+    }).then((id) => {
+      if (typeof id === "string") send({ type: "chooseSlash", id });
+    });
+  }, [slashDraft]);
   return (
     <div
       id="agent-composer"
@@ -1614,57 +1760,6 @@ function Composer({ s, n, send }: { s: Snapshot; n: NativeFacts; send: Send }) {
         marginBottom: t("metrics.text_padding"),
       }}
     >
-      {slash.length > 0 && (
-        <div
-          id="agent-shortcuts"
-          role="listbox"
-          label="Shortcuts"
-          style={{
-            ...column,
-            gap: t("metrics.pill_inset"),
-            padding: t("metrics.gap"),
-          }}
-        >
-          {slash.map((c, i) => {
-            const copy = n.slashCopy[c.id] ?? slashCopy(c.id, c.value, s);
-            const on = i === s.slash.index;
-            return (
-              <div
-                key={c.id}
-                role="option"
-                label={copy.label}
-                aria-selected={on}
-                onClick={() => choose(c.id, c.value)}
-                style={{
-                  ...row,
-                  gap: t("metrics.text_padding"),
-                  height: t("metrics.control"),
-                  paddingLeft: t("metrics.text_padding"),
-                  paddingRight: t("metrics.text_padding"),
-                  borderRadius: t("metrics.control_radius"),
-                  ...(on ? { background: t("colors.fill_strong") } : {}),
-                }}
-              >
-                <text
-                  style={{ ...quiet, color: t("colors.text"), flexShrink: 0 }}
-                >
-                  {copy.label}
-                </text>
-                <text
-                  style={{
-                    ...faint,
-                    ...shrink,
-                    whiteSpace: "nowrap",
-                    textOverflow: "ellipsis",
-                  }}
-                >
-                  {copy.description}
-                </text>
-              </div>
-            );
-          })}
-        </div>
-      )}
       <div
         id="agent-field"
         style={{
@@ -1785,9 +1880,14 @@ function Composer({ s, n, send }: { s: Snapshot; n: NativeFacts; send: Send }) {
                 selection: [text.length, text.length],
                 base: s.draft.text,
               });
-              // The shortcuts menu answers to the composer it belongs to.
-              if (text.startsWith("/") && !s.slash.visible)
+              // Typing says the composer is focused (the host reports no
+              // focus of its own for a hosted editor), so shortcuts can show;
+              // the menu hangs from this node.
+              composerNode.current = Number(event.currentTarget);
+              if (!focused.current) {
+                focused.current = true;
                 send({ type: "focus", focused: true });
+              }
             }}
             onChange={(event) => {
               // The native editor reports the text as it is typed, so Send
@@ -1900,87 +2000,112 @@ function Composer({ s, n, send }: { s: Snapshot; n: NativeFacts; send: Send }) {
           paddingRight: t("metrics.gap"),
         }}
       >
-        <UI.PopUpButton
-          data-pm-variant="inline"
+        {/* The original's three run choices and its access mode, each a
+            trigger for the window's searchable menu. */}
+        <Trigger
           id="agent-provider"
-          label="Provider"
-          value={s.settings.provider}
-          binding={n.bindings.model}
-          disabled={working || s.composerDisabled}
-          onChange={(e) =>
-            send({ type: "setProvider", provider: String(e.value) })
-          }
-          options={pairs(s.catalog.providers, s.settings.provider)}
-          style={{ ...shrink, color: t("colors.secondary") }}
-        />
-        <UI.PopUpButton
-          data-pm-variant="inline"
-          id="agent-model"
-          label="Model"
-          value={s.settings.model}
-          binding={n.bindings.model}
-          disabled={working || s.composerDisabled}
-          onChange={(e) =>
-            send({
-              type: "setModel",
-              model: String(e.value),
-              effort: s.settings.effort,
+          label={`Provider, ${named(s.catalog.providers, s.settings.provider)}`}
+          text={named(s.catalog.providers, s.settings.provider)}
+          disabled={!menu || working || s.composerDisabled}
+          open={(anchor) =>
+            void menu?.({
+              anchor,
+              placeholder: "Search providers",
+              options: pairs(s.catalog.providers, s.settings.provider).map(
+                ({ v, label }) => ({
+                  label,
+                  value: v,
+                  checked: v === s.settings.provider,
+                  category: "Provider",
+                }),
+              ),
+            }).then((choice) => {
+              if (typeof choice === "string" && choice !== s.settings.provider)
+                send({ type: "setProvider", provider: choice });
             })
           }
-          options={pairs(s.catalog.models, s.settings.model)}
-          style={{ ...shrink, color: t("colors.secondary") }}
+        />
+        <Trigger
+          id="agent-model"
+          label={`Model, ${named(s.catalog.models, s.settings.model)}`}
+          text={named(s.catalog.models, s.settings.model)}
+          disabled={!menu || working || s.composerDisabled}
+          open={(anchor) =>
+            void menu?.({
+              anchor,
+              placeholder: "Search models",
+              options: pairs(s.catalog.models, s.settings.model).map(
+                ({ v, label }) => ({
+                  label,
+                  value: v,
+                  checked: v === s.settings.model,
+                  category: "Model",
+                }),
+              ),
+            }).then((choice) => {
+              if (typeof choice === "string" && choice !== s.settings.model)
+                send({
+                  type: "setModel",
+                  model: choice,
+                  effort: s.settings.effort,
+                });
+            })
+          }
         />
         {s.catalog.efforts.length > 1 && (
-          <UI.PopUpButton
-            data-pm-variant="inline"
+          <Trigger
             id="agent-effort"
-            label="Reasoning effort"
-            value={s.settings.effort}
-            binding={n.bindings.model}
-            disabled={working || s.composerDisabled}
-            onChange={(e) =>
-              send({
-                type: "setModel",
-                model: s.settings.model,
-                effort: String(e.value),
+            label={`Reasoning effort, ${effortLabel(s.settings.effort)}`}
+            text={effortLabel(s.settings.effort)}
+            tone="colors.muted"
+            disabled={!menu || working || s.composerDisabled}
+            open={(anchor) =>
+              void menu?.({
+                anchor,
+                placeholder: "Search",
+                options: s.catalog.efforts.map((v) => ({
+                  label: effortLabel(v),
+                  value: v,
+                  checked: v === s.settings.effort,
+                  category: "Reasoning Effort",
+                })),
+              }).then((choice) => {
+                if (typeof choice === "string" && choice !== s.settings.effort)
+                  send({
+                    type: "setModel",
+                    model: s.settings.model,
+                    effort: choice,
+                  });
               })
             }
-            options={s.catalog.efforts.map((v) => ({
-              v,
-              label: effortLabel(v),
-            }))}
-            style={{ ...shrink, color: t("colors.muted") }}
           />
         )}
         <div style={{ flexGrow: 1 }} />
-        <UI.PopUpButton
-          data-pm-variant="inline"
+        <Trigger
           id="agent-access"
-          label={`Agent access: ${ACCESS[s.settings.access].label}`}
-          title={ACCESS[s.settings.access].detail}
-          value={s.settings.access}
-          binding={n.bindings.access}
-          disabled={working || s.composerDisabled}
-          onChange={(e) =>
-            send({ type: "setAccess", access: e.value as Access })
+          label={`Agent access, ${ACCESS[s.settings.access].label}`}
+          text={ACCESS[s.settings.access].label}
+          tone={
+            s.settings.access === "full" ? "colors.warning" : "colors.secondary"
           }
-          options={(Object.keys(ACCESS) as Access[]).map((v) => ({
-            v,
-            label: ACCESS[v].label,
-            detail: ACCESS[v].detail,
-            // Full access asks for consent the native host can't show yet.
-            ...(v === "full" && s.settings.access !== "full"
-              ? { disabled: true }
-              : {}),
-          }))}
-          style={{
-            flexShrink: 0,
-            color: t(
-              s.settings.access === "full"
-                ? "colors.warning"
-                : "colors.secondary",
-            ),
-          }}
+          disabled={!menu || working || s.composerDisabled}
+          open={(anchor) =>
+            void menu?.({
+              anchor,
+              placeholder: "Search",
+              // Each mode with its one line of what it allows; Full access
+              // asks for consent first (the window's alert).
+              options: (Object.keys(ACCESS) as Access[]).map((v) => ({
+                label: `${ACCESS[v].label} — ${ACCESS[v].detail}`,
+                value: v,
+                checked: v === s.settings.access,
+                category: "How should agent actions be approved?",
+              })),
+            }).then((choice) => {
+              if (typeof choice === "string" && choice !== s.settings.access)
+                send({ type: "setAccess", access: choice as Access });
+            })
+          }
         />
       </div>
     </div>
@@ -1992,39 +2117,17 @@ function Composer({ s, n, send }: { s: Snapshot; n: NativeFacts; send: Send }) {
 export function AgentView({
   publication: { snapshot: s, native: n },
   send,
+  menu,
 }: {
   publication: Publication;
   send: Send;
+  /** The window's field menu (threads, run choices, access, shortcuts). */
+  menu?: Menu;
 }) {
   const [open, setOpen] = useState<Record<string, boolean>>({});
   const [typed, setTyped] = useState<Record<string, string>>({});
   const [away, setAway] = useState(false);
   const [jumps, setJumps] = useState(0);
-  // "Working for" ticks between the model's publications, from the last
-  // elapsed time it published.
-  const [tick, setTick] = useState({
-    at: Date.now(),
-    now: Date.now(),
-    ms: s.elapsedMs,
-  });
-  if (tick.ms !== s.elapsedMs)
-    setTick({ at: Date.now(), now: Date.now(), ms: s.elapsedMs });
-  // A layout effect: Preact schedules plain effects on a timer the realm
-  // may not have; the tick itself only runs where timers exist.
-  useLayoutEffect(() => {
-    if (s.runId === null || typeof setTimeout !== "function") return;
-    let alive = true;
-    const step = () => {
-      if (!alive) return;
-      setTick((t) => ({ ...t, now: Date.now() }));
-      setTimeout(step, 1000);
-    };
-    const first = setTimeout(step, 1000);
-    return () => {
-      alive = false;
-      clearTimeout(first);
-    };
-  }, [s.runId]);
   if (!n.visible) return null;
   const local: Local = {
     open,
@@ -2052,7 +2155,7 @@ export function AgentView({
         background: t(popover ? "colors.floating" : "colors.panel"),
       }}
     >
-      <Header s={s} n={n} send={send} />
+      <Header s={s} n={n} send={send} menu={menu} />
       {s.saveError && (
         <div
           role="status"
@@ -2083,12 +2186,14 @@ export function AgentView({
         role="group"
         label={setup ? "Agent setup" : "Agent conversation"}
         tabIndex={0}
-        data-pm-follow="end"
-        data-pm-follow-token={`${s.threadId}:${jumps}`}
         onScroll={(e) => setAway(obj(e.value).away === true)}
         metadata={{
           count: s.rows.count,
           range: s.rows.range as unknown as Json,
+          // Bottom anchored: new content keeps the latest in view unless
+          // the person scrolled up; a new token goes back to the end.
+          scrollAnchor: "end",
+          scrollToken: `${s.threadId}:${jumps}`,
         }}
         style={{
           ...column,
@@ -2111,18 +2216,7 @@ export function AgentView({
           (empty ? (
             <Welcome s={s} n={n} send={send} />
           ) : (
-            <Conversation
-              s={
-                s.runId === null || s.elapsedMs === null
-                  ? s
-                  : {
-                      ...s,
-                      elapsedMs: s.elapsedMs + Math.max(0, tick.now - tick.at),
-                    }
-              }
-              send={send}
-              local={local}
-            />
+            <Conversation s={s} send={send} local={local} />
           ))}
       </div>
       {s.stopError && (
@@ -2175,7 +2269,7 @@ export function AgentView({
           />
         </div>
       )}
-      {!setup && <Composer s={s} n={n} send={send} />}
+      {!setup && <Composer s={s} n={n} send={send} menu={menu} />}
     </div>
   );
 }
@@ -2183,9 +2277,11 @@ export function AgentView({
 export function AgentPanel({
   model,
   onError,
+  menu,
 }: {
   model: AgentModel;
   onError: (error: unknown) => void;
+  menu?: Menu;
 }) {
   const [publication, setPublication] = useState(() => model.inspect());
   useLayoutEffect(() => {
@@ -2203,6 +2299,7 @@ export function AgentPanel({
   return (
     <AgentView
       publication={publication}
+      menu={menu}
       send={(action) => {
         void model.dispatch(action).catch(onError);
       }}

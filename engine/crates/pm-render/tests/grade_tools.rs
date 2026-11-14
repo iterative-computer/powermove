@@ -127,7 +127,7 @@ fn cdl(x: [f64; 3], slope: [f64; 3], offset: [f64; 3], power: [f64; 3], sat: f64
 fn neutral_grading_tools_return_the_same_bits() {
     let mut renderer = Renderer::headless().unwrap();
     let input = draw(&mut renderer, None);
-    for id in ["colorWheels", "colorCurves"] {
+    for id in ["colorWheels", "colorCurves", "colorSpaceTransform"] {
         let output = draw(&mut renderer, Some(effect(id, &json!({}))));
         let changed = input
             .iter()
@@ -212,13 +212,30 @@ fn color_wheels_match_their_stated_definition() {
     assert!(d < 2e-5, "{d:e}");
 }
 
-/// Monotone cubic Hermite through sorted points (Fritsch-Carlson tangents,
-/// end tangents the end secants), straight beyond the ends.
+/// Monotone cubic Hermite through the points sorted by In (Fritsch-Carlson
+/// tangents, end tangents the end secants), straight beyond the ends. Points
+/// whose In lie within 1e-6 of the one before are one point: the one written
+/// last survives. A single point left is the line of slope 1 through it.
 fn monotone(points: &[(f64, f64)], v: f64) -> f64 {
-    let mut p = points.to_vec();
-    p.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut sorted: Vec<(usize, (f64, f64))> = points.iter().copied().enumerate().collect();
+    sorted.sort_by(|a, b| a.1.0.total_cmp(&b.1.0));
+    let mut p: Vec<(usize, (f64, f64))> = Vec::new();
+    for (i, point) in sorted.iter().enumerate() {
+        match p.last_mut() {
+            Some(last) if i > 0 && point.1.0 - sorted[i - 1].1.0 < 1e-6 => {
+                if point.0 > last.0 {
+                    *last = *point;
+                }
+            }
+            _ => p.push(*point),
+        }
+    }
+    let p: Vec<(f64, f64)> = p.into_iter().map(|(_, point)| point).collect();
     let n = p.len();
-    let secant = |i: usize| (p[i + 1].1 - p[i].1) / (p[i + 1].0 - p[i].0).max(1e-6);
+    if n == 1 {
+        return p[0].1 + (v - p[0].0);
+    }
+    let secant = |i: usize| (p[i + 1].1 - p[i].1) / (p[i + 1].0 - p[i].0);
     let tangent = |i: usize| {
         if i == 0 {
             return secant(0);
@@ -240,7 +257,7 @@ fn monotone(points: &[(f64, f64)], v: f64) -> f64 {
         return p[n - 1].1 + tangent(n - 1) * (v - p[n - 1].0);
     }
     let i = (0..n - 1).rev().find(|&i| v >= p[i].0).unwrap();
-    let h = (p[i + 1].0 - p[i].0).max(1e-6);
+    let h = p[i + 1].0 - p[i].0;
     let t = (v - p[i].0) / h;
     let (t2, t3) = (t * t, t * t * t);
     (2.0 * t3 - 3.0 * t2 + 1.0) * p[i].1
@@ -297,4 +314,299 @@ fn color_curves_are_monotone_cubics_through_their_points() {
     });
     eprintln!("curves: {d:e} from the reference");
     assert!(d < 2e-5, "{d:e}");
+}
+
+/// Adding a point leaves it at white, on the end point already there: the
+/// picture must not change (it bent a straight curve and clipped superwhites).
+#[test]
+fn an_unused_point_at_white_changes_nothing() {
+    let mut renderer = Renderer::headless().unwrap();
+    let input = draw(&mut renderer, None);
+    for count in [3, 15] {
+        let output = draw(
+            &mut renderer,
+            Some(effect("colorCurves", &json!({"count": count}))),
+        );
+        let changed = input
+            .iter()
+            .zip(&output)
+            .filter(|(a, b)| a.to_bits() != b.to_bits())
+            .count();
+        assert_eq!(changed, 0, "{count} points changed {changed} values");
+    }
+}
+
+/// Points with the same In are one point, the one written last; at either
+/// end and in the middle the curve stays finite and follows that point.
+#[test]
+fn coincident_points_are_one_point_the_last_written() {
+    let mut renderer = Renderer::headless().unwrap();
+    let input = draw(&mut renderer, None);
+    let cases: [&[(f64, f64)]; 5] = [
+        // The new point's Out edited while its In stays at white.
+        &[(0.0, 0.0), (1.0, 1.0), (1.0, 0.9)],
+        // Moved onto black.
+        &[(0.0, 0.0), (1.0, 1.0), (0.0, 0.1)],
+        // Two points disagreeing in the middle.
+        &[(0.0, 0.0), (0.5, 0.6), (1.0, 1.0), (0.5, 0.4)],
+        // Every point on one In: the line of slope 1 through the survivor.
+        &[(0.3, 0.2), (0.3, 0.5)],
+        // Within a millionth: still one point.
+        &[(0.0, 0.0), (0.6, 0.7), (0.6000004, 0.3), (1.0, 1.0)],
+    ];
+    for points in cases {
+        let output = draw(&mut renderer, Some(curve(0, points)));
+        let d = worst(&input, &output, |x| x.map(|v| monotone(points, v)));
+        eprintln!("{points:?}: {d:e} from the reference");
+        assert!(d < 2e-5, "{points:?}: {d:e}");
+    }
+    // The stated survivor, read off the reference: a straight line to 0.9.
+    let end = [(0.0, 0.0), (1.0, 1.0), (1.0, 0.9)];
+    assert!((monotone(&end, 1.1) - 0.99).abs() < 1e-12);
+    assert!((monotone(&end, 0.5) - 0.45).abs() < 1e-12);
+}
+
+/// A keyed point that lands on another at a key is the same coincidence.
+#[test]
+fn a_keyed_point_landing_on_another_is_one_point() {
+    let mut renderer = Renderer::headless().unwrap();
+    let input = draw(&mut renderer, None);
+    let mut fx = curve(0, &[(0.0, 0.0), (0.5, 0.6), (1.0, 1.0), (0.2, 0.3)]);
+    fx["p"]["x3"] = keys(json!(0.5), &[(0.0, json!(0.5)), (1.0, json!(0.9))]);
+    let output = draw(&mut renderer, Some(fx));
+    let at_key = [(0.0, 0.0), (0.5, 0.6), (1.0, 1.0), (0.5, 0.3)];
+    let d = worst(&input, &output, |x| x.map(|v| monotone(&at_key, v)));
+    eprintln!("keyed: {d:e} from the reference");
+    assert!(d < 2e-5, "{d:e}");
+}
+
+/// Values the controls can't hold (an expression's, or written by an older
+/// agent) are held to each control's range: the picture stays finite and is
+/// the one the range's end gives. 1e39 is a finite number that becomes an
+/// infinity at GPU precision.
+#[test]
+fn values_outside_the_controls_are_held_to_their_range() {
+    let mut renderer = Renderer::headless().unwrap();
+    let mut bits = |fx: Value| -> Vec<u32> {
+        let out = draw(&mut renderer, Some(fx));
+        assert!(out.iter().all(|v| v.is_finite()), "a value is not finite");
+        out.iter().map(|v| v.to_bits()).collect()
+    };
+    for (outside, held) in [
+        (json!({"exposure": 1024}), json!({"exposure": 8})),
+        (json!({"exposure": -1e39}), json!({"exposure": -8})),
+        (json!({"gainMaster": 1e39}), json!({"gainMaster": 8})),
+        (
+            json!({"saturation": 1e39, "contrast": -1e39}),
+            json!({"saturation": 200, "contrast": -100}),
+        ),
+    ] {
+        assert_eq!(
+            bits(effect("colorWheels", &outside)),
+            bits(effect("colorWheels", &held)),
+            "{outside}"
+        );
+    }
+    assert_eq!(
+        bits(curve(0, &[(0.0, 0.0), (0.5, 1e39), (1.0, 1.0)])),
+        bits(curve(0, &[(0.0, 0.0), (0.5, 2.0), (1.0, 1.0)])),
+    );
+}
+
+/// A CDL read from a file into Color Wheels grades as the ASC CDL says (its
+/// own reference, `pm_color::cdl::apply`), on the whole field.
+#[test]
+fn a_cdl_file_in_color_wheels_grades_as_the_cdl() {
+    use pm_color::cdl;
+    let text = r#"<ColorDecisionList xmlns="urn:ASC:CDL:v1.01"><ColorDecision>
+      <ColorCorrection id="shot"><SOPNode><Slope>1.1 0.98 0.9</Slope>
+      <Offset>-0.02 0 0.015</Offset><Power>0.95 1.0 1.05</Power></SOPNode>
+      <SATNode><Saturation>1.2</Saturation></SATNode></ColorCorrection>
+    </ColorDecision></ColorDecisionList>"#;
+    let correction = cdl::parse(text).unwrap();
+    let mut p = Map::new();
+    for (key, value) in cdl::to_wheels(&correction).unwrap() {
+        p.insert(key, json!(value));
+    }
+    let mut renderer = Renderer::headless().unwrap();
+    let input = draw(&mut renderer, None);
+    let output = draw(
+        &mut renderer,
+        Some(effect("colorWheels", &Value::Object(p))),
+    );
+    let d = worst(&input, &output, |x| cdl::apply(&correction, x));
+    eprintln!("CDL file in Color Wheels: {d:e} from the CDL");
+    assert!(d < 2e-5, "{d:e}");
+}
+
+/// Color Space Transform against its f64 reference (`pm_color::cst`), on the
+/// whole field (codes below black and above white included): camera logs to
+/// display, HDR to SDR through every tone mapping method, HLG to PQ, log to
+/// ACEScct, and both gamut mappings. The worst difference, relative above
+/// 1, is printed; each must stay under half a 10-bit code (f32 against f64
+/// through log, power and PQ curves; the largest, BT.2446 Method C near the
+/// top of PQ, is a near-cancellation of its inverse crosstalk then the sRGB
+/// encode's slope, about 4e-5 in linear light).
+#[test]
+fn color_space_transform_matches_its_reference() {
+    use pm_color::cst::{self, Settings};
+    assert_eq!(pm_fx_defs::grade::CST_GAMUTS, cst::GAMUTS);
+    assert_eq!(pm_fx_defs::grade::CST_TRANSFERS, cst::TRANSFERS);
+    assert_eq!(pm_fx_defs::grade::CST_TONE_MAPPING, cst::TONE_MAPPING);
+    assert_eq!(pm_fx_defs::grade::CST_GAMUT_MAPPING, cst::GAMUT_MAPPING);
+    let mut renderer = Renderer::headless().unwrap();
+    let input = draw(&mut renderer, None);
+    let base = Settings::default();
+    let cases: Vec<(&str, Settings)> = vec![
+        (
+            "S-Log3 S-Gamut3.Cine to Rec. 709",
+            Settings {
+                input_gamut: 6,
+                input_transfer: 10,
+                ..base
+            },
+        ),
+        (
+            "LogC4 AWG4 to ACEScct AP1",
+            Settings {
+                input_gamut: 9,
+                input_transfer: 13,
+                output_gamut: 4,
+                output_transfer: 7,
+                ..base
+            },
+        ),
+        (
+            "Rec. 709 to Rec. 2020 gamma 2.4, clipped",
+            Settings {
+                output_gamut: 2,
+                output_transfer: 3,
+                gamut_mapping: 1,
+                ..base
+            },
+        ),
+        (
+            "V-Log V-Gamut to Rec. 709, ACES RGC",
+            Settings {
+                input_gamut: 7,
+                input_transfer: 11,
+                gamut_mapping: 2,
+                ..base
+            },
+        ),
+        (
+            "HLG to PQ (Rec. 2020)",
+            Settings {
+                input_gamut: 2,
+                input_transfer: 6,
+                output_gamut: 2,
+                output_transfer: 5,
+                ..base
+            },
+        ),
+        (
+            "Log3G10 RWG to ACEScc AP0",
+            Settings {
+                input_gamut: 10,
+                input_transfer: 14,
+                output_gamut: 3,
+                output_transfer: 8,
+                ..base
+            },
+        ),
+        (
+            "BMD Film to Rec. 709 camera",
+            Settings {
+                input_gamut: 11,
+                input_transfer: 15,
+                output_transfer: 4,
+                ..base
+            },
+        ),
+        (
+            "F-Log 2020 to N-Log 2020",
+            Settings {
+                input_gamut: 2,
+                input_transfer: 16,
+                output_gamut: 2,
+                output_transfer: 17,
+                ..base
+            },
+        ),
+        (
+            "Apple Log to gamma 2.2 P3",
+            Settings {
+                input_gamut: 2,
+                input_transfer: 9,
+                output_gamut: 1,
+                output_transfer: 2,
+                ..base
+            },
+        ),
+        (
+            "LogC3 AWG3 to linear Rec. 709",
+            Settings {
+                input_gamut: 8,
+                input_transfer: 12,
+                output_transfer: 1,
+                ..base
+            },
+        ),
+        (
+            "S-Log3 S-Gamut3 to sRGB",
+            Settings {
+                input_gamut: 5,
+                input_transfer: 10,
+                ..base
+            },
+        ),
+    ];
+    let hdr = Settings {
+        input_gamut: 2,
+        input_transfer: 5,
+        source_peak: 4000.,
+        ..base
+    };
+    let mut all = cases;
+    for (name, tone) in [
+        ("BT.2390 per channel", 1),
+        ("BT.2390 luminance", 2),
+        ("BT.2390 saturation", 3),
+        ("BT.2446 A", 4),
+        ("BT.2446 C", 5),
+    ] {
+        all.push((name, Settings { tone, ..hdr }));
+    }
+    all.push((
+        "PQ 4000 to PQ 1000, BT.2390",
+        Settings {
+            output_gamut: 2,
+            output_transfer: 5,
+            tone: 1,
+            ..hdr
+        },
+    ));
+    for (name, s) in all {
+        let p = json!({
+            "inputGamut": s.input_gamut, "inputTransfer": s.input_transfer,
+            "outputGamut": s.output_gamut, "outputTransfer": s.output_transfer,
+            "toneMapping": s.tone, "sourcePeak": s.source_peak, "targetPeak": s.target_peak,
+            "desaturation": s.desaturation, "gamutMapping": s.gamut_mapping,
+        });
+        let output = draw(&mut renderer, Some(effect("colorSpaceTransform", &p)));
+        let mut worst = 0f64;
+        for (i, o) in input.chunks_exact(4).zip(output.chunks_exact(4)) {
+            let want = cst::transform([i[0], i[1], i[2]].map(f64::from), &s);
+            for c in 0..3 {
+                assert!(
+                    o[c].is_finite() && want[c].is_finite(),
+                    "{name}: {i:?} {o:?} {want:?}"
+                );
+                let d = (f64::from(o[c]) - want[c]).abs() / want[c].abs().max(1.);
+                worst = worst.max(d);
+            }
+        }
+        eprintln!("{name}: {worst:e} from the reference");
+        assert!(worst < 0.5 / 1023., "{name}: {worst:e}");
+    }
 }

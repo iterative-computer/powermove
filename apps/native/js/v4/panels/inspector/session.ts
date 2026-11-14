@@ -99,35 +99,64 @@ export class InspectorSession {
       throw error;
     }
   }
+  /** The latest refresh asked for; an older one never publishes over it. */
+  private refreshes = 0;
   private refresh() {
-    this.snapshot = structuredClone(this.model.inspect());
-    this.notify();
-    void this.queue(async () => {
-      if (!this.alive) return;
-      const wanted = new Map<string, Binding>();
-      for (const section of this.snapshot.sections) {
-        if (section.collapsed) continue;
-        for (const row of sectionRows(section)) {
-          for (const binding of rowBindings(row)) {
-            const duplicate = wanted.get(binding.handle);
-            if (
-              duplicate &&
-              JSON.stringify(duplicate.channels) !==
-                JSON.stringify(binding.channels)
-            )
-              throw new Error("Conflicting inspector binding handle");
-            wanted.set(binding.handle, binding);
+    const next = structuredClone(this.model.inspect());
+    const seq = ++this.refreshes;
+    const wanted = new Map<string, Binding>();
+    for (const section of next.sections) {
+      if (section.collapsed) continue;
+      for (const row of sectionRows(section)) {
+        for (const binding of rowBindings(row)) {
+          const duplicate = wanted.get(binding.handle);
+          if (
+            duplicate &&
+            JSON.stringify(duplicate.channels) !==
+              JSON.stringify(binding.channels)
+          ) {
+            this.onError(new Error("Conflicting inspector binding handle"));
+            return;
           }
+          wanted.set(binding.handle, binding);
         }
       }
+    }
+    const bound = [...wanted].every(
+      ([handle, binding]) =>
+        JSON.stringify(this.bindings.get(handle)?.channels) ===
+        JSON.stringify(binding.channels),
+    );
+    // What a shown state no longer uses lets go of its bindings after it is
+    // gone.
+    const release = async () => {
+      for (const handle of [...this.bindings.keys()]) {
+        if (seq !== this.refreshes) return;
+        if (!wanted.has(handle)) {
+          this.bindings.delete(handle);
+          await this.host.disposeBinding(handle);
+        }
+      }
+    };
+    if (bound) {
+      // Nothing new to bind (a value, the time): shown at once.
+      this.snapshot = next;
+      this.notify();
+      if ([...this.bindings.keys()].some((h) => !wanted.has(h)))
+        void this.queue(release).catch(() => {});
+      return;
+    }
+    void this.queue(async () => {
+      if (!this.alive) return;
+      // A handle whose channels change is disposed before it is registered
+      // again (cancellation/disposal is native and precedes registration).
       for (const [handle, old] of this.bindings) {
-        const next = wanted.get(handle);
+        const again = wanted.get(handle);
         if (
-          !next ||
-          JSON.stringify(next.channels) !== JSON.stringify(old.channels)
+          again &&
+          JSON.stringify(again.channels) !== JSON.stringify(old.channels)
         ) {
           this.bindings.delete(handle);
-          // Cancellation/disposal is native and precedes new registration.
           await this.host.disposeBinding(handle);
         }
       }
@@ -142,7 +171,12 @@ export class InspectorSession {
           this.bindings.set(handle, binding);
         }
       }
+      // A new state (another layer, a section opened) shows once its fields
+      // are bound: never a frame of disabled fields while they register.
+      if (seq !== this.refreshes) return;
+      this.snapshot = next;
       this.notify();
+      await release();
     }).catch(() => {}); // queue reports once; no unhandled worker rejection
   }
   /** UI callbacks report asynchronous failures through the host diagnostics path. */

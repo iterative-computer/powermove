@@ -196,10 +196,8 @@ fn valid_style(key: &str, value: &Value, table: &Value) -> bool {
         "textAlign" => &["left", "right", "center"][..],
         "fontVariantNumeric" => &["tabular-nums"][..],
         "overflow" => &["hidden", "visible", "scroll"][..],
-        "textOverflow" => &["ellipsis"][..],
+        "textOverflow" => &["ellipsis", "middle"][..],
         "whiteSpace" => &["nowrap", "normal"][..],
-        // The system's fixed-width face (source text, paths, tool arguments).
-        "fontFamily" => &["mono"][..],
         _ => &[][..],
     };
     if value.as_str().is_some_and(|v| categorical.contains(&v)) {

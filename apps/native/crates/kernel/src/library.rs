@@ -359,6 +359,8 @@ impl LibraryStore {
                 applied += 1;
             }
         }
+        // A v1 project reads its video as v1 showed it, as a file does.
+        crate::project_io::adopt_electron_rendering(&mut current, false);
         let metadata = self.read(&format!("projectMeta.{id}"))?;
         let history = self.read(&format!("projectHistory.{id}"))?;
         let legacy = if metadata.is_none() || history.is_none() {

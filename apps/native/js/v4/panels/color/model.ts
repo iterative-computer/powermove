@@ -5,6 +5,7 @@
  */
 import { HostClient } from "../../src/host-api";
 import { json, type Json } from "../../src/protocol";
+import { groups } from "./contract";
 
 export const MODEL_COMMAND = "panel.effect-controls";
 export const MODEL_CHANNEL = "panel:layer-effects";
@@ -63,7 +64,12 @@ export type Intent =
   | { type: "range"; range: [number, number] }
   | { type: "disclose"; id: string; open: boolean }
   | { type: "toggle" | "reset" | "remove"; id: string }
-  | { type: "add"; definition: string }
+  | {
+      type: "add";
+      definition: string;
+      /** Values the new effect starts with, in the same Undo step. */
+      parameters?: Record<string, Json>;
+    }
   | {
       type: "parameter";
       id: string;
@@ -123,14 +129,17 @@ export class ColorModel {
       next.revision < this.current.revision
     )
       return;
-    const wanted = new Map<string, string>();
-    if (!next.locked)
+    const wanted = new Map<string, string[]>();
+    if (!next.locked) {
       for (const r of next.rows)
         if (r.kind === "parameter" && !r.parameter.readonly)
-          wanted.set(r.parameter.binding, r.parameter.id);
-    for (const [handle, id] of wanted)
+          wanted.set(r.parameter.binding, [r.parameter.id]);
+      // A wheel's red, green and blue, a curve's points: one write each.
+      for (const g of groups(next)) wanted.set(g.binding, g.channels);
+    }
+    for (const [handle, channels] of wanted)
       if (!this.bindings.has(handle)) {
-        await this.host.registerBinding(handle, [id]);
+        await this.host.registerBinding(handle, channels);
         this.bindings.add(handle);
       }
     // A retired binding cancels any gesture it captured.
