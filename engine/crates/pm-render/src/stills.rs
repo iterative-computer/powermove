@@ -82,7 +82,11 @@ pub fn check(path: &Path, still: &StillImage) -> Result<(), Feature> {
         | ImageFormat::Ico
         | ImageFormat::Gif
         | ImageFormat::Exr
-        | ImageFormat::Dpx => {}
+        | ImageFormat::Dpx
+        // ImageIO supplies TGA's straight RGBA in its stored order and a
+        // Photoshop document's flattened image at its depth with its profile.
+        | ImageFormat::Tga
+        | ImageFormat::Psd => {}
         ImageFormat::Heif => {
             // ImageIO supplies oriented RGBA with its ICC profile and
             // alpha reading intact, including half-float SDR on newer macOS.

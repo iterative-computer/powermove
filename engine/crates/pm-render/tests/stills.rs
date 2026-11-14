@@ -182,6 +182,83 @@ fn native_exr_dpx_and_png_metadata_are_supported() {
     std::fs::remove_dir_all(&d).ok();
 }
 
+/// A flattened RGB Photoshop document of FFmpeg's test picture at 8 or 16
+/// bits, uncompressed (FFmpeg writes no PSD). 16-bit samples get a low byte
+/// no 8-bit drawing keeps.
+fn psd(path: &Path, bits: u16) {
+    let rgb = path.with_extension("rgb48");
+    ffmpeg(&rgb, &["-f", "rawvideo", "-pix_fmt", "rgb48be"]);
+    let raw = std::fs::read(&rgb).unwrap();
+    std::fs::remove_file(&rgb).ok();
+    let (w, h) = (96usize, 54usize);
+    let mut out = b"8BPS\0\x01\0\0\0\0\0\0\0\x03".to_vec();
+    out.extend_from_slice(&(h as u32).to_be_bytes());
+    out.extend_from_slice(&(w as u32).to_be_bytes());
+    out.extend_from_slice(&bits.to_be_bytes());
+    out.extend_from_slice(&3u16.to_be_bytes());
+    out.extend_from_slice(&[0; 14]);
+    for c in 0..3 {
+        for i in 0..w * h {
+            let at = (i * 3 + c) * 2;
+            let v = u16::from_be_bytes([raw[at], raw[at + 1]]) & 0xff00 | (i * 7 % 256) as u16;
+            if bits == 16 {
+                out.extend_from_slice(&v.to_be_bytes());
+            } else {
+                out.push((v >> 8) as u8);
+            }
+        }
+    }
+    std::fs::write(path, out).unwrap();
+}
+
+/// TGA (uncompressed and run-length encoded, with alpha) and Photoshop
+/// documents at 8 and 16 bits are drawn as ImageIO reads them. Untagged,
+/// ImageIO gives them its sRGB profile, so display sRGB is the stored code,
+/// premultiplied: exact, finer than an 8-bit step for the 16-bit document.
+#[test]
+fn tga_and_psd_are_drawn() {
+    use pm_media::image::icc::IccClass;
+    let d = dir().join("tga-psd");
+    std::fs::create_dir_all(&d).unwrap();
+    let flat = d.join("flat.tga");
+    ffmpeg(&flat, &["-pix_fmt", "bgra", "-rle", "0"]);
+    let rle = d.join("rle.tga");
+    ffmpeg(
+        &rle,
+        &[
+            "-vf",
+            "format=rgba,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='X*2'",
+            "-pix_fmt",
+            "bgra",
+        ],
+    );
+    let (psd8, psd16) = (d.join("rgb8.psd"), d.join("rgb16.psd"));
+    psd(&psd8, 8);
+    psd(&psd16, 16);
+    for (path, bits) in [(&flat, 8), (&rle, 8), (&psd8, 8), (&psd16, 16)] {
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        let still = pm_media::image::read(path, &pm_media::pool::FramePool::new(0)).unwrap();
+        assert_eq!(
+            (still.bit_depth, still.color.icc_class),
+            (bits, Some(IccClass::Srgb)),
+            "{name}"
+        );
+        assert_eq!(probe_image(path), Ok(()), "{name}");
+        let stored = pm_media::image::imageio::rgba_unit(&still.frame).unwrap();
+        let mut renderer = Renderer::headless().unwrap();
+        let (pixels, w, h) = render(&mut renderer, path);
+        assert_eq!((w, h), (96, 54), "{name}");
+        assert!(stored.chunks_exact(4).any(|p| p[3] < 1.0) == (name == "rle.tga"));
+        for (actual, s) in pixels.chunks_exact(4).zip(stored.chunks_exact(4)) {
+            let want = [s[0] * s[3], s[1] * s[3], s[2] * s[3], s[3]];
+            for (a, e) in actual.iter().zip(want) {
+                assert!((a - e).abs() < 2e-5, "{name}: {actual:?} vs {want:?}");
+            }
+        }
+    }
+    std::fs::remove_dir_all(&d).ok();
+}
+
 /// Y'CbCr JPEG uses Chromium's libjpeg-turbo path; gray and Y'CbCr layouts
 /// are compared in `tests/corpus.rs` and accepted by the media probe.
 #[test]
