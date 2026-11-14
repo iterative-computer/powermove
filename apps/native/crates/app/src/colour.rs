@@ -455,6 +455,97 @@ fn more_menu(rec2020: bool, extended: bool, output: bool, depth8: bool) -> Vec<s
     ]
 }
 
+/// What the Scopes panel counted, for an agent judging a grade
+/// (`get_panel_state` on the Scopes panel): the stage and signal read, the
+/// share of pixels Under, Over and Outside, the luma and R, G, B histograms
+/// in 32 bands with their lowest and highest lit level, the waveform's range
+/// in 16 vertical bands, and the vectorscope's centre, spread and hue.
+/// Levels are percent of the signal range; shares are percent of pixels.
+pub(crate) fn scope_summary(frame: &ScopeFrame) -> serde_json::Value {
+    use serde_json::json;
+    let pixels = frame.pixels.max(1) as f64;
+    let share = |n: u64| (n as f64 / pixels * 1000.).round() / 10.;
+    let levels = frame.config.levels.max(2) as usize;
+    let level = |bin: usize| (bin as f64 / (levels - 1) as f64 * 1000.).round() / 10.;
+    let histogram = |bins: &[u32]| {
+        let band = bins.len().div_ceil(32).max(1);
+        let lit = |i: &usize| bins[*i] > 0;
+        json!({
+            "bands": bins.chunks(band)
+                .map(|c| share(c.iter().map(|v| u64::from(*v)).sum()))
+                .collect::<Vec<_>>(),
+            "lowest": (0..bins.len()).find(lit).map(level),
+            "highest": (0..bins.len()).rev().find(lit).map(level),
+        })
+    };
+    // Waveform rows are levels (bottom first), columns the frame's width.
+    let columns = frame.config.columns.max(1) as usize;
+    let column_band = columns.div_ceil(16).max(1);
+    let waveform: Vec<serde_json::Value> = (0..columns)
+        .step_by(column_band)
+        .map(|start| {
+            let end = (start + column_band).min(columns);
+            let mut lit = (0..levels).filter(|row| {
+                (start..end).any(|col| {
+                    frame
+                        .waveform
+                        .get(row * columns + col)
+                        .is_some_and(|n| *n > 0)
+                })
+            });
+            let low = lit.next();
+            let high = lit.last().or(low);
+            json!({"low": low.map(level), "high": high.map(level)})
+        })
+        .collect();
+    // Vectorscope: rows of Cr, columns of Cb, each -0.5..0.5 across the bins.
+    let bins = frame.config.vector_bins.max(2) as usize;
+    let at = |i: usize| i as f64 / (bins - 1) as f64 - 0.5;
+    let (mut count, mut cb, mut cr, mut far) = (0f64, 0f64, 0f64, 0f64);
+    for (i, n) in frame.vectorscope.iter().enumerate() {
+        let n = f64::from(*n);
+        if n == 0. {
+            continue;
+        }
+        let (b, r) = (at(i % bins), at(i / bins));
+        count += n;
+        cb += b * n;
+        cr += r * n;
+        far = far.max((b * b + r * r).sqrt());
+    }
+    let (cb, cr) = if count > 0. {
+        (cb / count, cr / count)
+    } else {
+        (0., 0.)
+    };
+    let round = |v: f64| (v * 1000.).round() / 1000.;
+    let chroma = (cb * cb + cr * cr).sqrt();
+    json!({
+        "stage": if frame.config.stage == ScopeStage::Output { "Output" } else { "Picture" },
+        "signal": if frame.config.signal == ScopeSignal::Pq { "PQ (absolute light)" } else { "Display" },
+        "matrix": if frame.config.matrix == ScopeMatrix::Rec2020 { "Rec. 2020" } else { "Rec. 709" },
+        "pixels": frame.pixels,
+        "underPercent": share(u64::from(frame.under)),
+        "overPercent": share(u64::from(frame.over)),
+        "outsidePercent": share(u64::from(frame.outside)),
+        "notFinitePercent": share(u64::from(frame.invalid)),
+        "luma": histogram(&frame.luma_histogram),
+        "red": histogram(&frame.histogram[0]),
+        "green": histogram(&frame.histogram[1]),
+        "blue": histogram(&frame.histogram[2]),
+        "waveformBands": waveform,
+        "vectorscope": {
+            "meanCb": round(cb),
+            "meanCr": round(cr),
+            "meanChroma": round(chroma),
+            // Degrees from +Cb toward +Cr; the skin-tone line is at 123°.
+            "meanHueDegrees": (chroma > 1e-4).then(|| (cr.atan2(cb).to_degrees().rem_euclid(360.) * 10.).round() / 10.),
+            "maxChroma": round(far),
+        },
+        "note": "Levels are percent of the signal range, shares percent of pixels; bands run dark to light (histograms) and left to right (waveform).",
+    })
+}
+
 fn counts(frame: &ScopeFrame) -> Counts<'_> {
     Counts {
         extended: frame.config.signal == ScopeSignal::Pq,
@@ -698,6 +789,11 @@ impl Controller {
             .ok();
         })
         .detach();
+    }
+
+    /// What the Scopes panel last counted, summarised for an agent.
+    pub(crate) fn scope_reading(&self) -> Option<serde_json::Value> {
+        self.scopes.latest.as_deref().map(scope_summary)
     }
 
     /// The Scopes panel's content, and its tap on the viewer.
