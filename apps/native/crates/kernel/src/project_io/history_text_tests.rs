@@ -110,7 +110,7 @@ fn save_three(
         .unwrap();
     let history = match &plan.history {
         HistoryToWrite::Session(snapshot) => snapshot.to_saved(),
-        HistoryToWrite::Raw(value) => value.clone(),
+        HistoryToWrite::Raw(raw) => raw.value(),
     };
     let other = |twin: &Path, writer: Option<ReferenceWriter>| {
         let _ = fs::remove_file(twin);

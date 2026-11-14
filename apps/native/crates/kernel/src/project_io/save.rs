@@ -170,8 +170,9 @@ pub(crate) enum HistoryToWrite {
     /// This session's stack (imported records included), exported at run time.
     Session(HistorySnapshot),
     /// The member exactly as read (it could not be imported and nothing was
-    /// recorded since).
-    Raw(Value),
+    /// recorded since). Decoded by the writer, on the save's thread, and
+    /// only when it writes.
+    Raw(crate::history::CompactJson),
 }
 
 /// A save frozen at one document revision. `Send + 'static`: build it on the
@@ -918,6 +919,10 @@ impl SavePlan {
         };
         #[cfg(not(any(test, feature = "save-reference")))]
         let reference: Option<Value> = None;
+        let raw = match (&self.history, &reference) {
+            (HistoryToWrite::Raw(raw), None) => Some(raw.value()),
+            _ => None,
+        };
         let (history, guard) = match (&self.history, &reference) {
             (_, Some(value)) => (
                 HistoryPart::Value(value),
@@ -935,10 +940,13 @@ impl SavePlan {
                     outside_writes: self.outside_writes,
                 },
             ),
-            (HistoryToWrite::Raw(value), None) => (
-                HistoryPart::Value(value),
-                file_guard::GuardHistory::Value(value),
-            ),
+            (HistoryToWrite::Raw(_), None) => {
+                let value = raw.as_ref().expect("decoded above");
+                (
+                    HistoryPart::Value(value),
+                    file_guard::GuardHistory::Value(value),
+                )
+            }
         };
         lap.mark("history exported");
         // Freeze the requirement alongside this exact document/history revision.

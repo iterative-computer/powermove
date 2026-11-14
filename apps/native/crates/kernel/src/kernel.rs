@@ -814,12 +814,13 @@ impl Kernel {
             .slots
             .get_mut(id)
             .ok_or_else(|| KernelFailure::NoProject(id.into()))?;
+        // The document's own hash: computed once per state and kept (the
+        // save point asked for it already), never recomputed here.
         let hash = library_hash.unwrap_or_else(|| {
             slot.project
                 .store()
                 .current()
-                .root()
-                .map(pm_model::hash::canonical_hash)
+                .canonical_hash()
                 .unwrap_or_default()
         });
         if let (Some(d), Some(dir)) = (&self.durability, dir) {

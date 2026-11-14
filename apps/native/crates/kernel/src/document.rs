@@ -1495,7 +1495,7 @@ impl DocumentStore {
             .collect();
         let file_history = self.file.envelope.history.as_ref();
         let history = match (file_history, self.history_owned) {
-            (Some(raw), false) => HistoryToWrite::Raw(raw.value()),
+            (Some(raw), false) => HistoryToWrite::Raw(raw.clone()),
             _ => HistoryToWrite::Session(self.history.snapshot()),
         };
         let mut extra = self.file.envelope.extra.clone();
@@ -1705,7 +1705,7 @@ impl DocumentStore {
             ids.extend(assets.keys().filter_map(|k| k.as_str().map(str::to_owned)));
         }
         if let Some(root) = self.root() {
-            crate::commands::scene3d::collect_original_assets(&root.to_value(), &mut ids);
+            crate::commands::scene3d::collect_original_assets_in(root, &mut ids);
         }
         ids
     }
