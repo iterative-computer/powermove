@@ -320,6 +320,45 @@ mod tests {
         assert_eq!(shape(&kernel), (90., Some([0., 90.])));
     }
 
+    /// A composition's frame rate changed from 30 to 24 fps: the session
+    /// reads the rate it has now (the viewer is bound again on it), so a
+    /// step is a 24 fps frame, not the rate it was opened with.
+    #[test]
+    fn the_session_reads_the_frame_rate_the_composition_has_now() {
+        use pm_kernel::{Call, Caller, KernelActor, KernelConfig, OpenSource, Request};
+        let actor = KernelActor::spawn(KernelConfig::default());
+        let kernel = actor.handle();
+        let project = pm_model::json::parse(&crate::v4_view_tests::project_json(1)).unwrap();
+        kernel
+            .open("p", OpenSource::Untitled(project))
+            .wait()
+            .unwrap()
+            .unwrap();
+        let rate = |kernel: &pm_kernel::KernelHandle| {
+            crate::session::published_rate(&kernel.published("p").unwrap()).to_f64()
+        };
+        let before = rate(&kernel);
+        let revision = kernel.published("p").unwrap().revision();
+        let request = Request::new(
+            Caller::native(),
+            Call::Transact {
+                label: Some("Frame Rate".into()),
+                expected_revision: Some(revision),
+                body: pm_kernel::WriteBody::Commands(vec![pm_kernel::Command::Comp(
+                    pm_kernel::CompCommand::Set {
+                        patch: Box::new(pm_kernel::commands::comps::CompPatch {
+                            fps: Some(24.),
+                            ..Default::default()
+                        }),
+                    },
+                )]),
+            },
+        );
+        kernel.call("p", request).wait().unwrap().unwrap();
+        assert_ne!(before, 24.);
+        assert_eq!(rate(&kernel), 24.);
+    }
+
     #[test]
     fn the_loop_choice_is_kept_in_the_profile() {
         let dir = tempfile::tempdir().unwrap();
