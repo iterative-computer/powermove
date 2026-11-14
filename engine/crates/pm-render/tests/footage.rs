@@ -184,6 +184,78 @@ fn max_diff(ours: &[f32], want: &[[f64; 3]]) -> f64 {
         .fold(0.0, f64::max)
 }
 
+/// Interpret Footage › Tone Mapping: an HDR source in an SDR project takes
+/// the method chosen for it, each against `pm_color::cst::tone_to_sdr` on
+/// the decoded frame; Automatic is BT.2390 per channel, the same bits as
+/// choosing it.
+#[test]
+fn an_hdr_source_takes_the_tone_mapping_chosen_for_it() {
+    for (file, transfer) in [("hdr/hdr10.mov", "pq"), ("hdr/hlg.mov", "hlg")] {
+        let Some(path) = formats(file) else { return };
+        let src = MediaSource::open(&path).unwrap();
+        let v = src.probe.video.as_ref().unwrap();
+        let reading = resolve_video(v, &Interpretation::default());
+        let peak = reading.tone_map.expect("tone mapped").peak_nits;
+        let (w, h) = (v.width, v.height);
+        let signal = if transfer == "pq" {
+            HdrSignal::Pq
+        } else {
+            HdrSignal::Hlg
+        };
+        let mut r = Renderer::headless().unwrap();
+        let mut draw = |tone: Option<&str>| {
+            let mut interpret = json!({ "transfer": transfer });
+            if let Some(tone) = tone {
+                interpret["toneMapping"] = json!(tone);
+            }
+            let (doc, res) = document(&path, (w, h), 25.0, Some(interpret));
+            render(&mut r, &doc, (w, h), 0.13, &res)
+        };
+        let automatic = draw(None);
+        assert_eq!(
+            draw(Some("bt2390")),
+            automatic,
+            "{file}: Automatic is BT.2390"
+        );
+        let n = src.select(ticks(0.13).get()).unwrap();
+        let f = decode(&path, n);
+        let rgb = frame_rgb(&f, reading.siting.value, reading.matrix.value);
+        for (index, name) in pm_media::interpret::TONE_MAPPING.iter().enumerate() {
+            let ours = draw(Some(name));
+            let want: Vec<[f64; 3]> = rgb
+                .iter()
+                .map(|code| {
+                    let nits =
+                        pm_color::tonemap::to_working_light(signal, code.map(|v| v.clamp(0., 1.)))
+                            .map(|l| l * pm_color::tonemap::SDR_WHITE);
+                    let sdr = pm_color::cst::tone_to_sdr(nits, index, peak, 15.);
+                    pm_color::primaries::apply(&bt2020_to_709(), sdr)
+                        .map(pm_color::transfer::display_encode)
+                })
+                .collect();
+            // Relative above 1: None keeps light far above SDR white.
+            let d = want
+                .iter()
+                .enumerate()
+                .flat_map(|(i, w)| {
+                    let ours = &ours;
+                    (0..3).map(move |c| {
+                        (f64::from(ours[i * 4 + c]) - w[c]).abs() / w[c].abs().max(1.)
+                    })
+                })
+                .fold(0f64, f64::max);
+            eprintln!(
+                "{file} {name}: max |Δ| {d:.2e} (relative above 1) against the f64 reference"
+            );
+            // A quarter of an 8-bit code, as the BT.2390 test; None compresses
+            // nothing, so the PQ curve's steep top magnifies f32 differences of
+            // the decoded codes about tenfold: twice that.
+            let limit = if index == 0 { 2e-3 } else { 1e-3 };
+            assert!(d < limit, "{file} {name}: {d}");
+        }
+    }
+}
+
 #[test]
 fn hdr_sources_are_tone_mapped_with_bt2390() {
     for (file, signal) in [

@@ -41,6 +41,10 @@ struct Params {
     // HDR: x the content peak in cd/m²; y 1 for BT.2020 constant luminance;
     // z the exponent of the pure power transfer (7); w 1 to keep HDR light.
     hdr: vec4<f32>,
+    // An HDR source's tone mapping into an SDR project (pm_color::cst): x
+    // the method (1, BT.2390 per channel, the default), y its Highlight
+    // Desaturation.
+    tone: vec4<f32>,
 };
 
 @group(0) @binding(0) var luma: texture_2d<f32>;
@@ -184,11 +188,12 @@ fn to_working(input: vec3<f32>) -> vec3<f32> {
     }
     if (P.a.y == 5u || P.a.y == 6u) {
         let signal = clamp(c, vec3<f32>(0.0), vec3<f32>(1.0));
-        let light = select(
-            pm_hdr_to_sdr(signal, P.a.y == 6u, P.hdr.x),
-            pm_hdr_to_working(signal, P.a.y == 6u),
-            P.hdr.w == 1.0,
-        );
+        let method = u32(P.tone.x + 0.5);
+        var sdr = pm_hdr_to_sdr(signal, P.a.y == 6u, P.hdr.x);
+        if (method != 1u) {
+            sdr = pm_cst_tone_sdr(pm_hdr_nits(signal, P.a.y == 6u), method, P.hdr.x, P.tone.y);
+        }
+        let light = select(sdr, pm_hdr_to_working(signal, P.a.y == 6u), P.hdr.w == 1.0);
         let l = mat3x3<f32>(P.p0.xyz, P.p1.xyz, P.p2.xyz) * light;
         if (P.a.z == 0u) {
             return pm_e_encode3(l);

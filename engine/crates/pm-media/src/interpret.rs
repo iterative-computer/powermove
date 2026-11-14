@@ -23,6 +23,7 @@
 //!   "alphaMatte": "#RRGGBB",
 //!   "frameRate": 23.976, "frameRateRational": [24000, 1001],  (or "frameRate": [24000, 1001])
 //!   "fieldOrder": "topFirst" | "bottomFirst" | "progressive",
+//!   "toneMapping": "none" | "bt2390" | "bt2390Luminance" | "bt2390Saturation" | "bt2446a" | "bt2446c",
 //!   "pixelAspect": [10, 11],
 //!   "cleanAperture": true
 //! }
@@ -102,6 +103,10 @@ pub struct Interpretation {
     /// Which reading of the file's timestamps the asset's stored times
     /// address: the asset's own `timing` member, not part of `interpret`.
     pub clip: crate::clip::ClipTiming,
+    /// How an HDR source is tone mapped into an SDR project
+    /// ([`TONE_MAPPING`], an index of `pm_color::cst::TONE_MAPPING`); `None`
+    /// is the default, BT.2390 per channel.
+    pub tone_mapping: Option<u32>,
     /// Set when the frames come from a converted copy of the asset's
     /// original (a proxy or optimized media): the original's own reading,
     /// which the copy's codes hold, so the copy reads as the original does
@@ -229,6 +234,18 @@ impl Interpretation {
                 }),
             }
         }
+        if let Some(v) = obj.get("toneMapping").filter(|v| !v.is_null()) {
+            match v
+                .as_str()
+                .and_then(|n| TONE_MAPPING.iter().position(|t| *t == n))
+            {
+                Some(i) => out.tone_mapping = Some(i as u32),
+                None => issues.push(InterpretIssue {
+                    member: "toneMapping".into(),
+                    message: format!("{v} is not a tone mapping"),
+                }),
+            }
+        }
         out.field_order = match obj.get("fieldOrder").and_then(Value::as_str) {
             None | Some("auto") => FieldOverride::Auto,
             Some("topFirst") => FieldOverride::TopFirst,
@@ -334,7 +351,19 @@ impl Interpretation {
     }
 }
 
-const KNOWN: [&str; 12] = [
+/// The stored names of the tone mappings, in `pm_color::cst::TONE_MAPPING`'s
+/// order: BT.2390 per channel (`bt2390`) is the default.
+pub const TONE_MAPPING: [&str; 6] = [
+    "none",
+    "bt2390",
+    "bt2390Luminance",
+    "bt2390Saturation",
+    "bt2446a",
+    "bt2446c",
+];
+
+const KNOWN: [&str; 13] = [
+    "toneMapping",
     "primaries",
     "transfer",
     "matrix",
@@ -393,6 +422,9 @@ pub struct ToneMap {
     /// Peak luminance of the HDR content in cd/m² (L_HDR): 1000 for HLG;
     /// for PQ the mastering display's maximum when tagged, else 1000.
     pub peak_nits: f64,
+    /// `pm_color::cst::TONE_MAPPING` index: 1 (BT.2390 per channel) unless
+    /// Interpret Footage chose another.
+    pub method: u32,
 }
 
 /// The reading of a video source: its color, timing, fields, and geometry.
@@ -477,6 +509,7 @@ fn hdr_tone_map(transfer: Transfer, mastering: Option<&MasteringDisplay>) -> Opt
         Transfer::Hlg => Some(ToneMap {
             transfer,
             peak_nits: 1000.0,
+            method: 1,
         }),
         Transfer::Pq => Some(ToneMap {
             transfer,
@@ -484,6 +517,7 @@ fn hdr_tone_map(transfer: Transfer, mastering: Option<&MasteringDisplay>) -> Opt
                 .and_then(|m| m.max_luminance)
                 .filter(|l| l.is_finite() && *l >= 100.0)
                 .map_or(1000.0, |l| l.min(10000.0)),
+            method: 1,
         }),
         _ => None,
     }
@@ -598,7 +632,10 @@ pub fn resolve_video(v: &VideoProbe, interp: &Interpretation) -> VideoReading {
         bit_depth: auto.bit_depth,
     };
     VideoReading {
-        tone_map: hdr_tone_map(transfer.value, c.mastering.as_ref()),
+        tone_map: hdr_tone_map(transfer.value, c.mastering.as_ref()).map(|t| ToneMap {
+            method: interp.tone_mapping.unwrap_or(t.method),
+            ..t
+        }),
         primaries,
         transfer,
         matrix,
