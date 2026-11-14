@@ -116,6 +116,26 @@ pub fn receive(urls: Vec<String>, cx: &mut App) {
             }
             continue;
         }
+        // `review/thumbs/<file>`: the Project grid's thumbnail state.
+        #[cfg(debug_assertions)]
+        if let Some(file) = raw.strip_prefix("powermove://review/thumbs/") {
+            let file = url::form_urlencoded::parse(format!("x={file}").as_bytes())
+                .next()
+                .map(|(_, v)| v.into_owned())
+                .unwrap_or_default();
+            let mut out = String::new();
+            for controller in editors(cx) {
+                let c = controller.read(cx);
+                out.push_str(&format!(
+                    "{} published={} originals={}\n",
+                    c.thumbs.report(),
+                    c.published.is_some(),
+                    c.media_base.originals.len()
+                ));
+            }
+            let _ = std::fs::write(file, out);
+            continue;
+        }
         // `review/dragtypes/<file>`: every view of every window that is
         // registered for drags (AppKit's candidates for a drop), written
         // to `file`: its class, frame in the window, whether hidden, types.
