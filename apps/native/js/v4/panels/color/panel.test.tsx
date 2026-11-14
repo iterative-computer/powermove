@@ -4,27 +4,44 @@ import { PANEL_ID } from "./contract";
 import type { ColorModel, Intent, Projection } from "./model";
 import { ColorPanel } from "./panel";
 
-/** A controller that records what the panel asks of it. */
-function controller(p: Projection) {
+/** A controller that records what the panel asks of it; its menus answer
+ * with `choices`, in turn. */
+function controller(p: Projection, choices: string[]) {
   const sent: Intent[] = [];
+  const menus: { id: string; label: string; disabled?: boolean }[][] = [];
   const c = {
     snapshot: () => p,
     subscribe: () => () => {},
     send: (intent: Intent) => sent.push(intent),
     controlMenu: async () => {},
+    platform: {
+      contextMenu: async (items: { id: string; label: string }[]) => {
+        menus.push(items);
+        return choices.shift() ?? null;
+      },
+      report: (error: unknown) => {
+        throw error;
+      },
+    },
   } as unknown as ColorModel;
-  return { c, sent };
+  return { c, sent, menus };
 }
 
-async function mounted(p: Projection) {
-  const { c, sent } = controller(p);
+async function mounted(p: Projection, choices: string[] = []) {
+  const { c, sent, menus } = controller(p, choices);
+  const commands: string[] = [];
   const root = createRoot(async (commit) => ({
     accepted: true,
     revision: commit.baseRevision + 1,
   }));
-  await root.render(<ColorPanel controller={c} command={() => {}} />);
-  return { root, sent };
+  await root.render(
+    <ColorPanel controller={c} command={(name) => commands.push(name)} />,
+  );
+  return { root, sent, menus, commands };
 }
+
+/** Lets a menu's answer arrive. */
+const settle = () => new Promise((r) => setTimeout(r, 0));
 
 function named(root: SurfaceRoot, name: string) {
   const n = [...root.host.nodes.values()].find((n) => n.props.id === name);
@@ -125,9 +142,10 @@ test("every grade, the first Color Wheels included, has a Remove", async () => {
   await root.dispose();
 });
 
-// C2: grades stack. Add stays, and puts the new grade after the last one;
-// the panel lists grades in the order they apply, named apart, and moves one
-// past any other effect between them (the effect stack's order).
+// C2: grades stack. The header's Add menu puts the new grade after the last
+// one; the panel lists grades in the order they apply, named apart, and a
+// grade's heading menu (a right click) moves it past any other effect
+// between them (the effect stack's order).
 test("grades stack in the order they apply, named apart, and move", async () => {
   const at = (h: ReturnType<typeof tool>, ordinal: number) => ({
     ...h,
@@ -140,24 +158,41 @@ test("grades stack in the order they apply, named apart, and move", async () => 
     at(tool("l1", "applyColorLut", "Apply Color LUT"), 2),
     at(tool("w2", "colorWheels", "Color Wheels"), 3),
   ]);
-  const { root, sent } = await mounted(p);
-  const headings = [...root.host.nodes.values()]
-    .filter((n) => n.props.role === "heading" && n.props.label)
-    .map((n) => n.props.label);
-  expect(headings).toEqual([
-    "Clip · Video",
-    "Color Wheels",
-    "Apply Color LUT",
-    "Color Wheels 2",
+  const { root, sent, menus, commands } = await mounted(p, [
+    "colorWheels",
+    "colorCurves",
+    "lut",
+    "up",
+    "down",
+    null as unknown as string,
   ]);
-  await event(root, named(root, `${PANEL_ID}:add:colorWheels`).id, "click");
-  await event(root, named(root, `${PANEL_ID}:add:colorCurves`).id, "click");
+  const grades = [...root.host.nodes.values()]
+    .filter((n) => n.props["data-pm-component"] === "disclosure-group")
+    .map((n) => n.props.label);
+  expect(grades).toEqual(["Color Wheels", "Apply Color LUT", "Color Wheels 2"]);
+  const add = named(root, `${PANEL_ID}:add`).id;
+  for (let i = 0; i < 3; i++) {
+    await event(root, add, "click");
+    await settle();
+  }
+  expect(menus[0].filter(Boolean).map((i) => i.label)).toEqual([
+    "Color Wheels",
+    "Curve",
+    "Color Space Transform",
+    "LUT…",
+    "CDL…",
+  ]);
+  expect(commands).toEqual(["viewer.applyLut"]);
   // The LUT moves up past the blur to before the first wheels' successor
   // slot, and down after the second wheels; the first can't go up.
-  await event(root, named(root, `${PANEL_ID}:up:l1`).id, "click");
-  await event(root, named(root, `${PANEL_ID}:down:l1`).id, "click");
-  expect(named(root, `${PANEL_ID}:up:w1`).props.disabled).toBe(true);
-  expect(named(root, `${PANEL_ID}:down:w2`).props.disabled).toBe(true);
+  const heading = (id: string) => named(root, `${PANEL_ID}:grade:${id}`).id;
+  await event(root, heading("l1"), "pointerdown", { button: 2 });
+  await settle();
+  await event(root, heading("l1"), "pointerdown", { button: 2 });
+  await settle();
+  await event(root, heading("w1"), "pointerdown", { button: 2 });
+  await settle();
+  expect(menus.at(-1)!.find((i) => i?.id === "up")!.disabled).toBe(true);
   expect(sent.filter((i) => i.type === "add" || i.type === "drop")).toEqual([
     { type: "add", definition: "colorWheels", slot: 4 },
     {
@@ -172,10 +207,10 @@ test("grades stack in the order they apply, named apart, and move", async () => 
   await root.dispose();
 });
 
-// C3: a grade turns off and on from its name as well as its box (a checkbox's
-// title is part of it, as on macOS), and a grade that is off can still be
-// set up: its wheels and curve stay editable.
-test("a grade's name turns it off and on, and an off grade stays editable", async () => {
+// C3/C4: a grade's box turns it off and on; its name folds it, as a
+// Properties section's does; and a grade that is off can still be set up:
+// its wheels and curve stay editable.
+test("a grade's name folds it, and an off grade stays editable", async () => {
   const off = { ...tool("w", "colorWheels", "Color Wheels"), enabled: false };
   const rows = [
     off,
@@ -187,11 +222,19 @@ test("a grade's name turns it off and on, and an off grade stays editable", asyn
     range: [0, rows.length],
     rows,
   } as Projection);
-  await event(root, named(root, `${PANEL_ID}:title:w`).id, "click");
-  expect(sent.filter((i) => i.type === "toggle")).toEqual([
-    { type: "toggle", id: "w" },
-  ]);
   expect(named(root, `${PANEL_ID}:wheel:w:lift`).props.disabled).toBe(false);
+  const button = [...root.host.nodes.values()].find(
+    (n) =>
+      n.props["data-pm-component"] === "disclosure-button" &&
+      n.props.label === "Color Wheels",
+  )!;
+  await event(root, button.id, "click");
+  expect(
+    [...root.host.nodes.values()].some(
+      (n) => n.props.id === `${PANEL_ID}:wheel:w:lift`,
+    ),
+  ).toBe(false);
+  expect(sent.filter((i) => i.type === "toggle")).toEqual([]);
   await root.dispose();
 });
 
@@ -215,3 +258,45 @@ function wheelRow(key: string) {
     },
   };
 }
+
+// C4: Color Space Transform's two Gamut and two Transfer rows stand under
+// Input and Output, so the two pairs can be told apart.
+test("a Color Space Transform's rows stand under Input and Output", async () => {
+  const cst = tool("t", "colorSpaceTransform", "Color Space Transform");
+  const row = (key: string, label: string) => ({
+    ...wheelRow(key),
+    id: `parameter:t.${key}`,
+    parameter: {
+      ...wheelRow(key).parameter,
+      id: `t.${key}`,
+      effect: "t",
+      label,
+    },
+  });
+  const rows = [
+    cst,
+    row("inputGamut", "Gamut"),
+    row("inputTransfer", "Transfer"),
+    row("outputGamut", "Gamut"),
+    row("outputTransfer", "Transfer"),
+    row("extra", "Extra"),
+  ];
+  const { root } = await mounted({
+    ...stacked([cst]),
+    count: rows.length,
+    range: [0, rows.length],
+    rows,
+  } as Projection);
+  const groups = [...root.host.nodes.values()].filter(
+    (n) =>
+      n.props.role === "group" && ["Input", "Output"].includes(n.props.label),
+  );
+  expect(groups.map((g) => g.props.label)).toEqual(["Input", "Output"]);
+  // A row no part names is still shown.
+  expect(
+    [...root.host.nodes.values()].some(
+      (n) => n.props.id === `${PANEL_ID}:field:parameter:t.extra`,
+    ),
+  ).toBe(true);
+  await root.dispose();
+});
