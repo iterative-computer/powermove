@@ -1,4 +1,9 @@
-import { ProjectPanel, ProjectService, type ViewMode } from "./index";
+import {
+  FIRST_PAGE,
+  ProjectPanel,
+  ProjectService,
+  type ViewMode,
+} from "./index";
 import type { BuiltinEnv, Mounted } from "../../src/builtin";
 
 /** Poster keys are the host's own picture keys (`thumb/…`): the host draws
@@ -14,7 +19,7 @@ export async function mount(env: BuiltinEnv): Promise<Mounted> {
     subscription: "project",
     projectStamp: (p: any) => p.stamp ?? null,
   });
-  await service.page(0, 96);
+  await service.page(0, FIRST_PAGE);
   // The list/grid choice is the person's, kept per project by the host.
   const loadViewMode = (): Promise<ViewMode> =>
     platform("project.view").then(

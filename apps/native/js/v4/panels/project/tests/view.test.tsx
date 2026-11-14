@@ -588,3 +588,27 @@ test("the header chooses list or grid; the grid's rows are a column wide each", 
   expect(report.diagnostics).toEqual([]);
   await root.dispose();
 });
+test("the page asked for leaves room for media imported later", async () => {
+  const { root } = recorder();
+  const pages: [number, number][] = [];
+  const view = projection([asset("a"), asset("b")]);
+  await root.render(
+    <ProjectView
+      view={view}
+      input={() => {}}
+      menu={() => {}}
+      page={(offset, limit) => pages.push([offset, limit])}
+      native={native}
+      layout={{ columns: 2, rowHeight: 140 }}
+    />,
+  );
+  const list = root.inspect().nodes.find((n) => n.type === "virtual-list")!;
+  // The host's visible range stops at the rows there are (one row of two).
+  await event(root, list.id, "rangechange", { range: [0, 1], width: 300 });
+  const [offset, limit] = pages.at(-1)!;
+  expect(offset).toBe(0);
+  // Not the two items there are now: a third imported later must arrive
+  // with the next publication, without a scroll asking again.
+  expect(limit).toBeGreaterThanOrEqual(96);
+  await root.dispose();
+});

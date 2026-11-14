@@ -71,6 +71,8 @@ export interface GridLayout {
 }
 /** The panel's two layouts: source-list rows, or a grid of thumbnails. */
 export type ViewMode = "list" | "grid";
+/** The page the panel asks for first, and the least it asks for after. */
+export const FIRST_PAGE = 96;
 export interface NativeServices {
   /** Real registered local-text binding handles, supplied by the native host. */
   searchBinding: string;
@@ -959,12 +961,15 @@ export function ProjectView(props: ProjectViewProps) {
                 (to - from) * layout.columns > 4096
               )
                 return;
+              // The rows shown. A range that reaches the last row asks for a
+              // first page's worth more: the host's range stops at the rows
+              // there are now, and media imported later joins the end, which
+              // the next publication then brings without a scroll (the native
+              // model clamps to what exists).
+              const room = to >= count ? FIRST_PAGE : 0;
               props.page(
                 from * layout.columns,
-                Math.min(
-                  view.page.total - from * layout.columns,
-                  (to - from) * layout.columns,
-                ),
+                Math.min(4096, (to - from) * layout.columns + room),
               );
             }}
           >
