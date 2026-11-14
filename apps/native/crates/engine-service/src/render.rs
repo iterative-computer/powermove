@@ -721,7 +721,17 @@ impl Engine {
     fn release_idle_memory_inner(&mut self) {
         self.renderer.clear_draw_reuse();
         self.renderer.release_idle_targets();
-        self.renderer.release_idle_media();
+        // Paused in the frontmost app: the decoders of the clips under the
+        // playhead stay open (references only, no decoded frames), so Play
+        // continues their run. On a clip with one sync sample, Play after a
+        // closed decoder decoded the clip from its first frame again
+        // (~150 ms, wrong frames at Play; Fable 5.5 at 46 s). Approved
+        // exception to idle release (2026-11-14); see `maintain_memory`.
+        if keep_paused_decoders() {
+            self.renderer.release_idle_media_keeping_decoders();
+        } else {
+            self.renderer.release_idle_media();
+        }
         self.renderer.trim(0);
         self.clear_cache();
         self.disk_next = None;
@@ -733,6 +743,13 @@ impl Engine {
 
     pub fn maintain_memory(&mut self) -> bool {
         self.govern_memory();
+        // Kept paused decoders go when the app is hidden or in the
+        // background, or under memory pressure; drawing again (playhead
+        // moved, Play) and a project's release end them as well.
+        if self.idle_released && self.renderer.kept_decoders() > 0 && !keep_paused_decoders() {
+            self.renderer.release_kept_decoders();
+            crate::memory::pressure_relief();
+        }
         if !self.idle_released && self.last_frame.elapsed() >= Duration::from_secs(2) {
             self.release_idle_memory();
             return true;
@@ -741,6 +758,7 @@ impl Engine {
     }
 
     pub fn release_project_memory(&mut self) {
+        self.renderer.release_kept_decoders();
         objc2::rc::autoreleasepool(|_| self.release_project_memory_inner());
         crate::memory::pressure_relief();
     }
@@ -4792,4 +4810,18 @@ mod text_grid_tests {
             );
         }
     }
+}
+
+/// Whether a paused viewer keeps the decoders of the clips under its
+/// playhead: only while this app is frontmost and not hidden, and memory is
+/// not under pressure. Engine processes without an active app never do.
+fn keep_paused_decoders() -> bool {
+    if crate::memory::pressure() != crate::memory::Pressure::Normal {
+        return false;
+    }
+    if std::env::var_os("PM_KEEP_PAUSED_DECODERS").is_some_and(|v| v == "0") {
+        return false;
+    }
+    let app = objc2_app_kit::NSRunningApplication::currentApplication();
+    app.isActive() && !app.isHidden()
 }

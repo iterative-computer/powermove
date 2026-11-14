@@ -537,3 +537,65 @@ fn a_displayed_decoder_displaces_cold_idle_state_before_reopening() {
     drop(current);
     assert!(svc.usage().decoders <= budget);
 }
+
+/// Paused, the decoder of a clip under the playhead stays open under a zero
+/// share (references only, no decoded frames) and Play continues its run;
+/// every other session closes; drawing again (a nonzero lease) or
+/// `release_kept` ends the exception.
+#[test]
+fn a_paused_clip_keeps_only_its_decoder() {
+    let clip = MediaSource::open(&fixtures_dir().join("vp9-opus.webm")).unwrap();
+    let other = MediaSource::open(&fixtures_dir().join("h264-aac.mp4")).unwrap();
+    let svc = DecodeService::new(ServiceConfig::default());
+    let paused = |svc: &DecodeService| {
+        // Drawing: an ordinary share.
+        svc.apply_lease(MediaLease {
+            frame_cache: 24 << 20,
+            decoders: 32 << 20,
+        });
+        svc.session(&clip, 1, DecodePurpose::Display)
+            .unwrap()
+            .frame(10)
+            .unwrap();
+        svc.session(&other, 2, DecodePurpose::Display)
+            .unwrap()
+            .frame(3)
+            .unwrap();
+        assert_eq!(svc.usage().sessions, 2);
+        // Idle release with the clip under the playhead.
+        svc.keep_idle(&[(clip.id, 1)]);
+        svc.apply_lease(MediaLease {
+            frame_cache: 0,
+            decoders: 0,
+        });
+    };
+    paused(&svc);
+    let u = svc.usage();
+    assert_eq!((u.sessions, svc.kept_sessions()), (1, 1));
+    assert_eq!(u.cache.frames, 0, "no decoded frames are kept");
+    assert_eq!(u.pool.free_bytes, 0, "no free pool storage is kept");
+    {
+        let mut s = svc.session(&clip, 1, DecodePurpose::Display).unwrap();
+        let seeks = s.stats().seeks;
+        s.frame(11).unwrap();
+        assert_eq!(s.stats().seeks, seeks, "Play continues the paused run");
+    }
+    assert_eq!(svc.kept_sessions(), 1, "still kept after Play's first frame");
+    svc.release_kept();
+    assert_eq!((svc.usage().sessions, svc.kept_sessions()), (0, 0));
+
+    // Drawing again makes it an ordinary session: the next idle release
+    // without a clip under the playhead closes it.
+    paused(&svc);
+    svc.apply_lease(MediaLease {
+        frame_cache: 8 << 20,
+        decoders: 8 << 20,
+    });
+    assert_eq!(svc.kept_sessions(), 0);
+    svc.keep_idle(&[]);
+    svc.apply_lease(MediaLease {
+        frame_cache: 0,
+        decoders: 0,
+    });
+    assert_eq!(svc.usage().sessions, 0);
+}

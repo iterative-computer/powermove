@@ -2674,8 +2674,39 @@ impl MediaCache {
         self.begin_frame(self.look_ahead);
     }
 
+    /// Closes the decoders [`Self::release_idle_frames_keeping`] kept.
+    pub fn release_kept_decoders(&mut self) {
+        self.service.release_kept();
+        self.recount();
+    }
+
+    /// Decoders kept open for the clips under the paused playhead.
+    pub fn kept_decoders(&self) -> usize {
+        self.service.kept_sessions()
+    }
+
     /// Queue-owned GPU references remain valid; this only drops cache handles.
     pub fn release_idle_frames(&mut self) {
+        self.release_idle_frames_keeping(false);
+    }
+
+    /// [`Self::release_idle_frames`]; with `keep_decoders`, the decoder of
+    /// each video the last frame drew (the clips under the paused playhead)
+    /// stays open with its references only, no decoded frames, so Play
+    /// continues its run. Drawing again, [`Self::release_kept_decoders`] or
+    /// a project's release ends it.
+    pub fn release_idle_frames_keeping(&mut self, keep_decoders: bool) {
+        let keep: Vec<(u64, pm_media::decode::service::InstanceId)> = if keep_decoders {
+            self.video_seen
+                .iter()
+                .filter(|(_, seen)| **seen == self.frame_epoch)
+                .filter_map(|((path, instance), _)| {
+                    self.sources.get(path).map(|(_, src)| (src.id, *instance))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         self.stills.clear();
         self.still_prepared_at = None;
         self.stills.set_limit(0);
@@ -2686,7 +2717,10 @@ impl MediaCache {
         self.video_seen.clear();
         self.viewer.release(None);
         self.source_viewer.release(None);
-        self.service.release(None, None);
+        if keep.is_empty() {
+            self.service.release(None, None);
+        }
+        self.service.keep_idle(&keep);
         self.service.apply_lease(MediaLease {
             frame_cache: 0,
             decoders: 0,

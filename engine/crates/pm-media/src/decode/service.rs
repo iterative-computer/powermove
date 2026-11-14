@@ -20,7 +20,7 @@ use pm_protocol::color::ColorDescription;
 use pm_protocol::common::ByteSize;
 use pm_protocol::lease::LeaseCategories;
 use pm_time::{Rate, Tick};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -340,6 +340,10 @@ pub struct DecodeService {
     /// Most recently displayed streams, not background preparation. Bounded
     /// metadata lets a clip being shown displace older idle decoders first.
     displayed: Mutex<VecDeque<SessionKey>>,
+    /// Paused: the Display sessions of the clips under the playhead, kept
+    /// open (their decoder only) under a zero decoder share so Play
+    /// continues their run ([`DecodeService::keep_idle`]).
+    kept: Mutex<HashSet<SessionKey>>,
 }
 
 /// A session checked out of the pool; it returns on drop.
@@ -573,7 +577,10 @@ impl Drop for SessionGuard<'_> {
             let svc = self.service;
             // Over the combined media allowance, return the window first,
             // then close if needed. A zero decoder share always closes it.
-            let zero = svc.lease.lock().unwrap().decoders == 0;
+            // A session kept for a paused clip stays open under a zero
+            // share (its window still goes).
+            let kept = svc.kept.lock().unwrap().contains(&self.key);
+            let zero = svc.lease.lock().unwrap().decoders == 0 && !kept;
             // PM_FIX_KEEP_SESSION: over the share, a session gives back its
             // window but stays open as its key's one idle session; cold
             // sources and idle release close it.
@@ -596,7 +603,7 @@ impl Drop for SessionGuard<'_> {
                 // a warm decoder to reclaim reusable free buffers forces the
                 // next playing frame to open and seek all over again.
                 svc.trim_free();
-                if !keep && (zero || svc.decoders_over()) {
+                if !keep && !kept && (zero || svc.decoders_over()) {
                     drop(s);
                     svc.open_sessions.fetch_sub(1, Ordering::Relaxed);
                     super::diag::bump(&super::diag::SESSIONS_CLOSED_OVER_SHARE, 1);
@@ -659,6 +666,7 @@ impl DecodeService {
             recovery_opens: AtomicU64::new(0),
             lease: Mutex::new(MediaLease::UNLIMITED),
             displayed: Mutex::new(VecDeque::new()),
+            kept: Mutex::new(HashSet::new()),
         }
     }
 
@@ -749,6 +757,77 @@ impl DecodeService {
         }
     }
 
+    /// Paused: closes every idle session except the Display sessions of
+    /// `keep` (source, instance), the clips under the paused playhead. Those
+    /// keep their decoder and its references only: their windows and the
+    /// free pool storage go. They stay open under a zero decoder share, so
+    /// Play continues their run instead of decoding again from a sync sample
+    /// (on a clip with one sync sample, from the clip's first frame), until
+    /// a nonzero lease (drawing again) or [`Self::release_kept`].
+    pub fn keep_idle(&self, keep: &[(u64, InstanceId)]) {
+        let keys: HashSet<SessionKey> = keep
+            .iter()
+            .map(|&(source, instance)| SessionKey {
+                source,
+                instance,
+                purpose: DecodePurpose::Display,
+            })
+            .collect();
+        *self.kept.lock().unwrap() = keys.clone();
+        let mut idle = self.idle.lock().unwrap();
+        idle.retain(|key, list| {
+            if keys.contains(key) {
+                while list.len() > 1 {
+                    list.pop();
+                    self.open_sessions.fetch_sub(1, Ordering::Relaxed);
+                    super::diag::bump(&super::diag::SESSIONS_RELEASED, 1);
+                }
+                for s in list.iter_mut() {
+                    s.clear_window();
+                }
+                !list.is_empty()
+            } else {
+                self.open_sessions
+                    .fetch_sub(list.len() as u64, Ordering::Relaxed);
+                super::diag::bump(&super::diag::SESSIONS_RELEASED, list.len() as u64);
+                false
+            }
+        });
+        drop(idle);
+        self.trim_free();
+    }
+
+    /// Closes the sessions [`Self::keep_idle`] kept (the app went to the
+    /// background, memory pressure).
+    pub fn release_kept(&self) {
+        let keys = std::mem::take(&mut *self.kept.lock().unwrap());
+        let mut idle = self.idle.lock().unwrap();
+        idle.retain(|key, list| {
+            if keys.contains(key) {
+                self.open_sessions
+                    .fetch_sub(list.len() as u64, Ordering::Relaxed);
+                super::diag::bump(&super::diag::SESSIONS_RELEASED, list.len() as u64);
+                false
+            } else {
+                true
+            }
+        });
+        drop(idle);
+        self.trim_free();
+    }
+
+    /// Sessions open because [`Self::keep_idle`] kept them.
+    pub fn kept_sessions(&self) -> usize {
+        let keys = self.kept.lock().unwrap().clone();
+        self.idle
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(key, _)| keys.contains(key))
+            .map(|(_, list)| list.len())
+            .sum()
+    }
+
     /// A new session for `source` (counted as open).
     fn open_session(
         &self,
@@ -815,6 +894,10 @@ impl DecodeService {
     /// their renderer lets them go.
     pub fn apply_lease(&self, lease: MediaLease) -> MediaUsage {
         *self.lease.lock().unwrap() = lease;
+        if lease.decoders > 0 {
+            // Drawing again: kept sessions are ordinary ones under the share.
+            self.kept.lock().unwrap().clear();
+        }
         self.cache.set_budget(lease.frame_cache);
         self.fit_decoders();
         self.usage()
@@ -868,6 +951,8 @@ impl DecodeService {
         // A zero share closes every idle session: the state VideoToolbox
         // keeps per session is not measurable, so nothing else frees it.
         let zero = self.lease.lock().unwrap().decoders == 0;
+        let kept = self.kept.lock().unwrap().clone();
+        let eligible = |key: &SessionKey| eligible(key) && !(zero && kept.contains(key));
         // PM_FIX_KEEP_SESSION=2: over the share, idle sessions keep only
         // their decoder (windows and free pool memory go above); only a zero
         // share (idle release, project close) closes them.

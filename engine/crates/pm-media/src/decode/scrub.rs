@@ -632,7 +632,13 @@ impl Shared {
                     .session(&self.source, self.instance, self.purpose)?;
                 let (keep, stride, forward) = {
                     let st = self.state.lock().unwrap();
-                    let forward = st.playing && st.stride > 0 && !st.firm.contains_key(&n);
+                    // Holding over needs a frame to hold: a worker that
+                    // has handed a playing viewer nothing yet (a fresh one
+                    // on a warm session) decodes the frame.
+                    let forward = st.playing
+                        && st.stride > 0
+                        && st.presented.is_some()
+                        && !st.firm.contains_key(&n);
                     if st.stride < 0 {
                         (self.reverse_reach(&st), st.stride.unsigned_abs() as usize, forward)
                     } else {
