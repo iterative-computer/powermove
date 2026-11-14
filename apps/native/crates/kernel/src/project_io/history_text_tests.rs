@@ -605,3 +605,218 @@ fn the_guard_keeps_no_more_verdicts_than_the_history_reaches() {
         assert_eq!(store.history().guard_verdicts(), 0);
     }
 }
+
+/// A recorded write that only sets an otherwise absent edit log to `[]`:
+/// its patch is a record array with no item, so `pack` keeps the history
+/// plain and so must the writer (review w31 F3).
+#[test]
+fn a_history_whose_only_record_array_is_empty_stays_plain() {
+    let dir = TempDir::new("empty-records");
+    let files = Files::new(&dir);
+    let mut store = DocumentStore::new_untitled(project(6, false));
+    edit(&mut store, 0);
+    let before = store.current().clone();
+    let ops = pm_model::ops::ops_from_value(
+        &parse(r#"[{"path":["edits"],"exists":true,"value":[]}]"#).unwrap(),
+    )
+    .unwrap();
+    let applied = store
+        .kernel_apply(
+            &crate::WriteBody::Ops(ops),
+            Origin::Interface,
+            crate::document::ChangeCause::Write {
+                label: "Clear edits".into(),
+                origin: Origin::Interface,
+                entry: None,
+            },
+        )
+        .unwrap()
+        .expect("a change");
+    store.kernel_record(
+        "Clear edits".into(),
+        Origin::Interface,
+        applied.forward,
+        applied.inverse,
+        &before,
+        applied.scopes,
+    );
+    let first = SaveTarget::SaveAs {
+        path: files.packed.clone(),
+        replace: false,
+    };
+    save_three(&mut store, first, &files, "only an empty record array");
+    assert!(
+        document(&files.packed)
+            .get("history")
+            .and_then(|h| h.get("format"))
+            .is_none(),
+        "no record: the history stays plain"
+    );
+    drop(store);
+    reopened_alike(&files);
+}
+
+/// A project showing one embedded image, `m`.
+fn with_media() -> DocumentStore {
+    let mut p = project(6, false);
+    let root = p.as_object_mut().unwrap();
+    root.insert(
+        "assets",
+        parse(r#"{"m":{"id":"m","name":"Picture","kind":"image","type":"image/png"}}"#).unwrap(),
+    );
+    let layers = root.get_mut("layers").unwrap().as_array_mut().unwrap();
+    layers.push(
+        parse(r#"{"id":"pic","type":"image","name":"Picture","from":0,"dur":5,"on":true,"p":{"opacity":{"v":100,"kf":[]}},"d":{"asset":"m"},"fx":[]}"#)
+            .unwrap(),
+    );
+    let mut store = DocumentStore::new_untitled(p);
+    store.media_mut().insert(MediaEntry {
+        id: "m".into(),
+        media_type: "image/png".into(),
+        revision: "r1".into(),
+        source: MediaSource::Memory(std::sync::Arc::from(&b"synthetic picture bytes"[..])),
+    });
+    store
+}
+
+fn remove_media(store: &mut DocumentStore) {
+    store
+        .execute(
+            crate::MediaCommand::RemoveAsset {
+                asset_id: "m".into(),
+            }
+            .into(),
+            Origin::Interface,
+        )
+        .unwrap();
+}
+
+/// Media only an undo step refers to (a removed picture) is restored by the
+/// old app only when the history it walks is plain, before it imports the
+/// history: such a file's history is written plain, and its bytes are kept
+/// (review w31 F2).
+#[test]
+fn history_only_media_keeps_the_history_plain() {
+    let dir = TempDir::new("history-media");
+    let files = Files::new(&dir);
+    let mut store = with_media();
+    for i in 0..10 {
+        edit(&mut store, i);
+    }
+    add_layer(&mut store, "extra");
+    remove_media(&mut store);
+    let first = SaveTarget::SaveAs {
+        path: files.packed.clone(),
+        replace: false,
+    };
+    save_three(&mut store, first, &files, "the picture removed");
+    let saved = document(&files.packed);
+    assert!(
+        saved.get("history").and_then(|h| h.get("format")).is_none(),
+        "the history stays plain while it alone refers to embedded media"
+    );
+    let container =
+        read_container(&File::open(&files.packed).unwrap(), ReadOptions::default()).unwrap();
+    assert!(
+        container
+            .media
+            .iter()
+            .chain(&container.archived_media)
+            .any(|m| m.id.as_str() == Some("m")),
+        "the picture's bytes stay in the file"
+    );
+    // Undone: the project lists the picture again, the history is packed.
+    store.undo().unwrap();
+    save_three(
+        &mut store,
+        SaveTarget::InPlace,
+        &files,
+        "the removal undone",
+    );
+    assert_eq!(
+        document(&files.packed)
+            .get("history")
+            .and_then(|h| h.get("format"))
+            .and_then(Value::as_str),
+        Some("powermove-history-dictionary")
+    );
+    drop(store);
+    reopened_alike(&files);
+}
+
+/// The old app's whole file-open path (`tests/v1_reader/read_file.ts`, run
+/// on exported v1.2.0 and v1.3.2 sources listed in `PM_V1_SRC`, separated by
+/// `:`): a fresh media store, open, Undo, Save As, reopen. The picture
+/// survives in the plain case (removed media) and the packed case (media the
+/// project still lists); the same removal written packed regardless loses
+/// it, which the witness must catch.
+#[test]
+fn the_old_app_keeps_the_media_through_open_undo_and_save_as() {
+    let Some(sources) = std::env::var_os("PM_V1_SRC") else {
+        eprintln!("PM_V1_SRC not set: the old app's open path was not run");
+        return;
+    };
+    let dir = TempDir::new("v1-open");
+    let write = |store: &mut DocumentStore, path: &Path, writer: Option<ReferenceWriter>| {
+        let plan = store
+            .prepare_save(
+                SaveTarget::SaveAs {
+                    path: path.to_owned(),
+                    replace: false,
+                },
+                SaveOptions {
+                    reference_writer: writer,
+                    ..SaveOptions::default()
+                },
+            )
+            .unwrap();
+        let receipt = run(plan);
+        store.finish_save(receipt).unwrap();
+    };
+    // Removed media: plain history (the writer), and packed regardless.
+    let mut removed = with_media();
+    add_layer(&mut removed, "extra");
+    remove_media(&mut removed);
+    let plain = dir.path("removed-plain.pmv");
+    write(&mut removed, &plain, None);
+    let forced = dir.path("removed-packed-regardless.pmv");
+    write(
+        &mut removed,
+        &forced,
+        Some(ReferenceWriter::PackedRegardless),
+    );
+    // Media the project still lists: packed history.
+    let mut kept = with_media();
+    add_layer(&mut kept, "extra");
+    let packed = dir.path("listed-packed.pmv");
+    write(&mut kept, &packed, None);
+    assert!(
+        document(&packed)
+            .get("history")
+            .and_then(|h| h.get("format"))
+            .is_some()
+    );
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/v1_reader/read_file.ts");
+    let bun = std::env::var_os("PM_TEST_BUN").unwrap_or_else(|| "bun".into());
+    for source in std::env::split_paths(&sources) {
+        for (file, keeps) in [(&plain, true), (&packed, true), (&forced, false)] {
+            let out = std::process::Command::new(&bun)
+                .arg(&script)
+                .arg(file)
+                .arg("m")
+                .env("V1_SRC", &source)
+                .output()
+                .expect("bun runs the old app's reader");
+            let text = String::from_utf8_lossy(&out.stdout);
+            eprintln!("{} {}:\n{text}", source.display(), file.display());
+            assert_eq!(
+                out.status.success(),
+                keeps,
+                "{} on {}: {text}{}",
+                source.display(),
+                file.display(),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    }
+}

@@ -182,7 +182,10 @@ fn write_project(root: &Node, had_comps: bool, sink: &mut impl Sink) {
 /// written step by step from text each step made once (the same bytes).
 pub(crate) enum HistoryPart<'a> {
     Value(&'a Value),
+    /// Packed history form.
     Session(&'a crate::history::HistorySnapshot),
+    /// Plain history form.
+    SessionPlain(&'a crate::history::HistorySnapshot),
 }
 
 pub(crate) fn write_document(parts: &DocumentParts<'_>, sink: &mut impl Sink) {
@@ -203,6 +206,7 @@ pub(crate) fn write_document(parts: &DocumentParts<'_>, sink: &mut impl Sink) {
     match parts.history {
         HistoryPart::Value(history) => write_canonical(history, sink),
         HistoryPart::Session(snapshot) => snapshot.write_saved_packed(sink),
+        HistoryPart::SessionPlain(snapshot) => snapshot.write_saved(sink),
     }
     sink.push_str(",");
     key(sink, "ws");

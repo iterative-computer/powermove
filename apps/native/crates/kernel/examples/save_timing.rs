@@ -184,6 +184,32 @@ fn compare(file: &std::path::Path, layer: &str) {
     step(&mut store, "after an undo");
     store.redo().unwrap();
     step(&mut store, "after a redo");
+    // Remove one embedded picture: its media is then only the history's, and
+    // the history is written plain (the old app restores media from it).
+    let embedded: Vec<String> = store
+        .media()
+        .iter()
+        .map(|m| m.id.to_string_lossy())
+        .collect();
+    let listed = store
+        .root()
+        .and_then(|r| r.get("assets"))
+        .map(|a| a.to_value())
+        .unwrap_or(pm_model::Value::Null);
+    if let Some(id) = embedded.iter().find(|id| listed.get(id.as_str()).is_some()) {
+        store
+            .execute(
+                pm_kernel::MediaCommand::RemoveAsset {
+                    asset_id: id.clone(),
+                }
+                .into(),
+                Origin::Interface,
+            )
+            .unwrap();
+        step(&mut store, "a save that falls back to the plain history");
+        rename(&mut store, "Compare four");
+        step(&mut store, "a later save, still plain");
+    }
     drop(store);
     for (label, path) in [("packed", file), ("unpacked", plain.as_path())] {
         let t = Instant::now();

@@ -234,11 +234,13 @@ impl PackedText {
         let bytes = zstd::bulk::decompress(&self.data, self.len).expect("internal history bytes");
         String::from_utf8(bytes).expect("canonical history text")
     }
+    /// Whether the step gives `pack` any record: a record array with at
+    /// least one item (an empty one alone leaves the history plain).
     fn has_records(&self) -> bool {
         self.sides
             .iter()
             .flatten()
-            .any(|p| matches!(p, PackedPiece::Records { .. }))
+            .any(|p| matches!(p, PackedPiece::Records { items, .. } if !items.is_empty()))
     }
 }
 

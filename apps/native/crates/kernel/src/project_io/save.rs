@@ -625,6 +625,28 @@ impl SavePlan {
         }
     }
 
+    /// Whether the file embeds media the project's own assets don't list:
+    /// media only an undo or redo step refers to. The old app (v1.2.0 to
+    /// v1.3.2) restores a file's media by walking the plain history's
+    /// entries before it imports the history; a packed history hides those
+    /// assets from that walk and their bytes would be left behind (review
+    /// w31 F2). Such a history is written plain; the media stays.
+    fn history_only_media(&self) -> bool {
+        let assets = self
+            .document
+            .root()
+            .and_then(|root| root.get("assets"))
+            .map(|assets| match assets.kind() {
+                pm_model::NodeKind::Object(map) => map
+                    .keys()
+                    .cloned()
+                    .collect::<std::collections::HashSet<_>>(),
+                _ => Default::default(),
+            })
+            .unwrap_or_default();
+        self.media.iter().any(|entry| !assets.contains(&entry.id))
+    }
+
     fn attempt(&self, fault: Option<WriteFault>) -> Result<SaveReceipt, ProjectIoError> {
         let mut lap = Lap::new();
         self.validate()?;
@@ -822,6 +844,13 @@ impl SavePlan {
                 Some(snapshot.to_saved())
             }
             (HistoryToWrite::Session(snapshot), Some(ReferenceWriter::Packed)) => {
+                Some(if self.history_only_media() {
+                    snapshot.to_saved()
+                } else {
+                    crate::history::pack(snapshot.to_saved())
+                })
+            }
+            (HistoryToWrite::Session(snapshot), Some(ReferenceWriter::PackedRegardless)) => {
                 Some(crate::history::pack(snapshot.to_saved()))
             }
             _ => None,
@@ -834,7 +863,11 @@ impl SavePlan {
                 file_guard::GuardHistory::Value(value),
             ),
             (HistoryToWrite::Session(snapshot), None) => (
-                HistoryPart::Session(snapshot),
+                if self.history_only_media() {
+                    HistoryPart::SessionPlain(snapshot)
+                } else {
+                    HistoryPart::Session(snapshot)
+                },
                 file_guard::GuardHistory::Session {
                     snapshot,
                     state_token: self.state_token,
@@ -1140,8 +1173,12 @@ impl SavePlan {
 pub enum ReferenceWriter {
     /// `to_saved()` as a whole value: the writer before the packed form.
     Unpacked,
-    /// `pack(to_saved())` as a whole value.
+    /// `pack(to_saved())` as a whole value, or `to_saved()` when the file
+    /// embeds media only the history refers to (the same rule as the writer).
     Packed,
+    /// `pack(to_saved())` whatever media the file embeds: the writer before
+    /// that rule (for the old-reader witness).
+    PackedRegardless,
 }
 
 /// Phase times of one save attempt on stderr (`PM_SAVE_TRACE=1`).
