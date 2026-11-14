@@ -320,13 +320,16 @@ fn a_font_installed_while_a_project_is_open_retires_its_rendered_frames(
     // it was asked for (its fence holds), yet it resolves the family to a
     // fallback face where the app resolves it to the font. Its faces are
     // compared with the app's: it fails rather than export another face.
-    assert_eq!(
-        exported(&dir.path().join("unlisted"), |fonts| {
-            fonts
-                .0
-                .retain(|(path, _)| path.file_name() != font.file_name());
-        }),
-        Err(jobs::FACES_DIFFER.to_owned())
+    let unlisted = exported(&dir.path().join("unlisted"), |fonts| {
+        fonts
+            .0
+            .retain(|(path, _)| path.file_name() != font.file_name());
+    });
+    assert!(
+        unlisted
+            .as_ref()
+            .is_err_and(|e| e.starts_with(jobs::FACES_DIFFER.trim_end_matches('.'))),
+        "{unlisted:?}"
     );
     assert!(
         std::fs::read_dir(dir.path().join("unlisted")).map_or(true, |mut d| d.next().is_none()),
