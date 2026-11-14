@@ -603,6 +603,15 @@ pub fn layer_menu(published: &Published, pressed: &str, time: f64) -> Vec<serde_
         json!([!target.solo]),
         editable,
     ));
+    // Shy has no row button: the row menu and the Layer menu keep it.
+    let shy = layer(published, &target.id).and_then(|l| l.get("shy").and_then(Value::as_bool))
+        == Some(true);
+    rows.push(row(
+        if shy { "Unshy" } else { "Shy" },
+        "toggleShy",
+        json!([]),
+        editable,
+    ));
     // Unlocking is never refused: it is how a locked layer becomes editable.
     rows.push(match facts.locked_group(pressed) {
         Some(group) => row("Unlock Group", "unlockGroup", json!([group.id]), true),

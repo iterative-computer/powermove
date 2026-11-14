@@ -66,6 +66,11 @@ pub enum Outbound {
     HideHome,
     /// A menu command this window runs (Open…, New Project, Store, sign-in).
     Command(&'static str),
+    /// The library began opening a project (ghost loading starts now): its
+    /// name and its composition's aspect when the index knows it.
+    Opening { name: String, aspect: Option<f32> },
+    /// The library's open ended without a project (failed or declined).
+    OpenEnded,
 }
 pub type Sink = Rc<dyn Fn(Outbound, &mut App)>;
 pub struct ProjectLibrary {
@@ -108,6 +113,8 @@ pub struct ProjectLibrary {
     new_project: Option<Entity<NativeControl>>,
     /// The project this window shows (its card reads Active).
     pub active: Option<String>,
+    /// The open last announced to the window (`Outbound::Opening`).
+    announced_open: Option<String>,
     /// Cards per grid row at the last layout, for arrow keys.
     columns: usize,
     /// A failure Home reports in its header (the editor's status line is
@@ -186,6 +193,7 @@ impl ProjectLibrary {
             search: None,
             new_project: None,
             active: None,
+            announced_open: None,
             columns: 1,
             notice: None,
             kernel,
@@ -216,6 +224,26 @@ impl ProjectLibrary {
         }
         if self.controller.opening().is_some() {
             self.notice = None;
+        }
+        // Ghost loading: the window shows the editor the moment an open
+        // begins, not when the project has been read.
+        let opening = self.controller.opening().map(str::to_owned);
+        if crate::ghost::announce(&self.announced_open, &opening) {
+            let event = match &opening {
+                Some(name) => Outbound::Opening {
+                    name: name.clone(),
+                    aspect: self
+                        .controller
+                        .rows
+                        .iter()
+                        .find(|r| &r.name == name)
+                        .and_then(|r| r.dimensions())
+                        .map(|(w, h)| w as f32 / h as f32),
+                },
+                None => Outbound::OpenEnded,
+            };
+            self.announced_open = opening;
+            (self.sink)(event, cx);
         }
         for effect in self.controller.take_effects() {
             self.effect(effect, cx);

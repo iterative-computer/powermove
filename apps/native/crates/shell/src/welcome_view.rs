@@ -89,7 +89,6 @@ impl WelcomeView {
         let primary = self.frame.default.as_deref() == Some(&button.id);
         let enabled = button.enabled;
         let id = button.id.clone();
-        let focus = c.focus;
         let mut element = div()
             .id(SharedString::from(format!("welcome-{}", button.id)))
             .debug_selector(|| format!("welcome-{id}", id = id.clone()))
@@ -97,7 +96,6 @@ impl WelcomeView {
             .aria_label(button.label.clone())
             .aria_disabled(!enabled)
             .tab_index(0)
-            .focus_visible_style(move |s| s.ring(px(2.)).ring_color(rgb(focus)))
             .px(px(m.inset))
             .h(px(m.row))
             .flex()

@@ -43,6 +43,11 @@ pub trait Integration {
     fn checked(&self, _cx: &App) -> std::collections::BTreeSet<String> {
         Default::default()
     }
+    /// Recent projects (library id, name), newest first, for the project
+    /// name's menu in the bar.
+    fn recent(&self, _cx: &App) -> Vec<(String, String)> {
+        Vec::new()
+    }
     /// True when a native surface below GPUI draws this panel's body. The shell
     /// leaves the body transparent and routes its pointer events to that surface.
     fn native_panel(&self, _id: &str, _cx: &App) -> bool {

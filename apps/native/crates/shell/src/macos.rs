@@ -187,9 +187,11 @@ fn keeps_windows() -> bool {
 pub fn open_editor(cx: &mut App) {
     open_editor_window(cx, true, None, None);
 }
-/// Opens a new editor window as a native tab of the window with session id `leader`.
+/// Was: a new editor window as a native tab of `leader`'s. One project per
+/// window now, so it is a window of its own.
 pub fn open_editor_tab(cx: &mut App, leader: u64) {
-    open_editor_window(cx, true, None, Some(leader).filter(|l| *l != 0));
+    let _ = leader;
+    open_editor_window(cx, true, None, None);
 }
 fn next_window_id() -> u64 {
     thread_local! { static NEXT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }
