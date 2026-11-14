@@ -190,7 +190,19 @@ pub(crate) fn full_sync(file: &File) -> io::Result<()> {
 }
 
 fn sync_dir(dir: &Path) -> io::Result<()> {
+    #[cfg(test)]
+    SYNCED.with(|s| {
+        if let Some(log) = s.borrow_mut().as_mut() {
+            log.push(dir.to_path_buf());
+        }
+    });
     full_sync(&File::open(dir)?)
+}
+
+// Test-only: the folders synced on this thread, in order, while recording.
+#[cfg(test)]
+thread_local! {
+    static SYNCED: std::cell::RefCell<Option<Vec<PathBuf>>> = const { std::cell::RefCell::new(None) };
 }
 
 enum Job {
@@ -561,20 +573,6 @@ pub fn sessions(project_dir: &Path) -> Vec<PathBuf> {
 /// The prefix of a session folder still being created.
 const STAGING: &str = ".creating-";
 
-/// How a session of `project_dir` names `old`, the session it continues:
-/// its folder name in the same project, `../<project>/<session>` in another
-/// project under the same journal root, `None` elsewhere.
-fn continuation_name(project_dir: &Path, old: &Path) -> Option<String> {
-    let name = old.file_name()?.to_str()?;
-    let parent = old.parent()?;
-    if parent == project_dir {
-        return Some(name.to_owned());
-    }
-    (parent.parent()? == project_dir.parent()?)
-        .then(|| Some(format!("../{}/{name}", parent.file_name()?.to_str()?)))
-        .flatten()
-}
-
 /// A session with a header that verifies, or a checkpoint: one a kill left
 /// half created (an older build, before the staging folder) is neither.
 fn published(session: &Path) -> bool {
@@ -632,6 +630,9 @@ fn archive_predecessors(session: &Path) -> io::Result<()> {
         }
         let from = old.parent().expect("session parent").to_path_buf();
         fs::rename(&old, &destination)?;
+        // Its new entry durable before its removal: a power loss in between
+        // must leave it in one of the two places, never neither.
+        sync_dir(&archive)?;
         sync_dir(&from)?;
     }
     Ok(())
@@ -694,16 +695,14 @@ impl Journal {
         // Adopted recovered work starts from checkpoint 0, not the base.
         // Until that lands, the session it supersedes here still holds the
         // state, and recovery continues from it.
-        // Another project's session (a file moved while closed, recovered
-        // here) is named relative to this project's folder.
-        let continues: Option<String> = (!saved && !supersedes.is_empty()).then(|| {
+        let start = (!saved && !supersedes.is_empty()).then(|| {
             supersedes
                 .iter()
-                .filter_map(|old| continuation_name(project_dir, old))
+                .filter(|old| old.parent() == Some(project_dir))
+                .filter_map(|old| old.file_name()?.to_str())
                 .max()
-                .unwrap_or_default()
+                .unwrap_or("")
         });
-        let start = continues.as_deref();
         let (file, target) = open_segment(
             durability,
             &staging,
@@ -1569,29 +1568,23 @@ fn continued(session: &Path) -> Option<PathBuf> {
         return None;
     }
     let name = head.get("continues")?.as_str()?;
-    let parent = session.parent()?;
-    let parts: Vec<&str> = name.split('/').collect();
-    let plain = |p: &str| !p.is_empty() && p != "." && p != ".." && !p.contains('\\');
-    let leaf = match parts.as_slice() {
-        [leaf] if plain(leaf) => *leaf,
-        ["..", project, leaf] if plain(project) && plain(leaf) => {
-            let earlier = parent.parent()?.join(project).join(leaf);
-            if earlier.is_dir() {
-                return Some(earlier);
-            }
-            *leaf
-        }
-        _ => return None,
-    };
-    // Beside it: the same project, or both set aside in `discarded/`.
-    let earlier = parent.join(leaf);
-    earlier.is_dir().then_some(earlier)
+    // Beside it: in the same project, or both set aside in `discarded/`.
+    let earlier = session.parent()?.join(name);
+    (!name.is_empty() && !name.contains('/') && earlier.is_dir()).then_some(earlier)
 }
 
+/// The header line of a segment, verified. Only that line is read: a later
+/// record torn inside a character (a machine crash mid-append) is the
+/// torn-tail reader's to handle, never a reason to doubt the header.
 fn segment_head(path: &Path) -> Option<Map> {
-    let mut text = String::new();
-    File::open(path).ok()?.read_to_string(&mut text).ok()?;
-    let first = text.lines().next()?;
+    use std::io::BufRead;
+    let mut line = Vec::new();
+    std::io::BufReader::new(File::open(path).ok()?)
+        .read_until(b'\n', &mut line)
+        .ok()?;
+    let first = std::str::from_utf8(&line)
+        .ok()?
+        .trim_end_matches(['\n', '\r']);
     let (sum, json) = first.split_once(' ')?;
     (checksum(json) == sum).then_some(())?;
     parse(json).ok()?.as_object().cloned()
@@ -1732,17 +1725,13 @@ fn recover_session(session: &Path, base: Option<Base>) -> Result<Recovered, Stri
             }
             (
                 (first, 0),
+                // The state from the predecessor; what it may be matched
+                // against (its base and ancestors) from this session's own
+                // header, which lists only the bases its recovery verified.
                 Loaded {
                     revision,
-                    base: earlier.base,
-                    bases: {
-                        let mut bases = earlier.bases;
-                        let start = Ancestor::start(&session_base);
-                        if !bases.contains(&start) {
-                            bases.push(start);
-                        }
-                        bases
-                    },
+                    base: session_base.clone(),
+                    bases: bases_of(&head, &session_base),
                     document: earlier.document.root().cloned(),
                     history: LoadedHistory::Ready(earlier.history),
                     workspace: earlier.workspace,
@@ -2102,4 +2091,57 @@ mod meta_line_tests {
             to_canonical_string(&Value::Object(whole))
         );
     }
+}
+
+/// Review w32 re-check, finding 4: archiving a continued session moves its
+/// predecessor first, and that predecessor's new entry in `discarded/` is
+/// made durable before its removal from the project folder is, so a power
+/// loss between the two leaves it in one place or the other, never neither.
+#[cfg(test)]
+#[test]
+fn an_archived_predecessor_is_durable_where_it_went_before_it_leaves() {
+    let root = std::env::temp_dir().join(format!(
+        "pm-archive-order-{}-{}",
+        std::process::id(),
+        crate::new_id("t")
+    ));
+    let project = root.join("P");
+    let (s1, s2) = (project.join("s1"), project.join("s2"));
+    fs::create_dir_all(&s1).unwrap();
+    fs::create_dir_all(&s2).unwrap();
+    // S2's header continues S1 (its checkpoint 0 never landed).
+    let mut head = Map::new();
+    head.insert("t", Value::from("head"));
+    head.insert("format", Value::from(JOURNAL_FORMAT));
+    head.insert("version", Value::Number(f64::from(FORMAT)));
+    head.insert("project", Value::from("P"));
+    head.insert("base", Value::from("b"));
+    head.insert("start", Value::from("checkpoint"));
+    head.insert("continues", Value::from("s1"));
+    let mut text = String::new();
+    line(&mut text, &Value::Object(head));
+    fs::write(s2.join(segment_name(0)), text).unwrap();
+    assert_eq!(chain(&s2), [s2.clone(), s1.clone()]);
+    SYNCED.with(|s| *s.borrow_mut() = Some(Vec::new()));
+    archive_chain(s2.clone()).unwrap();
+    let synced = SYNCED.with(|s| s.borrow_mut().take().unwrap());
+    let archive = project.join("discarded");
+    assert!(archive.join("s1").is_dir() && archive.join("s2").is_dir());
+    // After S1's move: the archive, then the project folder it left.
+    let first_archive = synced
+        .iter()
+        .position(|d| *d == archive)
+        .expect("archive synced");
+    let project_after = synced
+        .iter()
+        .enumerate()
+        .skip(1)
+        .find(|(_, d)| **d == project)
+        .map(|(i, _)| i)
+        .expect("project synced after the move");
+    assert!(
+        first_archive < project_after,
+        "the source removal was made durable first: {synced:?}"
+    );
+    let _ = fs::remove_dir_all(&root);
 }
