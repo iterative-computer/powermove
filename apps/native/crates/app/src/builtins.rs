@@ -1812,6 +1812,14 @@ impl Controller {
                     }
                     Ok(Value::Null)
                 }
+                // Escape in the docked composer: it lets go of the keyboard
+                // and the editor has it again (Space plays).
+                "agent.blur" => {
+                    if let Some(view) = self.builtins.views.get("agent").cloned() {
+                        view.update(cx, |v, cx| v.blur_semantic("agent-composer-text", cx));
+                    }
+                    Ok(Value::Null)
+                }
                 "agent.close" => {
                     // Docked, Close takes it out of the workspace and the
                     // popover opens again (`returns_to_popover`, agent-panel.md §1).
@@ -2483,7 +2491,7 @@ impl SurfaceWindow {
             return;
         };
         let toolbar = f64::from(self.owner.read(cx).host.borrow().tokens.metrics.toolbar);
-        let Ok(Some(content)) = cx.update_window(editor, |_, w, _| {
+        let Ok(Some(content)) = cx.update_window(editor, |_, w, _| -> Option<crate::popover_drag::Area> {
             crate::platform::ns_window(w).map(|n| native::content(&n))
         }) else {
             return;
@@ -2534,7 +2542,7 @@ impl SurfaceWindow {
             return false;
         };
         let panel = self.panel.clone();
-        cx.update_window(editor, |root, w, cx| {
+        cx.update_window(editor, |root, w, cx| -> Option<bool> {
             let content = native::content(&crate::platform::ns_window(w)?);
             let at = in_editor(native::pointer(), content);
             let shell = root.downcast::<pm_shell::view::Editor>().ok()?;
@@ -2561,7 +2569,7 @@ impl SurfaceWindow {
         let panel = self.panel.clone();
         let docked = drag.docking
             && cx
-                .update_window(editor, |root, _, cx| {
+                .update_window(editor, |root, _, cx| -> Option<bool> {
                     let shell = root.downcast::<pm_shell::view::Editor>().ok()?;
                     Some(shell.update(cx, |e, cx| e.drop_from_outside(&panel, cx)))
                 })

@@ -100,7 +100,7 @@ impl Panel {
             Intent::ClosePopover => Some(self.host_action(thread, ShellAction::Close)?),
             Intent::BlurComposer => {
                 self.focus_composer(thread, false)?;
-                None
+                Some(self.host_action(thread, ShellAction::Blur)?)
             }
             Intent::NativeText => {
                 self.session_mut(thread)?.draft.disarm();

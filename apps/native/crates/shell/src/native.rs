@@ -2333,6 +2333,16 @@ impl Host {
                                 p.hide();
                             }
                         }
+                        // A press anywhere but on the text being edited (the
+                        // timeline, the viewer, a control, another panel)
+                        // gives the editor the keyboard back, as a click away
+                        // from a field does in Electron: Space then plays.
+                        if e.windowNumber() == window.windowNumber() {
+                            let gpui = host.borrow().gpui.clone();
+                            if click_leaves_text(&window, &gpui, e) {
+                                window.makeFirstResponder(Some(&gpui));
+                            }
+                        }
                         return event.as_ptr();
                     }
                     if e.r#type() == NSEventType::KeyUp {
@@ -6395,6 +6405,55 @@ mod key_owner_tests {
 }
 /// A first responder that is no longer on screen: a view out of its window
 /// or hidden (with a hidden ancestor), or the field editor of one.
+/// A press in `window` that lands off the text view (or field) holding its
+/// keyboard: anywhere in the editor's GPUI view, a native control, another
+/// field (which then takes the keyboard itself, as AppKit gives it).
+fn click_leaves_text(window: &NSWindow, gpui: &NSView, event: &NSEvent) -> bool {
+    let Some(responder) = window.firstResponder() else {
+        return false;
+    };
+    unsafe {
+        let mut text: *mut AnyObject = Retained::as_ptr(&responder) as *mut AnyObject;
+        let is_text: bool = msg_send![&*text, isKindOfClass: NSText::class()];
+        if !is_text {
+            return false;
+        }
+        // A field's editor stands for its field.
+        let editor: bool = msg_send![&*text, isFieldEditor];
+        if editor {
+            let delegate: *mut AnyObject = msg_send![&*text, delegate];
+            if !delegate.is_null() {
+                text = delegate;
+            }
+        }
+        let Some(content) = window.contentView() else {
+            return false;
+        };
+        let Some(hit) = content.hitTest(event.locationInWindow()) else {
+            return true;
+        };
+        // On the text itself, its scroll view or its field: it keeps it.
+        let mut view: Option<Retained<NSView>> = Some(hit);
+        while let Some(v) = view {
+            let p = Retained::as_ptr(&v) as *mut AnyObject;
+            if p == text {
+                return false;
+            }
+            if std::ptr::eq(Retained::as_ptr(&v), gpui) {
+                return true;
+            }
+            if let Ok(scroll) = v.clone().downcast::<NSScrollView>()
+                && scroll
+                    .documentView()
+                    .is_some_and(|d| Retained::as_ptr(&d) as *mut AnyObject == text)
+            {
+                return false;
+            }
+            view = v.superview();
+        }
+        true
+    }
+}
 fn stray_responder(responder: &NSResponder) -> bool {
     unsafe {
         let mut view: *mut AnyObject = responder as *const NSResponder as *mut AnyObject;

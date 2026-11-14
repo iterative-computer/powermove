@@ -242,6 +242,12 @@ impl TextField {
         self.slot.begin_editing();
         cx.notify();
     }
+    /// Ends editing and gives the keyboard back to the editor (Escape in a
+    /// docked composer).
+    pub fn blur(&mut self, cx: &mut Context<Self>) {
+        self.slot.blur();
+        cx.notify();
+    }
     /// Focused with all its text selected, so typing replaces it.
     pub fn begin_editing_selecting_all(&mut self, cx: &mut Context<Self>) {
         self.slot.begin_editing();

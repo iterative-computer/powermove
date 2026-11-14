@@ -95,6 +95,11 @@ struct State {
     /// inspector (Option-Tab still types a tab).
     tab_inserts: Cell<bool>,
     focus_pending: Cell<bool>,
+    /// A composer takes the keyboard only when the person asked for it: a
+    /// press on it, Tab to it, or the host beginning to edit it (an explicit
+    /// open). Never AppKit handing a window's keyboard to the first text
+    /// view it finds (Powermove: Space then typed instead of playing).
+    armed: Cell<bool>,
     original: RefCell<String>,
     events: RefCell<Vec<TextEvent>>,
     wake: RefCell<Option<Rc<dyn Fn()>>>,
@@ -234,6 +239,78 @@ impl CanvasTextView {
     }
 }
 define_class!(
+    /// A composer (the Agent's prompt): an ordinary text view that becomes
+    /// first responder only for the person (`State::armed`, `ComposerTextView::wanted`).
+    #[unsafe(super(NSTextView, NSText, NSView, NSResponder, NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "PMComposerTextView"]
+    #[ivars = RefCell<Weak<State>>]
+    struct ComposerTextView;
+    unsafe impl NSObjectProtocol for ComposerTextView {}
+    impl ComposerTextView {
+        #[unsafe(method(becomeFirstResponder))]
+        fn become_first_responder(&self) -> bool {
+            if !self.wanted() {
+                return false;
+            }
+            unsafe { msg_send![super(self), becomeFirstResponder] }
+        }
+    }
+);
+impl ComposerTextView {
+    /// The person's press on it or Tab to it (the event AppKit is handling
+    /// now), or the host's own `begin_editing`.
+    fn wanted(&self) -> bool {
+        if self.ivars().borrow().upgrade().is_some_and(|s| s.armed.get()) {
+            return composer_takes_keyboard(true, None);
+        }
+        let Some(mtm) = MainThreadMarker::new() else {
+            return false;
+        };
+        let event = NSApplication::sharedApplication(mtm).currentEvent();
+        composer_takes_keyboard(
+            false,
+            event.as_ref().map(|e| match e.r#type() {
+                NSEventType::LeftMouseDown | NSEventType::RightMouseDown | NSEventType::OtherMouseDown => {
+                    Asking::Press
+                }
+                NSEventType::KeyDown => Asking::Key(e.keyCode()),
+                _ => Asking::Other,
+            }),
+        )
+    }
+}
+/// What AppKit is handling when it offers a composer the keyboard.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Asking {
+    Press,
+    Key(u16),
+    Other,
+}
+/// A composer takes the keyboard for the person only: the host began to
+/// edit it (an explicit open, a press on its well), a press on it, or Tab
+/// (key code 48) moving to it. Never a window becoming key, a remount, a
+/// run ending or a pick elsewhere.
+pub(crate) fn composer_takes_keyboard(armed: bool, asking: Option<Asking>) -> bool {
+    armed || matches!(asking, Some(Asking::Press) | Some(Asking::Key(48)))
+}
+#[cfg(test)]
+mod composer_keyboard_tests {
+    use super::{Asking, composer_takes_keyboard};
+    #[test]
+    fn a_composer_takes_the_keyboard_only_for_the_person() {
+        assert!(composer_takes_keyboard(false, Some(Asking::Press)), "a click into it");
+        assert!(composer_takes_keyboard(false, Some(Asking::Key(48))), "Tab to it");
+        assert!(composer_takes_keyboard(true, None), "the host began editing it");
+        // A window becoming key, a remount or a republish: no event of the
+        // person's, or one that was not for it (Space, Return).
+        assert!(!composer_takes_keyboard(false, None));
+        assert!(!composer_takes_keyboard(false, Some(Asking::Other)));
+        assert!(!composer_takes_keyboard(false, Some(Asking::Key(49))), "Space plays");
+        assert!(!composer_takes_keyboard(false, Some(Asking::Key(36))));
+    }
+}
+define_class!(
     /// Holds the canvas editor without taking any pointer event.
     #[unsafe(super(NSView, NSResponder, NSObject))]
     #[thread_kind = MainThreadOnly]
@@ -279,6 +356,7 @@ define_class!(
         #[unsafe(method(textDidEndEditing:))]
         fn text_end(&self, _: &NSNotification) {
             let s = self.ivars();
+            s.armed.set(false);
             if s.kind == TextKind::Canvas {
                 s.editing.set(false);
                 s.emit(TextEvent::Blurred);
@@ -419,6 +497,7 @@ impl NativeTextSlot {
     pub fn new(gpui: &NSView, kind: TextKind, label: &str, initial: &str) -> Self {
         let mtm = MainThreadMarker::new().expect("text slots require the main thread");
         let mut canvas = None;
+        let mut composer = None;
         let editor = if kind == TextKind::Canvas {
             let this = CanvasTextView::alloc(mtm).set_ivars(RefCell::new(Weak::new()));
             let v: Retained<CanvasTextView> =
@@ -446,7 +525,15 @@ impl NativeTextSlot {
             }
             Editor::Multiline(v)
         } else if matches!(kind, TextKind::Multiline | TextKind::Composer) {
-            let v = NSTextView::initWithFrame(NSTextView::alloc(mtm), NSRect::ZERO);
+            let v = if kind == TextKind::Composer {
+                let this = ComposerTextView::alloc(mtm).set_ivars(RefCell::new(Weak::new()));
+                let v: Retained<ComposerTextView> =
+                    unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] };
+                composer = Some(v.clone());
+                Retained::into_super(v)
+            } else {
+                NSTextView::initWithFrame(NSTextView::alloc(mtm), NSRect::ZERO)
+            };
             v.setRichText(false);
             v.setImportsGraphics(false);
             v.setAllowsUndo(true);
@@ -530,6 +617,7 @@ impl NativeTextSlot {
             editing: Cell::new(false),
             tab_inserts: Cell::new(false),
             focus_pending: Cell::new(false),
+            armed: Cell::new(false),
             original: RefCell::new(initial.into()),
             events: RefCell::new(Vec::new()),
             wake: RefCell::new(None),
@@ -554,6 +642,9 @@ impl NativeTextSlot {
         });
         if let Some(canvas) = &canvas {
             *canvas.ivars().borrow_mut() = Rc::downgrade(&state);
+        }
+        if let Some(composer) = &composer {
+            *composer.ivars().borrow_mut() = Rc::downgrade(&state);
         }
         let delegate = TextDelegate::alloc(mtm).set_ivars(state.clone());
         let delegate: Retained<TextDelegate> = unsafe { msg_send![super(delegate), init] };
@@ -650,7 +741,29 @@ impl NativeTextSlot {
         if !self.state.editing.replace(true) {
             *self.state.original.borrow_mut() = self.value();
         }
+        self.state.armed.set(true);
         self.state.focus_pending.set(true);
+    }
+    /// Ends editing (its text kept) and gives the keyboard back to the GPUI
+    /// view it sits on, the editor: what Escape in a docked composer and a
+    /// press elsewhere do.
+    pub fn blur(&self) {
+        self.state.focus_pending.set(false);
+        self.state.armed.set(false);
+        let view: Retained<NSView> = match &self.state.editor {
+            Editor::Field(v) => Retained::into_super(Retained::into_super(v.clone())),
+            Editor::Multiline(v) => Retained::into_super(Retained::into_super(v.clone())),
+        };
+        let Some(w) = view.window() else {
+            return;
+        };
+        let first = w.firstResponder().is_some_and(|r| {
+            std::ptr::eq(Retained::as_ptr(&r) as *const AnyObject, Retained::as_ptr(&view) as *const AnyObject)
+        });
+        if first {
+            w.makeFirstResponder(Some(&self.state.gpui));
+        }
+        self.state.finish(false);
     }
     pub fn take_events(&self) -> Vec<TextEvent> {
         std::mem::take(&mut *self.state.events.borrow_mut())

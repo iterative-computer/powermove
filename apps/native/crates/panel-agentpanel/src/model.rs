@@ -344,6 +344,8 @@ pub enum EffectKind {
 pub enum ShellAction {
     Open,
     Close,
+    /// The docked composer gives the keyboard back to the editor (Escape).
+    Blur,
     Pin,
     BeginDrag,
     CancelDrag,

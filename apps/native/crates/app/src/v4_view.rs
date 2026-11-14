@@ -1388,6 +1388,15 @@ impl SurfaceView {
         }
     }
     fn take_ready(&mut self, cx: &mut Context<Self>) {
+        // Asked for by an open that is over (the popover closed before its
+        // composer came): never focus a field later, docked or elsewhere.
+        if self
+            .ready_text
+            .as_ref()
+            .is_some_and(|(_, _, asked)| asked.elapsed() > std::time::Duration::from_secs(2))
+        {
+            self.ready_text = None;
+        }
         let Some(id) = self
             .ready_text
             .as_ref()
@@ -1449,6 +1458,23 @@ impl SurfaceView {
             .runtime
             .bound_layers(&self.publication.panel, &binding)?;
         (*bound == [layer.clone()]).then_some(id)
+    }
+    /// The text field `semantic` lets go of the keyboard (the editor has it).
+    pub(crate) fn blur_semantic(&mut self, semantic: &str, cx: &mut Context<Self>) {
+        if let Some((s, _, _)) = &self.ready_text
+            && s == semantic
+        {
+            self.ready_text = None;
+        }
+        if let Some(field) = self
+            .prepared
+            .semantics
+            .get(semantic)
+            .and_then(|id| self.fields.get(id))
+            .cloned()
+        {
+            field.update(cx, |f, cx| f.blur(cx));
+        }
     }
     pub fn focus_semantic(&self, semantic: &str, window: &mut Window, cx: &mut App) {
         if let Some(id) = self.prepared.semantics.get(semantic) {
