@@ -12,9 +12,13 @@
 //!   the worker decodes the exact one. [`ViewerDecode::landed`] changes when
 //!   it lands, and the presenter draws again.
 //! - [`Want::Playback`] (frames while playing) waits at most the frame's
-//!   decode allowance for the exact frame, then returns a stand-in as
-//!   `Scrub` does, so a slow frame costs picture accuracy and never the
-//!   render thread's deadline. Look-ahead normally has it cached already.
+//!   decode allowance for the exact frame, then returns a stand-in, so a
+//!   slow frame costs picture accuracy and never the render thread's
+//!   deadline. Look-ahead normally has it cached already. Playing forward,
+//!   a stand-in is never earlier than a frame already shown (the picture
+//!   holds, never goes back), and a frame the decoder's run has already
+//!   passed is held over rather than decoded again from its sync sample
+//!   when that costs more than waiting for the run to reach the playhead.
 //!
 //! The worker keeps one decoder session warm per source and instance (the
 //! decode service's pool), always serves the newest scrub target (older
@@ -83,6 +87,9 @@ pub struct ScrubStats {
     pub stopped: u64,
     /// Frames decoded ahead in the direction of motion.
     pub ahead: u64,
+    /// Targets a playing viewer asked for after the decoder's run had
+    /// passed them: held over instead of seeking back.
+    pub passed_over: u64,
     pub errors: u64,
     /// Worker threads started (one per source and instance; idle ones
     /// exit).
@@ -166,6 +173,16 @@ struct State {
     ahead_from: Option<usize>,
     /// The newest frame the worker decoded: the stand-in of last resort.
     latest: Option<(usize, DecodedFrame)>,
+    /// The newest frame handed to a playing viewer and its presented
+    /// position. A playing viewer is never handed an earlier frame than
+    /// this until it moves back (a loop or a seek): holding a picture
+    /// is a stutter, going back in time is a glitch.
+    presented: Option<(usize, DecodedFrame)>,
+    /// The last request came from a playing viewer ([`Want::Playback`]).
+    playing: bool,
+    /// Frames a caller waits for without a deadline ([`Want::Exact`]):
+    /// never passed over.
+    firm: HashMap<usize, usize>,
     /// Bytes of one decoded frame (bounds the look-ahead by the cache).
     frame_bytes: usize,
     shutdown: bool,
@@ -289,6 +306,7 @@ impl ViewerDecode {
             self.stats.lock().unwrap().cached += 1;
             super::diag::bump(&super::diag::FETCH_CACHED, 1);
             st.moved_to(n);
+            st.present(n, want, n, &frame);
             // A drag that moves through cached frames keeps the look-ahead
             // ahead of it.
             st.ahead_from = Some(n);
@@ -305,6 +323,8 @@ impl ViewerDecode {
             return None;
         }
         st.moved_to(n);
+        st.playing = matches!(want, Want::Playback(_));
+        st.forget_presented_unless_forward(n, want);
         if let Some(e) = st.failed.remove(&n) {
             self.stats.lock().unwrap().errors += 1;
             return Some(Err(MediaError::decode(e)));
@@ -334,6 +354,9 @@ impl ViewerDecode {
         let waited = Instant::now();
         st.exact.push_back(n);
         *st.waiting.entry(n).or_default() += 1;
+        if want == Want::Exact {
+            *st.firm.entry(n).or_default() += 1;
+        }
         st.ahead_from = None;
         shared.wake.notify_one();
         let deadline = match want {
@@ -351,6 +374,8 @@ impl ViewerDecode {
                     st.waiting.remove(&n);
                     st.delivered.remove(&n);
                 }
+                st.unfirm(n, want);
+                st.present(n, want, n, &frame);
                 return Some(Ok(Fetched {
                     frame,
                     shown: n,
@@ -366,6 +391,7 @@ impl ViewerDecode {
                     st.waiting.remove(&n);
                     st.failed.remove(&n);
                 }
+                st.unfirm(n, want);
                 self.stats.lock().unwrap().errors += 1;
                 return Some(Err(MediaError::decode(e)));
             }
@@ -380,10 +406,11 @@ impl ViewerDecode {
             };
             let now = Instant::now();
             if now >= deadline {
-                if let Some((shown, frame)) = shared.nearest(n, &st) {
+                if let Some((shown, frame)) = shared.playing_stand_in(n, &st) {
                     // Keep decoding it as the newest target: a queue of late
                     // exact frames would only ever fall further behind.
                     st.leave(n);
+                    st.present(n, want, shown, &frame);
                     self.stats.lock().unwrap().stand_ins += 1;
                     super::diag::bump(&super::diag::FETCH_STAND_INS, 1);
                     return Some(Ok(Fetched {
@@ -495,6 +522,37 @@ impl State {
         }
     }
 
+    fn unfirm(&mut self, n: usize, want: Want) {
+        if want == Want::Exact
+            && let Some(w) = self.firm.get_mut(&n)
+        {
+            *w -= 1;
+            if *w == 0 {
+                self.firm.remove(&n);
+            }
+        }
+    }
+
+    /// Records a frame handed to a playing viewer.
+    fn present(&mut self, n: usize, want: Want, shown: usize, frame: &DecodedFrame) {
+        self.forget_presented_unless_forward(n, want);
+        if matches!(want, Want::Playback(_))
+            && self.presented.as_ref().is_none_or(|(p, _)| shown >= *p)
+        {
+            self.presented = Some((shown, frame.clone()));
+        }
+    }
+
+    /// A paused or scrubbing viewer, or a playing one that moved back
+    /// (a loop or a seek), may be handed any frame again.
+    fn forget_presented_unless_forward(&mut self, n: usize, want: Want) {
+        if !matches!(want, Want::Playback(_))
+            || self.presented.as_ref().is_some_and(|(p, _)| n < *p)
+        {
+            self.presented = None;
+        }
+    }
+
     fn moved_to(&mut self, n: usize) {
         if let Some(last) = self.last
             && last != n
@@ -533,26 +591,79 @@ impl Shared {
         st.latest.clone()
     }
 
+    /// The stand-in for a playing viewer at presented frame `n`: the newest
+    /// decoded frame at or before `n` that is not earlier than the frame it
+    /// was last handed, else that frame again. Playing forward, the picture
+    /// holds or advances and never goes back in time (a cached frame from
+    /// earlier in the run, after the newer ones were evicted, did).
+    fn playing_stand_in(&self, n: usize, st: &State) -> Option<(usize, DecodedFrame)> {
+        let Some((floor, held)) = st.presented.as_ref() else {
+            return self.nearest(n, st);
+        };
+        let cache = self.service.cache();
+        let cached = cache
+            .samples_of(self.source.id, self.purpose)
+            .into_iter()
+            .filter_map(|s| self.shown_at.get(s).copied())
+            .filter(|&m| (*floor..=n).contains(&m))
+            .max()
+            .and_then(|m| cache.get(&self.key(m)).map(|f| (m, f)));
+        let latest = st
+            .latest
+            .clone()
+            .filter(|(m, _)| (*floor..=n).contains(m));
+        [cached, latest]
+            .into_iter()
+            .flatten()
+            .max_by_key(|(m, _)| *m)
+            .or_else(|| Some((*floor, held.clone())))
+    }
+
     fn run(self: Arc<Self>) {
         unsafe {
             libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE, 0);
         }
         while let Some(job) = self.next_job() {
             let n = job.frame();
+            let mut passed_over = false;
             let result = (|| -> Result<Option<DecodedFrame>> {
                 let mut guard = self
                     .service
                     .session(&self.source, self.instance, self.purpose)?;
-                let (keep, stride) = {
+                let (keep, stride, forward) = {
                     let st = self.state.lock().unwrap();
+                    // Holding over needs a frame to hold: a worker that
+                    // has handed a playing viewer nothing yet (a fresh one
+                    // on a warm session) decodes the frame.
+                    let forward = st.playing
+                        && st.stride > 0
+                        && st.presented.is_some()
+                        && !st.firm.contains_key(&n);
                     if st.stride < 0 {
-                        (self.reverse_reach(&st), st.stride.unsigned_abs() as usize)
+                        (self.reverse_reach(&st), st.stride.unsigned_abs() as usize, forward)
                     } else {
-                        (0, 1)
+                        (0, 1, forward)
                     }
                 };
                 guard.set_window(DEFAULT_WINDOW.max(keep + 1));
                 guard.set_keep_before(keep, stride);
+                // A frame the decoder's run has passed (decoded ahead, then
+                // evicted) is not decoded again by seeking back while the
+                // viewer plays forward: look-ahead steps past it, and a
+                // playing viewer holds its picture for the few frames until
+                // the run reaches its playhead, when that costs less than
+                // decoding again from the sync sample. Seeking back sent a
+                // clip with one sync sample to its start and held the
+                // picture ~350 ms (Fable 5.5, "23c Solar farm", 46.2 s).
+                let passed = guard.passed(n);
+                let pass_over = match job {
+                    Job::Ahead(_) => passed.is_some(),
+                    _ => forward && passed.is_some_and(|(back, again)| back <= again),
+                };
+                if pass_over {
+                    passed_over = true;
+                    return Ok(None);
+                }
                 match job {
                     Job::Exact(n) => guard.frame(n).map(Some),
                     Job::Scrub(n) | Job::Ahead(n) => {
@@ -594,6 +705,14 @@ impl Shared {
                     if !matches!(job, Job::Ahead(_)) {
                         st.ahead_from = Some(n);
                     }
+                }
+                Ok(None) if passed_over => {
+                    self.stats.lock().unwrap().passed_over += 1;
+                    super::diag::bump(&super::diag::WORKER_PASSED_OVER, 1);
+                    // Waiters take a stand-in at their deadline; decoding
+                    // continues ahead from here.
+                    st.exact.retain(|&e| e != n);
+                    st.ahead_from = Some(n);
                 }
                 Ok(None) => {
                     self.stats.lock().unwrap().stopped += 1;
@@ -806,6 +925,114 @@ mod tests {
         let f = viewer.fetch(&src, 1, 5, Want::Exact).unwrap();
         assert!(f.exact && f.shown == 5);
         assert_eq!(viewer.stats().workers, 2);
+    }
+
+    /// Playing forward, a stand-in is never earlier than a frame already
+    /// shown: Fable 5.5 at 46 s showed source frame 41, then 38 (the newer
+    /// frames were evicted while an older one stayed cached).
+    #[test]
+    fn playback_never_goes_back_to_an_earlier_frame() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/h264-aac.mp4");
+        let src = MediaSource::open(&path).unwrap();
+        assert!(src.index.frames.len() > 12);
+        let service = Arc::new(DecodeService::new(Default::default()));
+        let viewer = ViewerDecode::new(service.clone());
+        let key = |n: usize| FrameKey {
+            source: src.id,
+            sample: src.index.frames[n].sample,
+            purpose: DecodePurpose::Display,
+        };
+        let early = viewer.fetch(&src, 1, 3, Want::Exact).unwrap();
+        let shown = viewer.fetch(&src, 1, 8, Want::Exact).unwrap();
+        assert!(shown.exact && shown.shown == 8);
+        // Playing reaches frame 8 from the cache.
+        let play = |n| viewer.fetch(&src, 1, n, Want::Playback(Duration::ZERO)).unwrap();
+        assert!(play(8).exact);
+        // Frame 8 and everything after it is evicted; frame 3 stays. (The
+        // look-ahead from 8 settles first and is not restarted.)
+        std::thread::sleep(Duration::from_millis(300));
+        let worker = viewer.worker(&src, 1);
+        {
+            let mut st = worker.shared.state.lock().unwrap();
+            st.ahead_from = None;
+            service.cache().remove_source(src.id);
+            service.cache().insert(key(3), early.frame.clone());
+            st.latest = Some((3, early.frame.clone()));
+        }
+        let late = play(12);
+        assert!(
+            late.exact || late.shown >= 8,
+            "playing forward went back to frame {}",
+            late.shown
+        );
+        // Moving back (a loop) may show earlier frames again.
+        {
+            let mut st = worker.shared.state.lock().unwrap();
+            service.cache().remove_source(src.id);
+            service.cache().insert(key(3), early.frame.clone());
+            st.latest = Some((3, early.frame.clone()));
+        }
+        let looped = play(2);
+        assert!(looped.exact || looped.shown < 8, "a loop held frame {}", looped.shown);
+    }
+
+    /// Playing forward, a frame the decoder's run has passed (decoded ahead,
+    /// then evicted) is held over, not decoded again from the sync sample.
+    #[test]
+    fn playback_does_not_seek_back_for_a_frame_the_run_passed() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/vp9-opus.webm");
+        let src = MediaSource::open(&path).unwrap();
+        let service = Arc::new(DecodeService::new(Default::default()));
+        let viewer = ViewerDecode::new(service.clone());
+        let play = |n, wait| {
+            viewer
+                .fetch(&src, 1, n, Want::Playback(Duration::from_millis(wait)))
+                .unwrap()
+        };
+        for n in 0..=6 {
+            assert!(play(n, 5_000).exact, "frame {n} did not land");
+        }
+        // The next render finds frame 6 cached and the look-ahead runs past
+        // frame 7 on the same run (frame 8 lands).
+        assert!(play(6, 0).exact);
+        let t = std::time::Instant::now();
+        let key8 = FrameKey {
+            source: src.id,
+            sample: src.index.frames[8].sample,
+            purpose: DecodePurpose::Display,
+        };
+        while !service.cache().contains(&key8) {
+            assert!(
+                t.elapsed().as_secs() < 5,
+                "the look-ahead never ran: {:?} cache {:?} samples {:?}",
+                viewer.stats(),
+                service.cache().stats(),
+                service.cache().samples_of(src.id, DecodePurpose::Display)
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        let worker = viewer.worker(&src, 1);
+        {
+            let mut st = worker.shared.state.lock().unwrap();
+            st.ahead_from = None;
+            service.cache().remove_source(src.id);
+            service.clear_idle_windows();
+        }
+        let before = viewer.stats();
+        let held = play(7, 0);
+        assert!(!held.exact && held.shown == 6, "held {} ({})", held.shown, held.exact);
+        let t = std::time::Instant::now();
+        while viewer.stats().passed_over == before.passed_over {
+            assert!(t.elapsed().as_secs() < 20, "frame 7 was decoded again from its sync sample");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(viewer.stats().decoded, before.decoded);
+        // A paused viewer still gets the exact frame.
+        let exact = viewer.fetch(&src, 1, 7, Want::Exact).unwrap();
+        assert!(exact.exact && exact.shown == 7);
     }
 
     /// A playing viewer never waits out a decode: past the allowance it gets

@@ -149,11 +149,48 @@ pub struct Catalog {
     /// Each listed model's own reasoning efforts (main's per-model choices).
     pub model_efforts: Vec<(String, Vec<String>)>,
     pub claude: bool,
+    /// What a saved choice that is not a listed model stands for: `""` is the
+    /// model the provider runs when none is chosen; an alias (Claude's
+    /// resolved `claude-opus-5-5`) is its listed model.
+    pub resolves: Vec<(String, String)>,
+    /// The effort each listed model runs at when none is chosen, where the
+    /// provider says (Codex's `defaultReasoningEffort`).
+    pub default_efforts: Vec<(String, String)>,
 }
+/// The effort a model runs at when its provider names none: Claude Code's
+/// documented default for its current models.
+const USUAL_EFFORT: &str = "medium";
 impl Catalog {
+    /// The listed model a saved choice runs. No choice (`""`, `null` or an
+    /// older `"default"`) is the provider's default model, so a picker always
+    /// names a real model; the saved value itself is left as it was, and the
+    /// provider still picks its own default for it. Unknown values stay as saved.
+    pub fn resolve<'a>(&'a self, model: &'a str) -> &'a str {
+        let key = if model == "default" { "" } else { model };
+        if !key.is_empty() && self.models.iter().any(|(id, _)| id == key) {
+            return model;
+        }
+        self.resolves
+            .iter()
+            .find(|(from, _)| from == key)
+            .map(|(_, to)| to.as_str())
+            .or_else(|| {
+                key.is_empty()
+                    .then(|| self.models.first().map(|(id, _)| id.as_str()))
+                    .flatten()
+            })
+            .unwrap_or(model)
+    }
+    /// A choice a thread may save: a listed model, one it stands for, or none.
+    pub fn accepts(&self, model: &str) -> bool {
+        model.is_empty()
+            || self.models.iter().any(|(m, _)| m == model)
+            || self.resolves.iter().any(|(from, _)| from == model)
+    }
     /// The efforts `model` takes: its own when the provider listed them, else
-    /// every listed effort (the provider's default model). `""` is Default.
+    /// every listed effort. `""` here is the effort's Default.
     pub fn efforts_for(&self, model: &str) -> Vec<String> {
+        let model = self.resolve(model);
         match self.model_efforts.iter().find(|(id, _)| id == model) {
             Some((_, own)) => std::iter::once(String::new())
                 .chain(own.iter().cloned())
@@ -161,8 +198,54 @@ impl Catalog {
             None => self.efforts.clone(),
         }
     }
+    /// The efforts the effort picker offers for `model`: the ones that model
+    /// takes, never an empty "Default". None: the model has no effort levels
+    /// and the picker is hidden.
+    pub fn effort_choices(&self, model: &str) -> Vec<String> {
+        self.efforts_for(model)
+            .into_iter()
+            .filter(|e| !e.is_empty() && e != "default")
+            .collect()
+    }
+    /// The effort `model` runs at for a saved choice: the choice when the
+    /// model takes it; else (none saved: `""`, `null`, an older `"default"`,
+    /// or one this model lacks) the model's own default, which the provider
+    /// names, else the usual default, else its first level. `""` only when
+    /// the model has no effort levels.
+    pub fn resolve_effort(&self, model: &str, effort: &str) -> String {
+        let choices = self.effort_choices(model);
+        if choices.iter().any(|e| e == effort) {
+            return effort.to_owned();
+        }
+        let model = self.resolve(model);
+        self.default_efforts
+            .iter()
+            .find(|(m, _)| m == model)
+            .map(|(_, e)| e.as_str())
+            .filter(|e| choices.iter().any(|c| c == e))
+            .or_else(|| {
+                choices
+                    .iter()
+                    .find(|c| *c == USUAL_EFFORT)
+                    .map(String::as_str)
+            })
+            .or_else(|| choices.first().map(String::as_str))
+            .unwrap_or_default()
+            .to_owned()
+    }
 }
 pub fn slash_choices(draft: &str, catalog: &Catalog, working: bool, blocked: bool) -> Vec<Choice> {
+    slash_choices_for(draft, catalog, "", working, blocked)
+}
+/// The shortcut menu's rows for a thread on `model`: `/effort` lists the
+/// efforts that model takes.
+pub fn slash_choices_for(
+    draft: &str,
+    catalog: &Catalog,
+    model: &str,
+    working: bool,
+    blocked: bool,
+) -> Vec<Choice> {
     if !draft.starts_with('/') || draft.contains(['\r', '\n']) {
         return vec![];
     }
@@ -176,7 +259,7 @@ pub fn slash_choices(draft: &str, catalog: &Catalog, working: bool, blocked: boo
             "effort" => (
                 SlashAction::Effort,
                 catalog
-                    .efforts
+                    .effort_choices(model)
                     .iter()
                     .map(|id| {
                         (
@@ -225,7 +308,11 @@ pub fn slash_choices(draft: &str, catalog: &Catalog, working: bool, blocked: boo
     ]
     .into_iter()
     .filter(|(id, _)| {
-        id.starts_with(&lower) && (*id != "new" || !blocked) && (*id != "stop" || working)
+        id.starts_with(&lower)
+            && (*id != "new" || !blocked)
+            && (*id != "stop" || working)
+            // A model with no effort levels has nothing to set.
+            && (*id != "effort" || !catalog.effort_choices(model).is_empty())
     })
     .map(|(id, action)| Choice {
         id: id.into(),

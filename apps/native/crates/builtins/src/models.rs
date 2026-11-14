@@ -1670,6 +1670,13 @@ impl Backend {
                     }
                 }
                 link.touch();
+                // The panel shows a change only from a publication. A pick in
+                // the window's menu (model, effort, access, thread) reaches the
+                // panel after the window last republished, so the action itself
+                // republishes, queued behind this command. Typing needs none.
+                if !matches!(args["action"]["type"].as_str(), Some("draft" | "focus")) {
+                    link.publish_now();
+                }
                 self.agent_snapshot()?
             }
             "profile.get" => {

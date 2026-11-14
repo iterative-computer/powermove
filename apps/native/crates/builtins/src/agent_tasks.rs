@@ -221,7 +221,14 @@ fn select(link: &AgentLink, parent: &Value, target: Option<&Value>) -> Result<Se
                 .then(|| parent["model"].as_str().map(str::to_owned))
                 .flatten()
         })
-        .or_else(|| models.first().map(|m| m.id.clone()));
+        // The provider's default model, else the first it listed.
+        .or_else(|| {
+            models
+                .iter()
+                .find(|m| m.default)
+                .or(models.first())
+                .map(|m| m.id.clone())
+        });
     // A provider that listed no models runs its default.
     let efforts = match (&model, models.is_empty()) {
         (None, true) => vec![],

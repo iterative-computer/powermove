@@ -37,6 +37,7 @@ struct Key {
     path: PathBuf,
     instance: u64,
     export: bool,
+    decode: bool,
     stamp: (u64, u128),
     settings: String,
 }
@@ -137,8 +138,8 @@ impl Drop for BackgroundPrepare {
     }
 }
 
-/// Opens a job's source and decodes its selected frame into the service's
-/// cache. Background preparation is `bounded` by the prepared-session cap;
+/// Opens a job's source and, when requested, decodes its selected frame.
+/// Background decoder preparation is `bounded` by the prepared-session cap;
 /// a frame about to draw the source is not.
 fn prepare_one(
     job: Job,
@@ -167,6 +168,9 @@ fn prepare_one(
         let none = Interpretation::default();
         let interp = job.interpret.as_ref().unwrap_or(&none);
         video_drawable(src, interp).map_err(|m| MediaFailure::Unsupported(Feature::Media(m)))?;
+        if !job.key.decode {
+            return Ok(false);
+        }
         let v = src
             .probe
             .video
@@ -291,6 +295,7 @@ impl MediaCache {
                         path: v.path.clone(),
                         instance: v.instance,
                         export,
+                        decode: true,
                         stamp: current,
                         settings: String::new(),
                     },
@@ -432,15 +437,17 @@ impl MediaCache {
         failures
     }
 
-    /// Queue source probe/index, decoder startup and the selected decoded
-    /// frame without blocking the presenter. Nothing reads the whole file. Returns true for a queued job;
-    /// full queues defer to normal source opening at render time.
+    /// Queue source probe/index without blocking the presenter. Paused and
+    /// export preparation also warm the selected picture and decoder.
+    /// Returns true for a queued job; full queues defer to render time.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn prepare_video(
         &mut self,
         path: &Path,
         instance: u64,
         seconds: f64,
         export: bool,
+        read_ahead: bool,
         interpret: Option<&Interpretation>,
         composition: pm_time::Rate,
     ) -> Result<bool, MediaFailure> {
@@ -449,6 +456,36 @@ impl MediaCache {
         self.drain_prepared();
         let current = stamp(path)
             .ok_or_else(|| MediaFailure::Failed(format!("{} is offline", path.display())))?;
+        // A playing stream needs its decoder references and near frames.
+        // Opening a future clip's decoder beside it can evict that working
+        // set even though the future clip is not visible yet. Prepare its
+        // probe/index now; the display worker opens its decoder at the cut.
+        // Paused startup and export still prepare the exact selected frame.
+        let decode = export || !read_ahead;
+        if !decode
+            && self
+                .sources
+                .get(path)
+                .is_some_and(|(seen, _)| *seen == current)
+        {
+            return Ok(false);
+        }
+        // The display worker already decodes ahead for a hot stream. A
+        // preparation job uses the same pooled decoder: seeking it farther
+        // ahead forces playback back to the GOP start and evicts the frames
+        // playback needs from a small cache. Only cold streams need warming.
+        if !export
+            && self
+                .video_seen
+                .get(&(path.to_path_buf(), instance))
+                .is_some_and(|seen| self.frame_epoch.wrapping_sub(*seen) <= 1)
+            && self
+                .sources
+                .get(path)
+                .is_some_and(|(seen, _)| *seen == current)
+        {
+            return Ok(false);
+        }
         if self
             .background
             .as_ref()
@@ -468,6 +505,7 @@ impl MediaCache {
             path: path.to_path_buf(),
             instance,
             export,
+            decode,
             stamp: current,
             settings: format!("{interpret:?}|{composition:?}|{seconds:?}"),
         };
@@ -504,5 +542,90 @@ impl MediaCache {
                 "media preparation worker stopped".into(),
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn playing_preparation_opens_the_source_without_a_competing_decoder() {
+        let gpu = pm_gpu::Gpu::new("playing-source-preparation").unwrap();
+        let mut media = MediaCache::new(&gpu.device);
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/vp9-opus.webm");
+        assert!(
+            media
+                .prepare_video(&path, 7, 0., false, true, None, pm_time::Rate::FPS_30)
+                .unwrap()
+        );
+        assert!(media.wait_for_preparation().is_empty());
+        assert!(media.sources.contains_key(&path), "the cold index is ready");
+        let usage = media.service.usage();
+        assert_eq!(usage.sessions, 0, "a future clip must not compete: {usage:?}");
+        assert_eq!(usage.frame_cache + usage.decoders, 0);
+        assert!(
+            !media
+                .prepare_video(&path, 7, 1., false, true, None, pm_time::Rate::FPS_30)
+                .unwrap(),
+            "the prepared index needs no repeated background job"
+        );
+        // Paused startup still prepares the selected picture and decoder.
+        assert!(
+            media
+                .prepare_video(&path, 7, 0., false, false, None, pm_time::Rate::FPS_30)
+                .unwrap()
+        );
+        assert!(media.wait_for_preparation().is_empty());
+        assert_eq!(media.service.usage().sessions, 1);
+        assert!(media.service.usage().frame_cache > 0);
+        // Export remains independent even when its caller reads ahead.
+        assert!(
+            media
+                .prepare_video(&path, 7, 0., true, true, None, pm_time::Rate::FPS_30)
+                .unwrap()
+        );
+        assert!(media.wait_for_preparation().is_empty());
+        assert_eq!(media.service.usage().sessions, 2);
+    }
+
+    #[test]
+    fn active_video_preparation_leaves_the_display_decoder_alone() {
+        let gpu = pm_gpu::Gpu::new("active-video-preparation").unwrap();
+        let mut media = MediaCache::new(&gpu.device);
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/vp9-opus.webm");
+        media.source(&path).unwrap();
+        media.video_seen.insert((path.clone(), 7), media.frame_epoch);
+        assert!(
+            !media
+                .prepare_video(&path, 7, 1., false, false, None, pm_time::Rate::FPS_30)
+                .unwrap()
+        );
+        assert!(
+            media.background.is_none(),
+            "a hot stream needs no preparation worker"
+        );
+        // Another instance of the same file is still a cold stream.
+        assert!(
+            media
+                .prepare_video(&path, 8, 1., false, false, None, pm_time::Rate::FPS_30)
+                .unwrap()
+        );
+        assert!(media.wait_for_preparation().is_empty());
+        media.frame_epoch += 2;
+        assert!(
+            media
+                .prepare_video(&path, 7, 1., false, false, None, pm_time::Rate::FPS_30)
+                .unwrap()
+        );
+        assert!(media.wait_for_preparation().is_empty());
+        // Export's explicit preparation remains independent of display.
+        media.video_seen.insert((path.clone(), 7), media.frame_epoch);
+        assert!(
+            media
+                .prepare_video(&path, 7, 1., true, false, None, pm_time::Rate::FPS_30)
+                .unwrap()
+        );
+        assert!(media.wait_for_preparation().is_empty());
     }
 }

@@ -187,6 +187,8 @@ fn frozen_slash_oracle_matches_78_source_executions() {
         efforts: vec!["low".into(), "high".into(), "xhigh".into()],
         model_efforts: vec![],
         claude: true,
+        resolves: vec![],
+        default_efforts: vec![],
     };
     let cases = fixture["cases"].as_array().unwrap();
     assert_eq!(cases.len(), 78);

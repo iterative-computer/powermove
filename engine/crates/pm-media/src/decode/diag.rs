@@ -29,6 +29,7 @@ counters! {
     WORKER_DECODED = "worker_decoded",
     WORKER_AHEAD = "worker_ahead",
     WORKER_STOPPED = "worker_stopped",
+    WORKER_PASSED_OVER = "worker_passed_over",
     OPEN_COLD_FRAMES = "open_cold_frames",
     OPEN_COLD_JOBS = "open_cold_jobs",
     OUTLINE_HITS = "outline_hits",

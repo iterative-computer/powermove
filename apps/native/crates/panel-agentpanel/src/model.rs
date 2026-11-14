@@ -1367,7 +1367,7 @@ impl Panel {
         if !catalog.providers.iter().any(|(p, _)| p == provider.name()) {
             return Err(Error::Invalid("provider"));
         }
-        if !(catalog.models.iter().any(|(m, _)| *m == model)
+        if !(catalog.accepts(&model)
             || provider == Provider::Claude && crate::input::valid_claude_id(&model))
         {
             return Err(Error::Invalid("provider model"));
@@ -1384,16 +1384,22 @@ impl Panel {
             .sessions
             .get_mut(id)
             .ok_or_else(|| Error::UnknownId(id.into()))?;
-        if !(s.catalog.models.iter().any(|(m, _)| *m == model)
+        if !(s.catalog.accepts(&model)
             || s.settings.provider == Provider::Claude && crate::input::valid_claude_id(&model))
         {
             return Err(Error::Invalid("model or effort"));
         }
-        // Each model takes its own efforts. Switching to a model without the
-        // current effort falls back to Default; asking for one it lacks fails.
+        // Each model takes its own efforts. A model change keeps the effort
+        // (the one saved or the one shown) when the new model takes it, else
+        // falls back to that model's default; asking a model for an effort it
+        // lacks fails.
+        let changed = s.catalog.resolve(&model) != s.catalog.resolve(&s.settings.model);
+        let shown = s
+            .catalog
+            .resolve_effort(&s.settings.model, &s.settings.effort);
         let mut effort = effort;
         if !s.catalog.efforts_for(&model).contains(&effort) {
-            if effort != s.settings.effort {
+            if !(changed || effort == s.settings.effort || effort == shown) {
                 return Err(Error::Invalid("model or effort"));
             }
             effort = String::new();

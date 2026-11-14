@@ -20,9 +20,10 @@ impl Panel {
     }
     pub fn slash_choices(&self, thread: &str) -> Result<Vec<Choice>> {
         let s = self.session(thread)?;
-        Ok(input::slash_choices(
+        Ok(input::slash_choices_for(
             &s.draft.legacy().0,
             &s.catalog,
+            &s.settings.model,
             s.run.is_some(),
             s.applying,
         ))

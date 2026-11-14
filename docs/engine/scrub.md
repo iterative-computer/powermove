@@ -89,6 +89,17 @@ it (export frames still decode on the caller's thread, with `DecodePurpose::Expo
   newest decoded frame as a last resort) while the worker decodes the exact
   one. Only the very first frame of a source, with nothing to stand in,
   waits.
+- **Playing requests hold, never go back** (`Want::Playback`: the exact
+  frame within the frame's decode allowance, else a stand-in). Playing
+  forward, the stand-in is the newest decoded frame at or before the
+  playhead that is not earlier than the frame last handed out, else that
+  frame again: a cached older frame (newer ones evicted) is never shown
+  after a newer one. A frame the decoder's run has already passed (decoded
+  ahead, then evicted) is not decoded again by seeking back to its sync
+  sample when waiting for the run to reach the playhead costs fewer
+  samples (`passedOver`); look-ahead steps past such frames and never
+  resets the decoder. On a clip with one sync sample a seek back decodes
+  the clip from its start (Fable 5.5, 46 s: ~350 ms held).
 - **Warm sessions.** The worker takes its session from the service's pool
   for each job and returns it, so a scrub, the paused frame after it, and
   Play all continue the same run.

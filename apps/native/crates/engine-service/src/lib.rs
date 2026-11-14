@@ -2539,6 +2539,14 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                             "render_gpu_ms": render_gpu_ms,
                             "picture": traced_picture
                                 .then(|| format!("{:016x}", f.submission.picture_hash())),
+                            // Traced runs only: the decode service's running
+                            // counters and each memory client's weight, grant
+                            // and reported use, so a native stall can be read
+                            // against what the headless bench reports.
+                            "decode": pm_media::decode::diag::snapshot()
+                                .into_iter()
+                                .collect::<std::collections::BTreeMap<_, _>>(),
+                            "memory": pm_memory::clients(),
                         }),
                     ) {
                         row.extend(more);

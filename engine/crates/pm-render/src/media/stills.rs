@@ -300,6 +300,10 @@ impl StillPrefetch {
         }
     }
 
+    pub(crate) fn limit(&self) -> usize {
+        self.shared.limit.load(Ordering::Acquire)
+    }
+
     /// Holds up to `bytes` of decoded stills: a lower allowance cancels the
     /// queued and in-flight reservations and gives the stills held beyond it
     /// back now, those asked for longest ago first.

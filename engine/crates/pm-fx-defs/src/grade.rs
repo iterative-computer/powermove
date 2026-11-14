@@ -259,11 +259,23 @@ fn choice(key: &str, label: &str, group: &str, labels: &[&str]) -> Parameter {
 /// nothing.
 fn color_space_transform() -> Definition {
     let params = vec![
-        choice("inputGamut", "Gamut", "Input", &CST_GAMUTS),
-        choice("inputTransfer", "Transfer", "Input", &CST_TRANSFERS),
-        choice("outputGamut", "Gamut", "Output", &CST_GAMUTS),
-        choice("outputTransfer", "Transfer", "Output", &CST_TRANSFERS),
-        choice("toneMapping", "Method", "Tone Mapping", &CST_TONE_MAPPING),
+        // Each label names its side and stage: panels that list the rows
+        // without their groups showed Gamut, Transfer, Gamut, Transfer.
+        choice("inputGamut", "Input Gamut", "Input", &CST_GAMUTS),
+        choice("inputTransfer", "Input Transfer", "Input", &CST_TRANSFERS),
+        choice("outputGamut", "Output Gamut", "Output", &CST_GAMUTS),
+        choice(
+            "outputTransfer",
+            "Output Transfer",
+            "Output",
+            &CST_TRANSFERS,
+        ),
+        choice(
+            "toneMapping",
+            "Tone Mapping",
+            "Tone Mapping",
+            &CST_TONE_MAPPING,
+        ),
         number(
             "sourcePeak",
             "Source Peak",
@@ -296,7 +308,7 @@ fn color_space_transform() -> Definition {
         ),
         choice(
             "gamutMapping",
-            "Method",
+            "Gamut Mapping",
             "Gamut Mapping",
             &CST_GAMUT_MAPPING,
         ),
