@@ -1215,10 +1215,24 @@ pub fn run_child() -> Result<()> {
                     "{} is still loading ({uses}{others}). Try again once the project's extensions have loaded.",
                     missing.effect
                 ),
-                None => anyhow::bail!(
-                    "{} isn't installed ({uses}{others}). Install the extension that provides it, or turn the effect off, then export again.",
-                    missing.effect
-                ),
+                None => match request.resources.unavailable_owner(&missing.effect) {
+                    Some(owner) => anyhow::bail!(
+                        "{} {}, so {} can't be drawn ({uses}{others}). Check it in Settings ▸ Extensions, or turn the effect off, then export again.",
+                        owner.name,
+                        owner.why,
+                        missing.effect
+                    ),
+                    None => {
+                        let provider = match crate::resources::named_extension(&missing.effect) {
+                            Some(id) => format!("the extension “{id}” that provides it"),
+                            None => "the extension that provides it".to_owned(),
+                        };
+                        anyhow::bail!(
+                            "{} isn't installed ({uses}{others}). Install {provider}, or turn the effect off, then export again.",
+                            missing.effect
+                        )
+                    }
+                },
             }
         }
         // A viewer still already isolates failing layers below. Definition

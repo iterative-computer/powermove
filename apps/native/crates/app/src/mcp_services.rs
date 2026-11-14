@@ -307,6 +307,7 @@ impl EngineJobs {
                         text: Some(crate::extensions::canvas_text(fonts)),
                         frames: None,
                         rasters: Some(overrides.hooks()),
+                        clipboard: None,
                         vars: Some(crate::extensions::vars_source(&self.profile)),
                         wake: Arc::new(|| {}),
                     },
@@ -339,6 +340,7 @@ impl EngineJobs {
         Ok(Arc::new(pm_engine_service::resources::ResourceSnapshot {
             generation,
             definitions: crate::extensions::definitions(&value),
+            unavailable: crate::extensions::unavailable(&host.publication()),
             ..Default::default()
         }))
     }
