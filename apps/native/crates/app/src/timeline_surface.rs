@@ -1901,7 +1901,14 @@ impl TimelineSurface {
         let cursor =
             if (x - self.view.layer_column).abs() <= m.hit as f64 / 4. && y >= m.ruler as f64 {
                 CursorStyle::ResizeColumn
-            } else if let Some((_, Some(_))) = self.frame.as_ref().and_then(|f| f.hit_clip(x, y)) {
+            } else if let Some((id, Some(_))) = self.frame.as_ref().and_then(|f| f.hit_clip(x, y))
+                // A locked layer's ends offer no trim.
+                && !self.frame.as_ref().is_some_and(|f| {
+                    f.ops.iter().any(|o| {
+                        o.id.strip_prefix("clip:") == Some(id) && o.detail["cursor"] == "notAllowed"
+                    })
+                })
+            {
                 CursorStyle::ResizeLeftRight
             } else {
                 CursorStyle::Arrow
@@ -2852,7 +2859,9 @@ fn strip_hover(op: &Op, pointer_x: f64, origin: Point<Pixels>, t: &Tokens, windo
         window,
     );
     let grip = t.trim_grip();
-    if b.width < f64::from(grip.inset * 4. + grip.width) {
+    // A locked layer cannot be trimmed: no grip offers it.
+    let locked = op.detail["cursor"] == "notAllowed";
+    if locked || b.width < f64::from(grip.inset * 4. + grip.width) {
         return;
     }
     let height = (b.height as f32 * grip.height).round();
