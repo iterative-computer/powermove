@@ -992,7 +992,8 @@ exports[`spec §4 empty: op-tree snapshot and Rust wire/accessibility validator 
       "children": [
         38,
         42,
-        43,
+        46,
+        47,
       ],
       "id": 37,
       "input": null,
@@ -1042,7 +1043,7 @@ exports[`spec §4 empty: op-tree snapshot and Rust wire/accessibility validator 
         "data-pm-component": "toolbar-item",
         "disabled": true,
         "id": "agent-model",
-        "label": "Model and reasoning effort, GPT-6.1",
+        "label": "Model, GPT-6.1",
         "style": {
           "alignItems": "center",
           "borderRadius": {
@@ -1168,8 +1169,125 @@ exports[`spec §4 empty: op-tree snapshot and Rust wire/accessibility validator 
       "type": "div",
     },
     "42": {
-      "children": [],
+      "children": [
+        43,
+        45,
+      ],
       "id": 42,
+      "input": null,
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+      },
+      "parent": 37,
+      "props": {
+        "aria-haspopup": "menu",
+        "data-pm-component": "toolbar-item",
+        "disabled": true,
+        "id": "agent-effort",
+        "label": "Reasoning effort, High",
+        "style": {
+          "alignItems": "center",
+          "borderRadius": {
+            "token": "metrics.inner_radius",
+          },
+          "color": {
+            "token": "colors.secondary",
+          },
+          "display": "flex",
+          "flexDirection": "row",
+          "flexShrink": 0,
+          "gap": {
+            "token": "metrics.pill_inset",
+          },
+          "minHeight": {
+            "token": "metrics.hit",
+          },
+          "minWidth": {
+            "token": "metrics.hit",
+          },
+          "paddingLeft": {
+            "token": "metrics.gap",
+          },
+          "paddingRight": {
+            "token": "metrics.gap",
+          },
+          "symbolSize": {
+            "token": "metrics.symbol_toolbar",
+          },
+        },
+      },
+      "text": "",
+      "type": "button",
+    },
+    "43": {
+      "children": [
+        44,
+      ],
+      "id": 43,
+      "input": null,
+      "listeners": {},
+      "parent": 42,
+      "props": {
+        "style": {
+          "color": {
+            "token": "colors.secondary",
+          },
+          "flexShrink": 1,
+          "fontSize": {
+            "token": "typography.body",
+          },
+          "lineHeight": {
+            "token": "typography.reading_leading",
+          },
+          "overflow": "hidden",
+          "textOverflow": "ellipsis",
+          "whiteSpace": "nowrap",
+        },
+      },
+      "text": "",
+      "type": "text",
+    },
+    "44": {
+      "children": [],
+      "id": 44,
+      "input": null,
+      "listeners": {},
+      "parent": 43,
+      "props": {},
+      "text": "High",
+      "type": "text",
+    },
+    "45": {
+      "children": [],
+      "id": 45,
+      "input": null,
+      "listeners": {},
+      "parent": 42,
+      "props": {
+        "metadata": {
+          "symbol": "chevron.up.chevron.down",
+        },
+        "style": {
+          "color": {
+            "token": "colors.muted",
+          },
+          "flexShrink": 0,
+          "symbolSize": {
+            "token": "metrics.symbol_inline",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "46": {
+      "children": [],
+      "id": 46,
       "input": null,
       "listeners": {},
       "parent": 37,
@@ -1181,12 +1299,12 @@ exports[`spec §4 empty: op-tree snapshot and Rust wire/accessibility validator 
       "text": "",
       "type": "div",
     },
-    "43": {
+    "47": {
       "children": [
-        44,
-        46,
+        48,
+        50,
       ],
-      "id": 43,
+      "id": 47,
       "input": null,
       "listeners": {
         "click": {
@@ -1238,14 +1356,14 @@ exports[`spec §4 empty: op-tree snapshot and Rust wire/accessibility validator 
       "text": "",
       "type": "button",
     },
-    "44": {
+    "48": {
       "children": [
-        45,
+        49,
       ],
-      "id": 44,
+      "id": 48,
       "input": null,
       "listeners": {},
-      "parent": 43,
+      "parent": 47,
       "props": {
         "style": {
           "color": {
@@ -1266,22 +1384,32 @@ exports[`spec §4 empty: op-tree snapshot and Rust wire/accessibility validator 
       "text": "",
       "type": "text",
     },
-    "45": {
+    "49": {
       "children": [],
-      "id": 45,
+      "id": 49,
       "input": null,
       "listeners": {},
-      "parent": 44,
+      "parent": 48,
       "props": {},
       "text": "Composition only",
       "type": "text",
     },
-    "46": {
+    "5": {
       "children": [],
-      "id": 46,
+      "id": 5,
       "input": null,
       "listeners": {},
-      "parent": 43,
+      "parent": 4,
+      "props": {},
+      "text": "New thread",
+      "type": "text",
+    },
+    "50": {
+      "children": [],
+      "id": 50,
+      "input": null,
+      "listeners": {},
+      "parent": 47,
       "props": {
         "metadata": {
           "symbol": "chevron.up.chevron.down",
@@ -1298,16 +1426,6 @@ exports[`spec §4 empty: op-tree snapshot and Rust wire/accessibility validator 
       },
       "text": "",
       "type": "div",
-    },
-    "5": {
-      "children": [],
-      "id": 5,
-      "input": null,
-      "listeners": {},
-      "parent": 4,
-      "props": {},
-      "text": "New thread",
-      "type": "text",
     },
     "6": {
       "children": [],
@@ -1623,6 +1741,25 @@ exports[`spec §4 empty: op-tree snapshot and Rust wire/accessibility validator 
     "create",
     "setProps",
     "setProps",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setProps",
+    "setProps",
+    "create",
+    "setProps",
+    "create",
+    "setText",
+    "insertBefore",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
+    "insertBefore",
+    "insertBefore",
     "create",
     "setProps",
     "setProps",
@@ -2663,7 +2800,8 @@ exports[`spec §4 empty-other-access: op-tree snapshot and Rust wire/accessibili
       "children": [
         38,
         42,
-        43,
+        46,
+        47,
       ],
       "id": 37,
       "input": null,
@@ -2713,7 +2851,7 @@ exports[`spec §4 empty-other-access: op-tree snapshot and Rust wire/accessibili
         "data-pm-component": "toolbar-item",
         "disabled": true,
         "id": "agent-model",
-        "label": "Model and reasoning effort, GPT-6.1",
+        "label": "Model, GPT-6.1",
         "style": {
           "alignItems": "center",
           "borderRadius": {
@@ -2839,8 +2977,125 @@ exports[`spec §4 empty-other-access: op-tree snapshot and Rust wire/accessibili
       "type": "div",
     },
     "42": {
-      "children": [],
+      "children": [
+        43,
+        45,
+      ],
       "id": 42,
+      "input": null,
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+      },
+      "parent": 37,
+      "props": {
+        "aria-haspopup": "menu",
+        "data-pm-component": "toolbar-item",
+        "disabled": true,
+        "id": "agent-effort",
+        "label": "Reasoning effort, High",
+        "style": {
+          "alignItems": "center",
+          "borderRadius": {
+            "token": "metrics.inner_radius",
+          },
+          "color": {
+            "token": "colors.secondary",
+          },
+          "display": "flex",
+          "flexDirection": "row",
+          "flexShrink": 0,
+          "gap": {
+            "token": "metrics.pill_inset",
+          },
+          "minHeight": {
+            "token": "metrics.hit",
+          },
+          "minWidth": {
+            "token": "metrics.hit",
+          },
+          "paddingLeft": {
+            "token": "metrics.gap",
+          },
+          "paddingRight": {
+            "token": "metrics.gap",
+          },
+          "symbolSize": {
+            "token": "metrics.symbol_toolbar",
+          },
+        },
+      },
+      "text": "",
+      "type": "button",
+    },
+    "43": {
+      "children": [
+        44,
+      ],
+      "id": 43,
+      "input": null,
+      "listeners": {},
+      "parent": 42,
+      "props": {
+        "style": {
+          "color": {
+            "token": "colors.secondary",
+          },
+          "flexShrink": 1,
+          "fontSize": {
+            "token": "typography.body",
+          },
+          "lineHeight": {
+            "token": "typography.reading_leading",
+          },
+          "overflow": "hidden",
+          "textOverflow": "ellipsis",
+          "whiteSpace": "nowrap",
+        },
+      },
+      "text": "",
+      "type": "text",
+    },
+    "44": {
+      "children": [],
+      "id": 44,
+      "input": null,
+      "listeners": {},
+      "parent": 43,
+      "props": {},
+      "text": "High",
+      "type": "text",
+    },
+    "45": {
+      "children": [],
+      "id": 45,
+      "input": null,
+      "listeners": {},
+      "parent": 42,
+      "props": {
+        "metadata": {
+          "symbol": "chevron.up.chevron.down",
+        },
+        "style": {
+          "color": {
+            "token": "colors.muted",
+          },
+          "flexShrink": 0,
+          "symbolSize": {
+            "token": "metrics.symbol_inline",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "46": {
+      "children": [],
+      "id": 46,
       "input": null,
       "listeners": {},
       "parent": 37,
@@ -2852,12 +3107,12 @@ exports[`spec §4 empty-other-access: op-tree snapshot and Rust wire/accessibili
       "text": "",
       "type": "div",
     },
-    "43": {
+    "47": {
       "children": [
-        44,
-        46,
+        48,
+        50,
       ],
-      "id": 43,
+      "id": 47,
       "input": null,
       "listeners": {
         "click": {
@@ -2909,14 +3164,14 @@ exports[`spec §4 empty-other-access: op-tree snapshot and Rust wire/accessibili
       "text": "",
       "type": "button",
     },
-    "44": {
+    "48": {
       "children": [
-        45,
+        49,
       ],
-      "id": 44,
+      "id": 48,
       "input": null,
       "listeners": {},
-      "parent": 43,
+      "parent": 47,
       "props": {
         "style": {
           "color": {
@@ -2937,22 +3192,32 @@ exports[`spec §4 empty-other-access: op-tree snapshot and Rust wire/accessibili
       "text": "",
       "type": "text",
     },
-    "45": {
+    "49": {
       "children": [],
-      "id": 45,
+      "id": 49,
       "input": null,
       "listeners": {},
-      "parent": 44,
+      "parent": 48,
       "props": {},
       "text": "Supervised",
       "type": "text",
     },
-    "46": {
+    "5": {
       "children": [],
-      "id": 46,
+      "id": 5,
       "input": null,
       "listeners": {},
-      "parent": 43,
+      "parent": 4,
+      "props": {},
+      "text": "New thread",
+      "type": "text",
+    },
+    "50": {
+      "children": [],
+      "id": 50,
+      "input": null,
+      "listeners": {},
+      "parent": 47,
       "props": {
         "metadata": {
           "symbol": "chevron.up.chevron.down",
@@ -2969,16 +3234,6 @@ exports[`spec §4 empty-other-access: op-tree snapshot and Rust wire/accessibili
       },
       "text": "",
       "type": "div",
-    },
-    "5": {
-      "children": [],
-      "id": 5,
-      "input": null,
-      "listeners": {},
-      "parent": 4,
-      "props": {},
-      "text": "New thread",
-      "type": "text",
     },
     "6": {
       "children": [],
@@ -3294,6 +3549,25 @@ exports[`spec §4 empty-other-access: op-tree snapshot and Rust wire/accessibili
     "create",
     "setProps",
     "setProps",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setProps",
+    "setProps",
+    "create",
+    "setProps",
+    "create",
+    "setText",
+    "insertBefore",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
+    "insertBefore",
+    "insertBefore",
     "create",
     "setProps",
     "setProps",
@@ -4334,7 +4608,8 @@ exports[`spec §4 empty-extension: op-tree snapshot and Rust wire/accessibility 
       "children": [
         38,
         42,
-        43,
+        46,
+        47,
       ],
       "id": 37,
       "input": null,
@@ -4384,7 +4659,7 @@ exports[`spec §4 empty-extension: op-tree snapshot and Rust wire/accessibility 
         "data-pm-component": "toolbar-item",
         "disabled": true,
         "id": "agent-model",
-        "label": "Model and reasoning effort, GPT-6.1",
+        "label": "Model, GPT-6.1",
         "style": {
           "alignItems": "center",
           "borderRadius": {
@@ -4510,8 +4785,125 @@ exports[`spec §4 empty-extension: op-tree snapshot and Rust wire/accessibility 
       "type": "div",
     },
     "42": {
-      "children": [],
+      "children": [
+        43,
+        45,
+      ],
       "id": 42,
+      "input": null,
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+      },
+      "parent": 37,
+      "props": {
+        "aria-haspopup": "menu",
+        "data-pm-component": "toolbar-item",
+        "disabled": true,
+        "id": "agent-effort",
+        "label": "Reasoning effort, High",
+        "style": {
+          "alignItems": "center",
+          "borderRadius": {
+            "token": "metrics.inner_radius",
+          },
+          "color": {
+            "token": "colors.secondary",
+          },
+          "display": "flex",
+          "flexDirection": "row",
+          "flexShrink": 0,
+          "gap": {
+            "token": "metrics.pill_inset",
+          },
+          "minHeight": {
+            "token": "metrics.hit",
+          },
+          "minWidth": {
+            "token": "metrics.hit",
+          },
+          "paddingLeft": {
+            "token": "metrics.gap",
+          },
+          "paddingRight": {
+            "token": "metrics.gap",
+          },
+          "symbolSize": {
+            "token": "metrics.symbol_toolbar",
+          },
+        },
+      },
+      "text": "",
+      "type": "button",
+    },
+    "43": {
+      "children": [
+        44,
+      ],
+      "id": 43,
+      "input": null,
+      "listeners": {},
+      "parent": 42,
+      "props": {
+        "style": {
+          "color": {
+            "token": "colors.secondary",
+          },
+          "flexShrink": 1,
+          "fontSize": {
+            "token": "typography.body",
+          },
+          "lineHeight": {
+            "token": "typography.reading_leading",
+          },
+          "overflow": "hidden",
+          "textOverflow": "ellipsis",
+          "whiteSpace": "nowrap",
+        },
+      },
+      "text": "",
+      "type": "text",
+    },
+    "44": {
+      "children": [],
+      "id": 44,
+      "input": null,
+      "listeners": {},
+      "parent": 43,
+      "props": {},
+      "text": "High",
+      "type": "text",
+    },
+    "45": {
+      "children": [],
+      "id": 45,
+      "input": null,
+      "listeners": {},
+      "parent": 42,
+      "props": {
+        "metadata": {
+          "symbol": "chevron.up.chevron.down",
+        },
+        "style": {
+          "color": {
+            "token": "colors.muted",
+          },
+          "flexShrink": 0,
+          "symbolSize": {
+            "token": "metrics.symbol_inline",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "46": {
+      "children": [],
+      "id": 46,
       "input": null,
       "listeners": {},
       "parent": 37,
@@ -4523,12 +4915,12 @@ exports[`spec §4 empty-extension: op-tree snapshot and Rust wire/accessibility 
       "text": "",
       "type": "div",
     },
-    "43": {
+    "47": {
       "children": [
-        44,
-        46,
+        48,
+        50,
       ],
-      "id": 43,
+      "id": 47,
       "input": null,
       "listeners": {
         "click": {
@@ -4580,14 +4972,14 @@ exports[`spec §4 empty-extension: op-tree snapshot and Rust wire/accessibility 
       "text": "",
       "type": "button",
     },
-    "44": {
+    "48": {
       "children": [
-        45,
+        49,
       ],
-      "id": 44,
+      "id": 48,
       "input": null,
       "listeners": {},
-      "parent": 43,
+      "parent": 47,
       "props": {
         "style": {
           "color": {
@@ -4608,22 +5000,32 @@ exports[`spec §4 empty-extension: op-tree snapshot and Rust wire/accessibility 
       "text": "",
       "type": "text",
     },
-    "45": {
+    "49": {
       "children": [],
-      "id": 45,
+      "id": 49,
       "input": null,
       "listeners": {},
-      "parent": 44,
+      "parent": 48,
       "props": {},
       "text": "Composition only",
       "type": "text",
     },
-    "46": {
+    "5": {
       "children": [],
-      "id": 46,
+      "id": 5,
       "input": null,
       "listeners": {},
-      "parent": 43,
+      "parent": 4,
+      "props": {},
+      "text": "New thread",
+      "type": "text",
+    },
+    "50": {
+      "children": [],
+      "id": 50,
+      "input": null,
+      "listeners": {},
+      "parent": 47,
       "props": {
         "metadata": {
           "symbol": "chevron.up.chevron.down",
@@ -4640,16 +5042,6 @@ exports[`spec §4 empty-extension: op-tree snapshot and Rust wire/accessibility 
       },
       "text": "",
       "type": "div",
-    },
-    "5": {
-      "children": [],
-      "id": 5,
-      "input": null,
-      "listeners": {},
-      "parent": 4,
-      "props": {},
-      "text": "New thread",
-      "type": "text",
     },
     "6": {
       "children": [],
@@ -4965,6 +5357,25 @@ exports[`spec §4 empty-extension: op-tree snapshot and Rust wire/accessibility 
     "create",
     "setProps",
     "setProps",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setProps",
+    "setProps",
+    "create",
+    "setProps",
+    "create",
+    "setText",
+    "insertBefore",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
+    "insertBefore",
+    "insertBefore",
     "create",
     "setProps",
     "setProps",
@@ -6003,7 +6414,8 @@ exports[`spec §4 checking: op-tree snapshot and Rust wire/accessibility validat
       "children": [
         38,
         42,
-        43,
+        46,
+        47,
       ],
       "id": 37,
       "input": null,
@@ -6053,7 +6465,7 @@ exports[`spec §4 checking: op-tree snapshot and Rust wire/accessibility validat
         "data-pm-component": "toolbar-item",
         "disabled": true,
         "id": "agent-model",
-        "label": "Model and reasoning effort, GPT-6.1",
+        "label": "Model, GPT-6.1",
         "style": {
           "alignItems": "center",
           "borderRadius": {
@@ -6179,8 +6591,125 @@ exports[`spec §4 checking: op-tree snapshot and Rust wire/accessibility validat
       "type": "div",
     },
     "42": {
-      "children": [],
+      "children": [
+        43,
+        45,
+      ],
       "id": 42,
+      "input": null,
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+      },
+      "parent": 37,
+      "props": {
+        "aria-haspopup": "menu",
+        "data-pm-component": "toolbar-item",
+        "disabled": true,
+        "id": "agent-effort",
+        "label": "Reasoning effort, High",
+        "style": {
+          "alignItems": "center",
+          "borderRadius": {
+            "token": "metrics.inner_radius",
+          },
+          "color": {
+            "token": "colors.secondary",
+          },
+          "display": "flex",
+          "flexDirection": "row",
+          "flexShrink": 0,
+          "gap": {
+            "token": "metrics.pill_inset",
+          },
+          "minHeight": {
+            "token": "metrics.hit",
+          },
+          "minWidth": {
+            "token": "metrics.hit",
+          },
+          "paddingLeft": {
+            "token": "metrics.gap",
+          },
+          "paddingRight": {
+            "token": "metrics.gap",
+          },
+          "symbolSize": {
+            "token": "metrics.symbol_toolbar",
+          },
+        },
+      },
+      "text": "",
+      "type": "button",
+    },
+    "43": {
+      "children": [
+        44,
+      ],
+      "id": 43,
+      "input": null,
+      "listeners": {},
+      "parent": 42,
+      "props": {
+        "style": {
+          "color": {
+            "token": "colors.secondary",
+          },
+          "flexShrink": 1,
+          "fontSize": {
+            "token": "typography.body",
+          },
+          "lineHeight": {
+            "token": "typography.reading_leading",
+          },
+          "overflow": "hidden",
+          "textOverflow": "ellipsis",
+          "whiteSpace": "nowrap",
+        },
+      },
+      "text": "",
+      "type": "text",
+    },
+    "44": {
+      "children": [],
+      "id": 44,
+      "input": null,
+      "listeners": {},
+      "parent": 43,
+      "props": {},
+      "text": "High",
+      "type": "text",
+    },
+    "45": {
+      "children": [],
+      "id": 45,
+      "input": null,
+      "listeners": {},
+      "parent": 42,
+      "props": {
+        "metadata": {
+          "symbol": "chevron.up.chevron.down",
+        },
+        "style": {
+          "color": {
+            "token": "colors.muted",
+          },
+          "flexShrink": 0,
+          "symbolSize": {
+            "token": "metrics.symbol_inline",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "46": {
+      "children": [],
+      "id": 46,
       "input": null,
       "listeners": {},
       "parent": 37,
@@ -6192,12 +6721,12 @@ exports[`spec §4 checking: op-tree snapshot and Rust wire/accessibility validat
       "text": "",
       "type": "div",
     },
-    "43": {
+    "47": {
       "children": [
-        44,
-        46,
+        48,
+        50,
       ],
-      "id": 43,
+      "id": 47,
       "input": null,
       "listeners": {
         "click": {
@@ -6249,14 +6778,14 @@ exports[`spec §4 checking: op-tree snapshot and Rust wire/accessibility validat
       "text": "",
       "type": "button",
     },
-    "44": {
+    "48": {
       "children": [
-        45,
+        49,
       ],
-      "id": 44,
+      "id": 48,
       "input": null,
       "listeners": {},
-      "parent": 43,
+      "parent": 47,
       "props": {
         "style": {
           "color": {
@@ -6277,22 +6806,32 @@ exports[`spec §4 checking: op-tree snapshot and Rust wire/accessibility validat
       "text": "",
       "type": "text",
     },
-    "45": {
+    "49": {
       "children": [],
-      "id": 45,
+      "id": 49,
       "input": null,
       "listeners": {},
-      "parent": 44,
+      "parent": 48,
       "props": {},
       "text": "Composition only",
       "type": "text",
     },
-    "46": {
+    "5": {
       "children": [],
-      "id": 46,
+      "id": 5,
       "input": null,
       "listeners": {},
-      "parent": 43,
+      "parent": 4,
+      "props": {},
+      "text": "New thread",
+      "type": "text",
+    },
+    "50": {
+      "children": [],
+      "id": 50,
+      "input": null,
+      "listeners": {},
+      "parent": 47,
       "props": {
         "metadata": {
           "symbol": "chevron.up.chevron.down",
@@ -6309,16 +6848,6 @@ exports[`spec §4 checking: op-tree snapshot and Rust wire/accessibility validat
       },
       "text": "",
       "type": "div",
-    },
-    "5": {
-      "children": [],
-      "id": 5,
-      "input": null,
-      "listeners": {},
-      "parent": 4,
-      "props": {},
-      "text": "New thread",
-      "type": "text",
     },
     "6": {
       "children": [],
@@ -6634,6 +7163,25 @@ exports[`spec §4 checking: op-tree snapshot and Rust wire/accessibility validat
     "create",
     "setProps",
     "setProps",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setProps",
+    "setProps",
+    "create",
+    "setProps",
+    "create",
+    "setText",
+    "insertBefore",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
+    "insertBefore",
+    "insertBefore",
     "create",
     "setProps",
     "setProps",
@@ -9435,7 +9983,8 @@ exports[`spec §4 loading: op-tree snapshot and Rust wire/accessibility validato
       "children": [
         32,
         36,
-        37,
+        40,
+        41,
       ],
       "id": 31,
       "input": null,
@@ -9485,7 +10034,7 @@ exports[`spec §4 loading: op-tree snapshot and Rust wire/accessibility validato
         "data-pm-component": "toolbar-item",
         "disabled": true,
         "id": "agent-model",
-        "label": "Model and reasoning effort, GPT-6.1",
+        "label": "Model, GPT-6.1",
         "style": {
           "alignItems": "center",
           "borderRadius": {
@@ -9583,8 +10132,153 @@ exports[`spec §4 loading: op-tree snapshot and Rust wire/accessibility validato
       "type": "div",
     },
     "36": {
-      "children": [],
+      "children": [
+        37,
+        39,
+      ],
       "id": 36,
+      "input": null,
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+      },
+      "parent": 31,
+      "props": {
+        "aria-haspopup": "menu",
+        "data-pm-component": "toolbar-item",
+        "disabled": true,
+        "id": "agent-effort",
+        "label": "Reasoning effort, High",
+        "style": {
+          "alignItems": "center",
+          "borderRadius": {
+            "token": "metrics.inner_radius",
+          },
+          "color": {
+            "token": "colors.secondary",
+          },
+          "display": "flex",
+          "flexDirection": "row",
+          "flexShrink": 0,
+          "gap": {
+            "token": "metrics.pill_inset",
+          },
+          "minHeight": {
+            "token": "metrics.hit",
+          },
+          "minWidth": {
+            "token": "metrics.hit",
+          },
+          "paddingLeft": {
+            "token": "metrics.gap",
+          },
+          "paddingRight": {
+            "token": "metrics.gap",
+          },
+          "symbolSize": {
+            "token": "metrics.symbol_toolbar",
+          },
+        },
+      },
+      "text": "",
+      "type": "button",
+    },
+    "37": {
+      "children": [
+        38,
+      ],
+      "id": 37,
+      "input": null,
+      "listeners": {},
+      "parent": 36,
+      "props": {
+        "style": {
+          "color": {
+            "token": "colors.secondary",
+          },
+          "flexShrink": 1,
+          "fontSize": {
+            "token": "typography.body",
+          },
+          "lineHeight": {
+            "token": "typography.reading_leading",
+          },
+          "overflow": "hidden",
+          "textOverflow": "ellipsis",
+          "whiteSpace": "nowrap",
+        },
+      },
+      "text": "",
+      "type": "text",
+    },
+    "38": {
+      "children": [],
+      "id": 38,
+      "input": null,
+      "listeners": {},
+      "parent": 37,
+      "props": {},
+      "text": "High",
+      "type": "text",
+    },
+    "39": {
+      "children": [],
+      "id": 39,
+      "input": null,
+      "listeners": {},
+      "parent": 36,
+      "props": {
+        "metadata": {
+          "symbol": "chevron.up.chevron.down",
+        },
+        "style": {
+          "color": {
+            "token": "colors.muted",
+          },
+          "flexShrink": 0,
+          "symbolSize": {
+            "token": "metrics.symbol_inline",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "4": {
+      "children": [
+        5,
+      ],
+      "id": 4,
+      "input": null,
+      "listeners": {},
+      "parent": 3,
+      "props": {
+        "style": {
+          "color": {
+            "token": "colors.text",
+          },
+          "flexShrink": 1,
+          "fontSize": {
+            "token": "typography.body",
+          },
+          "lineHeight": {
+            "token": "typography.reading_leading",
+          },
+          "overflow": "hidden",
+          "textOverflow": "ellipsis",
+          "whiteSpace": "nowrap",
+        },
+      },
+      "text": "",
+      "type": "text",
+    },
+    "40": {
+      "children": [],
+      "id": 40,
       "input": null,
       "listeners": {},
       "parent": 31,
@@ -9596,12 +10290,12 @@ exports[`spec §4 loading: op-tree snapshot and Rust wire/accessibility validato
       "text": "",
       "type": "div",
     },
-    "37": {
+    "41": {
       "children": [
-        38,
-        40,
+        42,
+        44,
       ],
-      "id": 37,
+      "id": 41,
       "input": null,
       "listeners": {
         "click": {
@@ -9653,14 +10347,14 @@ exports[`spec §4 loading: op-tree snapshot and Rust wire/accessibility validato
       "text": "",
       "type": "button",
     },
-    "38": {
+    "42": {
       "children": [
-        39,
+        43,
       ],
-      "id": 38,
+      "id": 42,
       "input": null,
       "listeners": {},
-      "parent": 37,
+      "parent": 41,
       "props": {
         "style": {
           "color": {
@@ -9681,50 +10375,22 @@ exports[`spec §4 loading: op-tree snapshot and Rust wire/accessibility validato
       "text": "",
       "type": "text",
     },
-    "39": {
+    "43": {
       "children": [],
-      "id": 39,
+      "id": 43,
       "input": null,
       "listeners": {},
-      "parent": 38,
+      "parent": 42,
       "props": {},
       "text": "Composition only",
       "type": "text",
     },
-    "4": {
-      "children": [
-        5,
-      ],
-      "id": 4,
-      "input": null,
-      "listeners": {},
-      "parent": 3,
-      "props": {
-        "style": {
-          "color": {
-            "token": "colors.text",
-          },
-          "flexShrink": 1,
-          "fontSize": {
-            "token": "typography.body",
-          },
-          "lineHeight": {
-            "token": "typography.reading_leading",
-          },
-          "overflow": "hidden",
-          "textOverflow": "ellipsis",
-          "whiteSpace": "nowrap",
-        },
-      },
-      "text": "",
-      "type": "text",
-    },
-    "40": {
+    "44": {
       "children": [],
-      "id": 40,
+      "id": 44,
       "input": null,
       "listeners": {},
-      "parent": 37,
+      "parent": 41,
       "props": {
         "metadata": {
           "symbol": "chevron.up.chevron.down",
@@ -10039,6 +10705,25 @@ exports[`spec §4 loading: op-tree snapshot and Rust wire/accessibility validato
     "create",
     "setProps",
     "setProps",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setProps",
+    "setProps",
+    "create",
+    "setProps",
+    "create",
+    "setText",
+    "insertBefore",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
+    "insertBefore",
+    "insertBefore",
     "create",
     "setProps",
     "setProps",
@@ -10617,7 +11302,8 @@ exports[`spec §4 working: op-tree snapshot and Rust wire/accessibility validato
       "children": [
         22,
         26,
-        27,
+        30,
+        31,
       ],
       "id": 21,
       "input": null,
@@ -10667,7 +11353,7 @@ exports[`spec §4 working: op-tree snapshot and Rust wire/accessibility validato
         "data-pm-component": "toolbar-item",
         "disabled": true,
         "id": "agent-model",
-        "label": "Model and reasoning effort, GPT-6.1",
+        "label": "Model, GPT-6.1",
         "style": {
           "alignItems": "center",
           "borderRadius": {
@@ -10765,25 +11451,11 @@ exports[`spec §4 working: op-tree snapshot and Rust wire/accessibility validato
       "type": "div",
     },
     "26": {
-      "children": [],
-      "id": 26,
-      "input": null,
-      "listeners": {},
-      "parent": 21,
-      "props": {
-        "style": {
-          "flexGrow": 1,
-        },
-      },
-      "text": "",
-      "type": "div",
-    },
-    "27": {
       "children": [
-        28,
-        30,
+        27,
+        29,
       ],
-      "id": 27,
+      "id": 26,
       "input": null,
       "listeners": {
         "click": {
@@ -10798,8 +11470,8 @@ exports[`spec §4 working: op-tree snapshot and Rust wire/accessibility validato
         "aria-haspopup": "menu",
         "data-pm-component": "toolbar-item",
         "disabled": true,
-        "id": "agent-access",
-        "label": "Agent access, Composition only",
+        "id": "agent-effort",
+        "label": "Reasoning effort, High",
         "style": {
           "alignItems": "center",
           "borderRadius": {
@@ -10810,7 +11482,7 @@ exports[`spec §4 working: op-tree snapshot and Rust wire/accessibility validato
           },
           "display": "flex",
           "flexDirection": "row",
-          "flexShrink": 1,
+          "flexShrink": 0,
           "gap": {
             "token": "metrics.pill_inset",
           },
@@ -10820,7 +11492,6 @@ exports[`spec §4 working: op-tree snapshot and Rust wire/accessibility validato
           "minWidth": {
             "token": "metrics.hit",
           },
-          "overflow": "hidden",
           "paddingLeft": {
             "token": "metrics.gap",
           },
@@ -10835,14 +11506,14 @@ exports[`spec §4 working: op-tree snapshot and Rust wire/accessibility validato
       "text": "",
       "type": "button",
     },
-    "28": {
+    "27": {
       "children": [
-        29,
+        28,
       ],
-      "id": 28,
+      "id": 27,
       "input": null,
       "listeners": {},
-      "parent": 27,
+      "parent": 26,
       "props": {
         "style": {
           "color": {
@@ -10863,15 +11534,38 @@ exports[`spec §4 working: op-tree snapshot and Rust wire/accessibility validato
       "text": "",
       "type": "text",
     },
+    "28": {
+      "children": [],
+      "id": 28,
+      "input": null,
+      "listeners": {},
+      "parent": 27,
+      "props": {},
+      "text": "High",
+      "type": "text",
+    },
     "29": {
       "children": [],
       "id": 29,
       "input": null,
       "listeners": {},
-      "parent": 28,
-      "props": {},
-      "text": "Composition only",
-      "type": "text",
+      "parent": 26,
+      "props": {
+        "metadata": {
+          "symbol": "chevron.up.chevron.down",
+        },
+        "style": {
+          "color": {
+            "token": "colors.muted",
+          },
+          "flexShrink": 0,
+          "symbolSize": {
+            "token": "metrics.symbol_inline",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
     },
     "3": {
       "children": [
@@ -10935,7 +11629,116 @@ exports[`spec §4 working: op-tree snapshot and Rust wire/accessibility validato
       "id": 30,
       "input": null,
       "listeners": {},
-      "parent": 27,
+      "parent": 21,
+      "props": {
+        "style": {
+          "flexGrow": 1,
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "31": {
+      "children": [
+        32,
+        34,
+      ],
+      "id": 31,
+      "input": null,
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+      },
+      "parent": 21,
+      "props": {
+        "aria-haspopup": "menu",
+        "data-pm-component": "toolbar-item",
+        "disabled": true,
+        "id": "agent-access",
+        "label": "Agent access, Composition only",
+        "style": {
+          "alignItems": "center",
+          "borderRadius": {
+            "token": "metrics.inner_radius",
+          },
+          "color": {
+            "token": "colors.secondary",
+          },
+          "display": "flex",
+          "flexDirection": "row",
+          "flexShrink": 1,
+          "gap": {
+            "token": "metrics.pill_inset",
+          },
+          "minHeight": {
+            "token": "metrics.hit",
+          },
+          "minWidth": {
+            "token": "metrics.hit",
+          },
+          "overflow": "hidden",
+          "paddingLeft": {
+            "token": "metrics.gap",
+          },
+          "paddingRight": {
+            "token": "metrics.gap",
+          },
+          "symbolSize": {
+            "token": "metrics.symbol_toolbar",
+          },
+        },
+      },
+      "text": "",
+      "type": "button",
+    },
+    "32": {
+      "children": [
+        33,
+      ],
+      "id": 32,
+      "input": null,
+      "listeners": {},
+      "parent": 31,
+      "props": {
+        "style": {
+          "color": {
+            "token": "colors.secondary",
+          },
+          "flexShrink": 1,
+          "fontSize": {
+            "token": "typography.body",
+          },
+          "lineHeight": {
+            "token": "typography.reading_leading",
+          },
+          "overflow": "hidden",
+          "textOverflow": "ellipsis",
+          "whiteSpace": "nowrap",
+        },
+      },
+      "text": "",
+      "type": "text",
+    },
+    "33": {
+      "children": [],
+      "id": 33,
+      "input": null,
+      "listeners": {},
+      "parent": 32,
+      "props": {},
+      "text": "Composition only",
+      "type": "text",
+    },
+    "34": {
+      "children": [],
+      "id": 34,
+      "input": null,
+      "listeners": {},
+      "parent": 31,
       "props": {
         "metadata": {
           "symbol": "chevron.up.chevron.down",
@@ -11241,6 +12044,25 @@ exports[`spec §4 working: op-tree snapshot and Rust wire/accessibility validato
     "create",
     "setProps",
     "setProps",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setProps",
+    "setProps",
+    "create",
+    "setProps",
+    "create",
+    "setText",
+    "insertBefore",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
+    "insertBefore",
+    "insertBefore",
     "create",
     "setProps",
     "setProps",
@@ -11818,7 +12640,8 @@ exports[`spec §4 stopping: op-tree snapshot and Rust wire/accessibility validat
       "children": [
         22,
         26,
-        27,
+        30,
+        31,
       ],
       "id": 21,
       "input": null,
@@ -11868,7 +12691,7 @@ exports[`spec §4 stopping: op-tree snapshot and Rust wire/accessibility validat
         "data-pm-component": "toolbar-item",
         "disabled": true,
         "id": "agent-model",
-        "label": "Model and reasoning effort, GPT-6.1",
+        "label": "Model, GPT-6.1",
         "style": {
           "alignItems": "center",
           "borderRadius": {
@@ -11966,25 +12789,11 @@ exports[`spec §4 stopping: op-tree snapshot and Rust wire/accessibility validat
       "type": "div",
     },
     "26": {
-      "children": [],
-      "id": 26,
-      "input": null,
-      "listeners": {},
-      "parent": 21,
-      "props": {
-        "style": {
-          "flexGrow": 1,
-        },
-      },
-      "text": "",
-      "type": "div",
-    },
-    "27": {
       "children": [
-        28,
-        30,
+        27,
+        29,
       ],
-      "id": 27,
+      "id": 26,
       "input": null,
       "listeners": {
         "click": {
@@ -11999,8 +12808,8 @@ exports[`spec §4 stopping: op-tree snapshot and Rust wire/accessibility validat
         "aria-haspopup": "menu",
         "data-pm-component": "toolbar-item",
         "disabled": true,
-        "id": "agent-access",
-        "label": "Agent access, Composition only",
+        "id": "agent-effort",
+        "label": "Reasoning effort, High",
         "style": {
           "alignItems": "center",
           "borderRadius": {
@@ -12011,7 +12820,7 @@ exports[`spec §4 stopping: op-tree snapshot and Rust wire/accessibility validat
           },
           "display": "flex",
           "flexDirection": "row",
-          "flexShrink": 1,
+          "flexShrink": 0,
           "gap": {
             "token": "metrics.pill_inset",
           },
@@ -12021,7 +12830,6 @@ exports[`spec §4 stopping: op-tree snapshot and Rust wire/accessibility validat
           "minWidth": {
             "token": "metrics.hit",
           },
-          "overflow": "hidden",
           "paddingLeft": {
             "token": "metrics.gap",
           },
@@ -12036,14 +12844,14 @@ exports[`spec §4 stopping: op-tree snapshot and Rust wire/accessibility validat
       "text": "",
       "type": "button",
     },
-    "28": {
+    "27": {
       "children": [
-        29,
+        28,
       ],
-      "id": 28,
+      "id": 27,
       "input": null,
       "listeners": {},
-      "parent": 27,
+      "parent": 26,
       "props": {
         "style": {
           "color": {
@@ -12064,15 +12872,38 @@ exports[`spec §4 stopping: op-tree snapshot and Rust wire/accessibility validat
       "text": "",
       "type": "text",
     },
+    "28": {
+      "children": [],
+      "id": 28,
+      "input": null,
+      "listeners": {},
+      "parent": 27,
+      "props": {},
+      "text": "High",
+      "type": "text",
+    },
     "29": {
       "children": [],
       "id": 29,
       "input": null,
       "listeners": {},
-      "parent": 28,
-      "props": {},
-      "text": "Composition only",
-      "type": "text",
+      "parent": 26,
+      "props": {
+        "metadata": {
+          "symbol": "chevron.up.chevron.down",
+        },
+        "style": {
+          "color": {
+            "token": "colors.muted",
+          },
+          "flexShrink": 0,
+          "symbolSize": {
+            "token": "metrics.symbol_inline",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
     },
     "3": {
       "children": [
@@ -12136,7 +12967,116 @@ exports[`spec §4 stopping: op-tree snapshot and Rust wire/accessibility validat
       "id": 30,
       "input": null,
       "listeners": {},
-      "parent": 27,
+      "parent": 21,
+      "props": {
+        "style": {
+          "flexGrow": 1,
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "31": {
+      "children": [
+        32,
+        34,
+      ],
+      "id": 31,
+      "input": null,
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+      },
+      "parent": 21,
+      "props": {
+        "aria-haspopup": "menu",
+        "data-pm-component": "toolbar-item",
+        "disabled": true,
+        "id": "agent-access",
+        "label": "Agent access, Composition only",
+        "style": {
+          "alignItems": "center",
+          "borderRadius": {
+            "token": "metrics.inner_radius",
+          },
+          "color": {
+            "token": "colors.secondary",
+          },
+          "display": "flex",
+          "flexDirection": "row",
+          "flexShrink": 1,
+          "gap": {
+            "token": "metrics.pill_inset",
+          },
+          "minHeight": {
+            "token": "metrics.hit",
+          },
+          "minWidth": {
+            "token": "metrics.hit",
+          },
+          "overflow": "hidden",
+          "paddingLeft": {
+            "token": "metrics.gap",
+          },
+          "paddingRight": {
+            "token": "metrics.gap",
+          },
+          "symbolSize": {
+            "token": "metrics.symbol_toolbar",
+          },
+        },
+      },
+      "text": "",
+      "type": "button",
+    },
+    "32": {
+      "children": [
+        33,
+      ],
+      "id": 32,
+      "input": null,
+      "listeners": {},
+      "parent": 31,
+      "props": {
+        "style": {
+          "color": {
+            "token": "colors.secondary",
+          },
+          "flexShrink": 1,
+          "fontSize": {
+            "token": "typography.body",
+          },
+          "lineHeight": {
+            "token": "typography.reading_leading",
+          },
+          "overflow": "hidden",
+          "textOverflow": "ellipsis",
+          "whiteSpace": "nowrap",
+        },
+      },
+      "text": "",
+      "type": "text",
+    },
+    "33": {
+      "children": [],
+      "id": 33,
+      "input": null,
+      "listeners": {},
+      "parent": 32,
+      "props": {},
+      "text": "Composition only",
+      "type": "text",
+    },
+    "34": {
+      "children": [],
+      "id": 34,
+      "input": null,
+      "listeners": {},
+      "parent": 31,
       "props": {
         "metadata": {
           "symbol": "chevron.up.chevron.down",
@@ -12442,6 +13382,25 @@ exports[`spec §4 stopping: op-tree snapshot and Rust wire/accessibility validat
     "create",
     "setProps",
     "setProps",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setProps",
+    "setProps",
+    "create",
+    "setProps",
+    "create",
+    "setText",
+    "insertBefore",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
+    "insertBefore",
+    "insertBefore",
     "create",
     "setProps",
     "setProps",
@@ -13707,7 +14666,8 @@ exports[`spec §4 awaiting-answer: op-tree snapshot and Rust wire/accessibility 
       "children": [
         45,
         49,
-        50,
+        53,
+        54,
       ],
       "id": 44,
       "input": null,
@@ -13757,7 +14717,7 @@ exports[`spec §4 awaiting-answer: op-tree snapshot and Rust wire/accessibility 
         "data-pm-component": "toolbar-item",
         "disabled": true,
         "id": "agent-model",
-        "label": "Model and reasoning effort, GPT-6.1",
+        "label": "Model, GPT-6.1",
         "style": {
           "alignItems": "center",
           "borderRadius": {
@@ -13855,18 +14815,60 @@ exports[`spec §4 awaiting-answer: op-tree snapshot and Rust wire/accessibility 
       "type": "div",
     },
     "49": {
-      "children": [],
+      "children": [
+        50,
+        52,
+      ],
       "id": 49,
       "input": null,
-      "listeners": {},
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+      },
       "parent": 44,
       "props": {
+        "aria-haspopup": "menu",
+        "data-pm-component": "toolbar-item",
+        "disabled": true,
+        "id": "agent-effort",
+        "label": "Reasoning effort, High",
         "style": {
-          "flexGrow": 1,
+          "alignItems": "center",
+          "borderRadius": {
+            "token": "metrics.inner_radius",
+          },
+          "color": {
+            "token": "colors.secondary",
+          },
+          "display": "flex",
+          "flexDirection": "row",
+          "flexShrink": 0,
+          "gap": {
+            "token": "metrics.pill_inset",
+          },
+          "minHeight": {
+            "token": "metrics.hit",
+          },
+          "minWidth": {
+            "token": "metrics.hit",
+          },
+          "paddingLeft": {
+            "token": "metrics.gap",
+          },
+          "paddingRight": {
+            "token": "metrics.gap",
+          },
+          "symbolSize": {
+            "token": "metrics.symbol_toolbar",
+          },
         },
       },
       "text": "",
-      "type": "div",
+      "type": "button",
     },
     "5": {
       "children": [],
@@ -13881,9 +14883,84 @@ exports[`spec §4 awaiting-answer: op-tree snapshot and Rust wire/accessibility 
     "50": {
       "children": [
         51,
-        53,
       ],
       "id": 50,
+      "input": null,
+      "listeners": {},
+      "parent": 49,
+      "props": {
+        "style": {
+          "color": {
+            "token": "colors.secondary",
+          },
+          "flexShrink": 1,
+          "fontSize": {
+            "token": "typography.body",
+          },
+          "lineHeight": {
+            "token": "typography.reading_leading",
+          },
+          "overflow": "hidden",
+          "textOverflow": "ellipsis",
+          "whiteSpace": "nowrap",
+        },
+      },
+      "text": "",
+      "type": "text",
+    },
+    "51": {
+      "children": [],
+      "id": 51,
+      "input": null,
+      "listeners": {},
+      "parent": 50,
+      "props": {},
+      "text": "High",
+      "type": "text",
+    },
+    "52": {
+      "children": [],
+      "id": 52,
+      "input": null,
+      "listeners": {},
+      "parent": 49,
+      "props": {
+        "metadata": {
+          "symbol": "chevron.up.chevron.down",
+        },
+        "style": {
+          "color": {
+            "token": "colors.muted",
+          },
+          "flexShrink": 0,
+          "symbolSize": {
+            "token": "metrics.symbol_inline",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "53": {
+      "children": [],
+      "id": 53,
+      "input": null,
+      "listeners": {},
+      "parent": 44,
+      "props": {
+        "style": {
+          "flexGrow": 1,
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "54": {
+      "children": [
+        55,
+        57,
+      ],
+      "id": 54,
       "input": null,
       "listeners": {
         "click": {
@@ -13935,14 +15012,14 @@ exports[`spec §4 awaiting-answer: op-tree snapshot and Rust wire/accessibility 
       "text": "",
       "type": "button",
     },
-    "51": {
+    "55": {
       "children": [
-        52,
+        56,
       ],
-      "id": 51,
+      "id": 55,
       "input": null,
       "listeners": {},
-      "parent": 50,
+      "parent": 54,
       "props": {
         "style": {
           "color": {
@@ -13963,22 +15040,22 @@ exports[`spec §4 awaiting-answer: op-tree snapshot and Rust wire/accessibility 
       "text": "",
       "type": "text",
     },
-    "52": {
+    "56": {
       "children": [],
-      "id": 52,
+      "id": 56,
       "input": null,
       "listeners": {},
-      "parent": 51,
+      "parent": 55,
       "props": {},
       "text": "Composition only",
       "type": "text",
     },
-    "53": {
+    "57": {
       "children": [],
-      "id": 53,
+      "id": 57,
       "input": null,
       "listeners": {},
-      "parent": 50,
+      "parent": 54,
       "props": {
         "metadata": {
           "symbol": "chevron.up.chevron.down",
@@ -14350,6 +15427,25 @@ exports[`spec §4 awaiting-answer: op-tree snapshot and Rust wire/accessibility 
     "create",
     "setProps",
     "setProps",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setProps",
+    "setProps",
+    "create",
+    "setProps",
+    "create",
+    "setText",
+    "insertBefore",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
+    "insertBefore",
+    "insertBefore",
     "create",
     "setProps",
     "setProps",
@@ -15045,7 +16141,8 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
       "children": [
         27,
         31,
-        32,
+        35,
+        36,
       ],
       "id": 26,
       "input": null,
@@ -15095,7 +16192,7 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
         "data-pm-component": "toolbar-item",
         "disabled": true,
         "id": "agent-model",
-        "label": "Model and reasoning effort, GPT-6.1",
+        "label": "Model, GPT-6.1",
         "style": {
           "alignItems": "center",
           "borderRadius": {
@@ -15250,8 +16347,125 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
       "type": "div",
     },
     "31": {
-      "children": [],
+      "children": [
+        32,
+        34,
+      ],
       "id": 31,
+      "input": null,
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+      },
+      "parent": 26,
+      "props": {
+        "aria-haspopup": "menu",
+        "data-pm-component": "toolbar-item",
+        "disabled": true,
+        "id": "agent-effort",
+        "label": "Reasoning effort, High",
+        "style": {
+          "alignItems": "center",
+          "borderRadius": {
+            "token": "metrics.inner_radius",
+          },
+          "color": {
+            "token": "colors.secondary",
+          },
+          "display": "flex",
+          "flexDirection": "row",
+          "flexShrink": 0,
+          "gap": {
+            "token": "metrics.pill_inset",
+          },
+          "minHeight": {
+            "token": "metrics.hit",
+          },
+          "minWidth": {
+            "token": "metrics.hit",
+          },
+          "paddingLeft": {
+            "token": "metrics.gap",
+          },
+          "paddingRight": {
+            "token": "metrics.gap",
+          },
+          "symbolSize": {
+            "token": "metrics.symbol_toolbar",
+          },
+        },
+      },
+      "text": "",
+      "type": "button",
+    },
+    "32": {
+      "children": [
+        33,
+      ],
+      "id": 32,
+      "input": null,
+      "listeners": {},
+      "parent": 31,
+      "props": {
+        "style": {
+          "color": {
+            "token": "colors.secondary",
+          },
+          "flexShrink": 1,
+          "fontSize": {
+            "token": "typography.body",
+          },
+          "lineHeight": {
+            "token": "typography.reading_leading",
+          },
+          "overflow": "hidden",
+          "textOverflow": "ellipsis",
+          "whiteSpace": "nowrap",
+        },
+      },
+      "text": "",
+      "type": "text",
+    },
+    "33": {
+      "children": [],
+      "id": 33,
+      "input": null,
+      "listeners": {},
+      "parent": 32,
+      "props": {},
+      "text": "High",
+      "type": "text",
+    },
+    "34": {
+      "children": [],
+      "id": 34,
+      "input": null,
+      "listeners": {},
+      "parent": 31,
+      "props": {
+        "metadata": {
+          "symbol": "chevron.up.chevron.down",
+        },
+        "style": {
+          "color": {
+            "token": "colors.muted",
+          },
+          "flexShrink": 0,
+          "symbolSize": {
+            "token": "metrics.symbol_inline",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "35": {
+      "children": [],
+      "id": 35,
       "input": null,
       "listeners": {},
       "parent": 26,
@@ -15263,12 +16477,12 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
       "text": "",
       "type": "div",
     },
-    "32": {
+    "36": {
       "children": [
-        33,
-        35,
+        37,
+        39,
       ],
-      "id": 32,
+      "id": 36,
       "input": null,
       "listeners": {
         "click": {
@@ -15320,14 +16534,14 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
       "text": "",
       "type": "button",
     },
-    "33": {
+    "37": {
       "children": [
-        34,
+        38,
       ],
-      "id": 33,
+      "id": 37,
       "input": null,
       "listeners": {},
-      "parent": 32,
+      "parent": 36,
       "props": {
         "style": {
           "color": {
@@ -15348,22 +16562,22 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
       "text": "",
       "type": "text",
     },
-    "34": {
+    "38": {
       "children": [],
-      "id": 34,
+      "id": 38,
       "input": null,
       "listeners": {},
-      "parent": 33,
+      "parent": 37,
       "props": {},
       "text": "Composition only",
       "type": "text",
     },
-    "35": {
+    "39": {
       "children": [],
-      "id": 35,
+      "id": 39,
       "input": null,
       "listeners": {},
-      "parent": 32,
+      "parent": 36,
       "props": {
         "metadata": {
           "symbol": "chevron.up.chevron.down",
@@ -15691,6 +16905,25 @@ exports[`spec §4 hover: op-tree snapshot and Rust wire/accessibility validator 
     "create",
     "setProps",
     "setProps",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setProps",
+    "setProps",
+    "create",
+    "setProps",
+    "create",
+    "setText",
+    "insertBefore",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
+    "insertBefore",
+    "insertBefore",
     "create",
     "setProps",
     "setProps",
@@ -16449,7 +17682,8 @@ exports[`spec §4 focus: op-tree snapshot and Rust wire/accessibility validator 
       "children": [
         30,
         34,
-        35,
+        38,
+        39,
       ],
       "id": 29,
       "input": null,
@@ -16556,7 +17790,7 @@ exports[`spec §4 focus: op-tree snapshot and Rust wire/accessibility validator 
         "data-pm-component": "toolbar-item",
         "disabled": true,
         "id": "agent-model",
-        "label": "Model and reasoning effort, GPT-6.1",
+        "label": "Model, GPT-6.1",
         "style": {
           "alignItems": "center",
           "borderRadius": {
@@ -16654,8 +17888,125 @@ exports[`spec §4 focus: op-tree snapshot and Rust wire/accessibility validator 
       "type": "div",
     },
     "34": {
-      "children": [],
+      "children": [
+        35,
+        37,
+      ],
       "id": 34,
+      "input": null,
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+      },
+      "parent": 29,
+      "props": {
+        "aria-haspopup": "menu",
+        "data-pm-component": "toolbar-item",
+        "disabled": true,
+        "id": "agent-effort",
+        "label": "Reasoning effort, High",
+        "style": {
+          "alignItems": "center",
+          "borderRadius": {
+            "token": "metrics.inner_radius",
+          },
+          "color": {
+            "token": "colors.secondary",
+          },
+          "display": "flex",
+          "flexDirection": "row",
+          "flexShrink": 0,
+          "gap": {
+            "token": "metrics.pill_inset",
+          },
+          "minHeight": {
+            "token": "metrics.hit",
+          },
+          "minWidth": {
+            "token": "metrics.hit",
+          },
+          "paddingLeft": {
+            "token": "metrics.gap",
+          },
+          "paddingRight": {
+            "token": "metrics.gap",
+          },
+          "symbolSize": {
+            "token": "metrics.symbol_toolbar",
+          },
+        },
+      },
+      "text": "",
+      "type": "button",
+    },
+    "35": {
+      "children": [
+        36,
+      ],
+      "id": 35,
+      "input": null,
+      "listeners": {},
+      "parent": 34,
+      "props": {
+        "style": {
+          "color": {
+            "token": "colors.secondary",
+          },
+          "flexShrink": 1,
+          "fontSize": {
+            "token": "typography.body",
+          },
+          "lineHeight": {
+            "token": "typography.reading_leading",
+          },
+          "overflow": "hidden",
+          "textOverflow": "ellipsis",
+          "whiteSpace": "nowrap",
+        },
+      },
+      "text": "",
+      "type": "text",
+    },
+    "36": {
+      "children": [],
+      "id": 36,
+      "input": null,
+      "listeners": {},
+      "parent": 35,
+      "props": {},
+      "text": "High",
+      "type": "text",
+    },
+    "37": {
+      "children": [],
+      "id": 37,
+      "input": null,
+      "listeners": {},
+      "parent": 34,
+      "props": {
+        "metadata": {
+          "symbol": "chevron.up.chevron.down",
+        },
+        "style": {
+          "color": {
+            "token": "colors.muted",
+          },
+          "flexShrink": 0,
+          "symbolSize": {
+            "token": "metrics.symbol_inline",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "38": {
+      "children": [],
+      "id": 38,
       "input": null,
       "listeners": {},
       "parent": 29,
@@ -16667,12 +18018,12 @@ exports[`spec §4 focus: op-tree snapshot and Rust wire/accessibility validator 
       "text": "",
       "type": "div",
     },
-    "35": {
+    "39": {
       "children": [
-        36,
-        38,
+        40,
+        42,
       ],
-      "id": 35,
+      "id": 39,
       "input": null,
       "listeners": {
         "click": {
@@ -16724,67 +18075,6 @@ exports[`spec §4 focus: op-tree snapshot and Rust wire/accessibility validator 
       "text": "",
       "type": "button",
     },
-    "36": {
-      "children": [
-        37,
-      ],
-      "id": 36,
-      "input": null,
-      "listeners": {},
-      "parent": 35,
-      "props": {
-        "style": {
-          "color": {
-            "token": "colors.secondary",
-          },
-          "flexShrink": 1,
-          "fontSize": {
-            "token": "typography.body",
-          },
-          "lineHeight": {
-            "token": "typography.reading_leading",
-          },
-          "overflow": "hidden",
-          "textOverflow": "ellipsis",
-          "whiteSpace": "nowrap",
-        },
-      },
-      "text": "",
-      "type": "text",
-    },
-    "37": {
-      "children": [],
-      "id": 37,
-      "input": null,
-      "listeners": {},
-      "parent": 36,
-      "props": {},
-      "text": "Composition only",
-      "type": "text",
-    },
-    "38": {
-      "children": [],
-      "id": 38,
-      "input": null,
-      "listeners": {},
-      "parent": 35,
-      "props": {
-        "metadata": {
-          "symbol": "chevron.up.chevron.down",
-        },
-        "style": {
-          "color": {
-            "token": "colors.muted",
-          },
-          "flexShrink": 0,
-          "symbolSize": {
-            "token": "metrics.symbol_inline",
-          },
-        },
-      },
-      "text": "",
-      "type": "div",
-    },
     "4": {
       "children": [
         5,
@@ -16812,6 +18102,67 @@ exports[`spec §4 focus: op-tree snapshot and Rust wire/accessibility validator 
       },
       "text": "",
       "type": "text",
+    },
+    "40": {
+      "children": [
+        41,
+      ],
+      "id": 40,
+      "input": null,
+      "listeners": {},
+      "parent": 39,
+      "props": {
+        "style": {
+          "color": {
+            "token": "colors.secondary",
+          },
+          "flexShrink": 1,
+          "fontSize": {
+            "token": "typography.body",
+          },
+          "lineHeight": {
+            "token": "typography.reading_leading",
+          },
+          "overflow": "hidden",
+          "textOverflow": "ellipsis",
+          "whiteSpace": "nowrap",
+        },
+      },
+      "text": "",
+      "type": "text",
+    },
+    "41": {
+      "children": [],
+      "id": 41,
+      "input": null,
+      "listeners": {},
+      "parent": 40,
+      "props": {},
+      "text": "Composition only",
+      "type": "text",
+    },
+    "42": {
+      "children": [],
+      "id": 42,
+      "input": null,
+      "listeners": {},
+      "parent": 39,
+      "props": {
+        "metadata": {
+          "symbol": "chevron.up.chevron.down",
+        },
+        "style": {
+          "color": {
+            "token": "colors.muted",
+          },
+          "flexShrink": 0,
+          "symbolSize": {
+            "token": "metrics.symbol_inline",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
     },
     "5": {
       "children": [],
@@ -17100,6 +18451,25 @@ exports[`spec §4 focus: op-tree snapshot and Rust wire/accessibility validator 
     "create",
     "setProps",
     "setProps",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setProps",
+    "setProps",
+    "create",
+    "setProps",
+    "create",
+    "setText",
+    "insertBefore",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
+    "insertBefore",
+    "insertBefore",
     "create",
     "setProps",
     "setProps",
@@ -17858,7 +19228,8 @@ exports[`spec §4 selected: op-tree snapshot and Rust wire/accessibility validat
       "children": [
         30,
         34,
-        35,
+        38,
+        39,
       ],
       "id": 29,
       "input": null,
@@ -17965,7 +19336,7 @@ exports[`spec §4 selected: op-tree snapshot and Rust wire/accessibility validat
         "data-pm-component": "toolbar-item",
         "disabled": true,
         "id": "agent-model",
-        "label": "Model and reasoning effort, GPT-6.1",
+        "label": "Model, GPT-6.1",
         "style": {
           "alignItems": "center",
           "borderRadius": {
@@ -18063,8 +19434,125 @@ exports[`spec §4 selected: op-tree snapshot and Rust wire/accessibility validat
       "type": "div",
     },
     "34": {
-      "children": [],
+      "children": [
+        35,
+        37,
+      ],
       "id": 34,
+      "input": null,
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+      },
+      "parent": 29,
+      "props": {
+        "aria-haspopup": "menu",
+        "data-pm-component": "toolbar-item",
+        "disabled": true,
+        "id": "agent-effort",
+        "label": "Reasoning effort, High",
+        "style": {
+          "alignItems": "center",
+          "borderRadius": {
+            "token": "metrics.inner_radius",
+          },
+          "color": {
+            "token": "colors.secondary",
+          },
+          "display": "flex",
+          "flexDirection": "row",
+          "flexShrink": 0,
+          "gap": {
+            "token": "metrics.pill_inset",
+          },
+          "minHeight": {
+            "token": "metrics.hit",
+          },
+          "minWidth": {
+            "token": "metrics.hit",
+          },
+          "paddingLeft": {
+            "token": "metrics.gap",
+          },
+          "paddingRight": {
+            "token": "metrics.gap",
+          },
+          "symbolSize": {
+            "token": "metrics.symbol_toolbar",
+          },
+        },
+      },
+      "text": "",
+      "type": "button",
+    },
+    "35": {
+      "children": [
+        36,
+      ],
+      "id": 35,
+      "input": null,
+      "listeners": {},
+      "parent": 34,
+      "props": {
+        "style": {
+          "color": {
+            "token": "colors.secondary",
+          },
+          "flexShrink": 1,
+          "fontSize": {
+            "token": "typography.body",
+          },
+          "lineHeight": {
+            "token": "typography.reading_leading",
+          },
+          "overflow": "hidden",
+          "textOverflow": "ellipsis",
+          "whiteSpace": "nowrap",
+        },
+      },
+      "text": "",
+      "type": "text",
+    },
+    "36": {
+      "children": [],
+      "id": 36,
+      "input": null,
+      "listeners": {},
+      "parent": 35,
+      "props": {},
+      "text": "High",
+      "type": "text",
+    },
+    "37": {
+      "children": [],
+      "id": 37,
+      "input": null,
+      "listeners": {},
+      "parent": 34,
+      "props": {
+        "metadata": {
+          "symbol": "chevron.up.chevron.down",
+        },
+        "style": {
+          "color": {
+            "token": "colors.muted",
+          },
+          "flexShrink": 0,
+          "symbolSize": {
+            "token": "metrics.symbol_inline",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "38": {
+      "children": [],
+      "id": 38,
       "input": null,
       "listeners": {},
       "parent": 29,
@@ -18076,12 +19564,12 @@ exports[`spec §4 selected: op-tree snapshot and Rust wire/accessibility validat
       "text": "",
       "type": "div",
     },
-    "35": {
+    "39": {
       "children": [
-        36,
-        38,
+        40,
+        42,
       ],
-      "id": 35,
+      "id": 39,
       "input": null,
       "listeners": {
         "click": {
@@ -18133,67 +19621,6 @@ exports[`spec §4 selected: op-tree snapshot and Rust wire/accessibility validat
       "text": "",
       "type": "button",
     },
-    "36": {
-      "children": [
-        37,
-      ],
-      "id": 36,
-      "input": null,
-      "listeners": {},
-      "parent": 35,
-      "props": {
-        "style": {
-          "color": {
-            "token": "colors.secondary",
-          },
-          "flexShrink": 1,
-          "fontSize": {
-            "token": "typography.body",
-          },
-          "lineHeight": {
-            "token": "typography.reading_leading",
-          },
-          "overflow": "hidden",
-          "textOverflow": "ellipsis",
-          "whiteSpace": "nowrap",
-        },
-      },
-      "text": "",
-      "type": "text",
-    },
-    "37": {
-      "children": [],
-      "id": 37,
-      "input": null,
-      "listeners": {},
-      "parent": 36,
-      "props": {},
-      "text": "Composition only",
-      "type": "text",
-    },
-    "38": {
-      "children": [],
-      "id": 38,
-      "input": null,
-      "listeners": {},
-      "parent": 35,
-      "props": {
-        "metadata": {
-          "symbol": "chevron.up.chevron.down",
-        },
-        "style": {
-          "color": {
-            "token": "colors.muted",
-          },
-          "flexShrink": 0,
-          "symbolSize": {
-            "token": "metrics.symbol_inline",
-          },
-        },
-      },
-      "text": "",
-      "type": "div",
-    },
     "4": {
       "children": [
         5,
@@ -18221,6 +19648,67 @@ exports[`spec §4 selected: op-tree snapshot and Rust wire/accessibility validat
       },
       "text": "",
       "type": "text",
+    },
+    "40": {
+      "children": [
+        41,
+      ],
+      "id": 40,
+      "input": null,
+      "listeners": {},
+      "parent": 39,
+      "props": {
+        "style": {
+          "color": {
+            "token": "colors.secondary",
+          },
+          "flexShrink": 1,
+          "fontSize": {
+            "token": "typography.body",
+          },
+          "lineHeight": {
+            "token": "typography.reading_leading",
+          },
+          "overflow": "hidden",
+          "textOverflow": "ellipsis",
+          "whiteSpace": "nowrap",
+        },
+      },
+      "text": "",
+      "type": "text",
+    },
+    "41": {
+      "children": [],
+      "id": 41,
+      "input": null,
+      "listeners": {},
+      "parent": 40,
+      "props": {},
+      "text": "Composition only",
+      "type": "text",
+    },
+    "42": {
+      "children": [],
+      "id": 42,
+      "input": null,
+      "listeners": {},
+      "parent": 39,
+      "props": {
+        "metadata": {
+          "symbol": "chevron.up.chevron.down",
+        },
+        "style": {
+          "color": {
+            "token": "colors.muted",
+          },
+          "flexShrink": 0,
+          "symbolSize": {
+            "token": "metrics.symbol_inline",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
     },
     "5": {
       "children": [],
@@ -18509,6 +19997,25 @@ exports[`spec §4 selected: op-tree snapshot and Rust wire/accessibility validat
     "create",
     "setProps",
     "setProps",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setProps",
+    "setProps",
+    "create",
+    "setProps",
+    "create",
+    "setText",
+    "insertBefore",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
+    "insertBefore",
+    "insertBefore",
     "create",
     "setProps",
     "setProps",
@@ -19546,7 +21053,8 @@ exports[`spec §4 disabled: op-tree snapshot and Rust wire/accessibility validat
       "children": [
         38,
         42,
-        43,
+        46,
+        47,
       ],
       "id": 37,
       "input": null,
@@ -19596,7 +21104,7 @@ exports[`spec §4 disabled: op-tree snapshot and Rust wire/accessibility validat
         "data-pm-component": "toolbar-item",
         "disabled": true,
         "id": "agent-model",
-        "label": "Model and reasoning effort, GPT-6.1",
+        "label": "Model, GPT-6.1",
         "style": {
           "alignItems": "center",
           "borderRadius": {
@@ -19722,8 +21230,125 @@ exports[`spec §4 disabled: op-tree snapshot and Rust wire/accessibility validat
       "type": "div",
     },
     "42": {
-      "children": [],
+      "children": [
+        43,
+        45,
+      ],
       "id": 42,
+      "input": null,
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+      },
+      "parent": 37,
+      "props": {
+        "aria-haspopup": "menu",
+        "data-pm-component": "toolbar-item",
+        "disabled": true,
+        "id": "agent-effort",
+        "label": "Reasoning effort, High",
+        "style": {
+          "alignItems": "center",
+          "borderRadius": {
+            "token": "metrics.inner_radius",
+          },
+          "color": {
+            "token": "colors.secondary",
+          },
+          "display": "flex",
+          "flexDirection": "row",
+          "flexShrink": 0,
+          "gap": {
+            "token": "metrics.pill_inset",
+          },
+          "minHeight": {
+            "token": "metrics.hit",
+          },
+          "minWidth": {
+            "token": "metrics.hit",
+          },
+          "paddingLeft": {
+            "token": "metrics.gap",
+          },
+          "paddingRight": {
+            "token": "metrics.gap",
+          },
+          "symbolSize": {
+            "token": "metrics.symbol_toolbar",
+          },
+        },
+      },
+      "text": "",
+      "type": "button",
+    },
+    "43": {
+      "children": [
+        44,
+      ],
+      "id": 43,
+      "input": null,
+      "listeners": {},
+      "parent": 42,
+      "props": {
+        "style": {
+          "color": {
+            "token": "colors.secondary",
+          },
+          "flexShrink": 1,
+          "fontSize": {
+            "token": "typography.body",
+          },
+          "lineHeight": {
+            "token": "typography.reading_leading",
+          },
+          "overflow": "hidden",
+          "textOverflow": "ellipsis",
+          "whiteSpace": "nowrap",
+        },
+      },
+      "text": "",
+      "type": "text",
+    },
+    "44": {
+      "children": [],
+      "id": 44,
+      "input": null,
+      "listeners": {},
+      "parent": 43,
+      "props": {},
+      "text": "High",
+      "type": "text",
+    },
+    "45": {
+      "children": [],
+      "id": 45,
+      "input": null,
+      "listeners": {},
+      "parent": 42,
+      "props": {
+        "metadata": {
+          "symbol": "chevron.up.chevron.down",
+        },
+        "style": {
+          "color": {
+            "token": "colors.muted",
+          },
+          "flexShrink": 0,
+          "symbolSize": {
+            "token": "metrics.symbol_inline",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "46": {
+      "children": [],
+      "id": 46,
       "input": null,
       "listeners": {},
       "parent": 37,
@@ -19735,12 +21360,12 @@ exports[`spec §4 disabled: op-tree snapshot and Rust wire/accessibility validat
       "text": "",
       "type": "div",
     },
-    "43": {
+    "47": {
       "children": [
-        44,
-        46,
+        48,
+        50,
       ],
-      "id": 43,
+      "id": 47,
       "input": null,
       "listeners": {
         "click": {
@@ -19792,14 +21417,14 @@ exports[`spec §4 disabled: op-tree snapshot and Rust wire/accessibility validat
       "text": "",
       "type": "button",
     },
-    "44": {
+    "48": {
       "children": [
-        45,
+        49,
       ],
-      "id": 44,
+      "id": 48,
       "input": null,
       "listeners": {},
-      "parent": 43,
+      "parent": 47,
       "props": {
         "style": {
           "color": {
@@ -19820,22 +21445,32 @@ exports[`spec §4 disabled: op-tree snapshot and Rust wire/accessibility validat
       "text": "",
       "type": "text",
     },
-    "45": {
+    "49": {
       "children": [],
-      "id": 45,
+      "id": 49,
       "input": null,
       "listeners": {},
-      "parent": 44,
+      "parent": 48,
       "props": {},
       "text": "Composition only",
       "type": "text",
     },
-    "46": {
+    "5": {
       "children": [],
-      "id": 46,
+      "id": 5,
       "input": null,
       "listeners": {},
-      "parent": 43,
+      "parent": 4,
+      "props": {},
+      "text": "New thread",
+      "type": "text",
+    },
+    "50": {
+      "children": [],
+      "id": 50,
+      "input": null,
+      "listeners": {},
+      "parent": 47,
       "props": {
         "metadata": {
           "symbol": "chevron.up.chevron.down",
@@ -19852,16 +21487,6 @@ exports[`spec §4 disabled: op-tree snapshot and Rust wire/accessibility validat
       },
       "text": "",
       "type": "div",
-    },
-    "5": {
-      "children": [],
-      "id": 5,
-      "input": null,
-      "listeners": {},
-      "parent": 4,
-      "props": {},
-      "text": "New thread",
-      "type": "text",
     },
     "6": {
       "children": [],
@@ -20177,6 +21802,25 @@ exports[`spec §4 disabled: op-tree snapshot and Rust wire/accessibility validat
     "create",
     "setProps",
     "setProps",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setProps",
+    "setProps",
+    "create",
+    "setProps",
+    "create",
+    "setText",
+    "insertBefore",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
+    "insertBefore",
+    "insertBefore",
     "create",
     "setProps",
     "setProps",
@@ -21275,7 +22919,8 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
       "children": [
         42,
         46,
-        47,
+        50,
+        51,
       ],
       "id": 41,
       "input": null,
@@ -21325,7 +22970,7 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
         "data-pm-component": "toolbar-item",
         "disabled": true,
         "id": "agent-model",
-        "label": "Model and reasoning effort, GPT-6.1",
+        "label": "Model, GPT-6.1",
         "style": {
           "alignItems": "center",
           "borderRadius": {
@@ -21423,8 +23068,135 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
       "type": "div",
     },
     "46": {
-      "children": [],
+      "children": [
+        47,
+        49,
+      ],
       "id": 46,
+      "input": null,
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+      },
+      "parent": 41,
+      "props": {
+        "aria-haspopup": "menu",
+        "data-pm-component": "toolbar-item",
+        "disabled": true,
+        "id": "agent-effort",
+        "label": "Reasoning effort, High",
+        "style": {
+          "alignItems": "center",
+          "borderRadius": {
+            "token": "metrics.inner_radius",
+          },
+          "color": {
+            "token": "colors.secondary",
+          },
+          "display": "flex",
+          "flexDirection": "row",
+          "flexShrink": 0,
+          "gap": {
+            "token": "metrics.pill_inset",
+          },
+          "minHeight": {
+            "token": "metrics.hit",
+          },
+          "minWidth": {
+            "token": "metrics.hit",
+          },
+          "paddingLeft": {
+            "token": "metrics.gap",
+          },
+          "paddingRight": {
+            "token": "metrics.gap",
+          },
+          "symbolSize": {
+            "token": "metrics.symbol_toolbar",
+          },
+        },
+      },
+      "text": "",
+      "type": "button",
+    },
+    "47": {
+      "children": [
+        48,
+      ],
+      "id": 47,
+      "input": null,
+      "listeners": {},
+      "parent": 46,
+      "props": {
+        "style": {
+          "color": {
+            "token": "colors.secondary",
+          },
+          "flexShrink": 1,
+          "fontSize": {
+            "token": "typography.body",
+          },
+          "lineHeight": {
+            "token": "typography.reading_leading",
+          },
+          "overflow": "hidden",
+          "textOverflow": "ellipsis",
+          "whiteSpace": "nowrap",
+        },
+      },
+      "text": "",
+      "type": "text",
+    },
+    "48": {
+      "children": [],
+      "id": 48,
+      "input": null,
+      "listeners": {},
+      "parent": 47,
+      "props": {},
+      "text": "High",
+      "type": "text",
+    },
+    "49": {
+      "children": [],
+      "id": 49,
+      "input": null,
+      "listeners": {},
+      "parent": 46,
+      "props": {
+        "metadata": {
+          "symbol": "chevron.up.chevron.down",
+        },
+        "style": {
+          "color": {
+            "token": "colors.muted",
+          },
+          "flexShrink": 0,
+          "symbolSize": {
+            "token": "metrics.symbol_inline",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "5": {
+      "children": [],
+      "id": 5,
+      "input": null,
+      "listeners": {},
+      "parent": 4,
+      "props": {},
+      "text": "New thread",
+      "type": "text",
+    },
+    "50": {
+      "children": [],
+      "id": 50,
       "input": null,
       "listeners": {},
       "parent": 41,
@@ -21436,12 +23208,12 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
       "text": "",
       "type": "div",
     },
-    "47": {
+    "51": {
       "children": [
-        48,
-        50,
+        52,
+        54,
       ],
-      "id": 47,
+      "id": 51,
       "input": null,
       "listeners": {
         "click": {
@@ -21493,14 +23265,14 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
       "text": "",
       "type": "button",
     },
-    "48": {
+    "52": {
       "children": [
-        49,
+        53,
       ],
-      "id": 48,
+      "id": 52,
       "input": null,
       "listeners": {},
-      "parent": 47,
+      "parent": 51,
       "props": {
         "style": {
           "color": {
@@ -21521,32 +23293,22 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
       "text": "",
       "type": "text",
     },
-    "49": {
+    "53": {
       "children": [],
-      "id": 49,
+      "id": 53,
       "input": null,
       "listeners": {},
-      "parent": 48,
+      "parent": 52,
       "props": {},
       "text": "Composition only",
       "type": "text",
     },
-    "5": {
+    "54": {
       "children": [],
-      "id": 5,
+      "id": 54,
       "input": null,
       "listeners": {},
-      "parent": 4,
-      "props": {},
-      "text": "New thread",
-      "type": "text",
-    },
-    "50": {
-      "children": [],
-      "id": 50,
-      "input": null,
-      "listeners": {},
-      "parent": 47,
+      "parent": 51,
       "props": {
         "metadata": {
           "symbol": "chevron.up.chevron.down",
@@ -21889,6 +23651,25 @@ exports[`spec §4 error: op-tree snapshot and Rust wire/accessibility validator 
     "create",
     "setProps",
     "setProps",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setProps",
+    "setProps",
+    "create",
+    "setProps",
+    "create",
+    "setText",
+    "insertBefore",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
+    "insertBefore",
+    "insertBefore",
     "create",
     "setProps",
     "setProps",
@@ -22884,7 +24665,8 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
       "children": [
         39,
         43,
-        44,
+        47,
+        48,
       ],
       "id": 38,
       "input": null,
@@ -22934,7 +24716,7 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
         "data-pm-component": "toolbar-item",
         "disabled": true,
         "id": "agent-model",
-        "label": "Model and reasoning effort, GPT-6.1",
+        "label": "Model, GPT-6.1",
         "style": {
           "alignItems": "center",
           "borderRadius": {
@@ -23060,8 +24842,125 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
       "type": "div",
     },
     "43": {
-      "children": [],
+      "children": [
+        44,
+        46,
+      ],
       "id": 43,
+      "input": null,
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+      },
+      "parent": 38,
+      "props": {
+        "aria-haspopup": "menu",
+        "data-pm-component": "toolbar-item",
+        "disabled": true,
+        "id": "agent-effort",
+        "label": "Reasoning effort, High",
+        "style": {
+          "alignItems": "center",
+          "borderRadius": {
+            "token": "metrics.inner_radius",
+          },
+          "color": {
+            "token": "colors.secondary",
+          },
+          "display": "flex",
+          "flexDirection": "row",
+          "flexShrink": 0,
+          "gap": {
+            "token": "metrics.pill_inset",
+          },
+          "minHeight": {
+            "token": "metrics.hit",
+          },
+          "minWidth": {
+            "token": "metrics.hit",
+          },
+          "paddingLeft": {
+            "token": "metrics.gap",
+          },
+          "paddingRight": {
+            "token": "metrics.gap",
+          },
+          "symbolSize": {
+            "token": "metrics.symbol_toolbar",
+          },
+        },
+      },
+      "text": "",
+      "type": "button",
+    },
+    "44": {
+      "children": [
+        45,
+      ],
+      "id": 44,
+      "input": null,
+      "listeners": {},
+      "parent": 43,
+      "props": {
+        "style": {
+          "color": {
+            "token": "colors.secondary",
+          },
+          "flexShrink": 1,
+          "fontSize": {
+            "token": "typography.body",
+          },
+          "lineHeight": {
+            "token": "typography.reading_leading",
+          },
+          "overflow": "hidden",
+          "textOverflow": "ellipsis",
+          "whiteSpace": "nowrap",
+        },
+      },
+      "text": "",
+      "type": "text",
+    },
+    "45": {
+      "children": [],
+      "id": 45,
+      "input": null,
+      "listeners": {},
+      "parent": 44,
+      "props": {},
+      "text": "High",
+      "type": "text",
+    },
+    "46": {
+      "children": [],
+      "id": 46,
+      "input": null,
+      "listeners": {},
+      "parent": 43,
+      "props": {
+        "metadata": {
+          "symbol": "chevron.up.chevron.down",
+        },
+        "style": {
+          "color": {
+            "token": "colors.muted",
+          },
+          "flexShrink": 0,
+          "symbolSize": {
+            "token": "metrics.symbol_inline",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "47": {
+      "children": [],
+      "id": 47,
       "input": null,
       "listeners": {},
       "parent": 38,
@@ -23073,12 +24972,12 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
       "text": "",
       "type": "div",
     },
-    "44": {
+    "48": {
       "children": [
-        45,
-        47,
+        49,
+        51,
       ],
-      "id": 44,
+      "id": 48,
       "input": null,
       "listeners": {
         "click": {
@@ -23130,14 +25029,14 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
       "text": "",
       "type": "button",
     },
-    "45": {
+    "49": {
       "children": [
-        46,
+        50,
       ],
-      "id": 45,
+      "id": 49,
       "input": null,
       "listeners": {},
-      "parent": 44,
+      "parent": 48,
       "props": {
         "style": {
           "color": {
@@ -23158,22 +25057,32 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
       "text": "",
       "type": "text",
     },
-    "46": {
+    "5": {
       "children": [],
-      "id": 46,
+      "id": 5,
       "input": null,
       "listeners": {},
-      "parent": 45,
+      "parent": 4,
+      "props": {},
+      "text": "New thread",
+      "type": "text",
+    },
+    "50": {
+      "children": [],
+      "id": 50,
+      "input": null,
+      "listeners": {},
+      "parent": 49,
       "props": {},
       "text": "Composition only",
       "type": "text",
     },
-    "47": {
+    "51": {
       "children": [],
-      "id": 47,
+      "id": 51,
       "input": null,
       "listeners": {},
-      "parent": 44,
+      "parent": 48,
       "props": {
         "metadata": {
           "symbol": "chevron.up.chevron.down",
@@ -23190,16 +25099,6 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
       },
       "text": "",
       "type": "div",
-    },
-    "5": {
-      "children": [],
-      "id": 5,
-      "input": null,
-      "listeners": {},
-      "parent": 4,
-      "props": {},
-      "text": "New thread",
-      "type": "text",
     },
     "6": {
       "children": [],
@@ -23505,6 +25404,25 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
     "create",
     "setProps",
     "setProps",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setProps",
+    "setProps",
+    "create",
+    "setProps",
+    "create",
+    "setText",
+    "insertBefore",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
+    "insertBefore",
+    "insertBefore",
     "create",
     "setProps",
     "setProps",
@@ -24263,7 +26181,8 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
       "children": [
         30,
         34,
-        35,
+        38,
+        39,
       ],
       "id": 29,
       "input": null,
@@ -24370,7 +26289,7 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
         "data-pm-component": "toolbar-item",
         "disabled": true,
         "id": "agent-model",
-        "label": "Model and reasoning effort, GPT-6.1",
+        "label": "Model, GPT-6.1",
         "style": {
           "alignItems": "center",
           "borderRadius": {
@@ -24468,8 +26387,125 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
       "type": "div",
     },
     "34": {
-      "children": [],
+      "children": [
+        35,
+        37,
+      ],
       "id": 34,
+      "input": null,
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+      },
+      "parent": 29,
+      "props": {
+        "aria-haspopup": "menu",
+        "data-pm-component": "toolbar-item",
+        "disabled": true,
+        "id": "agent-effort",
+        "label": "Reasoning effort, High",
+        "style": {
+          "alignItems": "center",
+          "borderRadius": {
+            "token": "metrics.inner_radius",
+          },
+          "color": {
+            "token": "colors.secondary",
+          },
+          "display": "flex",
+          "flexDirection": "row",
+          "flexShrink": 0,
+          "gap": {
+            "token": "metrics.pill_inset",
+          },
+          "minHeight": {
+            "token": "metrics.hit",
+          },
+          "minWidth": {
+            "token": "metrics.hit",
+          },
+          "paddingLeft": {
+            "token": "metrics.gap",
+          },
+          "paddingRight": {
+            "token": "metrics.gap",
+          },
+          "symbolSize": {
+            "token": "metrics.symbol_toolbar",
+          },
+        },
+      },
+      "text": "",
+      "type": "button",
+    },
+    "35": {
+      "children": [
+        36,
+      ],
+      "id": 35,
+      "input": null,
+      "listeners": {},
+      "parent": 34,
+      "props": {
+        "style": {
+          "color": {
+            "token": "colors.secondary",
+          },
+          "flexShrink": 1,
+          "fontSize": {
+            "token": "typography.body",
+          },
+          "lineHeight": {
+            "token": "typography.reading_leading",
+          },
+          "overflow": "hidden",
+          "textOverflow": "ellipsis",
+          "whiteSpace": "nowrap",
+        },
+      },
+      "text": "",
+      "type": "text",
+    },
+    "36": {
+      "children": [],
+      "id": 36,
+      "input": null,
+      "listeners": {},
+      "parent": 35,
+      "props": {},
+      "text": "High",
+      "type": "text",
+    },
+    "37": {
+      "children": [],
+      "id": 37,
+      "input": null,
+      "listeners": {},
+      "parent": 34,
+      "props": {
+        "metadata": {
+          "symbol": "chevron.up.chevron.down",
+        },
+        "style": {
+          "color": {
+            "token": "colors.muted",
+          },
+          "flexShrink": 0,
+          "symbolSize": {
+            "token": "metrics.symbol_inline",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "38": {
+      "children": [],
+      "id": 38,
       "input": null,
       "listeners": {},
       "parent": 29,
@@ -24481,12 +26517,12 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
       "text": "",
       "type": "div",
     },
-    "35": {
+    "39": {
       "children": [
-        36,
-        38,
+        40,
+        42,
       ],
-      "id": 35,
+      "id": 39,
       "input": null,
       "listeners": {
         "click": {
@@ -24538,67 +26574,6 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
       "text": "",
       "type": "button",
     },
-    "36": {
-      "children": [
-        37,
-      ],
-      "id": 36,
-      "input": null,
-      "listeners": {},
-      "parent": 35,
-      "props": {
-        "style": {
-          "color": {
-            "token": "colors.secondary",
-          },
-          "flexShrink": 1,
-          "fontSize": {
-            "token": "typography.body",
-          },
-          "lineHeight": {
-            "token": "typography.reading_leading",
-          },
-          "overflow": "hidden",
-          "textOverflow": "ellipsis",
-          "whiteSpace": "nowrap",
-        },
-      },
-      "text": "",
-      "type": "text",
-    },
-    "37": {
-      "children": [],
-      "id": 37,
-      "input": null,
-      "listeners": {},
-      "parent": 36,
-      "props": {},
-      "text": "Composition only",
-      "type": "text",
-    },
-    "38": {
-      "children": [],
-      "id": 38,
-      "input": null,
-      "listeners": {},
-      "parent": 35,
-      "props": {
-        "metadata": {
-          "symbol": "chevron.up.chevron.down",
-        },
-        "style": {
-          "color": {
-            "token": "colors.muted",
-          },
-          "flexShrink": 0,
-          "symbolSize": {
-            "token": "metrics.symbol_inline",
-          },
-        },
-      },
-      "text": "",
-      "type": "div",
-    },
     "4": {
       "children": [
         5,
@@ -24626,6 +26601,67 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
       },
       "text": "",
       "type": "text",
+    },
+    "40": {
+      "children": [
+        41,
+      ],
+      "id": 40,
+      "input": null,
+      "listeners": {},
+      "parent": 39,
+      "props": {
+        "style": {
+          "color": {
+            "token": "colors.secondary",
+          },
+          "flexShrink": 1,
+          "fontSize": {
+            "token": "typography.body",
+          },
+          "lineHeight": {
+            "token": "typography.reading_leading",
+          },
+          "overflow": "hidden",
+          "textOverflow": "ellipsis",
+          "whiteSpace": "nowrap",
+        },
+      },
+      "text": "",
+      "type": "text",
+    },
+    "41": {
+      "children": [],
+      "id": 41,
+      "input": null,
+      "listeners": {},
+      "parent": 40,
+      "props": {},
+      "text": "Composition only",
+      "type": "text",
+    },
+    "42": {
+      "children": [],
+      "id": 42,
+      "input": null,
+      "listeners": {},
+      "parent": 39,
+      "props": {
+        "metadata": {
+          "symbol": "chevron.up.chevron.down",
+        },
+        "style": {
+          "color": {
+            "token": "colors.muted",
+          },
+          "flexShrink": 0,
+          "symbolSize": {
+            "token": "metrics.symbol_inline",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
     },
     "5": {
       "children": [],
@@ -24914,6 +26950,25 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
     "create",
     "setProps",
     "setProps",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setProps",
+    "setProps",
+    "create",
+    "setProps",
+    "create",
+    "setText",
+    "insertBefore",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
+    "insertBefore",
+    "insertBefore",
     "create",
     "setProps",
     "setProps",
@@ -25672,7 +27727,8 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
       "children": [
         30,
         34,
-        35,
+        38,
+        39,
       ],
       "id": 29,
       "input": null,
@@ -25779,7 +27835,7 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
         "data-pm-component": "toolbar-item",
         "disabled": true,
         "id": "agent-model",
-        "label": "Model and reasoning effort, GPT-6.1",
+        "label": "Model, GPT-6.1",
         "style": {
           "alignItems": "center",
           "borderRadius": {
@@ -25877,8 +27933,125 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
       "type": "div",
     },
     "34": {
-      "children": [],
+      "children": [
+        35,
+        37,
+      ],
       "id": 34,
+      "input": null,
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+      },
+      "parent": 29,
+      "props": {
+        "aria-haspopup": "menu",
+        "data-pm-component": "toolbar-item",
+        "disabled": true,
+        "id": "agent-effort",
+        "label": "Reasoning effort, High",
+        "style": {
+          "alignItems": "center",
+          "borderRadius": {
+            "token": "metrics.inner_radius",
+          },
+          "color": {
+            "token": "colors.secondary",
+          },
+          "display": "flex",
+          "flexDirection": "row",
+          "flexShrink": 0,
+          "gap": {
+            "token": "metrics.pill_inset",
+          },
+          "minHeight": {
+            "token": "metrics.hit",
+          },
+          "minWidth": {
+            "token": "metrics.hit",
+          },
+          "paddingLeft": {
+            "token": "metrics.gap",
+          },
+          "paddingRight": {
+            "token": "metrics.gap",
+          },
+          "symbolSize": {
+            "token": "metrics.symbol_toolbar",
+          },
+        },
+      },
+      "text": "",
+      "type": "button",
+    },
+    "35": {
+      "children": [
+        36,
+      ],
+      "id": 35,
+      "input": null,
+      "listeners": {},
+      "parent": 34,
+      "props": {
+        "style": {
+          "color": {
+            "token": "colors.secondary",
+          },
+          "flexShrink": 1,
+          "fontSize": {
+            "token": "typography.body",
+          },
+          "lineHeight": {
+            "token": "typography.reading_leading",
+          },
+          "overflow": "hidden",
+          "textOverflow": "ellipsis",
+          "whiteSpace": "nowrap",
+        },
+      },
+      "text": "",
+      "type": "text",
+    },
+    "36": {
+      "children": [],
+      "id": 36,
+      "input": null,
+      "listeners": {},
+      "parent": 35,
+      "props": {},
+      "text": "High",
+      "type": "text",
+    },
+    "37": {
+      "children": [],
+      "id": 37,
+      "input": null,
+      "listeners": {},
+      "parent": 34,
+      "props": {
+        "metadata": {
+          "symbol": "chevron.up.chevron.down",
+        },
+        "style": {
+          "color": {
+            "token": "colors.muted",
+          },
+          "flexShrink": 0,
+          "symbolSize": {
+            "token": "metrics.symbol_inline",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "38": {
+      "children": [],
+      "id": 38,
       "input": null,
       "listeners": {},
       "parent": 29,
@@ -25890,12 +28063,12 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
       "text": "",
       "type": "div",
     },
-    "35": {
+    "39": {
       "children": [
-        36,
-        38,
+        40,
+        42,
       ],
-      "id": 35,
+      "id": 39,
       "input": null,
       "listeners": {
         "click": {
@@ -25947,67 +28120,6 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
       "text": "",
       "type": "button",
     },
-    "36": {
-      "children": [
-        37,
-      ],
-      "id": 36,
-      "input": null,
-      "listeners": {},
-      "parent": 35,
-      "props": {
-        "style": {
-          "color": {
-            "token": "colors.secondary",
-          },
-          "flexShrink": 1,
-          "fontSize": {
-            "token": "typography.body",
-          },
-          "lineHeight": {
-            "token": "typography.reading_leading",
-          },
-          "overflow": "hidden",
-          "textOverflow": "ellipsis",
-          "whiteSpace": "nowrap",
-        },
-      },
-      "text": "",
-      "type": "text",
-    },
-    "37": {
-      "children": [],
-      "id": 37,
-      "input": null,
-      "listeners": {},
-      "parent": 36,
-      "props": {},
-      "text": "Composition only",
-      "type": "text",
-    },
-    "38": {
-      "children": [],
-      "id": 38,
-      "input": null,
-      "listeners": {},
-      "parent": 35,
-      "props": {
-        "metadata": {
-          "symbol": "chevron.up.chevron.down",
-        },
-        "style": {
-          "color": {
-            "token": "colors.muted",
-          },
-          "flexShrink": 0,
-          "symbolSize": {
-            "token": "metrics.symbol_inline",
-          },
-        },
-      },
-      "text": "",
-      "type": "div",
-    },
     "4": {
       "children": [
         5,
@@ -26035,6 +28147,67 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
       },
       "text": "",
       "type": "text",
+    },
+    "40": {
+      "children": [
+        41,
+      ],
+      "id": 40,
+      "input": null,
+      "listeners": {},
+      "parent": 39,
+      "props": {
+        "style": {
+          "color": {
+            "token": "colors.secondary",
+          },
+          "flexShrink": 1,
+          "fontSize": {
+            "token": "typography.body",
+          },
+          "lineHeight": {
+            "token": "typography.reading_leading",
+          },
+          "overflow": "hidden",
+          "textOverflow": "ellipsis",
+          "whiteSpace": "nowrap",
+        },
+      },
+      "text": "",
+      "type": "text",
+    },
+    "41": {
+      "children": [],
+      "id": 41,
+      "input": null,
+      "listeners": {},
+      "parent": 40,
+      "props": {},
+      "text": "Composition only",
+      "type": "text",
+    },
+    "42": {
+      "children": [],
+      "id": 42,
+      "input": null,
+      "listeners": {},
+      "parent": 39,
+      "props": {
+        "metadata": {
+          "symbol": "chevron.up.chevron.down",
+        },
+        "style": {
+          "color": {
+            "token": "colors.muted",
+          },
+          "flexShrink": 0,
+          "symbolSize": {
+            "token": "metrics.symbol_inline",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
     },
     "5": {
       "children": [],
@@ -26323,6 +28496,25 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
     "create",
     "setProps",
     "setProps",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setProps",
+    "setProps",
+    "create",
+    "setProps",
+    "create",
+    "setText",
+    "insertBefore",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
+    "insertBefore",
+    "insertBefore",
     "create",
     "setProps",
     "setProps",
@@ -27015,7 +29207,8 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
       "children": [
         29,
         33,
-        34,
+        37,
+        38,
       ],
       "id": 28,
       "input": null,
@@ -27065,7 +29258,7 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
         "data-pm-component": "toolbar-item",
         "disabled": true,
         "id": "agent-model",
-        "label": "Model and reasoning effort, GPT-6.1",
+        "label": "Model, GPT-6.1",
         "style": {
           "alignItems": "center",
           "borderRadius": {
@@ -27220,8 +29413,125 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
       "type": "div",
     },
     "33": {
-      "children": [],
+      "children": [
+        34,
+        36,
+      ],
       "id": 33,
+      "input": null,
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+      },
+      "parent": 28,
+      "props": {
+        "aria-haspopup": "menu",
+        "data-pm-component": "toolbar-item",
+        "disabled": true,
+        "id": "agent-effort",
+        "label": "Reasoning effort, High",
+        "style": {
+          "alignItems": "center",
+          "borderRadius": {
+            "token": "metrics.inner_radius",
+          },
+          "color": {
+            "token": "colors.secondary",
+          },
+          "display": "flex",
+          "flexDirection": "row",
+          "flexShrink": 0,
+          "gap": {
+            "token": "metrics.pill_inset",
+          },
+          "minHeight": {
+            "token": "metrics.hit",
+          },
+          "minWidth": {
+            "token": "metrics.hit",
+          },
+          "paddingLeft": {
+            "token": "metrics.gap",
+          },
+          "paddingRight": {
+            "token": "metrics.gap",
+          },
+          "symbolSize": {
+            "token": "metrics.symbol_toolbar",
+          },
+        },
+      },
+      "text": "",
+      "type": "button",
+    },
+    "34": {
+      "children": [
+        35,
+      ],
+      "id": 34,
+      "input": null,
+      "listeners": {},
+      "parent": 33,
+      "props": {
+        "style": {
+          "color": {
+            "token": "colors.secondary",
+          },
+          "flexShrink": 1,
+          "fontSize": {
+            "token": "typography.body",
+          },
+          "lineHeight": {
+            "token": "typography.reading_leading",
+          },
+          "overflow": "hidden",
+          "textOverflow": "ellipsis",
+          "whiteSpace": "nowrap",
+        },
+      },
+      "text": "",
+      "type": "text",
+    },
+    "35": {
+      "children": [],
+      "id": 35,
+      "input": null,
+      "listeners": {},
+      "parent": 34,
+      "props": {},
+      "text": "High",
+      "type": "text",
+    },
+    "36": {
+      "children": [],
+      "id": 36,
+      "input": null,
+      "listeners": {},
+      "parent": 33,
+      "props": {
+        "metadata": {
+          "symbol": "chevron.up.chevron.down",
+        },
+        "style": {
+          "color": {
+            "token": "colors.muted",
+          },
+          "flexShrink": 0,
+          "symbolSize": {
+            "token": "metrics.symbol_inline",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "37": {
+      "children": [],
+      "id": 37,
       "input": null,
       "listeners": {},
       "parent": 28,
@@ -27233,12 +29543,12 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
       "text": "",
       "type": "div",
     },
-    "34": {
+    "38": {
       "children": [
-        35,
-        37,
+        39,
+        41,
       ],
-      "id": 34,
+      "id": 38,
       "input": null,
       "listeners": {
         "click": {
@@ -27290,14 +29600,14 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
       "text": "",
       "type": "button",
     },
-    "35": {
+    "39": {
       "children": [
-        36,
+        40,
       ],
-      "id": 35,
+      "id": 39,
       "input": null,
       "listeners": {},
-      "parent": 34,
+      "parent": 38,
       "props": {
         "style": {
           "color": {
@@ -27317,39 +29627,6 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
       },
       "text": "",
       "type": "text",
-    },
-    "36": {
-      "children": [],
-      "id": 36,
-      "input": null,
-      "listeners": {},
-      "parent": 35,
-      "props": {},
-      "text": "Composition only",
-      "type": "text",
-    },
-    "37": {
-      "children": [],
-      "id": 37,
-      "input": null,
-      "listeners": {},
-      "parent": 34,
-      "props": {
-        "metadata": {
-          "symbol": "chevron.up.chevron.down",
-        },
-        "style": {
-          "color": {
-            "token": "colors.muted",
-          },
-          "flexShrink": 0,
-          "symbolSize": {
-            "token": "metrics.symbol_inline",
-          },
-        },
-      },
-      "text": "",
-      "type": "div",
     },
     "4": {
       "children": [
@@ -27378,6 +29655,39 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
       },
       "text": "",
       "type": "text",
+    },
+    "40": {
+      "children": [],
+      "id": 40,
+      "input": null,
+      "listeners": {},
+      "parent": 39,
+      "props": {},
+      "text": "Composition only",
+      "type": "text",
+    },
+    "41": {
+      "children": [],
+      "id": 41,
+      "input": null,
+      "listeners": {},
+      "parent": 38,
+      "props": {
+        "metadata": {
+          "symbol": "chevron.up.chevron.down",
+        },
+        "style": {
+          "color": {
+            "token": "colors.muted",
+          },
+          "flexShrink": 0,
+          "symbolSize": {
+            "token": "metrics.symbol_inline",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
     },
     "5": {
       "children": [],
@@ -27678,6 +29988,25 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
     "create",
     "setProps",
     "setProps",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setProps",
+    "setProps",
+    "create",
+    "setProps",
+    "create",
+    "setText",
+    "insertBefore",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
+    "insertBefore",
+    "insertBefore",
     "create",
     "setProps",
     "setProps",
@@ -28370,7 +30699,8 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
       "children": [
         29,
         33,
-        34,
+        37,
+        38,
       ],
       "id": 28,
       "input": null,
@@ -28420,7 +30750,7 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
         "data-pm-component": "toolbar-item",
         "disabled": true,
         "id": "agent-model",
-        "label": "Model and reasoning effort, GPT-6.1",
+        "label": "Model, GPT-6.1",
         "style": {
           "alignItems": "center",
           "borderRadius": {
@@ -28575,8 +30905,125 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
       "type": "div",
     },
     "33": {
-      "children": [],
+      "children": [
+        34,
+        36,
+      ],
       "id": 33,
+      "input": null,
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+      },
+      "parent": 28,
+      "props": {
+        "aria-haspopup": "menu",
+        "data-pm-component": "toolbar-item",
+        "disabled": true,
+        "id": "agent-effort",
+        "label": "Reasoning effort, High",
+        "style": {
+          "alignItems": "center",
+          "borderRadius": {
+            "token": "metrics.inner_radius",
+          },
+          "color": {
+            "token": "colors.secondary",
+          },
+          "display": "flex",
+          "flexDirection": "row",
+          "flexShrink": 0,
+          "gap": {
+            "token": "metrics.pill_inset",
+          },
+          "minHeight": {
+            "token": "metrics.hit",
+          },
+          "minWidth": {
+            "token": "metrics.hit",
+          },
+          "paddingLeft": {
+            "token": "metrics.gap",
+          },
+          "paddingRight": {
+            "token": "metrics.gap",
+          },
+          "symbolSize": {
+            "token": "metrics.symbol_toolbar",
+          },
+        },
+      },
+      "text": "",
+      "type": "button",
+    },
+    "34": {
+      "children": [
+        35,
+      ],
+      "id": 34,
+      "input": null,
+      "listeners": {},
+      "parent": 33,
+      "props": {
+        "style": {
+          "color": {
+            "token": "colors.secondary",
+          },
+          "flexShrink": 1,
+          "fontSize": {
+            "token": "typography.body",
+          },
+          "lineHeight": {
+            "token": "typography.reading_leading",
+          },
+          "overflow": "hidden",
+          "textOverflow": "ellipsis",
+          "whiteSpace": "nowrap",
+        },
+      },
+      "text": "",
+      "type": "text",
+    },
+    "35": {
+      "children": [],
+      "id": 35,
+      "input": null,
+      "listeners": {},
+      "parent": 34,
+      "props": {},
+      "text": "High",
+      "type": "text",
+    },
+    "36": {
+      "children": [],
+      "id": 36,
+      "input": null,
+      "listeners": {},
+      "parent": 33,
+      "props": {
+        "metadata": {
+          "symbol": "chevron.up.chevron.down",
+        },
+        "style": {
+          "color": {
+            "token": "colors.muted",
+          },
+          "flexShrink": 0,
+          "symbolSize": {
+            "token": "metrics.symbol_inline",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "37": {
+      "children": [],
+      "id": 37,
       "input": null,
       "listeners": {},
       "parent": 28,
@@ -28588,12 +31035,12 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
       "text": "",
       "type": "div",
     },
-    "34": {
+    "38": {
       "children": [
-        35,
-        37,
+        39,
+        41,
       ],
-      "id": 34,
+      "id": 38,
       "input": null,
       "listeners": {
         "click": {
@@ -28645,14 +31092,14 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
       "text": "",
       "type": "button",
     },
-    "35": {
+    "39": {
       "children": [
-        36,
+        40,
       ],
-      "id": 35,
+      "id": 39,
       "input": null,
       "listeners": {},
-      "parent": 34,
+      "parent": 38,
       "props": {
         "style": {
           "color": {
@@ -28672,39 +31119,6 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
       },
       "text": "",
       "type": "text",
-    },
-    "36": {
-      "children": [],
-      "id": 36,
-      "input": null,
-      "listeners": {},
-      "parent": 35,
-      "props": {},
-      "text": "Composition only",
-      "type": "text",
-    },
-    "37": {
-      "children": [],
-      "id": 37,
-      "input": null,
-      "listeners": {},
-      "parent": 34,
-      "props": {
-        "metadata": {
-          "symbol": "chevron.up.chevron.down",
-        },
-        "style": {
-          "color": {
-            "token": "colors.muted",
-          },
-          "flexShrink": 0,
-          "symbolSize": {
-            "token": "metrics.symbol_inline",
-          },
-        },
-      },
-      "text": "",
-      "type": "div",
     },
     "4": {
       "children": [
@@ -28733,6 +31147,39 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
       },
       "text": "",
       "type": "text",
+    },
+    "40": {
+      "children": [],
+      "id": 40,
+      "input": null,
+      "listeners": {},
+      "parent": 39,
+      "props": {},
+      "text": "Composition only",
+      "type": "text",
+    },
+    "41": {
+      "children": [],
+      "id": 41,
+      "input": null,
+      "listeners": {},
+      "parent": 38,
+      "props": {
+        "metadata": {
+          "symbol": "chevron.up.chevron.down",
+        },
+        "style": {
+          "color": {
+            "token": "colors.muted",
+          },
+          "flexShrink": 0,
+          "symbolSize": {
+            "token": "metrics.symbol_inline",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
     },
     "5": {
       "children": [],
@@ -29033,6 +31480,25 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
     "create",
     "setProps",
     "setProps",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setProps",
+    "setProps",
+    "create",
+    "setProps",
+    "create",
+    "setText",
+    "insertBefore",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
+    "insertBefore",
+    "insertBefore",
     "create",
     "setProps",
     "setProps",
@@ -30073,7 +32539,8 @@ exports[`spec §4 increase-contrast: op-tree snapshot and Rust wire/accessibilit
       "children": [
         38,
         42,
-        43,
+        46,
+        47,
       ],
       "id": 37,
       "input": null,
@@ -30123,7 +32590,7 @@ exports[`spec §4 increase-contrast: op-tree snapshot and Rust wire/accessibilit
         "data-pm-component": "toolbar-item",
         "disabled": true,
         "id": "agent-model",
-        "label": "Model and reasoning effort, GPT-6.1",
+        "label": "Model, GPT-6.1",
         "style": {
           "alignItems": "center",
           "borderRadius": {
@@ -30249,8 +32716,125 @@ exports[`spec §4 increase-contrast: op-tree snapshot and Rust wire/accessibilit
       "type": "div",
     },
     "42": {
-      "children": [],
+      "children": [
+        43,
+        45,
+      ],
       "id": 42,
+      "input": null,
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+      },
+      "parent": 37,
+      "props": {
+        "aria-haspopup": "menu",
+        "data-pm-component": "toolbar-item",
+        "disabled": true,
+        "id": "agent-effort",
+        "label": "Reasoning effort, High",
+        "style": {
+          "alignItems": "center",
+          "borderRadius": {
+            "token": "metrics.inner_radius",
+          },
+          "color": {
+            "token": "colors.secondary",
+          },
+          "display": "flex",
+          "flexDirection": "row",
+          "flexShrink": 0,
+          "gap": {
+            "token": "metrics.pill_inset",
+          },
+          "minHeight": {
+            "token": "metrics.hit",
+          },
+          "minWidth": {
+            "token": "metrics.hit",
+          },
+          "paddingLeft": {
+            "token": "metrics.gap",
+          },
+          "paddingRight": {
+            "token": "metrics.gap",
+          },
+          "symbolSize": {
+            "token": "metrics.symbol_toolbar",
+          },
+        },
+      },
+      "text": "",
+      "type": "button",
+    },
+    "43": {
+      "children": [
+        44,
+      ],
+      "id": 43,
+      "input": null,
+      "listeners": {},
+      "parent": 42,
+      "props": {
+        "style": {
+          "color": {
+            "token": "colors.secondary",
+          },
+          "flexShrink": 1,
+          "fontSize": {
+            "token": "typography.body",
+          },
+          "lineHeight": {
+            "token": "typography.reading_leading",
+          },
+          "overflow": "hidden",
+          "textOverflow": "ellipsis",
+          "whiteSpace": "nowrap",
+        },
+      },
+      "text": "",
+      "type": "text",
+    },
+    "44": {
+      "children": [],
+      "id": 44,
+      "input": null,
+      "listeners": {},
+      "parent": 43,
+      "props": {},
+      "text": "High",
+      "type": "text",
+    },
+    "45": {
+      "children": [],
+      "id": 45,
+      "input": null,
+      "listeners": {},
+      "parent": 42,
+      "props": {
+        "metadata": {
+          "symbol": "chevron.up.chevron.down",
+        },
+        "style": {
+          "color": {
+            "token": "colors.muted",
+          },
+          "flexShrink": 0,
+          "symbolSize": {
+            "token": "metrics.symbol_inline",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "46": {
+      "children": [],
+      "id": 46,
       "input": null,
       "listeners": {},
       "parent": 37,
@@ -30262,12 +32846,12 @@ exports[`spec §4 increase-contrast: op-tree snapshot and Rust wire/accessibilit
       "text": "",
       "type": "div",
     },
-    "43": {
+    "47": {
       "children": [
-        44,
-        46,
+        48,
+        50,
       ],
-      "id": 43,
+      "id": 47,
       "input": null,
       "listeners": {
         "click": {
@@ -30319,14 +32903,14 @@ exports[`spec §4 increase-contrast: op-tree snapshot and Rust wire/accessibilit
       "text": "",
       "type": "button",
     },
-    "44": {
+    "48": {
       "children": [
-        45,
+        49,
       ],
-      "id": 44,
+      "id": 48,
       "input": null,
       "listeners": {},
-      "parent": 43,
+      "parent": 47,
       "props": {
         "style": {
           "color": {
@@ -30347,22 +32931,32 @@ exports[`spec §4 increase-contrast: op-tree snapshot and Rust wire/accessibilit
       "text": "",
       "type": "text",
     },
-    "45": {
+    "49": {
       "children": [],
-      "id": 45,
+      "id": 49,
       "input": null,
       "listeners": {},
-      "parent": 44,
+      "parent": 48,
       "props": {},
       "text": "Composition only",
       "type": "text",
     },
-    "46": {
+    "5": {
       "children": [],
-      "id": 46,
+      "id": 5,
       "input": null,
       "listeners": {},
-      "parent": 43,
+      "parent": 4,
+      "props": {},
+      "text": "New thread",
+      "type": "text",
+    },
+    "50": {
+      "children": [],
+      "id": 50,
+      "input": null,
+      "listeners": {},
+      "parent": 47,
       "props": {
         "metadata": {
           "symbol": "chevron.up.chevron.down",
@@ -30379,16 +32973,6 @@ exports[`spec §4 increase-contrast: op-tree snapshot and Rust wire/accessibilit
       },
       "text": "",
       "type": "div",
-    },
-    "5": {
-      "children": [],
-      "id": 5,
-      "input": null,
-      "listeners": {},
-      "parent": 4,
-      "props": {},
-      "text": "New thread",
-      "type": "text",
     },
     "6": {
       "children": [],
@@ -30704,6 +33288,25 @@ exports[`spec §4 increase-contrast: op-tree snapshot and Rust wire/accessibilit
     "create",
     "setProps",
     "setProps",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setProps",
+    "setProps",
+    "create",
+    "setProps",
+    "create",
+    "setText",
+    "insertBefore",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
+    "insertBefore",
+    "insertBefore",
     "create",
     "setProps",
     "setProps",
@@ -31744,7 +34347,8 @@ exports[`spec §4 reduce-transparency: op-tree snapshot and Rust wire/accessibil
       "children": [
         38,
         42,
-        43,
+        46,
+        47,
       ],
       "id": 37,
       "input": null,
@@ -31794,7 +34398,7 @@ exports[`spec §4 reduce-transparency: op-tree snapshot and Rust wire/accessibil
         "data-pm-component": "toolbar-item",
         "disabled": true,
         "id": "agent-model",
-        "label": "Model and reasoning effort, GPT-6.1",
+        "label": "Model, GPT-6.1",
         "style": {
           "alignItems": "center",
           "borderRadius": {
@@ -31920,8 +34524,125 @@ exports[`spec §4 reduce-transparency: op-tree snapshot and Rust wire/accessibil
       "type": "div",
     },
     "42": {
-      "children": [],
+      "children": [
+        43,
+        45,
+      ],
       "id": 42,
+      "input": null,
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+      },
+      "parent": 37,
+      "props": {
+        "aria-haspopup": "menu",
+        "data-pm-component": "toolbar-item",
+        "disabled": true,
+        "id": "agent-effort",
+        "label": "Reasoning effort, High",
+        "style": {
+          "alignItems": "center",
+          "borderRadius": {
+            "token": "metrics.inner_radius",
+          },
+          "color": {
+            "token": "colors.secondary",
+          },
+          "display": "flex",
+          "flexDirection": "row",
+          "flexShrink": 0,
+          "gap": {
+            "token": "metrics.pill_inset",
+          },
+          "minHeight": {
+            "token": "metrics.hit",
+          },
+          "minWidth": {
+            "token": "metrics.hit",
+          },
+          "paddingLeft": {
+            "token": "metrics.gap",
+          },
+          "paddingRight": {
+            "token": "metrics.gap",
+          },
+          "symbolSize": {
+            "token": "metrics.symbol_toolbar",
+          },
+        },
+      },
+      "text": "",
+      "type": "button",
+    },
+    "43": {
+      "children": [
+        44,
+      ],
+      "id": 43,
+      "input": null,
+      "listeners": {},
+      "parent": 42,
+      "props": {
+        "style": {
+          "color": {
+            "token": "colors.secondary",
+          },
+          "flexShrink": 1,
+          "fontSize": {
+            "token": "typography.body",
+          },
+          "lineHeight": {
+            "token": "typography.reading_leading",
+          },
+          "overflow": "hidden",
+          "textOverflow": "ellipsis",
+          "whiteSpace": "nowrap",
+        },
+      },
+      "text": "",
+      "type": "text",
+    },
+    "44": {
+      "children": [],
+      "id": 44,
+      "input": null,
+      "listeners": {},
+      "parent": 43,
+      "props": {},
+      "text": "High",
+      "type": "text",
+    },
+    "45": {
+      "children": [],
+      "id": 45,
+      "input": null,
+      "listeners": {},
+      "parent": 42,
+      "props": {
+        "metadata": {
+          "symbol": "chevron.up.chevron.down",
+        },
+        "style": {
+          "color": {
+            "token": "colors.muted",
+          },
+          "flexShrink": 0,
+          "symbolSize": {
+            "token": "metrics.symbol_inline",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "46": {
+      "children": [],
+      "id": 46,
       "input": null,
       "listeners": {},
       "parent": 37,
@@ -31933,12 +34654,12 @@ exports[`spec §4 reduce-transparency: op-tree snapshot and Rust wire/accessibil
       "text": "",
       "type": "div",
     },
-    "43": {
+    "47": {
       "children": [
-        44,
-        46,
+        48,
+        50,
       ],
-      "id": 43,
+      "id": 47,
       "input": null,
       "listeners": {
         "click": {
@@ -31990,14 +34711,14 @@ exports[`spec §4 reduce-transparency: op-tree snapshot and Rust wire/accessibil
       "text": "",
       "type": "button",
     },
-    "44": {
+    "48": {
       "children": [
-        45,
+        49,
       ],
-      "id": 44,
+      "id": 48,
       "input": null,
       "listeners": {},
-      "parent": 43,
+      "parent": 47,
       "props": {
         "style": {
           "color": {
@@ -32018,22 +34739,32 @@ exports[`spec §4 reduce-transparency: op-tree snapshot and Rust wire/accessibil
       "text": "",
       "type": "text",
     },
-    "45": {
+    "49": {
       "children": [],
-      "id": 45,
+      "id": 49,
       "input": null,
       "listeners": {},
-      "parent": 44,
+      "parent": 48,
       "props": {},
       "text": "Composition only",
       "type": "text",
     },
-    "46": {
+    "5": {
       "children": [],
-      "id": 46,
+      "id": 5,
       "input": null,
       "listeners": {},
-      "parent": 43,
+      "parent": 4,
+      "props": {},
+      "text": "New thread",
+      "type": "text",
+    },
+    "50": {
+      "children": [],
+      "id": 50,
+      "input": null,
+      "listeners": {},
+      "parent": 47,
       "props": {
         "metadata": {
           "symbol": "chevron.up.chevron.down",
@@ -32050,16 +34781,6 @@ exports[`spec §4 reduce-transparency: op-tree snapshot and Rust wire/accessibil
       },
       "text": "",
       "type": "div",
-    },
-    "5": {
-      "children": [],
-      "id": 5,
-      "input": null,
-      "listeners": {},
-      "parent": 4,
-      "props": {},
-      "text": "New thread",
-      "type": "text",
     },
     "6": {
       "children": [],
@@ -32375,6 +35096,25 @@ exports[`spec §4 reduce-transparency: op-tree snapshot and Rust wire/accessibil
     "create",
     "setProps",
     "setProps",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setProps",
+    "setProps",
+    "create",
+    "setProps",
+    "create",
+    "setText",
+    "insertBefore",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
+    "insertBefore",
+    "insertBefore",
     "create",
     "setProps",
     "setProps",
@@ -33415,7 +36155,8 @@ exports[`spec §4 reduce-motion: op-tree snapshot and Rust wire/accessibility va
       "children": [
         38,
         42,
-        43,
+        46,
+        47,
       ],
       "id": 37,
       "input": null,
@@ -33465,7 +36206,7 @@ exports[`spec §4 reduce-motion: op-tree snapshot and Rust wire/accessibility va
         "data-pm-component": "toolbar-item",
         "disabled": true,
         "id": "agent-model",
-        "label": "Model and reasoning effort, GPT-6.1",
+        "label": "Model, GPT-6.1",
         "style": {
           "alignItems": "center",
           "borderRadius": {
@@ -33591,8 +36332,125 @@ exports[`spec §4 reduce-motion: op-tree snapshot and Rust wire/accessibility va
       "type": "div",
     },
     "42": {
-      "children": [],
+      "children": [
+        43,
+        45,
+      ],
       "id": 42,
+      "input": null,
+      "listeners": {
+        "click": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+      },
+      "parent": 37,
+      "props": {
+        "aria-haspopup": "menu",
+        "data-pm-component": "toolbar-item",
+        "disabled": true,
+        "id": "agent-effort",
+        "label": "Reasoning effort, High",
+        "style": {
+          "alignItems": "center",
+          "borderRadius": {
+            "token": "metrics.inner_radius",
+          },
+          "color": {
+            "token": "colors.secondary",
+          },
+          "display": "flex",
+          "flexDirection": "row",
+          "flexShrink": 0,
+          "gap": {
+            "token": "metrics.pill_inset",
+          },
+          "minHeight": {
+            "token": "metrics.hit",
+          },
+          "minWidth": {
+            "token": "metrics.hit",
+          },
+          "paddingLeft": {
+            "token": "metrics.gap",
+          },
+          "paddingRight": {
+            "token": "metrics.gap",
+          },
+          "symbolSize": {
+            "token": "metrics.symbol_toolbar",
+          },
+        },
+      },
+      "text": "",
+      "type": "button",
+    },
+    "43": {
+      "children": [
+        44,
+      ],
+      "id": 43,
+      "input": null,
+      "listeners": {},
+      "parent": 42,
+      "props": {
+        "style": {
+          "color": {
+            "token": "colors.secondary",
+          },
+          "flexShrink": 1,
+          "fontSize": {
+            "token": "typography.body",
+          },
+          "lineHeight": {
+            "token": "typography.reading_leading",
+          },
+          "overflow": "hidden",
+          "textOverflow": "ellipsis",
+          "whiteSpace": "nowrap",
+        },
+      },
+      "text": "",
+      "type": "text",
+    },
+    "44": {
+      "children": [],
+      "id": 44,
+      "input": null,
+      "listeners": {},
+      "parent": 43,
+      "props": {},
+      "text": "High",
+      "type": "text",
+    },
+    "45": {
+      "children": [],
+      "id": 45,
+      "input": null,
+      "listeners": {},
+      "parent": 42,
+      "props": {
+        "metadata": {
+          "symbol": "chevron.up.chevron.down",
+        },
+        "style": {
+          "color": {
+            "token": "colors.muted",
+          },
+          "flexShrink": 0,
+          "symbolSize": {
+            "token": "metrics.symbol_inline",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "46": {
+      "children": [],
+      "id": 46,
       "input": null,
       "listeners": {},
       "parent": 37,
@@ -33604,12 +36462,12 @@ exports[`spec §4 reduce-motion: op-tree snapshot and Rust wire/accessibility va
       "text": "",
       "type": "div",
     },
-    "43": {
+    "47": {
       "children": [
-        44,
-        46,
+        48,
+        50,
       ],
-      "id": 43,
+      "id": 47,
       "input": null,
       "listeners": {
         "click": {
@@ -33661,14 +36519,14 @@ exports[`spec §4 reduce-motion: op-tree snapshot and Rust wire/accessibility va
       "text": "",
       "type": "button",
     },
-    "44": {
+    "48": {
       "children": [
-        45,
+        49,
       ],
-      "id": 44,
+      "id": 48,
       "input": null,
       "listeners": {},
-      "parent": 43,
+      "parent": 47,
       "props": {
         "style": {
           "color": {
@@ -33689,22 +36547,32 @@ exports[`spec §4 reduce-motion: op-tree snapshot and Rust wire/accessibility va
       "text": "",
       "type": "text",
     },
-    "45": {
+    "49": {
       "children": [],
-      "id": 45,
+      "id": 49,
       "input": null,
       "listeners": {},
-      "parent": 44,
+      "parent": 48,
       "props": {},
       "text": "Composition only",
       "type": "text",
     },
-    "46": {
+    "5": {
       "children": [],
-      "id": 46,
+      "id": 5,
       "input": null,
       "listeners": {},
-      "parent": 43,
+      "parent": 4,
+      "props": {},
+      "text": "New thread",
+      "type": "text",
+    },
+    "50": {
+      "children": [],
+      "id": 50,
+      "input": null,
+      "listeners": {},
+      "parent": 47,
       "props": {
         "metadata": {
           "symbol": "chevron.up.chevron.down",
@@ -33721,16 +36589,6 @@ exports[`spec §4 reduce-motion: op-tree snapshot and Rust wire/accessibility va
       },
       "text": "",
       "type": "div",
-    },
-    "5": {
-      "children": [],
-      "id": 5,
-      "input": null,
-      "listeners": {},
-      "parent": 4,
-      "props": {},
-      "text": "New thread",
-      "type": "text",
     },
     "6": {
       "children": [],
@@ -34046,6 +36904,25 @@ exports[`spec §4 reduce-motion: op-tree snapshot and Rust wire/accessibility va
     "create",
     "setProps",
     "setProps",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setProps",
+    "setProps",
+    "create",
+    "setProps",
+    "create",
+    "setText",
+    "insertBefore",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
+    "insertBefore",
+    "insertBefore",
     "create",
     "setProps",
     "setProps",

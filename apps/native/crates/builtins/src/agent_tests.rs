@@ -599,7 +599,7 @@ fn composition_run_gets_session_and_edit_tools_and_the_chosen_model() {
     panel.connected(Provider::Claude);
     panel.choose("agent-model", "provider:claude");
     panel.choose("agent-model", "model:fixture");
-    panel.choose("agent-model", "effort:high");
+    panel.choose("agent-effort", "high");
     panel.connected(Provider::Claude);
     panel.send("Go");
     let agent = panel.agent();
@@ -858,11 +858,11 @@ fn the_model_access_and_slash_menus_change_the_run_settings() {
     panel.pick(&menu, "model:fixture-5", move |_| {
         settings(&a).0 == "fixture-5"
     });
-    panel.click("agent-model");
+    panel.click("agent-effort");
     let menu = panel.request("agentMenu");
-    assert!(Agent::labels(&menu).contains(&"High".to_owned()));
+    assert_eq!(Agent::labels(&menu), ["Low", "High"]);
     let a = agent.clone();
-    panel.pick(&menu, "effort:high", move |_| settings(&a).1 == "high");
+    panel.pick(&menu, "low", move |_| settings(&a).1 == "low");
     // Access: v1's four modes; Full access asks first.
     panel.click("agent-access");
     let menu = panel.request("agentMenu");
@@ -905,6 +905,119 @@ fn the_model_access_and_slash_menus_change_the_run_settings() {
     );
     let a = agent.clone();
     panel.pick(&menu, "new", move |_| thread_id(&a) != before);
+    panel.panels.close();
+}
+impl Agent {
+    /// A node's accessible label, from the publication last seen.
+    fn label(&mut self, id: &str) -> Option<String> {
+        self.latest
+            .as_ref()?
+            .surface
+            .nodes()
+            .values()
+            .find_map(|n| {
+                (n.props.get("id").and_then(Value::as_str) == Some(id))
+                    .then(|| {
+                        n.props
+                            .get("label")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned)
+                    })
+                    .flatten()
+            })
+    }
+    /// Answers the open menu, then waits for the panel to show `shown` on
+    /// `id` with nothing asking it to publish: the window doesn't republish
+    /// after a menu pick, the open popover must still follow it.
+    fn pick_and_see(&mut self, menu: &crate::PlatformRequest, value: &str, id: &str, shown: &str) {
+        self.panels.platform_reply(menu.id, Ok(json!(value)));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(latest) = self.panels.take_publications().pop() {
+                self.latest = Some(latest);
+            }
+            if self.label(id).as_deref() == Some(shown) {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "after {value}, {id} still reads {:?}",
+                self.label(id)
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+}
+#[test]
+fn the_trigger_label_and_menu_tick_follow_a_pick_without_reopening() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, environment(root.path(), "reply"));
+    panel.connected(Provider::Chatgpt);
+    // Nothing chosen: the pickers name the provider's default model and
+    // its default effort, ticked; neither menu has a "Default" row.
+    panel.text();
+    assert_eq!(
+        panel.label("agent-model").as_deref(),
+        Some("Model, Fixture 5")
+    );
+    assert_eq!(
+        panel.label("agent-effort").as_deref(),
+        Some("Reasoning effort, High")
+    );
+    panel.click("agent-model");
+    let menu = panel.request("agentMenu");
+    let ticked = |menu: &crate::PlatformRequest| -> Vec<String> {
+        menu.input["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|o| o["checked"] == true)
+            .map(|o| o["label"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let labels = Agent::labels(&menu);
+    assert!(!labels.iter().any(|l| l.contains("Default")), "{labels:?}");
+    assert!(
+        !labels.contains(&"High".to_owned()),
+        "effort has its own menu"
+    );
+    assert_eq!(ticked(&menu), ["ChatGPT", "Fixture 5"]);
+    // A pick shows at once: label, and the tick when the menu opens again.
+    panel.pick_and_see(&menu, "model:fixture-6", "agent-model", "Model, Fixture 6");
+    // High isn't Fixture 6's: it runs at its own default.
+    assert_eq!(
+        panel.label("agent-effort").as_deref(),
+        Some("Reasoning effort, Medium")
+    );
+    panel.click("agent-model");
+    let menu = panel.request("agentMenu");
+    assert_eq!(ticked(&menu), ["ChatGPT", "Fixture 6"]);
+    panel.panels.platform_reply(menu.id, Ok(Value::Null));
+    panel.click("agent-effort");
+    let menu = panel.request("agentMenu");
+    assert_eq!(Agent::labels(&menu), ["Low", "Medium", "Extra high"]);
+    assert_eq!(ticked(&menu), ["Medium"]);
+    panel.pick_and_see(
+        &menu,
+        "xhigh",
+        "agent-effort",
+        "Reasoning effort, Extra high",
+    );
+    panel.click("agent-effort");
+    let menu = panel.request("agentMenu");
+    assert_eq!(ticked(&menu), ["Extra high"]);
+    panel.panels.platform_reply(menu.id, Ok(Value::Null));
+    // A model with no effort levels has no effort picker.
+    panel.click("agent-model");
+    let menu = panel.request("agentMenu");
+    panel.pick_and_see(
+        &menu,
+        "model:fixture-plain",
+        "agent-model",
+        "Model, Fixture Plain",
+    );
+    assert_eq!(panel.label("agent-effort"), None);
     panel.panels.close();
 }
 #[test]

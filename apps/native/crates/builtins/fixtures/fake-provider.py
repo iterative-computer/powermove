@@ -106,8 +106,16 @@ def codex():
             sign_out()
             emit({'id': request['id'], 'result': {}})
         elif method == 'model/list':
+            # The default model, one with other efforts and one with none.
             emit({'id': request['id'], 'result': {'data': [{'model': 'fixture-5', 'displayName': 'Fixture 5', 'hidden': False,
-                'supportedReasoningEfforts': [{'reasoningEffort': 'low'}, {'reasoningEffort': 'high'}]}]}})
+                'isDefault': True, 'defaultReasoningEffort': 'high',
+                'supportedReasoningEfforts': [{'reasoningEffort': 'low'}, {'reasoningEffort': 'high'}]},
+                {'model': 'fixture-6', 'displayName': 'Fixture 6', 'hidden': False, 'isDefault': False,
+                 'defaultReasoningEffort': 'medium',
+                 'supportedReasoningEfforts': [{'reasoningEffort': 'low'}, {'reasoningEffort': 'medium'},
+                                               {'reasoningEffort': 'xhigh'}]},
+                {'model': 'fixture-plain', 'displayName': 'Fixture Plain', 'hidden': False, 'isDefault': False,
+                 'supportedReasoningEfforts': []}]}})
         elif method == 'thread/start':
             emit({'id': request['id'], 'result': {'thread': {'id': 'thread'}}})
         elif method == 'turn/start':
