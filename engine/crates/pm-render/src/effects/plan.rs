@@ -35,8 +35,9 @@ pub struct Param {
 /// One effect pass node: an effect instance's passes.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EffectStep {
-    /// Electron extension shaders address the output raster, including at
-    /// reduced capture/export sizes. Built-ins retain their engine contract.
+    /// Electron extension shaders address the output raster in final output
+    /// (exports and captures at any size). Viewer frames clear it, and
+    /// built-ins never set it: their pixels are composition pixels.
     pub raster_space: bool,
     pub owner: Option<std::sync::Arc<Owner>>,
     pub source_domain: Option<(pm_fx_defs::spatial::Extent, pm_fx_defs::spatial::Extent)>,
@@ -60,7 +61,8 @@ pub struct EffectStep {
     pub params: Vec<Param>,
     /// Output pixels per composition pixel where this step draws. A step
     /// without an owner binding uses composition pixels for built-ins;
-    /// `raster_space` extensions receive output pixels as in Electron.
+    /// `raster_space` extensions (final output) receive output pixels as in
+    /// Electron.
     pub density: [f64; 2],
 }
 

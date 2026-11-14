@@ -1760,9 +1760,11 @@ fn resized_frames_draw_effects_on_the_composition_grid() {
 }
 
 /// Electron's runEffects uses output pixels, LINEAR/CLAMP_TO_EDGE sampling
-/// and one texel of the current input. The same synthetic extension runs as a
-/// viewer frame and an export, at half, full and double size. An adjustment
-/// layer samples the accumulated white plate below it.
+/// and one texel of the current input. The same synthetic extension runs as
+/// an export at half, full and double size, and as a 1:1 viewer frame (a
+/// viewer frame at another scale is the full picture resampled:
+/// `effect_scale.rs`). An adjustment layer samples the accumulated white
+/// plate below it.
 #[test]
 fn extension_pixels_and_bilinear_taps_match_electron_at_each_output_size() {
     let _gpu = gpu();
@@ -1797,6 +1799,9 @@ fn extension_pixels_and_bilinear_taps_match_electron_at_each_output_size() {
         ));
         for scale in [0.5, 1.0, 2.0] {
             for final_output in [false, true] {
+                if !final_output && scale != 1.0 {
+                    continue;
+                }
                 let req = RenderRequest {
                     export: final_output,
                     output_kind: if final_output {
