@@ -175,6 +175,16 @@ impl AgentLink {
             State::Unavailable => ("unavailable", status.detail.unwrap_or_else(signed_out)),
         }
     }
+    /// Nobody is signed in (or no API/local model is saved): the panel offers
+    /// to connect, rather than reporting a fault.
+    pub fn signed_out(&self, provider: Provider) -> bool {
+        match provider {
+            Provider::Compatible => self.compatible().is_none(),
+            _ => self
+                .accounts()
+                .is_some_and(|a| matches!(a.status(provider).state, State::Disconnected)),
+        }
+    }
     /// The saved API or local model connection (Settings › Accounts).
     pub fn compatible(&self) -> Option<pm_agents::compatible::Saved> {
         let host = self.environment.shared().as_ref()?.compatible.clone()?;
@@ -323,7 +333,18 @@ pub fn admit(action: &Value, connected: bool, live: bool) -> Result<(), String> 
                 || action["key"]["composing"] == true
                 || action["key"]["shiftKey"] == true
         }
-        Some("chooseSlash") => action["id"] == "settings",
+        Some("retry") => connected,
+        Some("connect") => true,
+        // Shortcuts the panel or this host carries out (/attach goes through
+        // the file picker, as the attach button does).
+        Some("chooseSlash") => action["id"].as_str().is_some_and(|id| {
+            matches!(
+                id,
+                "settings" | "stop" | "new" | "attach" | "model" | "effort" | "provider"
+            ) || ["model-", "effort-", "provider-"]
+                .iter()
+                .any(|p| id.starts_with(p))
+        }),
         _ => false,
     };
     if allowed {

@@ -59,8 +59,17 @@ impl Window {
         }
         let mut items = vec![];
         for i in range.clone() {
+            // An archived step names the run it came from (its trace
+            // message), so the view can fold a finished turn's work.
+            let mut trace = Value::Null;
             let (id, value) = if i < self.index.len() {
                 let row = &self.index.page(i..i + 1)[0];
+                if row.step_index.is_some()
+                    && let Some(message) = self.archived.get(&row.message)
+                {
+                    trace = json!({"id":row.message,"durationMs":message.value["durationMs"],
+                        "steering":message.value["steering"] == true});
+                }
                 (
                     format!("history:{}", row.id),
                     self.index
@@ -80,8 +89,12 @@ impl Window {
                 .questions
                 .get(command_id)
                 .map_or_else(Default::default, |draft| draft.chosen().clone());
-            items.push(json!({"id":id,"commandId":id,"value":value,"chosen":chosen,
-                "open":session.disclosures.get(&id).copied().unwrap_or_else(||session.disclosure_open(command_id, false))}));
+            let mut item = json!({"id":id,"commandId":id,"value":value,"chosen":chosen,
+                "open":session.disclosures.get(&id).copied().unwrap_or_else(||session.disclosure_open(command_id, false))});
+            if !trace.is_null() {
+                item["trace"] = trace;
+            }
+            items.push(item);
         }
         let mut value = panel.inspect(&self.thread)?;
         let text = session.draft.text();
@@ -97,6 +110,16 @@ impl Window {
                 .unwrap_or_default()
         );
         value["elapsedMs"] = json!(session.elapsed_ms(now));
+        // What the run is doing before its first step lands.
+        value["activity"] = json!(session.activity);
+        // The thread picker's rows, newest first as the archive keeps them.
+        value["threads"] = json!(
+            panel
+                .summaries()
+                .into_iter()
+                .map(|t| json!({"id":t.id,"title":t.title,"busy":t.busy,"updatedAt":t.updated_at}))
+                .collect::<Vec<_>>()
+        );
         value["stopping"] = json!(session.run.as_ref().is_some_and(|r| r.stopping));
         value["showJump"] = json!(session.follow.show_jump);
         let access = match session.settings.access {
@@ -216,6 +239,78 @@ fn control_id(panel: &Panel, thread: &str, id: &str) -> Result<String> {
     }
     Ok(raw.into())
 }
+/// A shortcut's effect the panel's own model can carry out at once (/new,
+/// /provider …), so it never waits on a host that has no runner for it.
+fn settle(
+    panel: &mut Panel,
+    thread: &str,
+    effect: Option<Effect>,
+    context: &Context<'_>,
+) -> Result<Option<Effect>> {
+    use crate::model::EffectKind;
+    let Some(effect) = effect else {
+        return Ok(None);
+    };
+    match &effect.kind {
+        EffectKind::NewThread => {
+            panel.new_thread(context.new_thread, context.now)?;
+            Ok(None)
+        }
+        EffectKind::SelectProvider(name) => {
+            let provider = match name.as_str() {
+                "chatgpt" => Provider::Chatgpt,
+                "claude" => Provider::Claude,
+                "compatible" => Provider::Compatible,
+                _ => return Err(Error::Invalid("provider")),
+            };
+            panel.set_provider(
+                thread,
+                provider,
+                String::new(),
+                (context.catalogs)(provider),
+            )?;
+            Ok(None)
+        }
+        _ => Ok(Some(effect)),
+    }
+}
+fn retry_turn(
+    panel: &mut Panel,
+    thread: &str,
+    message: Option<&str>,
+    run: &str,
+    request: &str,
+    now: u64,
+) -> Result<Effect> {
+    let s = panel.session(thread)?;
+    if s.run.is_some() {
+        return Err(Error::Busy);
+    }
+    let rows = s.conversation.page(0..s.conversation.len());
+    let end = match message {
+        Some(id) => rows
+            .iter()
+            .position(|r| r.id == id)
+            .ok_or_else(|| Error::UnknownId(id.into()))?,
+        None => rows.len(),
+    };
+    let user = rows[..end]
+        .iter()
+        .rev()
+        .find(|r| r.value["role"] == "user")
+        .ok_or(Error::Invalid("retry has no user turn"))?;
+    let text = user.value["text"].as_str().unwrap_or_default().to_owned();
+    let files = user.value["attachments"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let request_draft = crate::composer::Draft::from_legacy(&text, &files)
+        .or_else(|_| crate::composer::Draft::from_legacy(&text, &[]))?;
+    let saved = std::mem::replace(panel.draft_mut(thread)?, request_draft);
+    let effect = panel.submit(thread, run, request, now);
+    *panel.draft_mut(thread)? = saved;
+    effect
+}
 fn optional_boolean(value: &Value, name: &str) -> Result<bool> {
     match value.get(name) {
         None => Ok(false),
@@ -284,7 +379,7 @@ pub fn dispatch(
                     panel.draft_mut(thread)?.insert_text(&text, now, true);
                 }
             }
-            outcome.effect
+            settle(panel, thread, outcome.effect, &context)?
         }
         "openSettings" => Some(panel.host_settings(thread)?),
         "submit" => Some(panel.submit(thread, context.run, context.request, now)?),
@@ -322,7 +417,10 @@ pub fn dispatch(
             }
             None
         }
-        "chooseSlash" => panel.choose_slash(thread, string(action, "id")?, now)?,
+        "chooseSlash" => {
+            let effect = panel.choose_slash(thread, string(action, "id")?, now)?;
+            settle(panel, thread, effect, &context)?
+        }
         "removeAttachment" => {
             panel
                 .draft_mut(thread)?
@@ -386,6 +484,22 @@ pub fn dispatch(
             None
         }
         "undoResult" => Some(panel.undo_result(thread)?),
+        // Try Again on a failed turn: the request before it, sent again
+        // (with the files it carried); the composer's own draft stays.
+        "retry" => {
+            let message = action["id"].as_str().map(|id| {
+                let id = id.strip_prefix("history:").unwrap_or(id);
+                id.split('/').next().unwrap_or(id).to_owned()
+            });
+            Some(retry_turn(
+                panel,
+                thread,
+                message.as_deref(),
+                context.run,
+                context.request,
+                now,
+            )?)
+        }
         "artifact" => {
             Some(panel.artifact(thread, string(action, "path")?, boolean(action, "import")?)?)
         }
@@ -578,6 +692,133 @@ mod tests {
             assert_eq!(e.target.project, "synthetic-project");
         }
         assert!(act(&mut p, json!({"type":"shell","action":"invented"})).is_err());
+    }
+    #[test]
+    fn escape_in_the_popover_composer_closes_it_unless_the_shortcuts_menu_takes_it() {
+        // The reported bug: Escape in the composer never closed the popover.
+        let mut p = panel();
+        let e = act(&mut p, json!({"type":"key","key":{"key":"Escape"}}))
+            .unwrap()
+            .unwrap();
+        assert!(matches!(e.kind, EffectKind::Shell(ShellAction::Close)));
+        // An open shortcuts menu takes the first Escape and stays put.
+        act(&mut p, json!({"type":"focus","focused":true})).unwrap();
+        act(&mut p, json!({"type":"draft","text":"/","selection":[1,1]})).unwrap();
+        assert_eq!(snapshot(&p)["slash"]["visible"], true);
+        assert!(
+            act(&mut p, json!({"type":"key","key":{"key":"Escape"}}))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(snapshot(&p)["slash"]["visible"], false);
+        let e = act(&mut p, json!({"type":"key","key":{"key":"Escape"}}))
+            .unwrap()
+            .unwrap();
+        assert!(matches!(e.kind, EffectKind::Shell(ShellAction::Close)));
+    }
+    #[test]
+    fn shortcuts_the_panel_owns_run_at_once_instead_of_waiting_on_a_host() {
+        let mut p = panel();
+        act(&mut p, json!({"type":"focus","focused":true})).unwrap();
+        p.draft_mut("thread").unwrap().insert_text("keep", 1, false);
+        act(
+            &mut p,
+            json!({"type":"draft","text":"/new","selection":[4,4]}),
+        )
+        .unwrap();
+        // No NewThread effect reaches a host that has no runner for it.
+        assert!(
+            act(&mut p, json!({"type":"chooseSlash","id":"new"}))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(p.session(p.active_id()).unwrap().draft.text(), "");
+    }
+    #[test]
+    fn try_again_sends_the_failed_turns_request_and_keeps_the_composer_draft() {
+        let mut p = panel();
+        draft(&mut p);
+        act(&mut p, json!({"type":"submit"})).unwrap();
+        p.receive(
+            "thread",
+            "run",
+            1,
+            Update::Complete {
+                text: r#"{"type":"error","error":{"message":"Overloaded"}}"#.into(),
+                error: true,
+                cancelled: false,
+            },
+            20,
+        )
+        .unwrap();
+        let v = snapshot(&p);
+        let failed = v["rows"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["value"]["error"] == true)
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        p.draft_mut("thread")
+            .unwrap()
+            .insert_text("next idea", 30, false);
+        let ctx = Context {
+            run: "run-2",
+            request: "request-2",
+            new_thread: "new",
+            now: 40,
+            popover_open: true,
+            catalogs: &|_| Default::default(),
+        };
+        let e = dispatch(&mut p, "thread", &json!({"type":"retry","id":failed}), ctx)
+            .unwrap()
+            .unwrap();
+        match e.kind {
+            EffectKind::Send { text, .. } => assert_eq!(text, "Authored 日本🙂\n"),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(snapshot(&p)["draft"]["text"], "next idea");
+        // A running turn has nothing to try again.
+        assert!(act(&mut p, json!({"type":"retry"})).is_err());
+    }
+    #[test]
+    fn the_snapshot_names_threads_and_each_archived_steps_run() {
+        let mut p = panel();
+        draft(&mut p);
+        act(&mut p, json!({"type":"submit"})).unwrap();
+        p.receive(
+            "thread",
+            "run",
+            1,
+            Update::Trace(json!({"kind":"tool-start","itemId":"call","toolName":"get_project_state","label":"Get project state"})),
+            12,
+        )
+        .unwrap();
+        p.receive(
+            "thread",
+            "run",
+            2,
+            Update::Complete {
+                text: "Done.".into(),
+                error: false,
+                cancelled: false,
+            },
+            5_012,
+        )
+        .unwrap();
+        let v = snapshot(&p);
+        assert_eq!(v["threads"][0]["id"], "thread");
+        let step = v["rows"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["value"]["kind"] == "tool")
+            .unwrap();
+        assert!(step["trace"]["id"].is_string());
+        assert_eq!(step["trace"]["steering"], false);
+        assert!(step["trace"]["durationMs"].as_u64().is_some());
     }
     #[test]
     fn switched_thread_refuses_old_actions_and_old_windows() {

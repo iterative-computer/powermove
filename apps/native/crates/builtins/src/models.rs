@@ -612,6 +612,7 @@ impl Backend {
         }
         let session = panel.session(active).map_err(|e| format!("{e:?}"))?;
         let (connection, reason) = self.native.agent_link.connection(provider);
+        let signed_out = connection == "unavailable" && self.native.agent_link.signed_out(provider);
         let needs_answer = session.needs_answer();
         // A docked panel fills its dock under the dock's own title; the
         // popover has a fixed width, its own title and the floating ground.
@@ -621,7 +622,7 @@ impl Backend {
             "docked"
         };
         Ok(
-            json!({"generation":self.identity.generation,"sequence":self.native.agent_link.sequence(),"snapshot":snapshot,"native":{"connection":connection,"reason":reason,"presentation":presentation,"atMinimumDockWidth":false,"visible":true,"extensionContext":false,"loadingHistory":false,"dropTarget":false,"needsAnswer":needs_answer,"keyboardFocus":null,"textSelected":false,"hoverRow":null,"increaseContrast":false,"reduceTransparency":false,"reduceMotion":false,"slashCopy":{},"bindings":{"access":"agent.access","model":"agent.model"}}}),
+            json!({"generation":self.identity.generation,"sequence":self.native.agent_link.sequence(),"snapshot":snapshot,"native":{"connection":connection,"signedOut":signed_out,"reason":reason,"presentation":presentation,"atMinimumDockWidth":false,"visible":true,"extensionContext":false,"loadingHistory":false,"dropTarget":false,"needsAnswer":needs_answer,"keyboardFocus":null,"textSelected":false,"hoverRow":null,"increaseContrast":false,"reduceTransparency":false,"reduceMotion":false,"slashCopy":{},"bindings":{"access":"agent.access","model":"agent.model"}}}),
         )
     }
     pub(crate) fn settings_snapshot(&mut self) -> Result<Value, String> {
@@ -1392,6 +1393,18 @@ impl Backend {
                     let (provider, live) = (session.settings.provider, session.run.is_some());
                     let sequence = link.admitted_sequence(args, &thread, &session.draft.text());
                     let action = &args["action"];
+                    if action["type"] == "connect" {
+                        // The provider's own sign-in, as Settings › Accounts
+                        // starts it; its progress comes back as `waiting`.
+                        if let Some(accounts) = link.accounts()
+                            && provider != pm_agents::Provider::Compatible
+                        {
+                            accounts.connect(provider);
+                        }
+                        drop(state);
+                        link.touch();
+                        return Ok(NativeCommand::Value(self.agent_snapshot()?));
+                    }
                     if action["type"] == "retryConnection" {
                         if let Some(accounts) = link.accounts() {
                             accounts.refresh(provider);
@@ -1498,6 +1511,8 @@ impl Backend {
                         EffectKind::OpenSettings => Some("agent.settings"),
                         EffectKind::Shell(ShellAction::Open) => Some("agent.open"),
                         EffectKind::Shell(ShellAction::Close) => Some("agent.close"),
+                        // /attach: the window's file picker, as the + button.
+                        EffectKind::ChooseFiles => Some("agent.attach"),
                         EffectKind::Send { .. } | EffectKind::Stop | EffectKind::Answer { .. } => {
                             crate::agent_host::run_effect(
                                 &agent,
