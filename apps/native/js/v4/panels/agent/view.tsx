@@ -1,7 +1,13 @@
+/**
+ * The Agent panel, natively. It follows the original app’s panel for
+ * state, copy and keyboard (thread bar, conversation with folded work, tool
+ * groups, questions, errors with Try Again, composer with its run options)
+ * and draws it with the native kit and pm-design tokens.
+ */
 import type { ComponentChildren } from "preact";
 import { useLayoutEffect, useRef, useState } from "preact/hooks";
 import * as UI from "../../src/components";
-import type { SurfaceEvent } from "../../src/protocol";
+import type { Json, SurfaceEvent } from "../../src/protocol";
 import type {
   Access,
   Action,
@@ -11,722 +17,218 @@ import type {
   Row,
   Snapshot,
 } from "./contract";
-import { gaps, type Gap } from "./gaps";
+import {
+  ACCESS,
+  FAMILY_SYMBOL,
+  breakable,
+  activity,
+  effortLabel,
+  entries,
+  markdown,
+  plain,
+  presentError,
+  providerName,
+  slashCopy,
+  str,
+  suggestions,
+  type Activity,
+  type Block,
+  type Entry,
+  type Message,
+  type Run,
+  type ToolDetail,
+  type ToolsRow,
+} from "./present";
 
 const t = UI.token;
-const vertical = {
+/** The composer and answer fields hold the model's draft (sent as actions),
+ * not a host-bound value, so they take no binding. */
+const Field = UI.TextField as (
+  props: Omit<Parameters<typeof UI.TextField>[0], "binding"> & {
+    binding?: string;
+  },
+) => ReturnType<typeof UI.TextField>;
+type Send = (action: Action) => void;
+type Style = Record<string, string | number | null | { token: string }>;
+type Obj = Record<string, Json>;
+const obj = (v: unknown): Obj =>
+  v && typeof v === "object" && !Array.isArray(v) ? (v as Obj) : {};
+
+const column: Style = { display: "flex", flexDirection: "column" };
+const row: Style = {
   display: "flex",
-  flexDirection: "column",
-  gap: t("metrics.inset"),
+  flexDirection: "row",
+  alignItems: "center",
 };
-const reading = {
+/** A flex child that may shrink below its text, so its text wraps (a
+ * clipped box has no content minimum) and nothing runs past its edge. */
+const shrink: Style = { flexShrink: 1, overflow: "hidden" };
+/** Anything a person can press or focus is at least a hit target. */
+const target: Style = {
+  minWidth: t("metrics.hit"),
+  minHeight: t("metrics.hit"),
+};
+const reading: Style = {
   color: t("colors.text"),
   fontSize: t("typography.reading"),
   lineHeight: t("typography.reading_leading"),
 };
-const body = { color: t("colors.secondary"), fontSize: t("typography.body") };
-const muted = { color: t("colors.muted"), fontSize: t("typography.body") };
-const title = {
+const quiet: Style = {
+  color: t("colors.secondary"),
+  fontSize: t("typography.body"),
+  lineHeight: t("typography.reading_leading"),
+};
+const faint: Style = {
+  color: t("colors.muted"),
+  fontSize: t("typography.body"),
+  lineHeight: t("typography.reading_leading"),
+};
+const strong: Style = {
   color: t("colors.text"),
   fontSize: t("typography.title"),
   fontWeight: t("typography.semibold_weight"),
 };
-/** Question/approval card (agent-panel.md §3, design review 2026-11-01). */
-const card = (popover: boolean) => ({
-  ...vertical,
-  background: t(popover ? "colors.panel" : "colors.panel_secondary"),
-  borderRadius: t("metrics.control_radius"),
-  padding: t("metrics.inset"),
-});
-// The composer's pop-ups give way (and truncate) before its buttons do, so
-// Send stays in a narrow popover.
-const shrink = { flexShrink: 1, overflow: "hidden" } as const;
-const keep = { flexShrink: 0 } as const;
-const copy = {
-  editor: "Composition only",
-  supervised: "Supervised",
-  auto: "Auto",
-  full: "Full access",
-} as const;
-const effortCopy: Record<string, string> = {
-  "": "Default effort",
-  none: "No effort",
-  low: "Low",
-  medium: "Medium",
-  high: "High",
-  xhigh: "Extra High",
-  max: "Max",
-  ultra: "Ultra",
+/** A hairline chip in the code face (`data-pm-variant="code"`), cut in the
+ * middle so a path keeps its start and its file name. */
+const chip: Style = {
+  fontSize: t("typography.minimum"),
+  color: t("colors.secondary"),
+  background: t("colors.fill"),
+  borderWidth: t("metrics.border"),
+  borderColor: t("colors.hairline"),
+  borderRadius: t("metrics.inner_radius"),
+  paddingLeft: t("metrics.gap"),
+  paddingRight: t("metrics.gap"),
+  whiteSpace: "nowrap",
+  textOverflow: "middle",
+  ...shrink,
 };
+/** A card in the conversation: questions, errors, results. */
+const card: Style = {
+  ...column,
+  gap: t("metrics.text_padding"),
+  background: t("colors.panel_secondary"),
+  borderRadius: t("metrics.panel_radius"),
+  padding: t("metrics.inset"),
+};
+const hairline: Style = {
+  borderBottomWidth: t("metrics.border"),
+  borderColor: t("colors.separator"),
+};
+
 export function elapsed(ms: number) {
   const seconds = Math.floor(Math.max(0, ms) / 1000);
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
 }
-function Placeholder({
-  gap,
-  label,
-  children,
-}: {
-  gap: Gap;
-  label: string;
-  children?: ComponentChildren;
-}) {
-  return (
+
+// ── Prose ────────────────────────────────────────────────────────────────
+
+/** A paragraph of styled runs, wrapped natively as one text. */
+function Para({ runs, style }: { runs: Run[]; style?: Style }) {
+  const text = runs.map((r) => r.t).join("");
+  const styled = runs.some((r) => r.b || r.i || r.c || r.a);
+  // Long unbroken tokens (paths, links, JSON) get places to wrap.
+  const shown = runs.map((r) => ({ ...r, t: breakable(r.t) }));
+  return styled ? (
     <div
-      role="group"
-      label={label}
-      metadata={{ apiGap: gap, detail: gaps[gap] }}
-    >
-      {children}
-    </div>
-  );
-}
-/** The kit owns system push/default/destructive button presentation. */
-function Push({
-  id,
-  label,
-  selected,
-  onClick,
-}: {
-  id?: string;
-  label: string;
-  selected?: boolean;
-  onClick?: () => void;
-}) {
-  return (
-    <UI.PushButton
-      id={id}
-      label={label}
-      role={selected ? "default" : "normal"}
-      disabled={!onClick}
-      onClick={onClick}
+      label={text}
+      metadata={{ runs: shown as unknown as Json }}
+      style={{ ...shrink, ...style }}
     />
+  ) : (
+    <text style={{ ...shrink, ...style }}>{breakable(text)}</text>
   );
 }
-/** Steps a turn's work is made of: tools, tasks and thinking. */
-const STEPS = new Set(["tool", "task", "thought"]);
-type Part = { work: Row[] } | { row: Row };
-/** Consecutive steps fold into one work line per turn (agent-panel.md §3). */
-function parts(rows: Row[]): Part[] {
-  const out: Part[] = [];
-  for (const row of rows) {
-    const last = out[out.length - 1];
-    if (!STEPS.has(str(row.value.kind))) out.push({ row });
-    else if (last && "work" in last) last.work.push(row);
-    else out.push({ work: [row] });
-  }
-  return out;
-}
-function Rows({
-  s,
-  n,
-  send,
-}: {
-  s: Snapshot;
-  n: NativeFacts;
-  send: (a: Action) => void;
-}) {
-  const all = parts(s.rows.items);
+/** Markdown as native text: paragraphs, headings, lists, quotes and code. */
+function Prose({ text, style = reading }: { text: string; style?: Style }) {
+  const blocks = markdown(text);
   return (
-    <UI.List
-      id="agent-conversation"
-      label="Agent conversation"
-      tabIndex={0}
-      metadata={{
-        apiGap: "variableList",
-        count: s.rows.count,
-        range: s.rows.range,
-        textSelected: n.textSelected,
-        // Bottom anchored: new content keeps the latest in view unless the
-        // person scrolled up.
-        scrollAnchor: "end",
-      }}
-      state={{ keyboardFocus: n.keyboardFocus === "conversation" }}
-      style={{
-        ...vertical,
-        minWidth: t("metrics.hit"),
-        minHeight: t("metrics.hit"),
-      }}
-    >
-      {all.map((part, index) =>
-        "work" in part ? (
-          <Work
-            key={`work-${part.work[0].id}`}
-            rows={part.work}
-            live={
-              (s.runId !== null && index === all.length - 1) ||
-              part.work.some(
-                (r) => r.value.status === "running" || r.value.live === true,
-              )
-            }
-            n={n}
-            send={send}
-          />
-        ) : (
-          <Message key={part.row.id} row={part.row} n={n} send={send} />
-        ),
-      )}
-    </UI.List>
-  );
-}
-const num = (value: unknown) =>
-  typeof value === "number" && Number.isFinite(value) ? value : undefined;
-/** v1's duration words: "<1s", "4s", "1m 12s", "1h 3m". */
-export function duration(ms: number) {
-  if (!Number.isFinite(ms) || ms < 0) return "";
-  const seconds = Math.round(ms / 1000);
-  if (seconds < 1) return "<1s";
-  if (seconds < 60) return `${seconds}s`;
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ${seconds % 60}s`;
-  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
-}
-/** A reasoning stretch's chip: its opening sentence, on one line (v1). */
-export function thoughtLead(text: string) {
-  const flat = text.replace(/\*\*/g, "").replace(/\s+/g, " ").trim();
-  const sentence = flat.match(/^.{12,}?[.!?](\s|$)/)?.[0]?.trim();
-  return sentence && sentence.length < flat.length ? sentence : flat;
-}
-const span = (v: Row["value"]) => {
-  const start = num(v.startedAt);
-  const end = num(v.endedAt);
-  return start !== undefined && end !== undefined ? end - start : undefined;
-};
-/** A step's symbol (SF Symbols), by the family of what it did (v1 families). */
-function stepSymbol(v: Row["value"]) {
-  if (v.kind === "thought") return "brain";
-  if (v.kind === "task") return "person.2";
-  const name = str(v.toolName).toLowerCase().split("__").at(-1) ?? "";
-  const by: [RegExp, string][] = [
-    [/^(probe_media|sample_media_frames|media_contact_sheet)$/, "film"],
-    [/^(media_waveform|transcribe_media|generate_captions)$/, "waveform"],
-    [/^(delegate_task|task_status|task_cancel|agent|task)/, "person.2"],
-    [
-      /panel|workspace|project_state|render_frames|apply_commands|edit_video|rollback|check_project/,
-      "square.on.square",
-    ],
-    [
-      /^(web|search|browse|fetch|grep|glob|find|ls$|list)|url/,
-      "magnifyingglass",
-    ],
-    [/^(bash|command|shell|terminal|exec|run|process)/, "terminal"],
-    [
-      /^(edit|write|create|patch|apply|delete|move|multiedit)|file_change/,
-      "pencil",
-    ],
-    [/^(read|view|cat)/, "doc.text"],
-    [/^(compact|wait)/, "clock"],
-    [/^(image|render|draw|screenshot)/, "photo"],
-    [/^computer/, "cursorarrow.rays"],
-  ];
-  return by.find(([p]) => p.test(name))?.[1] ?? "wrench.and.screwdriver";
-}
-/** One stretch of a turn's work, in v1's grammar: a quiet header ("4 tool
- * calls · 1 failed · 21s"), then a row per step. Open while the turn runs
- * (or a subagent failed) and folded once it is done; the person may open it.
- * Reasoning alone needs no header: its row is its own disclosure. */
-function Work({
-  rows,
-  live,
-  n,
-  send,
-}: {
-  key?: string;
-  rows: Row[];
-  live: boolean;
-  n: NativeFacts;
-  send: (a: Action) => void;
-}) {
-  const [chosen, choose] = useState<boolean | null>(null);
-  const tools = rows.filter((r) => r.value.kind !== "thought");
-  const failed = tools.filter((r) => r.value.status === "error").length;
-  const open =
-    chosen ??
-    (live ||
-      tools.some((r) => r.value.kind === "task" && r.value.status === "error"));
-  if (!tools.length)
-    return (
-      <>
-        {rows.map((row) => (
-          <Step key={row.id} row={row} n={n} send={send} />
-        ))}
-      </>
-    );
-  const starts = rows
-    .map((r) => num(r.value.startedAt))
-    .filter((v) => v !== undefined);
-  const ends = rows
-    .map((r) => num(r.value.endedAt))
-    .filter((v) => v !== undefined);
-  const took =
-    !live && starts.length && ends.length
-      ? duration(Math.max(...ends) - Math.min(...starts))
-      : "";
-  const label = [
-    `${tools.length} tool ${tools.length === 1 ? "call" : "calls"}`,
-    !live && failed ? `${failed} failed` : "",
-    took,
-  ]
-    .filter(Boolean)
-    .join(" · ");
-  return (
-    <div
-      role="group"
-      label={label}
-      style={{ display: "flex", flexDirection: "column" }}
-    >
-      <UI.ListItem
-        id={`${rows[0].id}-work`}
-        label={`${label}, ${open ? "expanded" : "collapsed"}`}
-        onSelect={() => choose(!open)}
-        style={line(muted.color)}
-      >
-        <div
-          metadata={{ symbol: open ? "chevron.down" : "chevron.right" }}
-          style={glyph(muted.color)}
-        />
-        <text style={muted}>{label}</text>
-      </UI.ListItem>
-      {open &&
-        rows.map((row) => <Step key={row.id} row={row} n={n} send={send} />)}
+    <div style={{ ...column, ...shrink, gap: t("metrics.text_padding") }}>
+      {blocks.map((b, i) => (
+        <ProseBlock key={i} block={b} style={style} />
+      ))}
     </div>
   );
 }
-/** A row's content laid on one line: glyph, words, trailing state. */
-const line = (color: ReturnType<typeof t>) =>
-  ({
-    display: "flex",
-    flexDirection: "row",
-    alignItems: "center",
-    gap: t("metrics.gap"),
-    color,
-  }) as const;
-const glyph = (color: ReturnType<typeof t>) => ({
-  color,
-  symbolSize: t("metrics.symbol_inline"),
-  flexShrink: 0,
-});
-const STATE: Record<string, string> = {
-  error: "Failed",
-  stopped: "Stopped",
-  cancelled: "Stopped",
-  waiting: "Waiting",
-  continued: "Continued",
-};
-/** One step, as v1's tool rows: the glyph (a spinner while it runs), what it
- * was ("Run", "Edit", "Thought for 4s") and a hairline chip with what it was
- * done to (the command, the files, the query, the media; a thought's first
- * sentence), cut in the middle; then its state or its time. Opening it shows
- * the whole of it: the full argument and the output, or the error. */
-function Step({
-  row,
-  n,
-  send,
+function ProseBlock({
+  block: b,
+  style,
 }: {
-  key?: string;
-  row: Row;
-  n: NativeFacts;
-  send: (a: Action) => void;
+  key?: string | number;
+  block: Block;
+  style: Style;
 }) {
-  const v = row.value;
-  const thought = v.kind === "thought";
-  const status = str(v.status);
-  const running = thought ? v.live === true : status === "running";
-  const took = span(v);
-  const label = thought
-    ? running
-      ? "Thinking"
-      : took !== undefined
-        ? `Thought for ${duration(took)}`
-        : "Thought"
-    : str(v.title) || str(v.label) || str(v.toolName) || str(v.text);
-  // What it worked on: the media or layer by its name in the project, else
-  // the provider's argument, never only the tool's own id.
-  const detail = str(v.detail);
-  const argument = thought
-    ? ""
-    : str(v.subjectName) ||
-      (detail && detail !== str(v.toolName) ? detail : "");
-  const chip = (thought ? thoughtLead(str(v.label)) : argument)
-    .replace(/\s+/g, " ")
-    .trim();
-  const result = thought
-    ? str(v.label)
-    : [argument, str(v.output)].filter(Boolean).join("\n\n");
-  const state =
-    STATE[status] ?? STATE[str((v.task as { status?: unknown })?.status)];
-  const after =
-    state ?? (!running && took !== undefined && !thought ? duration(took) : "");
-  const open = row.open && !!result;
-  const task = v.kind === "task" || v.toolName === "delegate_task";
-  return (
-    <div style={{ display: "flex", flexDirection: "column" }}>
-      <UI.ListItem
-        id={row.id}
-        label={[label, chip, state].filter(Boolean).join(", ")}
-        onSelect={() => {
-          if (result)
-            send({ type: "disclose", id: row.commandId, open: !row.open });
-        }}
-        state={{ hover: n.hoverRow === row.id }}
-        style={line(body.color)}
-      >
-        {running && !thought ? (
-          <UI.ProgressRow label={`${label} is running`}>{[]}</UI.ProgressRow>
-        ) : (
-          <div
-            metadata={{ symbol: stepSymbol(v) }}
-            style={glyph(muted.color)}
-          />
-        )}
-        <text style={{ ...body, flexShrink: 0 }}>{label}</text>
-        {chip && !(open && thought) && (
-          <div
-            data-pm-variant={thought ? undefined : "code"}
-            style={{
-              flexShrink: 1,
-              borderWidth: t("metrics.border"),
-              borderColor: t("colors.separator"),
-              borderRadius: t("metrics.inner_radius"),
-              paddingLeft: t("metrics.inner_radius"),
-              paddingRight: t("metrics.inner_radius"),
-            }}
-          >
-            <text
-              style={{
-                ...muted,
-                fontSize: t("typography.minimum"),
-                whiteSpace: "nowrap",
-                textOverflow: "middle",
-              }}
-            >
-              {chip}
-            </text>
-          </div>
-        )}
-        <div style={{ flexGrow: 1 }} />
-        {after && (
-          <div
-            metadata={
-              status === "error" ? { symbol: "xmark.circle.fill" } : undefined
-            }
-            style={line(
-              t(status === "error" ? "colors.danger" : "colors.muted"),
-            )}
-          >
-            <text
-              style={
-                status === "error"
-                  ? { ...body, color: t("colors.danger") }
-                  : muted
-              }
-            >
-              {after}
-            </text>
-          </div>
-        )}
-        {running && task && (
-          <UI.ToolbarItem
-            label={`Stop ${label}`}
-            onClick={() => send({ type: "stopTask", id: row.commandId })}
-            style={{ color: t("colors.accent_text") }}
-          >
-            Stop
-          </UI.ToolbarItem>
-        )}
-      </UI.ListItem>
-      {open && (
+  switch (b.kind) {
+    case "p":
+      return <Para runs={b.runs} style={style} />;
+    case "h":
+      return (
+        <Para
+          runs={b.runs}
+          style={{ ...style, fontWeight: t("typography.semibold_weight") }}
+        />
+      );
+    case "li":
+      return (
         <div
-          data-pm-variant={thought ? undefined : "code"}
           style={{
-            background: t("colors.field"),
-            borderRadius: t("metrics.control_radius"),
+            ...row,
+            alignItems: "start",
+            gap: t("metrics.gap"),
+            paddingLeft: b.depth ? t("metrics.agent_gap") : t("metrics.gap"),
+          }}
+        >
+          <text style={{ ...style, color: t("colors.muted"), flexShrink: 0 }}>
+            {b.marker}
+          </text>
+          <Para runs={b.runs} style={{ ...style, flexGrow: 1 }} />
+        </div>
+      );
+    case "quote":
+      return (
+        <div
+          style={{
+            ...shrink,
+            borderLeftWidth: t("metrics.border"),
+            borderColor: t("colors.separator"),
+            paddingLeft: t("metrics.inset"),
+          }}
+        >
+          <Para
+            runs={b.runs}
+            style={{ ...style, color: t("colors.secondary") }}
+          />
+        </div>
+      );
+    case "code":
+      return (
+        <div
+          style={{
+            ...shrink,
+            background: t("colors.fill"),
+            borderRadius: t("metrics.inner_radius"),
             padding: t("metrics.text_padding"),
           }}
         >
           <text
-            style={
-              thought ? body : { ...body, fontSize: t("typography.minimum") }
-            }
+            data-pm-variant="code"
+            style={{
+              fontSize: t("typography.minimum"),
+              color: t("colors.text"),
+              lineHeight: t("typography.dense_leading"),
+            }}
           >
-            {result}
+            {breakable(b.text)}
           </text>
         </div>
-      )}
-    </div>
-  );
-}
-const str = (value: unknown) => (typeof value === "string" ? value : "");
-const MEDIA_KIND: Record<string, string> = {
-  image: "Image",
-  video: "Video",
-  audio: "Sound",
-};
-function Message({
-  row,
-  n,
-  send,
-}: {
-  key?: string;
-  row: Row;
-  n: NativeFacts;
-  send: (a: Action) => void;
-}) {
-  const v = row.value;
-  const text = str(v.text) || str(v.content) || str(v.label);
-  const kind = str(v.kind);
-  const questions = Array.isArray(v.questions) ? v.questions : [];
-  const firstQuestion = questions[0];
-  const questionTitle =
-    str(v.title) ||
-    text ||
-    (firstQuestion &&
-    typeof firstQuestion === "object" &&
-    !Array.isArray(firstQuestion)
-      ? str(firstQuestion.question)
-      : "");
-  if (kind === "question" && v.status === "answered") {
-    const answers =
-      v.answers && typeof v.answers === "object" && !Array.isArray(v.answers)
-        ? Object.values(v.answers).map(str).filter(Boolean).join(", ")
-        : "";
-    const label = answers ? `Answered: ${answers}` : "Skipped";
-    return (
-      <div role="listitem" label={label} metadata={{ rowId: row.id }}>
-        <text style={muted}>{label}</text>
-      </div>
-    );
+      );
+    case "rule":
+      return <div style={hairline} />;
   }
-  if (kind === "question" && v.status === "closed")
-    return (
-      <div
-        role="listitem"
-        label={`Not answered: ${questionTitle}`}
-        metadata={{ rowId: row.id }}
-      >
-        <text style={muted}>Not answered</text>
-      </div>
-    );
+}
 
-  if (v.role === "user")
-    return (
-      <div
-        role="listitem"
-        label={`You said: ${text}`}
-        metadata={{ rowId: row.id, apiGap: "richText" }}
-        style={{
-          display: "flex",
-          flexDirection: "row",
-          justifyContent: "end",
-          // agent-panel.md §3: the message takes at most 84 % of the width.
-          paddingLeft: t("metrics.message_inset"),
-        }}
-      >
-        <div
-          style={{
-            ...reading,
-            background: t("colors.field"),
-            borderRadius: t("metrics.panel_radius"),
-            paddingTop: t("metrics.text_padding"),
-            paddingBottom: t("metrics.text_padding"),
-            paddingLeft: t("metrics.inset"),
-            paddingRight: t("metrics.inset"),
-          }}
-        >
-          <text>{text}</text>
-        </div>
-      </div>
-    );
-  if (kind === "question")
-    return (
-      <div
-        role="listitem"
-        label={`Question from the agent: ${questionTitle}`}
-        metadata={{ rowId: row.id }}
-        style={card(n.presentation === "popover")}
-      >
-        <text style={title}>{questionTitle}</text>
-        {questions.map((q) =>
-          q && typeof q === "object" && !Array.isArray(q) ? (
-            <div role="group" label={str(q.question)} style={{ ...vertical }}>
-              <text style={body}>{str(q.question)}</text>
-              {(Array.isArray(q.options) ? q.options : []).map((o) => {
-                const label =
-                  o && typeof o === "object" && !Array.isArray(o)
-                    ? str(o.label)
-                    : "";
-                const id = str(q.id);
-                return (
-                  <Push
-                    id={`${row.id}-${id}-${label}`}
-                    label={label}
-                    selected={row.chosen[id]?.includes(label)}
-                    onClick={() =>
-                      send({
-                        type: "chooseAnswer",
-                        step: row.commandId,
-                        question: id,
-                        option: label,
-                      })
-                    }
-                  />
-                );
-              })}
-            </div>
-          ) : null,
-        )}
-        {v.transport === "reply" && (
-          <Push
-            id={`${row.id}-skip`}
-            label="Skip"
-            onClick={() =>
-              send({ type: "answer", step: row.commandId, skip: true })
-            }
-          />
-        )}
-        <Push
-          id={`${row.id}-answer`}
-          label="Answer"
-          onClick={
-            Object.values(row.chosen).some((a) => a.length > 0)
-              ? () => send({ type: "answer", step: row.commandId, skip: false })
-              : undefined
-          }
-        />
-      </div>
-    );
-  // publish_visual_reply: each reply opens in its own sandboxed viewer.
-  const visuals = Array.isArray(v.visualReplies) ? v.visualReplies : [];
-  // Images, videos and sounds the reply names (the host lists them); each
-  // opens in its own app, a web address only when the person asks.
-  const media = Array.isArray(v.media) ? v.media : [];
-  if (visuals.length || media.length)
-    return (
-      <div
-        role="listitem"
-        label={`Agent: ${text}`}
-        metadata={{ rowId: row.id }}
-        style={vertical}
-      >
-        {text && <text style={reading}>{text}</text>}
-        {visuals.map((reply) => {
-          const r =
-            reply && typeof reply === "object" && !Array.isArray(reply)
-              ? reply
-              : {};
-          return (
-            <div
-              key={str(r.id)}
-              role="group"
-              label={str(r.title)}
-              metadata={{ visualReply: str(r.id) }}
-              style={card(false)}
-            >
-              <text style={title}>{str(r.title)}</text>
-              <text style={muted}>Interactive visualization</text>
-              <Push
-                id={`${row.id}-${str(r.id)}`}
-                label="Open"
-                onClick={() => send({ type: "openVisual", id: str(r.id) })}
-              />
-            </div>
-          );
-        })}
-        {media.map((item, index) => {
-          const m =
-            item && typeof item === "object" && !Array.isArray(item)
-              ? item
-              : {};
-          const path = str(m.path);
-          const remote = m.remote === true;
-          return (
-            <div
-              key={path}
-              role="group"
-              label={str(m.name)}
-              metadata={{ media: path }}
-              style={card(false)}
-            >
-              <text style={title}>{str(m.name)}</text>
-              <text style={muted}>
-                {(MEDIA_KIND[str(m.kind)] ?? "File") +
-                  (remote ? " on the web" : "")}
-              </text>
-              <Push
-                id={`${row.id}-media-${index}`}
-                label={remote ? "Open in Browser" : "Open"}
-                onClick={() => send({ type: "openMedia", path, reveal: false })}
-              />
-              {!remote && (
-                <Push
-                  id={`${row.id}-media-${index}-reveal`}
-                  label="Show in Finder"
-                  onClick={() =>
-                    send({ type: "openMedia", path, reveal: true })
-                  }
-                />
-              )}
-            </div>
-          );
-        })}
-      </div>
-    );
-  if (kind === "error" || v.error === true)
-    return (
-      <div
-        role="listitem"
-        label={text}
-        metadata={{ rowId: row.id }}
-        style={{ ...vertical, gap: t("metrics.gap"), alignItems: "start" }}
-      >
-        {/* The triangle in the danger colour leads the message (§3 Error item). */}
-        <div
-          metadata={{ symbol: "exclamationmark.triangle.fill" }}
-          style={{
-            display: "flex",
-            flexDirection: "row",
-            alignItems: "center",
-            gap: t("metrics.gap"),
-            color: t("colors.danger"),
-            fontSize: t("typography.body"),
-          }}
-        >
-          <text style={{ ...body, color: t("colors.text") }}>{text}</text>
-        </div>
-        <Push label="Try Again" />
-      </div>
-    );
-  if (v.nativeResult || kind === "result")
-    return (
-      <Placeholder gap="preview" label="Rendered result">
-        <text style={title}>Rendered result</text>
-        <text style={reading}>{text}</text>
-        <Push
-          label="Keep Change"
-          onClick={() => send({ type: "keepResult" })}
-        />
-        <Push label="Undo Change" />
-        <Push label="Add to Timeline" />
-        <Push label="Show in Finder" />
-      </Placeholder>
-    );
-  return (
-    <div
-      role="listitem"
-      label={`Agent: ${text}`}
-      metadata={{ rowId: row.id, apiGap: "richText" }}
-      style={reading}
-    >
-      <text>{text}</text>
-    </div>
-  );
-}
-/** A saved choice the catalog no longer lists stays visible rather than blank. */
-function pairs(entries: [string, string][], current: string) {
-  return entries.some(([v]) => v === current)
-    ? entries
-    : [...entries, [current, current] as [string, string]];
-}
+// ── Menus and the thread bar ────────────────────────────────────────────
+
 /** One row of the window's field menu (the kit's searchable menu). */
 export interface MenuOption {
   label: string;
@@ -742,34 +244,6 @@ export type Menu = (request: {
   placeholder: string;
   options: MenuOption[];
 }) => Promise<unknown>;
-/** v1's access modes, in v1's order (legacy/assistant/spatial.ts). */
-const ACCESS: Access[] = ["editor", "supervised", "auto", "full"];
-/** v1's slash commands' copy (slash-commands.ts). */
-const SLASH: Record<string, string> = {
-  new: "/new",
-  model: "/model",
-  effort: "/effort",
-  provider: "/provider",
-  attach: "/attach",
-  settings: "/settings",
-  stop: "/stop",
-};
-/** A choice the menu shows for one slash command or one of its values. */
-function slashLabel(s: Snapshot, id: string, value: string | null) {
-  if (value === null) return SLASH[id] ?? `/${id}`;
-  const command = id.slice(0, id.length - value.length - 1);
-  const list =
-    command === "model"
-      ? s.catalog.models
-      : command === "provider"
-        ? s.catalog.providers
-        : [];
-  const label =
-    command === "effort"
-      ? (effortCopy[value] ?? value)
-      : (list.find(([v]) => v === value)?.[1] ?? value);
-  return `/${command} ${label}`;
-}
 /** A borderless trigger in a bar or header that opens the window's menu:
  * its value, then the pop-up chevron (as a bar NSPopUpButton). */
 function Trigger({
@@ -778,15 +252,14 @@ function Trigger({
   text,
   disabled,
   open,
-  widest,
+  tone = "colors.secondary",
 }: {
   id: string;
   label: string;
   text: string;
   disabled?: boolean;
   open: (anchor: number) => void;
-  /** The most it may take (the header's thread title, `m.value_column`). */
-  widest?: ReturnType<typeof t>;
+  tone?: string;
 }) {
   return (
     <UI.ToolbarItem
@@ -798,15 +271,20 @@ function Trigger({
         if (!disabled) open(Number(event.currentTarget));
       }}
       style={{
-        ...line(body.color),
-        flexShrink: 1,
-        ...(widest ? { maxWidth: widest } : {}),
+        ...row,
+        ...shrink,
+        gap: t("metrics.pill_inset"),
+        paddingLeft: t("metrics.gap"),
+        paddingRight: t("metrics.gap"),
+        borderRadius: t("metrics.inner_radius"),
+        color: t(tone),
       }}
     >
       <text
         style={{
-          ...body,
-          flexShrink: 1,
+          ...quiet,
+          ...shrink,
+          color: t(tone),
           whiteSpace: "nowrap",
           textOverflow: "ellipsis",
         }}
@@ -815,48 +293,1444 @@ function Trigger({
       </text>
       <div
         metadata={{ symbol: "chevron.up.chevron.down" }}
-        style={glyph(muted.color)}
+        style={{
+          color: t("colors.muted"),
+          symbolSize: t("metrics.symbol_inline"),
+          flexShrink: 0,
+        }}
       />
     </UI.ToolbarItem>
   );
 }
-export function AgentView({
-  publication: { snapshot: s, native: n },
+function Header({
+  s,
+  n,
   send,
   menu,
 }: {
-  publication: Publication;
-  send: (action: Action) => void;
+  s: Snapshot;
+  n: NativeFacts;
+  send: Send;
   menu?: Menu;
 }) {
-  // The slash menu opens once per draft that asks for it; closing it
-  // unchosen leaves the draft as typed.
-  const slashOpened = useRef<string | null>(null);
-  const slashDraft =
-    s.slash.visible && s.slash.choices.length ? s.draft.text : null;
-  useLayoutEffect(() => {
-    if (slashDraft === null) {
-      slashOpened.current = null;
-      return;
+  const popover = n.presentation === "popover";
+  const title = s.threadTitle || "New thread";
+  // Switching while a change is applied would leave it half done.
+  const blocked = s.composerDisabled;
+  return (
+    // The header slot: the popover draws it on its own ground; docked, it
+    // shares the dock's tab row.
+    <div
+      id="agent-header"
+      data-pm-slot="header"
+      role="group"
+      label="Agent threads"
+      style={{
+        ...row,
+        flexShrink: 0,
+        gap: t("metrics.pill_inset"),
+        height: t("metrics.header"),
+        paddingLeft: t("metrics.gap"),
+        paddingRight: t("metrics.gap"),
+      }}
+    >
+      <Trigger
+        id="agent-threads"
+        label={
+          blocked
+            ? "Finish applying the current change to switch threads"
+            : `Switch thread, ${title}`
+        }
+        // Docked, the trigger names the list and the tab keeps its name.
+        text={popover ? title : "Threads"}
+        tone="colors.text"
+        disabled={!menu}
+        open={(anchor) => {
+          const threads = s.threads ?? [];
+          const current = threads.find((t) => t.id === s.threadId);
+          void menu?.({
+            anchor,
+            placeholder: "Search threads…",
+            options: [
+              ...(blocked ? [] : [{ label: "New Thread", value: "new" }]),
+              ...threads.map((t) => ({
+                label: t.busy
+                  ? `${t.title || "New thread"} · Working…`
+                  : t.title || "New thread",
+                value: `thread:${t.id}`,
+                checked: t.id === s.threadId,
+                category: "Threads",
+              })),
+              // Apart from the list, last: the one destructive row.
+              ...(current
+                ? [
+                    {
+                      label: "Delete Thread…",
+                      value: `delete:${current.id}`,
+                      category: "This Thread",
+                    },
+                  ]
+                : []),
+            ],
+          }).then((choice) => {
+            if (typeof choice !== "string") return;
+            if (choice === "new") send({ type: "newThread" });
+            else if (choice.startsWith("thread:")) {
+              const id = choice.slice(7);
+              if (id !== s.threadId && !blocked)
+                send({ type: "switchThread", id });
+            } else if (choice.startsWith("delete:"))
+              send({ type: "deleteThread", id: choice.slice(7) });
+          });
+        }}
+      />
+      <div style={{ flexGrow: 1 }} />
+      <UI.ToolbarItem
+        id="agent-new"
+        label="New Thread"
+        title="New Thread"
+        disabled={blocked}
+        metadata={{ symbol: "plus" }}
+        style={{ flexShrink: 0, symbolSize: t("metrics.symbol_panel") }}
+        onClick={() => {
+          if (!blocked) send({ type: "newThread" });
+        }}
+      />
+      {popover && (
+        <UI.ToolbarItem
+          id="agent-presentation"
+          label="Pin to Workspace"
+          title="Pin to Workspace"
+          metadata={{ symbol: "pin" }}
+          style={{ flexShrink: 0, symbolSize: t("metrics.symbol_panel") }}
+          onClick={() => send({ type: "shell", action: "pin" })}
+        />
+      )}
+    </div>
+  );
+}
+
+// ── Empty state and connection ───────────────────────────────────────────
+
+function Welcome({ s, n, send }: { s: Snapshot; n: NativeFacts; send: Send }) {
+  const explanation = n.extensionContext
+    ? "Build and improve your extensions."
+    : s.settings.access === "editor"
+      ? "Your ideas. Editable motion."
+      : "Create, research, and build with your project.";
+  return (
+    <div
+      id="agent-welcome"
+      role="group"
+      label="Make your next move"
+      style={{
+        ...column,
+        flexGrow: 1,
+        justifyContent: "center",
+        gap: t("metrics.inset"),
+      }}
+    >
+      <div style={{ ...column, gap: t("metrics.gap") }}>
+        <text style={{ ...strong, fontSize: t("typography.heading") }}>
+          Make your next move
+        </text>
+        <text style={quiet}>{explanation}</text>
+      </div>
+      <div style={{ ...column, gap: t("metrics.gap") }}>
+        {suggestions(s.settings.access, n.extensionContext).map(
+          ([label, prompt]) => (
+            <button
+              key={label}
+              role="button"
+              label={label}
+              tabIndex={0}
+              onClick={() =>
+                send({
+                  type: "draft",
+                  text: prompt,
+                  selection: [prompt.length, prompt.length],
+                  base: s.draft.text,
+                })
+              }
+              style={{
+                ...target,
+                ...row,
+                height: t("metrics.control"),
+                paddingLeft: t("metrics.text_padding"),
+                paddingRight: t("metrics.text_padding"),
+                background: t("colors.fill"),
+                borderRadius: t("metrics.control_radius"),
+              }}
+            >
+              <text style={{ ...quiet, ...shrink, flexGrow: 1 }}>{label}</text>
+              <div
+                metadata={{ symbol: "chevron.right" }}
+                style={{
+                  color: t("colors.muted"),
+                  symbolSize: t("metrics.symbol_inline"),
+                }}
+              />
+            </button>
+          ),
+        )}
+      </div>
+    </div>
+  );
+}
+function Gate({
+  s,
+  n,
+  send,
+  compact,
+}: {
+  s: Snapshot;
+  n: NativeFacts;
+  send: Send;
+  compact: boolean;
+}) {
+  const provider = s.settings.provider;
+  const name = providerName(provider);
+  const local = provider === "compatible";
+  const checking = n.connection === "checking";
+  const waiting = n.connection === "waiting";
+  const fault = n.connection === "unavailable" && !n.signedOut;
+  const heading = checking
+    ? "Checking connection…"
+    : waiting
+      ? `Finish connecting ${name}`
+      : local
+        ? "Bring your own model"
+        : `Connect ${name}`;
+  const body = checking
+    ? `Checking your ${name} connection.`
+    : n.reason ||
+      (local
+        ? "Run a model on this Mac with Ollama or LM Studio, or use an API key from OpenRouter, OpenAI, Anthropic, Google and others."
+        : `Use your ${name} subscription to power the Powermove agent.`);
+  return (
+    <div
+      id="agent-connect"
+      role="group"
+      label="Connect your agent"
+      style={{
+        ...column,
+        gap: t("metrics.inset"),
+        ...(compact ? {} : { flexGrow: 1, justifyContent: "center" }),
+      }}
+    >
+      <div
+        role="group"
+        label="Connection provider"
+        style={{ ...row, gap: t("metrics.gap") }}
+      >
+        {s.catalog.providers.map(([id, label]) => (
+          <UI.ToolbarItem
+            key={id}
+            id={`agent-connect-${id}`}
+            label={id === "compatible" ? "API / local" : label}
+            active={id === provider}
+            onClick={() => {
+              if (id !== provider) send({ type: "setProvider", provider: id });
+            }}
+            style={{
+              paddingLeft: t("metrics.text_padding"),
+              paddingRight: t("metrics.text_padding"),
+              borderRadius: t("metrics.control_radius"),
+            }}
+          >
+            {id === "compatible" ? "API / local" : label}
+          </UI.ToolbarItem>
+        ))}
+      </div>
+      {fault ? (
+        <ErrorNotice
+          raw={n.reason || `Powermove couldn’t start its ${name} service.`}
+          fallbackTitle={`${name} couldn’t start`}
+          retry={() => send({ type: "retryConnection" })}
+          id="agent-connect-error"
+        />
+      ) : (
+        <div style={{ ...card }} role="status" label={`${heading}. ${body}`}>
+          <text style={strong}>{heading}</text>
+          <text style={quiet}>{body}</text>
+          <div style={{ ...row }}>
+            <UI.PushButton
+              id="agent-connect-action"
+              role="default"
+              label={
+                checking
+                  ? "Checking…"
+                  : waiting
+                    ? "Waiting for sign-in…"
+                    : local
+                      ? "Open Settings"
+                      : `Connect ${name}`
+              }
+              disabled={checking || waiting}
+              onClick={() =>
+                send(local ? { type: "openSettings" } : { type: "connect" })
+              }
+            />
+          </div>
+        </div>
+      )}
+      {(!local || fault) && (
+        <div style={row}>
+          <button
+            role="button"
+            label="Connection settings"
+            tabIndex={0}
+            onClick={() => send({ type: "openSettings" })}
+            style={{
+              ...target,
+              ...row,
+              gap: t("metrics.gap"),
+              borderRadius: t("metrics.inner_radius"),
+            }}
+          >
+            <text style={faint}>Connection settings</text>
+            <div
+              metadata={{ symbol: "chevron.right" }}
+              style={{
+                color: t("colors.muted"),
+                symbolSize: t("metrics.symbol_inline"),
+              }}
+            />
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Errors ───────────────────────────────────────────────────────────────
+
+function ErrorNotice({
+  raw,
+  retry,
+  retryDisabled,
+  fallbackTitle,
+  id,
+}: {
+  raw: string;
+  retry?: () => void;
+  retryDisabled?: boolean;
+  fallbackTitle?: string;
+  id: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const p = presentError(raw);
+  const title =
+    fallbackTitle && p.title === "Something needs attention"
+      ? fallbackTitle
+      : p.title;
+  // When nothing was translated the message already is the raw text.
+  const details = p.details !== p.message ? p.details : "";
+  return (
+    <div id={id} role="alert" label={`${title}. ${p.message}`} style={card}>
+      <div style={{ ...row, gap: t("metrics.text_padding") }}>
+        <div
+          metadata={{ symbol: "exclamationmark.circle.fill" }}
+          style={{
+            color: t("colors.danger"),
+            symbolSize: t("metrics.symbol_panel"),
+            flexShrink: 0,
+          }}
+        />
+        <text style={{ ...strong, ...shrink }}>{title}</text>
+      </div>
+      <div
+        style={{
+          ...column,
+          gap: t("metrics.text_padding"),
+          paddingLeft: t("metrics.hit"),
+        }}
+      >
+        <text style={{ ...quiet, ...shrink }}>{p.message}</text>
+        {(retry || details) && (
+          <div style={{ ...row, gap: t("metrics.text_padding") }}>
+            {retry && (
+              <UI.PushButton
+                id={`${id}-retry`}
+                label="Try Again"
+                disabled={retryDisabled}
+                onClick={retryDisabled ? undefined : retry}
+              />
+            )}
+            <div style={{ flexGrow: 1 }} />
+            {details && (
+              <button
+                role="button"
+                label={open ? "Hide details" : "Details"}
+                aria-expanded={open}
+                tabIndex={0}
+                onClick={() => setOpen(!open)}
+                style={{
+                  ...target,
+                  ...row,
+                  gap: t("metrics.gap"),
+                  height: t("metrics.hit"),
+                  paddingLeft: t("metrics.text_padding"),
+                  paddingRight: t("metrics.gap"),
+                  borderRadius: t("metrics.inner_radius"),
+                }}
+              >
+                <text style={faint}>Details</text>
+                <div
+                  metadata={{ symbol: open ? "chevron.up" : "chevron.down" }}
+                  style={{
+                    color: t("colors.muted"),
+                    symbolSize: t("metrics.symbol_inline"),
+                  }}
+                />
+              </button>
+            )}
+          </div>
+        )}
+        {details && open && (
+          <div
+            style={{
+              ...shrink,
+              background: t("colors.panel_secondary"),
+              borderRadius: t("metrics.inner_radius"),
+              padding: t("metrics.text_padding"),
+            }}
+          >
+            <text
+              data-pm-variant="code"
+              style={{
+                fontSize: t("typography.minimum"),
+                color: t("colors.secondary"),
+                lineHeight: t("typography.dense_leading"),
+              }}
+            >
+              {breakable(details)}
+            </text>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Conversation ─────────────────────────────────────────────────────────
+
+interface Local {
+  open: Record<string, boolean>;
+  toggle: (key: string, value: boolean) => void;
+  typed: Record<string, string>;
+  type: (key: string, text: string) => void;
+}
+
+function UserMessage({
+  m,
+  answering,
+}: {
+  key?: string | number;
+  m: Message;
+  answering: boolean;
+}) {
+  const text = str(m.value.text);
+  const files = Array.isArray(m.value.attachments) ? m.value.attachments : [];
+  const shown =
+    text ||
+    (files.length
+      ? `Attached ${files.length} file${files.length === 1 ? "" : "s"}`
+      : "");
+  return (
+    <div
+      role="listitem"
+      label={`You said: ${shown}`}
+      metadata={{ rowId: m.rowId }}
+      // The bubble keeps a reply's width of room on its leading side.
+      style={{
+        ...row,
+        justifyContent: "end",
+        paddingLeft: t("metrics.section_gap"),
+      }}
+    >
+      <div
+        style={{
+          ...column,
+          ...shrink,
+          gap: t("metrics.gap"),
+          background: t("colors.field"),
+          borderRadius: t("metrics.panel_radius"),
+          paddingTop: t("metrics.text_padding"),
+          paddingBottom: t("metrics.text_padding"),
+          paddingLeft: t("metrics.inset"),
+          paddingRight: t("metrics.inset"),
+          // The request being answered carries the accent, as the original's halo.
+          ...(answering
+            ? {
+                borderWidth: t("metrics.border"),
+                borderColor: t("colors.accent"),
+              }
+            : {}),
+        }}
+      >
+        {files.length > 0 && (
+          <div style={{ ...row, flexWrap: "wrap", gap: t("metrics.gap") }}>
+            {files.map((f, i) => (
+              <text key={i} data-pm-variant="code" style={chip}>
+                {str(obj(f).name) || "File"}
+              </text>
+            ))}
+          </div>
+        )}
+        {text && <Prose text={text} />}
+      </div>
+    </div>
+  );
+}
+const STOPPED = /\b(cancell?ed|stopped)\b/i;
+const MEDIA_KIND: Record<string, string> = {
+  image: "Image",
+  video: "Video",
+  audio: "Sound",
+};
+function AssistantMessage({
+  m,
+  s,
+  send,
+}: {
+  key?: string | number;
+  m: Message;
+  s: Snapshot;
+  send: Send;
+}) {
+  const v = m.value;
+  const text = str(v.text);
+  const working = s.runId !== null;
+  // A run the person stopped is not a fault: it reads as a plain line with
+  // the retry it still deserves (the original's plain notice).
+  if (v.error === true && STOPPED.test(text) && text.length < 200)
+    return (
+      <div
+        role="listitem"
+        label={text}
+        metadata={{ rowId: m.rowId }}
+        style={{ ...column, gap: t("metrics.text_padding") }}
+      >
+        <text style={{ ...quiet, ...shrink }}>{plain(text)}</text>
+        <div style={row}>
+          <UI.PushButton
+            id={`error-${m.key}-retry`}
+            label="Try Again"
+            disabled={working}
+            onClick={
+              working ? undefined : () => send({ type: "retry", id: m.rowId })
+            }
+          />
+        </div>
+      </div>
+    );
+  if (v.error === true)
+    return (
+      <div
+        role="listitem"
+        label={text}
+        metadata={{ rowId: m.rowId }}
+        style={column}
+      >
+        <ErrorNotice
+          id={`error-${m.key}`}
+          raw={text}
+          retry={() => send({ type: "retry", id: m.rowId })}
+          retryDisabled={working}
+        />
+      </div>
+    );
+  if (v.nativeResult || v.kind === "result")
+    return <Result s={s} send={send} text={text} />;
+  return (
+    <div
+      role="listitem"
+      label={`Agent: ${plain(text)}`}
+      metadata={{ rowId: m.rowId }}
+      style={{ ...column, gap: t("metrics.text_padding") }}
+    >
+      {text && <Prose text={text} />}
+      {v.requiresProject === true && (
+        <div style={row}>
+          <UI.PushButton
+            label="Continue with project tools"
+            disabled={working}
+            onClick={
+              working
+                ? undefined
+                : () => {
+                    send({ type: "setAccess", access: "auto" });
+                    send({ type: "retry", id: m.rowId });
+                  }
+            }
+          />
+        </div>
+      )}
+      <ReplyCards value={v} rowId={m.rowId} send={send} />
+    </div>
+  );
+}
+/** What a reply names besides its words: interactive visual replies (each
+ * opens in its own viewer) and the images, videos and sounds it mentions
+ * (each opens in its own app; a web address only when asked). */
+function ReplyCards({
+  value: v,
+  rowId,
+  send,
+}: {
+  value: Obj;
+  rowId: string;
+  send: Send;
+}) {
+  const visuals = Array.isArray(v.visualReplies) ? v.visualReplies : [];
+  const media = Array.isArray(v.media) ? v.media : [];
+  if (!visuals.length && !media.length) return null;
+  const m = { rowId };
+  return (
+    <>
+      {visuals.map((reply) => {
+        const r = obj(reply);
+        return (
+          <div
+            key={str(r.id)}
+            role="group"
+            label={str(r.title)}
+            style={{ ...card, ...row, gap: t("metrics.text_padding") }}
+          >
+            <div
+              metadata={{ symbol: "chart.bar.doc.horizontal" }}
+              style={{
+                color: t("colors.secondary"),
+                symbolSize: t("metrics.symbol_action"),
+                flexShrink: 0,
+              }}
+            />
+            <div style={{ ...column, ...shrink, flexGrow: 1 }}>
+              <text style={strong}>{str(r.title)}</text>
+              <text style={faint}>Interactive visualization</text>
+            </div>
+            <UI.PushButton
+              id={`${m.rowId}-${str(r.id)}`}
+              label="Open"
+              onClick={() => send({ type: "openVisual", id: str(r.id) })}
+            />
+          </div>
+        );
+      })}
+      {media.map((item, index) => {
+        const it = obj(item);
+        const path = str(it.path);
+        const remote = it.remote === true;
+        return (
+          <div
+            key={path || index}
+            role="group"
+            label={str(it.name)}
+            style={{ ...card, gap: t("metrics.gap") }}
+          >
+            <div style={{ ...column, ...shrink }}>
+              <text style={{ ...strong, ...shrink }}>{str(it.name)}</text>
+              <text style={faint}>
+                {(MEDIA_KIND[str(it.kind)] ?? "File") +
+                  (remote ? " on the web" : "")}
+              </text>
+            </div>
+            <div style={{ ...row, gap: t("metrics.text_padding") }}>
+              <UI.PushButton
+                id={`${m.rowId}-media-${index}`}
+                label={remote ? "Open in Browser" : "Open"}
+                onClick={() => send({ type: "openMedia", path, reveal: false })}
+              />
+              {!remote && (
+                <UI.PushButton
+                  id={`${m.rowId}-media-${index}-reveal`}
+                  label="Show in Finder"
+                  onClick={() =>
+                    send({ type: "openMedia", path, reveal: true })
+                  }
+                />
+              )}
+            </div>
+          </div>
+        );
+      })}
+    </>
+  );
+}
+function Result({ s, send, text }: { s: Snapshot; send: Send; text: string }) {
+  const ready = s.phase === "result";
+  return (
+    <div role="listitem" label="Rendered result" style={card}>
+      <text style={{ ...faint, fontWeight: t("typography.semibold_weight") }}>
+        Rendered result
+      </text>
+      <text style={strong}>Review the actual result</text>
+      <Prose text={text || "The rendered change is ready."} />
+      <text style={faint}>
+        Powermove source changes from this run are one Command-Z Undo step.
+      </text>
+      {ready && (
+        <div
+          style={{
+            ...row,
+            justifyContent: "end",
+            gap: t("metrics.text_padding"),
+          }}
+        >
+          <UI.PushButton
+            label="Undo Change"
+            onClick={() => send({ type: "undoResult" })}
+          />
+          <UI.PushButton
+            role="default"
+            label="Keep Change"
+            onClick={() => send({ type: "keepResult" })}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** One turn's trail: prose, reasoning, questions and tool groups. */
+function Trail({
+  m,
+  s,
+  send,
+  local,
+}: {
+  key?: string | number;
+  m: Message;
+  s: Snapshot;
+  send: Send;
+  local: Local;
+}) {
+  const rows = activity(m.steps);
+  const running = s.runId !== null && m.live;
+  if (!rows.length && running && s.activity)
+    return (
+      <div
+        role="status"
+        label={s.activity}
+        style={{ ...row, gap: t("metrics.text_padding") }}
+      >
+        <div
+          metadata={{ symbol: "circle.dotted" }}
+          style={{
+            color: t("colors.muted"),
+            symbolSize: t("metrics.symbol_inline"),
+            flexShrink: 0,
+          }}
+        />
+        <text style={{ ...faint, ...shrink }}>{plain(s.activity)}</text>
+      </div>
+    );
+  return (
+    <div style={{ ...column, gap: t("metrics.inset") }}>
+      {rows.map((r, i) => (
+        <Step
+          key={r.key}
+          r={r}
+          s={s}
+          send={send}
+          local={local}
+          live={running && i === rows.length - 1}
+        />
+      ))}
+    </div>
+  );
+}
+function Step({
+  r,
+  s,
+  send,
+  local,
+  live,
+}: {
+  key?: string | number;
+  r: Activity;
+  s: Snapshot;
+  send: Send;
+  local: Local;
+  live: boolean;
+}) {
+  switch (r.kind) {
+    case "text":
+      return (
+        <div
+          role="listitem"
+          label={`Agent: ${plain(r.text)}`}
+          metadata={{ rowId: r.key }}
+        >
+          <div style={{ ...column, gap: t("metrics.text_padding") }}>
+            <Prose text={r.text} />
+            <ReplyCards
+              value={r.row.value as Obj}
+              rowId={r.row.id}
+              send={send}
+            />
+          </div>
+        </div>
+      );
+    case "thought":
+      // Reasoning stays inline, quieter than the reply.
+      return (
+        <div
+          role="listitem"
+          label={`Thought: ${plain(r.text)}`}
+          metadata={{ rowId: r.key }}
+        >
+          <Prose text={r.text} style={faint} />
+        </div>
+      );
+    case "question":
+      return <Question row={r.row} send={send} local={local} />;
+    case "tools":
+      return <Tools r={r} s={s} send={send} local={local} live={live} />;
+  }
+}
+const STATUS_WORD: Record<string, string> = {
+  error: "Failed",
+  stopped: "Stopped",
+  waiting: "Waiting",
+  continued: "Continued",
+};
+function Tools({
+  r,
+  send,
+  local,
+  live,
+}: {
+  r: ToolsRow;
+  s: Snapshot;
+  send: Send;
+  local: Local;
+  live: boolean;
+}) {
+  // A live group stays open while the run works; it settles closed once the
+  // run moves on. A person's own toggle wins.
+  const auto = live || r.details.some((d) => d.task && d.status === "error");
+  const open = local.open[r.key] ?? auto;
+  const headerless = r.toolCount === 0;
+  const details = (
+    <div
+      role="list"
+      label="Tool activity details"
+      style={{ ...column, gap: t("metrics.gap") }}
+    >
+      {r.details.map((d, i) => (
+        <ToolLine
+          key={`${d.id}-${i}`}
+          d={d}
+          k={`${r.key}:${d.id}-${i}`}
+          send={send}
+          local={local}
+        />
+      ))}
+      {r.files.length > 0 && !live && r.status !== "running" && (
+        <div
+          style={{
+            ...row,
+            flexWrap: "wrap",
+            gap: t("metrics.gap"),
+            paddingTop: t("metrics.gap"),
+          }}
+        >
+          {r.files.map((f) => (
+            <text key={f} data-pm-variant="code" style={chip}>
+              {f}
+            </text>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+  if (headerless) return details;
+  const word = r.status === "error" ? "Failed" : r.meta;
+  return (
+    <div
+      role="group"
+      label={r.summary}
+      style={{ ...column, gap: t("metrics.gap") }}
+    >
+      <div style={row}>
+        <button
+          id={`${r.key}-work`}
+          role="button"
+          label={`${r.label}${word ? `, ${word}` : ""}`}
+          title={r.tooltip ?? r.summary}
+          aria-expanded={open}
+          tabIndex={0}
+          onClick={() => local.toggle(r.key, !open)}
+          style={{
+            ...target,
+            ...row,
+            gap: t("metrics.gap"),
+            height: t("metrics.hit"),
+            paddingRight: t("metrics.gap"),
+            borderRadius: t("metrics.inner_radius"),
+          }}
+        >
+          <div
+            metadata={{ symbol: open ? "chevron.down" : "chevron.right" }}
+            style={{
+              color: t("colors.muted"),
+              symbolSize: t("metrics.symbol_inline"),
+              flexShrink: 0,
+            }}
+          />
+          <text
+            style={{
+              ...quiet,
+              color: t(
+                r.status === "running" ? "colors.text" : "colors.secondary",
+              ),
+            }}
+          >
+            {r.status === "running" && r.toolCount ? `${r.label}…` : r.label}
+          </text>
+          {word && (
+            <text
+              style={{
+                ...faint,
+                color: t(
+                  r.status === "error" ? "colors.danger" : "colors.muted",
+                ),
+                fontVariantNumeric: "tabular-nums",
+              }}
+            >
+              {word}
+            </text>
+          )}
+        </button>
+      </div>
+      {open && details}
+    </div>
+  );
+}
+function ToolLine({
+  d,
+  k,
+  send,
+  local,
+}: {
+  key?: string | number;
+  d: ToolDetail;
+  k: string;
+  send: Send;
+  local: Local;
+}) {
+  const expandable = !!d.output;
+  const auto =
+    (!!d.task && d.status === "error") ||
+    (d.kind === "thought" && d.status === "running");
+  const open = expandable && (local.open[k] ?? auto);
+  const running = d.status === "running" && d.kind === "tool";
+  const symbol =
+    d.task && d.status !== "running"
+      ? d.task.status === "cancelled"
+        ? "stop.fill"
+        : d.status === "error"
+          ? "xmark"
+          : "checkmark"
+      : running
+        ? "circle.dotted"
+        : FAMILY_SYMBOL[d.family];
+  const word =
+    STATUS_WORD[d.status] ??
+    (d.task?.status === "cancelled"
+      ? "Stopped"
+      : d.task?.status === "waiting"
+        ? "Waiting"
+        : d.span);
+  const line = (
+    <>
+      {running && !open ? (
+        // A small spinner while the call runs (the kit's indeterminate row).
+        <UI.ProgressRow label={`${d.label} is running`}>{[]}</UI.ProgressRow>
+      ) : (
+        <div
+          metadata={{ symbol: open ? "chevron.down" : symbol }}
+          style={{
+            color: t(d.status === "error" ? "colors.danger" : "colors.muted"),
+            symbolSize: t("metrics.symbol_inline"),
+            flexShrink: 0,
+          }}
+        />
+      )}
+      <text style={{ ...quiet, color: t("colors.text"), flexShrink: 0 }}>
+        {d.label}
+      </text>
+      {d.detail && !(open && d.kind === "thought") && (
+        <text
+          style={
+            d.kind === "thought"
+              ? {
+                  ...faint,
+                  ...shrink,
+                  whiteSpace: "nowrap",
+                  textOverflow: "ellipsis",
+                }
+              : chip
+          }
+        >
+          {d.detail}
+        </text>
+      )}
+      <div style={{ flexGrow: 1 }} />
+      {word && (
+        <text
+          style={{
+            ...faint,
+            color: t(d.status === "error" ? "colors.danger" : "colors.muted"),
+            flexShrink: 0,
+            fontVariantNumeric: "tabular-nums",
+          }}
+        >
+          {word}
+        </text>
+      )}
+    </>
+  );
+  const lineStyle: Style = {
+    ...row,
+    gap: t("metrics.gap"),
+    minHeight: t("metrics.hit"),
+    paddingRight: t("metrics.gap"),
+    borderRadius: t("metrics.inner_radius"),
+  };
+  return (
+    <div
+      role="listitem"
+      label={`${d.label}${d.detail ? ` ${d.detail}` : ""}`}
+      style={{ ...column, gap: t("metrics.gap") }}
+    >
+      <div style={{ ...row, gap: t("metrics.gap") }}>
+        {expandable ? (
+          <button
+            role="button"
+            label={d.label}
+            aria-expanded={open}
+            tabIndex={0}
+            onClick={() => local.toggle(k, !open)}
+            style={{ ...target, ...lineStyle, ...shrink, flexGrow: 1 }}
+          >
+            {line}
+          </button>
+        ) : (
+          <div style={{ ...lineStyle, ...shrink, flexGrow: 1 }}>{line}</div>
+        )}
+        {d.task && d.status === "running" && (
+          <UI.PushButton
+            label="Stop"
+            title={`Stop ${d.label}`}
+            onClick={() => send({ type: "stopTask", id: d.rowId })}
+          />
+        )}
+      </div>
+      {d.task && d.status === "running" && !open && d.progress && (
+        <text style={{ ...faint, ...shrink, paddingLeft: t("metrics.hit") }}>
+          {d.progress}
+        </text>
+      )}
+      {open && (
+        <div
+          style={{
+            ...shrink,
+            marginLeft: t("metrics.hit"),
+            background:
+              d.kind === "thought" || d.task ? null : t("colors.fill"),
+            borderRadius: t("metrics.inner_radius"),
+            padding:
+              d.kind === "thought" || d.task ? null : t("metrics.text_padding"),
+          }}
+        >
+          {d.kind === "thought" || d.task ? (
+            <Prose text={d.output} style={faint} />
+          ) : (
+            <text
+              data-pm-variant="code"
+              style={{
+                fontSize: t("typography.minimum"),
+                color: t("colors.secondary"),
+                lineHeight: t("typography.dense_leading"),
+              }}
+            >
+              {breakable(
+                d.output.length > 6000
+                  ? `${d.output.slice(0, 6000)}\n…`
+                  : d.output,
+              )}
+            </text>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** A question from the agent, answered in place. Choices and a typed answer
+ * combine; nothing is sent until Answer. */
+function Question({
+  row: r,
+  send,
+  local,
+}: {
+  row: Row;
+  send: Send;
+  local: Local;
+}) {
+  const v = r.value as Obj;
+  const status = str(v.status);
+  const open = status === "open";
+  const questions = (Array.isArray(v.questions) ? v.questions : []).map(obj);
+  const answers = obj(v.answers);
+  const typedKey = (q: string) => `${r.id}:${q}`;
+  const answered =
+    Object.values(r.chosen).some((a) => a.length > 0) ||
+    questions.some((q) => (local.typed[typedKey(str(q.id))] ?? "").trim());
+  return (
+    <div
+      role="group"
+      label={`Question from the agent: ${plain(str(questions[0]?.question))}`}
+      metadata={{ rowId: r.id }}
+      style={{
+        ...card,
+        gap: t("metrics.inset"),
+        ...(open ? {} : { background: t("colors.fill") }),
+      }}
+    >
+      {questions.map((q) => {
+        const id = str(q.id);
+        const options = (Array.isArray(q.options) ? q.options : []).map(obj);
+        const chosen = r.chosen[id] ?? [];
+        const multiple = q.multiSelect === true;
+        return (
+          <div
+            key={id}
+            role="group"
+            label={plain(str(q.question))}
+            style={{ ...column, gap: t("metrics.text_padding") }}
+          >
+            {str(q.header) && (
+              <text
+                style={{
+                  ...faint,
+                  fontWeight: t("typography.semibold_weight"),
+                }}
+              >
+                {plain(str(q.header))}
+              </text>
+            )}
+            <Prose text={str(q.question)} />
+            {open ? (
+              <>
+                {options.length > 0 && (
+                  <div
+                    role="radiogroup"
+                    label={plain(str(q.question))}
+                    style={{ ...column, gap: t("metrics.pill_inset") }}
+                  >
+                    {options.map((o) => {
+                      const label = str(o.label);
+                      const on = chosen.includes(label);
+                      return (
+                        <button
+                          key={label}
+                          id={`${r.id}-${id}-${label}`}
+                          role="button"
+                          label={plain(label)}
+                          aria-pressed={on}
+                          tabIndex={0}
+                          onClick={() =>
+                            send({
+                              type: "chooseAnswer",
+                              step: r.commandId,
+                              question: id,
+                              option: label,
+                            })
+                          }
+                          style={{
+                            ...target,
+                            ...row,
+                            alignItems: "start",
+                            gap: t("metrics.text_padding"),
+                            minHeight: t("metrics.control"),
+                            paddingTop: t("metrics.gap"),
+                            paddingBottom: t("metrics.gap"),
+                            paddingLeft: t("metrics.text_padding"),
+                            paddingRight: t("metrics.text_padding"),
+                            borderRadius: t("metrics.control_radius"),
+                            ...(on
+                              ? { background: t("colors.fill_strong") }
+                              : {}),
+                          }}
+                        >
+                          <div
+                            metadata={{
+                              symbol: multiple
+                                ? on
+                                  ? "checkmark.square.fill"
+                                  : "square"
+                                : on
+                                  ? "largecircle.fill.circle"
+                                  : "circle",
+                            }}
+                            style={{
+                              color: t(
+                                on ? "colors.accent_text" : "colors.muted",
+                              ),
+                              symbolSize: t("metrics.symbol_panel"),
+                              flexShrink: 0,
+                            }}
+                          />
+                          <div style={{ ...column, ...shrink, flexGrow: 1 }}>
+                            <Para
+                              runs={[{ t: plain(label) }]}
+                              style={{
+                                ...reading,
+                                color: t(
+                                  on ? "colors.text" : "colors.secondary",
+                                ),
+                              }}
+                            />
+                            {str(o.description) && (
+                              <text style={{ ...faint, ...shrink }}>
+                                {plain(str(o.description))}
+                              </text>
+                            )}
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+                {multiple && options.length > 0 && (
+                  <text style={faint}>Choose any that apply</text>
+                )}
+                {q.allowOther !== false && (
+                  <Field
+                    id={`${r.id}-${id}-other`}
+                    label={`Answer: ${plain(str(q.question))}`}
+                    value={local.typed[typedKey(id)] ?? ""}
+                    metadata={{
+                      placeholder: options.length
+                        ? "Or type an answer"
+                        : "Type an answer",
+                      secret: q.secret === true,
+                    }}
+                    onInput={(e) => {
+                      const text = String(e.value ?? "");
+                      local.type(typedKey(id), text);
+                      send({
+                        type: "typeAnswer",
+                        step: r.commandId,
+                        question: id,
+                        text,
+                      });
+                    }}
+                    onChange={(e) => {
+                      const text = String(e.value ?? "");
+                      local.type(typedKey(id), text);
+                      send({
+                        type: "typeAnswer",
+                        step: r.commandId,
+                        question: id,
+                        text,
+                      });
+                    }}
+                    onKeyDown={(e: SurfaceEvent) => {
+                      if (
+                        e.key === "Enter" &&
+                        !e.shiftKey &&
+                        !e.composing &&
+                        answered
+                      )
+                        send({
+                          type: "answer",
+                          step: r.commandId,
+                          skip: false,
+                        });
+                    }}
+                  />
+                )}
+              </>
+            ) : status === "answered" && str(answers[id]) ? (
+              <div
+                role="group"
+                label={`Answered: ${str(answers[id])}`}
+                style={{ ...row, gap: t("metrics.gap") }}
+              >
+                <div
+                  metadata={{ symbol: "checkmark" }}
+                  style={{
+                    color: t("colors.muted"),
+                    symbolSize: t("metrics.symbol_inline"),
+                    flexShrink: 0,
+                  }}
+                />
+                <Para
+                  runs={[{ t: str(answers[id]) }]}
+                  style={{ ...quiet, ...shrink }}
+                />
+              </div>
+            ) : (
+              <text
+                role="status"
+                label={status === "answered" ? "Skipped" : "Not answered"}
+                style={faint}
+              >
+                {status === "answered" ? "Skipped" : "Not answered"}
+              </text>
+            )}
+          </div>
+        );
+      })}
+      {open && (
+        <div
+          style={{
+            ...row,
+            justifyContent: "end",
+            gap: t("metrics.text_padding"),
+          }}
+        >
+          {v.transport === "reply" && (
+            <UI.PushButton
+              id={`${r.id}-skip`}
+              label="Skip"
+              onClick={() =>
+                send({ type: "answer", step: r.commandId, skip: true })
+              }
+            />
+          )}
+          <UI.PushButton
+            id={`${r.id}-answer`}
+            role="default"
+            label="Answer"
+            disabled={!answered}
+            onClick={
+              answered
+                ? () => send({ type: "answer", step: r.commandId, skip: false })
+                : undefined
+            }
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Conversation({
+  s,
+  send,
+  local,
+}: {
+  s: Snapshot;
+  send: Send;
+  local: Local;
+}) {
+  const list = entries(s);
+  const running = s.runId !== null;
+  // The request being answered: the last prompt of a running turn.
+  const answering = running
+    ? [...list]
+        .reverse()
+        .find(
+          (e) =>
+            e.kind === "message" &&
+            e.message.role === "user" &&
+            !e.message.steering,
+        )?.key
+    : undefined;
+  const render = (e: Entry): ComponentChildren => {
+    if (e.kind === "working")
+      return (
+        <div
+          key={e.key}
+          role="status"
+          label={e.label}
+          style={{ ...hairline, paddingBottom: t("metrics.inset") }}
+        >
+          <text style={{ ...faint, fontVariantNumeric: "tabular-nums" }}>
+            {e.label}
+          </text>
+        </div>
+      );
+    if (e.kind === "work") {
+      const open = local.open[e.key] ?? false;
+      return (
+        <div key={e.key} style={{ ...column, gap: t("metrics.agent_gap") }}>
+          <button
+            id={e.key}
+            role="button"
+            label={e.label}
+            aria-expanded={open}
+            tabIndex={0}
+            onClick={() => local.toggle(e.key, !open)}
+            style={{
+              ...target,
+              ...row,
+              ...hairline,
+              gap: t("metrics.gap"),
+              paddingBottom: t("metrics.inset"),
+            }}
+          >
+            <text style={{ ...faint, fontVariantNumeric: "tabular-nums" }}>
+              {e.label}
+            </text>
+            <div
+              metadata={{ symbol: open ? "chevron.down" : "chevron.right" }}
+              style={{
+                color: t("colors.muted"),
+                symbolSize: t("metrics.symbol_inline"),
+              }}
+            />
+          </button>
+          {open && e.items.map(item)}
+        </div>
+      );
     }
-    if (!menu || slashOpened.current === slashDraft) return;
-    slashOpened.current = slashDraft;
-    const composer = composerNode.current;
-    if (composer === null) return;
-    void menu({
-      anchor: composer,
-      placeholder: "Search commands",
-      options: s.slash.choices.map((c) => ({
-        label: slashLabel(s, c.id, c.value),
-        value: c.id,
-      })),
-    }).then((id) => {
-      if (typeof id === "string") send({ type: "chooseSlash", id });
-    });
-  }, [slashDraft]);
-  const composerNode = useRef<number | null>(null);
-  const composerFocused = useRef(false);
-  if (!n.visible) return null;
+    return item(e.message);
+  };
+  const item = (m: Message) =>
+    m.role === "user" ? (
+      <UserMessage key={m.key} m={m} answering={m.key === answering} />
+    ) : m.role === "assistant" ? (
+      <AssistantMessage key={m.key} m={m} s={s} send={send} />
+    ) : (
+      <Trail key={m.key} m={m} s={s} send={send} local={local} />
+    );
+  return <>{list.map(render)}</>;
+}
+
+// ── Composer ─────────────────────────────────────────────────────────────
+
+/** A saved choice the catalog no longer lists stays visible rather than blank. */
+/** The catalog's name for a value (the value itself when unlisted). */
+function named(entries: [string, string][], current: string) {
+  return entries.find(([v]) => v === current)?.[1] || current || "Default";
+}
+function pairs(entries: [string, string][], current: string) {
+  const options = entries.map(([v, label]) => ({ v, label }));
+  return entries.some(([v]) => v === current)
+    ? options
+    : [...options, { v: current, label: current }];
+}
+function Composer({
+  s,
+  n,
+  send,
+  menu,
+  shown,
+}: {
+  s: Snapshot;
+  n: NativeFacts;
+  send: Send;
+  menu?: Menu;
+  /** Counts the panel's showings (each change of presentation). */
+  shown: number;
+}) {
   const working = s.runId !== null;
   const available = n.connection === "connected";
   const disabled = !available || s.composerDisabled;
@@ -865,495 +1739,570 @@ export function AgentView({
     : working
       ? "Add direction…"
       : "Describe a change…";
-  const explanation = n.extensionContext
-    ? "Build and improve your extensions."
-    : s.settings.access === "editor"
-      ? "Your ideas. Editable motion."
-      : "Create, research, and build with your project.";
-  const popover = n.presentation === "popover";
-  const ground = t(popover ? "colors.floating" : "colors.panel");
-  // The model pop-up reads "{model} · {effort}" (agent-panel.md §3).
-  const modelName =
-    pairs(s.catalog.models, s.settings.model).find(
-      ([v]) => v === s.settings.model,
-    )?.[1] || "Default";
+  const hasDraft = s.draft.text.trim().length > 0 || s.attachments.length > 0;
+  const modelName = named(s.catalog.models, s.settings.model);
   const modelText =
     s.catalog.efforts.length > 1 && s.settings.effort
-      ? `${modelName} · ${effortCopy[s.settings.effort] ?? s.settings.effort}`
+      ? `${modelName} · ${effortLabel(s.settings.effort)}`
       : modelName;
+  const sendLabel = working ? "Send direction" : "Send";
+  // The shortcuts menu hangs from the composer, once per draft that asks
+  // for it (the window's searchable menu); closing it unchosen leaves the
+  // draft as typed.
+  const composerNode = useRef<number | null>(null);
+  const focused = useRef(false);
+  const opened = useRef<string | null>(null);
+  const slashDraft =
+    s.slash.visible && s.slash.choices.length ? s.draft.text : null;
+  useLayoutEffect(() => {
+    if (slashDraft === null) {
+      opened.current = null;
+      return;
+    }
+    if (!menu || opened.current === slashDraft || composerNode.current === null)
+      return;
+    opened.current = slashDraft;
+    void menu({
+      anchor: composerNode.current,
+      placeholder: "Search commands",
+      options: s.slash.choices.map((c) => {
+        const copy = n.slashCopy[c.id] ?? slashCopy(c.id, c.value, s);
+        return { label: `${copy.label} — ${copy.description}`, value: c.id };
+      }),
+    }).then((id) => {
+      if (typeof id === "string") send({ type: "chooseSlash", id });
+    });
+  }, [slashDraft]);
   return (
     <div
-      id="agent-panel"
+      id="agent-composer"
       role="group"
-      label="Agent conversation"
-      metadata={{
-        apiGap: "shell",
-        presentation: n.presentation,
-        provisional: true,
-        atMinimumDockWidth: n.atMinimumDockWidth,
-      }}
+      label="Message composer"
+      state={{ dropTarget: n.dropTarget }}
       style={{
-        display: "flex",
-        flexDirection: "column",
-        ...(popover ? { width: t("metrics.agent_width") } : {}),
-        background: ground,
-        borderRadius: t("metrics.panel_radius"),
+        ...column,
+        flexShrink: 0,
+        gap: t("metrics.gap"),
+        background: t(
+          n.dropTarget ? "colors.accent_wash" : "colors.panel_secondary",
+        ),
+        borderRadius: t("metrics.popover_radius"),
+        padding: t("metrics.gap"),
+        marginLeft: t("metrics.text_padding"),
+        marginRight: t("metrics.text_padding"),
+        marginBottom: t("metrics.text_padding"),
       }}
     >
       <div
-        id="agent-header"
-        data-pm-slot="header"
-        role="group"
-        label="Agent"
-        title={popover ? "Drag to move or pin to workspace" : undefined}
-        metadata={{ apiGap: "shell" }}
+        id="agent-field"
         style={{
-          display: "flex",
-          flexDirection: "row",
-          alignItems: "center",
-          justifyContent: "space-between",
-          height: t("metrics.header"),
-          paddingLeft: t("metrics.inset"),
-          paddingRight: t("metrics.inset"),
+          ...column,
+          gap: t("metrics.gap"),
+          background: t("colors.floating"),
+          borderRadius: t("metrics.panel_radius"),
+          borderWidth: t("metrics.border"),
+          borderColor: t("colors.hairline"),
+          paddingTop: t("metrics.gap"),
+          paddingBottom: t("metrics.gap"),
+          paddingLeft: t("metrics.gap"),
+          paddingRight: t("metrics.gap"),
         }}
       >
-        <text style={{ ...title, flexShrink: 0 }}>Agent</text>
-        <div
-          style={{
-            flexShrink: 1,
-            display: "flex",
-            flexDirection: "row",
-            alignItems: "center",
-          }}
-        >
-          <Trigger
-            id="agent-threads"
-            label={`Switch thread, ${s.threadTitle || "New thread"}`}
-            // Docked, the header shares the dock's tab row: the trigger
-            // names the list, and the tab keeps its name.
-            text={popover ? s.threadTitle || "New thread" : "Threads"}
-            widest={t("metrics.value_column")}
-            disabled={!menu}
-            open={(anchor) => {
-              const threads = s.threads ?? [];
-              const current = threads.find((t) => t.id === s.threadId);
-              void menu?.({
-                anchor,
-                placeholder: "Search threads…",
-                options: [
-                  ...(s.composerDisabled
-                    ? []
-                    : [{ label: "New Thread", value: "new" }]),
-                  ...threads.map((t) => ({
-                    label: t.busy ? `${t.title} · Working…` : t.title,
-                    value: `thread:${t.id}`,
-                    checked: t.id === s.threadId,
-                    category: "Threads",
-                  })),
-                  // Apart from the list, last: the one destructive row.
-                  ...(current
-                    ? [
-                        {
-                          label: "Delete Thread…",
-                          value: `delete:${current.id}`,
-                          category: "This Thread",
-                        },
-                      ]
-                    : []),
-                ],
-              }).then((choice) => {
-                if (choice === "new") send({ type: "newThread" });
-                else if (
-                  typeof choice === "string" &&
-                  choice.startsWith("thread:")
-                ) {
-                  const id = choice.slice(7);
-                  if (id !== s.threadId) send({ type: "switchThread", id });
-                } else if (
-                  typeof choice === "string" &&
-                  choice.startsWith("delete:")
-                )
-                  send({ type: "deleteThread", id: choice.slice(7) });
-              });
-            }}
-          />
-          <UI.ToolbarItem
-            disabled={s.composerDisabled}
-            id="agent-new"
-            label="New Thread"
-            title="New Thread"
-            metadata={{ symbol: "square.and.pencil" }}
-            style={{ symbolSize: t("metrics.symbol_panel") }}
-            onClick={() => {
-              if (!s.composerDisabled) send({ type: "newThread" });
-            }}
-          />
-          {popover && (
-            <UI.ToolbarItem
-              id="agent-presentation"
-              label="Pin to Workspace"
-              title="Pin to Workspace"
-              metadata={{ symbol: "pin" }}
-              style={{ symbolSize: t("metrics.symbol_panel") }}
-              onClick={() => send({ type: "shell", action: "pin" })}
-            />
-          )}
-        </div>
-      </div>
-      <div
-        style={{
-          ...vertical,
-          // The conversation takes the free height and scrolls inside it;
-          // the composer stays at the foot.
-          flexGrow: 1,
-          overflow: "hidden",
-          paddingLeft: t("metrics.inset"),
-          paddingRight: t("metrics.inset"),
-        }}
-      >
-        {s.saveError && (
+        {s.attachments.length > 0 && (
           <div
-            role="status"
-            label="Thread history couldn’t be saved. Keep this window open."
-            metadata={{ symbol: "exclamationmark.triangle.fill" }}
+            style={{
+              ...row,
+              flexWrap: "wrap",
+              gap: t("metrics.gap"),
+              paddingLeft: t("metrics.gap"),
+              paddingRight: t("metrics.gap"),
+            }}
           >
-            <text style={{ ...body, color: t("colors.warning") }}>
-              Thread history couldn’t be saved. Keep this window open.
-            </text>
-          </div>
-        )}
-        {/* A live run keeps its conversation, whatever its account says now. */}
-        {!working && n.connection === "checking" ? (
-          <UI.ProgressRow label="Checking connection…" />
-        ) : !working && n.connection === "waiting" ? (
-          <>
-            <UI.ProgressRow label="Waiting for sign-in…" />
-            <Push
-              label="Open Settings"
-              onClick={() => send({ type: "openSettings" })}
-            />
-          </>
-        ) : !working && n.connection === "unavailable" ? (
-          <UI.EmptyState
-            label="Connect Your Agent"
-            explanation={n.reason}
-            action={
-              // A pair of buttons sits side by side, as in macOS alerts.
+            {s.attachments.map((a) => (
               <div
+                key={a.id}
+                role="group"
+                label={`${a.name}, attachment`}
+                metadata={{ armed: s.draft.armed === a.id }}
                 style={{
-                  display: "flex",
-                  flexDirection: "row",
-                  gap: t("metrics.gap"),
+                  ...row,
+                  ...shrink,
+                  gap: t("metrics.pill_inset"),
+                  height: t("metrics.hit"),
+                  paddingLeft: t("metrics.gap"),
+                  background: t(
+                    s.draft.armed === a.id
+                      ? "colors.selected_fill"
+                      : "colors.fill",
+                  ),
+                  borderRadius: t("metrics.inner_radius"),
                 }}
               >
-                <Push
-                  label="Connection Settings…"
-                  onClick={() => send({ type: "openSettings" })}
-                />
-                <Push
-                  label="Try Again"
-                  onClick={() => send({ type: "retryConnection" })}
+                <button
+                  role="button"
+                  label={`${a.name}, attachment`}
+                  title={a.name}
+                  tabIndex={0}
+                  onClick={() => send({ type: "openAttachment", id: a.id })}
+                  style={{
+                    ...target,
+                    ...row,
+                    ...shrink,
+                    gap: t("metrics.gap"),
+                  }}
+                >
+                  <div
+                    metadata={{ symbol: "doc" }}
+                    style={{
+                      color: t("colors.muted"),
+                      symbolSize: t("metrics.symbol_inline"),
+                      flexShrink: 0,
+                    }}
+                  />
+                  <text
+                    style={{
+                      ...quiet,
+                      ...shrink,
+                      whiteSpace: "nowrap",
+                      textOverflow: "ellipsis",
+                    }}
+                  >
+                    {a.name}
+                  </text>
+                </button>
+                <UI.ToolbarItem
+                  label={`Remove ${a.name}`}
+                  title={`Remove ${a.name}`}
+                  metadata={{ symbol: "xmark" }}
+                  style={{
+                    symbolSize: t("metrics.symbol_inline"),
+                    flexShrink: 0,
+                  }}
+                  onClick={() => send({ type: "removeAttachment", id: a.id })}
                 />
               </div>
-            }
-          />
-        ) : (
-          <>
-            {n.loadingHistory && (
-              <UI.ProgressRow label="Loading earlier messages…" />
-            )}
-            {s.rows.count === 0 ? (
-              <UI.EmptyState
-                label="Make Your Next Move"
-                explanation={explanation}
-                action={null}
-              />
-            ) : (
-              <Rows s={s} n={n} send={send} />
-            )}
-            {working && (
-              <UI.ProgressRow
-                label={
-                  s.stopping
-                    ? "Stopping…"
-                    : `Working · ${elapsed(s.elapsedMs ?? 0)}`
-                }
-              />
-            )}
-          </>
-        )}
-        {s.stopError && (
-          <div
-            role="status"
-            label="Couldn’t stop this task."
-            metadata={{ symbol: "exclamationmark.triangle.fill" }}
-          >
-            <text style={{ ...body, color: t("colors.danger") }}>
-              Couldn’t stop this task.
-            </text>
+            ))}
           </div>
         )}
-        {s.showJump && (
-          <UI.ToolbarItem
-            label="Scroll to Latest"
-            disabled
-            metadata={{ apiGap: "variableList" }}
-          />
-        )}
-      </div>
-      <div
-        id="agent-composer"
-        role="group"
-        label="Message Powermove agent"
-        metadata={{
-          apiGap: "composer",
-          placeholder,
-          hint: "Return to send, Shift-Return for a new line",
-          selection: s.draft.selection,
-          maxLinesToken: "metrics.composer_max_lines",
-          disabled,
-        }}
-        state={{ dropTarget: n.dropTarget }}
-        title="Return to send · Shift-Return for a new line · / for shortcuts"
-        style={{
-          display: "flex",
-          flexDirection: "column",
-          // Two concentric surfaces, as v1: a quiet tray holding the field
-          // (the draft with attach and send) over the run's options.
-          background: t(n.dropTarget ? "colors.accent_wash" : "colors.field"),
-          borderRadius: t("metrics.panel_radius"),
-          minWidth: t("metrics.hit"),
-          margin: t("metrics.inset"),
-          padding: t("metrics.gap"),
-        }}
-      >
-        <div
-          id="agent-field"
-          style={{
-            ...vertical,
-            background: ground,
-            borderRadius: t("metrics.inner_radius"),
-            minHeight: t("metrics.hit"),
-            paddingLeft: t("metrics.gap"),
-            paddingRight: t("metrics.gap"),
-          }}
-        >
-          {s.attachments.map((a) => (
-            <div
-              key={a.id}
-              role="group"
-              label={`${a.name}, attachment`}
-              metadata={{ apiGap: "composer", armed: s.draft.armed === a.id }}
-            >
-              <UI.ToolbarItem
-                label={`${a.name}, attachment`}
-                onClick={() => send({ type: "openAttachment", id: a.id })}
-              >
-                {a.name}
-              </UI.ToolbarItem>
-              <UI.ToolbarItem
-                label={`Remove ${a.name}`}
-                title={`Remove ${a.name}`}
-                onClick={() => send({ type: "removeAttachment", id: a.id })}
-              />
-            </div>
-          ))}
-          {n.dropTarget ? (
-            <text style={{ ...body, color: t("colors.accent_text") }}>
-              Drop to attach
-            </text>
-          ) : (
-            <UI.TextField
-              multiline
-              id="agent-composer-text"
-              label="Message Powermove agent"
-              value={s.draft.text}
-              disabled={disabled}
-              metadata={{ placeholder, submitOnReturn: true }}
-              state={{ keyboardFocus: n.keyboardFocus === "composer" }}
-              tabIndex={0}
-              onInput={(event) => {
-                // The slash menu hangs from the composer, and shows only while
-                // it is focused: typing in it says it is (the host reports
-                // no focus of its own for a hosted editor).
-                composerNode.current = Number(event.currentTarget);
-                if (!composerFocused.current) {
-                  composerFocused.current = true;
-                  send({ type: "focus", focused: true });
-                }
-                const text = String(event.value ?? "");
+        {n.dropTarget ? (
+          <text
+            style={{
+              ...quiet,
+              color: t("colors.accent_text"),
+              paddingLeft: t("metrics.text_padding"),
+            }}
+          >
+            Drop to attach
+          </text>
+        ) : (
+          <Field
+            // A fresh editor each time the panel is shown somewhere new, so
+            // it starts from the draft as it is now (typed text lives in the
+            // editor, not in the value the host last saw).
+            key={`composer-${shown}`}
+            multiline
+            id="agent-composer-text"
+            label="Message Powermove agent"
+            title="Return to send · Shift-Return for a new line · / for shortcuts"
+            value={s.draft.text}
+            disabled={disabled}
+            metadata={{ placeholder, submitOnReturn: true }}
+            state={{ keyboardFocus: n.keyboardFocus === "composer" }}
+            tabIndex={0}
+            onInput={(event) => {
+              const text = String(event.value ?? "");
+              send({
+                type: "draft",
+                text,
+                selection: [text.length, text.length],
+                base: s.draft.text,
+              });
+              // Typing says the composer is focused (the host reports no
+              // focus of its own for a hosted editor), so shortcuts can show;
+              // the menu hangs from this node.
+              composerNode.current = Number(event.currentTarget);
+              if (!focused.current) {
+                focused.current = true;
+                send({ type: "focus", focused: true });
+              }
+            }}
+            onChange={(event) => {
+              // The native editor reports the text as it is typed, so Send
+              // follows the draft.
+              const text = String(event.value ?? "");
+              if (text !== s.draft.text)
                 send({
                   type: "draft",
                   text,
                   selection: [text.length, text.length],
                   base: s.draft.text,
                 });
-              }}
-              onChange={(event) => {
-                // The native editor reports the text as it is typed, so Send
-                // follows the draft.
-                const text = String(event.value ?? "");
-                if (text !== s.draft.text)
-                  send({
-                    type: "draft",
-                    text,
-                    selection: [text.length, text.length],
-                    base: s.draft.text,
-                  });
-              }}
-              onKeyDown={(event) => {
-                event.stopPropagation();
-                send(composerKey(event));
+            }}
+            onKeyDown={(event) => {
+              event.stopPropagation();
+              send(composerKey(event));
+            }}
+            style={{
+              ...reading,
+              background: t("colors.floating"),
+              minWidth: t("metrics.hit"),
+            }}
+          />
+        )}
+        <div
+          style={{
+            ...row,
+            gap: t("metrics.gap"),
+            height: t("metrics.control"),
+          }}
+        >
+          <UI.ToolbarItem
+            id="agent-attach"
+            label="Add attachments"
+            title="Add images, video, audio or documents"
+            metadata={{ symbol: "plus" }}
+            disabled={disabled || s.attachments.length >= 6}
+            style={{ flexShrink: 0, symbolSize: t("metrics.symbol_panel") }}
+            onClick={() => send({ type: "attach" })}
+          />
+          <div style={{ flexGrow: 1 }} />
+          {working && (
+            <button
+              id="agent-stop"
+              role="button"
+              label="Stop current run"
+              title="Stop current run"
+              tabIndex={0}
+              disabled={s.stopping}
+              metadata={{ symbol: "stop.fill" }}
+              onClick={() => {
+                if (!s.stopping) send({ type: "stop" });
               }}
               style={{
-                ...reading,
-                background: ground,
-                borderRadius: t("metrics.inner_radius"),
-                height: t("metrics.hit"),
-                minWidth: t("metrics.hit"),
+                ...target,
+                ...row,
+                justifyContent: "center",
+                flexShrink: 0,
+                width: t("metrics.control"),
+                height: t("metrics.control"),
+                borderRadius: t("metrics.control_radius"),
+                background: t("colors.text"),
+                color: t("colors.floating"),
+                symbolSize: t("metrics.symbol_inline"),
               }}
             />
           )}
-          <div
-            style={{
-              display: "flex",
-              flexDirection: "row",
-              alignItems: "center",
-              justifyContent: "space-between",
-              height: t("metrics.hit"),
-            }}
-          >
-            <UI.ToolbarItem
-              id="agent-attach"
-              style={keep}
-              label="Add Attachments"
-              attr={{ symbol: "plus" }}
-              title="Add Attachments"
-              disabled={s.composerDisabled || s.attachments.length >= 6}
-              onClick={() => send({ type: "attach" })}
+          {(!working || hasDraft) && (
+            <button
+              id="agent-send"
+              role="button"
+              label={sendLabel}
+              title={sendLabel}
+              tabIndex={0}
+              disabled={disabled || !s.sendable}
+              metadata={{ symbol: "return" }}
+              onClick={() => {
+                if (!disabled && s.sendable) send({ type: "submit" });
+              }}
+              style={{
+                ...target,
+                ...row,
+                justifyContent: "center",
+                flexShrink: 0,
+                width: t("metrics.control"),
+                height: t("metrics.control"),
+                borderRadius: t("metrics.control_radius"),
+                symbolSize: t("metrics.symbol_panel"),
+                background: t(
+                  !disabled && s.sendable ? "colors.accent" : "colors.fill",
+                ),
+                color: t(
+                  !disabled && s.sendable
+                    ? "colors.selected_text"
+                    : "colors.muted",
+                ),
+              }}
             />
-            {working ? (
-              <UI.ToolbarItem
-                id="agent-stop"
-                label="Stop current run"
-                title="Stop Current Run"
-                metadata={{ symbol: "stop.circle.fill" }}
-                style={{ ...keep, symbolSize: t("metrics.symbol_action") }}
-                disabled={s.stopping}
-                onClick={() => {
-                  if (!s.stopping) send({ type: "stop" });
-                }}
-              />
-            ) : (
-              <UI.ToolbarItem
-                id="agent-send"
-                label="Send"
-                title="Send"
-                metadata={{ symbol: "arrow.up.circle.fill" }}
-                style={{ ...keep, symbolSize: t("metrics.symbol_action") }}
-                disabled={disabled || !s.sendable}
-                onClick={() => {
-                  if (!disabled && s.sendable) send({ type: "submit" });
-                }}
-              />
-            )}
-          </div>
-        </div>
-        <div
-          id="agent-options"
-          style={{
-            display: "flex",
-            flexDirection: "row",
-            // One row at any width: the model's words give way first, then
-            // the access mode's (they truncate, never wrap).
-            alignItems: "center",
-            justifyContent: "space-between",
-            gap: t("metrics.gap"),
-            height: t("metrics.hit"),
-            paddingTop: t("metrics.pill_inset"),
-          }}
-        >
-          <Trigger
-            id="agent-model"
-            label={`Model and reasoning effort, ${modelText}`}
-            text={modelText}
-            disabled={!menu || working || s.composerDisabled}
-            open={(anchor) => {
-              void menu?.({
-                anchor,
-                placeholder: "Search models",
-                options: [
-                  ...pairs(s.catalog.providers, s.settings.provider).map(
-                    ([v, label]) => ({
-                      label,
-                      value: `provider:${v}`,
-                      checked: v === s.settings.provider,
-                      category: "Provider",
-                    }),
-                  ),
-                  ...pairs(s.catalog.models, s.settings.model).map(
-                    ([v, label]) => ({
-                      label,
-                      value: `model:${v}`,
-                      checked: v === s.settings.model,
-                      category: "Model",
-                    }),
-                  ),
-                  ...(s.catalog.efforts.length > 1
-                    ? s.catalog.efforts.map((v) => ({
-                        label: effortCopy[v] ?? v,
-                        value: `effort:${v}`,
-                        checked: v === s.settings.effort,
-                        category: "Reasoning Effort",
-                      }))
-                    : []),
-                ],
-              }).then((choice) => {
-                if (typeof choice !== "string") return;
-                const [kind, value] = [
-                  choice.slice(0, choice.indexOf(":")),
-                  choice.slice(choice.indexOf(":") + 1),
-                ];
-                if (kind === "provider")
-                  send({ type: "setProvider", provider: value });
-                else if (kind === "model")
-                  send({
-                    type: "setModel",
-                    model: value,
-                    effort: s.settings.effort,
-                  });
-                else if (kind === "effort")
-                  send({
-                    type: "setModel",
-                    model: s.settings.model,
-                    effort: value,
-                  });
-              });
-            }}
-          />
-          <Trigger
-            id="agent-access"
-            label={`Agent access, ${copy[s.settings.access]}`}
-            text={copy[s.settings.access]}
-            disabled={!menu || working || s.composerDisabled}
-            open={(anchor) => {
-              void menu?.({
-                anchor,
-                placeholder: "Search",
-                options: ACCESS.map((v) => ({
-                  label: copy[v],
-                  value: v,
-                  checked: v === s.settings.access,
-                  category: "How should agent actions be approved?",
-                })),
-              }).then((choice) => {
-                if (typeof choice === "string" && choice !== s.settings.access)
-                  send({ type: "setAccess", access: choice as Access });
-              });
-            }}
-          />
+          )}
         </div>
       </div>
+      <div
+        id="agent-options"
+        style={{
+          ...row,
+          gap: t("metrics.gap"),
+          height: t("metrics.control"),
+          paddingLeft: t("metrics.gap"),
+          paddingRight: t("metrics.gap"),
+        }}
+      >
+        {/* The original's three run choices and its access mode, each a
+            trigger for the window's searchable menu. */}
+        {/* Provider, model and effort in one menu: "{model} · {effort}"
+            (agent-panel.md §3). */}
+        <Trigger
+          id="agent-model"
+          label={`Model and reasoning effort, ${modelText}`}
+          text={modelText}
+          disabled={!menu || working || s.composerDisabled}
+          open={(anchor) =>
+            void menu?.({
+              anchor,
+              placeholder: "Search models",
+              options: [
+                ...pairs(s.catalog.providers, s.settings.provider).map(
+                  ({ v, label }) => ({
+                    label,
+                    value: `provider:${v}`,
+                    checked: v === s.settings.provider,
+                    category: "Provider",
+                  }),
+                ),
+                ...pairs(s.catalog.models, s.settings.model).map(
+                  ({ v, label }) => ({
+                    label,
+                    value: `model:${v}`,
+                    checked: v === s.settings.model,
+                    category: "Model",
+                  }),
+                ),
+                ...(s.catalog.efforts.length > 1
+                  ? s.catalog.efforts.map((v) => ({
+                      label: effortLabel(v),
+                      value: `effort:${v}`,
+                      checked: v === s.settings.effort,
+                      category: "Reasoning Effort",
+                    }))
+                  : []),
+              ],
+            }).then((choice) => {
+              if (typeof choice !== "string") return;
+              const at = choice.indexOf(":");
+              const [kind, value] = [choice.slice(0, at), choice.slice(at + 1)];
+              if (kind === "provider")
+                send({ type: "setProvider", provider: value });
+              else if (kind === "model")
+                send({
+                  type: "setModel",
+                  model: value,
+                  effort: s.settings.effort,
+                });
+              else if (kind === "effort")
+                send({
+                  type: "setModel",
+                  model: s.settings.model,
+                  effort: value,
+                });
+            })
+          }
+        />
+        <div style={{ flexGrow: 1 }} />
+        <Trigger
+          id="agent-access"
+          label={`Agent access, ${ACCESS[s.settings.access].label}`}
+          text={ACCESS[s.settings.access].label}
+          tone={
+            s.settings.access === "full" ? "colors.warning" : "colors.secondary"
+          }
+          disabled={!menu || working || s.composerDisabled}
+          open={(anchor) =>
+            void menu?.({
+              anchor,
+              placeholder: "Search",
+              // Full access asks for consent first (the window's alert).
+              options: (Object.keys(ACCESS) as Access[]).map((v) => ({
+                label: ACCESS[v].label,
+                value: v,
+                checked: v === s.settings.access,
+                category: "How should agent actions be approved?",
+              })),
+            }).then((choice) => {
+              if (typeof choice === "string" && choice !== s.settings.access)
+                send({ type: "setAccess", access: choice as Access });
+            })
+          }
+        />
+      </div>
+    </div>
+  );
+}
+
+// ── The panel ────────────────────────────────────────────────────────────
+
+export function AgentView({
+  publication: { snapshot: s, native: n },
+  send,
+  menu,
+}: {
+  publication: Publication;
+  send: Send;
+  /** The window's field menu (threads, run choices, access, shortcuts). */
+  menu?: Menu;
+}) {
+  const [open, setOpen] = useState<Record<string, boolean>>({});
+  const [typed, setTyped] = useState<Record<string, string>>({});
+  const [away, setAway] = useState(false);
+  const [jumps, setJumps] = useState(0);
+  // Each change of where the panel is shown (the popover opening, a dock)
+  // counts as a new showing.
+  const presentation = useRef({ at: n.presentation, count: 0 });
+  if (presentation.current.at !== n.presentation)
+    presentation.current = {
+      at: n.presentation,
+      count: presentation.current.count + 1,
+    };
+  if (!n.visible) return null;
+  const local: Local = {
+    open,
+    toggle: (key, value) => setOpen({ ...open, [key]: value }),
+    typed,
+    type: (key, text) => setTyped({ ...typed, [key]: text }),
+  };
+  const working = s.runId !== null;
+  const connected = n.connection === "connected";
+  const empty = s.rows.count === 0 && !working;
+  // While the connection is still being checked, what was shown stays
+  // (the original keeps setup and composer from flashing).
+  const gate = !connected && !working && n.connection !== "checking";
+  // Nothing to keep yet: the connection is the whole panel.
+  const setup = gate && empty && !s.draft.text && !s.attachments.length;
+  const popover = n.presentation === "popover";
+  return (
+    <div
+      id="agent-panel"
+      role="group"
+      label="Powermove agent"
+      metadata={{ presentation: n.presentation }}
+      style={{
+        ...column,
+        flexGrow: 1,
+        ...(popover ? { width: t("metrics.agent_width") } : {}),
+        background: t(popover ? "colors.floating" : "colors.panel"),
+      }}
+    >
+      <Header s={s} n={n} send={send} menu={menu} />
+      {s.saveError && (
+        <div
+          role="status"
+          label="Thread history couldn’t be saved. Keep this window open."
+          style={{
+            ...row,
+            gap: t("metrics.gap"),
+            paddingLeft: t("metrics.inset"),
+            paddingRight: t("metrics.inset"),
+            paddingBottom: t("metrics.gap"),
+          }}
+        >
+          <div
+            metadata={{ symbol: "exclamationmark.triangle.fill" }}
+            style={{
+              color: t("colors.warning"),
+              symbolSize: t("metrics.symbol_inline"),
+              flexShrink: 0,
+            }}
+          />
+          <text style={{ ...quiet, ...shrink, color: t("colors.warning") }}>
+            Thread history couldn’t be saved. Keep this window open.
+          </text>
+        </div>
+      )}
+      <div
+        id="agent-conversation"
+        role="group"
+        label={setup ? "Agent setup" : "Agent conversation"}
+        tabIndex={0}
+        onScroll={(e) => setAway(obj(e.value).away === true)}
+        metadata={{
+          count: s.rows.count,
+          range: s.rows.range as unknown as Json,
+          // Bottom anchored: new content keeps the latest in view unless
+          // the person scrolled up; a new token goes back to the end.
+          scrollAnchor: "end",
+          scrollToken: `${s.threadId}:${jumps}`,
+        }}
+        style={{
+          ...column,
+          ...target,
+          flexGrow: 1,
+          overflow: "scroll",
+          gap: t("metrics.agent_gap"),
+          paddingTop: t("metrics.gap"),
+          paddingBottom: t("metrics.inset"),
+          paddingLeft: t("metrics.agent_gap"),
+          paddingRight: t("metrics.agent_gap"),
+        }}
+      >
+        {gate && <Gate s={s} n={n} send={send} compact={!setup} />}
+        {!setup &&
+          (n.loadingHistory ? (
+            <UI.ProgressRow label="Loading earlier messages…" />
+          ) : null)}
+        {!setup &&
+          (empty ? (
+            <Welcome s={s} n={n} send={send} />
+          ) : (
+            <Conversation s={s} send={send} local={local} />
+          ))}
+      </div>
+      {s.stopError && (
+        <div
+          role="status"
+          label="Couldn’t stop this task."
+          style={{
+            ...row,
+            gap: t("metrics.gap"),
+            paddingLeft: t("metrics.agent_gap"),
+            paddingRight: t("metrics.agent_gap"),
+            paddingBottom: t("metrics.gap"),
+          }}
+        >
+          <div
+            metadata={{ symbol: "exclamationmark.triangle.fill" }}
+            style={{
+              color: t("colors.danger"),
+              symbolSize: t("metrics.symbol_inline"),
+              flexShrink: 0,
+            }}
+          />
+          <text style={{ ...quiet, ...shrink, color: t("colors.danger") }}>
+            Couldn’t stop this task.
+          </text>
+        </div>
+      )}
+      {!setup && away && (
+        <div
+          style={{
+            ...row,
+            justifyContent: "center",
+            paddingBottom: t("metrics.gap"),
+          }}
+        >
+          <UI.ToolbarItem
+            id="agent-jump"
+            label="Scroll to latest"
+            title="Scroll to latest"
+            metadata={{ symbol: "chevron.down" }}
+            onClick={() => {
+              setAway(false);
+              setJumps(jumps + 1);
+            }}
+            style={{
+              background: t("colors.fill"),
+              borderRadius: t("metrics.popover_radius"),
+              symbolSize: t("metrics.symbol_inline"),
+            }}
+          />
+        </div>
+      )}
+      {!setup && (
+        <Composer
+          s={s}
+          n={n}
+          send={send}
+          menu={menu}
+          shown={presentation.current.count}
+        />
+      )}
     </div>
   );
 }

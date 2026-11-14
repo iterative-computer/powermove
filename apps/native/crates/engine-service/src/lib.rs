@@ -2881,6 +2881,8 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 recorder.record(serde_json::json!({
                     "audio_start": true, "at": now, "viewer_id": id,
                     "wait_ms": waited as f64 / 1e3, "fallback": fallback,
+                    "output_latency_us": sample.output_latency_us,
+                    "sample_host_us": sample.host_time.get(), "sample_media": sample.media_time.get(),
                 }));
             }
             changed |= v
@@ -3046,9 +3048,13 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             let shown = plan.map(|p| p.shown);
             let media = if let Some(shown) = shown {
                 let at = |s: f64| {
-                    sample.media_time_at(
-                        pm_protocol::common::HostMicros::new((s.max(0.) * 1e6) as u64).unwrap(),
-                    )
+                    let host = (s.max(0.) * 1e6) as u64;
+                    if pm_media::decode::diag::knob("PM_ABL_PLAY_START_FENCE") == Some(0) {
+                        // The old projection, for a controlled latency A/B.
+                        sample.media_time_at(pm_protocol::common::HostMicros::new(host).unwrap())
+                    } else {
+                        Ticks::new(r.transport.clock.picture_at(host as i64)).unwrap_or(Ticks::ZERO)
+                    }
                 };
                 let plain = at(shown);
                 let lead = at(shown + interval / 2.);

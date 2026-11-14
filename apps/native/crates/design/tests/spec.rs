@@ -227,6 +227,14 @@ const ROLES: &[(&str, &str)] = &[
     ),
     ("metrics.sheet_width", "Default sheet width"),
     ("metrics.agent_width", "Default agent panel width"),
+    (
+        "metrics.agent_height",
+        "Agent popover height when the window has room",
+    ),
+    (
+        "metrics.agent_gap",
+        "Space between turns in the Agent conversation",
+    ),
     ("metrics.tree_indent", "Indent per outline level"),
     (
         "metrics.kind_badge",
