@@ -386,7 +386,7 @@ impl WelcomeView {
             } else {
                 format!("Show All {}", names.names.len())
             };
-            let focus = c.focus;
+            // No focus ring, as on every button (owner decision, 2026-11-14).
             card = card.child(
                 div()
                     .id("welcome-names-toggle")
@@ -395,7 +395,6 @@ impl WelcomeView {
                     .aria_label(label.clone())
                     .aria_expanded(self.names_open)
                     .tab_index(0)
-                    .focus_visible_style(move |s| s.ring(px(2.)).ring_color(rgb(focus)))
                     .h(px(t.space.xxl + t.space.xs))
                     .flex()
                     .items_center()
