@@ -1,7 +1,7 @@
 #include <metal_stdlib>
 using namespace metal;
 struct Line { float4 ends; float4 color; };
-struct Params { uint count; uint reduced; uint whole; uint channels; float4 output; float4 canvas; float2 drawable; float2 pad3; Line lines[120]; };
+struct Params { uint count; uint reduced; uint whole; uint channels; float4 output; float4 canvas; float2 drawable; float2 range; Line lines[120]; };
 vertex float4 vs(uint i [[vertex_id]]) {
     float2 q=float2(float((i<<1)&2),float(i&2));
     return float4(q*2-1,0,1);
@@ -80,6 +80,19 @@ fragment half4 fs(float4 p [[position]], texture2d<half> src [[texture(0)]], con
     if(u.channels>=1&&u.channels<=3) { v=float3(v[u.channels-1]); c.a=1; }
     else if(u.channels==4) { v=float3(c.a); c.a=1; }
     else if(u.channels==5) { v=mix(v*c.a,float3(1.0,0.0,0.0),0.5*(1.0-c.a)); c.a=1; }
+    else if(u.channels==6) {
+        // The frame before the SDR clip, at this pixel's nearest texel.
+        float2 size=float2(src.get_width(),src.get_height());
+        float2 q=u.whole!=0 ? (u.canvas.xy+p.xy)/u.canvas.zw*size : u.reduced!=0 ? p.xy/u.drawable*size : p.xy;
+        float4 r=float4(src.read(uint2(clamp(q,float2(0),size-1))));
+        float3 e=r.a>0 ? r.rgb/r.a : float3(0);
+        float3 l=float3(dec(e.r),dec(e.g),dec(e.b));
+        if(u.range.y>0.5) l=float3(0.6274039*l.r+0.3292830*l.g+0.0433131*l.b,0.0690973*l.r+0.9195404*l.g+0.0113623*l.b,0.0163914*l.r+0.0880133*l.g+0.8955953*l.b);
+        bool over=max(l.r,max(l.g,l.b))>u.range.x*1.0005;
+        bool outside=min(l.r,min(l.g,l.b))<-0.0005;
+        if(over) v=mix(v,float3(1.0,0.0,1.0),0.6);
+        if(outside) v=mix(v,float3(0.0,1.0,1.0),0.6);
+    }
     v=float3(dec(v.r),dec(v.g),dec(v.b));
     v=float3(0.8224621*v.r+0.1775380*v.g,0.0331941*v.r+0.9668058*v.g,0.0170827*v.r+0.0723974*v.g+0.9105199*v.b);
     // Preserve signed, extended linear engine output. Clipping to a transient

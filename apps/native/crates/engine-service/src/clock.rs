@@ -93,8 +93,16 @@ impl TransportClock {
 
     /// Whether unwrapped media `media` of the current run is inside the loop.
     fn in_loop(&self, media: i64) -> Option<TickRange> {
-        self.loop_range
-            .filter(|r| r.is_valid() && self.run_start < r.end.get() && media >= r.start.get())
+        self.loop_range.filter(|r| {
+            r.is_valid()
+                && if self.rate.num < 0 {
+                    // Mirror pm-audio: reverse runs enter from above, then
+                    // keep wrapping after their unwrapped line passes zero.
+                    self.run_start >= r.start.get() && media < r.end.get()
+                } else {
+                    self.run_start < r.end.get() && media >= r.start.get()
+                }
+        })
     }
 
     /// Follows a sample of the audio device clock (the master clock). A
@@ -151,6 +159,28 @@ impl TransportClock {
             self.discontinuity();
         }
         new_run
+    }
+
+    /// The first device sample received for a commanded start. It may
+    /// already describe a later buffer; the run still began where Play
+    /// was pressed, not at that buffer's media time.
+    pub fn follow_start(&mut self, sample: &ClockSample, from: i64) -> bool {
+        let changed = self.follow(sample);
+        if let Some(range) = sample.loop_range.filter(TickRange::is_valid) {
+            // The first buffer can already be across the loop boundary.
+            // Put it on the pass reached from the commanded starting point,
+            // rather than waiting a whole pass for its wrapped time.
+            let length = range.end.get() - range.start.get();
+            if sample.rate.num > 0 && self.anchor_media < from {
+                let passes = 1 + (from - self.anchor_media - 1) / length;
+                self.anchor_media += passes * length;
+            } else if sample.rate.num < 0 && self.anchor_media > from {
+                let passes = 1 + (self.anchor_media - from - 1) / length;
+                self.anchor_media -= passes * length;
+            }
+        }
+        self.run_start = from;
+        changed
     }
 
     /// The device's latency and rate from the audio sample this line
@@ -306,6 +336,17 @@ impl TransportClock {
         self.wrap(self.unwrapped_at(at))
     }
 
+    /// The picture at host µs `at`. Before the run's first audible frame,
+    /// keep its starting picture: extrapolating a future audio anchor can
+    /// otherwise wrap a pre-roll time to the end of the work area.
+    pub fn picture_at(&self, at: i64) -> i64 {
+        if self.run_starts_at(at).is_some() {
+            self.wrap(self.run_start)
+        } else {
+            self.media_at(at)
+        }
+    }
+
     fn discontinuity(&mut self) {
         self.epoch = self.epoch.wrapping_add(1).max(1);
     }
@@ -313,7 +354,7 @@ impl TransportClock {
     /// Plays at `rate` from where the line is at host µs `now`, the run's
     /// first media shown at host µs `start` (at or after `now`).
     pub fn play_at(&mut self, rate: PlaybackRate, now: i64, start: i64) {
-        let media = self.media_at(now);
+        let media = self.picture_at(now);
         self.anchor_media = media;
         self.run_start = media;
         self.followed = None;
@@ -336,7 +377,7 @@ impl TransportClock {
             }
             TransportCommand::Play { .. } => return false,
             TransportCommand::Pause => {
-                let media = self.media_at(now);
+                let media = self.picture_at(now);
                 self.followed = None;
                 self.anchor_media = self.snap(media);
                 self.anchor_host = now;
@@ -355,7 +396,7 @@ impl TransportClock {
                 };
             }
             TransportCommand::Step { frames } => {
-                let media = self.snap(self.media_at(now));
+                let media = self.snap(self.picture_at(now));
                 self.anchor_media = self.wrap(media + i64::from(frames) * self.frame);
                 self.run_start = self.anchor_media;
                 self.followed = None;
@@ -560,6 +601,179 @@ mod tests {
             running.media_time.get(),
             30 * FRAME + TICKS_PER_SECOND / 5 - TICKS_PER_SECOND * 110 / 1000
         );
+    }
+
+    #[test]
+    fn pictures_before_an_audio_start_never_wrap_to_the_loop_end() {
+        let range = TickRange {
+            start: Ticks::ZERO,
+            end: Ticks::from_whole_seconds(3),
+        };
+        for latency in [20_000, 160_000] {
+            for from in [0, TICKS_PER_SECOND] {
+                let mut clock = TransportClock::new(TICKS_PER_SECOND / 30);
+                clock.apply(TransportCommand::SetLoop { range: Some(range) }, 0);
+                clock.hold(from, 1_000_000);
+                let mut heard = audio(
+                    7,
+                    TransportState::Playing,
+                    1_000_000 + latency,
+                    from,
+                    Some(range),
+                );
+                heard.output_latency_us = latency as u32;
+                clock.follow(&heard);
+                for elapsed in (0..latency).step_by(1_000) {
+                    assert_eq!(
+                        clock.picture_at((1_000_000 + elapsed) as i64),
+                        from,
+                        "from {from}, latency {latency}, elapsed {elapsed}"
+                    );
+                }
+                let start = (1_000_000 + latency) as i64;
+                assert_eq!(clock.picture_at(start), from);
+                assert_eq!(
+                    clock.picture_at(start + 100_000),
+                    from + TICKS_PER_SECOND / 10
+                );
+                // The start fence must not prevent a later, real loop wrap.
+                assert_eq!(clock.picture_at(start + 3_000_000), from);
+            }
+        }
+    }
+
+    #[test]
+    fn reverse_pictures_wait_at_the_run_start_too() {
+        let mut clock = TransportClock::new(FRAME);
+        clock.hold(TICKS_PER_SECOND, 1_000_000);
+        clock.play_at(PlaybackRate { num: -1, den: 1 }, 1_000_000, 1_160_000);
+        assert_eq!(clock.picture_at(1_000_000), TICKS_PER_SECOND);
+        assert_eq!(clock.picture_at(1_160_000), TICKS_PER_SECOND);
+        assert_eq!(clock.picture_at(1_260_000), TICKS_PER_SECOND * 9 / 10);
+    }
+
+    #[test]
+    fn a_later_first_device_buffer_does_not_move_the_start_forward() {
+        let asked = 1_000_000_i64;
+        let starts = asked + PREROLL_US;
+        for latency in [20_000_i64, 160_000] {
+            for from in [0, TICKS_PER_SECOND] {
+                // A later clock publication, or the first callback already
+                // past the scheduled start because of the output latency.
+                let offset = 100_000.max(latency + 10_000 - PREROLL_US);
+                let observed = starts + offset - latency;
+                assert!(observed >= asked);
+                let mut heard = audio(
+                    7,
+                    TransportState::Playing,
+                    (starts + offset) as u64,
+                    from + offset * TICKS_PER_SECOND / 1_000_000,
+                    None,
+                );
+                heard.output_latency_us = latency as u32;
+                let mut old = TransportClock::new(TICKS_PER_SECOND / 30);
+                old.hold(from, asked);
+                old.follow(&heard);
+                let early = old.sample(observed);
+                assert_eq!(
+                    early.media_time, heard.media_time,
+                    "the old hand-over jumps to a later buffer and holds it"
+                );
+                assert_eq!(early.host_time, heard.host_time);
+
+                let mut clock = TransportClock::new(TICKS_PER_SECOND / 30);
+                clock.play_at(PlaybackRate::NORMAL, asked, starts);
+                // Transport never publishes the speculative host-clock lead:
+                // an audible Play holds until the device's clock arrives.
+                clock.hold(from, asked);
+                assert_eq!(clock.sample(observed).media_time.get(), from);
+                clock.follow_start(&heard, from);
+                for elapsed in (0..300_000).step_by(1_000) {
+                    let now = observed + elapsed;
+                    let sample = clock.sample(now);
+                    let expected_host = now.max(starts);
+                    let expected_media =
+                        from + (expected_host - starts) * TICKS_PER_SECOND / 1_000_000;
+                    assert_eq!(sample.host_time.get(), expected_host as u64);
+                    assert_eq!(
+                        sample.media_time.get(),
+                        expected_media,
+                        "from {from}, latency {latency}, elapsed {elapsed}"
+                    );
+                    assert_eq!(clock.picture_at(now), expected_media);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_first_buffer_across_the_loop_boundary_keeps_the_same_start() {
+        let range = TickRange {
+            start: Ticks::ZERO,
+            end: Ticks::from_whole_seconds(3),
+        };
+        let starts = 1_050_000;
+        for (direction, from) in [
+            (1, 29 * TICKS_PER_SECOND / 10),
+            (-1, TICKS_PER_SECOND / 10),
+            (-1, 3 * TICKS_PER_SECOND),
+        ] {
+            let mut clock = TransportClock::new(FRAME);
+            clock.apply(TransportCommand::SetLoop { range: Some(range) }, 0);
+            clock.hold(from, 1_000_000);
+            let media = (from + direction * TICKS_PER_SECOND * 120 / 1_000)
+                .rem_euclid(3 * TICKS_PER_SECOND);
+            let mut heard = audio(
+                7,
+                TransportState::Playing,
+                (starts + 120_000) as u64,
+                media,
+                Some(range),
+            );
+            heard.rate = PlaybackRate {
+                num: direction as i32,
+                den: 1,
+            };
+            heard.output_latency_us = 160_000;
+            clock.follow_start(&heard, from);
+            assert_eq!(clock.picture_at(starts - 20_000), from);
+            for elapsed in [50_000, 150_000, 3_150_000] {
+                let want = (from + direction * elapsed * TICKS_PER_SECOND / 1_000_000)
+                    .rem_euclid(3 * TICKS_PER_SECOND);
+                assert_eq!(clock.picture_at(starts + elapsed), want);
+                assert_eq!(clock.sample(starts + elapsed).loop_range, Some(range));
+            }
+        }
+    }
+
+    #[test]
+    fn pause_step_and_rate_changes_before_the_start_stay_at_the_start() {
+        let from = 60 * FRAME;
+        for rate in [PlaybackRate::NORMAL, PlaybackRate { num: -1, den: 1 }] {
+            for command in [
+                TransportCommand::Pause,
+                TransportCommand::Step { frames: 1 },
+                TransportCommand::Step { frames: -1 },
+            ] {
+                let mut clock = TransportClock::new(FRAME);
+                clock.hold(from, 1_000_000);
+                clock.play_at(rate, 1_000_000, 1_160_000);
+                clock.apply(command, 1_020_000);
+                let step = match command {
+                    TransportCommand::Step { frames } => frames,
+                    _ => 0,
+                };
+                assert_eq!(
+                    clock.sample(1_030_000).media_time.get(),
+                    from + i64::from(step) * FRAME
+                );
+            }
+            let mut clock = TransportClock::new(FRAME);
+            clock.hold(from, 1_000_000);
+            clock.play_at(rate, 1_000_000, 1_160_000);
+            clock.play_at(PlaybackRate { num: 2, den: 1 }, 1_010_000, 1_170_000);
+            assert_eq!(clock.sample(1_020_000).media_time.get(), from);
+        }
     }
 
     #[test]
