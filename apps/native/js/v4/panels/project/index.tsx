@@ -282,13 +282,13 @@ export function ProjectView(props: ProjectViewProps) {
       }}
       preventDefault={{ keydown: ["Enter", "Escape"] }}
       onKeyDown={(e) => {
+        // Typing a name is the field's: no key moves or previews the grid.
+        e.stopPropagation();
         if (e.composing) return;
         if (e.key === "Escape") {
-          e.stopPropagation();
           input("CancelRename");
         }
         if (e.key === "Enter") {
-          e.stopPropagation();
           input({ CommitRename: { folder: folderId, value: rename } });
         }
       }}
@@ -623,7 +623,9 @@ export function ProjectView(props: ProjectViewProps) {
     ),
   );
   const gridKey = (event: SurfaceEvent) => {
-    if (event.composing || event.target !== event.currentTarget) return;
+    // The list or one of its items: a click focuses the item it lands on,
+    // and its keys are the grid's (fields inside keep theirs, below).
+    if (event.composing) return;
     if (event.key === "F2" && view?.focused && "Folder" in view.focused) {
       input({ BeginRename: view.focused.Folder });
       return;

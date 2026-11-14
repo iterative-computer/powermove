@@ -612,3 +612,27 @@ test("the page asked for leaves room for media imported later", async () => {
   expect(limit).toBeGreaterThanOrEqual(96);
   await root.dispose();
 });
+test("keys on a clicked card reach the grid: Space previews, arrows move", async () => {
+  const { root } = recorder();
+  const inputs: Input[] = [];
+  const view = projection([asset("a"), asset("b")]);
+  view.page.rows[0].focused = true;
+  view.focused = view.page.rows[0].id;
+  await root.render(
+    <ProjectView
+      view={view}
+      input={(i) => inputs.push(i)}
+      menu={() => {}}
+      page={() => {}}
+      native={native}
+      layout={{ columns: 2, rowHeight: 140 }}
+    />,
+  );
+  // A click focuses the card, so the key's target is the card itself.
+  await event(root, card(root, "a").id, "keydown", { key: " " });
+  await event(root, card(root, "a").id, "keydown", { key: "ArrowRight" });
+  expect(
+    inputs.map((i) => (i as { GridKey?: { key: string } }).GridKey?.key),
+  ).toEqual(["Space", "Right"]);
+  await root.dispose();
+});
