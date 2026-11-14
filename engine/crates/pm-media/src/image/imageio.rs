@@ -56,6 +56,15 @@ unsafe extern "C" {
         options: CFDictionaryRef,
     ) -> CGImageRef;
     fn CGImageSourceGetType(src: CGImageSourceRef) -> CFStringRef;
+    fn CGImageSourceCopyAuxiliaryDataInfoAtIndex(
+        src: CGImageSourceRef,
+        index: usize,
+        kind: CFStringRef,
+    ) -> CFDictionaryRef;
+    static kCGImageSourceDecodeRequest: CFStringRef;
+    static kCGImageSourceDecodeToHDR: CFStringRef;
+    static kCGImageAuxiliaryDataTypeISOGainMap: CFStringRef;
+    static kCGImageAuxiliaryDataTypeHDRGainMap: CFStringRef;
 }
 
 #[link(name = "CoreGraphics", kind = "framework")]
@@ -87,6 +96,11 @@ unsafe extern "C" {
     static kCGColorSpaceExtendedLinearSRGB: CFStringRef;
     fn CGColorSpaceCreateWithICCData(data: CFTypeRef) -> CGColorSpaceRef;
     fn CGColorSpaceGetNumberOfComponents(space: CGColorSpaceRef) -> usize;
+    fn CGColorSpaceCopyName(space: CGColorSpaceRef) -> CFStringRef;
+    fn CGImageGetContentHeadroom(img: CGImageRef) -> f32;
+    fn CGColorSpaceGetBaseColorSpace(space: CGColorSpaceRef) -> CGColorSpaceRef;
+    fn CGColorSpaceGetColorTableCount(space: CGColorSpaceRef) -> usize;
+    fn CGColorSpaceGetColorTable(space: CGColorSpaceRef, table: *mut u8);
     fn CGDataProviderCreateWithCFData(data: CFTypeRef) -> *mut c_void;
     fn CGDataProviderRelease(provider: *mut c_void);
     fn CGImageCreate(
@@ -488,13 +502,127 @@ pub fn read_frame(
     pool: &FramePool,
     format: ImageFormat,
 ) -> Result<StillImage> {
-    read_frame_inner(path, index, pool, format, None)
+    read_frame_inner(path, index, pool, format, None, true)
+}
+
+/// [`read_frame`] of a still's first frame, reading a gain-map still as
+/// HDR (`hdr`) or as its SDR base.
+pub fn read_still(
+    path: &Path,
+    pool: &FramePool,
+    format: ImageFormat,
+    hdr: bool,
+) -> Result<StillImage> {
+    read_frame_inner(path, 0, pool, format, None, hdr)
+}
+
+/// Whether the still carries a gain map ImageIO applies (ISO 21496-1, or
+/// Apple's HDR gain map).
+pub fn has_gain_map(path: &Path) -> Result<bool> {
+    let src = source(path)?;
+    Ok(unsafe { gain_map(src.as_mut_ptr()) })
+}
+
+/// # Safety
+/// `src` is a live image source.
+unsafe fn gain_map(src: CGImageSourceRef) -> bool {
+    unsafe {
+        [
+            kCGImageAuxiliaryDataTypeISOGainMap,
+            kCGImageAuxiliaryDataTypeHDRGainMap,
+        ]
+        .into_iter()
+        .any(|kind| {
+            Cf::from_create(CGImageSourceCopyAuxiliaryDataInfoAtIndex(src, 0, kind)).is_some()
+        })
+    }
+}
+
+/// The H.273 primaries and transfer of a BT.2100 PQ or HLG color space
+/// (ImageIO's reading of an HDR HEIC, and of a gain-map still decoded as
+/// HDR), by its name.
+fn hdr_signal(space: CGColorSpaceRef) -> Option<(u8, u8)> {
+    if space.is_null() {
+        return None;
+    }
+    let name = unsafe { Cf::from_create(CGColorSpaceCopyName(space)) }?;
+    let name = unsafe { cf_string_value(name.as_ptr()) }?;
+    let primaries = if name.contains("ITUR_709") {
+        1
+    } else if name.contains("ITUR_2100") || name.contains("ITUR_2020") {
+        9
+    } else if name.contains("DisplayP3") {
+        12
+    } else {
+        return None;
+    };
+    let transfer = if name.contains("_PQ") {
+        16
+    } else if name.contains("_HLG") {
+        18
+    } else {
+        return None;
+    };
+    Some((primaries, transfer))
+}
+
+/// The 16-bit RGBA codes of `img` in its own color space (no conversion);
+/// `None` when any pixel is not opaque.
+///
+/// # Safety
+/// `img` is a live image and `space` its color space.
+unsafe fn draw_codes(
+    img: CGImageRef,
+    space: CGColorSpaceRef,
+    w: usize,
+    h: usize,
+) -> Result<Option<Vec<u16>>> {
+    let mut buf = vec![0u16; w * h * 4];
+    unsafe {
+        let ctx = CGBitmapContextCreate(
+            buf.as_mut_ptr() as *mut c_void,
+            w,
+            h,
+            16,
+            w * 8,
+            space,
+            PREMULTIPLIED_LAST | ORDER_16_LITTLE,
+        );
+        if ctx.is_null() {
+            return Err(MediaError::Image(
+                "could not create a 16-bit context".into(),
+            ));
+        }
+        CGContextSetInterpolationQuality(ctx, INTERPOLATION_NONE);
+        CGContextDrawImage(
+            ctx,
+            CGRect {
+                x: 0.0,
+                y: 0.0,
+                w: w as f64,
+                h: h as f64,
+            },
+            img,
+        );
+        CGContextRelease(ctx);
+    }
+    Ok(buf
+        .chunks_exact(4)
+        .all(|px| px[3] == u16::MAX)
+        .then_some(buf))
 }
 
 /// Decode a viewer-sized image without allocating the native-resolution
 /// bitmap. Exact frames continue to use the original native-depth reader.
 pub fn read_preview(path: &Path, pool: &FramePool, max_edge: u32) -> Result<StillImage> {
-    read_frame_inner(path, 0, pool, ImageFormat::Other, Some(max_edge.max(1)))
+    read_frame_inner(
+        path,
+        0,
+        pool,
+        ImageFormat::Other,
+        Some(max_edge.max(1)),
+        false,
+    )
 }
 
 fn read_frame_inner(
@@ -503,8 +631,13 @@ fn read_frame_inner(
     pool: &FramePool,
     format: ImageFormat,
     max_edge: Option<u32>,
+    hdr: bool,
 ) -> Result<StillImage> {
     let src = source(path)?;
+    // A gain map is applied to the still itself (not its animation frames or
+    // previews), at the headroom the map describes, unless its SDR base is
+    // asked for.
+    let gain_map = index == 0 && max_edge.is_none() && unsafe { gain_map(src.as_mut_ptr()) };
     let count = unsafe { CGImageSourceGetCount(src.as_mut_ptr()) };
     if index >= count {
         return Err(MediaError::invalid(format!("frame {index} of {count}")));
@@ -539,11 +672,18 @@ fn read_frame_inner(
             ))
         }
     } else {
+        let request =
+            unsafe { cf_dict(&[(kCGImageSourceDecodeRequest, kCGImageSourceDecodeToHDR)]) };
+        let options = if gain_map && hdr {
+            request.as_ptr()
+        } else {
+            std::ptr::null()
+        };
         unsafe {
             Cf::from_create(CGImageSourceCreateImageAtIndex(
                 src.as_mut_ptr(),
                 index,
-                std::ptr::null(),
+                options,
             ))
         }
     }
@@ -575,8 +715,18 @@ fn read_frame_inner(
     let direct = (model == MODEL_RGB && (comps == 3 || comps == 4))
         || (model == MODEL_MONOCHROME && (comps == 1 || comps == 2));
     let label = format!("ImageIO {uti} {bpc}-bit");
-    let (rgba, bits, float, premultiplied, icc_class, icc) = if direct && matches!(bpc, 8 | 16 | 32)
-    {
+    // BT.2100 PQ and HLG (an HDR HEIC; a gain-map still read as HDR, in
+    // BT.709 PQ with SDR white at 203 cd/m²): the codes as stored, described
+    // by H.273, so the still is read as video of that signal is. Opaque
+    // only: a partly transparent one is converted as other models are.
+    let coded = match hdr_signal(space).filter(|_| model == MODEL_RGB) {
+        Some(signal) => unsafe { draw_codes(p, space, w, h)? }.map(|codes| (signal, codes)),
+        None => None,
+    };
+    let signal = coded.as_ref().map(|c| c.0);
+    let (rgba, bits, float, premultiplied, icc_class, icc) = if let Some((_, codes)) = coded {
+        (Unpacked::U16(codes), 16, false, false, None, None)
+    } else if direct && matches!(bpc, 8 | 16 | 32) {
         let data = unsafe { Cf::from_create(CGDataProviderCopyData(CGImageGetDataProvider(p))) }
             .ok_or_else(|| MediaError::Image("no pixel data".into()))?;
         let bytes = unsafe { cf_data_bytes(data.as_ptr()) }
@@ -599,8 +749,15 @@ fn read_frame_inner(
     {
         // Untagged RGB palette entries are sRGB samples. Drawing their
         // device RGB base through ColorSync would silently assign a profile.
-        let table = super::raster::tiff_palette(path)?
-            .ok_or_else(|| MediaError::Image("missing TIFF RGB palette".into()))?;
+        // TIFF's 16-bit map is read from the file; other formats' (TGA's)
+        // entries from the image's color table.
+        let table = if format == ImageFormat::Tiff {
+            super::raster::tiff_palette(path)?
+                .ok_or_else(|| MediaError::Image("missing TIFF RGB palette".into()))?
+        } else {
+            unsafe { color_table(space) }
+                .ok_or_else(|| MediaError::Image("missing RGB palette".into()))?
+        };
         let data = unsafe { Cf::from_create(CGDataProviderCopyData(CGImageGetDataProvider(p))) }
             .ok_or_else(|| MediaError::Image("no palette indices".into()))?;
         let bytes = unsafe { cf_data_bytes(data.as_ptr()) }
@@ -698,6 +855,15 @@ fn read_frame_inner(
             icc_bytes: icc.as_ref().map(|d| d.len()),
             icc,
             icc_class,
+            cicp: signal.map(|(primaries, transfer)| [primaries, transfer, 0, 1]),
+            // A PQ still's content peak: the headroom over SDR white the
+            // image states (a gain map's), at 203 cd/m².
+            mastering_peak: signal
+                .filter(|s| s.1 == 16)
+                .map(|_| f64::from(unsafe { CGImageGetContentHeadroom(p) }))
+                .filter(|h| *h > 1.0)
+                .map(|h| h * 203.0),
+            gain_map,
             ..ImageColor::plain(
                 if float {
                     Transfer::Linear
@@ -752,9 +918,43 @@ unsafe fn draw_linear(img: CGImageRef, w: usize, h: usize) -> Result<Vec<f32>> {
 }
 
 /// Whether the file embeds an ICC profile ImageIO converts from (TIFF tag
-/// 34675; other containers' CMYK readings always carry their own).
+/// 34675; TGA has no profile; other containers' CMYK readings always carry
+/// their own).
 fn embedded_profile(path: &Path, format: ImageFormat) -> Result<bool> {
-    Ok(format != ImageFormat::Tiff || super::raster::tiff_icc(path)?.is_some())
+    Ok(match format {
+        ImageFormat::Tiff => super::raster::tiff_icc(path)?.is_some(),
+        ImageFormat::Tga => false,
+        _ => true,
+    })
+}
+
+/// The RGB entries of an indexed color space, widened to 16 bits; `None`
+/// when its base is not RGB or it has no table.
+///
+/// # Safety
+/// `space` is an indexed color space (or null).
+unsafe fn color_table(space: CGColorSpaceRef) -> Option<Vec<[u16; 3]>> {
+    if space.is_null() {
+        return None;
+    }
+    unsafe {
+        let base = CGColorSpaceGetBaseColorSpace(space);
+        if base.is_null() || CGColorSpaceGetNumberOfComponents(base) != 3 {
+            return None;
+        }
+        let count = CGColorSpaceGetColorTableCount(space);
+        if count == 0 {
+            return None;
+        }
+        let mut table = vec![0u8; count * 3];
+        CGColorSpaceGetColorTable(space, table.as_mut_ptr());
+        Some(
+            table
+                .chunks_exact(3)
+                .map(|e| [e[0], e[1], e[2]].map(|v| u16::from(v) * 257))
+                .collect(),
+        )
+    }
 }
 
 /// Expands MSB-first packed indices without changing their RGB entries.

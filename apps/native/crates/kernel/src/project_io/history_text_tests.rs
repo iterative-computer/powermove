@@ -500,3 +500,108 @@ fn one_state_saves_the_same_bytes_twice() {
         "a history with whole layer arrays is written packed"
     );
 }
+
+/// A write no history entry covers can undo a recorded change; undo and redo
+/// then reach states whose content the state token alone does not name. The
+/// file guard must judge them by replay, not by what it judged under the
+/// same token before (review w31 F1). A project with a recorded switch to
+/// linear blending (only a newer reader opens it), a rename, then an
+/// outside write switching blending off again; saves between undos. Undone
+/// to the start, redo would restore linear blending: the requirement must
+/// be written, as the full replay writes it.
+#[test]
+fn an_outside_write_over_a_recorded_change_keeps_the_requirement() {
+    let dir = TempDir::new("outside");
+    let files = Files::new(&dir);
+    let blending = |on: bool| {
+        let mut p = project(1, false);
+        p.as_object_mut().unwrap().insert(
+            "color",
+            parse(&format!(r#"{{"linearBlending":{on}}}"#)).unwrap(),
+        );
+        p
+    };
+    let mut store = DocumentStore::new_untitled(blending(false));
+    // 1. Recorded: linear blending on. 2. Recorded: a rename.
+    store
+        .restore_project(blending(true), "Linear blending", Origin::Interface)
+        .unwrap();
+    edit(&mut store, 0);
+    // 3. Outside any entry: linear blending off.
+    let ops = pm_model::ops::ops_from_value(
+        &parse(r#"[{"path":["color","linearBlending"],"exists":true,"value":false}]"#).unwrap(),
+    )
+    .unwrap();
+    let written = store
+        .kernel_apply(
+            &crate::WriteBody::Ops(ops),
+            Origin::Interface,
+            crate::document::ChangeCause::Write {
+                label: "Direct edit".into(),
+                origin: Origin::Interface,
+                entry: None,
+            },
+        )
+        .unwrap();
+    assert!(written.is_some());
+    store.kernel_outside_write();
+    let first = SaveTarget::SaveAs {
+        path: files.packed.clone(),
+        replace: false,
+    };
+    // 4. Save; 5. undo the rename, save; 6. undo the switch, save.
+    save_three(&mut store, first, &files, "after the outside write");
+    store.undo().unwrap();
+    save_three(&mut store, SaveTarget::InPlace, &files, "the rename undone");
+    store.undo().unwrap();
+    save_three(
+        &mut store,
+        SaveTarget::InPlace,
+        &files,
+        "the switch undone: redo restores it",
+    );
+    let document = pm_model::container::read_container(
+        &File::open(&files.packed).unwrap(),
+        pm_model::container::ReadOptions::default(),
+    )
+    .unwrap()
+    .document;
+    assert_eq!(
+        document.get("requiresEngine").and_then(Value::as_str),
+        Some("native"),
+        "redo reaches linear blending: the file needs the native reader"
+    );
+}
+
+/// The file guard's kept verdicts stay within the history's reachable
+/// states and the current one, over more edits than the history keeps,
+/// whether or not the project itself needs the native reader (review w31
+/// F4); clearing the history clears them.
+#[test]
+fn the_guard_keeps_no_more_verdicts_than_the_history_reaches() {
+    for future in [false, true] {
+        let mut store = DocumentStore::new_untitled(project(6, future));
+        for i in 0..1_100 {
+            edit(&mut store, i);
+            let snapshot = store.history().snapshot();
+            let _ = file_guard::save_extra(
+                store.root(),
+                file_guard::GuardHistory::Session {
+                    snapshot: &snapshot,
+                    state_token: store.kernel_state_token(),
+                    outside_writes: 0,
+                },
+                &pm_model::Map::new(),
+            );
+            let bound = store.history().records().len() + 1;
+            assert!(
+                store.history().guard_verdicts() <= bound,
+                "{} verdicts kept for {bound} states after {i} edits (native project: {future})",
+                store.history().guard_verdicts()
+            );
+        }
+        assert!(store.history().records().len() <= crate::history::MAX_ENTRIES);
+        store.kernel_clear();
+        assert_eq!(store.history().guard_verdicts(), 0);
+    }
+}

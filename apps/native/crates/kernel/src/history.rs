@@ -547,7 +547,9 @@ pub struct History {
 pub(crate) type GuardStates = Arc<std::sync::Mutex<GuardMemo>>;
 #[derive(Debug, Default)]
 pub(crate) struct GuardMemo {
-    pub states: std::collections::HashMap<u64, (u64, bool)>,
+    /// Whether each judged state (by token) needs the native reader. Only
+    /// kept while no write outside the history has happened.
+    pub states: std::collections::HashMap<u64, bool>,
     /// Saves that had to replay the whole history (diagnostics, tests).
     pub full_replays: u64,
 }
@@ -702,6 +704,11 @@ impl History {
         self.total_bytes = 0;
         self.cursor = 0;
         self.base_token = next_token();
+        self.guard_states
+            .lock()
+            .expect("guard states")
+            .states
+            .clear();
     }
 
     fn drop_oldest(&mut self) {
@@ -1029,6 +1036,11 @@ impl History {
     #[cfg(test)]
     pub(crate) fn full_replays(&self) -> u64 {
         self.guard_states.lock().expect("guard states").full_replays
+    }
+    /// How many state verdicts the file guard keeps for this history.
+    #[cfg(test)]
+    pub(crate) fn guard_verdicts(&self) -> usize {
+        self.guard_states.lock().expect("guard states").states.len()
     }
     pub fn snapshot(&self) -> HistorySnapshot {
         HistorySnapshot {

@@ -126,6 +126,7 @@ fn slash_choices_follow_phase_and_provider_catalog_without_new_copy() {
         model_efforts: vec![],
         claude: true,
         resolves: vec![],
+        default_efforts: vec![],
     };
     assert_eq!(slash_choices("/", &catalog, false, false).len(), 6);
     assert_eq!(slash_choices("/", &catalog, true, false).len(), 7);
@@ -326,6 +327,7 @@ fn each_model_offers_its_own_efforts() {
         ],
         claude: false,
         resolves: vec![],
+        default_efforts: vec![],
     };
     assert_eq!(catalog.efforts_for("fast"), vec!["", "low"]);
     assert_eq!(catalog.efforts_for("deep"), vec!["", "low", "xhigh"]);

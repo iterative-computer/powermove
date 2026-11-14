@@ -29,13 +29,25 @@ use pm_media::pool::FramePool;
 type StillKey = (PathBuf, u64, u128, StillAsk);
 
 /// How the frame that draws a still reads it: the viewer's preview edge (the
-/// longest side it shows the still at, when it draws previews) and whether
-/// the asset has Interpret Footage overrides. The worker decodes what
+/// longest side it shows the still at, when it draws previews), whether
+/// the asset has Interpret Footage overrides, and which picture of a still
+/// with a gain map it reads. The worker decodes what
 /// `MediaCache::image_scaled` would for the same ask.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub(crate) struct StillAsk {
     pub edge: Option<u32>,
     pub interpreted: bool,
+    pub rendition: pm_media::image::Rendition,
+}
+
+impl StillAsk {
+    pub fn of(edge: Option<u32>, interpret: Option<&pm_media::interpret::Interpretation>) -> Self {
+        StillAsk {
+            edge,
+            interpreted: interpret.is_some(),
+            rendition: interpret.and_then(|i| i.gain_map).unwrap_or_default(),
+        }
+    }
 }
 
 /// Stills queued or waiting for their frame at once (eight UHD 16-bit
@@ -201,6 +213,10 @@ fn decode(
     }
     // The frame's probe reads the file's facts first, once per stamp. Read
     // whole here, the still gives them, and is not decoded twice for them.
+    // The file's facts are those of its default reading (a gain-map still
+    // as HDR); a still read for its SDR base is decoded as such.
+    let rendition = key.3.rendition;
+    let default = rendition == pm_media::image::Rendition::default();
     let (facts, whole) = match super::known_still_facts(path) {
         Some(facts) => (facts, None),
         None => {
@@ -208,6 +224,7 @@ fn decode(
             (super::still_facts_from(path, whole.as_ref()), whole)
         }
     };
+    let whole = whole.filter(|_| default);
     // The facts say whether the frame reads a preview of this still or the
     // whole of it.
     let edge = key
@@ -219,10 +236,10 @@ fn decode(
             .map(|still| (still, Some(edge)))
             .or_else(|_| match whole {
                 Some(whole) => Ok((whole, None)),
-                None => pm_media::image::read(path, pool).map(|s| (s, None)),
+                None => pm_media::image::read_with(path, pool, rendition).map(|s| (s, None)),
             }),
         (None, Some(whole)) => Ok((whole, None)),
-        (None, None) => pm_media::image::read(path, pool).map(|s| (s, None)),
+        (None, None) => pm_media::image::read_with(path, pool, rendition).map(|s| (s, None)),
     };
     if estimate.is_none() {
         shared.unknown.store(false, Ordering::Release);
@@ -298,6 +315,10 @@ impl StillPrefetch {
         if self.abandoned.take().is_some() {
             self.shared.landed.fetch_add(1, Ordering::AcqRel);
         }
+    }
+
+    pub(crate) fn limit(&self) -> usize {
+        self.shared.limit.load(Ordering::Acquire)
     }
 
     /// Holds up to `bytes` of decoded stills: a lower allowance cancels the
@@ -694,7 +715,7 @@ mod tests {
         );
         let ask = StillAsk {
             edge: Some(edge),
-            interpreted: false,
+            ..Default::default()
         };
         let mut prefetch = StillPrefetch::default();
         prefetch.request(&path, stamp, ask, &pool);
@@ -709,6 +730,7 @@ mod tests {
         let interpreted = StillAsk {
             edge: Some(edge),
             interpreted: true,
+            ..Default::default()
         };
         prefetch.request(&path, stamp, interpreted, &pool);
         settle(&mut prefetch);

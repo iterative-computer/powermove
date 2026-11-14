@@ -289,14 +289,25 @@ pub(super) enum GuardHistory<'a> {
     },
 }
 
-/// `history_needs_native(root, to_saved(snapshot))`, without rebuilding the
-/// saved history: what importing each step would find is found once per
-/// step, and each reachable document state's verdict is kept by its token.
-/// Any state not judged before (under the same outside writes) sends it to
-/// the full replay, which records what it judges.
+/// The state undoing document record `i` reaches.
+fn undone(documents: &[&crate::history::HistoryRecord], base: u64, i: usize) -> u64 {
+    if i == 0 { base } else { documents[i - 1].id }
+}
+
+/// `project || history_needs_native(root, to_saved(snapshot))`, without
+/// rebuilding the saved history: what importing each step would find is
+/// found once per step, and each reachable document state's verdict is kept
+/// by its token. A state token names one content only while no write
+/// outside the history has happened: such a write can overlap a recorded
+/// change, and undo or redo then reach content the token never named
+/// (review w31 F1). From the first one, every save replays in full and
+/// keeps no verdicts. Any state not judged before also sends it to the full
+/// replay, which records what it judges. The kept verdicts never outgrow
+/// the snapshot's current and reachable states.
 fn session_needs_native(
     root: Option<&Node>,
     snapshot: &HistorySnapshot,
+    project: bool,
     state_token: u64,
     outside_writes: u64,
 ) -> bool {
@@ -305,20 +316,46 @@ fn session_needs_native(
         states.lock().expect("guard states").full_replays += 1;
         history_needs_native(root, &snapshot.to_saved(), judged)
     };
+    if outside_writes != 0 {
+        states.lock().expect("guard states").states.clear();
+        return project || full(None);
+    }
+    let chain = snapshot.guard_chain();
+    let tokens: Vec<u64> = match &chain {
+        Some((documents, base, applied)) => (0..*applied)
+            .rev()
+            .map(|i| undone(documents, *base, i))
+            .chain(documents[*applied..].iter().map(|r| r.id))
+            .collect(),
+        None => Vec::new(),
+    };
+    {
+        let reachable: std::collections::HashSet<u64> = tokens.iter().copied().collect();
+        let mut known = states.lock().expect("guard states");
+        known
+            .states
+            .retain(|t, _| *t == state_token || reachable.contains(t));
+        if root.is_some() {
+            // The state being written, judged now: a later save that reaches
+            // it by undo or redo knows it.
+            known.states.insert(state_token, project);
+        }
+    }
+    if project {
+        return true;
+    }
     if root.is_none() {
         return true;
     }
-    let Some((documents, base, applied)) = snapshot.guard_chain() else {
+    let Some((documents, base, applied)) = &chain else {
         return full(None);
     };
     if documents.len() > crate::history::MAX_ENTRIES {
         return true;
     }
-    let trace = std::env::var_os("PM_SAVE_TRACE").is_some();
-    let started = std::time::Instant::now();
     let mut bytes = Vec::with_capacity(documents.len());
     let mut operations = false;
-    for record in &documents {
+    for record in documents {
         match record.import_facts() {
             Ok(facts) => {
                 bytes.push(facts.bytes);
@@ -327,59 +364,22 @@ fn session_needs_native(
             Err(_) => return true,
         }
     }
-    if crate::history::import_kept(&bytes, applied) != documents.len() || operations {
+    if crate::history::import_kept(&bytes, *applied) != documents.len() || operations {
         return true;
     }
-    // The state undoing record `i` reaches, and the state redoing it does.
-    let undone = |i: usize| if i == 0 { base } else { documents[i - 1].id };
-    let tokens: Vec<u64> = (0..applied)
-        .rev()
-        .map(undone)
-        .chain(documents[applied..].iter().map(|r| r.id))
-        .collect();
     {
-        let mut known = states.lock().expect("guard states");
+        let known = states.lock().expect("guard states");
         let verdicts: Option<Vec<bool>> = tokens
             .iter()
-            .map(|t| {
-                known
-                    .states
-                    .get(t)
-                    .filter(|(w, _)| *w == outside_writes)
-                    .map(|(_, v)| *v)
-            })
+            .map(|t| known.states.get(t).copied())
             .collect();
-        if trace {
-            let missing = tokens
-                .iter()
-                .filter(|t| !known.states.contains_key(t))
-                .count();
-            let other = tokens
-                .iter()
-                .filter(|t| {
-                    known
-                        .states
-                        .get(t)
-                        .is_some_and(|(w, _)| *w != outside_writes)
-                })
-                .count();
-            eprintln!(
-                "PM_GUARD facts {:.0} ms; {} states, {missing} unknown, {other} under other outside writes ({outside_writes})",
-                started.elapsed().as_secs_f64() * 1000.,
-                tokens.len()
-            );
-        }
         if let Some(verdicts) = verdicts {
             return verdicts.into_iter().any(|v| v);
         }
-        // Forget states no longer reachable from this stack.
-        known
-            .states
-            .retain(|t, _| *t == state_token || tokens.contains(t));
     }
     let mut record = |undo: bool, index: usize, needs: bool| {
         let token = if undo {
-            undone(index)
+            undone(documents, *base, index)
         } else {
             documents[index].id
         };
@@ -387,7 +387,7 @@ fn session_needs_native(
             .lock()
             .expect("guard states")
             .states
-            .insert(token, (outside_writes, needs));
+            .insert(token, needs);
     };
     full(Some(&mut record))
 }
@@ -407,19 +407,7 @@ pub(super) fn save_extra<'a>(
             snapshot,
             state_token,
             outside_writes,
-        } => {
-            // The state being written is judged now: a later save that
-            // reaches it by undo knows it.
-            if root.is_some() {
-                snapshot
-                    .guard_states()
-                    .lock()
-                    .expect("guard states")
-                    .states
-                    .insert(state_token, (outside_writes, project));
-            }
-            project || session_needs_native(root, snapshot, state_token, outside_writes)
-        }
+        } => session_needs_native(root, snapshot, project, state_token, outside_writes),
     };
     let ours = extra.get(MARKER).and_then(Value::as_str) == Some(NATIVE);
     let absent = extra.get(MARKER).is_none_or(|v| matches!(v, Value::Null));

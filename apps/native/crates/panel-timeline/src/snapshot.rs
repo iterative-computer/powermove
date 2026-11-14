@@ -551,6 +551,15 @@ impl TimelineIndex {
             .iter()
             .find(|m| (m.time - time).abs() < 0.5 / self.fps)
     }
+    /// The latest time the timeline shows: the composition's end, or a
+    /// layer or the work area running past it.
+    pub fn maximum_time(&self) -> f64 {
+        self.layers
+            .iter()
+            .map(|l| l.from + l.duration)
+            .fold(self.duration, f64::max)
+            .max(self.work[1])
+    }
     pub fn minimum_time(&self) -> f64 {
         self.layers
             .iter()

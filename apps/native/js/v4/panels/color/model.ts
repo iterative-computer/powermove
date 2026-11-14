@@ -81,8 +81,10 @@ export type Intent =
       id: string;
       action: "diamond" | "stopwatch" | "reset";
     };
+/** A menu row (null: a separator). */
+export type MenuItem = { id: string; label: string; disabled?: boolean } | null;
 export interface Platform {
-  contextMenu(items: { id: string; label: string }[]): Promise<string | null>;
+  contextMenu(items: MenuItem[]): Promise<string | null>;
   report(error: unknown): void;
 }
 

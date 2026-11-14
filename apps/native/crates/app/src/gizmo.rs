@@ -147,6 +147,9 @@ pub struct ViewFrame {
 }
 pub trait Host: 'static {
     fn time(&self, cx: &App) -> f64;
+    /// The Project panel's dragged items dropped on the viewer: placed at
+    /// the playhead, on top of the stack.
+    fn drop_project_items(&self, _cx: &mut App) {}
     fn playing(&self, cx: &App) -> bool;
     fn frame(&self, bounds: Bounds<Pixels>, cx: &App) -> Option<ViewFrame>;
     fn tool(&self, cx: &App) -> Tool;
@@ -2509,6 +2512,12 @@ impl Render for GizmoSurface {
             .id("viewer-gizmos")
             .size_full()
             .cursor(self.cursor)
+            .on_drop(cx.listener(|s, drag: &crate::v4_view::PanelDrag, _, cx| {
+                if drag.panel == pm_builtins::PROJECT_PANEL {
+                    cx.stop_propagation();
+                    s.host.drop_project_items(cx);
+                }
+            }))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|s, event: &MouseDownEvent, window, cx| s.on_down(event, window, cx)),

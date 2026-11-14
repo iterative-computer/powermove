@@ -261,6 +261,11 @@ test("failure retries and closes through native host; transport rejection never 
   const g = fixture(s);
   await g.model.closeFailure();
   expect(g.model.open).toBe(false);
+  // Escape is the failed sheet's Close (E3: every sheet's Escape cancels).
+  const e = fixture(s);
+  e.model.open = true;
+  expect(await e.model.key("Escape")).toBe(true);
+  expect(e.model.open).toBe(false);
   const h = fixture();
   h.rejection = "fixture rejection";
   await expect(h.model.start()).rejects.toThrow("fixture rejection");

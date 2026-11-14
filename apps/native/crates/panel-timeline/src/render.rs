@@ -327,6 +327,14 @@ pub struct Scene {
     pub markers: Vec<Marker>,
     pub bars: Vec<Bar>,
 }
+/// Where dropped media joins the layer stack ([`Scene::drop_before`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DropSlot {
+    /// On top of the stack (the track view).
+    Top,
+    /// Above this layer; `None`: at the bottom.
+    Before(Option<String>),
+}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
     InvalidGeometry,
@@ -679,6 +687,49 @@ impl Scene {
         self.rows
             .get(self.tops.partition_point(|top| *top <= y).checked_sub(1)?)
     }
+    /// Where media dropped at a content-space y joins the stack (v1.2.0's
+    /// `mediaDropAt`): a new layer is always its own strip, so the pointer
+    /// resolves to a boundary between layers. The upper half of a layer row
+    /// inserts above that layer; its lower half, its property rows and its
+    /// group's children insert below its whole block; below the last row
+    /// appends at the bottom. The layer the new one goes above, `None` for
+    /// the bottom. Track rows (the track view) put new media on top, as v1.
+    pub fn drop_before(&self, y: f64) -> DropSlot {
+        let Some(slot) = self
+            .tops
+            .partition_point(|top| *top <= y.max(0.))
+            .checked_sub(1)
+        else {
+            return DropSlot::Top;
+        };
+        let Some(row) = self.rows.get(slot) else {
+            return DropSlot::Before(None);
+        };
+        if matches!(row.content, RowContent::Track { .. }) {
+            return DropSlot::Top;
+        }
+        let layer_row = |i: usize| match self.rows.get(i).map(|r| (r, crate::v4::parse_row(&r.id)))
+        {
+            Some((r, Ok(crate::RowId::Layer(id)))) => Some((r.depth, id)),
+            _ => None,
+        };
+        // The layer whose block the pointer is in.
+        let mut owner = slot;
+        while owner > 0 && layer_row(owner).is_none() {
+            owner -= 1;
+        }
+        let Some((depth, id)) = layer_row(owner) else {
+            return DropSlot::Before(None);
+        };
+        let height = self.tops[slot + 1] - self.tops[slot];
+        if owner == slot && y - self.tops[slot] < height / 2. {
+            return DropSlot::Before(Some(id));
+        }
+        let next = (owner + 1..self.rows.len())
+            .find_map(|i| layer_row(i).filter(|(d, _)| *d <= depth))
+            .map(|(_, id)| id);
+        DropSlot::Before(next)
+    }
     /// Ordinal window covering a scroll offset, for the outline's row request.
     pub fn visible_range(&self, scroll_y: f64, height: f64) -> Range<usize> {
         let first = self
@@ -773,12 +824,25 @@ impl Scene {
                     || op.id.starts_with("key-focus:")
                     || op.id.starts_with("trim:");
                 let x = if track { v.layer_column } else { 0. };
-                op.clip = Some(Rect::new(
+                let area = Rect::new(
                     x,
                     m.ruler as f64,
                     v.width - x,
                     (v.height - m.ruler as f64).max(0.),
-                ));
+                );
+                // An op clipped to its own box (a summary key to its strip)
+                // keeps that inside the tracks; wholly outside, it is not
+                // painted.
+                op.clip = match op.clip {
+                    None => Some(area),
+                    Some(own) => match intersection(own, area) {
+                        Some(both) => Some(both),
+                        None => {
+                            op.covered = true;
+                            Some(own)
+                        }
+                    },
+                };
             }
             ax.push(json!({"id":row.id,"role":"row","label":row.accessibility_label,"rowIndex":i,"rowCount":self.total(),"selected":row.selected,"depth":row.depth,"focusable":false}));
         }
@@ -919,26 +983,31 @@ impl Scene {
         }
         match &row.content {
             RowContent::Layer { clip, summary } => {
-                if let Some(clip) = clip {
-                    paint_clip(clip, y, h, v, self.label_step(v).0, t, ops);
-                }
-                // Summary marks only while the layer is collapsed: open, its
-                // property rows show the keys themselves.
+                let strip = clip
+                    .as_ref()
+                    .and_then(|clip| paint_clip(clip, y, h, v, self.label_step(v).0, t, ops));
+                // Summary marks only while the layer is collapsed (open, its
+                // property rows show the keys themselves), and only inside
+                // the strip they belong to: a layer with no strip on screen
+                // shows none.
                 let open = self
                     .rows
                     .get(i + 1)
                     .is_some_and(|next| matches!(next.content, RowContent::Property { .. }));
-                if !open {
-                    let ink = clip.as_ref().map_or(c.text, |clip| {
-                        t.strip(clip.label.color(t), strip_state(clip)).foreground
-                    });
+                if let (false, Some(clip), Some(strip)) = (open, clip, strip) {
+                    let ink = t.strip(clip.label.color(t), strip_state(clip)).foreground;
                     // In the strip's foot, under the name's descenders.
                     let size = (m.keyframe - SUMMARY_KEY_INSET) as f64;
+                    let within = Within {
+                        from: v.x(clip.from),
+                        to: v.x(clip.from + clip.duration),
+                        strip,
+                    };
                     paint_keys(
                         &row.id,
                         summary,
-                        Some(ink),
-                        y + h - t.strip_gap() as f64 - 1.5 * m.border as f64 - size / 2.,
+                        Some((ink, within)),
+                        strip.y + strip.height - 1.5 * m.border as f64 - size / 2.,
                         v,
                         t,
                         ops,
@@ -1281,20 +1350,28 @@ fn strip_state(c: &Clip) -> pm_design::StripState {
         StripState::Rest
     }
 }
-fn paint_clip(c: &Clip, y: f64, h: f64, v: Viewport, grid: f64, t: &Tokens, ops: &mut Vec<Op>) {
+/// Paints clip `c` and gives back its strip's box on screen (none when the
+/// clip is off screen).
+fn paint_clip(
+    c: &Clip,
+    y: f64,
+    h: f64,
+    v: Viewport,
+    grid: f64,
+    t: &Tokens,
+    ops: &mut Vec<Op>,
+) -> Option<Rect> {
     let m = t.metrics;
     let colors = &t.colors;
     // Each strip is its own object: an even gap all round (pm-design `strip_gap`).
     let gap = t.strip_gap() as f64;
-    let Some(r) = span(
+    let r = span(
         v.x(c.from) + gap / 2.,
         v.x(c.from + c.duration) - gap / 2.,
         y + gap,
         h - 2. * gap,
         v,
-    ) else {
-        return;
-    };
+    )?;
     let radius = t.strip_radius(r.height as f32) as f64;
     // Media Offline (docs/native/design/media-offline.md): the viewer's
     // ground with the danger hatch, as the engine's card.
@@ -1324,13 +1401,12 @@ fn paint_clip(c: &Clip, y: f64, h: f64, v: Viewport, grid: f64, t: &Tokens, ops:
         "sourceEdges":[v.x(c.from),v.x(c.from+c.duration)],
         "selected":c.selected,
         "top":material.top,"bottom":material.bottom,
-        "glow":material.glow.0,"glowAlpha":material.glow.1,
         // The ruler's grid reads through the body: its first line inside
         // the strip and the distance between lines, in points.
         "grid":material.grid.0,"gridAlpha":material.grid.1,
         "gridFrom":grid_from,"gridStep":grid * v.pps,
-        "rim":material.rim.0,"rimAlpha":material.rim.1,
-        "rimTop":material.rim_top.0,"rimTopAlpha":material.rim_top.1,"rimWidth":material.rim_width,"rimInset":material.rim_inset,
+        "ring":material.ring.0,"ringAlpha":material.ring.1,"ringWidth":material.ring_width,
+        "light":material.light.0,"lightAlpha":material.light.1,
         "shadow":material.shadow.0,"shadowAlpha":material.shadow.1,
         "shadowY":material.shadow.2,"shadowBlur":material.shadow.3,
     });
@@ -1514,12 +1590,25 @@ fn paint_clip(c: &Clip, y: f64, h: f64, v: Viewport, grid: f64, t: &Tokens, ops:
             ops.push(o);
         }
     }
+    Some(r)
+}
+/// The strip a collapsed layer's summary marks belong to: its source edges
+/// (`from`, `to`, unclamped panel x) and its box on screen.
+#[derive(Clone, Copy)]
+struct Within {
+    from: f64,
+    to: f64,
+    strip: Rect,
 }
 /// Keys on a property row (v1's marks): linear diamond, ease circle, hold
 /// square; the first and last keys of an animated span are half filled toward
 /// it, so a curve's ends read at a glance; selected keys are `accent` with a
 /// `panel` keyline. A collapsed layer's summary marks (`summary` = the clip's
-/// foreground) are small quiet diamonds inside the clip's foot.
+/// foreground, and the strip they sit in) are small quiet diamonds inside the
+/// strip's foot, as v1: keys outside the layer's in and out points are not
+/// drawn, the edge keys stand just inside its ends, marks closer than one
+/// glyph to the last one drawn are left out (a dense run reads as evenly
+/// spaced marks, not a bar), and every mark is clipped to the strip.
 /// A key glyph's look: shape, colour, selected (opacity and keyline), half.
 type Glyph<'a> = (&'a str, u32, bool, Option<&'a str>);
 /// A collapsed layer's summary marks are this much smaller than a key.
@@ -1527,7 +1616,7 @@ const SUMMARY_KEY_INSET: f32 = 5.;
 fn paint_keys(
     row: &str,
     keys: &[Key],
-    summary: Option<u32>,
+    summary: Option<(u32, Within)>,
     y: f64,
     v: Viewport,
     t: &Tokens,
@@ -1539,6 +1628,12 @@ fn paint_keys(
         } else {
             0.
         };
+    // A summary mark's centre stays this far inside its strip's ends.
+    let reach = size / 2. + 2. * t.metrics.border as f64;
+    let within = summary.map(|(_, w)| w);
+    if within.is_some_and(|w| w.strip.width < 2. * reach) {
+        return;
+    }
     let from = v.scroll_time - size / v.pps;
     let to = v.scroll_time + (v.width - v.layer_column + size) / v.pps;
     let start = keys.partition_point(|k| k.seconds < from);
@@ -1550,10 +1645,20 @@ fn paint_keys(
     // The glyph drawn last and its device half-pixel: keys are in time
     // order, so an identical glyph on the same half-pixel follows it directly.
     let mut on_top: Option<(i64, Glyph)> = None;
+    // The last summary mark drawn (thinning).
+    let mut drawn = f64::NEG_INFINITY;
     // `key:["row","key"]`, the row's part escaped once.
     let prefix = format!("key:[{},", serde_json::to_string(row).unwrap_or_default());
     for key in &keys[start..end] {
-        let x = v.x(key.seconds);
+        let mut x = v.x(key.seconds);
+        if let Some(w) = within {
+            // Outside the layer's in and out points: not drawn (v1).
+            if x < w.from - 0.5 || x > w.to + 0.5 {
+                continue;
+            }
+            x = x.clamp(w.strip.x + reach, w.strip.x + w.strip.width - reach);
+        }
+        let summary = summary.map(|(ink, _)| ink);
         let shape = if summary.is_some() {
             "diamond"
         } else {
@@ -1598,6 +1703,17 @@ fn paint_keys(
         let glyph = ((x * 2.).round() as i64, (shape, color, key.selected, half));
         o.covered = on_top == Some(glyph);
         on_top = Some(glyph);
+        if summary.is_some() {
+            // Clipped to the strip; a mark within one glyph of the last
+            // one drawn stays for hit-testing but is not painted (a
+            // selected mark always is).
+            o.clip = within.map(|w| w.strip);
+            if x - drawn < size && !key.selected {
+                o.covered = true;
+            } else {
+                drawn = x;
+            }
+        }
         ops.push(o);
         if key.focused {
             // The ring may cover keys under it: the next one draws again.
@@ -2171,6 +2287,82 @@ mod decoration_tests {
             &visible(2),
         );
         assert_eq!(shapes["L1"].len(), DECORATIONS_PER_CLIP);
+    }
+}
+
+#[cfg(test)]
+mod drop_tests {
+    use super::*;
+    use crate::RowId;
+
+    fn row(row: RowId, depth: usize) -> PaintRow {
+        let content = match row {
+            RowId::Layer(_) => RowContent::Layer {
+                clip: None,
+                summary: std::sync::Arc::from([]),
+            },
+            RowId::Property { .. } => RowContent::Property {
+                state: KeyState::Static,
+                keys: vec![],
+            },
+        };
+        PaintRow {
+            id: crate::v4::row_id(&row),
+            accessibility_label: "row".into(),
+            depth,
+            selected: false,
+            hovered: false,
+            focused: false,
+            content,
+        }
+    }
+
+    /// v1.2.0's `mediaDropAt`: upper half of a layer row above it, lower
+    /// half and its properties below its block, a group's children inside
+    /// its block, past the last row at the bottom.
+    #[test]
+    fn dropped_media_joins_the_stack_between_layers_as_v1_did() {
+        let t = Tokens::new(pm_design::Scheme::Dark, Default::default());
+        let layer = |id: &str, depth| row(RowId::Layer(id.into()), depth);
+        let property = |id: &str| {
+            row(
+                RowId::Property {
+                    layer_id: id.into(),
+                    channel: "opacity".into(),
+                },
+                1,
+            )
+        };
+        // A, its opacity row, group G with child C, then B.
+        let scene = Scene::new(
+            vec![
+                layer("A", 0),
+                property("A"),
+                layer("G", 0),
+                layer("C", 1),
+                layer("B", 0),
+            ],
+            10.,
+            30.,
+            &t,
+        )
+        .unwrap();
+        let (l, p) = (t.metrics.track_row as f64, t.metrics.property_row as f64);
+        let before = |id: &str| DropSlot::Before(Some(id.into()));
+        assert_eq!(scene.drop_before(l * 0.25), before("A"));
+        assert_eq!(scene.drop_before(l * 0.75), before("G"));
+        assert_eq!(scene.drop_before(l + p * 0.5), before("G"));
+        // G's lower half: below its whole block (after child C).
+        let g = l + p;
+        assert_eq!(scene.drop_before(g + l * 0.75), before("B"));
+        assert_eq!(scene.drop_before(g + l + l * 0.25), before("C"));
+        assert_eq!(scene.drop_before(g + l + l * 0.75), before("B"));
+        assert_eq!(scene.drop_before(g + 2. * l + l * 0.25), before("B"));
+        assert_eq!(
+            scene.drop_before(g + 2. * l + l * 0.75),
+            DropSlot::Before(None)
+        );
+        assert_eq!(scene.drop_before(10. * l), DropSlot::Before(None));
     }
 }
 

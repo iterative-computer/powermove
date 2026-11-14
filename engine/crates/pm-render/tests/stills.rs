@@ -271,6 +271,101 @@ fn tga_and_psd_are_drawn() {
     std::fs::remove_dir_all(&d).ok();
 }
 
+/// A 4×2 TGA header, top row first: `kind` 1 (paletted, with `map`
+/// entries of its bits), 2 (true colour) or 3 (grey).
+fn tga_header(kind: u8, map: Option<(u16, u8)>, depth: u8, attribute: u8) -> Vec<u8> {
+    let mut h = vec![0u8; 18];
+    h[2] = kind;
+    if let Some((len, bits)) = map {
+        h[1] = 1;
+        h[5..7].copy_from_slice(&len.to_le_bytes());
+        h[7] = bits;
+    }
+    h[12..14].copy_from_slice(&4u16.to_le_bytes());
+    h[14..16].copy_from_slice(&2u16.to_le_bytes());
+    h[16] = depth;
+    h[17] = attribute | 0x20;
+    h
+}
+
+/// The other TGA kinds ImageIO reads: paletted (24-bit entries), 8-bit grey
+/// and 16-bit (5 bits per colour, bit replication to 8). Each is drawn as
+/// its colour codes in display sRGB. A 16-bit file's attribute bit is not
+/// read as alpha: ImageIO draws such files opaque, and so does the app.
+#[test]
+fn paletted_grey_and_16_bit_tga_are_drawn() {
+    let d = dir().join("tga-kinds");
+    std::fs::create_dir_all(&d).unwrap();
+    let entries = [[30u8, 20, 10], [60, 50, 40], [90, 80, 70], [220, 210, 200]];
+    let mut paletted = tga_header(1, Some((4, 24)), 8, 0);
+    for [r, g, b] in entries {
+        paletted.extend([b, g, r]);
+    }
+    let indices = [0usize, 1, 2, 3, 3, 2, 1, 0];
+    paletted.extend(indices.map(|i| i as u8));
+    let levels = [0u8, 37, 128, 255, 1, 2, 254, 77];
+    let mut grey = tga_header(3, None, 8, 0);
+    grey.extend(levels);
+    let words = [
+        0x7c00u16,
+        0x03e0,
+        0x001f,
+        0xffff,
+        0x8000 | 0x4210,
+        0x0421,
+        0x7fff,
+        0x8000,
+    ];
+    let mut five = tga_header(2, None, 16, 1);
+    for w in words {
+        five.extend(w.to_le_bytes());
+    }
+    let widen = |v: u16| f32::from(((v << 3) | (v >> 2)) as u8) / 255.0;
+    // (file, its bytes, each pixel's colour codes in display sRGB)
+    type Case = (&'static str, Vec<u8>, Vec<[f32; 3]>);
+    let cases: [Case; 3] = [
+        (
+            "paletted.tga",
+            paletted,
+            indices
+                .iter()
+                .map(|&i| entries[i].map(|c| f32::from(c) / 255.0))
+                .collect(),
+        ),
+        (
+            "grey.tga",
+            grey,
+            levels.iter().map(|&l| [f32::from(l) / 255.0; 3]).collect(),
+        ),
+        (
+            "five.tga",
+            five,
+            words
+                .iter()
+                .map(|w| [w >> 10 & 31, w >> 5 & 31, w & 31].map(widen))
+                .collect(),
+        ),
+    ];
+    for (name, bytes, want) in cases {
+        let path = d.join(name);
+        std::fs::write(&path, bytes).unwrap();
+        assert_eq!(probe_image(&path), Ok(()), "{name}");
+        let mut renderer = Renderer::headless().unwrap();
+        let (pixels, w, h) = render(&mut renderer, &path);
+        assert_eq!((w, h), (4, 2), "{name}");
+        let mut worst = 0f32;
+        for (got, want) in pixels.chunks_exact(4).zip(&want) {
+            assert_eq!(got[3], 1.0, "{name}: {got:?}");
+            for (g, e) in got.iter().zip(want) {
+                worst = worst.max((g - e).abs());
+            }
+        }
+        eprintln!("MEASURE {name}: worst {worst}; drawn {:?}", &pixels[..8]);
+        assert!(worst < 2e-5, "{name}: {worst}");
+    }
+    std::fs::remove_dir_all(&d).ok();
+}
+
 /// Y'CbCr JPEG uses Chromium's libjpeg-turbo path; gray and Y'CbCr layouts
 /// are compared in `tests/corpus.rs` and accepted by the media probe.
 #[test]
@@ -1199,7 +1294,7 @@ fn pq_and_hlg_stills_keep_their_light_in_an_hdr_project() {
         let path = d.join(format!("{name}.png"));
         std::fs::write(&path, with_chunk(&raw, b"cICP", &[9, transfer, 0, 1])).unwrap();
         let hdr = serde_json::json!({ "mode": "hdr" });
-        let (px, ..) = render_in(&mut renderer, &path, Some(hdr));
+        let (px, ..) = render_in(&mut renderer, &path, Some(hdr.clone()));
         for (i, (code, nits)) in levels.iter().enumerate() {
             let got = f64::from(pm_color::transfer::display_decode_f32(px[i * 4 + 1]));
             let want = nits / 203.0;
@@ -1209,9 +1304,11 @@ fn pq_and_hlg_stills_keep_their_light_in_an_hdr_project() {
                 "{name} {code}: {got} vs {want}"
             );
         }
-        // The same samples as a HEIC ImageIO writes in BT.2100: ImageIO's
-        // reader labels its samples SDR, so the still is refused with its
-        // reason rather than drawn wrong (listed in the colour notes).
+        // The same samples as a HEIC ImageIO writes in BT.2100 are drawn
+        // as HDR with the same light, within what lossy HEVC keeps of three
+        // neighbouring pixels (it blends them a few percent into each
+        // other); hdr_stills.rs holds HEIC PQ and HLG light to one code on
+        // flat 64×36 fixtures.
         let heic = d.join(format!("{name}.heic"));
         imageio_write(
             &path,
@@ -1222,11 +1319,17 @@ fn pq_and_hlg_stills_keep_their_light_in_an_hdr_project() {
                 ..Default::default()
             },
         );
-        assert!(
-            unsupported(&heic).contains("HEIF PQ/HLG stills"),
-            "{name}.heic: {}",
-            unsupported(&heic)
-        );
+        assert!(probe_image(&heic).is_ok(), "{name}.heic is drawn");
+        let (px, ..) = render_in(&mut renderer, &heic, Some(hdr));
+        for (i, (code, nits)) in levels.iter().enumerate() {
+            let got = f64::from(pm_color::transfer::display_decode_f32(px[i * 4 + 1]));
+            let want = nits / 203.0;
+            eprintln!("{name}.heic {code:.4}: {got:.4} (want {want:.4})");
+            assert!(
+                (got - want).abs() <= 0.05 * want.max(1.0),
+                "{name}.heic {code}: {got} vs {want}"
+            );
+        }
     }
     std::fs::remove_dir_all(&d).ok();
 }

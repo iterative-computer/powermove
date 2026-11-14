@@ -103,9 +103,10 @@ impl<A: Clone + 'static> Alert<A> {
         // A development lane launch in the background: a question nobody can
         // see takes its Escape choice at once (none: dismissed), so nothing,
         // a quit least of all, waits on it. A normal launch always asks.
+        let buttons = keyed(&self.buttons);
         if gpui_macos::child_window::would_hold() {
             let (tx, rx) = async_channel::bounded(1);
-            let escape = self.buttons.iter().find(|b| b.key == Key::Escape);
+            let escape = buttons.iter().find(|b| b.key == Key::Escape);
             let _ = tx.try_send(escape.map(|b| b.action.clone()));
             eprintln!("powermove: a question in the background answered itself (lane launch)");
             return rx;
@@ -118,7 +119,7 @@ impl<A: Clone + 'static> Alert<A> {
             native.setAlertStyle(NSAlertStyle::Critical);
         }
         let mut default_cell = None;
-        for b in &self.buttons {
+        for b in &buttons {
             let button = native.addButtonWithTitle(&NSString::from_str(b.label));
             // Explicit for every button: NSAlert gives the first one Return.
             let (key, modifiers) = match b.key {
@@ -145,7 +146,7 @@ impl<A: Clone + 'static> Alert<A> {
         }
         configure(&native);
         let (tx, rx) = async_channel::bounded(1);
-        let actions: Vec<A> = self.buttons.iter().map(|b| b.action.clone()).collect();
+        let actions: Vec<A> = buttons.iter().map(|b| b.action.clone()).collect();
         let retained: Retained<NSAlert> = native.clone();
         let sheet = native.window();
         if self.notice {
@@ -191,6 +192,29 @@ pub fn note(message: &str, informative: &str) {
         .sheet(&window);
 }
 
+/// The buttons with their keys as every alert answers them (HIG): Return
+/// presses the default (the first when none is marked), and Escape the choice
+/// that changes nothing: the button marked so, else a lone button, else one
+/// titled Cancel (NSAlert's own rule, which setting every key would lose).
+fn keyed<A: Clone>(buttons: &[Button<A>]) -> Vec<Button<A>> {
+    let mut out = buttons.to_vec();
+    if !out.iter().any(|b| b.default)
+        && let Some(first) = out.first_mut()
+    {
+        first.default = true;
+    }
+    if !out.iter().any(|b| b.key == Key::Escape) {
+        let lone = out.len() == 1;
+        if let Some(b) = out
+            .iter_mut()
+            .find(|b| b.key == Key::None && (lone || b.label == "Cancel"))
+        {
+            b.key = Key::Escape;
+        }
+    }
+    out
+}
+
 fn chosen<A: Clone>(actions: &[A], response: NSModalResponse) -> Option<A> {
     let index = usize::try_from(response - NSAlertFirstButtonReturn).ok()?;
     actions.get(index).cloned()
@@ -203,6 +227,40 @@ mod tests {
         NSAlertSecondButtonReturn, NSAlertThirdButtonReturn, NSModalResponseAbort,
         NSModalResponseCancel,
     };
+    /// E3: every alert answers Return and Escape.
+    #[test]
+    fn every_alert_answers_return_and_escape() {
+        fn escape(b: &[Button<&'static str>]) -> Vec<&'static str> {
+            keyed(b)
+                .iter()
+                .filter(|b| b.key == Key::Escape)
+                .map(|b| b.action)
+                .collect()
+        }
+        fn default(b: &[Button<&'static str>]) -> Vec<&'static str> {
+            keyed(b)
+                .iter()
+                .filter(|b| b.default)
+                .map(|b| b.action)
+                .collect()
+        }
+        // A lone OK answers both.
+        let ok = [Button::new("OK", "ok")];
+        assert_eq!((default(&ok), escape(&ok)), (vec!["ok"], vec!["ok"]));
+        // A Cancel nobody marked still answers Escape, as NSAlert's would.
+        let pair = [Button::new("Quit Anyway", "quit"), Button::new("Cancel", "cancel")];
+        assert_eq!((default(&pair), escape(&pair)), (vec!["quit"], vec!["cancel"]));
+        // What an alert marks wins; a Cancel that is the default keeps both.
+        let marked = [
+            Button::new("Cancel", "cancel").default().cancel(),
+            Button::new("Delete", "delete").destructive(),
+        ];
+        assert_eq!((default(&marked), escape(&marked)), (vec!["cancel"], vec!["cancel"]));
+        // Never two Escapes or two defaults.
+        let both = [Button::new("Later", "later").cancel(), Button::new("Cancel", "c")];
+        assert_eq!(escape(&both), vec!["later"]);
+    }
+
     #[test]
     fn buttons_keep_their_order_and_dismissed_sheets_choose_nothing() {
         let actions = ["save", "cancel", "discard"];

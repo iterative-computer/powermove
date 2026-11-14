@@ -79,6 +79,7 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `metrics.control_radius` | Control radius inside a panel (panel radius − gap) | 8 | 8 | 8 | 8 |
 | `metrics.curve_editor` | The curve editor's least graph height | 200 | 200 | 200 | 200 |
 | `metrics.curve_editor_max` | The curve editor's greatest graph height in a wide panel | 360 | 360 | 360 | 360 |
+| `metrics.curve_editor_wide` | The curve editor's greatest width in a wide panel | 640 | 640 | 640 | 640 |
 | `metrics.dock_gap` | Space between docked panels and to the window edge | 8 | 8 | 8 | 8 |
 | `metrics.drag_opacity` | Opacity of a drag source left in place | 0.5 | 0.5 | 0.5 | 0.5 |
 | `metrics.drag_threshold` | Pointer travel before a drag starts | 3 | 3 | 3 | 3 |
@@ -91,6 +92,7 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `metrics.gap` | Gap between panels and to the window edge | 6 | 6 | 6 | 6 |
 | `metrics.gizmo_handle` | Transform handle and path vertex square | 7 | 7 | 7 | 7 |
 | `metrics.gizmo_keyline` | Gizmo stroke and keyline width over the image | 1 | 1 | 1 | 1 |
+| `metrics.grade_field` | A colour wheel's master field under the wheel | 72 | 72 | 72 | 72 |
 | `metrics.grade_pair` | Least width of two colour wheels side by side on their plates | 254 | 254 | 254 | 254 |
 | `metrics.grade_wheel` | A colour wheel's least diameter | 112 | 112 | 112 | 112 |
 | `metrics.grade_wheel_max` | A colour wheel's greatest diameter in a wide panel | 220 | 220 | 220 | 220 |
@@ -137,6 +139,7 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `metrics.sheet_width` | Default sheet width | 480 | 480 | 480 | 480 |
 | `metrics.sheet_width_wide` | Width of wide sheets: Export, Expression | 600 | 600 | 600 | 600 |
 | `metrics.sidebar` | Sidebar width of Home and Settings | 224 | 224 | 224 | 224 |
+| `metrics.splitter_reach` | How far a dock divider's grab reaches into the panels beside its gap | 4 | 4 | 4 | 4 |
 | `metrics.status` | Status bar height | 24 | 24 | 24 | 24 |
 | `metrics.status_dot` | Attention dot and drop insertion-line end circle | 6 | 6 | 6 | 6 |
 | `metrics.symbol_action` | SF Symbol size of a surface's one primary action glyph | 20 | 20 | 20 | 20 |

@@ -54,12 +54,14 @@ fn visit_plan(plan: &CompPlan, visit: &mut impl FnMut(&str, &Source)) {
 /// asset's interpretation, and the edge its draw reads it at
 /// (`crate::exec::source_edge`, from the same matrix, UV window and plane
 /// the draw resolves with).
-fn visit_stills(plan: &CompPlan, visit: &mut impl FnMut(&std::path::Path, bool, Option<u32>)) {
+type Interpret<'a> = Option<&'a pm_media::interpret::Interpretation>;
+
+fn visit_stills(plan: &CompPlan, visit: &mut impl FnMut(&std::path::Path, Interpret, Option<u32>)) {
     fn content(
         c: &Content,
         matrix: &[f64; 6],
         plane: bool,
-        visit: &mut impl FnMut(&std::path::Path, bool, Option<u32>),
+        visit: &mut impl FnMut(&std::path::Path, Interpret, Option<u32>),
     ) {
         match c {
             Content::Texture { source, uv, .. } => match source {
@@ -67,7 +69,7 @@ fn visit_stills(plan: &CompPlan, visit: &mut impl FnMut(&std::path::Path, bool, 
                     path, interpret, ..
                 } => visit(
                     path,
-                    interpret.is_some(),
+                    interpret.as_ref(),
                     crate::exec::source_edge(matrix, *uv, plane),
                 ),
                 Source::Comp(plan) | Source::Accumulate(plan) => visit_stills(plan, visit),
@@ -188,8 +190,8 @@ impl Renderer {
         // left a project with one such layer without any look-ahead).
         let mut result = MediaPreparation::default();
         if !request.export {
-            visit_stills(&plan, &mut |path, interpreted, edge| {
-                self.media.prepare_image(path, edge, interpreted);
+            visit_stills(&plan, &mut |path, interpret, edge| {
+                self.media.prepare_image(path, edge, interpret);
             });
         }
         for v in planned_videos(&plan) {
@@ -199,6 +201,7 @@ impl Renderer {
                 v.instance,
                 v.seconds,
                 request.export,
+                request.read_ahead,
                 v.interpret.as_ref(),
                 v.composition,
             ) {
