@@ -655,6 +655,42 @@ fn an_effect_still_loading_is_waited_for_never_bypassed() {
     );
 }
 
+/// Once loading is over, an effect whose extension is installed but provides
+/// nothing now is bypassed and the viewer names that extension and why, not
+/// "not installed".
+#[test]
+fn the_viewer_names_the_installed_extension_that_provides_nothing_now() {
+    let tinted = snapshot(&format!(
+        r##"{{"id":"P","name":"P","compId":"C","compName":"C","w":640,"h":360,"fps":30,"dur":3,"bg":"#000000",
+        "layers":[{}],"comps":{{}},"assets":{{}},"markers":[],"work":[0,3],"params":{{}}}}"##,
+        shape("top", "#FF0000", 320.).replace(
+            r#""fx":[]"#,
+            r#""fx":[{"id":"e1","type":"ext.invert","on":true,"p":{}}]"#
+        )
+    ));
+    let service = service("effect-owner-off");
+    let v = service
+        .viewer(config(tinted, MediaCatalog::default(), output(320, 180)))
+        .unwrap();
+    v.resources(Arc::new(pm_engine_service::resources::ResourceSnapshot {
+        generation: 1,
+        unavailable: vec![pm_engine_service::resources::Unavailable {
+            id: "ext".into(),
+            name: "Acme Effects".into(),
+            why: "is off until Powermove restarts".into(),
+        }],
+        ..Default::default()
+    }))
+    .unwrap();
+    let drawn = wait(&v, "drawn without it", |s| {
+        s.frame.as_ref().is_some_and(|f| f.gpu_ok) && !s.missing_effects.is_empty()
+    });
+    assert_eq!(
+        drawn.notice().as_deref(),
+        Some("Acme Effects is off until Powermove restarts: ext.invert is bypassed on 1 layer")
+    );
+}
+
 /// A frame that waited long for an extension's effect is drawn the moment the
 /// effect registers, not after the backoff its retries reached (up to a
 /// second; it delayed the first picture of a project with extension effects).

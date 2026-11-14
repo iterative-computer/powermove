@@ -108,7 +108,7 @@ export function ColorPanel({ controller: c, command }: ColorProps) {
       <SectionAction
         id={`${PANEL_ID}:import-cdl`}
         label="Import CDL…"
-        short="Import CDL"
+        short="Import"
         symbol="square.and.arrow.down"
         disabled={!editable}
         onActivate={() => command(IMPORT_CDL)}
@@ -117,7 +117,7 @@ export function ColorPanel({ controller: c, command }: ColorProps) {
         <SectionAction
           id={`${PANEL_ID}:export-cdl`}
           label="Export CDL…"
-          short="Export CDL"
+          short="Export"
           symbol="square.and.arrow.up"
           disabled={p.target !== "Layer"}
           onActivate={() => command(EXPORT_CDL)}
@@ -172,7 +172,7 @@ export function ColorPanel({ controller: c, command }: ColorProps) {
                 onActivate={() => command(LOAD_LUT)}
               />
               {add(CST, "Add Color Space Transform", "Transform")}
-              {cdl}
+              {!firstWheels && cdl}
             </AddRow>
             {tools.map((g, i) => (
               <Tool
@@ -183,6 +183,7 @@ export function ColorPanel({ controller: c, command }: ColorProps) {
                 editable={editable}
                 up={move(tools, i, -1)}
                 down={move(tools, i, 1)}
+                action={g === firstWheels ? cdl : null}
               >
                 {body(g)}
               </Tool>
@@ -195,8 +196,9 @@ export function ColorPanel({ controller: c, command }: ColorProps) {
 }
 
 /** Lift, Gamma, Gain and Offset: each a drawn wheel over its master and
- * its red, green and blue (as Resolve shows them), wrapping two across in a
- * narrow panel and four across in a wide one. */
+ * its red, green and blue (as Resolve shows them). The wheels go in two
+ * pairs, so a narrow panel shows them two across and a wide one four (never
+ * three and one), and every wheel grows with the panel's width. */
 function Wheels({
   g,
   locked,
@@ -205,6 +207,7 @@ function Wheels({
   g: GradeEffect;
   locked: boolean;
 }) {
+  const pairs = [WHEELS_OF.slice(0, 2), WHEELS_OF.slice(2, 4)];
   return (
     <div
       role="group"
@@ -213,123 +216,149 @@ function Wheels({
         display: "flex",
         flexDirection: "row",
         flexWrap: "wrap",
-        justifyContent: "center",
         columnGap: t("metrics.gap"),
         rowGap: t("metrics.gap"),
         paddingTop: t("metrics.gap"),
-        paddingLeft: t("metrics.gap"),
-        paddingRight: t("metrics.gap"),
+        // Inset as the plate above it (Balance and Tone).
+        paddingLeft: t("metrics.inset"),
+        paddingRight: t("metrics.inset"),
       }}
     >
-      {WHEELS_OF.map((w) => {
-        const group = wheelGroup(g, w.key);
-        const master = parameter(g, `${w.key}Master`);
-        const rgb = (group?.value ?? [w.neutral, w.neutral, w.neutral]) as [
-          number,
-          number,
-          number,
-        ];
-        // A grade that is off can still be set up before it is turned on.
-        const disabled = locked || !group;
-        return (
-          // One instrument: its name, the wheel (its master on the bezel),
-          // the master's field and the channels, on one plate.
-          <div
-            key={w.key}
-            role="group"
-            label={w.title}
-            data-pm-variant="plate"
-            style={{
-              display: "flex",
-              flexDirection: "column",
-              alignItems: "center",
-              gap: t("metrics.gap"),
-              padding: t("metrics.gap"),
-            }}
-          >
-            <text
-              style={{
-                color: t("colors.secondary"),
-                fontSize: t("typography.label"),
-                fontWeight: t("typography.semibold_weight"),
-              }}
-            >
-              {w.title}
-            </text>
-            {group && (
-              <UI.ColorWheel
-                id={`${PANEL_ID}:wheel:${g.header.id}:${w.key}`}
-                label={`${w.title} colour`}
-                binding={group.binding}
-                value={rgb}
-                neutral={w.neutral}
-                min={w.range[0]}
-                max={w.range[1]}
-                {...(master
-                  ? {
-                      master: {
-                        value: master.parameter.value as number,
-                        min: master.parameter.min ?? w.range[0],
-                        max: master.parameter.max ?? w.range[1],
-                      },
-                    }
-                  : {})}
-                disabled={disabled}
-                onKeyDown={stop}
-              />
-            )}
-            {master && (
-              <UI.NumberField
-                id={`${PANEL_ID}:field:${master.id}`}
-                label={`${w.title} Master`}
-                binding={master.parameter.binding}
-                value={master.parameter.value as number}
-                step={master.parameter.step}
-                min={master.parameter.min}
-                max={master.parameter.max}
-                precision={master.parameter.precision}
-                disabled={locked || master.parameter.readonly}
-                mixed={master.parameter.mixed}
-                onKeyDown={stop}
-                onClick={stop}
-                style={{ width: t("metrics.grade_wheel") }}
-              />
-            )}
-            <div
-              role="group"
-              label={`${w.title} red ${signed(rgb[0])}, green ${signed(rgb[1])}, blue ${signed(rgb[2])}`}
-              style={{
-                display: "flex",
-                flexDirection: "row",
-                justifyContent: "space-between",
-                width: t("metrics.grade_wheel"),
-              }}
-            >
-              {(["channel_red", "channel_green", "channel_blue"] as const).map(
-                (ink, i) => (
-                  <text
-                    key={ink}
-                    style={{
-                      color: t(`colors.${ink}`),
-                      fontSize: t("typography.caption"),
-                      fontVariantNumeric: "tabular-nums",
-                      whiteSpace: "nowrap",
-                    }}
-                  >
-                    {signed(rgb[i])}
-                  </text>
-                ),
-              )}
-            </div>
-          </div>
-        );
-      })}
+      {pairs.map((pair) => (
+        <div
+          key={pair[0].key}
+          style={{
+            display: "flex",
+            flexDirection: "row",
+            columnGap: t("metrics.gap"),
+            flexGrow: 1,
+            flexBasis: t("metrics.grade_pair"),
+            minWidth: t("metrics.grade_pair"),
+          }}
+        >
+          {pair.map((w) => (
+            <Wheel key={w.key} g={g} w={w} locked={locked} />
+          ))}
+        </div>
+      ))}
     </div>
   );
 }
 
-/** A group of grading controls on the grading material (the host draws it:
- * the kit's one switch between the materials under review). */
+/** One instrument: its name, the wheel (its master on the bezel), the
+ * master's field and the channels, on one plate. */
+function Wheel({
+  g,
+  w,
+  locked,
+}: {
+  key?: string;
+  g: GradeEffect;
+  w: (typeof WHEELS_OF)[number];
+  locked: boolean;
+}) {
+  const group = wheelGroup(g, w.key);
+  const master = parameter(g, `${w.key}Master`);
+  const rgb = (group?.value ?? [w.neutral, w.neutral, w.neutral]) as [
+    number,
+    number,
+    number,
+  ];
+  // A grade that is off can still be set up before it is turned on.
+  const disabled = locked || !group;
+  return (
+    <div
+      role="group"
+      label={w.title}
+      data-pm-variant="plate"
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "stretch",
+        gap: t("metrics.gap"),
+        padding: t("metrics.gap"),
+        flexGrow: 1,
+        flexBasis: t("metrics.grade_wheel"),
+      }}
+    >
+      <text
+        style={{
+          color: t("colors.secondary"),
+          fontSize: t("typography.label"),
+          fontWeight: t("typography.semibold_weight"),
+          textAlign: "center",
+        }}
+      >
+        {w.title}
+      </text>
+      {group && (
+        <UI.ColorWheel
+          id={`${PANEL_ID}:wheel:${g.header.id}:${w.key}`}
+          label={`${w.title} colour`}
+          binding={group.binding}
+          value={rgb}
+          neutral={w.neutral}
+          min={w.range[0]}
+          max={w.range[1]}
+          {...(master
+            ? {
+                master: {
+                  value: master.parameter.value as number,
+                  min: master.parameter.min ?? w.range[0],
+                  max: master.parameter.max ?? w.range[1],
+                },
+              }
+            : {})}
+          disabled={disabled}
+          onKeyDown={stop}
+        />
+      )}
+      {master && (
+        <UI.NumberField
+          id={`${PANEL_ID}:field:${master.id}`}
+          label={`${w.title} Master`}
+          binding={master.parameter.binding}
+          value={master.parameter.value as number}
+          step={master.parameter.step}
+          min={master.parameter.min}
+          max={master.parameter.max}
+          precision={master.parameter.precision}
+          disabled={locked || master.parameter.readonly}
+          mixed={master.parameter.mixed}
+          onKeyDown={stop}
+          onClick={stop}
+        />
+      )}
+      <div
+        role="group"
+        label={`${w.title} red ${signed(rgb[0])}, green ${signed(rgb[1])}, blue ${signed(rgb[2])}`}
+        style={{
+          display: "flex",
+          flexDirection: "row",
+          justifyContent: "space-between",
+        }}
+      >
+        {(["channel_red", "channel_green", "channel_blue"] as const).map(
+          (ink, i) => (
+            <text
+              key={ink}
+              style={{
+                color: t(`colors.${ink}`),
+                fontSize: t("typography.caption"),
+                fontVariantNumeric: "tabular-nums",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {signed(rgb[i])}
+            </text>
+          ),
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** A group of grading controls on the grading plate (the host draws it). */
 function Plate({
   label,
   children,
@@ -484,6 +513,7 @@ function Tool({
   editable,
   up,
   down,
+  action,
   children,
 }: {
   key?: string;
@@ -495,6 +525,8 @@ function Tool({
    * ends). */
   up: Intent | null;
   down: Intent | null;
+  /** Its own actions (the first Color Wheels' CDL Import and Export). */
+  action?: any;
   children: any;
 }) {
   return (
@@ -510,6 +542,7 @@ function Tool({
         editable={editable}
         up={up}
         down={down}
+        action={action}
       />
       {children}
     </div>
@@ -523,6 +556,7 @@ function ToolHeader({
   editable,
   up,
   down,
+  action,
 }: {
   title: string;
   tool: GradeEffect;
@@ -530,6 +564,7 @@ function ToolHeader({
   editable: boolean;
   up: Intent | null;
   down: Intent | null;
+  action?: any;
 }) {
   const id = tool.header.id;
   const order = (intent: Intent | null, label: string, symbol: string) => (
@@ -599,6 +634,7 @@ function ToolHeader({
       >
         <text>{title}</text>
       </div>
+      {action}
       {order(up, `Move ${title} Up`, "chevron.up")}
       {order(down, `Move ${title} Down`, "chevron.down")}
       <UI.ToolbarItem

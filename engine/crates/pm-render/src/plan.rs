@@ -1703,8 +1703,13 @@ fn native_content_quad<'d>(
     match ty.as_str() {
         "shape" => {
             let world = vector_world(scope, b, layer, time, scale)?;
+            let on_plane = scope.is_3d_layer(layer)?;
+            // An explicit 3D vector gets projected area coverage. Legacy 2D
+            // artwork inside a 3D group keeps its authored canvas sampling;
+            // changing those children also changes group glows and filters.
+            let grouped_canvas = on_plane && !node::truthy(node::member(Some(layer), "threeD"));
             if !crate::vector::level2(layer)
-                && (scope.is_3d_layer(layer)? || crate::raster_roi::at_rest(&world))
+                && (grouped_canvas || (!on_plane && crate::raster_roi::at_rest(&world)))
             {
                 let density = crate::text::continuous_raster_scale(&world);
                 return Ok(
@@ -1720,7 +1725,7 @@ fn native_content_quad<'d>(
                     }),
                 );
             }
-            if scope.is_3d_layer(layer)? {
+            if on_plane {
                 let mut plan = |scope: &mut Scope<'_, 'd>, world: &Mat2d, target| {
                     crate::vector::plan_shape(scope, layer, &d, time, world, target)
                 };

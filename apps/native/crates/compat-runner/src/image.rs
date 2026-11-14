@@ -46,6 +46,17 @@ pub(crate) fn rgba_bytes(width: u64, height: u64) -> Result<u64> {
 }
 
 impl Encoded {
+    /// A decoded picture with no encoded form (a video's frame).
+    pub fn frame(pixels: ImageData) -> Self {
+        Self {
+            bytes: Arc::from(&[][..]),
+            mime: "image/png".into(),
+            width: pixels.width(),
+            height: pixels.height(),
+            cost: u64::from(pixels.width()) * u64::from(pixels.height()) * 4,
+            kind: Kind::Raster(Arc::new(pixels)),
+        }
+    }
     /// Decodes `bytes`. `admit` sees what the image will hold before anything
     /// large is allocated, and may refuse it.
     pub fn load(bytes: &[u8], mime: &str, admit: impl FnOnce(u64) -> Result<()>) -> Result<Self> {
@@ -299,13 +310,8 @@ fn raster_size(_: &[u8]) -> Option<(u64, u64)> {
 
 #[cfg(target_os = "macos")]
 fn decode_raster(bytes: &[u8], expected_width: u64, expected_height: u64) -> Option<ImageData> {
-    use objc2_core_foundation::{
-        CFBoolean, CFData, CFDictionary, CFString, CGPoint, CGRect, CGSize,
-    };
-    use objc2_core_graphics::{
-        CGBitmapContextCreate, CGColorSpace, CGContext, CGImage, CGImageAlphaInfo,
-        kCGColorSpaceSRGB,
-    };
+    use objc2_core_foundation::{CFBoolean, CFData, CFDictionary, CFString};
+    use objc2_core_graphics::CGImage;
     use objc2_image_io::{
         CGImageSource, kCGImageSourceCreateThumbnailFromImageAlways,
         kCGImageSourceCreateThumbnailWithTransform,
@@ -334,6 +340,23 @@ fn decode_raster(bytes: &[u8], expected_width: u64, expected_height: u64) -> Opt
     {
         return None;
     }
+    rgba_of(&image)
+}
+
+/// A CGImage's straight RGBA8 pixels in sRGB (drawn through a bitmap
+/// context, so its own colour space is converted).
+#[cfg(target_os = "macos")]
+pub(crate) fn rgba_of(image: &objc2_core_graphics::CGImage) -> Option<ImageData> {
+    use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+    use objc2_core_graphics::{
+        CGBitmapContextCreate, CGColorSpace, CGContext, CGImage, CGImageAlphaInfo,
+        kCGColorSpaceSRGB,
+    };
+    let (width, height) = (CGImage::width(Some(image)), CGImage::height(Some(image)));
+    if width == 0 || height == 0 {
+        return None;
+    }
+    rgba_bytes(width as u64, height as u64).ok()?;
     let mut pixels = vec![0u8; width * height * 4];
     // SAFETY: a constant colour space name.
     let space = CGColorSpace::with_name(Some(unsafe { kCGColorSpaceSRGB }))?;
@@ -353,7 +376,7 @@ fn decode_raster(bytes: &[u8], expected_width: u64, expected_height: u64) -> Opt
         CGPoint::new(0., 0.),
         CGSize::new(width as f64, height as f64),
     );
-    CGContext::draw_image(Some(&context), rect, Some(&image));
+    CGContext::draw_image(Some(&context), rect, Some(image));
     drop(context);
     demultiply(&mut pixels);
     ImageData::from_rgba(width as u32, height as u32, pixels).ok()

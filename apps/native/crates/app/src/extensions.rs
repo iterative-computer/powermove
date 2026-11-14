@@ -364,9 +364,11 @@ fn pinned(
     } else {
         vec![]
     };
+    let unavailable = unavailable(publication);
     if definitions == current.definitions
         && pending == current.pending
         && loading == current.loading
+        && unavailable == current.unavailable
     {
         return None;
     }
@@ -375,8 +377,26 @@ fn pinned(
         definitions,
         pending,
         loading,
+        unavailable,
         ..Default::default()
     })
+}
+/// The installed extensions that provide nothing now, with why, as the
+/// viewer and jobs name them beside the effects they would provide.
+pub(crate) fn unavailable(
+    publication: &pm_compat_runner::host::Publication,
+) -> Vec<pm_engine_service::resources::Unavailable> {
+    publication
+        .unavailable
+        .iter()
+        .map(
+            |(id, name, why)| pm_engine_service::resources::Unavailable {
+                id: id.clone(),
+                name: name.clone(),
+                why: why.clone(),
+            },
+        )
+        .collect()
 }
 /// Effect types the engine draws without any extension.
 fn builtin_effects() -> &'static BTreeSet<String> {
@@ -517,6 +537,7 @@ impl Controller {
                 let _ = wake_tx.try_send(());
             }),
             vars: Some(vars_source(&self.profile)),
+            clipboard: Some(crate::platform::text_clipboard()),
         });
         rasters.connect(host.raster_inbox());
         self.extensions.doc_id = doc_id;
@@ -2152,6 +2173,7 @@ mod tests {
             contributions: Some(Arc::new(json!({"definitions": [effect("fast.tint")]}))),
             settled: false,
             loading: vec![("b-slow".into(), "Slow".into())],
+            unavailable: vec![],
         };
         // The host settles (with the late effect) before the window pins.
         let late = Publication {
@@ -2161,6 +2183,7 @@ mod tests {
             )),
             settled: true,
             loading: vec![],
+            unavailable: vec![],
         };
         let start = ResourceSnapshot {
             pending: true,

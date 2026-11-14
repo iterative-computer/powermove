@@ -146,7 +146,6 @@ pub struct Controller {
     pub(crate) playback_wake: Option<async_channel::Sender<()>>,
     pub errors: crate::error_log::Shared,
     pub rate: pm_time::Rate,
-    pub duration: f64,
     pub dimensions: [f64; 2],
     /// Composition background (`bg`); `None` when transparent.
     pub background: Option<u32>,
@@ -366,7 +365,7 @@ impl pm_shell::integration::Integration for Bridge {
                 .or_else(|| crate::takes_panel::panel(v, id, bounds, cx))
                 .or_else(|| crate::notes_panel::panel(v, id, bounds, w, cx))
                 .or_else(|| crate::workspaces::panel(v, id, bounds, cx))
-                .or_else(|| crate::generated_panel::panel(v, id, bounds, cx))
+                .or_else(|| crate::generated_panel::panel(v, id, bounds, w, cx))
                 .or_else(|| v.builtin_panel(id, bounds, w, cx))
         })
     }
@@ -780,7 +779,6 @@ impl Controller {
             playback_wake: None,
             errors: crate::error_log::shared(cx),
             rate: pm_time::Rate::FPS_30,
-            duration: 1.,
             dimensions: [1920., 1080.],
             background: None,
             keyframes: 0,
@@ -1043,7 +1041,13 @@ impl Controller {
                 .as_deref()
                 .filter(|_| p.history.can_redo),
         );
+        let shape = (self.duration(), self.work_area());
         self.published = Some(p);
+        // A run in progress follows a changed duration or work area at once
+        // (its loop, or where it stops), as the timeline does.
+        if shape != (self.duration(), self.work_area()) && self.running() {
+            self.shape_run();
+        }
         // A changed Views setting splits the viewer now, not at the next
         // frame (a paused viewer has none): read from the publication just stored.
         self.sync_studio_panes(cx);
@@ -1389,7 +1393,7 @@ impl Controller {
     pub fn seek_at(&mut self, seconds: f64, input: f64) {
         let mut target = None;
         if let Some(v) = &self.viewer
-            && let Some(time) = frame_start_at(self.rate, seconds.clamp(0., self.duration))
+            && let Some(time) = frame_start_at(self.rate, seconds.clamp(0., self.duration()))
         {
             target = Some(time as f64 / TICKS_PER_SECOND as f64);
             if let Err(e) = v.scrub_at(Ticks::new(time).unwrap_or(Ticks::ZERO), input) {
@@ -1505,11 +1509,37 @@ impl Controller {
             _ => None,
         };
         let electron_profile = path.is_some().then(|| self.electron.clone()).flatten();
-        let pending = self.kernel.shell(ShellCall::PrepareOpen {
+        let call = ShellCall::PrepareOpen {
             id: open_id,
             source,
             electron_profile,
-        });
+        };
+        // A file in a folder macOS guards: its question is answered before
+        // the kernel reads (`access`), so a Yes opens it the first time.
+        let (kernel, worker, file) = (
+            self.kernel.clone(),
+            cx.background_executor().clone(),
+            path.clone(),
+        );
+        let pending = async move {
+            if let Some(file) = file {
+                let access = worker
+                    .spawn(async move {
+                        crate::access::wait_for_read(
+                            &file,
+                            crate::access::ANSWER,
+                            crate::access::read_start,
+                        )
+                    })
+                    .await;
+                if access == crate::access::Access::Refused {
+                    return Some(Err(KernelFailure::Storage(
+                        "Operation not permitted (os error 1)".into(),
+                    )));
+                }
+            }
+            kernel.shell(call).await
+        };
         let saved = path.as_ref().is_none_or(|p| p.exists());
         self.settle_open(operation, name, path, saved, pending, cx);
     }
@@ -2213,7 +2243,6 @@ impl Controller {
                 .and_then(crate::node_number)
                 .unwrap_or(default)
         };
-        self.duration = number("dur", 1.).max(0.001);
         self.dimensions = composition_size(number("w", 1920.), number("h", 1080.));
         self.rate = composition_rate(composition);
         let media = self.media.clone();
@@ -2234,7 +2263,7 @@ impl Controller {
             },
             layer: Some(self.host.borrow().viewer_layer()),
             rate: self.rate,
-            end: Some((self.duration * TICKS_PER_SECOND as f64) as i64),
+            end: Some((self.duration() * TICKS_PER_SECOND as f64) as i64),
             audio: true,
         };
         let placed = match &old {
@@ -3364,7 +3393,7 @@ impl Controller {
                         return true;
                     }
                     "gotoEnd" => {
-                        self.seek((self.duration - 1. / self.rate.to_f64()).max(0.));
+                        self.seek((self.duration() - 1. / self.rate.to_f64()).max(0.));
                         return true;
                     }
                     _ => return false,
@@ -3373,7 +3402,7 @@ impl Controller {
                 // last frame it lands on that frame.
                 if let TransportCommand::Step { frames } = command {
                     let frame = 1. / self.rate.to_f64();
-                    let last = (self.duration - frame).max(0.);
+                    let last = (self.duration() - frame).max(0.);
                     let target = self.time() + f64::from(frames) * frame;
                     if target < -frame / 2. || target > last + frame / 2. {
                         self.end_run();
@@ -3420,12 +3449,17 @@ fn open_failure(error: &KernelFailure) -> crate::surfaces::documents::OpenFailur
         }
         KernelFailure::AlreadyOpen(_) | KernelFailure::Storage(_) => {
             let text = error.to_string().to_lowercase();
-            if text.contains("permission") {
+            if crate::access::refused_text(&text) {
+                return OpenFailure::AccessRefused;
+            } else if text.contains("permission") {
                 PermissionDenied
             } else if text.contains("not found") || text.contains("no such file") {
                 NotFound
             } else if text.contains("no space") {
                 DiskFull
+            } else if crate::access::os_text(&text) {
+                // The system failed the read: nothing says the file is damaged.
+                Unavailable
             } else {
                 InvalidData
             }
@@ -3435,6 +3469,27 @@ fn open_failure(error: &KernelFailure) -> crate::surfaces::documents::OpenFailur
 pub const SAVING: &str = "Saving…";
 /// `fpsRational`, else the stored float snapped to its exact rate: a project
 /// saved at 29.97 plays on the 30000/1001 grid the engine draws.
+/// The open composition's duration in seconds as the publication has it
+/// now (Project Settings, the Properties field and agents change it under a
+/// bound viewer), at least a millisecond.
+pub fn composition_duration(p: &Published) -> f64 {
+    p.snapshot
+        .root()
+        .and_then(|root| {
+            pm_kernel::model::comp_node(root, Some(&p.snapshot.render_comp()))
+                .unwrap_or(root)
+                .get("dur")
+        })
+        .and_then(crate::node_number)
+        .unwrap_or(1.)
+        .max(0.001)
+}
+impl Controller {
+    /// The open composition's duration now ([`composition_duration`]).
+    pub fn duration(&self) -> f64 {
+        self.published.as_deref().map_or(1., composition_duration)
+    }
+}
 fn composition_rate(composition: &pm_model::Node) -> pm_time::Rate {
     let rational = composition.get("fpsRational").map(|n| n.to_value());
     pm_model::ingest::IngestRate::from_document(
@@ -3508,6 +3563,33 @@ pub(crate) fn frame_start_at(rate: pm_time::Rate, seconds: f64) -> Option<i64> {
 #[cfg(test)]
 mod save_note_tests {
     use super::*;
+    /// A file macOS kept the app from reading (a folder it guards, the
+    /// person said No) is never called damaged; nor is any other OS failure.
+    #[::core::prelude::v1::test]
+    fn a_refused_or_failed_read_is_never_called_damaged() {
+        use crate::surfaces::documents::OpenFailure;
+        use pm_services::ServiceErrorCode;
+        let failure = |text: &str| open_failure(&KernelFailure::Storage(text.into()));
+        assert_eq!(
+            failure("Cannot read /Users/x/Downloads/p.pmv: Operation not permitted (os error 1)"),
+            OpenFailure::AccessRefused
+        );
+        assert_eq!(
+            failure("Cannot read /Volumes/x/p.pmv: Input/output error (os error 5)"),
+            OpenFailure::Service(ServiceErrorCode::Unavailable)
+        );
+        assert_eq!(
+            failure("Permission denied (os error 13)"),
+            OpenFailure::Service(ServiceErrorCode::PermissionDenied)
+        );
+        // Only the container's own verdict says the contents are bad.
+        assert_eq!(
+            failure("Invalid project container: truncated entry"),
+            OpenFailure::Service(ServiceErrorCode::InvalidData)
+        );
+        let alert = crate::surfaces::documents::open_error("p", OpenFailure::AccessRefused, true);
+        assert_eq!(alert.message, "Powermove isn’t allowed to open “p”.");
+    }
     // `gpui::*` above exports a `test` macro; name the built-in explicitly.
     #[::core::prelude::v1::test]
     fn a_typed_timecode_lands_on_its_frame() {
