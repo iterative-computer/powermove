@@ -123,7 +123,9 @@ export function snapshot(value: unknown): ViewerSnapshot {
   if (frame.resource !== null) text(frame.resource);
   if (typeof frame.loading !== "boolean" || typeof frame.failed !== "boolean")
     throw new TypeError("Invalid frame observation");
-  if (h.transport !== undefined) {
+  // Null (not just absent) while a timeline in the workspace owns play and
+  // the timecode: the native host sends `"transport": null` then.
+  if (h.transport !== undefined && h.transport !== null) {
     const t = record(h.transport);
     finite(t.time);
     for (const k of ["timecode", "spokenTime", "duration"])
