@@ -28,6 +28,22 @@ pub struct Row {
     pub symbol: &'static str,
     pub severity: Severity,
     pub text: String,
+    /// A second line in the secondary colour: why, under what.
+    pub detail: Option<String>,
+}
+/// A count and what it counts, side by side with the others in one card.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Stat {
+    pub value: String,
+    pub label: String,
+}
+/// Names in two calm columns under a heading: the first `preview` show, the
+/// rest behind Show All.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Names {
+    pub title: String,
+    pub names: Vec<String>,
+    pub preview: usize,
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct Button {
@@ -73,7 +89,12 @@ pub struct Frame {
     pub spinner: bool,
     /// The card under the line: copy steps, or the folders macOS protects.
     pub steps: Vec<StepRow>,
+    /// Counts side by side, under the line (the extension step's lead).
+    pub stats: Vec<Stat>,
+    /// A heading over the rows' card.
+    pub rows_title: Option<String>,
     pub rows: Vec<Row>,
+    pub names: Option<Names>,
     pub choices: Vec<Choice>,
     pub chosen: Option<String>,
     pub cards: bool,
@@ -85,6 +106,10 @@ pub struct Frame {
     /// Centred, the title on its own lines, the button under it (the
     /// Welcome); other frames read from the leading edge.
     pub centred: bool,
+    /// The title sits at the same height whatever follows, so a step's
+    /// screens don't jump as it moves on (N004–N006); others are centred
+    /// vertically.
+    pub top: bool,
 }
 impl Frame {
     /// Return activates this. Disabled buttons never do.
