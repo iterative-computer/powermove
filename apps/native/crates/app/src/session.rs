@@ -3147,6 +3147,19 @@ impl Controller {
                     self.toggle_loop(cx);
                 }
             }
+            "footage.interpret" => {
+                let Some(published) = self.published.clone() else {
+                    return false;
+                };
+                match crate::agent_commands::interpret(&cmd.args, &published) {
+                    Ok(plan) => self.run_layer_plan(plan, cx),
+                    Err(message) => {
+                        self.message = message;
+                        cx.notify();
+                        return false;
+                    }
+                }
+            }
             "workArea.set" | "precompose.selection" | "composition.new" => {
                 let Some(published) = self.published.clone() else {
                     return false;
