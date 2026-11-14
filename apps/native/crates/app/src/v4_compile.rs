@@ -148,6 +148,9 @@ pub enum Kit {
         rgb: [f64; 3],
         neutral: f64,
         range: [f64; 2],
+        /// Its master's push from neutral, -1 to 1 of the master's range
+        /// (shown on the wheel's bezel).
+        master: Option<f64>,
     },
     /// A curve editor: `[count, x0, y0, …]` and its channel's ink.
     Curve {
@@ -336,6 +339,10 @@ fn header(surface: &Surface) -> Option<Id> {
 /// How the host presents an element (`data-pm-variant`).
 pub fn variant(node: &Node) -> Option<&str> {
     node.props.get("data-pm-variant").and_then(Value::as_str)
+}
+/// The variant of node `id` of `surface`.
+pub fn variant_of(surface: &Surface, id: Id) -> Option<&str> {
+    surface.node(id).and_then(variant)
 }
 fn compile(
     surface: &Surface,
@@ -954,10 +961,19 @@ fn kit(node: &Node, component: Option<Component>, panel: &Panel, table: &TokenTa
                     .and_then(Value::as_f64)
             };
             let neutral = option("neutral").unwrap_or(0.);
+            let master = option("master").map(|m| {
+                let span = if m >= neutral {
+                    option("masterMax").unwrap_or(neutral + 1.) - neutral
+                } else {
+                    neutral - option("masterMin").unwrap_or(neutral - 1.)
+                };
+                ((m - neutral) / span.max(1e-9)).clamp(-1., 1.)
+            });
             Kit::Wheel {
                 rgb: std::array::from_fn(|i| numbers.get(i).copied().unwrap_or(neutral)),
                 neutral,
                 range: [option("min").unwrap_or(-1.), option("max").unwrap_or(1.)],
+                master,
             }
         }
         Some(Component::CurveEditor) => Kit::Curve {

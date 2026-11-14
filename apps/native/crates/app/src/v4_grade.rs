@@ -80,14 +80,30 @@ impl SurfaceView {
             active: drag.is_some(),
         };
         let paint: Box<dyn Fn(Bounds<Pixels>, &mut Window, &mut gpui::App)> = match (kit, drag) {
-            (Kit::Wheel { rgb, neutral, .. }, drag) => {
-                let rgb = match drag {
-                    Some(GradeDrag::Wheel { live, .. }) => *live,
-                    _ => *rgb,
+            (
+                Kit::Wheel {
+                    rgb,
+                    neutral,
+                    master,
+                    ..
+                },
+                drag,
+            ) => {
+                let (rgb, dragged) = match drag {
+                    Some(GradeDrag::Wheel { live, .. }) => (*live, true),
+                    _ => (*rgb, false),
                 };
-                let puck = grade::puck(rgb, *neutral);
+                let target = grade::puck(rgb, *neutral);
+                let master = *master;
+                let motion = self.grade_motion.clone();
                 Box::new(move |b, window, cx| {
-                    grade::paint_wheel(b, puck, look, &tokens, window, cx)
+                    // Under the pointer the puck is where the hand puts it;
+                    // otherwise (a reset, an undo, another wheel's edit) it
+                    // settles there on the layout spring, interruptibly.
+                    let puck = settle(&motion, id, target, dragged, &tokens, window);
+                    let started = std::time::Instant::now();
+                    grade::paint_wheel(b, puck, master, look, &tokens, window, cx);
+                    timing(started);
                 })
             }
             (Kit::Curve { values, channel }, drag) => {
@@ -103,7 +119,9 @@ impl SurfaceView {
                 let channel = *channel;
                 Box::new(move |b, window, _| {
                     let g = graph(b, &tokens);
-                    grade::paint_curve(g, &curve, channel, held, leaving, look, &tokens, window)
+                    let started = std::time::Instant::now();
+                    grade::paint_curve(g, &curve, channel, held, leaving, look, &tokens, window);
+                    timing(started);
                 })
             }
             _ => return None,
@@ -161,6 +179,7 @@ impl SurfaceView {
                 rgb,
                 neutral,
                 range,
+                ..
             } => {
                 let d = t
                     .metrics
@@ -333,6 +352,80 @@ impl SurfaceView {
 
 fn precise(v: f64) -> f64 {
     (v * 1000.).round() / 1000.
+}
+
+/// Each wheel's drawn puck, moving toward where its values put it.
+pub(super) type Motion =
+    Rc<RefCell<HashMap<Id, (pm_design::motion::Animated<2>, std::time::Instant)>>>;
+
+/// Where wheel `id`'s puck is drawn this frame: at `target` while dragged (or
+/// under Reduce Motion); else on the layout spring from where it was drawn.
+fn settle(
+    motion: &Motion,
+    id: Id,
+    target: (f64, f64),
+    dragged: bool,
+    t: &pm_design::Tokens,
+    window: &mut Window,
+) -> (f64, f64) {
+    use pm_design::motion::{Animated, POINT_PRECISION, Preset};
+    let goal = [target.0 as f32, target.1 as f32];
+    let now = std::time::Instant::now();
+    let mut all = motion.borrow_mut();
+    let (spring, last) = all.entry(id).or_insert_with(|| {
+        (
+            Animated::new(
+                goal,
+                Preset::Layout.spring(&t.motion),
+                POINT_PRECISION / 100.,
+            ),
+            now,
+        )
+    });
+    if dragged || t.accessibility.reduce_motion {
+        spring.snap(goal);
+    } else if spring.target != goal {
+        spring.animate_to(goal, Preset::Layout.spring(&t.motion));
+    }
+    let dt = now.duration_since(*last).as_secs_f32();
+    *last = now;
+    if spring.step(dt) {
+        window.request_animation_frame();
+    }
+    (spring.value[0] as f64, spring.value[1] as f64)
+}
+
+/// Development builds with `PM_GRADE_TIMING`: the grading controls' drawing
+/// time, every 240 draws, to the log (item 4c's cost per frame).
+fn timing(started: std::time::Instant) {
+    #[cfg(debug_assertions)]
+    {
+        thread_local! {
+            static ON: bool = std::env::var_os("PM_GRADE_TIMING").is_some();
+            static SAMPLES: RefCell<Vec<f64>> = const { RefCell::new(Vec::new()) };
+        }
+        if !ON.with(|on| *on) {
+            return;
+        }
+        let us = started.elapsed().as_secs_f64() * 1e6;
+        SAMPLES.with(|s| {
+            let mut s = s.borrow_mut();
+            s.push(us);
+            if s.len() >= 240 {
+                s.sort_by(f64::total_cmp);
+                let mean = s.iter().sum::<f64>() / s.len() as f64;
+                eprintln!(
+                    "grade draw ({:?}): mean {mean:.0} us, p95 {:.0} us, max {:.0} us",
+                    pm_shell::grade::material(),
+                    s[s.len() * 95 / 100],
+                    s[s.len() - 1]
+                );
+                s.clear();
+            }
+        });
+    }
+    #[cfg(not(debug_assertions))]
+    let _ = started;
 }
 
 /// The least distance between two points' inputs the editor leaves: the
