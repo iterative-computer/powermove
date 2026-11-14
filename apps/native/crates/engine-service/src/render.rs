@@ -1768,6 +1768,9 @@ impl Engine {
                     t.render_cpu_ms = crate::trace::thread_cpu_ms() - cpu_start;
                     if let Some(work) = work {
                         t.work = pm_perf::snapshot().since(&work);
+                        if let Ok(rendered) = &rendered {
+                            t.source_stand_ins = rendered.stand_ins.clone();
+                        }
                     }
                     t.images_over = self.renderer.image_over_budget();
                 }
@@ -2021,6 +2024,22 @@ impl Engine {
         }
         self.pool
             .retain(|s| s.size == size || Arc::strong_count(s) > 1);
+        // The half-grant bound covers the output surfaces in flight too,
+        // including frames with stand-ins (which never enter `self.cache`).
+        // Keeping a full cache beside those surfaces starved video decode
+        // at large preview sizes and reopened its decoder on every frame.
+        while self.pool.iter().filter(|s| s.size == size).count() >= capacity
+            && !self
+                .pool
+                .iter()
+                .any(|s| s.size == size && Arc::strong_count(s) == 1)
+        {
+            if self.cache.pop_front().is_none() {
+                // Only pinned surfaces remain. A frame in flight cannot be
+                // reclaimed; the existing eleven-surface bound still applies.
+                break;
+            }
+        }
         let free = self
             .pool
             .iter()
@@ -3104,6 +3123,66 @@ mod lifetime_tests {
                 }
             }
             assert!(worst < 0.002, "{mode:?}: max signal error {worst}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod playback_pool_tests {
+    use super::*;
+
+    #[test]
+    fn in_flight_stand_ins_share_the_output_cache_allowance() {
+        let mut engine =
+            Engine::without_definitions(Gpu::new("playback-output-pool").unwrap(), None).unwrap();
+        let size = Size::new(1920, 1080);
+        let bytes = u64::from(size.width) * u64::from(size.height) * 8;
+        let capacity =
+            (FRAME_CACHE_BYTES.min(engine.memory_client.grant() / 2) / bytes).clamp(1, 8) as usize;
+        let project = pm_model::json::parse(r##"{"id":"P","compId":"C","w":1920,"h":1080,"fps":30,"dur":2,"layers":[],"comps":{},"assets":{}}"##).unwrap();
+        let scene = Scene {
+            doc: Arc::new(pm_model::Document::new(
+                Some(pm_model::canonical::canonical_project(project)),
+                1,
+            )),
+            comp: "C".into(),
+            media: Arc::default(),
+            content: 1,
+        };
+        let spec = FrameSpec::exact(
+            Ticks::ZERO,
+            Output {
+                width: size.width,
+                height: size.height,
+                display: 0,
+                headroom: 1.,
+                crop: None,
+            },
+        );
+        let mut key = engine.cache_key(&scene, &spec, size);
+        let mut flights = VecDeque::new();
+        for n in 0..32 {
+            if flights.len() == 3 {
+                flights.pop_front();
+            }
+            let surface = engine.cache_surface(size).unwrap();
+            if n % 2 == 0 {
+                key.time = n;
+                engine.cache.push_back(CachedFrame {
+                    key,
+                    composition: scene.comp.clone(),
+                    surface: surface.clone(),
+                    failures: Arc::default(),
+                });
+            }
+            // Alternate exact cached pictures and uncached stand-ins, with
+            // the same three in-flight references the playing viewer holds.
+            flights.push_back(surface);
+            assert!(
+                engine.pool.len() <= capacity.max(3),
+                "frame {n}: {} surfaces for an allowance of {capacity}",
+                engine.pool.len()
+            );
         }
     }
 }

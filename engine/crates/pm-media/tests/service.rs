@@ -62,6 +62,105 @@ fn rule_7_selection_through_the_service() {
     }
 }
 
+/// Frame-threaded VP9 must feed future packets before returning the requested
+/// picture. Those extra buffers caused a viewer's small lease to discard its
+/// decoder and seek from the GOP start on almost every frame. Display uses
+/// intra-picture threads; every pixel must still equal the export decoder.
+#[test]
+fn vp9_display_has_no_threading_delay_and_matches_export() {
+    for (path, backend) in [
+        (fixtures_dir().join("vp9-opus.webm"), Backend::Ffmpeg),
+        (
+            fixtures_dir().join("vp9-alpha-threading.webm"),
+            Backend::FfmpegAlphaPair,
+        ),
+    ] {
+        let src = MediaSource::open(&path).unwrap();
+        let display = DecodeService::new(ServiceConfig {
+            cache_bytes: 0,
+            ..Default::default()
+        });
+        let export = DecodeService::new(ServiceConfig {
+            cache_bytes: 0,
+            ..Default::default()
+        });
+        let mut live = display
+            .session_with(&src, 1, DecodePurpose::Display, Some(backend))
+            .unwrap();
+        let mut reference = export
+            .session_with(&src, 1, DecodePurpose::Export, Some(backend))
+            .unwrap();
+        for n in 0..src.pts.len() {
+            let frame = live.frame(n).unwrap();
+            assert_eq!(
+                live.stats().samples_fed as usize,
+                src.index.frames[n].sample + 1,
+                "{} frame {n}: display must not feed later pictures",
+                path.display()
+            );
+            assert_eq!(
+                frame.md5_hex().unwrap(),
+                reference.frame(n).unwrap().md5_hex().unwrap(),
+                "{} frame {n}",
+                path.display()
+            );
+        }
+        // A backwards seek and a new forward run remain exact too.
+        for n in [src.pts.len() / 2, 0, 1, src.pts.len() - 1] {
+            assert_eq!(
+                live.frame(n).unwrap().md5_hex().unwrap(),
+                reference.frame(n).unwrap().md5_hex().unwrap()
+            );
+        }
+    }
+}
+
+#[test]
+fn a_returned_decoder_releases_free_buffers_before_its_decode_state() {
+    let src = MediaSource::open(&fixtures_dir().join("vp9-opus.webm")).unwrap();
+    let svc = DecodeService::new(ServiceConfig {
+        cache_bytes: 0,
+        pool_free_bytes: 8 << 20,
+        ..Default::default()
+    });
+    let mut session = svc
+        .session_with(&src, 1, DecodePurpose::Display, Some(Backend::Ffmpeg))
+        .unwrap();
+    drop(session.frame(0).unwrap());
+    let free_bytes = 8 * pm_media::pool::PAGE;
+    let budget = svc.usage().decoders + free_bytes;
+    svc.apply_lease(MediaLease {
+        frame_cache: 0,
+        decoders: budget,
+    });
+    // Simulate a larger buffer retired by another frame. It is entirely
+    // reclaimable; retaining it must not cost the running decoder its state.
+    drop(svc.pool().acquire(free_bytes).unwrap());
+    // Live storage can grow after the free-pool allowance was calculated
+    // (another decode worker), leaving yesterday's free allowance too large.
+    let pinned = svc.pool().acquire(pm_media::pool::PAGE).unwrap();
+    assert!(svc.usage().decoders > budget);
+    assert!(svc.usage().pool.free_bytes > 0);
+    drop(session);
+    let usage = svc.usage();
+    assert_eq!(
+        usage.sessions, 1,
+        "free buffers evicted a warm decoder: {usage:?}"
+    );
+    assert!(usage.decoders <= budget, "{usage:?}");
+    let session = svc
+        .session_with(&src, 1, DecodePurpose::Display, Some(Backend::Ffmpeg))
+        .unwrap();
+    assert_eq!(session.stats().requests, 1, "the same decoder is reused");
+    drop(session);
+    drop(pinned);
+    let usage = svc.apply_lease(MediaLease {
+        frame_cache: 0,
+        decoders: 0,
+    });
+    assert_eq!(usage.sessions, 0, "a zero lease still closes it");
+}
+
 #[test]
 fn frame_cache_obeys_its_lease() {
     let src = MediaSource::open(&fixtures_dir().join("h264-aac.mp4")).unwrap();

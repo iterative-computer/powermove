@@ -27,9 +27,17 @@ pub struct AlphaPairDecoder {
 }
 
 impl AlphaPairDecoder {
-    pub fn new(input: &super::Input, stream: usize, pool: FramePool, threads: i32) -> Result<Self> {
-        let color = FfDecoder::new(input, stream, None, pool.clone(), threads)?;
-        let alpha = FfDecoder::new(input, stream, None, pool.clone(), threads)?;
+    pub fn new(
+        input: &super::Input,
+        stream: usize,
+        pool: FramePool,
+        threads: i32,
+        purpose: crate::vt::DecodePurpose,
+    ) -> Result<Self> {
+        let color =
+            FfDecoder::new_for_purpose(input, stream, None, pool.clone(), threads, purpose)?;
+        let alpha =
+            FfDecoder::new_for_purpose(input, stream, None, pool.clone(), threads, purpose)?;
         if color.name() != "vp8" && color.name() != "vp9" {
             return Err(MediaError::unsupported(format!(
                 "alpha pairing needs FFmpeg's vp8 or vp9, got {}",
