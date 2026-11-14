@@ -86,14 +86,21 @@ fn main_disk_media_receipts_recovery_and_project_workspaces_migrate_without_brow
         "storage-upgrade-v1.json",
         "project-files.json",
         "project-files.json.pending-synthetic.json",
-        "recovery/files.json",
-        "backups/p/uncertain.json",
     ] {
         assert!(cp.files.contains_key(std::path::Path::new(path)), "{path}");
         assert_eq!(
             fs::read(config.electron_profile.join(path)).unwrap(),
             fs::read(config.native_profile.join("legacy-main").join(path)).unwrap()
         );
+    }
+    for excluded in [
+        "recovery",
+        "backups",
+        "Agent Workspaces",
+        "transcription-cache",
+    ] {
+        assert!(!cp.files.keys().any(|p| p.starts_with(excluded)));
+        assert!(!config.native_profile.join(excluded).exists());
     }
     let state: Value = read(&config.native_profile.join("Media Store/migration.json"));
     let pass = state["passes"]
@@ -127,58 +134,62 @@ fn main_disk_media_receipts_recovery_and_project_workspaces_migrate_without_brow
 }
 
 #[test]
-fn checksum_failure_keeps_source_and_checkpoint_recoverable_and_retries_exact_bytes() {
+fn size_mismatch_is_offline_and_checksum_verification_is_deferred_until_adoption() {
     let t = private_tempdir();
     let config = main_profile(&t.path().canonicalize().unwrap());
     let records: Value = serde_json::from_str(include_str!("fixtures/main-media.json")).unwrap();
+    let record = &records[0];
     let path = config
         .electron_profile
         .join("Media Store")
-        .join(records[0]["record"]["file"].as_str().unwrap());
+        .join(record["record"]["file"].as_str().unwrap());
     fs::write(&path, b"corrupt").unwrap();
     let before = files(&config.electron_profile);
-    assert!(run(&config, |_| Ok(())).is_err());
+    assert!(matches!(
+        run(&config, |_| Ok(())).unwrap(),
+        Outcome::Complete { .. }
+    ));
     assert_eq!(before, files(&config.electron_profile));
     assert!(
-        config
-            .native_profile
-            .join("first-launch-checkpoint/checkpoint.json")
-            .exists()
+        pm_native_migrate::linked_summary(&config.native_profile.join("Media Store"))
+            .unwrap()
+            .total_items
+            < 3
     );
-    assert!(!config.native_profile.join("Media Store/keys").exists());
-    // The immutable checkpoint is retained; changing the source later must not
-    // make a previously captured corrupt payload look verified.
-    fs::write(&path, records[0]["payload"].as_str().unwrap()).unwrap();
-    assert!(run(&config, |_| Ok(())).is_err());
 }
 
 #[test]
-fn verified_main_index_does_not_admit_unindexed_or_unknown_payloads() {
-    for relative in ["unindexed.bin", "Index/future-record.json"] {
-        let t = private_tempdir();
-        let config = main_profile(&t.path().canonicalize().unwrap());
-        let path = config.electron_profile.join("Media Store").join(relative);
-        fs::write(&path, b"synthetic unrecognized media").unwrap();
-        let source = files(&config.electron_profile);
-        let error = run(&config, |_| Ok(())).unwrap_err();
-        assert_eq!(
-            error.downcast_ref::<pm_first_launch::MigrationRequirement>(),
-            Some(&pm_first_launch::MigrationRequirement::MainFileMediaAdapter)
-        );
-        assert_eq!(source, files(&config.electron_profile));
-        assert_eq!(
-            fs::read(
-                config
-                    .native_profile
-                    .join("first-launch-checkpoint/profile/Media Store")
-                    .join(relative)
-            )
-            .unwrap(),
-            b"synthetic unrecognized media"
-        );
-        assert!(!config.native_profile.join("Media Store/keys").exists());
-        assert!(run(&config, |_| Ok(())).is_err());
-    }
+fn unindexed_payloads_are_left_in_source_and_unknown_index_metadata_is_refused() {
+    let t = private_tempdir();
+    let config = main_profile(&t.path().canonicalize().unwrap());
+    let path = config.electron_profile.join("Media Store/unindexed.bin");
+    fs::write(&path, b"synthetic unrecognized media").unwrap();
+    assert!(matches!(
+        run(&config, |_| Ok(())).unwrap(),
+        Outcome::Complete { .. }
+    ));
+    assert!(
+        !checkpoint(&config)
+            .files
+            .contains_key(std::path::Path::new("Media Store/unindexed.bin"))
+    );
+    assert_eq!(fs::read(path).unwrap(), b"synthetic unrecognized media");
+    let other = private_tempdir();
+    let config = main_profile(&other.path().canonicalize().unwrap());
+    let unknown = config
+        .electron_profile
+        .join("Media Store/Index/future-record.json");
+    fs::write(&unknown, b"synthetic unrecognized metadata").unwrap();
+    assert!(run(&config, |_| Ok(())).is_err());
+    assert_eq!(
+        fs::read(
+            config
+                .native_profile
+                .join("first-launch-checkpoint/profile/Media Store/Index/future-record.json")
+        )
+        .unwrap(),
+        fs::read(unknown).unwrap()
+    );
 }
 
 #[test]
@@ -355,21 +366,15 @@ fn full_main_source_link_identity_migrates_without_a_sampled_fingerprint() {
     assert_eq!(before, files(&config.electron_profile));
     assert_eq!(fs::read(source).unwrap(), b"synthetic original");
     assert_eq!(fs::read(proxy_source).unwrap(), b"synthetic playback proxy");
-    assert_eq!(
-        pass["diskRecords"]["media:proxy"]["source"],
-        "main-source-link"
-    );
+    assert_eq!(pass["diskRecords"]["media:proxy"]["source"], "linked");
 }
 
-/// An original from main's Media Store that only lives in a folder the person
-/// skipped is "not reached": offline with its source kept, listed in the
-/// report, and never blocking its project.
+/// Metadata-only links do not open guarded source folders or ask for read access.
 #[test]
-fn skipped_source_linked_media_is_not_reached_and_never_blocks() {
+fn guarded_main_source_links_are_published_without_opening_the_original() {
     use pm_first_launch::{
-        Outcome, run_with_folder_access,
+        Outcome,
         source_access::{self, Choice, PROMPT_TIMEOUT},
-        surfaces::migration::ReportKind,
     };
     let t = tempfile::tempdir().unwrap();
     let root = t.path().canonicalize().unwrap();
@@ -403,112 +408,28 @@ fn skipped_source_linked_media_is_not_reached_and_never_blocks() {
         vec![(downloads.clone(), "Downloads".into())],
         PROMPT_TIMEOUT,
     );
-    assert!(matches!(
-        run(&config, |_| Ok(())).unwrap(),
-        Outcome::NeedsFolderAccess { .. }
-    ));
-    let outcome = run_with_folder_access(&config, Choice::Skip, |_| Ok(())).unwrap();
+    let outcome = run(&config, |_| Ok(())).unwrap();
     assert!(
         matches!(
             outcome,
             Outcome::Complete {
                 blocked_owners: 0,
-                not_reached: 1,
-                ..
-            }
-        ),
-        "{outcome:?}"
-    );
-    let manifest: Value = read(&config.native_profile.join("Media Store/migration.json"));
-    let pass = manifest["passes"]
-        .as_object()
-        .unwrap()
-        .values()
-        .next()
-        .unwrap();
-    assert!(
-        pass["closure"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|e| e["reference"]["key"] == "media:original" && e["status"] == "not-reached"),
-        "{pass:#}"
-    );
-    assert_eq!(pass["blockedOwners"], json!([]));
-    let report = pm_first_launch::report::load(&config.native_profile).unwrap();
-    assert!(
-        report
-            .rows
-            .iter()
-            .any(|r| r.kind == ReportKind::NotReached && r.display_name == "external-original.mov"),
-        "{:?}",
-        report.rows
-    );
-    // The answer is kept per folder: a later run never asks about it again.
-    let state: pm_first_launch::State = read(&config.native_profile.join("migration.json"));
-    assert_eq!(
-        state.folder_outcomes.get(&downloads),
-        Some(&source_access::Outcome::Skipped)
-    );
-    assert_eq!(
-        fs::read(&source).unwrap(),
-        b"synthetic original",
-        "the original is untouched"
-    );
-
-    // Settings › Media lists the folder and its file, and Allow Access brings
-    // the original in (a test folder opens without a macOS prompt).
-    let waiting = pm_first_launch::waiting_folders(&config).unwrap();
-    assert_eq!(
-        waiting,
-        [pm_first_launch::WaitingFolder {
-            path: downloads.clone(),
-            name: "Downloads".into(),
-            files: 1,
-            outcome: source_access::Outcome::Skipped,
-        }]
-    );
-    // macOS refused it later (persisted Denied), then the person allowed
-    // Powermove in System Settings: Check Again reads it now.
-    let state_path = config.native_profile.join("migration.json");
-    let mut state: Value = read(&state_path);
-    let key = downloads.to_string_lossy().into_owned();
-    state["folder_outcomes"][&key] = json!("denied");
-    fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
-    assert_eq!(
-        pm_first_launch::waiting_folders(&config).unwrap()[0].outcome,
-        source_access::Outcome::Denied
-    );
-    let mut events = vec![];
-    let outcome = pm_first_launch::allow_folders(&config, std::slice::from_ref(&downloads), |e| {
-        events.push(e);
-        Ok(())
-    })
-    .unwrap();
-    assert!(
-        matches!(
-            outcome,
-            Outcome::Complete {
                 not_reached: 0,
-                blocked_owners: 0,
                 ..
             }
         ),
         "{outcome:?}"
     );
-    assert_eq!(events.last(), Some(&pm_first_launch::Event::Complete));
     let state: pm_first_launch::State = read(&config.native_profile.join("migration.json"));
-    assert_eq!(
-        state.folder_outcomes.get(&downloads),
-        Some(&source_access::Outcome::Granted)
-    );
-    assert_eq!(pm_first_launch::waiting_folders(&config).unwrap(), []);
-    let report = pm_first_launch::report::load(&config.native_profile).unwrap();
+    assert!(state.folder_outcomes.is_empty());
     assert!(
-        !report.rows.iter().any(|r| r.kind == ReportKind::NotReached),
-        "{:?}",
-        report.rows
+        pm_first_launch::waiting_folders(&config)
+            .unwrap()
+            .is_empty()
     );
+    let summary =
+        pm_native_migrate::linked_summary(&config.native_profile.join("Media Store")).unwrap();
+    assert_eq!(summary.folders[&downloads].items, 1);
     assert_eq!(fs::read(&source).unwrap(), b"synthetic original");
 }
 
@@ -710,7 +631,10 @@ fn content_addressed_main_store_media_migrate_as_verified_originals() {
         pass["diskRecords"].get("media:original").is_some(),
         "{pass}"
     );
-    assert!(pass["diskRecords"].get("content-key").is_none(), "{pass}");
+    assert!(
+        pass["diskRecords"].get("content-key").is_some(),
+        "metadata linking defers checksums to adoption: {pass}"
+    );
     let clip = pass["closure"]
         .as_array()
         .unwrap()
@@ -725,16 +649,33 @@ fn content_addressed_main_store_media_migrate_as_verified_originals() {
         "Media Store/keys/{:x}.json",
         Sha256::digest(b"media:original")
     )));
-    let hash = key["hash"].as_str().unwrap();
-    assert_eq!(
-        fs::read(
-            config
-                .native_profile
-                .join("Media Store/objects")
-                .join(&hash[..2])
-                .join(hash)
-        )
-        .unwrap(),
-        original
+    assert_eq!(fs::read(key["path"].as_str().unwrap()).unwrap(), original);
+    assert!(
+        pm_native_migrate::adopt_linked(&config.native_profile.join("Media Store"), |_, _| Ok(()))
+            .is_err(),
+        "corrupt content-addressed bytes are refused at adoption"
+    );
+}
+
+#[test]
+fn a_leftover_content_named_payload_no_record_names_does_not_stop_the_copy() {
+    let t = private_tempdir();
+    let config = main_profile(&t.path().canonicalize().unwrap());
+    let name = format!("{}.webm", "d".repeat(64));
+    fs::write(
+        config.electron_profile.join("Media Store").join(&name),
+        b"leftover",
+    )
+    .unwrap();
+    let source = files(&config.electron_profile);
+    run(&config, |_| Ok(())).unwrap();
+    assert_eq!(source, files(&config.electron_profile));
+    // Unreferenced payloads remain solely in the original profile.
+    assert!(
+        !config
+            .native_profile
+            .join("first-launch-checkpoint/profile/Media Store")
+            .join(&name)
+            .exists()
     );
 }

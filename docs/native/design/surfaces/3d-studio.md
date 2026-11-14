@@ -19,7 +19,7 @@ describes something the source didn't build, the source wins, and §12 lists the
 
 | Rule | Spec |
 |---|---|
-| Quiet at rest | Nothing appears unless it's useful now: the 3D group shows only in a composition with 3D layers, the status capsule only while it has news, the Light panel only while the Light tool is on |
+| Quiet at rest | A 3D composition adds almost nothing to the 2D editor (owner decision, 2026-11-13): no 3D toolbar, no camera inset, no lighting panel. The status capsule shows only while it has news; `View camera` only while looking around |
 | Exact under the hand | Handles draw on the frame they're pressed and never wait for the renderer. The engine answers picks and projected points; the host draws every handle (`docs/3d-studio-redesign.md` §4.1a) |
 | One colour language | Accent is selection. Axis colours are data. Material swatches and light colours are content. Nothing else in this family has colour |
 | Numbers stay put | Values are the inspector's tabular wells. No value floats beside the pointer |
@@ -28,87 +28,34 @@ describes something the source didn't build, the source wins, and §12 lists the
 **Words.** The source uses two sets of light names. Native uses one everywhere: `Softbox`,
 `Spotlight`, `Bulb`, `Sun`. The stored types stay `area`, `spot`, `point`, `sun`, so
 projects and agent operations don't change. `Intensity` becomes `Brightness` and `Cone
-Angle` becomes `Spread`, because they are the same values the Light panel shows. Spelling
+Angle` becomes `Spread`, as Properties shows them. Spelling
 follows the app's existing `Color`: `Aluminum`, not `Aluminium`.
 
 Layer kinds: model `cube` on `c.labels.blue`, light `lightbulb` on `c.labels.gray`, camera
 `camera` on `c.labels.gray`, in the kind badge (language §8). Camera layers keep their
 pinned place at the top of the timeline.
 
-## 2. Viewer 3D toolbar
+## 2. The viewer in a 3D composition
 
-Ports `GizmoToolbar.svelte`. Electron's strip sits under the viewer; native keeps its
-approved viewer bar at the top ([viewer-chrome.md](../panels/viewer-chrome.md)), so the
-group occupies the bar's **leading** slot and the zoom and preview-resolution pop-ups keep
-their trailing place.
+**Owner decision, 2026-11-13** (supersedes the earlier 3D toolbar): the 3D experience
+adds the least new UI over 2D. It uses the existing viewer, the window's tools and the
+existing Properties panel. There is no 3D toolbar group in the viewer bar, no camera
+inset, no split and no lighting panel.
 
-```
-┌ viewer bar (m.header) ──────────────────────────────────────────────────────────────┐
-│ [Camera|Free View] [Move Rotate Scale ┊ Orbit Pan Zoom ┊ Light] [Scene Axes] [Frame] │
-│ [Fast|Quality]                                    ···spacer···  [Fit (54 %) ⌄] [Auto ⌄] │
-└─────────────────────────────────────────────────────────────────────────────────────┘
-```
-
-(Drawn on two lines only to fit this page; it's one row.)
-
-**Shown** when the active composition has at least one 3D layer, in Composition mode
-only. In Source mode the slot keeps the source label. With no 3D layers the bar is exactly
-as in viewer-chrome.md.
-
-Order, leading to trailing, with `m.gap` between groups:
-
-| # | Control | Items | AX group |
-|---|---|---|---|
-| 1 | Segmented | `Camera` (`camera`), `Free View` (`view.3d`) | `Look Through` |
-| 2 | Segmented, icon only | `Move` (`move.3d`), `Rotate` (`rotate.3d`), `Scale` (`scale.3d`) · separator · `Orbit` (the capsule's Orbit glyph), `Pan` (`hand.raised`), `Zoom` (`plus.magnifyingglass`) · separator · `Light` (`lightbulb`) | `Tool` |
-| 3 | Borderless toggle, only while Move, Rotate or Scale is active | `Scene Axes` (`globe`) ⇄ `Object Axes` (`cube`) | name of the current state |
-| 4 | Borderless icon button | `Frame` (`viewfinder`) | `Frame` |
-| 5 | Segmented | `Fast` (`bolt`), `Quality` (`camera.aperture`) | `Preview` |
-
-Recipe: language §9 segmented control, track `c.field`, `m.field` tall, padding
-`m.control_radius − m.inner_radius`, segments `m.inner_radius`, selected segment `c.floating`
-with `c.text`, others `c.secondary`. Label `t.body` `t.medium_weight` beside the glyph at
-`m.symbol_inline`. An icon segment is `m.hit` wide, and every segment's hit area is the
-full `m.header` height. Group separators are `m.border` `c.separator`, `m.symbol_panel`
-tall. It's solid `c.panel` like the rest of the bar: no glass here. Accent is not used:
-the selected segment's fill says which tool is on, as in every other segmented control.
-
-| Width of the viewer | Behaviour |
+| State | Viewer |
 |---|---|
-| ≥ `m.viewer_3d_labels` | Items 1, 3 and 5 show labels |
-| Below it | Icons only, each with its tooltip |
-| Below `m.viewer_3d_collapse` | The whole group becomes one `3D` pull-down (`cube`), with the same items as a checkmarked `NSMenu` in the same order and groups |
+| At rest: the shot | The composition at its aspect, with the pasteboard, as any 2D composition. The camera's view is what renders |
+| Looking around: the editor view | The first orbit, pan or zoom leaves the shot. The editor view fills the **whole** viewer body, edge to edge (cover fit, never letterboxed, inset or split). It never edits the shot camera's position, rotation or keyframes |
+| Return | While away from the shot one control sits at the stage's **top-left**, `m.inset` from both edges: `View camera` (`camera`), glass `ViewerOverlay`. It eases back to the shot and goes away. The zoom pop-up's slot reads `Editor View` meanwhile |
 
-**Focus and full screen.** The group joins the glass `ViewerOverlay` capsule, leading of
-the zoom pop-up, icons only, dark-scheme tokens, borderless segments (no glass on glass).
+**Transport.** The viewer's play controls and timecode show only while no timeline is in
+the workspace (another panel maximised, a workspace without a timeline). With a timeline
+on screen its header owns play and the time; the viewer shows neither, paused or playing.
 
-**Tooltips** (line 1 name with shortcut, line 2 sentence):
-
-| Item | Line 2 |
-|---|---|
-| `Camera` | `See exactly what the shot renders.` |
-| `Free View` | `Look around without changing the shot.` |
-| `Move` | `Drag the selection, or one arrow for one axis.` |
-| `Rotate` | `Turn the selection by its rings.` |
-| `Scale` | `Resize the selection.` |
-| `Orbit` | `Drag to circle the view. Anytime: ⌥-drag.` |
-| `Pan` | `Drag to slide the view. Anytime: ⇧⌥-drag.` |
-| `Zoom` | `Drag to move closer. Anytime: ⌥-scroll.` |
-| `Light` | `Click a model to put light there.` |
-| `Scene Axes` | `Handles line up with the scene. Click for the object’s.` |
-| `Object Axes` | `Handles line up with the object. Click for the scene’s.` |
-| `Frame` (F) | `Fit the selection, or everything.` |
-| `Fast` | `Real-time preview. Exports stay full quality.` |
-| `Quality` | `Path-traced, as it will export.` |
-
-Behaviour is the source's. Picking a transform tool leaves Light and navigation; picking
-Orbit, Pan or Zoom keeps the transform tool underneath; `Light` toggles. The window tool
-capsule's Orbit and this `Orbit` are one tool, so selecting either shows both as active.
-All items also appear in `View ▸ 3D`, with the same names and checkmarks (language §9:
-the menu bar is the complete command surface). The choice of Fast or Quality is remembered.
-
-A tool that doesn't apply to the selection is disabled, with the tooltip `Not available
-for this layer.`: cameras don't scale, a `Sun` only rotates, a `Bulb` only moves.
+The 3D tools stay available without a toolbar: `View ▸ 3D` lists Camera, Free View, Move,
+Rotate, Scale, Orbit, Pan, Zoom, Light, the axes, Frame, Views and Fast or Quality, with
+their checkmarks (language §9: the menu bar is the complete command surface). The choice
+of Fast or Quality is remembered.
 
 ## 3. Fast, Quality and Final
 
@@ -148,22 +95,24 @@ in the real-time renderer: §10.
 
 ## 4. Navigation
 
-Unchanged from `navigation.ts`. Navigation only ever moves the transient Free View, and
-never the shot. If the view is `Camera`, the first navigation gesture switches to `Free
-View`, and that's the only side effect.
+Navigation only ever moves the transient editor view, never the shot, and adds no undo
+step. The first gesture leaves the shot for the editor view (§2).
 
 | Gesture | Result |
 |---|---|
-| ⌥-drag or middle-drag | Orbit |
-| ⇧⌥-drag | Pan |
-| Scroll | Zoom, in a navigation tool or with ⌥ held |
+| Two-finger trackpad scroll | Orbit |
+| ⇧ two-finger scroll | Pan |
+| Pinch, mouse wheel, ⌥ or ⌘ scroll | Zoom (dolly) |
+| ⌥-drag or middle-drag | Orbit; ⇧⌥-drag pans |
+| The window's Hand tool | Drag orbits, ⇧-drag pans |
+| The window's Zoom tool | Drag dollies |
 | ⇧ during Orbit or Zoom | Fine, one tenth speed |
-| Trackpad pinch | Zoom, as the 2D viewer |
 | F or Home | Frame the selection, or everything when nothing's selected |
+| `View camera` | Back to the shot |
 
-Framing eases with the `mo.enter` spring; under Reduce Motion it jumps. Cursors: Orbit and
-Pan use the open and closed hand, Zoom the magnifier. Navigation never adds an undo step.
-There's no view cube and no axis ball: the source's toolbar replaced them.
+While looking around the shot camera draws as its frustum and the frame it renders, in
+`c.secondary`, so the editor view shows where the shot is. There's no view cube and no
+axis ball.
 
 ## 5. Gizmos
 
@@ -185,6 +134,18 @@ handles when every selected layer is 3D, and the 2D rules in viewer-chrome.md
 | During a drag | Only the active handle stays, plus a `m.gizmo_keyline` guide through the pivot along the active axis in its colour. Everything returns on release |
 | Hit area | At least `m.hit` across any line or tip; a press elsewhere selects or navigates as usual |
 
+**Lights** (as Electron's light markers). Every light has a marker, always: a ring of
+`MARKER` (9.5 pt) with its kind's glyph (softbox, spotlight cone, bulb, sun rays) in
+`c.text` over a dark keyline. A light outside the view, or behind the eye, is pinned to
+the edge of what the viewer shows, with a chevron pointing to it; a pinned marker only
+selects. A press on a marker selects its light (⇧ toggles) and dragging moves it in the
+view plane; markers win over the transform handles. The selected light adds a
+`c.accent` ring, its softbox outline or spotlight cone, a dashed aim line and a ◆ at its
+target: dragging the ◆ moves the target in the view plane. Rotate swings a light's aim
+about its position (the renderer aims lights by their target, never by rotation). ⌥ while
+moving a light carries its target with it. A `Sun` only rotates, a `Bulb` only moves, as
+before; any light's marker can be dragged. Undo names: `Move Light`, `Aim Light`.
+
 Modifiers as `gizmo.ts`: ⌃ snaps (1 unit, 15°, 0.1), ⇧ is fine. Esc cancels a drag and
 restores the values. Undo names: `Move 3D Layer`, `Rotate 3D Layer`, `Scale 3D Layer`, plural
 with several. The drag edits ordinary channels, so an animated property gets a keyframe at the
@@ -194,52 +155,12 @@ Gizmos aren't exposed to VoiceOver. Every transform is reachable from Properties
 
 ## 6. Light tool
 
-Ports `light-panel.ts` and `light-tool.ts`. Choosing `Light` opens the **Light panel**.
-
-It's a glass child panel, not an `NSPopover`, because a popover dismisses on the click the
-tool needs. It uses the kit's `ViewerOverlay` frame with solid content (language §3, dense
-content in a floating surface): `c.floating`, dark-scheme tokens in both appearances, since
-it sits over the image. Placed at the viewer stage's top-leading corner, `m.gap` from both
-edges. Width `m.popover_width`, inset `m.inset`, height fits content. If the stage is
-shorter than the panel, the content scrolls. It enters with the `mo.enter` spring and leaves
-with `mo.exit`. In Focus and full screen it stays, like the tool. AppKit controls throughout.
-
-```
-┌ Light ─────────────────────┐
-│ [ Reflect | Direct | Orbit ]  │  Aim, NSSegmentedControl, full width
-│ [ Add ]  [ Softbox        ⌄ ] │  button + pop-up
-│ Softbox 2            Softbox  │  name t.title, kind t.minimum c.muted
-│ Brightness  ───●────  6.00    │
-│ Size        ─●──────  1.20    │  row m.row
-│ Distance    ────●───  3.40    │
-│ Spread      ──●─────  45°     │  Spotlight only
-└────────────────────────────┘
-```
-
-| Row | Spec |
-|---|---|
-| Aim | `Reflect` (`The highlight lands where you click.`), `Direct` (`The light faces where you click.`), `Orbit` (`Drag to circle the light around its target.`) as tooltips |
-| Add | Toggle push button `Add`, tooltip `Then click a model to put it there.` Pop-up `Softbox`, `Spotlight`, `Bulb`, `Sun`; choosing one also arms Add |
-| Slider rows | Label `t.body` `c.secondary`, width `m.hit × 3`. `NSSlider`, small, tinted by AccentColor. Readout `t.body` tabular `c.secondary`, **left-aligned**, width `m.control + m.inset`, unit `°` in `c.muted`. Gaps `m.gap`. Readout format as source: 2 decimals under 10, 1 under 100, none above |
-| Ranges | Brightness 0.05–2000 log; Size 0.02–40 log (hidden for a `Bulb` and `Sun`); Distance 0.1–200 log (hidden for `Sun`); Spread 1–89° linear (`Spotlight` only) |
-| Tooltips | Brightness `How much light it gives.` Size `Bigger softboxes give softer light and broader highlights.` Distance `How far it sits from what it lights. Brightness on the product stays the same.` Spread `How wide the spotlight’s beam is.` |
-| Hint (no light selected, or Add armed) | Replaces the name and sliders, `t.body` `c.muted`: `Select a light to aim it, or Add one.` / `Click a model to add a {kind} there.` |
-
-| Gesture in the viewer | Result |
-|---|---|
-| Click a model | Aims the selected light by the Aim mode. With no light selected, or Add armed, adds one there |
-| Keep dragging | The highlight slides with the pointer, live |
-| Scroll with a softbox selected | Resizes it, ×1.12 per notch, undo name `Softbox Size` |
-| ⌥⇧-click, any tool | Places a softbox's highlight under the pointer |
-| Esc | Leaves the tool |
-
-Cursor: crosshair over a model, standard elsewhere. A release, or the end of a slider pull,
-is one Undo: `Aim Light`, `Add {kind}`, `Light {row}`. The light's reflection is the
-feedback, so nothing else draws at the click. While a light moves, Quality runs Live and
-refines after release.
-
-VoiceOver: `AXGroup` `Light Tool`, controls in reading order. Sliders read `Brightness, 6.00`.
-Full Keyboard Access reaches the panel with Tab from the viewer; Esc returns focus to it.
+There is no Light panel (owner decision, 2026-11-13: "no lighting panel. properties should
+be in properties"). The Light tool stays in `View ▸ 3D`: with it, a click on a model
+aims the selected light so its highlight lands there, or adds a softbox there when no
+light is selected. Everything the panel held lives in Properties (§8): Brightness, Size,
+Distance, Spread, Temperature and Aim At. Its presets are `Layer ▸ Add 3D Layer` items
+(§7). Agents keep `light_preset` and `aim_light`.
 
 ## 7. Add and import
 
@@ -248,7 +169,8 @@ entries `Add 3D {primitive}`, `Add {light}`, `Add Camera`.
 
 `Cube` · `Sphere` · `Plane` · `Cylinder` · `Cone` · `Torus` · `Capsule` · `Icosphere` ·
 separator · `Import 3D Model…` · separator · `Softbox` · `Spotlight` · `Bulb` · `Sun` ·
-`Camera`
+`Camera` · separator · `Rim Strip Left` · `Rim Strip Right` · `Top Softbox` ·
+`Edge Highlight Card` · `Strip Light` (presets, placed for the selected model and the shot)
 
 Other commands keep their names: `New 3D Model`, `Add 3D Studio Cube`, `Duplicate 3D
 Layers`, `Delete 3D Layers`.
@@ -339,7 +261,10 @@ Texture slot: value-column pop-up-style button showing the file name or `Choose�
 
 `Type` pop-up (`Softbox`, `Spotlight`, `Bulb`, `Sun`), `Color`, `Brightness`. `Softbox`:
 `Width`, `Height`. `Bulb` and `Spotlight`: `Range`, `Falloff`. `Spotlight`: `Spread` 1–89°,
-`Softness` 0–1. Then `Cast Shadows`. Position and target live in the transform rows.
+`Softness` 0–1. Then `Temperature` (K, writes `Color`), `Distance` (slides the light along
+its aim, keeping its brightness on what it lights; not for `Sun`), `Aim At` (a model; not
+for `Bulb`), and `Cast Shadows`. Transform shows `Position` and `Target`; a light's
+rotation, which the renderer ignores, shows only while it holds a value or keyframe.
 
 ### Camera
 
@@ -416,11 +341,11 @@ Studio, or an orthographic camera, which render as they preview.
 |---|---|
 | Empty scene | No special state: a composition with no 3D layers shows nothing of this spec |
 | Loading | Viewer-chrome Loading; the last good frame stays visible |
-| Light and dark | Bar and Properties follow the app. Handles, capsule and Light panel use dark-scheme tokens in both |
-| Increase Contrast | Axis lines and handles gain a `c.separator` keyline; capsule and Light panel take the system border |
-| Reduce Transparency | Capsule and Light panel frame go solid through `Tokens::material` |
-| Reduce Motion | Framing jumps; capsule and Light panel cross-fade with `mo.reduced`. Refining itself continues, because it's content |
-| VoiceOver | Segments are radio groups named in §2; the `3D` pull-down announces the current tool. Selected tool changes post nothing extra |
+| Light and dark | Bar and Properties follow the app. Handles, capsule and `View camera` use dark-scheme tokens in both |
+| Increase Contrast | Axis lines and handles gain a `c.separator` keyline; capsule and `View camera` take the system border |
+| Reduce Transparency | Capsule and `View camera` go solid through `Tokens::material` |
+| Reduce Motion | Framing jumps; capsule and `View camera` cross-fade with `mo.reduced`. Refining itself continues, because it's content |
+| VoiceOver | `View camera` is a button named for its label; tool changes from `View ▸ 3D` post nothing extra |
 
 ## 12. Not in the source, so not in native yet
 
@@ -437,6 +362,6 @@ import; the corner axis cluster; a light ball; `Look` presets. See the owner que
 - Don't show Live as a status, or any percentage the model doesn't report.
 - Don't put glass in the viewer bar or inside Properties.
 - Don't use `c.accent` for a selected segment or a finish tile.
-- Don't use a popover for the Light panel.
+- Don't add a lighting panel, popover or 3D toolbar; light values belong in Properties.
 - Don't draw handles from the renderer, or let them wait on it.
 - Don't add a compatibility mode, a Blender route or `.blend` import.

@@ -238,6 +238,8 @@ Opus review remain outstanding. No P1/colour/performance gate is declared passed
   display timestamps never become GPU-derived presentation timestamps.
   A frame row also carries the loop's refresh `interval` and `ahead`,
   `stand_ins`, `late_layers` (override layers drawn from an earlier answer),
+  `source_stand_ins` (the source presentation indices of stand-ins, in draw
+  order; zero can also denote a still),
   the running `skipped_targets` and `held_frames`, the render's work counters
   (`work`: GPU and cache counters, `pm-perf`) and `render_gpu_ms`: from when
   the GPU was free for the render (its submission, or the frame before leaving
@@ -247,6 +249,15 @@ Opus review remain outstanding. No P1/colour/performance gate is declared passed
   the next: `ask_ahead_ms`, `upload_ahead_ms`, `prepare_ms`, the realm's batch
   state), `audio_start` (how long a start waited for the audio clock, and
   whether it fell back to the host clock), `commands`, `refused`.
+  Interactive software VP9 uses slice threading so a picture does not wait
+  for later packets or keep the extra frame-thread reference buffers.
+  `PM_ABL_VP9_FRAME_THREADS=1` restores frame threading for an opt-in A/B run;
+  export keeps FFmpeg's usual threading policy. The windowless `--bench`
+  accepts `--media=FILE` for an asset-id/source-path map and `--playback-only`
+  to report playback work and decoder counters without the seek/skim phases.
+  Output surfaces with stand-ins count toward the output-pool allowance
+  alongside cached pictures. Returned decoder buffers are reclaimed before
+  a decoder loses its warm state; zero leases still close its sessions.
 - Dependency: the app builds `wgpu`'s front crate from
   `engine/third_party/wgpu` (the engine's vendored 30.0.1 with its work
   counters; `[patch.crates-io]` in `apps/native/Cargo.toml`, as in

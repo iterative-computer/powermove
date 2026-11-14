@@ -93,6 +93,7 @@ mod shortcuts;
 mod shuttle;
 mod skimming;
 mod smoke;
+mod storage;
 mod store_window;
 #[cfg(test)]
 mod store_window_tests;

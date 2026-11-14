@@ -238,4 +238,11 @@ test("contract rejects malformed state atomically without erasing authored names
   const none = fixture();
   none.model = null;
   expect(snapshot(none).model).toBeNull();
+  // The native host sends `transport: null` while a timeline is shown.
+  const timelineShown: any = fixture();
+  timelineShown.host.transport = null;
+  expect(snapshot(timelineShown).host.transport).toBeNull();
+  const badTransport: any = fixture();
+  badTransport.host.transport = { time: "x" };
+  expect(() => snapshot(badTransport)).toThrow();
 });

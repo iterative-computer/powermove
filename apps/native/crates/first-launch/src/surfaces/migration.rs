@@ -438,8 +438,8 @@ impl Summary {
                 self.missing_projects,
                 projects(
                     self.missing_projects,
-                    "couldn’t be read. It’s kept safely and wasn’t changed.",
-                    "couldn’t be read. They’re kept safely and weren’t changed.",
+                    "in the original app’s list had nothing saved, so there was nothing to bring over.",
+                    "in the original app’s list had nothing saved, so there was nothing to bring over.",
                 ),
             ),
             (
@@ -489,7 +489,7 @@ pub const PROXY_EXPORT_WARNING: &str =
     "This uses proxy-only media, so quality may be lower. Relink the originals for full quality.";
 pub const REPORT_SECTIONS: [(&str, &str); 8] = [
     ("Projects Without Undo History", "Open"),
-    ("Projects That Couldn’t Be Read", "Show in Finder"),
+    ("Projects With Nothing Saved", "Show in Finder"),
     ("Waiting for Media", "Relink…"),
     ("Proxy-Only Media", "Relink…"),
     ("Media Not Reached", "Relink…"),

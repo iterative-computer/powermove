@@ -1,3 +1,4 @@
+import { mediaCommand } from "./media-command";
 import * as powermove from "./frozen/reference/kernel/editor-helpers";
 import { installIcons } from "./frozen/host/icons";
 import { HostChannel, HostError } from "./channel";
@@ -396,6 +397,7 @@ export class CompatRealm {
       snapshotAsync: async (...args: any[]) =>
         this.renderQuery("render.snapshot", args),
     };
+    this.PM.commandForAsset = mediaCommand(this.PM, this.kernel);
     Object.assign(this.PM, options.capabilities?.PM ?? {});
     this.bridgeEvents();
     options.installLegacy?.(this.PM);

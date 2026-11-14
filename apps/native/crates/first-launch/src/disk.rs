@@ -32,6 +32,17 @@ pub fn space(root: &Path, needed: u64) -> Result<()> {
     }
     Ok(())
 }
+/// Up-front bytes a copy of `bytes` from `source` into `destination` will
+/// really take. Same-volume APFS copies are clones that share blocks with the
+/// source, so they cost nothing up front; each file that falls back to a
+/// streamed copy still checks space before writing (see [`copy`]).
+pub fn copy_cost(source: &Path, destination: &Path, bytes: u64) -> u64 {
+    if pm_native_migrate::snapshot::clone_volume(source, destination) {
+        0
+    } else {
+        bytes
+    }
+}
 pub fn private_dir(path: &Path) -> Result<()> {
     // Check ancestors BEFORE mkdir: a beta folder replaced by a symlink must
     // never cause mkdir/chmod in the Electron profile or an external project.
@@ -132,23 +143,50 @@ pub struct Stamp {
     device: u64,
 }
 pub fn walk(root: &Path) -> Result<std::collections::BTreeMap<PathBuf, Stamp>> {
-    walk_filtered(root, &[])
+    walk_with(root, &[], Links::Refuse)
 }
-pub(crate) fn walk_filtered(
+/// Walk an Electron source family. Links and other special files inside it
+/// are left behind, never followed: agent work folders routinely hold Python
+/// venvs, package caches and `node_modules/.bin` links, and none of those
+/// can be part of a user's authored state. Copying a link could later let a
+/// native write escape the beta profile, so a skipped link is the safe copy.
+/// A family root that is itself a link (e.g. a folder the user moved to
+/// another disk) is followed: reading through it never writes to the source.
+pub(crate) fn walk_source(
     root: &Path,
     ignored: &[&str],
+) -> Result<std::collections::BTreeMap<PathBuf, Stamp>> {
+    walk_with(root, ignored, Links::Skip)
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Links {
+    Refuse,
+    Skip,
+}
+fn walk_with(
+    root: &Path,
+    ignored: &[&str],
+    links: Links,
 ) -> Result<std::collections::BTreeMap<PathBuf, Stamp>> {
     fn visit(
         base: &Path,
         p: &Path,
         out: &mut std::collections::BTreeMap<PathBuf, Stamp>,
         ignored: &[&str],
+        links: Links,
     ) -> Result<()> {
-        let m = fs::symlink_metadata(p)?;
-        ensure!(
-            !m.file_type().is_symlink(),
-            "symlink in checkpoint source; coordinated export required"
-        );
+        let m = if links == Links::Skip && p == base {
+            fs::metadata(p)?
+        } else {
+            fs::symlink_metadata(p)?
+        };
+        if m.file_type().is_symlink() {
+            ensure!(
+                links == Links::Skip,
+                "symlink in checkpoint source; coordinated export required"
+            );
+            return Ok(());
+        }
         if m.is_dir() {
             for e in fs::read_dir(p)? {
                 let path = e?.path();
@@ -156,11 +194,10 @@ pub(crate) fn walk_filtered(
                     .iter()
                     .any(|name| path.file_name().is_some_and(|n| n == *name))
                 {
-                    visit(base, &path, out, ignored)?;
+                    visit(base, &path, out, ignored, links)?;
                 }
             }
-        } else {
-            ensure!(m.is_file(), "nonregular checkpoint source");
+        } else if m.is_file() {
             out.insert(
                 p.strip_prefix(base)?.into(),
                 Stamp {
@@ -170,12 +207,15 @@ pub(crate) fn walk_filtered(
                     device: m.dev(),
                 },
             );
+        } else {
+            // Sockets, pipes and devices hold no bytes worth carrying over.
+            ensure!(links == Links::Skip, "nonregular checkpoint source");
         }
         Ok(())
     }
     let mut out = std::collections::BTreeMap::new();
     if root.exists() {
-        visit(root, root, &mut out, ignored)?;
+        visit(root, root, &mut out, ignored, links)?;
     }
     Ok(out)
 }
@@ -183,8 +223,33 @@ pub fn tree_bytes(root: &Path) -> Result<u64> {
     Ok(walk(root)?.values().map(|s| s.size).sum())
 }
 pub fn copy(source: &Path, target: &Path) -> Result<FileEntry> {
+    copy_with_sync(source, target, true)
+}
+/// Flush each staged file to the filesystem. The caller must issue a full
+/// storage barrier before publishing the enclosing checkpoint/receipt.
+pub(crate) fn copy_staged(source: &Path, target: &Path) -> Result<FileEntry> {
+    copy_with_sync(source, target, false)
+}
+pub(crate) fn sync_staged(file: &File) -> Result<()> {
+    use std::os::fd::AsRawFd;
+    // SAFETY: the descriptor is live and borrowed for this filesystem flush.
+    if unsafe { libc::fsync(file.as_raw_fd()) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(())
+}
+fn copy_with_sync(source: &Path, target: &Path, full: bool) -> Result<FileEntry> {
+    let sync = |file: &File| -> Result<()> {
+        if full {
+            file.sync_all()?;
+            Ok(())
+        } else {
+            sync_staged(file)
+        }
+    };
     let (expected, size) = hash_counted(source)?;
-    space(target.parent().context("missing parent")?, size)?;
+    // A clone shares the source's blocks, so free space is checked only
+    // before bytes are actually streamed.
     // clonefile keeps APFS snapshots cheap. Stream on other filesystems.
     #[cfg(target_os = "macos")]
     let cloned = {
@@ -201,6 +266,7 @@ pub fn copy(source: &Path, target: &Path) -> Result<FileEntry> {
     #[cfg(not(target_os = "macos"))]
     let cloned = false;
     if !cloned {
+        space(target.parent().context("missing parent")?, size)?;
         let mut input = regular(source)?;
         let mut output = OpenOptions::new()
             .write(true)
@@ -211,16 +277,16 @@ pub fn copy(source: &Path, target: &Path) -> Result<FileEntry> {
             std::io::copy(&mut input, &mut output)? == size,
             "checkpoint source changed"
         );
-        output.sync_all()?;
+        sync(&output)?;
     }
     let mode = fs::metadata(source)?.permissions().mode() & 0o777;
     fs::set_permissions(target, fs::Permissions::from_mode(mode & 0o700))?;
-    File::open(target)?.sync_all()?;
+    sync(&File::open(target)?)?;
     ensure!(
         hash(target)? == (expected.clone(), size),
         "checkpoint content mismatch"
     );
-    File::open(target.parent().unwrap())?.sync_all()?;
+    sync(&File::open(target.parent().unwrap())?)?;
     Ok(FileEntry {
         hash: expected,
         bytes: size,

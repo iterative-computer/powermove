@@ -410,7 +410,11 @@ fn light_adjustments_use_real_channels_and_preserve_unrelated_animation() {
     let before = root(&a);
     drive(&mut s, "tool.light", Value::Null);
     let v = publish(&mut s);
-    assert_eq!(v["lightPanel"]["rows"].as_array().unwrap().len(), 3);
+    // Brightness, Size, Distance and the colour temperature (its colour is a
+    // channel, as every stored colour is).
+    let rows = v["lightPanel"]["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 4);
+    assert_eq!(rows[3]["id"], "temperature");
     drive(&mut s, "light.adjust.brightness", json!(7.5));
     let after = root(&a);
     let old = &before["comps"]["c"]["layers"][0]["d"]["data"]["light"]["p"];

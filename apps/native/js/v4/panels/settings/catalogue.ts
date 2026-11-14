@@ -7,6 +7,7 @@ export const sections = [
   "general",
   "shortcuts",
   "media",
+  "storage",
   "accounts",
   "transcription",
   "extensions",
@@ -39,6 +40,12 @@ export const sectionCopy: Record<
     description:
       "Proxies, optimized media, and where Powermove keeps them on this Mac.",
     symbol: "film.stack",
+  },
+  storage: {
+    title: "Storage",
+    description:
+      "What Powermove and the app you used before keep on this Mac, and what you can remove.",
+    symbol: "internaldrive",
   },
   accounts: {
     title: "Accounts",

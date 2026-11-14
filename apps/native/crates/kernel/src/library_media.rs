@@ -164,7 +164,57 @@ impl ProxyOnly {
 /// Whether `entry` is bytes of the library's store, which a library save
 /// need not copy anywhere: the store keeps them.
 pub(crate) fn is_stored(entry: &MediaEntry, store: &Path) -> bool {
-    matches!(&entry.source, MediaSource::File { path, .. } if path.starts_with(store.join("objects")))
+    let MediaSource::File { path, length, .. } = &entry.source else {
+        return false;
+    };
+    if path.starts_with(store.join("objects")) {
+        return true;
+    }
+    use std::os::unix::fs::MetadataExt;
+    let keys = store.join("keys");
+    let Ok(stamp) = std::fs::metadata(&keys) else {
+        return false;
+    };
+    let identity = (stamp.ino(), stamp.mtime(), stamp.mtime_nsec());
+    thread_local! {
+        // Atomic key publication changes the directory stamp. Cache the index,
+        // not source availability, to avoid rereading every key for every asset.
+        static LINKS: std::cell::RefCell<Option<(PathBuf, (u64, i64, i64), HashSet<(PathBuf, u64)>)>> = const { std::cell::RefCell::new(None) };
+    }
+    let linked = LINKS.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if cache
+            .as_ref()
+            .is_none_or(|(p, s, _)| p != &keys || *s != identity)
+        {
+            let mut paths = HashSet::new();
+            for file in std::fs::read_dir(&keys)
+                .ok()
+                .into_iter()
+                .flatten()
+                .flatten()
+            {
+                let Ok(bytes) = std::fs::read(file.path()) else {
+                    continue;
+                };
+                let Some(record) = std::str::from_utf8(&bytes)
+                    .ok()
+                    .and_then(|s| pm_model::json::parse(s).ok())
+                else {
+                    continue;
+                };
+                if let Some(path) = record.get("path").and_then(Value::as_str)
+                    && Path::new(path).is_absolute()
+                    && let Some(size) = record.get("size").and_then(Value::as_f64)
+                {
+                    paths.insert((PathBuf::from(path), size as u64));
+                }
+            }
+            *cache = Some((keys, identity, paths));
+        }
+        cache.as_ref().unwrap().2.contains(&(path.clone(), *length))
+    });
+    linked && std::fs::symlink_metadata(path).is_ok_and(|m| m.is_file() && m.len() == *length)
 }
 
 fn text(node: Option<&Node>) -> Option<&str> {
@@ -216,8 +266,19 @@ fn stored(
         if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) || size < 0. {
             return None;
         }
-        let path: PathBuf = store.join("objects").join(&hash[..2]).join(hash);
-        (std::fs::metadata(&path).ok()?.len() == size as u64).then_some(())?;
+        let valid = |p: &Path| {
+            std::fs::symlink_metadata(p)
+                .ok()
+                .is_some_and(|m| m.is_file() && m.len() == size as u64)
+        };
+        let object = store.join("objects").join(&hash[..2]).join(hash);
+        let path: PathBuf = record
+            .get("path")
+            .and_then(Value::as_str)
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute() && valid(p))
+            .unwrap_or(object);
+        valid(&path).then_some(())?;
         let entry = MediaEntry {
             id: id.into(),
             media_type: record
@@ -275,6 +336,39 @@ mod tests {
             "a size mismatch is not these bytes"
         );
         assert!(media.get("c").is_none());
+        std::fs::remove_dir_all(store).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod linked_tests {
+    use super::*;
+    #[test]
+    fn linked_is_stored_and_invalid_link_falls_back_to_object() {
+        let store = std::env::temp_dir().join(crate::new_id("linked-media"));
+        std::fs::create_dir_all(store.join("keys")).unwrap();
+        let path = store.join("external.mp4");
+        std::fs::write(&path, b"abc").unwrap();
+        let hash = "ab".repeat(32);
+        let record = format!(
+            r#"{{"key":"key","hash":"{hash}","size":3,"path":{:?}}}"#,
+            path.to_str().unwrap()
+        );
+        std::fs::write(
+            store
+                .join("keys")
+                .join(format!("{:x}.json", Sha256::digest(b"key"))),
+            record,
+        )
+        .unwrap();
+        let (entry, _) = stored("a", Some("key".into()), None, &store).unwrap();
+        assert!(is_stored(&entry, &store));
+        std::fs::remove_file(path).unwrap();
+        assert!(!is_stored(&entry, &store));
+        assert!(stored("a", Some("key".into()), None, &store).is_none());
+        std::fs::create_dir_all(store.join("objects/ab")).unwrap();
+        std::fs::write(store.join("objects/ab").join(hash), b"abc").unwrap();
+        assert!(stored("a", Some("key".into()), None, &store).is_some());
         std::fs::remove_dir_all(store).unwrap();
     }
 }
