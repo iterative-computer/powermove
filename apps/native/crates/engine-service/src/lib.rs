@@ -494,6 +494,10 @@ struct View {
     /// Override answers of its document landed since the worker last
     /// looked.
     answers: bool,
+    /// What a refused picture waited for may have landed (override answers,
+    /// new definitions): it is tried again at once, not after the backoff
+    /// its retries reached.
+    retry_now: bool,
     skim_audio: Option<bool>,
     media_mode: MediaMode,
     paths: Arc<pm_export::render::MediaPaths>,
@@ -1190,6 +1194,7 @@ impl Viewer {
         v.stamp.sequence += 1;
         bump_site(line!(), "");
         v.dirty = true;
+        v.retry_now = true;
         // What a held frame said it was waiting for may be over: its line
         // goes now, not when the next frame finally lands (a frame still
         // waiting says for what on its next try).
@@ -1422,6 +1427,7 @@ impl EngineService {
                 for v in state.views.values_mut() {
                     if v.stamp.doc_id == doc_id {
                         v.answers = true;
+                        v.retry_now = true;
                         v.dirty |= every;
                     }
                 }
@@ -1579,6 +1585,7 @@ impl EngineService {
                 skim_rate: pm_protocol::common::PlaybackRate::NORMAL,
                 skim_moved: false,
                 answers: false,
+                retry_now: false,
                 skim_audio: None,
                 media_mode: MediaMode::default(),
                 paths,
@@ -2921,6 +2928,9 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 v.stamp.sequence += 1;
                 bump_site(line!(), "");
                 v.dirty = true;
+            }
+            if std::mem::take(&mut v.retry_now) {
+                r.not_before = r.not_before.min(now);
             }
             // Override answers landed for this viewer's document. A picture
             // that waits for them (refused, drawn with a stand-in, or not
@@ -5740,6 +5750,47 @@ mod worker_tests {
         assert!(
             !asked.lock().unwrap().is_empty(),
             "the layers were asked for"
+        );
+        v.retire();
+    }
+
+    /// A picture that waited long for its override layers is drawn the moment
+    /// their answers land, not after the backoff its retries reached (up to a
+    /// second: twice that on a project's first picture, as each load step's
+    /// new wrappers asked again).
+    #[test]
+    fn a_picture_waiting_for_its_layers_draws_the_moment_they_are_answered() {
+        let service = EngineService::start(pm_gpu::Gpu::new("answers-land-test").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        wait_for(&v, "a first frame", |s| {
+            s.frame.as_ref().is_some_and(|f| f.gpu_ok)
+        });
+        let (store, asked) = overridden(&service, &v);
+        v.scrub(seconds(2.)).unwrap();
+        // The wait line appears on a refusal some seconds in: retries are a
+        // second apart by now, and one has just been made.
+        wait_for(&v, "the wait line", |s| s.error.is_some());
+        let needs: Vec<_> = std::mem::take(&mut *asked.lock().unwrap());
+        assert!(!needs.is_empty(), "the layers were asked for");
+        let stamp = v.stamp().unwrap();
+        let answered = std::time::Instant::now();
+        store.answer_all(
+            1,
+            1,
+            needs
+                .into_iter()
+                .map(|n| (n, compat::Reply::Draw(compat::hidden_raster())))
+                .collect(),
+        );
+        wait_for(&v, "the answered picture", |s| {
+            s.frame
+                .as_ref()
+                .is_some_and(|f| f.gpu_ok && f.stamp == stamp)
+        });
+        assert!(
+            answered.elapsed() < Duration::from_millis(400),
+            "drawn {:?} after its answers landed",
+            answered.elapsed()
         );
         v.retire();
     }
