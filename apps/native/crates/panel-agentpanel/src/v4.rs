@@ -681,6 +681,56 @@ mod tests {
         assert!(matches!(e.kind, EffectKind::Shell(ShellAction::Close)));
     }
     #[test]
+    fn a_reply_returned_only_at_the_end_is_shown_once_after_earlier_notes() {
+        // Codex exec (Auto) streams notes, then returns its answer at the end.
+        let mut p = panel();
+        draft(&mut p);
+        act(&mut p, json!({"type":"submit"})).unwrap();
+        p.receive("thread","run",1,Update::Trace(json!({"kind":"answer","text":"I'll check the project."})),11).unwrap();
+        p.receive("thread","run",2,Update::Complete { text: "Added the title layer.".into(), error: false, cancelled: false },20).unwrap();
+        let texts = |p: &Panel| -> Vec<String> {
+            snapshot(p)["rows"]["items"].as_array().unwrap().iter()
+                .filter_map(|r| r["value"]["text"].as_str().map(str::to_owned)).collect()
+        };
+        assert!(texts(&p).iter().any(|t| t == "Added the title layer."));
+        // A streamed reply (the app server) is not repeated.
+        draft(&mut p);
+        let ctx = Context {
+            run: "run-2",
+            request: "request-2",
+            new_thread: "new",
+            now: 30,
+            popover_open: true,
+            catalogs: &|_| Default::default(),
+        };
+        dispatch(&mut p, "thread", &json!({"type":"submit"}), ctx).unwrap();
+        p.receive("thread","run-2",1,Update::Trace(json!({"kind":"answer","text":"Done: the title is in."})),31).unwrap();
+        p.receive("thread","run-2",2,Update::Complete { text: "Done: the title is in.".into(), error: false, cancelled: false },40).unwrap();
+        assert_eq!(texts(&p).iter().filter(|t| t.as_str() == "Done: the title is in.").count(), 1);
+    }
+    #[test]
+    fn a_question_still_open_after_its_run_is_answered_through_its_archived_row() {
+        // A message-transport question outlives its run (the agent asked and
+        // finished); the card's choices act on its archived row.
+        let mut p = panel();
+        draft(&mut p);
+        act(&mut p, json!({"type":"submit"})).unwrap();
+        p.receive("thread","run",1,Update::Trace(json!({"kind":"question","itemId":"q","transport":"message",
+            "questions":[{"id":"title","question":"Which title?","allowOther":true,"options":[{"label":"A"},{"label":"B"}]}]})),11).unwrap();
+        p.receive("thread","run",2,Update::Complete { text: "Waiting for your choice.".into(), error: false, cancelled: false },20).unwrap();
+        let v = snapshot(&p);
+        let row = v["rows"]["items"].as_array().unwrap().iter()
+            .find(|r| r["value"]["kind"] == "question").unwrap().clone();
+        assert_eq!(row["value"]["status"], "open");
+        let step = row["commandId"].as_str().unwrap();
+        act(&mut p, json!({"type":"chooseAnswer","step":step,"question":"title","option":"B"})).unwrap();
+        let v = snapshot(&p);
+        let row = v["rows"]["items"].as_array().unwrap().iter()
+            .find(|r| r["value"]["kind"] == "question").unwrap().clone();
+        assert_eq!(row["chosen"]["title"], json!(["B"]));
+        assert!(act(&mut p, json!({"type":"answer","step":step,"skip":false})).unwrap().is_some());
+    }
+    #[test]
     fn try_again_sends_the_failed_turns_request_and_keeps_the_composer_draft() {
         let mut p = panel();
         draft(&mut p);

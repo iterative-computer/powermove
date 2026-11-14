@@ -240,7 +240,7 @@ export interface ToolsRow {
   tooltip?: string;
 }
 export type Activity =
-  | { kind: "text"; key: string; text: string }
+  | { kind: "text"; key: string; text: string; row: Row }
   | { kind: "thought"; key: string; text: string; live: boolean }
   | { kind: "question"; key: string; row: Row }
   | ToolsRow;
@@ -425,7 +425,7 @@ export function activity(steps: Row[]): Activity[] {
       const text = str(v.text);
       if (!text.trim()) continue;
       flush();
-      out.push({ kind: "text", key: row.id, text });
+      out.push({ kind: "text", key: row.id, text, row });
     } else if (kind === "thought") {
       if (!str(v.label).trim()) continue;
       flush();

@@ -1221,6 +1221,9 @@ impl Controller {
                 match result {
                     Ok(handle) => {
                         v.builtins.windows.insert(id, handle.into());
+                        // The panel learns where it is shown now (the
+                        // popover's header has Pin, the docked one does not).
+                        v.update_builtins(cx);
                     }
                     Err(error) => v.message = error.to_string(),
                 }

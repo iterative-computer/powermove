@@ -96,9 +96,7 @@ test("focus order follows the thread bar, conversation and composer as the origi
     "agent-composer-text",
     "agent-attach",
     "agent-send",
-    "agent-provider",
     "agent-model",
-    "agent-effort",
     "agent-access",
   ]);
   expect(byId(root, "agent-conversation").props.label).toBe(
@@ -213,7 +211,7 @@ test("the thread picker lists threads with their state, switches, and offers New
   await Promise.resolve();
   expect(asked[0]!.options.map((o) => o.label)).toEqual([
     "New Thread",
-    "Ask which title to add · Current",
+    "Ask which title to add",
     "Make the headline · Working…",
     "Delete Thread…",
   ]);
@@ -227,7 +225,7 @@ test("the thread picker lists threads with their state, switches, and offers New
   assertWire(commits);
   root.dispose();
 });
-test("run choices and access open the window's menu; picks reach the model", async () => {
+test("provider, model and effort share one menu; access has its own; picks reach the model", async () => {
   const { root } = mount();
   const actions: Action[] = [];
   const p = fixture();
@@ -243,28 +241,37 @@ test("run choices and access open the window's menu; picks reach the model", asy
     efforts: ["", "high"],
   };
   p.snapshot.settings.model = "gpt-6";
-  const answers: Record<string, string> = {
-    "Search providers": "claude",
-    "Search models": "gpt-6-mini",
-    Search: "auto",
-  };
-  const asked: string[] = [];
+  p.snapshot.settings.effort = "high";
+  const picks = ["provider:claude", "model:gpt-6-mini", "effort:", "auto"];
+  const asked: MenuOption[][] = [];
   const menu: Menu = async (r) => {
-    asked.push(r.placeholder);
-    return r.options.some((o) => o.value === "auto")
-      ? "auto"
-      : answers[r.placeholder];
+    asked.push(r.options);
+    return picks.shift();
   };
   await root.render(
     <AgentView publication={p} menu={menu} send={(a) => actions.push(a)} />,
   );
-  for (const id of ["agent-provider", "agent-model", "agent-access"]) {
+  expect(byId(root, "agent-model").props.label).toBe(
+    "Model and reasoning effort, GPT-6 · High",
+  );
+  for (const id of [
+    "agent-model",
+    "agent-model",
+    "agent-model",
+    "agent-access",
+  ]) {
     await root.drive(byId(root, id).id, "click");
     await Promise.resolve();
   }
+  expect([...new Set(asked[0]!.map((o) => o.category))]).toEqual([
+    "Provider",
+    "Model",
+    "Reasoning Effort",
+  ]);
   expect(actions).toEqual([
     { type: "setProvider", provider: "claude" },
-    { type: "setModel", model: "gpt-6-mini", effort: "High" },
+    { type: "setModel", model: "gpt-6-mini", effort: "high" },
+    { type: "setModel", model: "gpt-6", effort: "" },
     { type: "setAccess", access: "auto" },
   ]);
   root.dispose();
@@ -643,6 +650,45 @@ test("a run the person stopped reads plainly, with Try Again", async () => {
   ).toBe(true);
   await root.drive(byId(root, "error-history:c-retry").id, "click");
   expect(actions).toEqual([{ type: "retry", id: "history:c" }]);
+  assertWire(commits);
+  root.dispose();
+});
+test("media and visual replies a streamed reply names get their cards", async () => {
+  const { root, commits } = mount();
+  const actions: Action[] = [];
+  const rows: Row[] = [
+    turn()[0]!,
+    {
+      id: "live:t",
+      commandId: "t",
+      chosen: {},
+      open: false,
+      value: {
+        id: "t",
+        kind: "text",
+        text: "Saw: take.wav",
+        media: [
+          {
+            kind: "audio",
+            path: "/tmp/take.wav",
+            name: "take.wav",
+            remote: false,
+          },
+        ],
+        visualReplies: [{ id: "v1", title: "Timing chart" }],
+      },
+    },
+  ];
+  await root.render(
+    <AgentView publication={withRows(rows)} send={(a) => actions.push(a)} />,
+  );
+  expect(root.inspect().nodes.some((n) => n.text === "Sound")).toBe(true);
+  await root.drive(byId(root, "live:t-media-0").id, "click");
+  await root.drive(byId(root, "live:t-v1").id, "click");
+  expect(actions).toEqual([
+    { type: "openMedia", path: "/tmp/take.wav", reveal: false },
+    { type: "openVisual", id: "v1" },
+  ]);
   assertWire(commits);
   root.dispose();
 });

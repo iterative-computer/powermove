@@ -28,7 +28,6 @@ import {
   plain,
   presentError,
   providerName,
-  relativeOpened,
   slashCopy,
   str,
   suggestions,
@@ -349,21 +348,15 @@ function Header({
         open={(anchor) => {
           const threads = s.threads ?? [];
           const current = threads.find((t) => t.id === s.threadId);
-          const now = Date.now();
           void menu?.({
             anchor,
             placeholder: "Search threads…",
             options: [
               ...(blocked ? [] : [{ label: "New Thread", value: "new" }]),
               ...threads.map((t) => ({
-                // Each thread says where it stands, as the original's list.
-                label: `${t.title || "New thread"} · ${
-                  t.busy
-                    ? "Working…"
-                    : t.id === s.threadId
-                      ? "Current"
-                      : relativeOpened(t.updatedAt, now)
-                }`,
+                label: t.busy
+                  ? `${t.title || "New thread"} · Working…`
+                  : t.title || "New thread",
                 value: `thread:${t.id}`,
                 checked: t.id === s.threadId,
                 category: "Threads",
@@ -850,8 +843,6 @@ function AssistantMessage({
     );
   if (v.nativeResult || v.kind === "result")
     return <Result s={s} send={send} text={text} />;
-  const visuals = Array.isArray(v.visualReplies) ? v.visualReplies : [];
-  const media = Array.isArray(v.media) ? v.media : [];
   return (
     <div
       role="listitem"
@@ -876,6 +867,28 @@ function AssistantMessage({
           />
         </div>
       )}
+      <ReplyCards value={v} rowId={m.rowId} send={send} />
+    </div>
+  );
+}
+/** What a reply names besides its words: interactive visual replies (each
+ * opens in its own viewer) and the images, videos and sounds it mentions
+ * (each opens in its own app; a web address only when asked). */
+function ReplyCards({
+  value: v,
+  rowId,
+  send,
+}: {
+  value: Obj;
+  rowId: string;
+  send: Send;
+}) {
+  const visuals = Array.isArray(v.visualReplies) ? v.visualReplies : [];
+  const media = Array.isArray(v.media) ? v.media : [];
+  if (!visuals.length && !media.length) return null;
+  const m = { rowId };
+  return (
+    <>
       {visuals.map((reply) => {
         const r = obj(reply);
         return (
@@ -898,6 +911,7 @@ function AssistantMessage({
               <text style={faint}>Interactive visualization</text>
             </div>
             <UI.PushButton
+              id={`${m.rowId}-${str(r.id)}`}
               label="Open"
               onClick={() => send({ type: "openVisual", id: str(r.id) })}
             />
@@ -924,11 +938,13 @@ function AssistantMessage({
             </div>
             <div style={{ ...row, gap: t("metrics.text_padding") }}>
               <UI.PushButton
+                id={`${m.rowId}-media-${index}`}
                 label={remote ? "Open in Browser" : "Open"}
                 onClick={() => send({ type: "openMedia", path, reveal: false })}
               />
               {!remote && (
                 <UI.PushButton
+                  id={`${m.rowId}-media-${index}-reveal`}
                   label="Show in Finder"
                   onClick={() =>
                     send({ type: "openMedia", path, reveal: true })
@@ -939,7 +955,7 @@ function AssistantMessage({
           </div>
         );
       })}
-    </div>
+    </>
   );
 }
 function Result({ s, send, text }: { s: Snapshot; send: Send; text: string }) {
@@ -1047,7 +1063,14 @@ function Step({
           label={`Agent: ${plain(r.text)}`}
           metadata={{ rowId: r.key }}
         >
-          <Prose text={r.text} />
+          <div style={{ ...column, gap: t("metrics.text_padding") }}>
+            <Prose text={r.text} />
+            <ReplyCards
+              value={r.row.value as Obj}
+              rowId={r.row.id}
+              send={send}
+            />
+          </div>
         </div>
       );
     case "thought":
@@ -1133,6 +1156,7 @@ function Tools({
     >
       <div style={row}>
         <button
+          id={`${r.key}-work`}
           role="button"
           label={`${r.label}${word ? `, ${word}` : ""}`}
           title={r.tooltip ?? r.summary}
@@ -1638,6 +1662,7 @@ function Conversation({
       return (
         <div key={e.key} style={{ ...column, gap: t("metrics.agent_gap") }}>
           <button
+            id={e.key}
             role="button"
             label={e.label}
             aria-expanded={open}
@@ -1712,6 +1737,11 @@ function Composer({
       ? "Add direction…"
       : "Describe a change…";
   const hasDraft = s.draft.text.trim().length > 0 || s.attachments.length > 0;
+  const modelName = named(s.catalog.models, s.settings.model);
+  const modelText =
+    s.catalog.efforts.length > 1 && s.settings.effort
+      ? `${modelName} · ${effortLabel(s.settings.effort)}`
+      : modelName;
   const sendLabel = working ? "Send direction" : "Send";
   // The shortcuts menu hangs from the composer, once per draft that asks
   // for it (the window's searchable menu); closing it unchosen leaves the
@@ -1991,7 +2021,6 @@ function Composer({
       </div>
       <div
         id="agent-options"
-        title="Model and reasoning effort"
         style={{
           ...row,
           gap: t("metrics.gap"),
@@ -2002,84 +2031,64 @@ function Composer({
       >
         {/* The original's three run choices and its access mode, each a
             trigger for the window's searchable menu. */}
-        <Trigger
-          id="agent-provider"
-          label={`Provider, ${named(s.catalog.providers, s.settings.provider)}`}
-          text={named(s.catalog.providers, s.settings.provider)}
-          disabled={!menu || working || s.composerDisabled}
-          open={(anchor) =>
-            void menu?.({
-              anchor,
-              placeholder: "Search providers",
-              options: pairs(s.catalog.providers, s.settings.provider).map(
-                ({ v, label }) => ({
-                  label,
-                  value: v,
-                  checked: v === s.settings.provider,
-                  category: "Provider",
-                }),
-              ),
-            }).then((choice) => {
-              if (typeof choice === "string" && choice !== s.settings.provider)
-                send({ type: "setProvider", provider: choice });
-            })
-          }
-        />
+        {/* Provider, model and effort in one menu: "{model} · {effort}"
+            (agent-panel.md §3). */}
         <Trigger
           id="agent-model"
-          label={`Model, ${named(s.catalog.models, s.settings.model)}`}
-          text={named(s.catalog.models, s.settings.model)}
+          label={`Model and reasoning effort, ${modelText}`}
+          text={modelText}
           disabled={!menu || working || s.composerDisabled}
           open={(anchor) =>
             void menu?.({
               anchor,
               placeholder: "Search models",
-              options: pairs(s.catalog.models, s.settings.model).map(
-                ({ v, label }) => ({
-                  label,
-                  value: v,
-                  checked: v === s.settings.model,
-                  category: "Model",
-                }),
-              ),
+              options: [
+                ...pairs(s.catalog.providers, s.settings.provider).map(
+                  ({ v, label }) => ({
+                    label,
+                    value: `provider:${v}`,
+                    checked: v === s.settings.provider,
+                    category: "Provider",
+                  }),
+                ),
+                ...pairs(s.catalog.models, s.settings.model).map(
+                  ({ v, label }) => ({
+                    label,
+                    value: `model:${v}`,
+                    checked: v === s.settings.model,
+                    category: "Model",
+                  }),
+                ),
+                ...(s.catalog.efforts.length > 1
+                  ? s.catalog.efforts.map((v) => ({
+                      label: effortLabel(v),
+                      value: `effort:${v}`,
+                      checked: v === s.settings.effort,
+                      category: "Reasoning Effort",
+                    }))
+                  : []),
+              ],
             }).then((choice) => {
-              if (typeof choice === "string" && choice !== s.settings.model)
+              if (typeof choice !== "string") return;
+              const at = choice.indexOf(":");
+              const [kind, value] = [choice.slice(0, at), choice.slice(at + 1)];
+              if (kind === "provider")
+                send({ type: "setProvider", provider: value });
+              else if (kind === "model")
                 send({
                   type: "setModel",
-                  model: choice,
+                  model: value,
                   effort: s.settings.effort,
+                });
+              else if (kind === "effort")
+                send({
+                  type: "setModel",
+                  model: s.settings.model,
+                  effort: value,
                 });
             })
           }
         />
-        {s.catalog.efforts.length > 1 && (
-          <Trigger
-            id="agent-effort"
-            label={`Reasoning effort, ${effortLabel(s.settings.effort)}`}
-            text={effortLabel(s.settings.effort)}
-            tone="colors.muted"
-            disabled={!menu || working || s.composerDisabled}
-            open={(anchor) =>
-              void menu?.({
-                anchor,
-                placeholder: "Search",
-                options: s.catalog.efforts.map((v) => ({
-                  label: effortLabel(v),
-                  value: v,
-                  checked: v === s.settings.effort,
-                  category: "Reasoning Effort",
-                })),
-              }).then((choice) => {
-                if (typeof choice === "string" && choice !== s.settings.effort)
-                  send({
-                    type: "setModel",
-                    model: s.settings.model,
-                    effort: choice,
-                  });
-              })
-            }
-          />
-        )}
         <div style={{ flexGrow: 1 }} />
         <Trigger
           id="agent-access"
@@ -2093,10 +2102,9 @@ function Composer({
             void menu?.({
               anchor,
               placeholder: "Search",
-              // Each mode with its one line of what it allows; Full access
-              // asks for consent first (the window's alert).
+              // Full access asks for consent first (the window's alert).
               options: (Object.keys(ACCESS) as Access[]).map((v) => ({
-                label: `${ACCESS[v].label} — ${ACCESS[v].detail}`,
+                label: ACCESS[v].label,
                 value: v,
                 checked: v === s.settings.access,
                 category: "How should agent actions be approved?",
@@ -2138,7 +2146,9 @@ export function AgentView({
   const working = s.runId !== null;
   const connected = n.connection === "connected";
   const empty = s.rows.count === 0 && !working;
-  const gate = !connected && !working;
+  // While the connection is still being checked, what was shown stays
+  // (the original keeps setup and composer from flashing).
+  const gate = !connected && !working && n.connection !== "checking";
   // Nothing to keep yet: the connection is the whole panel.
   const setup = gate && empty && !s.draft.text && !s.attachments.length;
   const popover = n.presentation === "popover";
