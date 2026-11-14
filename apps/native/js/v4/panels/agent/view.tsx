@@ -5,7 +5,7 @@
  * and draws it with the native kit and pm-design tokens.
  */
 import type { ComponentChildren } from "preact";
-import { useEffect, useLayoutEffect, useState } from "preact/hooks";
+import { useLayoutEffect, useState } from "preact/hooks";
 import * as UI from "../../src/components";
 import type { Json, SurfaceEvent } from "../../src/protocol";
 import type {
@@ -2009,8 +2009,10 @@ export function AgentView({
   });
   if (tick.ms !== s.elapsedMs)
     setTick({ at: Date.now(), now: Date.now(), ms: s.elapsedMs });
-  useEffect(() => {
-    if (s.runId === null) return;
+  // A layout effect: Preact schedules plain effects on a timer the realm
+  // may not have; the tick itself only runs where timers exist.
+  useLayoutEffect(() => {
+    if (s.runId === null || typeof setTimeout !== "function") return;
     let alive = true;
     const step = () => {
       if (!alive) return;
