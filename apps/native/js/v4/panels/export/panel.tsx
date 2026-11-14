@@ -385,7 +385,10 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
               style={{ flexGrow: 1 }}
               onChange={(kind) => {
                 model.chooseKind(kind as "video" | "images" | "project");
-                watch(model.refreshPlan());
+                // The page changes on the click: the plan (a host round trip
+                // that takes seconds on a large project) is asked for once
+                // the new page is out.
+                setTimeout(() => watch(model.refreshPlan()), 0);
               }}
             />
             <text

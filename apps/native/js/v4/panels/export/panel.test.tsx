@@ -251,6 +251,29 @@ test("all 16 scheme/accessibility combinations pass real native validation", asy
     check(replay(f.commits, appearance));
   await f.root.dispose();
 });
+test("a kind's page shows on the click; its plan is asked for after", async () => {
+  const f = await mounted();
+  const project = [...f.root.host.nodes.values()].find(
+    (n) => n.props.role === "radio" && n.props.label === "Project",
+  )!;
+  const asked = () =>
+    f.requests.filter(
+      (r) =>
+        r.operation.type === "command" && r.operation.command === "export.plan",
+    ).length;
+  const before = asked();
+  const shown = f.commits.length;
+  await event(f.root, project.id, "click");
+  await f.root.flush();
+  // The Project page is committed before any planning starts.
+  expect(f.model.kind).toBe("project");
+  expect(f.commits.length).toBeGreaterThan(shown);
+  expect(asked()).toBe(before);
+  await new Promise((r) => setTimeout(r, 0));
+  await f.root.flush();
+  expect(asked()).toBe(before + 1);
+  await f.root.dispose();
+});
 test("keyboard kind navigation and popup/checkbox interactions reach the model and host planner", async () => {
   const f = await mounted();
   const video = [...f.root.host.nodes.values()].find(
