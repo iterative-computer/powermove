@@ -246,12 +246,19 @@ impl Agent {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             self.text();
-            if let Some(r) = self
-                .panels
-                .take_platform_requests()
-                .into_iter()
-                .find(|r| r.operation == operation)
-            {
+            let mut found = None;
+            for r in self.panels.take_platform_requests() {
+                // New rows for a menu still open after a provider pick: the
+                // app puts them in that menu; here the person closes it.
+                if r.operation == "agentMenu" && r.input["update"] == true {
+                    self.panels.platform_reply(r.id, Ok(Value::Null));
+                    continue;
+                }
+                if found.is_none() && r.operation == operation {
+                    found = Some(r);
+                }
+            }
+            if let Some(r) = found {
                 return r;
             }
             assert!(Instant::now() < deadline, "no {operation} request");
