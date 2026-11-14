@@ -564,7 +564,7 @@ struct SourceLight {
     content_light: Option<ContentLight>,
 }
 
-/// Summarizes the HDR video `composition` can show, through its precomps and
+/// Summarizes the HDR video and stills `composition` can show, through its precomps and
 /// read through Interpret Footage. Comp-wide rather than per frame, so the tone
 /// map doesn't move between shots. Only headers are read, one file per thread
 /// up to four, once per file stamp.
@@ -582,11 +582,13 @@ pub fn hdr_content(
         .into_iter()
         .filter_map(|id| {
             let record = node::member(node::member(Some(root), "assets"), &id);
-            if !node::is_str(node::member(record, "kind"), "video") {
+            let kind = node::member(record, "kind");
+            let still = node::is_str(kind, "image");
+            if !still && !node::is_str(kind, "video") {
                 return None;
             }
             let path = resolver.path(&id, record)?;
-            Some((path, record.and_then(crate::footage::interpretation)))
+            Some((path, record.and_then(crate::footage::interpretation), still))
         })
         .collect();
     let lights: Vec<_> = std::thread::scope(|scope| {
@@ -596,7 +598,10 @@ pub fn hdr_content(
                 scope.spawn(move || {
                     clips
                         .iter()
-                        .filter_map(|(path, interpret)| source_light(path, interpret.as_ref()))
+                        .filter_map(|(path, interpret, still)| match still {
+                            true => still_light(path, interpret.as_ref()),
+                            false => source_light(path, interpret.as_ref()),
+                        })
                         .collect::<Vec<_>>()
                 })
             })
@@ -623,6 +628,25 @@ pub fn hdr_content(
         max_fall: levels.1,
     });
     content
+}
+
+/// An HDR still's light, as it is drawn: the content peak of its tone map
+/// (a gain map's headroom, a PQ still's stated peak, HLG's 1000 cd/m²).
+/// `None` for SDR stills, a gain-map still read for its SDR base, and
+/// unreadable files.
+fn still_light(path: &Path, interp: Option<&Interpretation>) -> Option<SourceLight> {
+    let facts = still_facts(path).ok()?;
+    let none = Interpretation::default();
+    let interp = interp.unwrap_or(&none);
+    if facts.color.gain_map && interp.gain_map == Some(pm_media::image::Rendition::SdrBase) {
+        return None;
+    }
+    let tone = still_reading(&facts, interp).ok()?.color.tone_map?;
+    Some(SourceLight {
+        peak_nits: tone.peak_nits,
+        mastering: None,
+        content_light: None,
+    })
 }
 
 /// `None` for SDR sources and unreadable files.
@@ -1586,10 +1610,7 @@ impl MediaCache {
                 path.display()
             )));
         }
-        let ask = stills::StillAsk {
-            edge,
-            interpreted: interpret.is_some(),
-        };
+        let ask = stills::StillAsk::of(edge, interpret);
         let issue = |i: ProbeIssue| match i {
             ProbeIssue::Unsupported(f) => MediaFailure::Unsupported(f),
             ProbeIssue::Unreadable(m) => MediaFailure::Failed(m),
@@ -1636,6 +1657,9 @@ impl MediaCache {
             pm_perf::bump(pm_perf::Counter::StillDecodes);
             whole = pm_media::image::read(path, &self.pool).ok();
             let _ = still_facts_from(path, whole.as_ref());
+            // The facts are the default reading's; a still read for its
+            // SDR base is decoded as such below.
+            whole = whole.filter(|_| ask.rendition == pm_media::image::Rendition::default());
         }
         probe_interpreted_image(path, interp).map_err(issue)?;
         let facts = still_facts(path).map_err(issue)?;
@@ -1647,15 +1671,15 @@ impl MediaCache {
                 (None, Some(whole)) => whole,
                 (Some(edge), whole) => {
                     pm_media::image::imageio::read_preview(path, &self.pool, edge).or_else(|e| {
-                        whole
-                            .ok_or(e)
-                            .or_else(|_| pm_media::image::read(path, &self.pool))
+                        whole.ok_or(e).or_else(|_| {
+                            pm_media::image::read_with(path, &self.pool, ask.rendition)
+                        })
                     })
                 }
                 .map_err(failed)?,
                 (None, None) => {
                     pm_perf::bump(pm_perf::Counter::StillDecodes);
-                    pm_media::image::read(path, &self.pool).map_err(failed)?
+                    pm_media::image::read_with(path, &self.pool, ask.rendition).map_err(failed)?
                 }
             },
         };
@@ -1810,7 +1834,12 @@ impl MediaCache {
     /// `media/stills.rs`). `edge` is the edge its draw reads it at
     /// (`exec::source_edge`): a viewer frame's still is decoded as a preview
     /// of that size, never whole (the decode a preview exists to avoid).
-    pub(crate) fn prepare_image(&mut self, path: &Path, edge: Option<u32>, interpreted: bool) {
+    pub(crate) fn prepare_image(
+        &mut self,
+        path: &Path,
+        edge: Option<u32>,
+        interpret: Option<&Interpretation>,
+    ) {
         let edge = edge.filter(|_| self.preview_media);
         let Some((len, modified)) = stamp(path) else {
             return;
@@ -1823,7 +1852,7 @@ impl MediaCache {
             return;
         }
         self.note_image_request();
-        let ask = stills::StillAsk { edge, interpreted };
+        let ask = stills::StillAsk::of(edge, interpret);
         self.stills.request(path, (len, modified), ask, &self.pool);
     }
 
@@ -2831,7 +2860,7 @@ mod still_share_tests {
 
         let still = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/stills2/png-chrm-srgb-gama-8.png");
-        media.prepare_image(&still, Some(64), false);
+        media.prepare_image(&still, Some(64), None);
         assert_eq!(media.service.usage().cache.budget, lease.frame_cache / 2);
         media.wait_for_stills();
         assert!(media.stills.held() > 0);
@@ -2871,7 +2900,7 @@ mod still_share_tests {
         assert_eq!(media.stills.limit(), 0);
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/stills2/png-chrm-srgb-gama-8.png");
-        media.prepare_image(&path, Some(64), false);
+        media.prepare_image(&path, Some(64), None);
         assert_eq!(media.service.usage().cache.budget, lease.frame_cache / 2);
         assert_eq!(media.stills.limit(), lease.frame_cache / 2);
         media.wait_for_stills();

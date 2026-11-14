@@ -327,6 +327,14 @@ pub struct Scene {
     pub markers: Vec<Marker>,
     pub bars: Vec<Bar>,
 }
+/// Where dropped media joins the layer stack ([`Scene::drop_before`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DropSlot {
+    /// On top of the stack (the track view).
+    Top,
+    /// Above this layer; `None`: at the bottom.
+    Before(Option<String>),
+}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
     InvalidGeometry,
@@ -678,6 +686,49 @@ impl Scene {
         }
         self.rows
             .get(self.tops.partition_point(|top| *top <= y).checked_sub(1)?)
+    }
+    /// Where media dropped at a content-space y joins the stack (v1.2.0's
+    /// `mediaDropAt`): a new layer is always its own strip, so the pointer
+    /// resolves to a boundary between layers. The upper half of a layer row
+    /// inserts above that layer; its lower half, its property rows and its
+    /// group's children insert below its whole block; below the last row
+    /// appends at the bottom. The layer the new one goes above, `None` for
+    /// the bottom. Track rows (the track view) put new media on top, as v1.
+    pub fn drop_before(&self, y: f64) -> DropSlot {
+        let Some(slot) = self
+            .tops
+            .partition_point(|top| *top <= y.max(0.))
+            .checked_sub(1)
+        else {
+            return DropSlot::Top;
+        };
+        let Some(row) = self.rows.get(slot) else {
+            return DropSlot::Before(None);
+        };
+        if matches!(row.content, RowContent::Track { .. }) {
+            return DropSlot::Top;
+        }
+        let layer_row = |i: usize| match self.rows.get(i).map(|r| (r, crate::v4::parse_row(&r.id)))
+        {
+            Some((r, Ok(crate::RowId::Layer(id)))) => Some((r.depth, id)),
+            _ => None,
+        };
+        // The layer whose block the pointer is in.
+        let mut owner = slot;
+        while owner > 0 && layer_row(owner).is_none() {
+            owner -= 1;
+        }
+        let Some((depth, id)) = layer_row(owner) else {
+            return DropSlot::Before(None);
+        };
+        let height = self.tops[slot + 1] - self.tops[slot];
+        if owner == slot && y - self.tops[slot] < height / 2. {
+            return DropSlot::Before(Some(id));
+        }
+        let next = (owner + 1..self.rows.len())
+            .find_map(|i| layer_row(i).filter(|(d, _)| *d <= depth))
+            .map(|(_, id)| id);
+        DropSlot::Before(next)
     }
     /// Ordinal window covering a scroll offset, for the outline's row request.
     pub fn visible_range(&self, scroll_y: f64, height: f64) -> Range<usize> {
@@ -2236,6 +2287,82 @@ mod decoration_tests {
             &visible(2),
         );
         assert_eq!(shapes["L1"].len(), DECORATIONS_PER_CLIP);
+    }
+}
+
+#[cfg(test)]
+mod drop_tests {
+    use super::*;
+    use crate::RowId;
+
+    fn row(row: RowId, depth: usize) -> PaintRow {
+        let content = match row {
+            RowId::Layer(_) => RowContent::Layer {
+                clip: None,
+                summary: std::sync::Arc::from([]),
+            },
+            RowId::Property { .. } => RowContent::Property {
+                state: KeyState::Static,
+                keys: vec![],
+            },
+        };
+        PaintRow {
+            id: crate::v4::row_id(&row),
+            accessibility_label: "row".into(),
+            depth,
+            selected: false,
+            hovered: false,
+            focused: false,
+            content,
+        }
+    }
+
+    /// v1.2.0's `mediaDropAt`: upper half of a layer row above it, lower
+    /// half and its properties below its block, a group's children inside
+    /// its block, past the last row at the bottom.
+    #[test]
+    fn dropped_media_joins_the_stack_between_layers_as_v1_did() {
+        let t = Tokens::new(pm_design::Scheme::Dark, Default::default());
+        let layer = |id: &str, depth| row(RowId::Layer(id.into()), depth);
+        let property = |id: &str| {
+            row(
+                RowId::Property {
+                    layer_id: id.into(),
+                    channel: "opacity".into(),
+                },
+                1,
+            )
+        };
+        // A, its opacity row, group G with child C, then B.
+        let scene = Scene::new(
+            vec![
+                layer("A", 0),
+                property("A"),
+                layer("G", 0),
+                layer("C", 1),
+                layer("B", 0),
+            ],
+            10.,
+            30.,
+            &t,
+        )
+        .unwrap();
+        let (l, p) = (t.metrics.track_row as f64, t.metrics.property_row as f64);
+        let before = |id: &str| DropSlot::Before(Some(id.into()));
+        assert_eq!(scene.drop_before(l * 0.25), before("A"));
+        assert_eq!(scene.drop_before(l * 0.75), before("G"));
+        assert_eq!(scene.drop_before(l + p * 0.5), before("G"));
+        // G's lower half: below its whole block (after child C).
+        let g = l + p;
+        assert_eq!(scene.drop_before(g + l * 0.75), before("B"));
+        assert_eq!(scene.drop_before(g + l + l * 0.25), before("C"));
+        assert_eq!(scene.drop_before(g + l + l * 0.75), before("B"));
+        assert_eq!(scene.drop_before(g + 2. * l + l * 0.25), before("B"));
+        assert_eq!(
+            scene.drop_before(g + 2. * l + l * 0.75),
+            DropSlot::Before(None)
+        );
+        assert_eq!(scene.drop_before(10. * l), DropSlot::Before(None));
     }
 }
 
