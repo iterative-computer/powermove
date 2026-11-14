@@ -3732,6 +3732,98 @@ mod viewer_output_tests {
         eprintln!("HLG view against the HLG delivery's codes: {d:e}");
         assert!(d < 0.5 / 1023., "HLG view {d:e}");
     }
+    /// A gain-map still shows its HDR light on an HDR display: in an HDR
+    /// project's EDR view (a display with 4× headroom) its bright half reads
+    /// three times SDR white, as its gain map describes, and its 18 % grey
+    /// stays 18 %; an SDR project's view shows the same still within white.
+    /// Read back from the picture the view presents.
+    #[test]
+    fn a_gain_map_still_shows_its_light_above_white_in_the_edr_view() {
+        let still = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../../engine/fixtures/hdr-stills/still-gainmap.heic");
+        let scene = |color: &str| {
+            let ch = |v: f64| format!(r#"{{"v":{v},"kf":[],"expr":null}}"#);
+            let transform = [
+                ("position.x", 32.),
+                ("position.y", 18.),
+                ("scale.x", 100.),
+                ("scale.y", 100.),
+                ("rotation", 0.),
+                ("opacity", 100.),
+            ]
+            .map(|(k, v)| format!(r#""{k}":{}"#, ch(v)))
+            .join(",");
+            let project = format!(
+                r##"{{"id":"P","name":"P",{color}"compId":"C","compName":"C","w":64,"h":36,"fps":30,"dur":1,"bg":"#000000",
+                "layers":[{{"id":"i","type":"image","name":"still","from":0,"dur":1,"on":true,"solo":false,"mblur":false,
+                  "p":{{{transform}}},"fx":[],"masks":[],"d":{{"asset":"pic","fit":"stretch","w":64,"h":36}}}}],
+                "comps":{{}},"assets":{{"pic":{{"id":"pic","type":"image","name":"still","ext":"heic","w":64,"h":36,"dur":0}}}},
+                "markers":[],"work":[0,1],"params":{{}}}}"##
+            );
+            Scene {
+                doc: Arc::new(pm_model::Document::new(
+                    Some(pm_model::canonical::canonical_project(
+                        pm_model::json::parse(&project).unwrap(),
+                    )),
+                    1,
+                )),
+                comp: "C".into(),
+                media: Arc::new(pm_export::render::MediaPaths {
+                    paths: [("pic".to_string(), still.clone())].into(),
+                    ..Default::default()
+                }),
+                content: 1,
+            }
+        };
+        let (w, h) = (64u32, 36u32);
+        let spec = FrameSpec::exact(
+            Ticks::ZERO,
+            Output {
+                headroom: 4.,
+                ..output(w, h)
+            },
+        );
+        // The middles of the left and right halves, as the view presents
+        // them (the still decodes on a worker: drawn until it has landed).
+        let shown = |engine: &mut Engine, scene: &Scene, mastering| {
+            engine.mastering = mastering;
+            engine.sync_tone(scene);
+            let deadline = Instant::now() + Duration::from_secs(20);
+            loop {
+                let sub = engine
+                    .frame(scene, spec, None, &Default::default(), true, Arc::default())
+                    .unwrap()
+                    .unwrap();
+                sub.commit();
+                sub.complete().unwrap();
+                assert!(sub.failures.is_empty(), "{:?}", sub.failures);
+                if !sub.stand_ins {
+                    let picture = sub
+                        .presented
+                        .as_ref()
+                        .map_or_else(|| sub.pixels(), |b| halves(b, (w * h) as usize));
+                    let at = |x: usize| picture[(h as usize / 2) * w as usize + x][1];
+                    return [at(8), at(56)];
+                }
+                assert!(Instant::now() < deadline, "the still never landed");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        let mut engine = Engine::new(Gpu::new("gain-map-edr-view-test").unwrap()).unwrap();
+        let hdr = scene(r#""color":{"mode":"hdr","masteringPeak":1000},"colorDepth":32,"#);
+        let [grey, bright] = shown(&mut engine, &hdr, Mastering::Edr);
+        eprintln!("MEASURE EDR view: grey {grey} bright {bright} (1.0 = SDR white)");
+        assert!((grey - 0.18).abs() < 0.01, "18 % grey: {grey}");
+        assert!(
+            (bright - 3.0).abs() < 0.03 * 3.0,
+            "three times white: {bright}"
+        );
+        let sdr = scene("");
+        let [grey, bright] = shown(&mut engine, &sdr, Mastering::LinearP3);
+        eprintln!("MEASURE SDR view: grey {grey} bright {bright}");
+        assert!((grey - 0.18).abs() < 0.01, "18 % grey: {grey}");
+        assert!(bright <= 1.002, "within white: {bright}");
+    }
     /// The range overlay tints what the delivery cannot hold: white pushed a
     /// stop in an SDR project is over SDR white (magenta); the same light in
     /// an HDR project's SDR view is toned within white first, so nothing is
