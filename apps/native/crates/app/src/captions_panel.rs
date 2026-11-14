@@ -1086,6 +1086,8 @@ fn render(
                     cx,
                 );
                 f.set_placeholder("Search captions");
+                // Inside the search well the panel draws.
+                f.set_bare(true);
                 f
             });
             let events = cx.subscribe(&field, |v, _, event: &TextEvent, cx| match event {
@@ -1285,7 +1287,9 @@ fn render(
             .flex()
             .items_center()
             .rounded(px(m.control_radius))
-            .bg(rgb(c.field))
+            // The well recipe: the ink at the wash step (an opaque field
+            // colour nearly vanishes on the panel).
+            .bg(pm_shell::kit::ink(c.text, t.translucency.hover))
             .text_size(px(ty.body))
             .text_color(rgb(c.text))
             .child(div().flex_1().truncate().child(name))
@@ -1385,10 +1389,32 @@ fn render(
         .child(
             div()
                 .mx(px(m.inset))
+                .mt(px(m.gap))
                 .flex()
                 .items_center()
                 .gap(px(m.gap))
-                .child(div().flex_1().child(search))
+                // The kit's search field (`Kit::search`): the wash with no
+                // edge, a magnifier, the native field.
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .flex()
+                        .items_center()
+                        .gap(px(t.space.sm))
+                        .h(px(m.control))
+                        .px(px(t.space.md))
+                        .rounded(px(m.control_radius))
+                        .bg(pm_shell::kit::ink(c.text, t.translucency.hover))
+                        .child(pm_shell::symbol::symbol(
+                            "magnifyingglass",
+                            m.symbol_inline,
+                            pm_shell::symbol::Weight::Medium,
+                            c.muted,
+                            window,
+                        ))
+                        .child(div().flex_1().min_w(px(0.)).child(search)),
+                )
                 .child(actions),
         )
         .child(list_body)
