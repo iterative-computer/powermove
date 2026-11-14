@@ -2843,6 +2843,7 @@ impl Controller {
             | "viewer.showBlue"
             | "viewer.showAlpha"
             | "viewer.showAlphaOverlay"
+            | "viewer.showRangeOverlay"
             | "viewer.rulers"
             | "viewer.grid"
             | "viewer.clearGuides"

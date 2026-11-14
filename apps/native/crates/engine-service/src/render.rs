@@ -1894,6 +1894,13 @@ impl Engine {
                 self.mastering.with_peaks(v.source_peak, v.mastering_peak)
             })
             .params()?;
+        // What the delivery holds, for the range overlay: an HDR project's
+        // master in Rec. 2020, or SDR white in Rec. 709 (an SDR project, or
+        // an HDR project's SDR view, whose picture is already toned).
+        params.range = match hdr {
+            Some(v) if params.output[0] != 3. => [v.mastering_peak / 203., 1.],
+            _ => [1., 0.],
+        };
         params.reduced = u32::from(size != Size::new(output.width, output.height));
         params.whole = u32::from(whole);
         params.drawable = [output.width as f32, output.height as f32];
@@ -3362,13 +3369,23 @@ mod viewer_output_tests {
                 {"id":"a","color":"#000000","position":0},{"id":"b","color":"#FFFFFF","position":100}]},"##;
         let scene = columns_in(2, 16., project);
         let (w, h) = (64u32, 36u32);
-        let spec = FrameSpec::exact(Ticks::ZERO, Output { headroom: 4., ..output(w, h) });
+        let spec = FrameSpec::exact(
+            Ticks::ZERO,
+            Output {
+                headroom: 4.,
+                ..output(w, h)
+            },
+        );
         let content = pm_render::media::hdr_content(&scene.doc, &scene.comp, scene.media.as_ref());
         let delivered = |engine: &mut Engine, hdr: bool| {
             let tone = pm_render::OutputTone::for_target(content.peak_nits as f32, 300., hdr);
-            let rgba = engine.export_toned(&scene, Ticks::ZERO, Size::new(w, h), tone).unwrap();
+            let rgba = engine
+                .export_toned(&scene, Ticks::ZERO, Size::new(w, h), tone)
+                .unwrap();
             rgba.chunks_exact(4)
-                .map(|p| [p[0], p[1], p[2]].map(|v| f64::from(pm_color::transfer::display_decode_f32(v))))
+                .map(|p| {
+                    [p[0], p[1], p[2]].map(|v| f64::from(pm_color::transfer::display_decode_f32(v)))
+                })
                 .collect::<Vec<_>>()
         };
         let to_709 = pm_color::primaries::conversion(
@@ -3377,9 +3394,18 @@ mod viewer_output_tests {
         )
         .unwrap();
         let shown = |engine: &mut Engine, mastering| {
+            // As the viewer draws: the view's tone taken for the scene first.
             engine.mastering = mastering;
+            engine.sync_tone(&scene);
             let sub = engine
-                .frame(&scene, spec, None, &Default::default(), true, Arc::default())
+                .frame(
+                    &scene,
+                    spec,
+                    None,
+                    &Default::default(),
+                    true,
+                    Arc::default(),
+                )
                 .unwrap()
                 .unwrap();
             sub.commit();
@@ -3416,6 +3442,51 @@ mod viewer_output_tests {
         assert!(d < 2e-3, "EDR view {d:e}");
         let lit = hdr_file[(h as usize / 2) * w as usize + 8];
         eprintln!("a pushed column in the PQ delivery's frame: {lit:?} (1.0 = 203 cd/m²)");
+    }
+    /// The range overlay tints what the delivery cannot hold: white pushed a
+    /// stop in an SDR project is over SDR white (magenta); the same light in
+    /// an HDR project's SDR view is toned within white first, so nothing is
+    /// tinted. The picture a capture reads is never tinted.
+    #[test]
+    fn the_range_overlay_tints_what_the_delivery_cannot_hold() {
+        let mut engine = Engine::new(Gpu::new("range-overlay-test").unwrap()).unwrap();
+        let spec = FrameSpec::exact(Ticks::ZERO, output(64, 36));
+        let overlay =
+            crate::OverlayGeometry::lossy([]).with_channels(crate::Channels::RangeOverlay);
+        let (captured, shown) = draw_with(
+            &mut engine,
+            &columns(1, 64.),
+            spec,
+            Mastering::LinearP3,
+            &overlay,
+        );
+        let shown = shown.expect("the presented picture");
+        assert!(
+            shown[0] > shown[1] * 1.5 && shown[2] > shown[1] * 1.5,
+            "over white is tinted magenta: {shown:?}"
+        );
+        assert!(
+            captured.iter().all(|c| *c > 1.5),
+            "a capture is the engine's frame: {captured:?}"
+        );
+        // As the viewer draws: the view's tone taken for the scene first.
+        // Another scene for the engine (its own content counter).
+        let hdr = Scene {
+            content: 2,
+            ..hdr_columns()
+        };
+        engine.mastering = Mastering::LinearP3;
+        engine.sync_tone(&hdr);
+        assert!(
+            engine.output_tone.is_some(),
+            "the SDR view of an HDR project is toned"
+        );
+        let (_, toned) = draw_with(&mut engine, &hdr, spec, Mastering::LinearP3, &overlay);
+        let toned = toned.expect("the presented picture");
+        assert!(
+            (toned[0] - toned[1]).abs() < 0.01 && (toned[2] - toned[1]).abs() < 0.01,
+            "the SDR view of an HDR project holds its toned white: {toned:?}"
+        );
     }
     /// The trace's picture hash reads the picture presented, as stored: in
     /// an SDR view that is the clipped picture on screen, not the engine's

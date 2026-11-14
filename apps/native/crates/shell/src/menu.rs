@@ -525,6 +525,10 @@ pub fn extras() -> Vec<(&'static str, Item)> {
         view("Show Blue Channel", "viewer.showBlue"),
         view("Show Alpha Channel", "viewer.showAlpha"),
         view("Show Alpha Overlay", "viewer.showAlphaOverlay"),
+        view(
+            "Show Over-Range and Out-of-Gamut",
+            "viewer.showRangeOverlay",
+        ),
         view("Popout Viewer", "viewer.popout"),
         view("Toggle Proxies", "viewer.toggleProxies"),
         view("Skimming", "toggleSkimming"),
