@@ -2876,7 +2876,8 @@ impl Controller {
                     }
                 }
             }
-            "settings" | "agent" => self.show_builtin(&cmd.name, window, cx),
+            "settings" => self.show_builtin(&cmd.name, window, cx),
+            "agent" => self.toggle_agent(window, cx),
             "bringWorkspace" => self.bring_workspace(window, cx),
             "quit" => cx.defer(crate::lifecycle::begin_quit),
             "closeWindow" | "closeTab" => self.request_close(crate::lifecycle::Intent::Window, cx),

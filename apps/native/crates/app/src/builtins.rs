@@ -49,6 +49,10 @@ pub struct Host {
     /// MCP panel tools).
     pub window_sizes: BTreeMap<String, (f32, f32)>,
     opening_windows: BTreeSet<String>,
+    /// When the Agent popover last gave way to a press in its editor (the
+    /// toolbar's Agent item among them), so that same press's toggle does
+    /// not open it again.
+    agent_dismissed: Option<std::time::Instant>,
     /// The Settings page the next show asks for (Keyboard Shortcuts…).
     pub settings_page: Option<String>,
     pub export_job: Option<crate::export_coordinator::Job>,
@@ -841,6 +845,47 @@ impl Controller {
         })
         .detach();
     }
+    /// Whether the Agent popover is showing (or on its way).
+    pub fn agent_open(&self, cx: &App) -> bool {
+        self.builtins.opening_windows.contains("agent")
+            || self
+                .builtins
+                .windows
+                .get("agent")
+                .is_some_and(|w| cx.windows().contains(w))
+    }
+    /// The Agent popover goes away (Escape, a press outside it, the toolbar
+    /// item, the panel's own close). Its conversation, draft and runs stay
+    /// with the panel's model, so reopening shows them as they were.
+    pub fn close_agent(&mut self, cx: &mut Context<Self>) {
+        let Some(handle) = self.builtins.windows.remove("agent") else {
+            return;
+        };
+        let _ = handle.update(cx, |_, w, _| w.remove_window());
+        self.update_builtins(cx);
+        gpui_macos::child_window::raise_if_active(&self.host.borrow().window);
+        cx.notify();
+    }
+    /// The toolbar's Agent item and View ▸ Agent toggle the popover, as the
+    /// original app's launcher does.
+    pub fn toggle_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let dismissed = self.builtins.agent_dismissed.take();
+        match agent_toggle(self.agent_open(cx), dismissed.map(|at| at.elapsed())) {
+            AgentToggle::Close => self.close_agent(cx),
+            AgentToggle::Open => self.show_builtin("agent", window, cx),
+            AgentToggle::Keep => {}
+        }
+    }
+    /// The popover stopped being the key window. A press in its editor
+    /// (anywhere outside the popover) closes it; another window taking key
+    /// (Settings, a file picker, another app) leaves it open.
+    fn agent_resigned(&mut self, cx: &mut Context<Self>) {
+        let editor = self.close_window;
+        if agent_dismisses(self.agent_open(cx), editor.is_some() && cx.active_window() == editor) {
+            self.close_agent(cx);
+            self.builtins.agent_dismissed = Some(std::time::Instant::now());
+        }
+    }
     pub fn show_builtin(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.start_builtins(cx);
         if id == "settings" {
@@ -880,7 +925,7 @@ impl Controller {
             "settings" => (m.settings_width, m.settings_height, WindowKind::Normal),
             "agent" => (
                 m.agent_width,
-                (2. * m.agent_width).min(
+                m.agent_height.min(
                     f32::from(window.viewport_size().height) - m.toolbar - m.status - 2. * m.gap,
                 ),
                 WindowKind::PopUp,
@@ -980,6 +1025,25 @@ impl Controller {
                     }
                     cx.new(|cx| {
                         cx.observe(&owner, |_, _, cx| cx.notify()).detach();
+                        if panel == "agent" {
+                            // A press anywhere in the editor closes the
+                            // popover, as a popover does (the original app's
+                            // outside-press dismissal).
+                            cx.observe_window_activation(window, |this: &mut SurfaceWindow, window, cx| {
+                                if window.is_window_active() {
+                                    return;
+                                }
+                                let owner = this.owner.clone();
+                                cx.spawn(async move |_, cx| {
+                                    cx.background_executor()
+                                        .timer(std::time::Duration::from_millis(60))
+                                        .await;
+                                    let _ = owner.update(cx, |v, cx| v.agent_resigned(cx));
+                                })
+                                .detach();
+                            })
+                            .detach();
+                        }
                         SurfaceWindow { owner, panel }
                     })
                 },
@@ -1349,11 +1413,7 @@ impl Controller {
                     Ok(Value::Null)
                 }
                 "agent.close" => {
-                    if let Some(handle) = self.builtins.windows.remove("agent") {
-                        let _ = handle.update(cx, |_, w, _| w.remove_window());
-                    }
-                    self.update_builtins(cx);
-                    gpui_macos::child_window::raise_if_active(&self.host.borrow().window);
+                    self.close_agent(cx);
                     Ok(Value::Null)
                 }
                 "settings.present" => {
@@ -1964,6 +2024,23 @@ impl Render for SurfaceWindow {
         // The agent popover's material is native (glass); other panel
         // windows paint the solid panel colour.
         div()
+            .when(popover, |d| {
+                // Escape closes the popover from anywhere in it; a control
+                // that uses Escape itself (a menu, the composer's shortcuts)
+                // handles it first. Deferred: this window is the one going.
+                d.on_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| {
+                    let m = e.keystroke.modifiers;
+                    if e.keystroke.key == "escape"
+                        && !(m.platform || m.control || m.alt || m.shift)
+                    {
+                        cx.stop_propagation();
+                        let owner = this.owner.clone();
+                        cx.defer(move |cx| {
+                            let _ = owner.update(cx, |v, cx| v.close_agent(cx));
+                        });
+                    }
+                }))
+            })
             .size_full()
             .overflow_hidden()
             .pt(px(band))
@@ -1983,6 +2060,53 @@ impl Render for SurfaceWindow {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum AgentToggle {
+    Open,
+    Close,
+    /// The press that toggles already closed it from outside.
+    Keep,
+}
+/// The toolbar's Agent item: an open popover closes; a closed one opens,
+/// unless the same press just closed it (the item lies outside the popover).
+fn agent_toggle(open: bool, since_dismissed: Option<std::time::Duration>) -> AgentToggle {
+    if open {
+        AgentToggle::Close
+    } else if since_dismissed.is_some_and(|d| d < AGENT_PRESS) {
+        AgentToggle::Keep
+    } else {
+        AgentToggle::Open
+    }
+}
+/// The popover gave up key: it closes when its own editor took it (a press
+/// outside the popover), never for another window or app.
+fn agent_dismisses(open: bool, editor_took_key: bool) -> bool {
+    open && editor_took_key
+}
+#[cfg(test)]
+mod agent_close_tests {
+    use super::*;
+    use std::time::Duration;
+    #[::core::prelude::v1::test]
+    fn the_toolbar_item_toggles_the_agent_popover_closed_and_open() {
+        // The reported bug: the item only ever opened (activated) it.
+        assert_eq!(agent_toggle(true, None), AgentToggle::Close);
+        assert_eq!(agent_toggle(false, None), AgentToggle::Open);
+        // The press on the item closed it from outside first: stay closed.
+        assert_eq!(agent_toggle(false, Some(Duration::from_millis(80))), AgentToggle::Keep);
+        // Long after an outside press, the item opens it again.
+        assert_eq!(agent_toggle(false, Some(Duration::from_secs(5))), AgentToggle::Open);
+    }
+    #[::core::prelude::v1::test]
+    fn a_press_in_the_editor_closes_the_popover_but_another_window_does_not() {
+        assert!(agent_dismisses(true, true));
+        assert!(!agent_dismisses(true, false));
+        assert!(!agent_dismisses(false, true));
+    }
+}
+/// How long after a press outside the Agent popover closed it a toolbar
+/// toggle from that same press is still the press (mouse down to mouse up).
+const AGENT_PRESS: std::time::Duration = std::time::Duration::from_millis(600);
 /// v1's timeline `gutterWidth` default (`api-helpers.ts`).
 const V1_DEFAULT_GUTTER: f64 = 224.;
 /// A painter's answer: JSON text (the realm returns `JSON.stringify(…)`),
