@@ -23,8 +23,28 @@ use std::{
 };
 
 /// Host services a gesture needs. Implemented by the Controller; tests record.
+/// Media dropped on the timeline: placed at `at`, joining the stack at
+/// `index` (0 the top; `None` the bottom).
+#[derive(Clone, Debug, PartialEq)]
+pub struct MediaDrop {
+    pub at: f64,
+    pub index: Option<usize>,
+    pub what: Dropped,
+}
+#[derive(Clone, Debug, PartialEq)]
+pub enum Dropped {
+    /// From Finder; Option held keeps a folder's files apart.
+    Files {
+        paths: Vec<std::path::PathBuf>,
+        alt: bool,
+    },
+    /// What the Project panel is dragging.
+    ProjectItems,
+}
 pub trait Delegate: 'static {
     fn time(&self, cx: &App) -> f64;
+    /// Media dropped on the timeline (Finder files, Project items).
+    fn drop_media(&self, _drop: MediaDrop, _cx: &mut App) {}
     fn seek(&self, seconds: f64, cx: &mut App);
     fn effect(&self, effect: HostEffect, cx: &mut App);
     fn report(&self, message: String, cx: &mut App);
@@ -263,6 +283,9 @@ pub struct TimelineSurface {
     /// Clears the skimmer when the window stops being active (Cmd-Tab, key
     /// loss, hide): the pointer may never move out of the timeline.
     activation: Option<Subscription>,
+    /// Where media being dragged over the timeline would land (window
+    /// position), for the insertion line.
+    media_over: Option<Point<Pixels>>,
 }
 const WHEEL_ZOOM: f64 = 0.01;
 /// The fewest letters of a clip's name worth showing before its ellipsis.
@@ -323,6 +346,7 @@ impl TimelineSurface {
             skimmer: None,
             hover_clip: None,
             activation: None,
+            media_over: None,
             late: None,
         };
         this.restore_view();
@@ -1073,6 +1097,40 @@ impl TimelineSurface {
     fn local(&self, position: Point<Pixels>) -> (f64, f64) {
         let at = position - self.bounds.origin;
         (f32::from(at.x) as f64, f32::from(at.y) as f64)
+    }
+    /// Where media dropped at `position` lands: the frame under the pointer
+    /// (the layer column counts as the first time shown), and its place in
+    /// the stack ([`Scene::drop_before`], v1.2.0's rule).
+    fn media_slot(&self, position: Point<Pixels>) -> (f64, Option<usize>, f64) {
+        let (x, y) = self.local(position);
+        let at = frame_time(
+            &self.model,
+            self.time_at(x.max(self.view.layer_column)).max(0.),
+        );
+        let ruler = self.tokens.metrics.ruler as f64;
+        let content = y.max(ruler) - ruler + self.view.scroll_y;
+        let layers = self.model.index.layers.len();
+        let (index, top) = match self.scene.as_ref().map(|s| (s.drop_before(content), s)) {
+            Some((pm_panel_timeline::render::DropSlot::Top, _)) | None => (Some(0), 0.),
+            Some((pm_panel_timeline::render::DropSlot::Before(Some(id)), scene)) => (
+                self.model.index.layer_ordinal(&id),
+                scene
+                    .scroll_for(&pm_panel_timeline::v4::row_id(
+                        &pm_panel_timeline::RowId::Layer(id),
+                    ))
+                    .unwrap_or(0.),
+            ),
+            Some((pm_panel_timeline::render::DropSlot::Before(None), scene)) => {
+                (Some(layers), scene.content_height())
+            }
+        };
+        (at, index, ruler + top - self.view.scroll_y)
+    }
+    fn drop_media(&mut self, what: Dropped, position: Point<Pixels>, cx: &mut Context<Self>) {
+        self.media_over = None;
+        let (at, index, _) = self.media_slot(position);
+        self.delegate.drop_media(MediaDrop { at, index, what }, cx);
+        cx.notify();
     }
     fn time_at(&self, x: f64) -> f64 {
         self.view.scroll_time + (x - self.view.layer_column) / self.view.pps
@@ -2481,6 +2539,33 @@ impl Render for TimelineSurface {
         };
         let weak = this.clone();
         let t = &self.tokens;
+        // Media dragged over the timeline: where it would land, an
+        // insertion line between layers and the frame under the pointer.
+        if !cx.has_active_drag() {
+            self.media_over = None;
+        }
+        let landing = self.media_over.map(|position| {
+            let (at, _, y) = self.media_slot(position);
+            let x = self.view.layer_column + (at - self.view.scroll_time) * self.view.pps;
+            let (width, height) = (self.bounds.size.width, self.bounds.size.height);
+            let accent = rgb(self.tokens.colors.accent);
+            [
+                div()
+                    .absolute()
+                    .left(px(self.view.layer_column as f32))
+                    .top(px(y as f32 - 1.))
+                    .w(width - px(self.view.layer_column as f32))
+                    .h(px(2.))
+                    .bg(accent),
+                div()
+                    .absolute()
+                    .left(px(x as f32))
+                    .top(px(self.tokens.metrics.ruler))
+                    .w(px(1.))
+                    .h(height - px(self.tokens.metrics.ruler))
+                    .bg(accent),
+            ]
+        });
         let tip = self.tip.clone().map(|(text, (x, y))| {
             // The shell's tooltip look: floating fill, separator edge, minimum type.
             div()
@@ -2540,6 +2625,34 @@ impl Render for TimelineSurface {
                 MouseButton::Left,
                 cx.listener(|s, event: &MouseDownEvent, _, cx| s.on_down(event, cx)),
             )
+            // Finder files and Project items dropped here land at the time
+            // and place in the stack under the pointer (v1.2.0's timeline).
+            .on_drag_move(cx.listener(|s, event: &DragMoveEvent<ExternalPaths>, _, cx| {
+                s.media_over = Some(event.event.position);
+                cx.notify();
+            }))
+            .on_drag_move(cx.listener(
+                |s, event: &DragMoveEvent<crate::v4_view::PanelDrag>, _, cx| {
+                    if event.drag(cx).panel == pm_builtins::PROJECT_PANEL {
+                        s.media_over = Some(event.event.position);
+                        cx.notify();
+                    }
+                },
+            ))
+            .on_drop(cx.listener(|s, paths: &ExternalPaths, window, cx| {
+                cx.stop_propagation();
+                let what = Dropped::Files {
+                    paths: paths.paths().to_vec(),
+                    alt: window.modifiers().alt,
+                };
+                s.drop_media(what, window.mouse_position(), cx);
+            }))
+            .on_drop(cx.listener(|s, drag: &crate::v4_view::PanelDrag, window, cx| {
+                if drag.panel == pm_builtins::PROJECT_PANEL {
+                    cx.stop_propagation();
+                    s.drop_media(Dropped::ProjectItems, window.mouse_position(), cx);
+                }
+            }))
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(|s, event: &MouseDownEvent, window, cx| {
@@ -2712,6 +2825,7 @@ impl Render for TimelineSurface {
                 .size_full(),
             )
             // Over the canvas.
+            .children(landing.into_iter().flatten())
             .children(tip)
             .children(self.skimmer_marks())
     }

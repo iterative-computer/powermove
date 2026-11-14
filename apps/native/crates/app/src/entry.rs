@@ -48,6 +48,30 @@ pub fn receive(urls: Vec<String>, cx: &mut App) {
             pm_shell::send_menu_command(command);
             continue;
         }
+        // `review/filedrop/<x,y;x,y;…>/<paths>`: files dragged in from
+        // Finder along a pointer path and dropped at its last point, as
+        // macOS delivers them (`FileDropEvent`), through the window's own
+        // hit testing (the drop as the release GPUI makes of Submit, never
+        // activating the app). `review/pointer/<x,y;x,y;…>`: a press at the first
+        // point, moves along the path, a release at the last (an in-app
+        // drag). Window points; one frame between steps.
+        #[cfg(debug_assertions)]
+        if let Some(rest) = raw.strip_prefix("powermove://review/filedrop/") {
+            if let Some((points, paths)) = rest.split_once('/') {
+                let paths: Vec<PathBuf> =
+                    url::form_urlencoded::parse(format!("x={paths}").as_bytes())
+                        .next()
+                        .map(|(_, v)| v.lines().map(PathBuf::from).collect())
+                        .unwrap_or_default();
+                review_input(review_points(points), Some(paths), cx);
+            }
+            continue;
+        }
+        #[cfg(debug_assertions)]
+        if let Some(points) = raw.strip_prefix("powermove://review/pointer/") {
+            review_input(review_points(points), None, cx);
+            continue;
+        }
         // `review/scroll/<built-in window>/<points>`: a sheet taller than
         // its window, scrolled down by that much (a window in the background
         // gets no wheel events, so reviews reach its lower rows here).
@@ -318,6 +342,105 @@ impl EntryHook for Hook<'_> {
     }
 }
 
+#[cfg(debug_assertions)]
+fn review_points(text: &str) -> Vec<Point<Pixels>> {
+    text.split(';')
+        .filter_map(|p| {
+            let (x, y) = p.split_once(',')?;
+            Some(point(px(x.parse().ok()?), px(y.parse().ok()?)))
+        })
+        .collect()
+}
+
+/// The steps of a review pointer path (module notes on `review/filedrop`
+/// and `review/pointer`): a file drop when `paths` is given, else a press,
+/// moves and a release.
+#[cfg(debug_assertions)]
+fn review_steps(points: &[Point<Pixels>], paths: Option<Vec<PathBuf>>) -> Vec<PlatformInput> {
+    let (Some(&first), Some(&last)) = (points.first(), points.last()) else {
+        return vec![];
+    };
+    let moves = |pressed| {
+        points.iter().map(move |&position| {
+            PlatformInput::MouseMove(MouseMoveEvent {
+                position,
+                pressed_button: pressed,
+                modifiers: Modifiers::default(),
+            })
+        })
+    };
+    match paths {
+        Some(paths) => std::iter::once(PlatformInput::FileDrop(FileDropEvent::Entered {
+            position: first,
+            paths: ExternalPaths(paths.into()),
+        }))
+        .chain(
+            points
+                .iter()
+                .map(|&position| PlatformInput::FileDrop(FileDropEvent::Pending { position })),
+        )
+        // The release GPUI makes of a drop's Submit, without the app
+        // activation Submit brings (a review never brings the app forward).
+        .chain([
+            PlatformInput::MouseUp(MouseUpEvent {
+                button: MouseButton::Left,
+                position: last,
+                modifiers: Modifiers::default(),
+                click_count: 1,
+            }),
+            PlatformInput::FileDrop(FileDropEvent::Exited),
+        ])
+        .collect(),
+        None => std::iter::once(PlatformInput::MouseMove(MouseMoveEvent {
+            position: first,
+            pressed_button: None,
+            modifiers: Modifiers::default(),
+        }))
+        .chain(std::iter::once(PlatformInput::MouseDown(MouseDownEvent {
+            button: MouseButton::Left,
+            position: first,
+            modifiers: Modifiers::default(),
+            click_count: 1,
+            first_mouse: false,
+        })))
+        .chain(moves(Some(MouseButton::Left)))
+        .chain(std::iter::once(PlatformInput::MouseUp(MouseUpEvent {
+            button: MouseButton::Left,
+            position: last,
+            modifiers: Modifiers::default(),
+            click_count: 1,
+        })))
+        .collect(),
+    }
+}
+
+/// Sends a review pointer path into the first editor window, one step a
+/// frame, so each event meets the hitboxes the last frame drew.
+#[cfg(debug_assertions)]
+fn review_input(points: Vec<Point<Pixels>>, paths: Option<Vec<PathBuf>>, cx: &mut App) {
+    let Some(&(_, handle)) = cx.default_global::<Entries>().editors.first() else {
+        return;
+    };
+    let steps = review_steps(&points, paths);
+    cx.spawn(async move |cx| {
+        for step in steps {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(32))
+                .await;
+            if cx
+                .update_window(handle, |_, window, cx| {
+                    window.dispatch_event(step, cx);
+                    window.refresh();
+                })
+                .is_err()
+            {
+                return;
+            }
+        }
+    })
+    .detach();
+}
+
 #[cfg(test)]
 mod tests {
     use super::{EntryQueue, admit};
@@ -345,3 +468,4 @@ mod tests {
         assert_eq!(queue.pending(), (1, 2));
     }
 }
+
