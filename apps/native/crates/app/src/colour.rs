@@ -817,7 +817,10 @@ impl Controller {
                 let s = view.read(cx);
                 scope_config(s.rec2020, s.extended, s.output)
             }
-            None => scope_config(self.project_hdr, self.project_hdr, false),
+            None => {
+                let hdr = self.project_output.hdr();
+                scope_config(hdr, hdr, false)
+            }
         };
         let (frames, inbox) = async_channel::bounded(1);
         if viewer.scopes(Some((config, frames))).is_err() || viewer.capture_next().is_err() {
@@ -854,7 +857,7 @@ impl Controller {
             && self.scopes.defaults != Some(p.snapshot.doc_id)
         {
             self.scopes.defaults = Some(p.snapshot.doc_id);
-            let hdr = self.project_hdr;
+            let hdr = self.project_output.hdr();
             view.update(cx, |view, _| {
                 view.rec2020 = hdr;
                 view.extended = hdr;
@@ -1033,25 +1036,47 @@ impl Controller {
         .detach();
     }
 
-    /// Follows the project's HDR switch in the viewer's default output.
-    pub fn follow_project_hdr(&mut self) {
-        use crate::viewer2::OutputMode;
-        let hdr = self
+    /// Follows the project's Output in the viewer's default view: a view
+    /// still on the old output's default moves to the new one's; a view the
+    /// person chose stays.
+    pub fn follow_project_output(&mut self) {
+        let output = self
             .published
             .as_ref()
             .and_then(|p| p.snapshot.root())
-            .and_then(|root| pm_render::composite::project_color(root).ok())
-            .is_some_and(|color| color.mode == pm_protocol::color::ColorMode::Hdr);
-        if hdr == self.project_hdr {
+            .map_or(pm_protocol::color::ProjectOutput::Sdr, |root| {
+                pm_kernel::model::project_output(root)
+            });
+        if output == self.project_output {
             return;
         }
-        self.project_hdr = hdr;
-        self.output_mode = match (hdr, self.output_mode) {
-            (true, OutputMode::Sdr) => OutputMode::Edr,
-            (false, OutputMode::Edr) => OutputMode::Sdr,
-            (_, mode) => mode,
-        };
+        self.output_mode = next_view(self.project_output, output, self.output_mode);
+        self.project_output = output;
         self.apply_viewer_options();
+    }
+}
+
+/// The viewer's default view for a project's Output: what its delivery shows.
+pub fn default_view(output: pm_protocol::color::ProjectOutput) -> crate::viewer2::OutputMode {
+    use crate::viewer2::OutputMode;
+    use pm_protocol::color::ProjectOutput;
+    match output {
+        ProjectOutput::Sdr => OutputMode::Sdr,
+        ProjectOutput::Pq => OutputMode::Pq,
+        ProjectOutput::Hlg => OutputMode::Hlg,
+    }
+}
+
+/// The view after the Output changes from `was` to `now`.
+fn next_view(
+    was: pm_protocol::color::ProjectOutput,
+    now: pm_protocol::color::ProjectOutput,
+    view: crate::viewer2::OutputMode,
+) -> crate::viewer2::OutputMode {
+    if view == default_view(was) {
+        default_view(now)
+    } else {
+        view
     }
 }
 

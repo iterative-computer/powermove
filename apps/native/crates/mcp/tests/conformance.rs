@@ -1069,3 +1069,37 @@ fn transform_layers_runs_over_the_batch_selection() {
     assert_eq!(opacity(&layers[1]), 50.);
     assert!(pm_mcp::commands::plan(&project, &[], &[edit], 0.).is_err());
 }
+
+#[test]
+fn the_agent_sets_the_project_output() {
+    let f = Fixture::new();
+    let id = f.create();
+    let mut s = f.session();
+    start(&mut s);
+    let color = |f: &Fixture| f.host.lock().unwrap().read_document(&id).unwrap()["color"].clone();
+    let applied = value(s.call(
+        "apply_commands",
+        json!({"commands":[{"type":"set_composition","patch":{"output":"hlg","masteringPeak":2000}}]}),
+    ));
+    assert_ne!(applied["results"][0]["ok"], json!(false), "{applied}");
+    let read = color(&f);
+    assert_eq!(
+        (&read["mode"], &read["hdrTransfer"], &read["masteringPeak"]),
+        (&json!("hdr"), &json!("hlg"), &json!(2000))
+    );
+    value(s.call(
+        "apply_commands",
+        json!({"commands":[{"type":"set_composition","patch":{"output":"sdr"}}]}),
+    ));
+    assert_eq!(color(&f)["mode"], json!("standard"));
+    let refused = s.call(
+        "apply_commands",
+        json!({"commands":[{"type":"set_composition","patch":{"output":"aces"}}]}),
+    );
+    assert!(
+        refused
+            .to_string()
+            .contains("output must be sdr, pq or hlg"),
+        "{refused}"
+    );
+}

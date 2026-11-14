@@ -81,8 +81,8 @@ pub struct Controller {
     pub media_mode: pm_engine_service::MediaMode,
     /// Preview Resolution (viewer bar) for this editor's viewers.
     pub quality: pm_engine_service::Quality,
-    /// The open project keeps HDR light.
-    pub project_hdr: bool,
+    /// What the open project delivers (Settings › Project › Output).
+    pub project_output: pm_protocol::color::ProjectOutput,
     pub scopes: crate::colour::Scopes,
     pub perf: crate::perf_panel::State,
     pub mixer: crate::mixer_panel::State,
@@ -736,7 +736,7 @@ impl Controller {
             output_mode: crate::viewer2::OutputMode::from_env(),
             media_mode: Default::default(),
             quality: Default::default(),
-            project_hdr: false,
+            project_output: pm_protocol::color::ProjectOutput::Sdr,
             scopes: Default::default(),
             perf: Default::default(),
             mixer: Default::default(),
@@ -991,7 +991,7 @@ impl Controller {
             self.stop_offered = Some(p.snapshot.doc_id);
             self.offer_reopen(&p, cx);
         }
-        self.follow_project_hdr();
+        self.follow_project_output();
         let saving = p.saving || self.save_pending;
         if let Some(note) = save_note(self.saving_note, saving, p.dirty, &self.message) {
             self.message = note.into();

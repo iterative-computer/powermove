@@ -180,7 +180,7 @@ test("concurrent actions carry their original publication admission and cannot o
   expect(model.inspect().snapshot.draft.text).toBe("First");
   model.dispose();
 });
-test("AccessKit tree has real group/list/button roles, exact labels and disabled Send; unsupported row counts stay explicit", async () => {
+test("AccessKit tree has real group/button roles, exact labels and disabled Send; unsupported row counts stay explicit", async () => {
   const commits: Commit[] = [];
   const root = createRoot(async (c) => {
     commits.push(c);
@@ -211,11 +211,9 @@ test("AccessKit tree has real group/list/button roles, exact labels and disabled
   expect(
     ax.some((n) => n.role === "Group" && n.label === "Agent conversation"),
   ).toBe(true);
-  const list = ax.find(
-    (n) => n.role === "List" && n.label === "Agent conversation",
-  )!;
-  expect(list).toBeDefined();
-  expect(list.rowCount).toBeNull();
+  // The transcript is one labelled group VoiceOver can enter; it claims
+  // no row count it can't keep (the model windows 60k rows).
+  expect(ax.some((n) => n.rowCount !== null)).toBe(false);
   expect(
     ax.find((n) => n.role === "Button" && n.label === "Send")?.disabled,
   ).toBe(true);

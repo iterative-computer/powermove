@@ -255,6 +255,7 @@ impl PixelBuffer {
                 width: w,
                 height: h,
                 planes,
+                light: None,
             })
         })
     }

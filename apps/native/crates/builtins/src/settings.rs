@@ -243,7 +243,7 @@ impl Backend {
             "project.duration",
             "project.background",
             "project.colorDepth",
-            "project.hdr",
+            "project.output",
             "project.masteringPeak"
         ]))?;
         let mut rows = vec![];
@@ -346,13 +346,14 @@ impl Backend {
             "detail":"Precision per color channel. Applies to every composition in this project.",
             "binding":fields["project.colorDepth"],"disabled":false}));
         let color = root.get("color");
-        let hdr = color
-            .and_then(|c| c.get("mode"))
-            .is_some_and(|m| m.to_value() == pm_model::Value::from("hdr"));
-        rows.push(json!({"id":"project.hdr","section":"project","group":"Color",
-            "label":"HDR","control":"switch","value":hdr,
-            "detail":"Keeps PQ and HLG light in the project for HDR delivery. Off, HDR footage is tone mapped to SDR white as it comes in.",
-            "binding":fields["project.hdr"],"disabled":false}));
+        let output = pm_kernel::model::project_output(root);
+        let hdr = output.hdr();
+        rows.push(json!({"id":"project.output","section":"project","group":"Color",
+            "label":"Output","control":"choice","value":output.id(),
+            "options":pm_protocol::color::ProjectOutput::ALL.iter()
+                .map(|o| json!({"v":o.id(),"label":o.label()})).collect::<Vec<_>>(),
+            "detail":"What this project delivers. HDR keeps PQ and HLG light in the project; SDR tone maps HDR footage to SDR white as it comes in.",
+            "binding":fields["project.output"],"disabled":false}));
         rows.push(
             json!({"id":"project.masteringPeak","section":"project","group":"Color",
             "label":"Mastering Peak","control":"choice","value":color
@@ -740,8 +741,13 @@ impl Backend {
                                 .ok_or("Invalid color depth")? as u32,
                         );
                     }
-                    Some("project.hdr") => {
-                        patch.hdr = Some(value.as_bool().ok_or("HDR must be on or off")?);
+                    Some("project.output") => {
+                        patch.output = Some(
+                            value
+                                .as_str()
+                                .and_then(pm_protocol::color::ProjectOutput::parse)
+                                .ok_or("Output must be sdr, pq or hlg")?,
+                        );
                     }
                     Some("project.masteringPeak") => {
                         patch.mastering_peak = Some(number(value, 400., 10000.)?);

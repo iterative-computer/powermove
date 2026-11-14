@@ -175,6 +175,13 @@ impl SoftwareSink {
                 "software video sink needs MOV, MP4, or WebM".into(),
             ));
         }
+        // libx265 here writes no RPUs: Dolby Vision is the VideoToolbox
+        // encoder's, never plain HLG under its name.
+        if crate::verify::expected_dolby_vision(spec) == Some(true) {
+            return Err(Error::InvalidSpec(
+                "Dolby Vision 8.4 requires the VideoToolbox sink".into(),
+            ));
+        }
         if matches!(spec.codec, Codec::Hevc { .. }) && spec.alpha != AlphaOutput::None {
             return Err(Error::InvalidSpec(
                 "HEVC alpha requires the VideoToolbox sink".into(),
@@ -670,6 +677,7 @@ fn unpack(bytes: &[u8], spec: &ExportSpec) -> EncoderInput {
         width: spec.width,
         height: spec.height,
         planes,
+        light: None,
     }
 }
 
@@ -806,6 +814,7 @@ fn probe_and_verify(
     let mut media_timescale = movie_timescale;
     let mut duration = timing.duration(spec.frames) as u64;
     let mut timecode = None;
+    let mut dolby_vision = None;
     if spec.container.is_quicktime_family() {
         let movie = crate::mp4box::Movie::read(path)?;
         let track = movie
@@ -819,6 +828,11 @@ fn probe_and_verify(
                 spec.tags.chroma_location().sample_loc_type(),
             );
             problems.extend(stream);
+            problems.extend(verify::dolby_vision_problem(
+                verify::expected_dolby_vision(spec),
+                visual.dolby_vision,
+            ));
+            dolby_vision = visual.dolby_vision;
             if full_range {
                 problems.push("the stream is flagged full range".into());
             }
@@ -995,7 +1009,8 @@ fn probe_and_verify(
         pixels,
         picture,
         notes,
-        dolby_vision: None,
+        dolby_vision,
+        content_light: None,
         hardware_encoder: Some(false),
         bytes: fs::metadata(path).map_err(io)?.len(),
         mix: None,

@@ -51,6 +51,9 @@ export interface SurfaceProps {
   "data-pm-variant"?: "inline" | "quiet" | "band" | "code" | "plate";
   /** Files dropped from Finder land on this target. */
   "data-pm-drop"?: "files";
+  /** An end-anchored scroller (`metadata.scrollAnchor: "end"`) reports
+   * `{away}` when the reader leaves its end or returns. */
+  onScroll?: (event: SurfaceEvent) => void;
   "data-pm-system-placement"?: "system";
   "data-pm-dismiss-outside"?: boolean;
   "data-pm-live-edit"?: boolean;

@@ -92,6 +92,11 @@ pub struct VideoOptions {
     /// names: laid over this export's defaults and checked by the same
     /// planner as a person's export.
     pub sheet: serde_json::Map<String, Value>,
+    /// Export as `<name>.<extension>` in the export folder, replacing an
+    /// earlier file of that name (and its caption files) once the export
+    /// succeeded, the old ones kept in the export archive. Off: a fresh name,
+    /// and nothing already there is ever replaced.
+    pub replace: bool,
 }
 /// The Export sheet's options an agent gives under the sheet's own names.
 pub const SHEET_OPTIONS: [&str; 15] = [
@@ -127,11 +132,12 @@ impl VideoOptions {
             .iter()
             .filter_map(|k| a.get(*k).map(|v| ((*k).to_owned(), v.clone())))
             .collect();
+        // A custom size is scale "custom" with both dimensions; a dimension
+        // without it would export at the composition's size.
         let sized = sheet.contains_key("width") || sheet.contains_key("height");
         let custom = sheet.get("scale").and_then(Value::as_str) == Some("custom");
-        if (sized || custom) && !(custom || !sheet.contains_key("scale"))
-            || (sized || custom) && !(sheet.contains_key("width") && sheet.contains_key("height"))
-        {
+        let both = sheet.contains_key("width") && sheet.contains_key("height");
+        if (sized || custom) && !(custom && both) {
             return Err(Error::invalid(
                 "A custom size takes scale \"custom\" with both width and height.",
             ));
@@ -160,6 +166,7 @@ impl VideoOptions {
             studio_quality: a.get("studioQuality").cloned(),
             studio_render_scale,
             sheet,
+            replace: a["replace"].as_bool().unwrap_or(false),
         })
     }
 }

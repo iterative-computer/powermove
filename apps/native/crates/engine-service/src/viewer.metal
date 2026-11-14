@@ -9,10 +9,12 @@ vertex float4 vs(uint i [[vertex_id]]) {
 float dec(float v) { float m=abs(v); return copysign(m<=0.04045 ? m/12.92 : pow((m+0.055)/1.055,2.4),v); }
 float pq(float n) { float y=pow(max(n,0.0)/10000.0,2610.0/16384.0); return pow((3424.0/4096.0+2413.0/128.0*y)/(1.0+2392.0/128.0*y),2523.0/32.0); }
 float unpq(float e) { float p=pow(max(e,0.0),32.0/2523.0); return 10000.0*pow(max(p-3424.0/4096.0,0.0)/(2413.0/128.0-2392.0/128.0*p),16384.0/2610.0); }
+// BT.2390 as the engine's output tone (pm_color::tonemap pm_eetf), in nits:
+// light past the source peak is held at it, so a target at or above the
+// source is still a hold, never a pass-through.
 float eetf(float n,float source,float target) {
-    if(target>=source) return n;
     float pw=pq(source), m=pq(target)/pw, e=clamp(pq(n)/pw,0.0,1.0), k=1.5*m-0.5;
-    if(e<k) return n;
+    if(m>=1.0||e<k) return unpq(e*pw);
     float t=(e-k)/(1.0-k), t2=t*t,t3=t2*t;
     return unpq(((2*t3-3*t2+1)*k+(t3-2*t2+t)*(1-k)+(-2*t3+3*t2)*m)*pw);
 }

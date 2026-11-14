@@ -1029,9 +1029,22 @@ impl Panel {
                 error,
                 cancelled,
             } => {
-                let spoke = s.trace.rows.values().any(|v| {
-                    v["kind"] == "text" && v["text"].as_str().is_some_and(|s| !s.trim().is_empty())
-                });
+                // The reply is shown once: a run that streamed it (the app
+                // server) already has it in its trail; a run that only
+                // returns it at the end (Codex exec in Auto/Supervised) has
+                // only its earlier notes there, so the reply is appended.
+                let flat = |t: &str| t.split_whitespace().collect::<Vec<_>>().join(" ");
+                let streamed = flat(
+                    &s.trace
+                        .rows
+                        .values()
+                        .filter(|v| v["kind"] == "text")
+                        .filter_map(|v| v["text"].as_str())
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                );
+                let spoke = !flat(&text).is_empty() && streamed.contains(&flat(&text))
+                    || text.trim().is_empty() && !streamed.is_empty();
                 s.archive_trace(now, false)?;
                 let held: Vec<_> = s
                     .conversation
