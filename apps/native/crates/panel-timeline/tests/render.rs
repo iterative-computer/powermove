@@ -51,7 +51,11 @@ fn selected_clips_keep_their_hue_with_a_white_rim_and_exact_authored_times() {
         let clip = f.ops.iter().find(|o| o.id == "clip:selected").unwrap();
         assert_eq!(clip.detail["from"], 0.125);
         assert_eq!(clip.detail["duration"], 5.375);
-        assert_eq!(clip.bounds.x, t.metrics.layer_column as f64); // sticky visible edge
+        // A strip that starts before the view runs on past its edge and is
+        // cut straight there (no rounded end where it does not end).
+        let column = t.metrics.layer_column as f64;
+        assert!(clip.bounds.x < column - clip.radius);
+        assert_eq!(clip.clip.unwrap().x, column);
         // The body is the layer's strip in its selected state: its own hue
         // with a bright rim inside the edge, never an accent fill or ring.
         let material = t.strip(t.colors.labels.teal, pm_design::StripState::Selected);
@@ -75,9 +79,10 @@ fn selected_clips_keep_their_hue_with_a_white_rim_and_exact_authored_times() {
             .unwrap();
         // The name starts clear of the trim grip inside the strip's edge.
         let grip = t.trim_grip();
+        // The name stays in sight at the view's edge.
         assert_eq!(
             content.bounds.x,
-            clip.bounds.x + (grip.inset + grip.width + t.space.xs) as f64
+            column + (grip.inset + grip.width + t.space.xs) as f64
         );
     }
 }
@@ -138,6 +143,11 @@ fn trim_hit_tests_use_authored_edges_and_ignore_gutter_ruler_and_offscreen_edges
     );
     let end = t.metrics.layer_column as f64 + (5.5 - 1.) * 100.;
     assert_eq!(f.hit_clip(end - 1., y), Some(("selected", Some(Edge::Out))));
+    // The strip is drawn inside its times; its trim zone still reaches the
+    // authored end and past it, at the strip's height only.
+    assert_eq!(f.hit_clip(end, y), Some(("selected", Some(Edge::Out))));
+    assert_eq!(f.hit_clip(end + 4., y), Some(("selected", Some(Edge::Out))));
+    assert_eq!(f.hit_clip(end + 6., y), None);
     assert_eq!(f.hit_clip(t.metrics.layer_column as f64 - 1., y), None);
     assert_eq!(f.hit_clip(end, 3.), None);
     assert_eq!(
@@ -200,9 +210,50 @@ fn malformed_geometry_and_nan_never_reach_native_painter() {
 
 #[test]
 fn graph_curves_handles_selection_and_names_use_neutral_spec_marks() {
-    use pm_panel_timeline::graph_render::*;
     let t = tokens();
     let v = viewport(&t);
+    let g = graph(true, false);
+    let area = Rect::new(v.layer_column, 220., v.width - v.layer_column, 220.);
+    let legend = Rect::new(v.layer_column, 220., v.width - v.layer_column, 28.);
+    let ops = g.prepare(v, area, legend, &t).unwrap();
+    assert_eq!(
+        ops.iter().find(|o| o.id == "curve:a:position.x").unwrap().color,
+        t.graph_curve("position.x", 0)
+    );
+    let legend = ops.iter().find(|o| o.id == "graph-legend").unwrap();
+    assert_eq!(legend.detail["items"][0]["text"], "X Position");
+    // Two selected keys: v1's transform box with its eight grips.
+    assert!(ops.iter().any(|o| o.id == "graph-box"));
+    assert_eq!(
+        ops.iter()
+            .filter(|o| o.id.starts_with("graph-transform-handle"))
+            .count(),
+        8
+    );
+    assert!(
+        ops.iter()
+            .filter(|o| o.id != "graph-legend" && o.id != "graph-legend-ground")
+            .all(|o| o.clip.is_some())
+    );
+    let wire =
+        serde_json::to_string_pretty(&ops.iter().map(Op::wire).collect::<Vec<_>>()).unwrap() + "\n";
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/graph-render.json");
+    if std::env::var_os("PM_UPDATE_TIMELINE_RENDER").is_some() {
+        std::fs::write(&path, &wire).unwrap();
+    }
+    // Workspace feature unification can enable serde_json preserve_order.
+    // JSON object order is immaterial; ordered paint arrays remain exact.
+    let expected: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let actual: serde_json::Value = serde_json::from_str(&wire).unwrap();
+    assert_eq!(actual, expected);
+}
+
+/// One X Position curve from 1 s (0) to 3 s (1), eased out of its first key,
+/// both keys selected or not; in the Speed Graph or the Value Graph.
+fn graph(selected: bool, speed: bool) -> pm_panel_timeline::graph_render::Graph {
+    use pm_panel_timeline::graph_render::*;
     let a = Point {
         seconds: 1.,
         value: 0.,
@@ -211,11 +262,21 @@ fn graph_curves_handles_selection_and_names_use_neutral_spec_marks() {
         seconds: 3.,
         value: 1.,
     };
+    let key = |id: &str, point: Point, handles| GraphPoint {
+        id: id.into(),
+        point,
+        selected,
+        shape: KeyShape::Bezier,
+        handles,
+        active_handle: None,
+    };
     let mut g = Graph::new(
         vec![Curve {
-            id: "x".into(),
-            name: "X".into(),
-            focused: true,
+            id: "a:position.x".into(),
+            path: "position.x".into(),
+            name: "X Position".into(),
+            index: 0,
+            layers: 1,
             segments: vec![Segment {
                 from: a,
                 to: b,
@@ -230,65 +291,89 @@ fn graph_curves_handles_selection_and_names_use_neutral_spec_marks() {
                     },
                 ]),
             }],
-            points: vec![GraphPoint {
-                id: "key".into(),
-                point: a,
-                selected: true,
-                handles: vec![(
-                    EaseSide::Out,
-                    Point {
-                        seconds: 1.5,
-                        value: 0.,
-                    },
-                )],
-                active_handle: Some(EaseSide::Out),
-            }],
+            points: vec![
+                key(
+                    "k1",
+                    a,
+                    vec![(
+                        EaseSide::Out,
+                        Point {
+                            seconds: 1.5,
+                            value: 0.,
+                        },
+                    )],
+                ),
+                key("k2", b, vec![]),
+            ],
         }],
-        0.,
-        1.,
+        -0.22,
+        1.22,
     )
     .unwrap();
-    g.grid = vec![(0., "0".into()), (1., "1".into())];
-    g.selection = Some(Rect::new(300., 250., 100., 80.));
-    let ops = g
-        .prepare(
-            v,
-            Rect::new(v.layer_column, 220., v.width - v.layer_column, 220.),
-            &t,
-        )
-        .unwrap();
-    assert_eq!(
-        ops.iter().find(|o| o.id == "curve:x").unwrap().color,
-        t.colors.text
-    );
-    assert_eq!(
-        ops.iter()
-            .find(|o| o.id == "curve-name:x")
-            .unwrap()
-            .text
-            .as_deref(),
-        Some("X")
-    );
-    assert_eq!(
-        ops.iter()
-            .filter(|o| o.id.starts_with("graph-transform-handle"))
-            .count(),
-        4
-    );
-    assert!(ops.iter().all(|o| o.clip.is_some()));
-    let wire =
-        serde_json::to_string_pretty(&ops.iter().map(Op::wire).collect::<Vec<_>>()).unwrap() + "\n";
-    let path =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/graph-render.json");
-    if std::env::var_os("PM_UPDATE_TIMELINE_RENDER").is_some() {
-        std::fs::write(&path, &wire).unwrap();
+    g.speed = speed;
+    g
+}
+
+#[test]
+fn the_transform_box_frames_two_selected_keys_and_scales_as_v1() {
+    use pm_panel_timeline::graph_render::*;
+    let t = tokens();
+    let v = viewport(&t);
+    let area = Rect::new(v.layer_column, 220., v.width - v.layer_column, 220.);
+    assert!(graph(false, false).transform_box(v, area).is_none());
+    let b = graph(true, false).transform_box(v, area).unwrap();
+    // It stands 8 points off the keys.
+    let left = v.layer_column + (1. - v.scroll_time) * v.pps;
+    assert!((b.rect.x - (left - BOX_INSET)).abs() < 1e-9);
+    assert_eq!(b.keys, ["k1", "k2"]);
+    assert_eq!((b.time, b.value), ((1., 3.), (0., 1.)));
+    // Each grip is taken within its reach, the nearest; nothing else is.
+    for grip in Grip::ALL {
+        let [x, y] = grip.at(b.rect);
+        assert_eq!(b.grip_at(x + 4., y), Some(grip));
     }
-    // Workspace feature unification can enable serde_json preserve_order.
-    // JSON object order is immaterial; ordered paint arrays remain exact.
-    let expected: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
-    let actual: serde_json::Value = serde_json::from_str(&wire).unwrap();
-    assert_eq!(actual, expected);
+    let [x, y] = Grip::E.at(b.rect);
+    assert_eq!(b.grip_at(x + GRIP_REACH + 1., y), None);
+    // The east edge scales time about the west edge; values stay.
+    assert_eq!(b.scale(Grip::E, 5., 9., false), (1., 0.5, 2., 1.));
+    // The north-west corner scales both about the south-east corner (the
+    // north grips carry the highest value).
+    assert_eq!(b.scale(Grip::NW, 2., 0.5, false), (3., 0., 0.5, 0.5));
+    // Cmd: about the centre.
+    assert_eq!(b.scale(Grip::E, 4., 0., true), (2., 0.5, 2., 1.));
+    // The Speed Graph frames the keys but offers no grips.
+    let speed = graph(true, true).transform_box(v, area).unwrap();
+    let [x, y] = Grip::E.at(speed.rect);
+    assert_eq!(speed.grip_at(x, y), None);
+}
+
+#[test]
+fn the_playhead_marks_each_curve_with_its_value_as_v1() {
+    use pm_panel_timeline::graph_render::*;
+    let t = tokens();
+    let v = viewport(&t);
+    let area = Rect::new(v.layer_column, 220., v.width - v.layer_column, 220.);
+    let g = graph(false, false);
+    let curve = &g.curves()[0];
+    // Held before and after the keys; on the eased segment between.
+    assert_eq!(curve.value_at(0.), Some(0.));
+    assert_eq!(curve.value_at(9.), Some(1.));
+    let mid = curve.value_at(2.).unwrap();
+    assert!((mid - 0.5).abs() < 1e-6, "{mid}");
+    let early = curve.value_at(1.25).unwrap();
+    assert!(early > 0. && early < 0.25, "{early}");
+    // A head on the plot: a dot on the curve in its ink, the value beside it.
+    let time = v.scroll_time + 200. / v.pps;
+    let marks = g.playhead_marks(v, area, time, &t);
+    assert_eq!(marks.len(), 1);
+    let m = &marks[0];
+    assert_eq!(m.color, t.graph_curve("position.x", 0));
+    assert_eq!(m.text, value_text(curve.value_at(time).unwrap()));
+    assert!((m.label.unwrap() - (m.y - 7.).clamp(area.y + 10., area.y + area.height - 3.)).abs() < 1e-9);
+    // None within 35 points of the layer column or 40 of the right edge.
+    let at = |x: f64| v.scroll_time + (x - v.layer_column) / v.pps;
+    assert!(g.playhead_marks(v, area, at(v.layer_column + 20.), &t).is_empty());
+    assert!(g.playhead_marks(v, area, at(v.width - 20.), &t).is_empty());
 }
 
 #[test]
@@ -495,11 +580,14 @@ fn audio_clips_draw_one_bar_per_point_from_their_trimmed_peaks() {
     );
     let bars = wave.detail["bars"].as_array().unwrap();
     let inset = 2. * t.metrics.border as f64;
-    assert_eq!(
-        bars.len(),
-        (body.bounds.width - 2. * inset).floor() as usize
+    // The waveform fills the strip's part in view.
+    let clip = body.clip.unwrap();
+    let (x0, x1) = (
+        body.bounds.x.max(clip.x),
+        (body.bounds.x + body.bounds.width).min(clip.x + clip.width),
     );
-    assert_eq!(wave.bounds.x, body.bounds.x + inset);
+    assert_eq!(bars.len(), (x1 - x0 - 2. * inset).floor() as usize);
+    assert_eq!(wave.bounds.x, x0 + inset);
     assert!(
         bars.iter().all(|b| b.as_f64() == Some(0.25)),
         "trimmed peaks only"
