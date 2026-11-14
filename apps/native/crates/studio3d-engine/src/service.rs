@@ -94,7 +94,7 @@ struct PreparedScene {
     failures: Vec<pm_render::LayerFailure>,
 }
 
-/// The existing compositor's Fast path. A host must attach it explicitly.
+/// The compositor's Fast path, attached on the shared worker device.
 /// A missing path returns an error; it never yields a blank "success".
 pub trait FastRenderer: Send {
     fn render(
@@ -102,6 +102,15 @@ pub trait FastRenderer: Send {
         input: &SceneInput,
         request: &SceneRequest,
     ) -> Result<RenderedScene, String>;
+    fn render_outputs(
+        &mut self, input: &SceneInput, request: &SceneRequest, flip_y: bool,
+        _auxiliary: &[crate::extract::AuxiliaryLayer],
+    ) -> Result<RenderedScene, String> {
+        if flip_y { self.render_bottom_up(input, request) } else { self.render(input, request) }
+    }
+    fn render_bottom_up(&mut self, input: &SceneInput, request: &SceneRequest) -> Result<RenderedScene, String> {
+        self.render(input, request)
+    }
 }
 
 /// Synchronous worker API. A native engine host must queue calls onto its
@@ -162,6 +171,7 @@ impl StudioService {
             .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
             && std::env::var_os("STUDIO_NO_RT").is_none();
         Ok(Self {
+            fast: Some(Box::new(crate::fast::Raster::new(device.clone(), queue.clone()))),
             renderer: Some(Renderer::with_device(
                 device,
                 queue,
@@ -402,7 +412,15 @@ impl StudioService {
         if request.width == 0 || request.height == 0 {return Err("Studio output is empty".into())}
         if tier == Tier::Fast {
             let input = source.scene(&request)?;
-            return self.fast.as_mut().ok_or("Fast compositor adapter is not attached")?.render(&input, &request);
+            if self.fast.is_none() {
+                if self.renderer.is_none() { self.renderer = Some(Renderer::new(request.width, request.height)?); }
+                let r = self.renderer.as_ref().unwrap();
+                self.fast_renderer(Box::new(crate::fast::Raster::new(r.device().clone(), r.queue().clone())));
+            }
+            let fast = self.fast.as_mut().unwrap();
+            let mut rendered = fast.render_outputs(&input, &request, flip_y, &source.auxiliary_layers(&request)?)?;
+            rendered.failures = source.layer_failures(&request)?;
+            return Ok(rendered);
         }
         let PreparedScene { quality, denoise, live_guided, orthographic, reset, width, height, outputs, key, resource_start, adaptive, failures, .. } =
             self.prepare_scene(source, request.clone(), tier)?;

@@ -1,0 +1,602 @@
+//! Studio's inexpensive forward preview. Geometry and texture identities are
+//! retained; camera motion updates only a small instance/camera upload.
+//! The legacy pm-render raster pass expects file maps and Scene3d geometry;
+//! Studio already supplies resolved live map arrays and immutable Mesh Arcs.
+//! Keeping this adapter on that boundary avoids re-evaluating the document.
+use crate::{
+    SceneExt,
+    extract::{MeshInstance, SceneInput, SceneRequest, TextureMaps},
+    service::{FastRenderer, FrameTimings, LayerTexture, RenderedScene},
+};
+use std::sync::Arc;
+use wgpu::util::DeviceExt;
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct Vertex {
+    position: [f32; 3],
+    normal: [f32; 3],
+    uv: [f32; 2],
+    uv1: [f32; 2],
+    color: [f32; 4],
+    material: u32,
+}
+struct Mesh {
+    identity: MeshInstance,
+    buffer: wgpu::Buffer,
+    count: u32,
+}
+pub struct Raster {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    color: wgpu::RenderPipeline,
+    depth: wgpu::RenderPipeline,
+    background: wgpu::RenderPipeline,
+    meshes: Vec<Mesh>,
+    maps: Option<TextureMaps>,
+    texture: Option<wgpu::Texture>,
+    sampler: wgpu::Sampler,
+}
+fn buffer(device: &wgpu::Device, bytes: &[u8], usage: wgpu::BufferUsages) -> wgpu::Buffer {
+    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("Studio Fast data"),
+        contents: if bytes.is_empty() { &[0; 16] } else { bytes },
+        usage,
+    })
+}
+impl Raster {
+    pub fn new(device: wgpu::Device, queue: wgpu::Queue) -> Self {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Studio Fast forward"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("fast.wgsl").into()),
+        });
+        let entries = [
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            storage(1, wgpu::ShaderStages::FRAGMENT),
+            storage(2, wgpu::ShaderStages::VERTEX),
+            storage(3, wgpu::ShaderStages::FRAGMENT),
+            wgpu::BindGroupLayoutEntry {
+                binding: 4,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2Array,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 5,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ];
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Studio Fast"),
+            entries: &entries,
+        });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Studio Fast"),
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
+        });
+        let attributes = wgpu::vertex_attr_array![0=>Float32x3,1=>Float32x3,2=>Float32x2,3=>Float32x2,4=>Float32x4,5=>Uint32];
+        let make = |depth| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Studio Fast"),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs"),
+                    compilation_options: Default::default(),
+                    buffers: &[Some(wgpu::VertexBufferLayout {
+                        array_stride: size_of::<Vertex>() as u64,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &attributes,
+                    })],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some(if depth { "depth" } else { "fs" }),
+                    compilation_options: Default::default(),
+                    targets: if depth {
+                        &[]
+                    } else {
+                        &[Some(wgpu::ColorTargetState {
+                            format: wgpu::TextureFormat::Rgba8Unorm,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })]
+                    },
+                }),
+                primitive: wgpu::PrimitiveState {
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: Some(depth),
+                    depth_compare: Some(if depth {
+                        wgpu::CompareFunction::LessEqual
+                    } else {
+                        wgpu::CompareFunction::Equal
+                    }),
+                    stencil: Default::default(),
+                    bias: Default::default(),
+                }),
+                multisample: Default::default(),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let background = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Studio Fast background"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("sky_vs"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("sky_fs"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: Default::default(),
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Equal),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let color = make(false);
+        let depth = make(true);
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Studio Fast maps"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        Self {
+            device,
+            queue,
+            color,
+            depth,
+            background,
+            meshes: vec![],
+            maps: None,
+            texture: None,
+            sampler,
+        }
+    }
+    fn mesh(&mut self, i: &MeshInstance, materials: usize) -> Result<usize, String> {
+        if let Some(index) = self.meshes.iter().position(|m| {
+            Arc::ptr_eq(&m.identity.mesh, &i.mesh)
+                && m.identity.material == i.material
+                && m.identity.material_palette == i.material_palette
+                && match (&m.identity.attributes, &i.attributes) {
+                    (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                    (None, None) => true,
+                    _ => false,
+                }
+        }) {
+            return Ok(index);
+        }
+        crate::extract::validate_mesh(&i.mesh, i.attributes.as_deref())?;
+        let mut vertices = Vec::new();
+        let m = &i.mesh;
+        for (f, t) in m.indices.iter().enumerate() {
+            let slot = m.triangle_materials.get(f).copied();
+            let material = match (slot, &i.material_palette) {
+                (None, _) => i.material,
+                (Some(n), Some(p)) => *p.get(n).ok_or("Fast material palette index")?,
+                (Some(n), None) => n,
+            };
+            if material >= materials {
+                return Err("Fast material index".into());
+            }
+            let p = t.map(|n| m.positions[n as usize]);
+            let face = (p[1] - p[0]).cross(p[2] - p[0]).normalize();
+            for &n in t {
+                let n = n as usize;
+                let a = i.attributes.as_deref();
+                let normal = if a.is_some_and(|a| a.flat_shading) {
+                    face
+                } else {
+                    m.normals.get(n).copied().unwrap_or(face)
+                };
+                vertices.push(Vertex {
+                    position: m.positions[n].to_array(),
+                    normal: normal.to_array(),
+                    uv: m.uvs.get(n).copied().unwrap_or([0.; 2]),
+                    uv1: a
+                        .and_then(|a| a.secondary_uvs.get(n))
+                        .copied()
+                        .unwrap_or_else(|| m.uvs.get(n).copied().unwrap_or([0.; 2])),
+                    color: a
+                        .and_then(|a| a.colors.get(n))
+                        .copied()
+                        .unwrap_or_else(|| m.colors.get(n).map_or([1.; 4], |v| v.to4(1.))),
+                    material: material as u32,
+                });
+            }
+        }
+        let index = self.meshes.len();
+        self.meshes.push(Mesh {
+            identity: i.clone(),
+            buffer: buffer(
+                &self.device,
+                bytemuck::cast_slice(&vertices),
+                wgpu::BufferUsages::VERTEX,
+            ),
+            count: vertices.len() as u32,
+        });
+        Ok(index)
+    }
+    fn maps(&mut self, input: &SceneInput) {
+        if self.texture.is_some() && self.maps == input.maps {
+            return;
+        }
+        let (width, height, layers) = input
+            .maps
+            .as_ref()
+            .map_or((1, 1, 1), |m| (m.width, m.height, m.layers.len() as u32));
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Studio Fast maps"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: layers,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        for layer in 0..layers {
+            let bytes = input
+                .maps
+                .as_ref()
+                .map_or(&[255; 4][..], |m| m.layers[layer as usize].as_slice());
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d {
+                        x: 0,
+                        y: 0,
+                        z: layer,
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                bytes,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(width * 4),
+                    rows_per_image: Some(height),
+                },
+                wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+        self.texture = Some(texture);
+        self.maps = input.maps.clone();
+    }
+    pub fn render_oriented(
+        &mut self,
+        input: &SceneInput,
+        request: &SceneRequest,
+        flip_y: bool,
+    ) -> Result<RenderedScene, String> {
+        self.render_outputs(input, request, flip_y, &[])
+    }
+    fn render_outputs(
+        &mut self,
+        input: &SceneInput,
+        request: &SceneRequest,
+        flip_y: bool,
+        auxiliary: &[crate::extract::AuxiliaryLayer],
+    ) -> Result<RenderedScene, String> {
+        let start = std::time::Instant::now();
+        let mut materials = input
+            .materials
+            .clone()
+            .unwrap_or_else(|| input.scene.gpu_materials());
+        if materials.is_empty() {
+            materials.push(crate::MaterialExt::gpu(
+                &crate::scene::Material::dielectric(crate::math::Vec3::ZERO, 1.),
+            ));
+        }
+        let mut draws = Vec::new();
+        let mut layers = Vec::new();
+        let mut instances = Vec::<[[f32; 4]; 8]>::new();
+        for i in &input.instances {
+            if !i.primary_visible || i.mesh.indices.is_empty() {
+                continue;
+            }
+            i.world.validate()?;
+            let mesh = self.mesh(i, materials.len())?;
+            let world = glam::Mat4::from_cols_array(&i.world.0);
+            let normal = world.inverse().transpose();
+            let mut matrices = [[0.; 4]; 8];
+            matrices[..4].copy_from_slice(&world.to_cols_array_2d());
+            matrices[4..].copy_from_slice(&normal.to_cols_array_2d());
+            let instance = instances.len() as u32;
+            instances.push(matrices);
+            if !layers.contains(&i.layer) {
+                layers.push(i.layer.clone());
+            }
+            draws.push((i.layer.clone(), mesh, instance));
+        }
+        for aux in auxiliary {
+            if !layers.contains(&aux.id) {
+                layers.push(aux.id.clone());
+            }
+        }
+        self.maps(input);
+        let camera = camera(input, request, flip_y);
+        let mut lights = input.scene.gpu_lights();
+        if lights.is_empty() {
+            lights.push(bytemuck::Zeroable::zeroed());
+        }
+        let camera = buffer(
+            &self.device,
+            bytemuck::cast_slice(&camera),
+            wgpu::BufferUsages::UNIFORM,
+        );
+        let materials = buffer(
+            &self.device,
+            bytemuck::cast_slice(&materials),
+            wgpu::BufferUsages::STORAGE,
+        );
+        if instances.is_empty() {
+            instances.push([[0.; 4]; 8]);
+        }
+        let instances = buffer(
+            &self.device,
+            bytemuck::cast_slice(&instances),
+            wgpu::BufferUsages::STORAGE,
+        );
+        let lights = buffer(
+            &self.device,
+            bytemuck::cast_slice(&lights),
+            wgpu::BufferUsages::STORAGE,
+        );
+        let maps = self
+            .texture
+            .as_ref()
+            .unwrap()
+            .create_view(&wgpu::TextureViewDescriptor {
+                dimension: Some(wgpu::TextureViewDimension::D2Array),
+                ..Default::default()
+            });
+        let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Studio Fast"),
+            layout: &self.color.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: camera.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: materials.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: instances.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: lights.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&maps),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+            ],
+        });
+        let depth = self.target(request, wgpu::TextureFormat::Depth32Float);
+        let depth = depth.create_view(&Default::default());
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Studio Fast shared depth"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &depth,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                ..Default::default()
+            });
+            pass.set_pipeline(&self.depth);
+            pass.set_bind_group(0, &group, &[]);
+            for (_, mesh, instance) in &draws {
+                let m = &self.meshes[*mesh];
+                pass.set_vertex_buffer(0, m.buffer.slice(..));
+                pass.draw(0..m.count, *instance..*instance + 1);
+            }
+        }
+        let mut outputs = Vec::new();
+        for layer in layers {
+            let texture = self.target(request, wgpu::TextureFormat::Rgba8Unorm);
+            let view = texture.create_view(&Default::default());
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Studio Fast layer"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &depth,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    ..Default::default()
+                });
+                if auxiliary.iter().any(|a| a.id == layer && a.include_void) {
+                    pass.set_pipeline(&self.background);
+                    pass.set_bind_group(0, &group, &[]);
+                    pass.draw(0..3, 0..1);
+                }
+                pass.set_pipeline(&self.color);
+                pass.set_bind_group(0, &group, &[]);
+                for (id, mesh, instance) in &draws {
+                    if id == &layer {
+                        let m = &self.meshes[*mesh];
+                        pass.set_vertex_buffer(0, m.buffer.slice(..));
+                        pass.draw(0..m.count, *instance..*instance + 1);
+                    }
+                }
+            }
+            outputs.push(LayerTexture { layer, texture });
+        }
+        self.queue.submit([encoder.finish()]);
+        // Keep only geometry used by the current immutable scene.
+        let used: std::collections::HashSet<_> = draws.iter().map(|(_, m, _)| *m).collect();
+        let mut index = 0;
+        self.meshes.retain(|_| {
+            let keep = used.contains(&index);
+            index += 1;
+            keep
+        });
+        Ok(RenderedScene {
+            request: request.clone(),
+            layers: outputs,
+            samples: 1,
+            adapter: "Studio Fast raster".into(),
+            hardware_rt: false,
+            timings: FrameTimings {
+                total_ms: start.elapsed().as_secs_f64() * 1000.,
+                ..Default::default()
+            },
+            failures: vec![],
+        })
+    }
+    fn target(&self, r: &SceneRequest, format: wgpu::TextureFormat) -> wgpu::Texture {
+        self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Studio Fast target"),
+            size: wgpu::Extent3d {
+                width: r.width,
+                height: r.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        })
+    }
+}
+fn storage(binding: u32, visibility: wgpu::ShaderStages) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Storage { read_only: true },
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    }
+}
+fn camera(input: &SceneInput, r: &SceneRequest, flip: bool) -> [[f32; 4]; 7] {
+    let c = input.scene.camera;
+    let (f, right, up) = input
+        .view
+        .basis
+        .map_or_else(|| c.basis(), |b| (b[0], b[1], b[2]));
+    let span = input
+        .view
+        .orthographic_span
+        .unwrap_or_else(|| (c.fov.to_radians() * 0.5).tan());
+    let [near, far] = input.view.clip_planes.unwrap_or([0.0001, 1e8]);
+    [
+        c.position.to4(input.scene.exposure),
+        f.to4(0.),
+        right.to4(span * r.width as f32 / r.height as f32),
+        up.to4(span),
+        [
+            near.max(0.000001),
+            far,
+            u8::from(input.view.orthographic_span.is_some()) as f32,
+            if flip { -1. } else { 1. },
+        ],
+        input
+            .view
+            .ambient
+            .to4(input.scene.gpu_lights().len() as f32),
+        input.scene.backdrop.to4(1.),
+    ]
+}
+impl FastRenderer for Raster {
+    fn render_outputs(
+        &mut self,
+        input: &SceneInput,
+        request: &SceneRequest,
+        flip_y: bool,
+        auxiliary: &[crate::extract::AuxiliaryLayer],
+    ) -> Result<RenderedScene, String> {
+        Raster::render_outputs(self, input, request, flip_y, auxiliary)
+    }
+    fn render(
+        &mut self,
+        input: &SceneInput,
+        request: &SceneRequest,
+    ) -> Result<RenderedScene, String> {
+        self.render_oriented(input, request, false)
+    }
+    fn render_bottom_up(
+        &mut self,
+        input: &SceneInput,
+        request: &SceneRequest,
+    ) -> Result<RenderedScene, String> {
+        self.render_oriented(input, request, true)
+    }
+}

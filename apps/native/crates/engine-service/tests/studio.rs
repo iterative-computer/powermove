@@ -444,6 +444,7 @@ fn viewer_tiers_reach_the_retained_native_backend_without_document_edits() {
     let mut uploads = None;
     for (tier, samples) in [
         (studio::Preview::Live, None),
+        (studio::Preview::Fast, Some(1)),
         (studio::Preview::Refine, Some(32)),
         (studio::Preview::Final, Some(4)),
         (studio::Preview::Live, None),
@@ -479,7 +480,19 @@ fn viewer_tiers_reach_the_retained_native_backend_without_document_edits() {
         pm_model::json::to_canonical_string(&doc.to_value().unwrap()),
         original
     );
-    assert!(studio::Preview::parse("fast").is_err());
+    // Export bypasses the viewer's transient tier even on the same renderer.
+    let mut export = request.clone(); export.export = true; export.viewer = false;
+    export.output_kind = OutputKind::Final;
+    let mut frames = Vec::new();
+    for tier in [studio::Preview::Fast, studio::Preview::Final] {
+        studio::attach_with_preview(&mut renderer, doc.clone(), &Default::default(), &scene, tier).unwrap();
+        let frame = renderer.render(&doc, "test", Ticks::ZERO, &export, &pm_render::MapResolver::default()).unwrap();
+        assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+        frames.push(renderer.read_rgba(&frame).unwrap());
+    }
+    assert_eq!(frames[0].iter().map(|x|x.to_bits()).collect::<Vec<_>>(), frames[1].iter().map(|x|x.to_bits()).collect::<Vec<_>>(), "export bytes must ignore viewer tier");
+    assert_eq!(pm_model::json::to_canonical_string(&doc.to_value().unwrap()), original);
+    assert_eq!(studio::Preview::parse("fast").unwrap(),studio::Preview::Fast);
 }
 #[test]
 fn metal_native_document_reflection_final_repeat_and_service_export() {

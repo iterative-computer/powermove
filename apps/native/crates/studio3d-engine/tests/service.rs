@@ -670,3 +670,43 @@ fn immutable_geometry_reuses_identical_replacement_but_never_hides_copy_on_write
     assert_eq!(service.geometry_uploads(),2,"material-only edit rebuilt geometry");
     assert_ne!(pixels(&service,&material),edited_pixels,"material edit reused stale output");
 }
+
+/// The preview uses exactly the frozen scene consumed by final rendering.
+/// Compare per-layer masks: this catches both camera errors and depth ownership.
+#[test]
+fn fast_preserves_framing_depth_and_final_bytes() {
+    struct Overlap(Source);
+    impl SceneSource for Overlap {
+        fn scene(&self, r: &SceneRequest) -> Result<SceneInput, String> {
+            let mut input=self.0.scene(r)?;
+            input.instances[0].world.0[12]=-0.25;
+            input.instances[1].world.0[12]=0.25;
+            input.instances[1].world.0[14]=-0.5;
+            input.scene.camera.position.y=0.35;
+            input.view.clip_planes=Some([0.1,100.]);
+            Ok(input)
+        }
+    }
+    let source=Overlap(Source::new());
+    let mut r=request();r.width=512;r.height=384;
+    let mut service=StudioService::default();
+    let final_tier=Tier::Final{samples:4,salt:11,denoise:Denoise::None};
+    let before=service.render(&source,r.clone(),final_tier).unwrap();
+    let full=pixels(&service,&before);
+    let fast=service.render(&source,r.clone(),Tier::Fast).unwrap();
+    assert_eq!(fast.samples,1);assert!(!fast.hardware_rt);
+    let preview=pixels(&service,&fast);
+    assert_eq!(full.len(),preview.len());
+    for (full,fast) in full.iter().zip(&preview) {
+        let mut intersection=0;let mut union=0;
+        for (a,b) in full.chunks_exact(4).zip(fast.chunks_exact(4)) {
+            let a=a[3]>=128;let b=b[3]>=128;
+            intersection+=usize::from(a&&b);union+=usize::from(a||b);
+        }
+        let iou=intersection as f64/union as f64;
+        assert!(iou>=0.98,"Fast/Full layer silhouette and occlusion IoU {iou}");
+    }
+    let after=service.render(&source,r,final_tier).unwrap();
+    assert_eq!(full,pixels(&service,&after),"viewer tier must not affect final frame bytes");
+    assert_eq!(source.0.changed.load(Ordering::SeqCst),0);
+}
