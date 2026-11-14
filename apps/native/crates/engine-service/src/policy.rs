@@ -160,15 +160,36 @@ pub const SETTLE_SLICE_SECONDS: f64 = 0.006;
 /// paused one from settling (it may then delay one of the playing frames).
 pub const SETTLE_HOLD_SECONDS: f64 = 0.05;
 
-/// Auto's adaptive resolution, which applies only while the playhead is
-/// dragged (After Effects' Adaptive Resolution): a full-resolution still that
-/// took longer than a refresh puts the dragged frames at [`AUTO_FLOOR`] until
-/// an exact frame fits a refresh again. Playback and stopped frames are always
-/// full resolution in Auto: a frame that misses its deadline is dropped, never
-/// drawn softer than the paused picture.
+/// Playing frames at full resolution slower than their content frame this
+/// many times in a row put Auto's playback at [`AUTO_FLOOR`].
+const LATE_PLAYS: u32 = 3;
+/// At the floor, a playing frame this far under its content frame predicts
+/// a full one inside it (half resolution measured at 0.16 to 0.38 of full).
+const PLAY_UNDER: f64 = 0.25;
+/// ...this many times in a row (about a second at 24 fps) before playback
+/// goes back to full resolution: one cheap frame does not flip it back.
+const QUICK_PLAYS: u32 = 24;
+
+/// Auto's adaptive resolution (After Effects' Adaptive Resolution). While the
+/// playhead is dragged, a full-resolution still that took longer than a
+/// refresh puts the dragged frames at [`AUTO_FLOOR`] until an exact frame fits
+/// a refresh again. While playing, frames that keep missing their content
+/// frame at full resolution play at [`AUTO_FLOOR`] until reduced frames are
+/// cheap enough for a full one to fit again. Stopped frames are always full
+/// resolution in Auto, and a fixed quality is always what it says.
 #[derive(Debug, Clone, Default)]
 pub struct AutoQuality {
     slow_stills: bool,
+    slow_play: bool,
+    /// Consecutive full playing frames over their content frame.
+    late_plays: u32,
+    /// Consecutive reduced playing frames under [`PLAY_UNDER`].
+    quick_plays: u32,
+    /// The frames being played draw layers only an extension draws: their
+    /// answers are per resolution, and a full-resolution frame draws them
+    /// from earlier answers when the extension is slower than playback, so
+    /// those frames always play at full resolution.
+    overrides: bool,
 }
 impl AutoQuality {
     pub fn reset(&mut self) {
@@ -187,12 +208,51 @@ impl AutoQuality {
             self.slow_stills = false;
         }
     }
+    /// Whether the frames being played draw extension layers (a frame held
+    /// for them, or the look-ahead finding them).
+    pub fn overrides(&mut self, overrides: bool) {
+        self.overrides = overrides;
+    }
+    /// A playing frame drawn at `scale` took `cost_ms` (start to GPU done)
+    /// against its content frame of `frame_ms`.
+    pub fn record_play(&mut self, cost_ms: f64, frame_ms: f64, scale: f64) {
+        if !cost_ms.is_finite() || !frame_ms.is_finite() || frame_ms <= 0. {
+            return;
+        }
+        if scale >= 1. {
+            self.quick_plays = 0;
+            self.late_plays = if cost_ms > frame_ms {
+                self.late_plays + 1
+            } else {
+                0
+            };
+            if self.late_plays >= LATE_PLAYS {
+                self.slow_play = true;
+                self.late_plays = 0;
+            }
+        } else if self.slow_play {
+            self.late_plays = 0;
+            self.quick_plays = if cost_ms < PLAY_UNDER * frame_ms {
+                self.quick_plays + 1
+            } else {
+                0
+            };
+            if self.quick_plays >= QUICK_PLAYS {
+                self.slow_play = false;
+                self.quick_plays = 0;
+            }
+        }
+    }
 }
 impl Quality {
-    /// Render scale for this frame. Auto is exact except for a slow drag.
+    /// Render scale for this frame. Auto is exact except for a slow drag or
+    /// slow playback.
     pub fn scale(self, auto: &AutoQuality, moment: Moment) -> f64 {
         match self {
             Self::Auto if moment == Moment::Scrub && auto.slow_stills => AUTO_FLOOR,
+            Self::Auto if moment == Moment::Playing && auto.slow_play && !auto.overrides => {
+                AUTO_FLOOR
+            }
             Self::Auto | Self::Full => 1.,
             Self::Half => 0.5,
             Self::Quarter => 0.25,
@@ -203,6 +263,77 @@ impl Quality {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Playback in Auto goes to half resolution only after frames keep
+    /// missing their content frame, comes back only after a run of cheap
+    /// reduced frames, and never touches a stop or a fixed quality.
+    #[test]
+    fn slow_playback_plays_at_half_with_hysteresis() {
+        let frame = 1000. / 24.;
+        let mut auto = AutoQuality::default();
+        let play = |auto: &AutoQuality| Quality::Auto.scale(auto, Moment::Playing);
+        // Two late frames (a first frame, a seek) are not slow playback.
+        auto.record_play(120., frame, 1.);
+        auto.record_play(120., frame, 1.);
+        auto.record_play(20., frame, 1.);
+        auto.record_play(120., frame, 1.);
+        assert_eq!(play(&auto), 1.);
+        auto.record_play(120., frame, 1.);
+        auto.record_play(120., frame, 1.);
+        assert_eq!(play(&auto), AUTO_FLOOR, "three late frames in a row");
+        assert_eq!(
+            Quality::Auto.scale(&auto, Moment::Paused),
+            1.,
+            "a stop is exact"
+        );
+        assert_eq!(
+            Quality::Auto.scale(&auto, Moment::Scrub),
+            1.,
+            "drags keep their own rule"
+        );
+        for fixed in [Quality::Full, Quality::Half, Quality::Quarter] {
+            assert_eq!(
+                fixed.scale(&auto, Moment::Playing),
+                fixed.scale(&AutoQuality::default(), Moment::Playing),
+                "{fixed:?} is always respected"
+            );
+        }
+        // Reduced frames that would not leave room for a full one keep it
+        // reduced; a run of cheap ones broken by one dear frame starts over.
+        for _ in 0..40 {
+            auto.record_play(15., frame, AUTO_FLOOR);
+        }
+        assert_eq!(play(&auto), AUTO_FLOOR);
+        for _ in 0..23 {
+            auto.record_play(5., frame, AUTO_FLOOR);
+        }
+        auto.record_play(15., frame, AUTO_FLOOR);
+        for _ in 0..23 {
+            auto.record_play(5., frame, AUTO_FLOOR);
+        }
+        assert_eq!(play(&auto), AUTO_FLOOR);
+        auto.record_play(5., frame, AUTO_FLOOR);
+        assert_eq!(play(&auto), 1., "a second of cheap reduced frames");
+    }
+
+    /// Frames that draw extension layers play at full resolution in Auto
+    /// however late they are; without them, slow playback reduces again; a
+    /// fixed quality is what it says either way.
+    #[test]
+    fn frames_with_extension_layers_play_full_in_auto() {
+        let frame = 1000. / 24.;
+        let mut auto = AutoQuality::default();
+        for _ in 0..3 {
+            auto.record_play(120., frame, 1.);
+        }
+        let play = |auto: &AutoQuality| Quality::Auto.scale(auto, Moment::Playing);
+        assert_eq!(play(&auto), AUTO_FLOOR);
+        auto.overrides(true);
+        assert_eq!(play(&auto), 1.);
+        assert_eq!(Quality::Half.scale(&auto, Moment::Playing), 0.5);
+        auto.overrides(false);
+        assert_eq!(play(&auto), AUTO_FLOOR);
+    }
 
     #[test]
     fn a_slow_still_drags_at_half_and_stops_exact() {
@@ -229,7 +360,7 @@ mod tests {
         assert_eq!(
             Quality::Auto.scale(&auto, Moment::Playing),
             1.,
-            "playback is never reduced in Auto"
+            "a slow drag does not reduce playback"
         );
         auto.record_still(9., 16.67, 1.);
         assert_eq!(
