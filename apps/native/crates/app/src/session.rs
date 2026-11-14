@@ -1509,11 +1509,37 @@ impl Controller {
             _ => None,
         };
         let electron_profile = path.is_some().then(|| self.electron.clone()).flatten();
-        let pending = self.kernel.shell(ShellCall::PrepareOpen {
+        let call = ShellCall::PrepareOpen {
             id: open_id,
             source,
             electron_profile,
-        });
+        };
+        // A file in a folder macOS guards: its question is answered before
+        // the kernel reads (`access`), so a Yes opens it the first time.
+        let (kernel, worker, file) = (
+            self.kernel.clone(),
+            cx.background_executor().clone(),
+            path.clone(),
+        );
+        let pending = async move {
+            if let Some(file) = file {
+                let access = worker
+                    .spawn(async move {
+                        crate::access::wait_for_read(
+                            &file,
+                            crate::access::ANSWER,
+                            crate::access::read_start,
+                        )
+                    })
+                    .await;
+                if access == crate::access::Access::Refused {
+                    return Some(Err(KernelFailure::Storage(
+                        "Operation not permitted (os error 1)".into(),
+                    )));
+                }
+            }
+            kernel.shell(call).await
+        };
         let saved = path.as_ref().is_none_or(|p| p.exists());
         self.settle_open(operation, name, path, saved, pending, cx);
     }
@@ -3423,12 +3449,17 @@ fn open_failure(error: &KernelFailure) -> crate::surfaces::documents::OpenFailur
         }
         KernelFailure::AlreadyOpen(_) | KernelFailure::Storage(_) => {
             let text = error.to_string().to_lowercase();
-            if text.contains("permission") {
+            if crate::access::refused_text(&text) {
+                return OpenFailure::AccessRefused;
+            } else if text.contains("permission") {
                 PermissionDenied
             } else if text.contains("not found") || text.contains("no such file") {
                 NotFound
             } else if text.contains("no space") {
                 DiskFull
+            } else if crate::access::os_text(&text) {
+                // The system failed the read: nothing says the file is damaged.
+                Unavailable
             } else {
                 InvalidData
             }
@@ -3532,6 +3563,33 @@ pub(crate) fn frame_start_at(rate: pm_time::Rate, seconds: f64) -> Option<i64> {
 #[cfg(test)]
 mod save_note_tests {
     use super::*;
+    /// A file macOS kept the app from reading (a folder it guards, the
+    /// person said No) is never called damaged; nor is any other OS failure.
+    #[::core::prelude::v1::test]
+    fn a_refused_or_failed_read_is_never_called_damaged() {
+        use crate::surfaces::documents::OpenFailure;
+        use pm_services::ServiceErrorCode;
+        let failure = |text: &str| open_failure(&KernelFailure::Storage(text.into()));
+        assert_eq!(
+            failure("Cannot read /Users/x/Downloads/p.pmv: Operation not permitted (os error 1)"),
+            OpenFailure::AccessRefused
+        );
+        assert_eq!(
+            failure("Cannot read /Volumes/x/p.pmv: Input/output error (os error 5)"),
+            OpenFailure::Service(ServiceErrorCode::Unavailable)
+        );
+        assert_eq!(
+            failure("Permission denied (os error 13)"),
+            OpenFailure::Service(ServiceErrorCode::PermissionDenied)
+        );
+        // Only the container's own verdict says the contents are bad.
+        assert_eq!(
+            failure("Invalid project container: truncated entry"),
+            OpenFailure::Service(ServiceErrorCode::InvalidData)
+        );
+        let alert = crate::surfaces::documents::open_error("p", OpenFailure::AccessRefused, true);
+        assert_eq!(alert.message, "Powermove isn’t allowed to open “p”.");
+    }
     // `gpui::*` above exports a `test` macro; name the built-in explicitly.
     #[::core::prelude::v1::test]
     fn a_typed_timecode_lands_on_its_frame() {

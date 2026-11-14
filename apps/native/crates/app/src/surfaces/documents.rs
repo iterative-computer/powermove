@@ -450,6 +450,9 @@ pub enum OpenFailure {
     /// The version chosen after a failed open was replaced by another file
     /// as it was put in place, so it was not opened.
     ChoiceReplaced,
+    /// macOS refused access to the file's folder (the person said No to its
+    /// question, or did not answer).
+    AccessRefused,
 }
 pub fn open_error(name: &str, failure: OpenFailure, path_exists: bool) -> Alert<Action> {
     let (message, informative) = match failure {
@@ -461,6 +464,10 @@ pub fn open_error(name: &str, failure: OpenFailure, path_exists: bool) -> Alert<
         OpenFailure::ChoiceReplaced => (
             format!("“{name}” wasn’t opened."),
             "The version you chose was replaced by another file as it was being opened. Nothing was lost: choose Window ▸ Error Log to see where that file is, then open the project again to choose.",
+        ),
+        OpenFailure::AccessRefused => (
+            crate::access::refused_title(name),
+            crate::access::REFUSED_DETAIL,
         ),
         OpenFailure::StillCopying => (
             format!("“{name}” is still being copied to this Mac."),
