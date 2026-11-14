@@ -68,6 +68,13 @@ pub fn receive(urls: Vec<String>, cx: &mut App) {
             }
             continue;
         }
+        // `review/key/<keystroke>`: one key pressed and let go in the
+        // editor window (`space`, `escape`, `right`), where it has focus.
+        #[cfg(debug_assertions)]
+        if let Some(key) = raw.strip_prefix("powermove://review/key/") {
+            review_key(key, cx);
+            continue;
+        }
         #[cfg(debug_assertions)]
         if let Some(points) = raw.strip_prefix("powermove://review/pointer/") {
             review_input(review_points(points), None, cx);
@@ -117,6 +124,39 @@ pub fn receive(urls: Vec<String>, cx: &mut App) {
             }
             continue;
         }
+        // `review/hit/<x,y>/<file>`: the view AppKit finds at a window point
+        // (top-left origin, points) and its registered drag ancestors.
+        #[cfg(debug_assertions)]
+        if let Some(rest) = raw.strip_prefix("powermove://review/hit/") {
+            if let Some((at, file)) = rest.split_once('/') {
+                let file = url::form_urlencoded::parse(format!("x={file}").as_bytes())
+                    .next()
+                    .map(|(_, v)| v.into_owned())
+                    .unwrap_or_default();
+                let _ = std::fs::write(file, review_hit(at));
+            }
+            continue;
+        }
+        // `review/thumbs/<file>`: the Project grid's thumbnail state.
+        #[cfg(debug_assertions)]
+        if let Some(file) = raw.strip_prefix("powermove://review/thumbs/") {
+            let file = url::form_urlencoded::parse(format!("x={file}").as_bytes())
+                .next()
+                .map(|(_, v)| v.into_owned())
+                .unwrap_or_default();
+            let mut out = String::new();
+            for controller in editors(cx) {
+                let c = controller.read(cx);
+                out.push_str(&format!(
+                    "{} published={} originals={}\n",
+                    c.thumbs.report(),
+                    c.published.is_some(),
+                    c.media_base.originals.len()
+                ));
+            }
+            let _ = std::fs::write(file, out);
+            continue;
+        }
         // `review/dragtypes/<file>`: every view of every window that is
         // registered for drags (AppKit's candidates for a drop), written
         // to `file`: its class, frame in the window, whether hidden, types.
@@ -140,6 +180,43 @@ pub fn receive(urls: Vec<String>, cx: &mut App) {
         }
     }
     drain(cx);
+}
+
+#[cfg(debug_assertions)]
+fn review_hit(at: &str) -> String {
+    use objc2_app_kit::NSApplication;
+    let Some((x, y)) = at
+        .split_once(',')
+        .and_then(|(x, y)| Some((x.parse::<f64>().ok()?, y.parse::<f64>().ok()?)))
+    else {
+        return "bad point".into();
+    };
+    let mtm = objc2::MainThreadMarker::new().expect("main thread");
+    let mut out = String::new();
+    for window in NSApplication::sharedApplication(mtm).windows().iter() {
+        if !window.isVisible() {
+            continue;
+        }
+        let Some(content) = window.contentView() else {
+            continue;
+        };
+        let Some(frame) = (unsafe { content.superview() }) else {
+            continue;
+        };
+        let height = frame.bounds().size.height;
+        let point = objc2_foundation::NSPoint::new(x, height - y);
+        let mut view = frame.hitTest(point);
+        out.push_str(&format!("window {:?}\n", window.title().to_string()));
+        while let Some(v) = view {
+            out.push_str(&format!(
+                "  {} drag-types={}\n",
+                v.class().name().to_string_lossy(),
+                v.registeredDraggedTypes().count()
+            ));
+            view = unsafe { v.superview() };
+        }
+    }
+    out
 }
 
 #[cfg(debug_assertions)]
@@ -474,6 +551,27 @@ fn review_steps(points: &[Point<Pixels>], paths: Option<Vec<PathBuf>>) -> Vec<Pl
 
 /// Sends a review pointer path into the first editor window, one step a
 /// frame, so each event meets the hitboxes the last frame drew.
+#[cfg(debug_assertions)]
+fn review_key(key: &str, cx: &mut App) {
+    let Some(&(_, handle)) = cx.default_global::<Entries>().editors.first() else {
+        return;
+    };
+    let Ok(keystroke) = gpui::Keystroke::parse(key) else {
+        return;
+    };
+    let _ = cx.update_window(handle, |_, window, cx| {
+        window.dispatch_event(
+            PlatformInput::KeyDown(gpui::KeyDownEvent {
+                keystroke: keystroke.clone(),
+                is_held: false,
+                prefer_character_input: false,
+            }),
+            cx,
+        );
+        window.dispatch_event(PlatformInput::KeyUp(gpui::KeyUpEvent { keystroke }), cx);
+    });
+}
+
 #[cfg(debug_assertions)]
 fn review_input(points: Vec<Point<Pixels>>, paths: Option<Vec<PathBuf>>, cx: &mut App) {
     let Some(&(_, handle)) = cx.default_global::<Entries>().editors.first() else {

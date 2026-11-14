@@ -263,3 +263,36 @@ test("60k model rows navigate outside mounted window and keep bounded view", asy
     await m.close();
   }
 }, 30_000);
+test("a new column count asks for a page with room for media imported later", async () => {
+  const m = await model(project, runtime);
+  const { root } = recorder();
+  const pages: number[] = [];
+  const page = m.service.page.bind(m.service);
+  m.service.page = (offset, limit, expected) => {
+    pages.push(limit);
+    return page(offset, limit, expected);
+  };
+  let columns = 1;
+  try {
+    await root.render(
+      <ProjectPanel
+        service={m.service}
+        native={native}
+        layout={layout}
+        layoutFor={() => ({ columns, rowHeight: 140 })}
+      />,
+    );
+    // The grid's width arrives: it lays out in more columns, and the panel
+    // asks for its page again from the first row.
+    columns = 2;
+    const list = root.inspect().nodes.find((n) => n.type === "virtual-list")!;
+    await event(root, list.id, "rangechange", { range: [0, 1], width: 400 });
+    await m.service.idle();
+    // Not clamped to the items there are now: an import that follows must
+    // arrive with the next publication.
+    expect(pages.at(-1)).toBeGreaterThanOrEqual(96);
+  } finally {
+    await root.dispose();
+    await m.close();
+  }
+});

@@ -266,7 +266,22 @@ pub fn plan(snapshot: &Snapshot, options: &Options, time: f64) -> Result<Plan, S
         // Two places at most, as the timeline's readouts: 73.53 s, 1.05 s, 10 s.
         let seconds = format!("{:.2}", pm_time::seconds_from_ticks(end - start));
         let seconds = seconds.trim_end_matches('0').trim_end_matches('.');
-        format!("{frames} frames · {seconds} s · {}×{}", width, height)
+        let summary = format!("{frames} frames · {seconds} s · {}×{}", width, height);
+        // Another rate than the composition's is said, chosen or not.
+        let own = number(comp, "fps").unwrap_or(fps);
+        if (fps - own).abs() > 1e-6 {
+            let rate = |r: f64| {
+                let shown = format!("{:.3}", r);
+                shown.trim_end_matches('0').trim_end_matches('.').to_owned()
+            };
+            format!(
+                "{summary} · {} fps · composition is {} fps",
+                rate(fps),
+                rate(own)
+            )
+        } else {
+            summary
+        }
     };
     // 3D layers render with the composition's saved quality unless the sheet
     // overrides it for this export: say which, and roughly how long.

@@ -94,6 +94,8 @@ export interface EventDetail {
     effect: "none" | "copy" | "move" | "link";
   };
   range?: TextRange;
+  /** A virtual list's `rangechange`: its viewport width in points. */
+  width?: number;
 }
 export interface SurfaceEvent extends EventDetail {
   type: string;

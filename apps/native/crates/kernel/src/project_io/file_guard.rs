@@ -614,6 +614,19 @@ mod tests {
         let path = save(&dir, "opaque-extension.pmv", project(&layer), Value::Null);
         assert_marked(&path, false);
         cases.push((path, false));
+        // An export frame rate the person chose: its record is the Export
+        // sheet's, kept across save and reopen, and nothing a reader needs.
+        let mut chosen = project(r#"{"id":"L","type":"text"}"#);
+        chosen.as_object_mut().unwrap().insert(
+            "exportDefaults",
+            parse(
+                r#"{"format":"mp4","scale":1,"fps":30,"fpsChosen":true,"range":"work","quality":"high","mblur":true,"audio":true,"alpha":false}"#,
+            )
+            .unwrap(),
+        );
+        let path = save(&dir, "chosen-export-rate.pmv", chosen, Value::Null);
+        assert_marked(&path, false);
+        cases.push((path, false));
         oracle(&cases);
     }
 
