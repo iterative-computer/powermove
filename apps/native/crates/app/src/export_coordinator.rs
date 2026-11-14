@@ -745,10 +745,11 @@ async fn execute_inner(
         .filter(|v| *v)
         .map(|_| 0.75);
     let mut session = pm_engine_service::jobs::JobSession::new(request);
-    // Its raster overrides answer from this publication, whatever is edited meanwhile.
-    if let Some(overrides) = engine.overrides {
-        overrides.pin(&mut session, &frozen.publication, false);
-    }
+    // Its raster overrides answer from this publication, whatever is edited
+    // meanwhile; while their extensions are slow, the sheet says what for.
+    let waiting = engine
+        .overrides
+        .map(|overrides| overrides.pin(&mut session, &frozen.publication, false));
     let handle = pm_engine_service::jobs::ExportHandle::start_scheduled(
         &std::env::current_exe().map_err(|e| e.to_string())?,
         session,
@@ -830,6 +831,14 @@ async fn execute_inner(
             let elapsed = started.elapsed().as_secs_f64();
             let mut run =
                 json!({"phase":"rendering","frame":frame,"total":planned.frames,"elapsed":elapsed});
+            if let Some(note) = waiting.as_ref().and_then(|w| w.lock().unwrap().clone()) {
+                let mut note = note.chars();
+                run["extra"] = json!(
+                    note.next()
+                        .map(|c| c.to_uppercase().chain(note).collect::<String>())
+                        .unwrap_or_default()
+                );
+            }
             // The sheet says "About N min left" from the pace so far (it
             // waits for a few frames before trusting it).
             if frame > 0 && frame < planned.frames {
