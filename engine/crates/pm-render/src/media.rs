@@ -2076,13 +2076,18 @@ impl MediaCache {
         // Both decode the same pixels: one decoder policy serves playback,
         // pause, scrub and export.
         let deinterlaced = timing.deinterlaced();
-        // A frame of the file that does not decode is damaged: named by the
-        // file and its time, for the person (`DamagedFrame`).
-        let damaged = |e: &dyn std::fmt::Display| {
+        // A frame of the file that does not read: named by the file, its
+        // time and why (`UnreadFrame`); only corrupt data is called damaged.
+        // A cancelled read stays a plain failure.
+        let damaged = |e: &pm_media::MediaError| {
+            if matches!(e, pm_media::MediaError::Cancelled) {
+                return MediaFailure::Failed(e.to_string());
+            }
             MediaFailure::Failed(
-                crate::DamagedFrame {
+                crate::UnreadFrame {
                     file: path.to_path_buf(),
                     seconds: Some(seconds),
+                    cause: crate::ReadCause::of(e),
                     reason: e.to_string(),
                 }
                 .message(),

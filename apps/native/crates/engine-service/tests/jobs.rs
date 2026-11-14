@@ -1181,3 +1181,30 @@ fn an_existing_file_is_replaced_only_when_told_and_the_old_one_is_kept() {
         .collect();
     assert!(leftovers.is_empty(), "{leftovers:?}");
 }
+/// A file Powermove may not read is not called damaged: the export says
+/// what happened and what to do, and publishes nothing.
+#[test]
+fn an_unreadable_file_of_an_image_sequence_says_why_it_could_not_be_read() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let frames = dir.path().join("frames");
+    std::fs::create_dir(&frames).unwrap();
+    let (project, media) = with_sequence(&frames);
+    let locked = frames.join("shot.0004.png");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let destination = dir.path().join("locked.mov");
+    let mut request = request_for(&project, destination.clone(), 1);
+    request.originals = media.originals.clone();
+    as_prores(&mut request);
+    let status = finish(request);
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(status.state, JobState::Failed, "{status:?}");
+    let message = status.error.unwrap().message;
+    for part in ["couldn't be exported", "shot.0004.png", "permission"] {
+        assert!(message.contains(part), "{part} in: {message}");
+    }
+    for wrong in ["damaged", "Replace or trim"] {
+        assert!(!message.contains(wrong), "{wrong} in: {message}");
+    }
+    assert!(!destination.exists());
+}
