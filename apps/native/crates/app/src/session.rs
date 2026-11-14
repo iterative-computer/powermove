@@ -1120,14 +1120,28 @@ impl Controller {
         } else if self.viewer.is_some() && published_rate(&p) != self.rate {
             // The composition's frame rate changed (Project Settings): the
             // viewer is bound again on the new frame grid, so stepping,
-            // playing and snapping follow at once, where the playhead was.
+            // playing and snapping follow at once, where the playhead was;
+            // a run in progress carries on at its speed.
             let time = self.time();
+            let playing = self
+                .running()
+                .then(|| {
+                    self.viewer
+                        .as_ref()
+                        .and_then(|v| v.status().clock)
+                        .map(|c| c.rate)
+                        .filter(|rate| *rate != PlaybackRate::STOPPED)
+                        .unwrap_or(PlaybackRate::NORMAL)
+                });
             self.published = Some(p.clone());
             self.builtins.natives.published.replace(Some(p.clone()));
             self.bind_composition();
             self.apply_viewer_options();
             self.rebuild_popout_viewer();
             self.seek(time);
+            if let Some(rate) = playing {
+                self.transport(TransportCommand::Play { rate });
+            }
         }
         self.refresh_media(cx);
         // Raster override answers are for one revision; frames ask afresh.
