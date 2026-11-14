@@ -740,6 +740,8 @@ impl Controller {
                 cx.new(|cx| SurfaceView::new(runtime, publication, tokens, natives, window, cx));
             if id == "timeline" {
                 outline.bind(view.downgrade());
+                let wake = self.playback_wake.clone();
+                view.update(cx, |v, _| v.installed = wake);
             }
             if id == "inspector"
                 && let Some(layer) = self.extensions.focus_text.take()
@@ -1613,6 +1615,13 @@ impl crate::timeline_surface::Delegate for ControllerDelegate {
             }
             other => v.message = format!("Not available yet: {other:?}"),
         });
+    }
+    fn view_moved(&self, cx: &mut App) {
+        if let Some(controller) = self.0.upgrade()
+            && let Some(wake) = &controller.read(cx).playback_wake
+        {
+            let _ = wake.try_send(());
+        }
     }
     fn view_facts(&self, facts: serde_json::Value, cx: &mut App) {
         if let Some(controller) = self.0.upgrade()
