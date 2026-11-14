@@ -3412,7 +3412,25 @@ impl Render for TimelineSurface {
                                     .iter()
                                     .find(|o| o.id.strip_prefix("clip:") == Some(id.as_str()))
                             {
-                                strip_hover(op, *x, bounds.origin, &tokens, window);
+                                // Its rim and grip stay inside the tracks (a strip
+                                // may run on out of view) and above a graph.
+                                let clip = op.clip.map(|c| {
+                                    Bounds::new(
+                                        bounds.origin + point(px(c.x as f32), px(c.y as f32)),
+                                        size(px(c.width as f32), px(c.height as f32)),
+                                    )
+                                });
+                                let mask = match (clip, above) {
+                                    (Some(c), Some(a)) => Some(c.intersect(&a)),
+                                    (c, a) => c.or(a),
+                                };
+                                window.with_content_mask(
+                                    mask.map(|bounds| ContentMask {
+                                        bounds,
+                                        fade_out: Default::default(),
+                                    }),
+                                    |w| strip_hover(op, *x, bounds.origin, &tokens, w),
+                                );
                             }
                             for op in
                                 pm_panel_timeline::render::decoration_ops(&frame.ops, &decorations)
