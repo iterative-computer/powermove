@@ -5131,3 +5131,176 @@ fn parent_and_track_matte_rows_carry_only_the_current_layer() {
         snapshot.to_string().len()
     );
 }
+
+/// The Easing panel, as the app mounts it, offers v1's actions on the
+/// selected keyframes; a preset, Easy Ease, an interpolation and a custom
+/// curve each ease them as one Undo step, and nothing changes with no
+/// keyframe selected.
+#[test]
+fn the_easing_panel_eases_the_selected_keyframes_in_one_undo_step() {
+    let actor = actor();
+    let kernel = actor.handle();
+    let add = |id: &str, time: f64, value: f64| {
+        kernel
+            .call(
+                "synthetic",
+                Request::new(
+                    Caller::native(),
+                    pm_kernel::Call::Transact {
+                        label: None,
+                        expected_revision: None,
+                        body: pm_kernel::WriteBody::Commands(vec![
+                            pm_kernel::KeyframeCommand::Add {
+                                layer_id: "a".into(),
+                                channel: "opacity".into(),
+                                time,
+                                key_id: id.into(),
+                                value: Some(pm_model::Value::from(value)),
+                            }
+                            .into(),
+                        ]),
+                    },
+                ),
+            )
+            .wait()
+            .unwrap()
+            .unwrap();
+    };
+    add("k0", 0., 0.);
+    add("k1", 1., 100.);
+    let key = |id: &str| {
+        let p = kernel.published("synthetic").unwrap();
+        let index = pm_panel_timeline::TimelineIndex::from_snapshot(&p.snapshot);
+        data::wire(&index.key(id).unwrap().2.stored.to_value())
+    };
+    let mut backend = data::Backend::new(
+        kernel.clone(),
+        pm_surface::host_api::Identity {
+            realm: "easing".into(),
+            generation: 1,
+            project: "synthetic".into(),
+        },
+        "easing",
+        false,
+    )
+    .unwrap();
+    let state = backend.easing_state().unwrap();
+    assert_eq!(state["count"], 0);
+    assert_eq!(state["presets"].as_array().unwrap().len(), 27);
+    assert!(
+        backend
+            .native_command("panel.easing", &json!({"type":"preset","preset":"easeOut"}))
+            .is_err(),
+        "nothing selected: refused"
+    );
+    kernel
+        .call(
+            "synthetic",
+            Request::new(Caller::native(), SelectionCall::Keys(vec!["k0".into()])),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    assert_eq!(backend.easing_state().unwrap()["count"], 1);
+    let untouched = key("k1");
+    let run = |backend: &mut data::Backend, action: Value| {
+        let models::NativeCommand::Kernel(request) =
+            backend.native_command("panel.easing", &action).unwrap()
+        else {
+            panic!("a kernel request")
+        };
+        let ack = kernel.call("synthetic", request).wait().unwrap().unwrap();
+        assert!(!matches!(ack.reply, pm_kernel::Reply::Throw(_)), "{action}");
+    };
+    let before = key("k0");
+    run(&mut backend, json!({"type":"preset","preset":"expoOut"}));
+    let eased = key("k0");
+    assert_eq!(eased["outInterp"], "bezier", "{eased}");
+    assert_ne!(eased["outEase"], before["outEase"]);
+    // The curve shapes the segment after the selected key; the next key
+    // keeps its time and value.
+    assert_eq!(
+        (&key("k1")["t"], &key("k1")["v"]),
+        (&untouched["t"], &untouched["v"])
+    );
+    run(&mut backend, json!({"type":"easyEase","side":"both"}));
+    let easy = key("k0");
+    assert_eq!(easy["outInterp"], "bezier");
+    assert_ne!(easy["outEase"], eased["outEase"]);
+    run(
+        &mut backend,
+        json!({"type":"interpolation","interpolation":"hold","side":"both"}),
+    );
+    assert_eq!(key("k0")["outInterp"], "hold");
+    // A curve takes a key off Hold.
+    run(
+        &mut backend,
+        json!({"type":"curve","curve":[0.9, 0., 0.1, 1.]}),
+    );
+    let custom = key("k0");
+    assert_eq!(custom["outInterp"], "bezier");
+    assert_ne!(custom["outEase"], eased["outEase"]);
+    // Each action is one Undo step: undo the curve, Hold and Easy Ease to
+    // reach the preset again.
+    for _ in 0..3 {
+        kernel
+            .call(
+                "synthetic",
+                Request::new(
+                    Caller::native(),
+                    pm_kernel::Call::History(pm_kernel::HistoryCall::Undo),
+                ),
+            )
+            .wait()
+            .unwrap()
+            .unwrap();
+    }
+    assert_eq!(key("k0"), eased);
+    for bad in [
+        json!({"type":"preset","preset":"wobble"}),
+        json!({"type":"curve","curve":[0.1, 0.2]}),
+        json!({"type":"interpolation","interpolation":"spline"}),
+    ] {
+        assert!(
+            backend.native_command("panel.easing", &bad).is_err(),
+            "{bad}"
+        );
+    }
+    // Mounted as the app mounts it: the drawn curve, a thumbnail per preset
+    // and the actions, each named for VoiceOver.
+    let mut panels = Builtins::new(kernel.clone(), "synthetic", || {}).unwrap();
+    panels.update_facts(json!({"time":0,"playing":false,"stage":[640.,360.]}));
+    finish(panels.mount("easing").unwrap());
+    let publication = panels.take_publications().pop().unwrap();
+    let components: Vec<(String, String)> = publication
+        .surface
+        .nodes()
+        .values()
+        .filter_map(|n| {
+            Some((
+                n.props.get("data-pm-component")?.as_str()?.to_owned(),
+                n.props.get("label")?.as_str()?.to_owned(),
+            ))
+        })
+        .collect();
+    assert!(components.contains(&("ease-curve".into(), "Easing curve".into())));
+    let thumbnails = components
+        .iter()
+        .filter(|(c, _)| c == "ease-thumbnail")
+        .count();
+    assert_eq!(thumbnails, 27, "a thumbnail per preset");
+    let labels: Vec<String> = publication
+        .surface
+        .nodes()
+        .values()
+        .filter_map(|n| {
+            n.props
+                .get("label")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect();
+    for label in ["Expo Out", "Easy Ease", "Hold", "Apply Curve", "Outgoing X"] {
+        assert!(labels.iter().any(|l| l == label), "{label}: {labels:?}");
+    }
+}

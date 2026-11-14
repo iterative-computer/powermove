@@ -367,7 +367,7 @@ fn every_kit_component_renders_a_real_element(cx: &mut TestAppContext) {
                 .to_owned()
         })
         .collect();
-    assert_eq!(names.len(), 32);
+    assert_eq!(names.len(), 34);
     for (i, name) in names.iter().enumerate() {
         let primitive = match name.as_str() {
             "sheet-anchor" | "popover-anchor" | "colour-popover" => "anchored",
@@ -396,6 +396,9 @@ fn every_kit_component_renders_a_real_element(cx: &mut TestAppContext) {
                 props["value"] = json!([2., 0., 0., 1., 1.]);
                 props["binding"] = json!("curve");
                 props["metadata"] = json!({"pmKit":{"channel":1}});
+            }
+            "ease-curve" | "ease-thumbnail" => {
+                props["value"] = json!([0.42, 0., 0.58, 1.]);
             }
             _ => {}
         }

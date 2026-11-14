@@ -1306,6 +1306,7 @@ impl Backend {
             }
             "profile.set" => Ok(json!({"stateRevision":self.kernel.state().revision})),
             "panel.settings" => self.settings_snapshot(),
+            "panel.easing" => self.easing_state(),
             "panel.inspector" | "panel.binding" => self.inspector_snapshot(),
             "viewer.chrome.drive" => self.viewer_snapshot(),
             "panel.project" => {
@@ -1319,6 +1320,94 @@ impl Backend {
             }
             _ => self.projection(),
         }
+    }
+    /// The Easing panel's view: how many keyframes are selected (what its
+    /// actions change) and the preset curves it offers, in v1's order.
+    pub(crate) fn easing_state(&mut self) -> Result<Value, String> {
+        self.sync()?;
+        let Some(p) = self.published() else {
+            return Ok(json!({"open": false, "count": 0, "presets": easing_presets()}));
+        };
+        Ok(json!({
+            "open": true,
+            "count": p.selection.keys().len(),
+            "revision": p.revision().to_string(),
+            "presets": easing_presets(),
+        }))
+    }
+    /// An Easing panel action on the selected keyframes, as one Undo step:
+    /// `{type:"preset", preset}`, `{type:"curve", curve:[x1,y1,x2,y2]}`,
+    /// `{type:"easyEase", side:"both"|"in"|"out"}` or
+    /// `{type:"interpolation", interpolation:"linear"|"bezier"|"hold"|"auto"|"continuous"}`.
+    pub(crate) fn easing_intent(&mut self, args: &Value) -> Result<Request, String> {
+        use pm_kernel::commands::keyframes::{EaseSide, EaseSpec, Interpolation};
+        self.sync()?;
+        let p = self.published().ok_or("No open project")?;
+        let key_ids: Vec<String> = p.selection.keys().to_vec();
+        if key_ids.is_empty() {
+            return Err("Select keyframes to apply easing".into());
+        }
+        let side = |v: &Value| match v["side"].as_str().unwrap_or("both") {
+            "in" => Ok(EaseSide::In),
+            "out" => Ok(EaseSide::Out),
+            "both" => Ok(EaseSide::Both),
+            _ => Err("Unknown easing side".to_string()),
+        };
+        let command: Command = match args["type"].as_str().unwrap_or("") {
+            "preset" => {
+                let name = args["preset"].as_str().unwrap_or("");
+                if !pm_eval::easing::PRESETS.iter().any(|(n, _)| *n == name) {
+                    return Err(format!("Unknown easing preset {name}"));
+                }
+                KeyframeCommand::SetEasing {
+                    key_ids,
+                    curve: EaseSpec::Preset(name.into()),
+                }
+                .into()
+            }
+            "curve" => {
+                let numbers: Vec<f64> = args["curve"]
+                    .as_array()
+                    .filter(|a| a.len() == 4)
+                    .ok_or("A curve is four numbers")?
+                    .iter()
+                    .map(|n| n.as_f64().filter(|n| n.is_finite()))
+                    .collect::<Option<_>>()
+                    .ok_or("A curve is four numbers")?;
+                KeyframeCommand::SetEasing {
+                    key_ids,
+                    curve: EaseSpec::Curve([numbers[0], numbers[1], numbers[2], numbers[3]]),
+                }
+                .into()
+            }
+            "easyEase" => KeyframeCommand::EasyEase {
+                key_ids,
+                side: side(args)?,
+            }
+            .into(),
+            "interpolation" => KeyframeCommand::SetInterpolation {
+                key_ids,
+                side: side(args)?,
+                interpolation: match args["interpolation"].as_str().unwrap_or("") {
+                    "linear" => Interpolation::Linear,
+                    "bezier" => Interpolation::Bezier,
+                    "hold" => Interpolation::Hold,
+                    "auto" => Interpolation::Auto,
+                    "continuous" => Interpolation::Continuous,
+                    other => return Err(format!("Unknown interpolation {other}")),
+                },
+            }
+            .into(),
+            other => return Err(format!("Unknown easing action {other}")),
+        };
+        Ok(Request::new(
+            self.caller,
+            Call::Transact {
+                label: None,
+                expected_revision: Some(p.revision()),
+                body: WriteBody::Commands(vec![command]),
+            },
+        ))
     }
     pub(crate) fn native_command(
         &mut self,
@@ -1398,6 +1487,7 @@ impl Backend {
             "panel.timeline" => {
                 return self.timeline_intent(args);
             }
+            "panel.easing" => return self.easing_intent(args).map(NativeCommand::Kernel),
             "panel.timeline.menu" => self.timeline_menu(args)?,
             "panel.timeline.dispose" => {
                 return Ok(NativeCommand::Timeline(json!({"type":"dispose"})));
@@ -1774,6 +1864,14 @@ impl Backend {
 }
 /// A move of media alone is a plain kernel edit; other Project edits restore
 /// the reviewed whole-project result under its document guard.
+/// The preset curves the Easing panel offers: v1's `PM.Ease.PRESETS` (the
+/// kernel's own list), each with its cubic Bézier numbers.
+fn easing_presets() -> Value {
+    pm_eval::easing::PRESETS
+        .iter()
+        .map(|(name, curve)| json!({"id": name, "curve": curve}))
+        .collect()
+}
 pub(crate) fn project_edit_request(
     edit: pm_panel_media::Edit,
     prepared: &pm_panel_media::PreparedEdit,

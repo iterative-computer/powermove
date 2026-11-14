@@ -455,6 +455,148 @@ fn dragging_a_graph_handle_shapes_the_curve_and_undo_restores_it(cx: &mut TestAp
     s.undo(cx);
     assert_eq!(ease(&s), before);
 }
+/// Window position of graph key `id`'s centre, as painted now.
+fn graph_key_at(s: &mut Stage, id: &str) -> Point<Pixels> {
+    let origin = s.origin();
+    let ops = s.surface.read_with(&s.vcx, |t, _| t.graph_ops_for_test());
+    let key = ops
+        .iter()
+        .find(|o| o.id == format!("graph-key:{id}"))
+        .unwrap_or_else(|| panic!("graph key {id} painted"))
+        .bounds;
+    origin
+        + point(
+            px((key.x + key.width / 2.) as f32),
+            px((key.y + key.height / 2.) as f32),
+        )
+}
+/// Chike's "keys jump when you drag them": a key pressed in the Value Graph
+/// (unselected, so the press selects it and shows its handles), dragged in
+/// small steps in value and time, stays under the pointer at every step, and
+/// stays where it was released: nothing rescales under it.
+#[gpui::test]
+fn a_dragged_graph_key_stays_under_the_pointer_and_lands_where_released(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    let ids = graph_on_first_key(&mut s, cx);
+    let start = graph_key_at(&mut s, &ids[1]);
+    s.vcx
+        .simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    let pressed = graph_key_at(&mut s, &ids[1]);
+    assert!(
+        (pressed.y - start.y).abs() < px(0.5),
+        "pressing (selecting) the key moved it: {start:?} -> {pressed:?}"
+    );
+    let (pps, fps) = s.surface.read_with(&s.vcx, |t, _| {
+        (t.frame().unwrap().viewport.pps, t.model().index.fps)
+    });
+    let frame = (pps / fps) as f32;
+    // Down 12 points and right 3 frames, in 12 steps, as a slow hand moves.
+    let to = start + point(px(frame * 3.), px(12.));
+    let mut last_y = start.y;
+    for step in 1..=12 {
+        let k = step as f32 / 12.;
+        let at = start + point((to.x - start.x) * k, (to.y - start.y) * k);
+        s.vcx
+            .simulate_mouse_move(at, MouseButton::Left, Modifiers::none());
+        s.idle(cx);
+        let travel = at - start;
+        if f32::from(travel.x).hypot(f32::from(travel.y)) < tokens().metrics.drag_threshold + 0.5 {
+            continue; // Under the drag threshold: nothing moves yet.
+        }
+        let key = graph_key_at(&mut s, &ids[1]);
+        assert!(
+            (key.y - at.y).abs() < px(1.),
+            "step {step}: key y {:?} left the pointer y {:?}",
+            key.y,
+            at.y
+        );
+        assert!(
+            (key.x - at.x).abs() <= px(frame / 2. + 0.5),
+            "step {step}: key x {:?} left the pointer x {:?} (frame {frame})",
+            key.x,
+            at.x
+        );
+        assert!(
+            key.y >= last_y - px(0.01),
+            "step {step}: the key went back up"
+        );
+        last_y = key.y;
+    }
+    s.vcx
+        .simulate_mouse_up(to, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    assert!(
+        s.recorder.reports.borrow().is_empty(),
+        "{:?}",
+        s.recorder.reports.borrow()
+    );
+    let landed = graph_key_at(&mut s, &ids[1]);
+    assert!(
+        (landed.y - to.y).abs() < px(1.) && (landed.x - to.x).abs() <= px(frame / 2. + 0.5),
+        "the key jumped on release: released at {to:?}, shown at {landed:?}"
+    );
+    let value = s.surface.read_with(&s.vcx, |t, _| {
+        t.model()
+            .index
+            .key(&ids[1])
+            .unwrap()
+            .2
+            .value
+            .as_f64()
+            .unwrap()
+    });
+    assert!(value < 51., "dragged down: {value}");
+    s.undo(cx);
+    let value = s.surface.read_with(&s.vcx, |t, _| {
+        t.model()
+            .index
+            .key(&ids[1])
+            .unwrap()
+            .2
+            .value
+            .as_f64()
+            .unwrap()
+    });
+    assert_eq!(value, 51.);
+}
+/// In the Speed Graph the vertical axis is speed: dragging a key up there
+/// raises its speed and leaves its value (and so the Value Graph) alone, as
+/// v1 did. It used to add the speed change to the key's value.
+#[gpui::test]
+fn a_speed_graph_drag_changes_speed_not_value(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    let ids = graph_on_first_key(&mut s, cx);
+    s.surface.update(&mut s.vcx, |t, cx| {
+        t.command("graph.speed", 0., None, false, cx)
+    });
+    s.idle(cx);
+    let at = graph_key_at(&mut s, &ids[0]);
+    let speed = |s: &Stage| {
+        let graph = s.surface.read_with(&s.vcx, |t, _| t.graph()).unwrap();
+        graph.curves()[0].points[0].point.value
+    };
+    let before = speed(&s);
+    s.drag(cx, at, at - point(px(0.), px(20.)), Modifiers::none());
+    assert!(
+        s.recorder.reports.borrow().is_empty(),
+        "{:?}",
+        s.recorder.reports.borrow()
+    );
+    let values: Vec<f64> = ids
+        .iter()
+        .map(|id| {
+            s.surface.read_with(&s.vcx, |t, _| {
+                t.model().index.key(id).unwrap().2.value.as_f64().unwrap()
+            })
+        })
+        .collect();
+    assert_eq!(values, vec![50., 51.], "a speed drag changed the values");
+    let after = speed(&s);
+    assert!(after > before + 1e-3, "speed {before} -> {after}");
+    s.undo(cx);
+    assert!((speed(&s) - before).abs() < 1e-6);
+}
 #[gpui::test]
 fn the_speed_graph_plots_the_rate_of_change(cx: &mut TestAppContext) {
     let mut s = stage(cx, 1);
@@ -1465,8 +1607,9 @@ fn a_double_click_on_an_unselected_name_opens_its_field(cx: &mut TestAppContext)
         .view
         .read_with(&s.vcx, |v, _| v.cancellable_field())
         .expect("the name field opened");
-    s.view
-        .update(&mut s.vcx, |v, cx| v.change(field, serde_json::json!("Logo"), cx));
+    s.view.update(&mut s.vcx, |v, cx| {
+        v.change(field, serde_json::json!("Logo"), cx)
+    });
     s.idle(cx);
     s.idle(cx);
     let p = s.rig.kernel.published(PROJECT).unwrap();

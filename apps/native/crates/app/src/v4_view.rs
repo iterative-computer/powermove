@@ -205,6 +205,9 @@ pub struct SurfaceView {
     grade_drawn: grade::Drawn,
     /// Each wheel's puck on its way to where its values put it.
     grade_motion: grade::Motion,
+    /// Each easing curve's preview run and the curve its drag left, until
+    /// the panel publishes it.
+    ease: grade::EaseState,
     move_busy: bool,
     /// Last label of each `role="status"` node; `None` until the first frame,
     /// so a panel's opening state is not read out.
@@ -281,6 +284,7 @@ impl SurfaceView {
             scrub_shown: None,
             grade_drawn: Default::default(),
             grade_motion: Default::default(),
+            ease: Default::default(),
             move_busy: false,
             statuses: None,
             queued_move: None,
@@ -971,120 +975,123 @@ impl SurfaceView {
             field.set_unit(unit);
             field
         });
-        self.subscriptions.entry(id).or_default().push(cx.subscribe_in(
-            &field,
-            window,
-            move |this, _, event, window, cx| {
-                // A multiline field hands Tab on: focus moves to the next
-                // (or previous) control, as from any other field.
-                match event {
-                    TextEvent::Key("tab") => return window.focus_next(cx),
-                    TextEvent::Key("backtab") => return window.focus_prev(cx),
-                    _ => {}
-                }
-                if this.prepared.node(id).and_then(|n| n.binding.clone()) != lease {
-                    return;
-                }
-                match event {
-                    TextEvent::Changed(value) => {
-                        if this
-                            .publication
-                            .surface
-                            .node(id)
-                            .is_some_and(|n| n.listeners.contains_key("input"))
-                        {
-                            this.send(
-                                id,
-                                "input",
-                                EventDetail {
-                                    value: Some(json!(value)),
-                                    ..Default::default()
-                                },
-                                cx,
-                            );
-                        }
+        self.subscriptions
+            .entry(id)
+            .or_default()
+            .push(
+                cx.subscribe_in(&field, window, move |this, _, event, window, cx| {
+                    // A multiline field hands Tab on: focus moves to the next
+                    // (or previous) control, as from any other field.
+                    match event {
+                        TextEvent::Key("tab") => return window.focus_next(cx),
+                        TextEvent::Key("backtab") => return window.focus_prev(cx),
+                        _ => {}
                     }
-                    TextEvent::Committed(value) => {
-                        let value = if number {
-                            match value.parse::<f64>() {
-                                Ok(n) if n.is_finite() => json!(n),
-                                _ => {
-                                    this.error = Some("Enter a finite number".into());
-                                    cx.notify();
-                                    return;
-                                }
-                            }
-                        } else {
-                            json!(value)
-                        };
-                        this.change(id, value, cx);
+                    if this.prepared.node(id).and_then(|n| n.binding.clone()) != lease {
+                        return;
                     }
-                    // Return in a composer: the panel sees the text as typed,
-                    // then the key, as a keyboard would deliver them.
-                    TextEvent::Submitted(value) => {
-                        let listens = |event: &str| {
-                            this.publication
+                    match event {
+                        TextEvent::Changed(value) => {
+                            if this
+                                .publication
                                 .surface
                                 .node(id)
-                                .is_some_and(|n| n.listeners.contains_key(event))
-                        };
-                        let (input, keydown) = (listens("input"), listens("keydown"));
-                        if input {
-                            let detail = EventDetail {
-                                value: Some(json!(value)),
-                                ..Default::default()
+                                .is_some_and(|n| n.listeners.contains_key("input"))
+                            {
+                                this.send(
+                                    id,
+                                    "input",
+                                    EventDetail {
+                                        value: Some(json!(value)),
+                                        ..Default::default()
+                                    },
+                                    cx,
+                                );
+                            }
+                        }
+                        TextEvent::Committed(value) => {
+                            let value = if number {
+                                match value.parse::<f64>() {
+                                    Ok(n) if n.is_finite() => json!(n),
+                                    _ => {
+                                        this.error = Some("Enter a finite number".into());
+                                        cx.notify();
+                                        return;
+                                    }
+                                }
+                            } else {
+                                json!(value)
                             };
-                            this.send(id, "input", detail, cx);
+                            this.change(id, value, cx);
                         }
-                        if keydown {
-                            let detail = EventDetail {
-                                key: Some("Enter".into()),
-                                ..Default::default()
+                        // Return in a composer: the panel sees the text as typed,
+                        // then the key, as a keyboard would deliver them.
+                        TextEvent::Submitted(value) => {
+                            let listens = |event: &str| {
+                                this.publication
+                                    .surface
+                                    .node(id)
+                                    .is_some_and(|n| n.listeners.contains_key(event))
                             };
-                            this.send(id, "keydown", detail, cx);
+                            let (input, keydown) = (listens("input"), listens("keydown"));
+                            if input {
+                                let detail = EventDetail {
+                                    value: Some(json!(value)),
+                                    ..Default::default()
+                                };
+                                this.send(id, "input", detail, cx);
+                            }
+                            if keydown {
+                                let detail = EventDetail {
+                                    key: Some("Enter".into()),
+                                    ..Default::default()
+                                };
+                                this.send(id, "keydown", detail, cx);
+                            }
                         }
-                    }
-                    TextEvent::Cancelled => {
-                        if this.prepared.node(id).is_some_and(|n| n.cancel_change) {
-                            this.change(id, json!(""), cx);
+                        TextEvent::Cancelled => {
+                            if this.prepared.node(id).is_some_and(|n| n.cancel_change) {
+                                this.change(id, json!(""), cx);
+                            }
                         }
-                    }
-                    // Escape in a composer reaches its panel as the key
-                    // (the Agent's shortcuts menu, then its popover).
-                    TextEvent::Key("escape") => {
-                        if this
-                            .publication
-                            .surface
-                            .node(id)
-                            .is_some_and(|n| n.listeners.contains_key("keydown"))
+                        // Escape in a composer reaches its panel as the key
+                        // (the Agent's shortcuts menu, then its popover).
+                        TextEvent::Key("escape") => {
+                            if this
+                                .publication
+                                .surface
+                                .node(id)
+                                .is_some_and(|n| n.listeners.contains_key("keydown"))
+                            {
+                                let detail = EventDetail {
+                                    key: Some("Escape".into()),
+                                    ..Default::default()
+                                };
+                                this.send(id, "keydown", detail, cx);
+                            }
+                        }
+                        // Up and Down in a number field step its value (Shift:
+                        // ten steps) and write it, as a spin field does.
+                        TextEvent::Key(key @ ("up" | "down" | "shiftUp" | "shiftDown"))
+                            if number =>
                         {
-                            let detail = EventDetail {
-                                key: Some("Escape".into()),
-                                ..Default::default()
+                            let Some(facts) = this.prepared.node(id).and_then(|n| n.number) else {
+                                return;
                             };
-                            this.send(id, "keydown", detail, cx);
+                            let Some(field) = this.fields.get(&id).cloned() else {
+                                return;
+                            };
+                            let typed = field.read(cx).editing_text();
+                            let next = arrow_step(&typed, facts, key);
+                            let shown = facts.text(next);
+                            field.update(cx, |f, cx| f.replace_text(&shown, cx));
+                            this.change(id, json!(next), cx);
                         }
+                        // Canvas editors only.
+                        TextEvent::Selection { .. } | TextEvent::Key(_) | TextEvent::Blurred => {}
                     }
-                    // Up and Down in a number field step its value (Shift:
-                    // ten steps) and write it, as a spin field does.
-                    TextEvent::Key(key @ ("up" | "down" | "shiftUp" | "shiftDown")) if number => {
-                        let Some(facts) = this.prepared.node(id).and_then(|n| n.number) else {
-                            return;
-                        };
-                        let Some(field) = this.fields.get(&id).cloned() else {
-                            return;
-                        };
-                        let typed = field.read(cx).editing_text();
-                        let next = arrow_step(&typed, facts, key);
-                        let shown = facts.text(next);
-                        field.update(cx, |f, cx| f.replace_text(&shown, cx));
-                        this.change(id, json!(next), cx);
-                    }
-                    // Canvas editors only.
-                    TextEvent::Selection { .. } | TextEvent::Key(_) | TextEvent::Blurred => {}
-                }
-            },
-        ));
+                }),
+            );
         if let Some(focus) = self.focus.get(&id) {
             let subscription = cx.on_focus(focus, window, move |v, _, cx| {
                 if let Some(field) = v.fields.get(&id) {
@@ -2187,7 +2194,15 @@ impl SurfaceView {
             if let Some(h) = self.grade_height(id, &node.kit) {
                 element = element.h(px(h));
             }
-            if !node.disabled {
+            // A thumbnail is a drawing: its press goes to what holds it.
+            let thumbnail = matches!(
+                node.kit,
+                Kit::Ease {
+                    thumbnail: true,
+                    ..
+                }
+            );
+            if !node.disabled && !thumbnail {
                 element = element.on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |v, event: &MouseDownEvent, window, cx| {
@@ -2956,7 +2971,7 @@ impl SurfaceView {
                 }
             }
             // Drawn with their own canvas (`grade_canvas`).
-            Kit::Wheel { .. } | Kit::Curve { .. } => {}
+            Kit::Wheel { .. } | Kit::Curve { .. } | Kit::Ease { .. } => {}
             Kit::Disclosure(published) => {
                 let open = &self
                     .disclosures
@@ -3349,9 +3364,10 @@ fn native_options(node: &pm_surface::Node) -> Vec<Value> {
                 .find(|m| m.get("v").is_some() && m.get("v") == option.get("v"));
             // A row's checkmark and its second line (the menu item subtitle).
             for key in ["checked", "detail"] {
-                if let (Some(value), Some(o)) =
-                    (row.and_then(|m| m.get(key)).cloned(), option.as_object_mut())
-                {
+                if let (Some(value), Some(o)) = (
+                    row.and_then(|m| m.get(key)).cloned(),
+                    option.as_object_mut(),
+                ) {
                     o.insert(key.into(), value);
                 }
             }
@@ -3371,7 +3387,9 @@ fn control_options(kind: crate::v4_control::Kind, node: &pm_surface::Node) -> Ve
         .and_then(|m| m.get("pmKit"))
         .and_then(|m| m.get("log"))
         == Some(&Value::Bool(true));
-    vec![json!({"min":n("min").unwrap_or(0.),"max":n("max").unwrap_or(1.),"step":n("step").unwrap_or(0.),"log":log})]
+    vec![
+        json!({"min":n("min").unwrap_or(0.),"max":n("max").unwrap_or(1.),"step":n("step").unwrap_or(0.),"log":log}),
+    ]
 }
 fn control_kind(panel: &str, node: &pm_surface::Node) -> Option<crate::v4_control::Kind> {
     use crate::v4_control::Kind;

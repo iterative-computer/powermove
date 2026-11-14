@@ -39,6 +39,9 @@ pub struct Graph {
     pub max: f64,
     pub grid: Vec<(f64, String)>,
     pub selection: Option<Rect>,
+    /// What this graph shows (mode, merge, layer and property): a range kept
+    /// steady across rebuilds is kept only for the same view.
+    pub view: String,
 }
 /// What a graph with no curve in it says.
 pub const EMPTY: &str = "Select an animated property to see its curve.";
@@ -133,7 +136,6 @@ pub fn sample(
             let selected = model.selection.key_selected(&layer_id, &key.id);
             let handles: Vec<_> = handles
                 .get(i)
-                .filter(|_| selected)
                 .into_iter()
                 .flat_map(|[before, after]| [(EaseSide::In, *before), (EaseSide::Out, *after)])
                 .filter_map(|(side, p)| {
@@ -147,9 +149,13 @@ pub fn sample(
                     ))
                 })
                 .collect();
+            // Every key's handles count toward the value range, shown or not:
+            // selecting a key (which shows its handles) must never rescale
+            // the graph under the pointer.
             for (_, p) in &handles {
                 range = (range.0.min(p.value), range.1.max(p.value));
             }
+            let handles = if selected { handles } else { vec![] };
             points.push(GraphPoint {
                 id: key.id.clone(),
                 point,
@@ -246,7 +252,13 @@ pub fn sample(
         }
     }
     let margin = ((range.1 - range.0) * 0.1).max(1.);
-    Graph::new(curves, range.0 - margin, range.1 + margin).ok()
+    let mut graph = Graph::new(curves, range.0 - margin, range.1 + margin).ok()?;
+    graph.view = format!(
+        "{}:{}:{layer_id}:{path}",
+        if speed { "speed" } else { "value" },
+        model.graph_merge
+    );
+    Some(graph)
 }
 impl Graph {
     pub fn curves(&self) -> &[Curve] {
@@ -302,7 +314,28 @@ impl Graph {
             max,
             grid: grid(min, max),
             selection: None,
+            view: String::new(),
         })
+    }
+    /// This graph drawn over the value range `min`..`max` instead of its own
+    /// (a range held through a drag), with value lines for that range.
+    pub fn with_range(mut self, min: f64, max: f64) -> Self {
+        if min.is_finite() && max.is_finite() && max > min {
+            (self.min, self.max) = (min, max);
+            self.grid = grid(min, max);
+        }
+        self
+    }
+    /// Whether this graph, shown over `min`..`max` (the range on screen),
+    /// still reads well there: every value fits, and the values fill at
+    /// least half of it. Then the range on screen is kept and nothing under
+    /// the pointer moves.
+    pub fn fits_in(&self, min: f64, max: f64) -> bool {
+        let span = max - min;
+        self.min >= min - 1e-9
+            && self.max <= max + 1e-9
+            && span > 0.
+            && (self.max - self.min) >= span * 0.5
     }
     pub fn prepare(&self, v: Viewport, bounds: Rect, t: &Tokens) -> Result<Vec<Op>, Error> {
         if !v.valid()

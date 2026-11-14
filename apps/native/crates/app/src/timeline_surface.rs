@@ -266,7 +266,10 @@ pub struct TimelineSurface {
     reading: BTreeSet<crate::waveforms::Key>,
     model: Arc<TimelineModel>,
     scene: Option<Arc<Scene>>,
+    /// The graph on screen; its value range may be held (`steady_graph`).
     graph: Option<Arc<Graph>>,
+    /// The latest graph over its own fitted range, for Fit Selected Curves.
+    graph_fitted: Option<Arc<Graph>>,
     frame: Option<Arc<Frame>>,
     /// The clip under the pointer and the pointer's x in the panel: its strip
     /// draws hovered, with the trim grip inside the nearer edge.
@@ -354,6 +357,7 @@ impl TimelineSurface {
             model: Default::default(),
             scene: None,
             graph: None,
+            graph_fitted: None,
             frame: None,
             bounds: Bounds::default(),
             body: Bounds::default(),
@@ -587,6 +591,10 @@ impl TimelineSurface {
         let frame = 1. / self.model.index.fps.max(1.);
         self.view.pps = (width.max(1.) / (last - first).max(frame)).clamp(PPS.0, PPS.1);
         self.view.scroll_time = (first - ROOM / self.view.pps).max(self.model.index.minimum_time());
+        // The values refit too: the curves fill the graph's height again.
+        if self.graph_fitted.is_some() {
+            self.graph = self.graph_fitted.clone();
+        }
         self.fitted = true;
         self.changed(true, cx);
     }
@@ -889,16 +897,8 @@ impl TimelineSurface {
         }
         self.model = built.model;
         self.scene = Some(built.scene.clone());
-        // A drag maps the pointer through the graph's value range: hold it until
-        // release so the curve does not slide out from under the pointer.
-        self.graph = match (&self.gesture, &self.graph, built.graph) {
-            (Gesture::Dragging { .. }, Some(held), Some(next)) => {
-                let mut next = Arc::unwrap_or_clone(next);
-                (next.min, next.max) = (held.min, held.max);
-                Some(Arc::new(next))
-            }
-            (_, _, next) => next,
-        };
+        self.graph = steady_graph(&self.gesture, self.graph.as_deref(), built.graph.clone());
+        self.graph_fitted = built.graph;
         self.outline.set_scene(Some(built.scene));
         self.frame = None;
         self.clamp_scroll();
@@ -2136,6 +2136,39 @@ impl TimelineSurface {
     #[cfg(test)]
     pub fn model(&self) -> Arc<TimelineModel> {
         self.model.clone()
+    }
+}
+/// The graph to show after a rebuild. A key or handle drag maps the pointer
+/// through the value range, so from the press until release the range on
+/// screen is held: selecting the key, its handles appearing and every step
+/// of the drag leave the curve under the pointer. Between gestures the range
+/// on screen is also kept while the rebuilt curve still fits it well
+/// (`Graph::fits_in`), so a release, an undo or a nudge doesn't rescale the
+/// graph; a curve that leaves the range, or shrinks to under half of it, or
+/// another property or graph mode, refits.
+fn steady_graph(
+    gesture: &Gesture,
+    shown: Option<&Graph>,
+    next: Option<Arc<Graph>>,
+) -> Option<Arc<Graph>> {
+    let (Some(shown), Some(next)) = (shown, next.as_deref()) else {
+        return next;
+    };
+    if shown.view != next.view {
+        return Some(Arc::new(next.clone()));
+    }
+    let held = matches!(
+        gesture,
+        Gesture::Dragging { .. }
+            | Gesture::Pressed(Press {
+                spec: Some(Spec::GraphKeys | Spec::Handle { .. }),
+                ..
+            })
+    );
+    if held || next.fits_in(shown.min, shown.max) {
+        Some(Arc::new(next.clone().with_range(shown.min, shown.max)))
+    } else {
+        Some(Arc::new(next.clone()))
     }
 }
 fn frame_time(model: &TimelineModel, time: f64) -> f64 {
