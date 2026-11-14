@@ -1762,12 +1762,9 @@ impl TimelineSurface {
             return;
         };
         let covered = scene.marquee(frame.viewport, &self.tokens, area);
-        let layers = if self.model.mode == TimelineMode::Tracks {
-            covered.clips
-        } else {
-            vec![]
-        };
-        let plan = session.update(covered.keys, layers);
+        // The layers whose bars (Layers) or clips (Tracks) the box touches;
+        // the session takes them only when it covers no keys (v1's rule).
+        let plan = session.update(covered.keys, covered.clips);
         self.queue.retain(|j| !matches!(j, Job::Apply(_)));
         self.queue.push_back(Job::Apply(plan));
         self.pump(cx);

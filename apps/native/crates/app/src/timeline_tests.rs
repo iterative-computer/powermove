@@ -328,6 +328,36 @@ fn marquee_selects_keys_without_seeking(cx: &mut TestAppContext) {
     assert_eq!(selected, 2);
     assert!(s.recorder.seeks.borrow().is_empty());
 }
+/// v1: a marquee from empty track space over layer bars (no keys inside)
+/// selects the layers it touches, in Layers mode as in Tracks; a click on
+/// empty space clears them again.
+#[gpui::test]
+fn a_marquee_over_layer_bars_selects_their_layers(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    // Layer 0 spans 0-2 s, layer 1 0.5-2.5 s: from past layer 0's end on
+    // its row, across both bars.
+    let start = s.at(0, 3.);
+    let end = s.at(1, 1.5);
+    s.drag(cx, start, end, Modifiers::none());
+    let selected = |s: &Stage| {
+        let mut ids = s
+            .rig
+            .kernel
+            .published(PROJECT)
+            .unwrap()
+            .selection
+            .layers()
+            .to_vec();
+        ids.sort();
+        ids
+    };
+    assert_eq!(selected(&s), ["l0", "l1"]);
+    assert!(s.recorder.seeks.borrow().is_empty());
+    let empty = s.at(0, 4.);
+    s.vcx.simulate_click(empty, Modifiers::none());
+    s.idle(cx);
+    assert!(selected(&s).is_empty());
+}
 #[gpui::test]
 fn graph_view_drags_a_key_in_value_and_undo_restores_it(cx: &mut TestAppContext) {
     let mut s = stage(cx, 1);
