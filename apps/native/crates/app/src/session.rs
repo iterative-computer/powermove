@@ -988,6 +988,17 @@ impl Controller {
             self.apply_viewer_options();
             self.rebuild_popout_viewer();
             self.seek(time);
+        } else if self.viewer.is_some() && published_rate(&p) != self.rate {
+            // The composition's frame rate changed (Project Settings): the
+            // viewer is bound again on the new frame grid, so stepping,
+            // playing and snapping follow at once, where the playhead was.
+            let time = self.time();
+            self.published = Some(p.clone());
+            self.builtins.natives.published.replace(Some(p.clone()));
+            self.bind_composition();
+            self.apply_viewer_options();
+            self.rebuild_popout_viewer();
+            self.seek(time);
         }
         self.refresh_media(cx);
         // Raster override answers are for one revision; frames ask afresh.
@@ -3520,6 +3531,14 @@ pub const SAVING: &str = "Saving…";
 /// The open composition's duration in seconds as the publication has it
 /// now (Project Settings, the Properties field and agents change it under a
 /// bound viewer), at least a millisecond.
+/// The frame rate of the composition shown, as it is now.
+pub fn published_rate(p: &Published) -> pm_time::Rate {
+    p.snapshot.root().map_or(pm_time::Rate::FPS_30, |root| {
+        composition_rate(
+            pm_kernel::model::comp_node(root, Some(&p.snapshot.render_comp())).unwrap_or(root),
+        )
+    })
+}
 pub fn composition_duration(p: &Published) -> f64 {
     p.snapshot
         .root()
