@@ -1838,7 +1838,7 @@ fn ask_ahead(
         return;
     }
     let speed = rate.num as f64 / rate.den.max(1) as f64;
-    let Some((lead, frames)) = store.ahead(spec.time.get(), speed) else {
+    let Some((lead, frames)) = store.ahead(spec.time.get(), speed, spec.scale) else {
         return;
     };
     let step = frame * i64::from(rate.num.signum());
@@ -3528,7 +3528,17 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                                 },
                             )
                         });
-                        if let (Some(needs), Some(store)) = (pending.clone(), engine.compat()) {
+                        if spec.moment == Moment::Playing && pending.is_some() {
+                            // A playing frame held for its override layers
+                            // is gone by when they land: the realm is asked
+                            // ahead of the playhead at this frame's scale, so
+                            // the frames that follow find their answers (it
+                            // asked nothing new while no frame was drawn).
+                            let rate = runtime.get(&id).map(|r| r.transport.rate());
+                            ask_ahead(&mut engine, &shared.disk, &scene, spec, rate);
+                        } else if let (Some(needs), Some(store)) =
+                            (pending.clone(), engine.compat())
+                        {
                             store.request(needs);
                             if let Some(ahead) = ahead {
                                 store.request_behind(ahead);
