@@ -145,12 +145,12 @@ pub struct SaveOptions {
     pub compact_min_dead_bytes: Option<u64>,
     #[doc(hidden)]
     pub fault: Option<WriteFault>,
-    /// Tests: write the history as `to_saved()` builds it and judge it with
-    /// the file guard's full replay (the writer before step texts), to
-    /// prove the two write the same bytes.
+    /// Tests: write the history from a whole rebuilt value and judge it with
+    /// the file guard's full replay: as the writer before the packed form
+    /// wrote it, or as `pack(to_saved())`, to prove what this writer writes.
     #[cfg(any(test, feature = "save-reference"))]
     #[doc(hidden)]
-    pub reference_writer: bool,
+    pub reference_writer: Option<ReferenceWriter>,
     #[doc(hidden)]
     pub hooks: durable::PublishHooks,
     /// The profile folder of the instance that saves: a save's record names
@@ -625,6 +625,28 @@ impl SavePlan {
         }
     }
 
+    /// Whether the file embeds media the project's own assets don't list:
+    /// media only an undo or redo step refers to. The old app (v1.2.0 to
+    /// v1.3.2) restores a file's media by walking the plain history's
+    /// entries before it imports the history; a packed history hides those
+    /// assets from that walk and their bytes would be left behind (review
+    /// w31 F2). Such a history is written plain; the media stays.
+    fn history_only_media(&self) -> bool {
+        let assets = self
+            .document
+            .root()
+            .and_then(|root| root.get("assets"))
+            .map(|assets| match assets.kind() {
+                pm_model::NodeKind::Object(map) => map
+                    .keys()
+                    .cloned()
+                    .collect::<std::collections::HashSet<_>>(),
+                _ => Default::default(),
+            })
+            .unwrap_or_default();
+        self.media.iter().any(|entry| !assets.contains(&entry.id))
+    }
+
     fn attempt(&self, fault: Option<WriteFault>) -> Result<SaveReceipt, ProjectIoError> {
         let mut lap = Lap::new();
         self.validate()?;
@@ -813,11 +835,24 @@ impl SavePlan {
         lap.mark("kept media copied");
 
         // The document record.
-        // Each session step is written from text it made once; a raw
-        // preserved history is written as read.
+        // A session's steps are written in the packed history form from text
+        // each made once. A history kept as read (nothing recorded since the
+        // open) is written exactly as read, as an untouched save must.
         #[cfg(any(test, feature = "save-reference"))]
         let reference = match (&self.history, self.options.reference_writer) {
-            (HistoryToWrite::Session(snapshot), true) => Some(snapshot.to_saved()),
+            (HistoryToWrite::Session(snapshot), Some(ReferenceWriter::Unpacked)) => {
+                Some(snapshot.to_saved())
+            }
+            (HistoryToWrite::Session(snapshot), Some(ReferenceWriter::Packed)) => {
+                Some(if self.history_only_media() {
+                    snapshot.to_saved()
+                } else {
+                    crate::history::pack(snapshot.to_saved())
+                })
+            }
+            (HistoryToWrite::Session(snapshot), Some(ReferenceWriter::PackedRegardless)) => {
+                Some(crate::history::pack(snapshot.to_saved()))
+            }
             _ => None,
         };
         #[cfg(not(any(test, feature = "save-reference")))]
@@ -828,7 +863,11 @@ impl SavePlan {
                 file_guard::GuardHistory::Value(value),
             ),
             (HistoryToWrite::Session(snapshot), None) => (
-                HistoryPart::Session(snapshot),
+                if self.history_only_media() {
+                    HistoryPart::SessionPlain(snapshot)
+                } else {
+                    HistoryPart::Session(snapshot)
+                },
                 file_guard::GuardHistory::Session {
                     snapshot,
                     state_token: self.state_token,
@@ -1110,9 +1149,9 @@ mod history_text_tests;
 #[doc(hidden)]
 impl SavePlan {
     /// This plan, written by the reference writer or by step texts.
-    pub fn with_reference_writer(&self, on: bool) -> SavePlan {
+    pub fn with_reference_writer(&self, writer: Option<ReferenceWriter>) -> SavePlan {
         let mut plan = self.clone();
-        plan.options.reference_writer = on;
+        plan.options.reference_writer = writer;
         plan
     }
     /// This plan saved to `twin` instead, which holds a copy of what the
@@ -1124,6 +1163,22 @@ impl SavePlan {
         plan.publish = None;
         plan
     }
+}
+
+/// The history writers kept to prove this one (tests and the
+/// `save-reference` example only).
+#[cfg(any(test, feature = "save-reference"))]
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReferenceWriter {
+    /// `to_saved()` as a whole value: the writer before the packed form.
+    Unpacked,
+    /// `pack(to_saved())` as a whole value, or `to_saved()` when the file
+    /// embeds media only the history refers to (the same rule as the writer).
+    Packed,
+    /// `pack(to_saved())` whatever media the file embeds: the writer before
+    /// that rule (for the old-reader witness).
+    PackedRegardless,
 }
 
 /// Phase times of one save attempt on stderr (`PM_SAVE_TRACE=1`).

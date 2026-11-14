@@ -11,7 +11,7 @@ use pm_model::{Map, Node, Value};
 
 use crate::history::{History, HistorySnapshot};
 
-const MARKER: &str = "requiresEngine";
+pub(super) const MARKER: &str = "requiresEngine";
 const NATIVE: &str = "native";
 
 fn field<'a, T: JsonTree>(value: &'a T, key: &str) -> Option<&'a T> {

@@ -89,10 +89,18 @@ fn run() {
 }
 
 fn compare(file: &std::path::Path, layer: &str) {
+    use pm_kernel::project_io::save::ReferenceWriter;
     use pm_kernel::project_io::{OpenOptions, SaveOptions, SaveTarget, open_project};
     use pm_kernel::{DocumentStore, Origin};
     let twin = file.with_extension("twin.pmv");
+    let plain = file.with_extension("plain.pmv");
+    let witness = std::env::var_os("PM_HISTORY_WITNESS").map(std::path::PathBuf::from);
+    let t = Instant::now();
     let mut store = DocumentStore::open(open_project(file, OpenOptions::default()).unwrap());
+    println!(
+        "open (as given): {:.0} ms",
+        t.elapsed().as_secs_f64() * 1000.
+    );
     // What the app runs on another thread after an open.
     let t = Instant::now();
     store.save_warmup()();
@@ -100,27 +108,57 @@ fn compare(file: &std::path::Path, layer: &str) {
         "warm-up after open: {:.0} ms",
         t.elapsed().as_secs_f64() * 1000.
     );
-    let step = |store: &mut DocumentStore, what: &str| {
+    let mut round = 0;
+    let mut step = |store: &mut DocumentStore, what: &str| {
         let plan = store
             .prepare_save(SaveTarget::InPlace, SaveOptions::default())
             .unwrap();
-        let _ = std::fs::remove_file(&twin);
-        std::fs::copy(plan.destination(), &twin).unwrap();
-        let ours = plan.retargeted(&twin).with_reference_writer(false);
-        let reference = plan.with_reference_writer(true);
-        eprintln!("-- {what}: reference writer");
-        let t = Instant::now();
-        let receipt = reference.run().unwrap();
-        let old_ms = t.elapsed().as_secs_f64() * 1000.;
-        eprintln!("-- {what}: step texts");
-        let t = Instant::now();
-        ours.run().unwrap();
-        let new_ms = t.elapsed().as_secs_f64() * 1000.;
+        for other in [&twin, &plain] {
+            let _ = std::fs::remove_file(other);
+            std::fs::copy(plan.destination(), other).unwrap();
+        }
+        let ours = plan.retargeted(&twin).with_reference_writer(None);
+        let unpacked = plan
+            .retargeted(&plain)
+            .with_reference_writer(Some(ReferenceWriter::Unpacked));
+        let reference = plan.with_reference_writer(Some(ReferenceWriter::Packed));
+        let timed = |label: &str, plan: pm_kernel::project_io::SavePlan| {
+            eprintln!("-- {what}: {label}");
+            let t = Instant::now();
+            let receipt = plan.run().unwrap();
+            (receipt, t.elapsed().as_secs_f64() * 1000.)
+        };
+        let (_, before) = timed("unpacked writer (before)", unpacked);
+        let (receipt, reference_ms) = timed("pack(to_saved()) rebuilt", reference);
+        let (_, after) = timed("packed writer (after)", ours);
         let same = std::fs::read(file).unwrap() == std::fs::read(&twin).unwrap();
+        let size = |p: &std::path::Path| std::fs::metadata(p).map_or(0, |m| m.len());
         println!(
-            "{what}: reference {old_ms:.0} ms, step texts {new_ms:.0} ms, files identical: {same}"
+            "{what}: before {before:.0} ms ({} bytes), after {after:.0} ms ({} bytes), rebuilt reference {reference_ms:.0} ms; written == pack(to_saved()): {same}",
+            size(&plain),
+            size(&twin)
         );
         assert!(same, "{what}: the files differ");
+        if let Some(dir) = &witness {
+            round += 1;
+            std::fs::create_dir_all(dir).unwrap();
+            let member = |p: &std::path::Path| {
+                pm_model::container::read_container(
+                    &std::fs::File::open(p).unwrap(),
+                    pm_model::container::ReadOptions::default(),
+                )
+                .unwrap()
+                .document
+                .get("history")
+                .cloned()
+                .unwrap_or(pm_model::Value::Null)
+            };
+            let write = |name: String, v: &pm_model::Value| {
+                std::fs::write(dir.join(name), pm_model::json::to_canonical_string(v)).unwrap()
+            };
+            write(format!("{round}-packed.json"), &member(&twin));
+            write(format!("{round}-plain.json"), &member(&plain));
+        }
         store.finish_save(receipt).unwrap();
     };
     let rename = |store: &mut DocumentStore, name: &str| {
@@ -137,12 +175,50 @@ fn compare(file: &std::path::Path, layer: &str) {
     step(&mut store, "converting save");
     step(&mut store, "second save");
     rename(&mut store, "Compare one");
-    step(&mut store, "after an edit");
+    step(&mut store, "first save after an edit");
     rename(&mut store, "Compare two");
-    step(&mut store, "after one more edit");
+    step(&mut store, "a later save");
+    rename(&mut store, "Compare three");
+    step(&mut store, "another later save");
     store.undo().unwrap();
     step(&mut store, "after an undo");
     store.redo().unwrap();
     step(&mut store, "after a redo");
+    // Remove one embedded picture: its media is then only the history's, and
+    // the history is written plain (the old app restores media from it).
+    let embedded: Vec<String> = store
+        .media()
+        .iter()
+        .map(|m| m.id.to_string_lossy())
+        .collect();
+    let listed = store
+        .root()
+        .and_then(|r| r.get("assets"))
+        .map(|a| a.to_value())
+        .unwrap_or(pm_model::Value::Null);
+    if let Some(id) = embedded.iter().find(|id| listed.get(id.as_str()).is_some()) {
+        store
+            .execute(
+                pm_kernel::MediaCommand::RemoveAsset {
+                    asset_id: id.clone(),
+                }
+                .into(),
+                Origin::Interface,
+            )
+            .unwrap();
+        step(&mut store, "a save that falls back to the plain history");
+        rename(&mut store, "Compare four");
+        step(&mut store, "a later save, still plain");
+    }
+    drop(store);
+    for (label, path) in [("packed", file), ("unpacked", plain.as_path())] {
+        let t = Instant::now();
+        let reopened = DocumentStore::open(open_project(path, OpenOptions::default()).unwrap());
+        println!(
+            "reopen {label}: {:.0} ms, {} steps",
+            t.elapsed().as_secs_f64() * 1000.,
+            reopened.history().records().len()
+        );
+    }
     let _ = std::fs::remove_file(&twin);
 }
