@@ -19,7 +19,6 @@ use pm_mcp::{
         ThreadArchive, VideoExportRequest,
     },
 };
-use pm_media::preview::PreviewReader;
 use pm_model::json::to_canonical_string;
 use pm_protocol::{
     color::{OutputColor, Precision},
@@ -357,7 +356,7 @@ impl EngineJobs {
         look: bool,
         preview: bool,
         studio_quality: Option<serde_json::Value>,
-        studio_render_scale:Option<f32>,
+        studio_render_scale: Option<f32>,
         resources: Resources,
     ) -> AnyResult<ExportHandle> {
         let media = crate::media::for_session(
@@ -1258,13 +1257,21 @@ impl EngineHook for EngineJobs {
     fn capture(&self, _: &CaptureRequest) -> Result<Value> {
         Err(Error::invalid("Frame capture needs a frozen project"))
     }
-    fn scene3d_assets(&self, frozen: &FrozenProject) -> Result<Arc<dyn pm_scene3d::geometry::AssetGeometry>> {
+    fn scene3d_assets(
+        &self,
+        frozen: &FrozenProject,
+    ) -> Result<Arc<dyn pm_scene3d::geometry::AssetGeometry>> {
         let published = self.published(frozen)?;
         let media = crate::media::for_session(
-            &published.snapshot, &published.media, published.path.as_deref(),
+            &published.snapshot,
+            &published.media,
+            published.path.as_deref(),
             &crate::media::cache_root(&self.profile),
-        ).map_err(failed)?;
-        Ok(Arc::new(pm_scene3d::geometry::FileAssets::new(media.catalog.originals.into_iter().collect())))
+        )
+        .map_err(failed)?;
+        Ok(Arc::new(pm_scene3d::geometry::FileAssets::new(
+            media.catalog.originals.into_iter().collect(),
+        )))
     }
     fn capture_snapshot(&self, request: &CaptureRequest, frozen: &FrozenProject) -> Result<Value> {
         let published = self.published(frozen)?;
@@ -1359,24 +1366,16 @@ impl EngineHook for EngineJobs {
         })
     }
     fn sample(&self, request: &FrameRequest) -> Result<Vec<Image>> {
-        let mut reader = self.reader(&request.request)?;
-        request
-            .frames
+        let times: Vec<f64> = request.frames.iter().map(|f| f.source).collect();
+        self.source_frames(&request.request, &times, (request.width, request.height))?
             .iter()
-            .map(|frame| {
-                let rgba = source_frame(&mut reader, frame.source).map_err(failed)?;
-                let pixels = fit(&rgba, request.width, request.height);
-                image(&pixels, request.width, request.height)
-            })
+            .map(|(pixels, w, h)| image(pixels, *w, *h))
             .collect()
     }
     fn sheet(&self, request: &SheetRequest) -> Result<Image> {
-        let mut reader = self.reader(&request.request)?;
-        let cells = request
-            .cells
-            .iter()
-            .map(|cell| source_frame(&mut reader, cell.source).map_err(failed))
-            .collect::<Result<Vec<_>>>()?;
+        let times: Vec<f64> = request.cells.iter().map(|c| c.source).collect();
+        let size = (request.plan.cell_width, request.plan.cell_height);
+        let cells = self.source_frames(&request.request, &times, size)?;
         sheet(&cells, &request.plan)
     }
     /// Each cell is a full engine job, so a long sheet returns a finished prefix.
@@ -1540,17 +1539,6 @@ fn sheet(cells: &[Rgba], plan: &SheetPlan) -> Result<Image> {
     }
     image(&canvas, width, height)
 }
-fn source_frame(reader: &mut PreviewReader, time: f64) -> AnyResult<Rgba> {
-    let frame = reader.frame_at(time)?;
-    let decoded = frame.decoded();
-    let (width, height) = (decoded.format.width as u32, decoded.format.height as u32);
-    let unit = pm_media::image::imageio::rgba_unit(decoded)?;
-    let pixels = unit
-        .iter()
-        .map(|v| (v.clamp(0., 1.) * 255.).round() as u8)
-        .collect();
-    Ok((pixels, width, height))
-}
 impl EngineJobs {
     fn original(&self, request: &MediaRequest) -> Result<PathBuf> {
         let asset = request
@@ -1571,17 +1559,59 @@ impl EngineJobs {
         .remove(asset)
         .ok_or_else(|| Error::invalid("This media's original is offline. Relink it first."))
     }
-    /// Source times read as the asset's layers read them (its `timing`).
-    fn reader(&self, request: &MediaRequest) -> Result<PreviewReader> {
-        let timing = pm_media::clip::ClipTiming::of_asset(
-            request
-                .asset
-                .as_ref()
-                .and_then(|asset| asset["timing"].as_f64()),
-        );
-        Ok(PreviewReader::open(&self.original(request)?)
-            .map_err(failed)?
-            .with_timing(timing))
+    /// The asset's source frames at `times` (seconds of its source, as its
+    /// layers read them), `width` × `height`, drawn by the renderer the way
+    /// every other path reads the file: Interpret Footage, a v1 project's
+    /// video reading (`videoColor`), the asset's timing and the image
+    /// sequence rule (`pm_render::footage`). Straight RGBA8 for the PNG.
+    fn source_frames(
+        &self,
+        request: &MediaRequest,
+        times: &[f64],
+        (width, height): (u32, u32),
+    ) -> Result<Vec<Rgba>> {
+        let path = self.original(request)?;
+        let id = request
+            .asset
+            .as_ref()
+            .and_then(|a| a["id"].as_str())
+            .unwrap_or_default();
+        let published = self.published(&request.snapshot)?;
+        let record = published
+            .snapshot
+            .root()
+            .and_then(|root| root.get("assets"))
+            .and_then(|assets| assets.get(id));
+        let interpretation = record.and_then(pm_render::footage::interpretation);
+        let sequence = record.is_some_and(pm_render::footage::is_sequence);
+        let mut renderer = pm_render::Renderer::headless().map_err(failed)?;
+        times
+            .iter()
+            .map(|seconds| {
+                let time = Ticks::saturating_from_i128(
+                    (seconds * pm_protocol::common::TICKS_PER_SECOND as f64).round() as i128,
+                );
+                let mut pixels = renderer
+                    .source_rgba8_export(
+                        &path,
+                        time,
+                        Size::new(width, height),
+                        pm_protocol::snapshot::SourceFit::Stretch,
+                        interpretation.as_ref(),
+                        sequence,
+                    )
+                    .map_err(failed)?;
+                for px in pixels.chunks_exact_mut(4) {
+                    let a = u32::from(px[3]);
+                    if a > 0 && a < 255 {
+                        for c in &mut px[..3] {
+                            *c = ((u32::from(*c) * 255 + a / 2) / a).min(255) as u8;
+                        }
+                    }
+                }
+                Ok((pixels, width, height))
+            })
+            .collect()
     }
 }
 fn seconds(micros: Option<i64>) -> Option<f64> {
@@ -1874,6 +1904,105 @@ mod relink_tests {
             .filter(|(_, at)| left[*at - 2..*at + 3].iter().any(|v| v.abs() > 0.2))
             .map(|(k, _)| k)
             .collect()
+    }
+
+    /// The agent's source frames read the file as every other path does:
+    /// an untagged HD FFV1 clip as a v1 project showed it (Rec. 601, with
+    /// `videoColor`), natively (Rec. 709), and with a matrix chosen in
+    /// Interpret Footage over the v1 reading (the native picture again).
+    #[test]
+    fn the_agents_source_frames_follow_interpret_footage_and_the_v1_reading() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let clip = root.join("untagged.mkv");
+        let made = std::process::Command::new(ffmpeg_path())
+            .args([
+                "-v",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=1280x720:rate=25",
+            ])
+            .args(["-frames:v", "2", "-c:v", "ffv1", "-pix_fmt", "yuv420p"])
+            .arg(&clip)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let actor = KernelActor::spawn(KernelConfig {
+            journal_root: Some(root.join("journals")),
+            ..Default::default()
+        });
+        let kernel = actor.handle();
+        kernel
+            .shell(ShellCall::AttachLibrary {
+                profile: root.clone(),
+                format: DiskFormat::V1_2,
+                electron_profile: None,
+            })
+            .wait()
+            .unwrap()
+            .unwrap();
+        let asset = |id: &str, extra: Value| {
+            let mut a = json!({"id":id,"name":"untagged.mkv","kind":"video","format":"mkv",
+                "w":1280,"h":720,"dur":0.08,"fps":25,"timing":2,"sourcePath":clip});
+            for (k, v) in extra.as_object().unwrap() {
+                a[k] = v.clone();
+            }
+            a
+        };
+        let project = json!({"id":"p","name":"Film","compId":"c","w":64,"h":36,"fps":25,"dur":1,
+        "bg":"#000000","comps":{},"layers":[],"assets":{
+            "native": asset("native", json!({})),
+            "v1": asset("v1", json!({"videoColor":"electron"})),
+            "chosen": asset("chosen", json!({"videoColor":"electron","interpret":{"matrix":"bt709"}})),
+        }});
+        kernel
+            .shell(ShellCall::Open {
+                id: "p".into(),
+                source: SessionSource::New(pm_model::json::parse(&project.to_string()).unwrap()),
+                electron_profile: None,
+            })
+            .wait()
+            .unwrap()
+            .unwrap();
+        let jobs = EngineJobs::new(
+            kernel.clone(),
+            PathBuf::new(),
+            Default::default(),
+            root.clone(),
+            OverrideWindows::default(),
+        );
+        let frames = |id: &str| -> Vec<u8> {
+            let (published, project) = root_of(&kernel);
+            let request = MediaRequest {
+                operation: pm_mcp::services::MediaOperation::SampleFrames,
+                snapshot: FrozenProject {
+                    project_id: "p".into(),
+                    document_id: published.snapshot.doc_id,
+                    revision: published.revision(),
+                    project,
+                },
+                arguments: json!({}),
+                asset: Some(json!({"id": id})),
+                layer: None,
+            };
+            let times = [0.0];
+            jobs.source_frames(&request, &times, (64, 36))
+                .unwrap()
+                .remove(0)
+                .0
+        };
+        let apart =
+            |a: &[u8], b: &[u8]| a.iter().zip(b).map(|(x, y)| x.abs_diff(*y)).max().unwrap();
+        let (native, v1, chosen) = (frames("native"), frames("v1"), frames("chosen"));
+        assert!(apart(&native, &v1) > 8, "the v1 reading is another picture");
+        assert!(
+            apart(&native, &chosen) <= 1,
+            "a chosen matrix wins over the v1 reading"
+        );
+        actor.shutdown();
     }
 
     /// An agent loads a LUT as Apply LUT… does: `import_media` reads and
