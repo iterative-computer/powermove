@@ -1516,9 +1516,23 @@ impl Engine {
             }
         };
         if let Some((config, frames)) = &self.scope_frames {
+            // An Output reading takes the project's output tone, as delivery
+            // does: SDR white on the standard range, the mastering peak on PQ.
+            let mut config = *config;
+            if config.stage == pm_render::scopes::ScopeStage::Output && config.tone.is_none() {
+                config.tone =
+                    crate::color::HdrView::of(&scene.doc, scene.comp.as_str(), &scene.media)
+                        .and_then(|view| {
+                            pm_render::OutputTone::for_target(
+                                view.source_peak,
+                                view.mastering_peak,
+                                config.signal == pm_render::scopes::ScopeSignal::Pq,
+                            )
+                        });
+            }
             self.scopes
                 .get_or_insert_with(|| crate::scopes::Tap::new(self.gpu.device.clone()))
-                .frame(&self.gpu.device, &self.gpu.queue, &surface, *config, frames);
+                .frame(&self.gpu.device, &self.gpu.queue, &surface, config, frames);
         }
         let source = unsafe {
             let hal = surface.texture.as_hal::<wgpu_hal::api::Metal>().unwrap();

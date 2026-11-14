@@ -86,14 +86,19 @@ fn published(k: &KernelHandle) -> Arc<Published> {
 
 #[test]
 fn panel_settings_choose_what_the_engine_counts() {
-    let config = scope_config(true, true);
+    let config = scope_config(true, true, true);
     assert_eq!(config.signal, ScopeSignal::Pq);
     assert_eq!(config.matrix, ScopeMatrix::Rec2020);
-    let config = scope_config(false, false);
+    assert_eq!(config.stage, ScopeStage::Output);
+    let config = scope_config(false, false, false);
     assert_eq!(config.signal, ScopeSignal::Display);
     assert_eq!(config.matrix, ScopeMatrix::Rec709);
-    let more = more_menu(false, false, true);
-    assert_eq!(more.len(), 5);
+    assert_eq!(config.stage, ScopeStage::Picture);
+    let more = more_menu(false, false, false, true);
+    assert_eq!(more.len(), 8);
+    assert_eq!(more[6]["label"], "Read: Picture");
+    assert_eq!(more[6]["checked"], true);
+    assert_eq!(more[7]["checked"], false);
     assert_eq!(more[0]["checked"], true);
     assert_eq!(more[1]["checked"], false);
     assert_eq!(more[4]["disabled"], true);

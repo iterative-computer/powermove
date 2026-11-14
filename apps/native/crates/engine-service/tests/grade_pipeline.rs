@@ -1218,3 +1218,159 @@ fn a_clip_read_as_in_powermove_1_is_the_same_in_the_viewer_the_cache_the_proxy_a
     // ProRes Proxy on flat bands, then the v1 reading's 8-bit upload.
     assert!(worst < 0.012, "the proxy against the PNG: {worst:.5}");
 }
+
+/// The scopes read what the export writes when they read Output: a graded
+/// picture with light above white (Color Wheels' gain on a 16-bit project,
+/// half float in the viewer and the export alike),
+/// counted in the real viewer's tap, against the same counts of the exported
+/// 16-bit PNG, which stops at white. Read as Picture the same frame counts
+/// its light above white as Over, which the file no longer holds.
+#[test]
+fn the_output_scopes_count_what_the_export_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut grade = layer("grade", "adjustment", json!({}), 0., 0., 100.);
+    let gain = |v: f64| channel(json!(v));
+    grade["fx"] = json!([{"id": "wheels", "type": "colorWheels", "version": 1, "on": true,
+        "p": {"gainMaster": gain(2.5), "gainRed": gain(1.2)}, "inputs": {}}]);
+    let value = json!({
+        "id": "P", "name": "P", "compId": "root", "compName": "P", "w": W, "h": H,
+        "fps": 30, "dur": 3, "bg": "#000000", "work": [0, 3], "colorDepth": 16,
+        "backgroundFill": {"type": "linear", "angle": 20, "stops": [
+            {"id": "a", "color": "#05060A", "position": 0},
+            {"id": "b", "color": "#7F6040", "position": 60},
+            {"id": "c", "color": "#E8E8F2", "position": 100}]},
+        "requiresEngine": "native",
+        "layers": [grade], "assets": {}, "comps": {}
+    });
+    let snapshot = pm_kernel::document::DocumentStore::new_untitled(
+        pm_model::json::parse(&value.to_string()).unwrap(),
+    )
+    .snapshot();
+    let media = MediaCatalog::default();
+    let png = dir.path().join("scopes.png");
+    export(
+        &snapshot,
+        &media,
+        &png,
+        ExportFormat::PngStill { sixteen_bit: true },
+        OutputColor::SrgbImage,
+        AlphaOutput::None,
+    );
+    let raw = ffmpeg(
+        &["-f", "rawvideo", "-pix_fmt", "rgba64le"],
+        &png,
+        &dir.path().join("scopes.raw"),
+    );
+    let code = |bytes: &[u8]| f64::from(u16::from_le_bytes([bytes[0], bytes[1]])) / 65535.;
+    let exported: Vec<[f64; 3]> = raw
+        .chunks_exact(8)
+        .map(|p| [code(p), code(&p[2..]), code(&p[4..])])
+        .collect();
+    let white = exported
+        .iter()
+        .filter(|p| p.iter().any(|v| *v >= 1.))
+        .count();
+    assert!(
+        white > 100,
+        "the grade puts light above white: {white} pixels at white"
+    );
+
+    let service = EngineService::start(pm_gpu::Gpu::new("scope-output").unwrap()).unwrap();
+    let viewer = service
+        .viewer(ViewerConfig {
+            composition: snapshot.open_comp().unwrap(),
+            snapshot: snapshot.clone(),
+            media: media.clone(),
+            output: Output {
+                width: W,
+                height: H,
+                display: 0,
+                headroom: 1.,
+                crop: None,
+            },
+            layer: None,
+            rate: pm_time::Rate::FPS_30,
+            end: Some(3 * TICKS_PER_SECOND),
+            audio: false,
+        })
+        .unwrap();
+    viewer.quality(Quality::Full).unwrap();
+    let at = Ticks::new(AT).unwrap();
+    viewer
+        .command(C::Seek {
+            time: at,
+            mode: SeekMode::Exact,
+        })
+        .unwrap();
+    wait(&viewer, "the playhead", |f| f.time == at);
+    let read = |stage: pm_render::scopes::ScopeStage| {
+        let (taps, counted) = async_channel::bounded(1);
+        let config = pm_render::scopes::ScopeConfig {
+            stage,
+            ..pm_render::scopes::ScopeConfig::PANEL
+        };
+        viewer.scopes(Some((config, taps))).unwrap();
+        viewer.capture_next().unwrap();
+        wait(&viewer, "a paused frame at full size", |f| {
+            f.time == at && f.moment == Moment::Paused && f.pixels.is_some() && f.scale >= 1.
+        });
+        // The tap's newest count: the frame drawn at full size.
+        let start = Instant::now();
+        let mut latest = None;
+        while start.elapsed() < Duration::from_secs(2) || latest.is_none() {
+            if let Ok(frame) = counted.try_recv() {
+                latest = Some(frame.unwrap());
+            }
+            assert!(start.elapsed() < Duration::from_secs(20), "no scope frame");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        viewer.scopes(None).unwrap();
+        let frame: pm_render::scopes::ScopeFrame = latest.unwrap();
+        assert_eq!(frame.pixels, u64::from(W * H), "a full-size frame");
+        frame
+    };
+    let config = pm_render::scopes::ScopeConfig::PANEL;
+    let reference = pm_color::scopes::compute(
+        &exported,
+        W as usize,
+        H as usize,
+        pm_color::scopes::ScopeConfig {
+            columns: config.columns as usize,
+            levels: config.levels as usize,
+            vector_bins: config.vector_bins as usize,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let pixels = u64::from(W * H);
+    let output = read(pm_render::scopes::ScopeStage::Output);
+    assert_eq!((output.over, output.under), (0, 0));
+    let luma = moved(
+        &output.luma_histogram,
+        &reference.luma_histogram.bins,
+        pixels,
+    );
+    let waveform = moved(&output.waveform, &reference.waveform, pixels);
+    let vector = moved(&output.vectorscope, &reference.vectorscope, pixels);
+    eprintln!(
+        "Output scopes vs PNG: luma {luma:.4}, waveform {waveform:.4}, vectorscope {vector:.4}"
+    );
+    assert!(luma < 0.005 && waveform < 0.005 && vector < 0.005);
+    for c in 0..3 {
+        let channel = moved(&output.histogram[c], &reference.histogram[c].bins, pixels);
+        let parade = moved(&output.parade[c], &reference.parade[c], pixels);
+        assert!(
+            channel < 0.005 && parade < 0.005,
+            "channel {c}: {channel:.4} {parade:.4}"
+        );
+    }
+    let picture = read(pm_render::scopes::ScopeStage::Picture);
+    eprintln!("Picture over: {} of {pixels}", picture.over);
+    assert!(
+        u64::from(picture.over) > 100,
+        "Picture counts the light above white"
+    );
+    let waveform = moved(&picture.waveform, &reference.waveform, pixels);
+    assert!(waveform > 0.005, "Picture is not the file: {waveform:.4}");
+    viewer.retire();
+}

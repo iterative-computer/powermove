@@ -5,7 +5,7 @@ use crate::session::Controller;
 use gpui::{AppContext, Context, Entity, prelude::*};
 use pm_kernel::{Call, Caller, Command, Published, Request, WriteBody};
 use pm_model::{Map, Value};
-use pm_render::scopes::{ScopeConfig, ScopeFrame, ScopeMatrix, ScopeSignal};
+use pm_render::scopes::{ScopeConfig, ScopeFrame, ScopeMatrix, ScopeSignal, ScopeStage};
 use pm_shell::scopes::{
     Counts, INVALID_FRAME, Kind, Menu, READ_FAILED, ScopesView, raster, reading,
 };
@@ -412,8 +412,13 @@ pub struct Scopes {
 }
 
 /// What the panel's settings ask the engine to count.
-fn scope_config(rec2020: bool, extended: bool) -> ScopeConfig {
+fn scope_config(rec2020: bool, extended: bool, output: bool) -> ScopeConfig {
     ScopeConfig {
+        stage: if output {
+            ScopeStage::Output
+        } else {
+            ScopeStage::Picture
+        },
         signal: if extended {
             ScopeSignal::Pq
         } else {
@@ -429,7 +434,7 @@ fn scope_config(rec2020: bool, extended: bool) -> ScopeConfig {
 }
 
 /// The More menu, as AppKit rows.
-fn more_menu(rec2020: bool, extended: bool, depth8: bool) -> Vec<serde_json::Value> {
+fn more_menu(rec2020: bool, extended: bool, output: bool, depth8: bool) -> Vec<serde_json::Value> {
     use serde_json::json;
     let mut range = json!({ "label": "Range: Extended", "checked": extended });
     if depth8 {
@@ -442,6 +447,11 @@ fn more_menu(rec2020: bool, extended: bool, depth8: bool) -> Vec<serde_json::Val
         json!({ "separator": true }),
         json!({ "label": "Range: Standard", "checked": !extended }),
         range,
+        json!({ "separator": true }),
+        json!({ "label": "Read: Picture", "checked": !output,
+            "tooltip": "The graded picture, before delivery: light above white is counted as Over." }),
+        json!({ "label": "Read: Output", "checked": output,
+            "tooltip": "What a delivered file holds: the project’s output tone, then the range’s limits." }),
     ]
 }
 
@@ -449,6 +459,7 @@ fn counts(frame: &ScopeFrame) -> Counts<'_> {
     Counts {
         extended: frame.config.signal == ScopeSignal::Pq,
         rec2020: frame.config.matrix == ScopeMatrix::Rec2020,
+        output: frame.config.stage == ScopeStage::Output,
         columns: frame.config.columns as usize,
         levels: frame.config.levels as usize,
         vector_bins: frame.config.vector_bins as usize,
@@ -739,9 +750,9 @@ impl Controller {
         let Some(view) = self.scopes.view.clone() else {
             return;
         };
-        let (kind, rec2020, extended) = {
+        let (kind, rec2020, extended, output) = {
             let view = view.read(cx);
-            (view.kind, view.rec2020, view.extended)
+            (view.kind, view.rec2020, view.extended, view.output)
         };
         let this = cx.entity().downgrade();
         match menu {
@@ -768,19 +779,22 @@ impl Controller {
                     .and_then(|p| p.snapshot.root())
                     .and_then(|root| root.get("colorDepth"))
                     .is_some_and(|d| d.to_value().as_f64() == Some(8.));
-                let options = more_menu(rec2020, extended, depth8);
+                let options = more_menu(rec2020, extended, output, depth8);
                 crate::v4_native::menu(window, &options, cx, move |chosen, cx| {
-                    let (rec2020, extended) = match chosen {
-                        Some(0) => (false, extended),
-                        Some(1) => (true, extended),
-                        Some(3) => (rec2020, false),
-                        Some(4) => (rec2020, true),
+                    let (rec2020, extended, output) = match chosen {
+                        Some(0) => (false, extended, output),
+                        Some(1) => (true, extended, output),
+                        Some(3) => (rec2020, false, output),
+                        Some(4) => (rec2020, true, output),
+                        Some(6) => (rec2020, extended, false),
+                        Some(7) => (rec2020, extended, true),
                         _ => return,
                     };
                     this.update(cx, |v, cx| {
                         view.update(cx, |view, _| {
                             view.rec2020 = rec2020;
                             view.extended = extended;
+                            view.output = output;
                         });
                         v.tap_scopes(cx);
                     })
@@ -796,7 +810,7 @@ impl Controller {
             return;
         };
         let settings = view.read(cx);
-        let config = scope_config(settings.rec2020, settings.extended);
+        let config = scope_config(settings.rec2020, settings.extended, settings.output);
         let wanted = (viewer.identity(), config);
         if self.scopes.tapped == Some(wanted) {
             return;
