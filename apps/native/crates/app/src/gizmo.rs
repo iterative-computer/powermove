@@ -230,6 +230,23 @@ pub struct Pose {
     pub scale: [f64; 2],
     pub rotation: f64,
 }
+impl Pose {
+    /// This layer moved by `delta` in the composition (a locked one stays).
+    fn moved(&self, delta: [f64; 2]) -> Pose {
+        let mut pose = self.clone();
+        if !pose.locked {
+            for corner in &mut pose.corners {
+                corner[0] += delta[0];
+                corner[1] += delta[1];
+            }
+            pose.anchor[0] += delta[0];
+            pose.anchor[1] += delta[1];
+            pose.world[4] += delta[0];
+            pose.world[5] += delta[1];
+        }
+        pose
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct ShapeSize {
     width: f64,
@@ -703,7 +720,15 @@ impl GizmoSurface {
                     s.studio.object_axes = axes.as_deref() == Some("object");
                     s.studio.light_kind = kind.unwrap_or_default();
                     s.studio.light_add = add.as_deref() == Some("on");
-                    s.poses = Arc::new(poses);
+                    // A move under way draws its own outline (`moved`): a
+                    // read of an earlier step would pull it back.
+                    if !s
+                        .drag
+                        .as_ref()
+                        .is_some_and(|d| d.active && d.hit == Hit::Body)
+                    {
+                        s.poses = Arc::new(poses);
+                    }
                     let had = s.studio.scene.is_some();
                     let published = look.as_deref() == Some("free");
                     // A look this viewer wrote holds until it is published.
@@ -1483,6 +1508,17 @@ impl GizmoSurface {
         if let Some(copies) = &drag.copies {
             commands = on_copies(commands, copies);
         }
+        // A move's outline follows the pointer now, not when the kernel's
+        // next publication has been read back (slow on a large project):
+        // each unlocked layer moves by exactly the composition offset.
+        let moved = (drag.hit == Hit::Body).then(|| {
+            let d = locked_delta(origin, at, mods.shift);
+            let delta = [d[0] + offset[0], d[1] + offset[1]];
+            drag.poses
+                .iter()
+                .map(|pose| pose.moved(delta))
+                .collect::<Vec<_>>()
+        });
         // The alignment feedback marks catching something new, not each
         // step that stays caught.
         let caught = |g: &[snap::Guide]| g.iter().map(|(_, to)| *to).collect::<Vec<_>>();
@@ -1492,6 +1528,10 @@ impl GizmoSurface {
         if guides != self.guides {
             self.guides = guides;
             cx.notify();
+        }
+        if let Some(moved) = moved {
+            self.poses = Arc::new(moved);
+            self.draw(cx);
         }
         self.queue.push_back(Job::Step(commands, true));
         // The viewer trace's input time; untraced, no timestamp is read.

@@ -355,6 +355,37 @@ fn dragging_the_body_moves_the_layer_and_undo_restores_it(cx: &mut TestAppContex
     s.undo(cx);
     assert_eq!(s.pose().position, before.position);
 }
+/// A move's outline is at the pointer as each move event lands, before the
+/// kernel has published the step and the pose is read back (on a large
+/// project that read trailed the pointer by many frames).
+#[gpui::test]
+fn a_moves_outline_follows_the_pointer_before_the_kernel_answers(cx: &mut TestAppContext) {
+    let mut s = stage(cx);
+    let (body, ..) = s.points();
+    let from = s.point_of([body[0] + 30., body[1] + 30.]);
+    let first = |s: &Stage| s.recorder.lines.borrow()[0].ends;
+    let before = first(&s);
+    s.vcx
+        .simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+    let to = from + point(px(40.), px(-10.));
+    s.vcx
+        .simulate_mouse_move(to, MouseButton::Left, Modifiers::none());
+    // No settle: the kernel's step and the read back have not run.
+    let moved = first(&s);
+    let comp = |n: f32, side: usize| f64::from(n) * [640., 360.][side];
+    assert!(
+        (comp(moved[0], 0) - comp(before[0], 0) - 40.).abs() < 0.01,
+        "{before:?} -> {moved:?}"
+    );
+    assert!(
+        (comp(moved[1], 1) - comp(before[1], 1) + 10.).abs() < 0.01,
+        "{before:?} -> {moved:?}"
+    );
+    s.vcx
+        .simulate_mouse_up(to, MouseButton::Left, Modifiers::none());
+    let surface = s.surface.clone();
+    settle(cx, move |cx| surface.read_with(cx, |g, _| g.idle()));
+}
 #[gpui::test]
 fn an_untraced_drag_reads_no_input_times(cx: &mut TestAppContext) {
     assert!(!pm_engine_service::trace::enabled());
