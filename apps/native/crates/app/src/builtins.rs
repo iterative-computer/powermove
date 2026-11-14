@@ -1193,12 +1193,20 @@ impl Controller {
                     }
                     cx.new(|cx| {
                         cx.observe(&owner, |_, _, cx| cx.notify()).detach();
+                        let keys = PopoverKeys::new(cx);
                         if panel == "agent" {
+                            // Its own keys reach it from the first moment,
+                            // before anything inside is clicked.
+                            keys.claim(window, cx);
                             // A press anywhere in the editor closes the
                             // popover, as a popover does (the original app's
                             // outside-press dismissal).
                             cx.observe_window_activation(window, |this: &mut SurfaceWindow, window, cx| {
                                 if window.is_window_active() {
+                                    // Key again (a reopen, a return from
+                                    // another window): Escape still reaches
+                                    // it with nothing inside focused.
+                                    this.keys.claim(window, cx);
                                     return;
                                 }
                                 let owner = this.owner.clone();
@@ -1212,7 +1220,7 @@ impl Controller {
                             })
                             .detach();
                         }
-                        SurfaceWindow { owner, panel }
+                        SurfaceWindow { owner, panel, keys }
                     })
                 },
             );
@@ -2231,12 +2239,42 @@ impl crate::gizmo::Host for ControllerDelegate {
 struct SurfaceWindow {
     owner: Entity<Controller>,
     panel: String,
+    keys: PopoverKeys,
+}
+/// A popover's own keys. With nothing focused GPUI delivers a key to the
+/// window's root only, so the popover's root holds focus whenever nothing
+/// inside does; a focused control inside still sees keys first, and what it
+/// leaves bubbles to the root (Escape closes the popover).
+pub(crate) struct PopoverKeys {
+    pub(crate) focus: FocusHandle,
+}
+impl PopoverKeys {
+    pub(crate) fn new(cx: &mut App) -> Self {
+        Self {
+            focus: cx.focus_handle(),
+        }
+    }
+    /// Nothing in the window is focused: the popover's root takes focus.
+    pub(crate) fn claim(&self, window: &mut Window, cx: &mut App) {
+        if window.focused(cx).is_none() {
+            window.focus(&self.focus, cx);
+        }
+    }
+    /// Plain Escape, the popover's dismissal key.
+    pub(crate) fn dismisses(e: &KeyDownEvent) -> bool {
+        let m = e.keystroke.modifiers;
+        e.keystroke.key == "escape" && !(m.platform || m.control || m.alt || m.shift)
+    }
 }
 impl Render for SurfaceWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let size = window.viewport_size();
         let panel = self.panel.clone();
         let popover = self.panel == "agent";
+        if popover {
+            // A focused control that went away leaves nothing focused.
+            self.keys.claim(window, cx);
+        }
         // Export is a sheet: no title bar band (its window fits its content).
         let sheet = self.panel == "export";
         // Settings draws its own sheet beside a sidebar on the window's
@@ -2287,11 +2325,9 @@ impl Render for SurfaceWindow {
                 // Escape closes the popover from anywhere in it; a control
                 // that uses Escape itself (a menu, the composer's shortcuts)
                 // handles it first. Deferred: this window is the one going.
-                d.on_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| {
-                    let m = e.keystroke.modifiers;
-                    if e.keystroke.key == "escape"
-                        && !(m.platform || m.control || m.alt || m.shift)
-                    {
+                d.track_focus(&self.keys.focus)
+                .on_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| {
+                    if PopoverKeys::dismisses(e) {
                         cx.stop_propagation();
                         let owner = this.owner.clone();
                         cx.defer(move |cx| {
@@ -2347,6 +2383,47 @@ fn agent_dismisses(open: bool, editor_took_key: bool) -> bool {
 mod agent_close_tests {
     use super::*;
     use std::time::Duration;
+    /// A popover's root as SurfaceWindow draws it: its keys, a control inside.
+    struct Popover {
+        keys: PopoverKeys,
+        inner: FocusHandle,
+        dismissed: usize,
+    }
+    impl Render for Popover {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            self.keys.claim(window, cx);
+            div()
+                .track_focus(&self.keys.focus)
+                .on_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| {
+                    if PopoverKeys::dismisses(e) {
+                        this.dismissed += 1;
+                        cx.stop_propagation();
+                    }
+                }))
+                .size_full()
+                .child(div().track_focus(&self.inner).size_full())
+        }
+    }
+    #[gpui::test]
+    fn escape_dismisses_a_reopened_popover_with_nothing_inside_focused(cx: &mut TestAppContext) {
+        // The reported path: reopened, nothing clicked, Escape.
+        let (view, vcx) = cx.add_window_view(|_, cx| Popover {
+            keys: PopoverKeys::new(cx),
+            inner: cx.focus_handle(),
+            dismissed: 0,
+        });
+        let mut vcx = vcx.clone();
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("escape");
+        assert_eq!(view.read_with(&vcx, |p, _| p.dismissed), 1);
+        // A focused control inside: Escape it leaves still bubbles up.
+        view.update_in(&mut vcx, |p, window, cx| window.focus(&p.inner, cx));
+        vcx.simulate_keystrokes("escape");
+        assert_eq!(view.read_with(&vcx, |p, _| p.dismissed), 2);
+        // Modified Escape is not the dismissal key.
+        vcx.simulate_keystrokes("shift-escape");
+        assert_eq!(view.read_with(&vcx, |p, _| p.dismissed), 2);
+    }
     #[::core::prelude::v1::test]
     fn the_toolbar_item_toggles_the_agent_popover_closed_and_open() {
         // The reported bug: the item only ever opened (activated) it.
