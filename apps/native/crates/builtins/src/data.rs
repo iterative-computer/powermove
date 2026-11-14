@@ -147,7 +147,9 @@ impl Backend {
             document,
             caller: Caller::realm(realm, 1, Origin::Interface),
             model: published.map(|p| Inspector::new(p, EffectClipboard::default())),
-            panel: EffectsPanel::new(presentation, 0..96),
+            // Effect Controls folds a grade's wheels and curve points into
+            // summary rows; the Color panel draws them itself.
+            panel: EffectsPanel::new(presentation, 0..96).folding_grades(panel == "layer-effects"),
             extension: format!("ext.builtin.{panel}"),
             native,
             panel_id: panel.into(),

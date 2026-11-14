@@ -853,3 +853,81 @@ fn effect_controls_and_the_inspector_service_share_one_app_clipboard() {
         json!({"empty": true})
     );
 }
+
+/// U2: Effect Controls sums a grade's instruments up (each wheel's master and
+/// red, green and blue on one row, a curve's points on one) and leaves the
+/// Color panel, which draws them, every row.
+#[test]
+fn effect_controls_folds_a_grades_wheels_and_curve_points_into_summary_rows() {
+    let (actor, mut backend) = setup();
+    let kernel = actor.handle();
+    for (slot, definition) in ["colorWheels", "colorCurves"].into_iter().enumerate() {
+        backend.sync().unwrap();
+        let request = backend
+            .model
+            .as_mut()
+            .unwrap()
+            .add_effect_at(Caller::native(), "a", definition, slot as f64)
+            .unwrap();
+        kernel.call("synthetic", request).wait().unwrap().unwrap();
+    }
+    let mut panels = Builtins::new(kernel.clone(), "synthetic", || {}).unwrap();
+    finish(panels.mount("layer-effects").unwrap());
+    let projection = panels
+        .broker
+        .entry("layer-effects")
+        .unwrap()
+        .lock()
+        .unwrap()
+        .backend
+        .clone()
+        .lock()
+        .unwrap()
+        .projection()
+        .unwrap();
+    let rows = projection["rows"].as_array().unwrap();
+    let summaries: Vec<(String, usize)> = rows
+        .iter()
+        .filter(|r| r["kind"] == "summary")
+        .map(|r| {
+            (
+                r["group"].as_str().unwrap().to_owned(),
+                r["parameters"].as_array().unwrap().len(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        summaries,
+        [
+            ("lift".to_owned(), 4),
+            ("gamma".to_owned(), 4),
+            ("gain".to_owned(), 4),
+            ("offset".to_owned(), 4),
+            ("curve".to_owned(), 31),
+        ]
+    );
+    let key = |rows: &[Value], key: &str| {
+        rows.iter()
+            .any(|r| r["kind"] == "parameter" && r["parameter"]["key"] == key)
+    };
+    assert!(!key(rows, "liftRed") && !key(rows, "x3"));
+    // Balance, Tone and the curve's Channel stay rows of their own.
+    assert!(key(rows, "temperature") && key(rows, "channel"));
+    // The Color panel draws the instruments: every row reaches it.
+    let mut color = data::Backend::new(
+        kernel.clone(),
+        pm_surface::host_api::Identity {
+            realm: "color-check".into(),
+            generation: 1,
+            project: "synthetic".into(),
+        },
+        "color",
+        false,
+    )
+    .unwrap();
+    color.sync().unwrap();
+    let projection = color.projection().unwrap();
+    let rows = projection["rows"].as_array().unwrap();
+    assert!(key(rows, "liftRed") && key(rows, "x3"));
+    assert!(!rows.iter().any(|r| r["kind"] == "summary"));
+}
