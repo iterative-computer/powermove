@@ -1087,6 +1087,53 @@ pub(crate) fn collect_original_assets(value: &Value, ids: &mut std::collections:
     }
 }
 
+/// [`collect_original_assets`] over the document's own nodes: the same ids,
+/// without first copying the whole project into a value.
+pub(crate) fn collect_original_assets_in(
+    node: &pm_model::Node,
+    ids: &mut std::collections::HashSet<String>,
+) {
+    use pm_model::NodeKind;
+    match node.kind() {
+        NodeKind::Object(map) => {
+            if let Some(NodeKind::Array(sources)) = node.get("native3dSources").map(|n| n.kind()) {
+                for source in sources.iter() {
+                    if let Some(NodeKind::String(id)) = source.get("id").map(|n| n.kind())
+                        && let Some(id) = id.as_str()
+                    {
+                        ids.insert(id.into());
+                    }
+                }
+            }
+            for (_, child) in map.iter() {
+                collect_original_assets_in(child, ids);
+            }
+        }
+        NodeKind::Array(items) => {
+            for child in items.iter() {
+                collect_original_assets_in(child, ids);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn the_node_walk_finds_the_same_originals_as_the_value_walk() {
+    let value = pm_model::json::parse(
+        r#"{"layers":[{"id":"a","native3dSources":[{"id":"o1"},{"id":2},{"x":1}]}],
+            "comps":{"c":{"layers":[{"d":{"native3dSources":[{"id":"o2"}]}},
+            {"native3dSources":{"id":"not-an-array"}}]}},"assets":{"o3":{}}}"#,
+    )
+    .unwrap();
+    let (mut a, mut b) = (Default::default(), Default::default());
+    collect_original_assets(&value, &mut a);
+    collect_original_assets_in(&pm_model::Node::from_value(value, 1), &mut b);
+    assert_eq!(a, b);
+    assert_eq!(a.len(), 2);
+}
+
 pub(crate) fn is_known_layer(layer: &Value) -> bool {
     matches!(
         layer

@@ -458,3 +458,21 @@ fn picker_pages_a_long_list_and_the_search_reaches_past_it() {
         "a family past the first page is one search away"
     );
 }
+
+/// Typing straight after ⌘K reaches the palette: the shortcut resolves to
+/// the palette at once, and the shell opens it inside that key press
+/// (`opens_in_place`, `Host::effects`) so the next key is read with the
+/// palette's field already first responder, never by the editor.
+#[test]
+fn the_palette_opens_inside_its_key_press_so_no_typing_is_lost() {
+    let mut r = Resolver::new();
+    let out = r.submit(key(1, "cmd+k"));
+    assert!(
+        matches!(&out[0], Effect::Dispatch { command, class: Class::NeverDeclines, .. } if command == "palette"),
+        "{out:?}"
+    );
+    // Carried out inside this key press (not through the editor's queue):
+    // the palette's field is first responder before the next key is read.
+    assert!(pm_shell::opens_in_place("palette"));
+    assert!(!pm_shell::opens_in_place("save"));
+}

@@ -115,7 +115,8 @@ pub fn view3d() -> Vec<Item> {
         ("Two Views", "views", "2"),
         ("Four Views", "views", "4"),
         ("", "", ""),
-        ("Fast Preview", "tier", "live"),
+        ("Fast Preview", "tier", "fast"),
+        ("Rendered Preview", "tier", "live"),
         ("Quality Preview", "tier", "refine"),
     ]
     .iter()

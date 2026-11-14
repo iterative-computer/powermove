@@ -335,19 +335,19 @@ pub fn geometry_key(g: &Geometry) -> String {
 
 /// The shared native map array uses raw RGBA8 1024² images. Key cached pixels
 /// by content, so relink/replacement under the same asset ID cannot go stale.
+/// Uploaded map identities own the pixels; this index adds no pixel cache
+/// and keeps reuse across immutable source replacement, even beyond 16 maps.
 pub fn texture_rgba(bytes: &[u8]) -> Result<Arc<Vec<u8>>> {
     use sha2::{Digest, Sha256};
-    static CACHE: std::sync::OnceLock<std::sync::Mutex<Vec<([u8; 32], Arc<Vec<u8>>)>>> =
-        std::sync::OnceLock::new();
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<HashMap<[u8; 32], std::sync::Weak<Vec<u8>>>>,
+    > = std::sync::OnceLock::new();
     let key: [u8; 32] = Sha256::digest(bytes).into();
     let mut cache = CACHE
         .get_or_init(Default::default)
         .lock()
         .map_err(|_| Error("Map image cache poisoned".into()))?;
-    if let Some(i) = cache.iter().position(|(k, _)| *k == key) {
-        let entry = cache.remove(i);
-        let pixels = entry.1.clone();
-        cache.push(entry);
+    if let Some(pixels) = cache.get(&key).and_then(std::sync::Weak::upgrade) {
         return Ok(pixels);
     }
     let image = image::load_from_memory(bytes)
@@ -357,9 +357,7 @@ pub fn texture_rgba(bytes: &[u8]) -> Result<Arc<Vec<u8>>> {
         image::imageops::resize(&image, 1024, 1024, image::imageops::FilterType::Triangle)
             .into_raw(),
     );
-    cache.push((key, pixels.clone()));
-    if cache.len() > 16 {
-        cache.remove(0);
-    }
+    cache.retain(|_, pixels| pixels.strong_count() > 0);
+    cache.insert(key, Arc::downgrade(&pixels));
     Ok(pixels)
 }

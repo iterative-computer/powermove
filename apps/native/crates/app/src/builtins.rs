@@ -14,6 +14,41 @@ type MediaProbeInputs = (
     BTreeMap<String, std::path::PathBuf>,
     BTreeMap<String, std::path::PathBuf>,
 );
+/// How long a panel's scroll thumb stays after the last scroll.
+const SCROLL_THUMB_HOLD: std::time::Duration = std::time::Duration::from_millis(900);
+/// The original app's scrollbar: 9 pt across, its thumb inset 2 pt within it.
+const SCROLL_BAR: f32 = 9.;
+const SCROLL_THUMB_INSET: f32 = 2.;
+/// A panel body's overlay scroll thumb (the original app's thin one: 9 pt,
+/// inset 2 pt, text ink at `translucency.faint`), when its content is taller
+/// than its slot of `width` × `height`.
+fn scroll_thumb(
+    handle: &ScrollHandle,
+    width: f32,
+    height: f32,
+    t: &pm_design::Tokens,
+) -> Option<AnyElement> {
+    let max = f32::from(handle.max_offset().y);
+    if max <= 0.5 || height <= 0. {
+        return None;
+    }
+    let content = height + max;
+    let length = (height * height / content).max(t.metrics.hit);
+    let offset = (-f32::from(handle.offset().y)).clamp(0., max);
+    let top = (height - length) * offset / max;
+    let thick = SCROLL_BAR - SCROLL_THUMB_INSET * 2.;
+    Some(
+        div()
+            .absolute()
+            .top(px(top + SCROLL_THUMB_INSET))
+            .left(px(width - thick - SCROLL_THUMB_INSET - t.metrics.border * 2.))
+            .w(px(thick))
+            .h(px((length - SCROLL_THUMB_INSET * 2.).max(thick)))
+            .rounded(px(thick / 2.))
+            .bg(pm_shell::kit::ink(t.colors.text, t.translucency.faint * 0.8))
+            .into_any_element(),
+    )
+}
 /// Rows the font picker lists at once; typing narrows the rest.
 const FONT_PAGE: usize = 80;
 #[derive(Default)]
@@ -57,6 +92,11 @@ pub struct Host {
     /// When Properties last followed while playing (`FOLLOW_EVERY` apart).
     followed_at: Option<std::time::Instant>,
     headers: BTreeMap<String, Entity<crate::v4_view::HeaderView>>,
+    /// Each panel body's scroll (owner request 2026-11-14: side panels
+    /// scroll when their content is taller than their slot), kept across
+    /// splitter drags, and when each last scrolled (its thumb shows a moment).
+    scrolls: BTreeMap<String, ScrollHandle>,
+    scrolled_at: BTreeMap<String, std::time::Instant>,
     pub(crate) ready: BTreeSet<String>,
     generations: BTreeMap<String, u64>,
     pub(crate) requests: VecDeque<PlatformRequest>,
@@ -995,20 +1035,69 @@ impl Controller {
                 t.metrics.border,
             );
         }
+        let body = (bounds.h - t.metrics.header).max(0.);
+        let keep = {
+            let view = view.clone();
+            canvas(
+                |_, _, _| (),
+                move |_, _, _, cx| view.read(cx).keep_native_slots(cx),
+            )
+            .absolute()
+            .size_0()
+        };
+        // The viewer and the timeline lay out to their slot and scroll their
+        // own way; every other panel's body scrolls when its content is
+        // taller than its slot, where it was left across splitter drags.
+        if matches!(id, "viewer" | "timeline") {
+            return Some(
+                div()
+                    .w_full()
+                    .h(px(body))
+                    .overflow_hidden()
+                    .child(view.clone().cached(StyleRefinement::default().size_full()))
+                    .child(keep)
+                    .into_any_element(),
+            );
+        }
+        let handle = self.builtins.scrolls.entry(id.into()).or_default().clone();
+        let shown = self
+            .builtins
+            .scrolled_at
+            .get(id)
+            .is_some_and(|at| at.elapsed() < SCROLL_THUMB_HOLD);
+        let thumb = shown
+            .then(|| scroll_thumb(&handle, bounds.w, body, &t))
+            .flatten();
+        let panel = id.to_owned();
         Some(
             div()
+                .relative()
                 .w_full()
-                .h(px((bounds.h - t.metrics.header).max(0.)))
-                .overflow_hidden()
-                .child(view.clone().cached(StyleRefinement::default().size_full()))
+                .h(px(body))
                 .child(
-                    canvas(
-                        |_, _, _| (),
-                        move |_, _, _, cx| view.read(cx).keep_native_slots(cx),
-                    )
-                    .absolute()
-                    .size_0(),
+                    div()
+                        .id(SharedString::from(format!("panel-body-{id}")))
+                        .size_full()
+                        .overflow_y_scroll()
+                        .track_scroll(&handle)
+                        .on_scroll_wheel(cx.listener(move |v, _, window, cx| {
+                            v.builtins.scrolled_at.insert(panel.clone(), std::time::Instant::now());
+                            // The thumb goes once the scrolling has stopped.
+                            cx.spawn_in(window, async move |this, cx| {
+                                cx.background_executor().timer(SCROLL_THUMB_HOLD).await;
+                                let _ = this.update(cx, |_, cx| cx.notify());
+                            })
+                            .detach();
+                            cx.notify();
+                        }))
+                        // As tall as its content, at least its slot.
+                        .child(
+                            view.clone()
+                                .cached(StyleRefinement::default().w_full().min_h(px(body))),
+                        )
+                        .child(keep),
                 )
+                .children(thumb)
                 .into_any_element(),
         )
     }
@@ -1920,6 +2009,9 @@ impl crate::timeline_surface::Delegate for ControllerDelegate {
     fn drop_media(&self, drop: crate::timeline_surface::MediaDrop, cx: &mut App) {
         let _ = self.0.update(cx, |v, cx| v.drop_media(drop, cx));
     }
+    fn drop_effect(&self, drop: crate::timeline_surface::EffectDrop, cx: &mut App) {
+        let _ = self.0.update(cx, |v, cx| v.drop_effect(drop, cx));
+    }
     fn skim(&self, seconds: Option<f64>, cx: &mut App) {
         let input = crate::skimming::input();
         let _ = self.0.update(cx, |v, _| v.skim(seconds, input));
@@ -2099,6 +2191,12 @@ impl crate::gizmo::Host for ControllerDelegate {
             let at = v.time();
             v.place_project_items(at, Some(0), cx);
         });
+    }
+    fn drop_effect(&self, drop: crate::timeline_surface::EffectDrop, cx: &mut App) {
+        let _ = self.0.update(cx, |v, cx| v.drop_effect(drop, cx));
+    }
+    fn drop_files(&self, paths: Vec<std::path::PathBuf>, alt: bool, cx: &mut App) {
+        let _ = self.0.update(cx, |v, cx| v.drop_on_viewer(paths, alt, cx));
     }
     fn time(&self, cx: &App) -> f64 {
         self.0.upgrade().map_or(0., |c| c.read(cx).time())

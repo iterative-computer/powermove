@@ -2405,6 +2405,7 @@ impl Controller {
                     .as_ref()
                     .is_some_and(|s| matches!(s.destination, SessionDestination::File(_)))
             });
+        let started = crate::diag::enabled().then(std::time::Instant::now);
         cx.spawn(async move |this, cx| {
             let result = if file_save {
                 // The save panel already confirmed replacing an existing file.
@@ -2426,6 +2427,13 @@ impl Controller {
             } else {
                 kernel.shell(ShellCall::Save(session)).await
             };
+            if let Some(started) = started {
+                crate::diag::line(serde_json::json!({
+                    "save": (started.elapsed().as_secs_f64() * 1000.).round(),
+                    "file": file_save,
+                    "ok": matches!(&result, Some(Ok(ShellReply::Saved { .. }))),
+                }));
+            }
             let _ = this.update(cx, |v, cx| {
                 v.save_pending = false;
                 let close = v.close_after_save.take();
@@ -2958,6 +2966,12 @@ impl Controller {
                         host.shell_state(serde_json::json!({ "showControls": shown }));
                     }
                 }
+            }
+            // The gear and ⌘, toggle: Settings showing closes, back to the
+            // tab it came forward over; open behind another tab, it comes
+            // forward. Its rows have saved as they changed (as its × closes).
+            "settings" if self.pages.toggle_closes("settings") => {
+                self.close_tab_page("settings", cx)
             }
             "settings" => self.show_builtin(&cmd.name, window, cx),
             "agent" => self.toggle_agent(window, cx),

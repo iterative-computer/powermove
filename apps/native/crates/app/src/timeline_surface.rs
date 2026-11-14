@@ -41,10 +41,34 @@ pub enum Dropped {
     /// What the Project panel is dragging.
     ProjectItems,
 }
+/// The Effects panel's id (`js/v4/app/panels.json`): its rows drag effects
+/// onto layers.
+pub const EFFECTS_PANEL: &str = "fxbrowser";
+
+#[cfg(test)]
+mod panel_id_tests {
+    /// The Effects panel the drop targets listen for is a built-in panel.
+    #[test]
+    fn the_effects_panel_id_is_a_built_in_panel() {
+        assert!(pm_builtins::builtin_panel(super::EFFECTS_PANEL).is_some());
+        assert!(pm_builtins::builtin_panel(pm_builtins::PROJECT_PANEL).is_some());
+    }
+}
+/// An effect dragged from the Effects panel `panel` dropped on `layer`'s row
+/// (`None`: no row there, and the selected layer takes it, as v1.2.0).
+#[derive(Clone, Debug, PartialEq)]
+pub struct EffectDrop {
+    pub panel: String,
+    pub definition: String,
+    pub label: String,
+    pub layer: Option<String>,
+}
 pub trait Delegate: 'static {
     fn time(&self, cx: &App) -> f64;
     /// Media dropped on the timeline (Finder files, Project items).
     fn drop_media(&self, _drop: MediaDrop, _cx: &mut App) {}
+    /// An effect from the Effects panel dropped on the timeline.
+    fn drop_effect(&self, _drop: EffectDrop, _cx: &mut App) {}
     fn seek(&self, seconds: f64, cx: &mut App);
     fn effect(&self, effect: HostEffect, cx: &mut App);
     fn report(&self, message: String, cx: &mut App);
@@ -286,6 +310,8 @@ pub struct TimelineSurface {
     /// Where media being dragged over the timeline would land (window
     /// position), for the insertion line.
     media_over: Option<Point<Pixels>>,
+    /// An effect from the Effects panel over the timeline: the pointer.
+    effect_over: Option<Point<Pixels>>,
 }
 const WHEEL_ZOOM: f64 = 0.01;
 /// The fewest letters of a clip's name worth showing before its ellipsis.
@@ -303,7 +329,7 @@ impl TimelineSurface {
         offline: BTreeSet<String>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let layer_column = tokens.metrics.layer_column as f64;
+        let layer_column = default_layer_column(&tokens.metrics);
         let view = Viewed {
             pps: 100.,
             scroll_time: 0.,
@@ -349,6 +375,7 @@ impl TimelineSurface {
             hover_clip: None,
             activation: None,
             media_over: None,
+            effect_over: None,
             late: None,
         };
         this.restore_view();
@@ -419,6 +446,9 @@ impl TimelineSurface {
             self.view.scroll_y = y.max(0.);
         }
         if let Some(column) = number("nativeLayerColumn").filter(|c| c.is_finite()) {
+            // A width saved narrower than a row's least (before it had one)
+            // opens at the least.
+            let column = column.max(least_layer_column(&self.tokens.metrics));
             self.view.layer_column = column;
             self.view.column_chosen = true;
             self.outline.column.set(column as f32);
@@ -453,8 +483,8 @@ impl TimelineSurface {
             // A layer column the person never dragged follows the theme's
             // (workspace timeline chrome); a dragged one stays.
             let (old, new) = (
-                self.tokens.metrics.layer_column as f64,
-                tokens.metrics.layer_column as f64,
+                default_layer_column(&self.tokens.metrics),
+                default_layer_column(&tokens.metrics),
             );
             let follows = (self.view.layer_column - old).abs() < 0.5 && old != new;
             self.tokens = tokens;
@@ -1164,6 +1194,31 @@ impl TimelineSurface {
             cx.notify();
         }
     }
+    /// The layer whose row is under `position` (a property row's layer) and
+    /// that row's top in the view: where a dropped effect goes.
+    fn layer_under(&self, position: Point<Pixels>) -> Option<(String, f64)> {
+        use pm_panel_timeline::{RowId, v4};
+        let (_, y) = self.local(position);
+        let ruler = self.tokens.metrics.ruler as f64;
+        if y < ruler {
+            return None;
+        }
+        let scene = self.scene.as_ref()?;
+        let row = scene.row_at(y - ruler + self.view.scroll_y)?;
+        let layer = match v4::parse_row(&row.id).ok()? {
+            RowId::Layer(id) => id,
+            RowId::Property { layer_id, .. } => layer_id,
+        };
+        let top = scene.scroll_for(&v4::row_id(&RowId::Layer(layer.clone())))?;
+        Some((layer, ruler + top - self.view.scroll_y))
+    }
+    fn effect_moved(&mut self, bounds: Bounds<Pixels>, at: Point<Pixels>, cx: &mut Context<Self>) {
+        let over = bounds.contains(&at).then_some(at);
+        if over != self.effect_over {
+            self.effect_over = over;
+            cx.notify();
+        }
+    }
     fn drop_media(&mut self, what: Dropped, position: Point<Pixels>, cx: &mut Context<Self>) {
         self.media_over = None;
         let (at, index, _) = self.media_slot(position);
@@ -1243,7 +1298,7 @@ impl TimelineSurface {
         let column = self.view.layer_column;
         if (x - column).abs() <= m.hit as f64 / 4. && y >= m.ruler as f64 {
             if event.click_count == 2 {
-                self.view.layer_column = m.layer_column as f64;
+                self.view.layer_column = default_layer_column(&m);
                 self.view.column_chosen = false;
                 self.changed(true, cx);
             } else {
@@ -1655,8 +1710,11 @@ impl TimelineSurface {
                 let m = self.tokens.metrics;
                 let width = f32::from(self.bounds.size.width) as f64;
                 let x = f32::from(event.position.x - self.bounds.origin.x) as f64;
-                self.view.layer_column =
-                    x.clamp(m.layer_column as f64 / 2., (width - m.hit as f64).max(1.));
+                // Never past the row's least width (its switches always fit);
+                // never past the panel's edge, unless the panel is narrower.
+                self.view.layer_column = x
+                    .min((width - m.hit as f64).max(1.))
+                    .max(least_layer_column(&m));
                 self.view.column_chosen = true;
                 self.changed(false, cx);
             }
@@ -1704,12 +1762,9 @@ impl TimelineSurface {
             return;
         };
         let covered = scene.marquee(frame.viewport, &self.tokens, area);
-        let layers = if self.model.mode == TimelineMode::Tracks {
-            covered.clips
-        } else {
-            vec![]
-        };
-        let plan = session.update(covered.keys, layers);
+        // The layers whose bars (Layers) or clips (Tracks) the box touches;
+        // the session takes them only when it covers no keys (v1's rule).
+        let plan = session.update(covered.keys, covered.clips);
         self.queue.retain(|j| !matches!(j, Job::Apply(_)));
         self.queue.push_back(Job::Apply(plan));
         self.pump(cx);
@@ -2587,7 +2642,22 @@ impl Render for TimelineSurface {
         // insertion line between layers and the frame under the pointer.
         if !cx.has_active_drag() {
             self.media_over = None;
+            self.effect_over = None;
         }
+        // An effect over a layer's row: the row it would join, outlined.
+        let effect_row = self
+            .effect_over
+            .and_then(|position| self.layer_under(position))
+            .map(|(_, y)| {
+                div()
+                    .absolute()
+                    .left(px(0.))
+                    .top(px(y as f32))
+                    .w(self.bounds.size.width)
+                    .h(px(self.tokens.metrics.track_row))
+                    .border(px(self.tokens.metrics.border * 2.))
+                    .border_color(rgb(self.tokens.colors.accent))
+            });
         let landing = self.media_over.map(|position| {
             let (at, _, y) = self.media_slot(position);
             let x = self.view.layer_column + (at - self.view.scroll_time) * self.view.pps;
@@ -2678,8 +2748,11 @@ impl Render for TimelineSurface {
             }))
             .on_drag_move(cx.listener(
                 |s, event: &DragMoveEvent<crate::v4_view::PanelDrag>, _, cx| {
-                    if event.drag(cx).panel == pm_builtins::PROJECT_PANEL {
+                    let panel = event.drag(cx).panel.clone();
+                    if panel == pm_builtins::PROJECT_PANEL {
                         s.media_moved(event.bounds, event.event.position, cx);
+                    } else if panel == EFFECTS_PANEL {
+                        s.effect_moved(event.bounds, event.event.position, cx);
                     }
                 },
             ))
@@ -2695,6 +2768,22 @@ impl Render for TimelineSurface {
                 if drag.panel == pm_builtins::PROJECT_PANEL {
                     cx.stop_propagation();
                     s.drop_media(Dropped::ProjectItems, window.mouse_position(), cx);
+                } else if drag.panel == EFFECTS_PANEL
+                    && let Some(definition) = &drag.item
+                {
+                    cx.stop_propagation();
+                    s.effect_over = None;
+                    let layer = s.layer_under(window.mouse_position()).map(|(id, _)| id);
+                    s.delegate.drop_effect(
+                        EffectDrop {
+                            panel: drag.panel.clone(),
+                            definition: definition.to_string(),
+                            label: drag.label.to_string(),
+                            layer,
+                        },
+                        cx,
+                    );
+                    cx.notify();
                 }
             }))
             .on_mouse_down(
@@ -2870,6 +2959,7 @@ impl Render for TimelineSurface {
             )
             // Over the canvas.
             .children(landing.into_iter().flatten())
+            .children(effect_row)
             .children(tip)
             .children(self.skimmer_marks())
     }
@@ -3499,4 +3589,22 @@ fn playhead_pin(area: Bounds<Pixels>) -> PathBuilder {
     path.line_to(point(l, shoulder));
     path.close();
     path
+}
+
+/// The layer column a timeline opens with: the theme's, at least the least.
+pub fn default_layer_column(m: &pm_design::Metrics) -> f64 {
+    (m.layer_column as f64).max(least_layer_column(m))
+}
+/// v1's least layer column (`GUTTER_MIN`, 320 pt).
+const V1_LEAST_LAYER_COLUMN: f64 = 320.;
+/// The narrowest the layer column goes: a layer row's number, disclosure,
+/// kind badge, three slots of name and its five switches, with its insets
+/// and gaps, and never narrower than v1's. The name truncates first; the
+/// switches always fit.
+pub fn least_layer_column(m: &pm_design::Metrics) -> f64 {
+    let (gap, hit) = (m.gap as f64, m.hit as f64);
+    // Insets and the gaps between number, disclosure, badge and name.
+    let room = 2. * gap + 4. * gap;
+    let row = room + hit + hit + m.kind_badge as f64 + 3. * hit + 5. * hit;
+    row.max(V1_LEAST_LAYER_COLUMN).ceil()
 }

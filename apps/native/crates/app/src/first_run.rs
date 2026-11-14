@@ -36,13 +36,15 @@ const APPLICATION_SUPPORT: &str = "Library/Application Support";
 pub struct Plan {
     /// Absent on an override with no source: isolated dev and test profiles.
     pub config: Option<Config>,
+    /// Original-app discovery for extensions and Storage, independent of migration.
+    pub original: Option<Config>,
     pub profile: PathBuf,
     pub launch: Launch,
     pub onboard: bool,
 }
 impl Plan {
-    /// No override reads the shipped locations. An override never reaches them:
-    /// a synthetic run names its source with `PM_NATIVE_ELECTRON_PROFILE`.
+    /// Migration keeps its isolated-profile rules. Original-app discovery also
+    /// uses the shipped folder unless a synthetic run opts out explicitly.
     pub fn resolve(
         profile: Option<PathBuf>,
         electron: Option<PathBuf>,
@@ -54,6 +56,12 @@ impl Plan {
         let isolated = profile.is_some();
         let defaults = support.as_deref().map(pm_first_launch::default_paths);
         let profile = profile.or_else(|| defaults.as_ref().map(|c| c.native_profile.clone()))?;
+        let original = Self::original_source(
+            &profile,
+            electron.clone(),
+            defaults.as_ref(),
+            std::env::var_os("PM_NATIVE_NO_ORIGINAL").as_deref() == Some(std::ffi::OsStr::new("1")),
+        );
         let config = match (electron, isolated) {
             (Some(electron_profile), _) => Some(Config {
                 electron_profile,
@@ -71,13 +79,28 @@ impl Plan {
         Some(Self {
             onboard: (!isolated || review) && !onboarding_completed(&profile),
             config,
+            original,
             profile,
             launch,
         })
     }
-    /// The source this launch must respect, for opens and locks.
+    fn original_source(
+        profile: &Path,
+        electron: Option<PathBuf>,
+        defaults: Option<&Config>,
+        disabled: bool,
+    ) -> Option<Config> {
+        if disabled {
+            return None;
+        }
+        Some(Config {
+            electron_profile: electron.or_else(|| defaults.map(|c| c.electron_profile.clone()))?,
+            native_profile: profile.to_owned(),
+        })
+    }
+    /// The original app for extension transfer and Storage; never enables migration.
     pub fn electron(&self) -> Option<PathBuf> {
-        self.config
+        self.original
             .as_ref()
             .map(|c| c.electron_profile.clone())
             .filter(|p| p.is_dir())
@@ -199,7 +222,7 @@ impl Flow {
         let declined = |c: &Config| {
             pm_first_launch::extension_transfer::declined(&c.native_profile).unwrap_or(false)
         };
-        if crate::extension_transfer::eligible(self.plan.config.as_ref())
+        if crate::extension_transfer::eligible(self.plan.original.as_ref())
             .is_some_and(|c| !declined(&c))
         {
             return vec![Effect::ScanExtensions];
@@ -1119,7 +1142,7 @@ impl Driver {
     }
     /// The extension scan or transfer on its own thread, reporting to the flow.
     fn extensions(&self, run: bool) {
-        let Some(config) = crate::extension_transfer::eligible(self.library.plan.config.as_ref())
+        let Some(config) = crate::extension_transfer::eligible(self.library.plan.original.as_ref())
         else {
             // The original app went away meanwhile: nothing to offer, so open.
             let update = if run {

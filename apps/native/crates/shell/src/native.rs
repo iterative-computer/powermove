@@ -2147,6 +2147,12 @@ impl Host {
         let window = gpui.window().unwrap();
         let content = window.contentView().unwrap();
         appearance(&window, &t);
+        // The editor keeps the keyboard from the start (Electron's window
+        // has it): AppKit otherwise gives a window that becomes key to the
+        // first field or control it finds, and Space and the timeline's
+        // keys go there until a click on the editor takes the keyboard back.
+        window.setInitialFirstResponder(Some(&gpui));
+        window.makeFirstResponder(Some(&gpui));
         window.setTitle(&NSString::from_str("Untitled"));
         window.setSubtitle(&NSString::from_str(""));
         window.setTabbingIdentifier(&NSString::from_str("com.powermove.native.editor"));
@@ -2408,12 +2414,21 @@ impl Host {
                     if e.windowNumber() != window.windowNumber() {
                         return event.as_ptr();
                     }
-                    let responder = window.firstResponder();
+                    let mut responder = window.firstResponder();
+                    // A responder no longer on screen (a hidden page's field, a
+                    // closed panel's control, either one's field editor) never
+                    // keeps the keyboard: the editor takes it back.
+                    if responder.as_deref().is_some_and(stray_responder) {
+                        let gpui = host.borrow().gpui.clone();
+                        window.makeFirstResponder(Some(&gpui));
+                        responder = window.firstResponder();
+                    }
                     let name = responder
                         .as_ref()
                         .map(|r| r.class().name().to_string_lossy().to_string())
                         .unwrap_or_default();
-                    // WebKit keeps its DOM-first key order. S5 forwards unhandled keys explicitly.
+                    // WebKit keeps its DOM-first key order; a key the page
+                    // leaves comes back through the compat slot (S5).
                     if menu::owns_text_edit(false, &name) {
                         return event.as_ptr();
                     }
@@ -2478,12 +2493,14 @@ impl Host {
                     {
                         return event.as_ptr();
                     }
-                    if matches!(
-                        chord.as_str(),
-                        "enter" | "space" | "up" | "down" | "left" | "right"
-                    ) && responder.as_ref().is_some_and(|r| unsafe {
-                        msg_send![&**r,isKindOfClass:NSControl::class()]
-                    }) {
+                    // A control a click left the keyboard with keeps Return and
+                    // the arrows; Space plays, as in Electron (only a field
+                    // types it; keyboard navigation, above, presses with it).
+                    if control_keeps(&chord)
+                        && responder.as_ref().is_some_and(|r| unsafe {
+                            msg_send![&**r,isKindOfClass:NSControl::class()]
+                        })
+                    {
                         return event.as_ptr();
                     }
                     let field = responder.as_ref().is_some_and(|r| unsafe {
@@ -2636,6 +2653,36 @@ impl Host {
     fn effects(&mut self, effects: Vec<Effect>) {
         for e in effects {
             match e {
+                Effect::Dispatch {
+                    token,
+                    command,
+                    args,
+                    class,
+                } if opens_in_place(&command)
+                    && self.menu_state.borrow().is_some()
+                    && self.palette.try_borrow_mut().is_ok() =>
+                {
+                    // The palette opens inside this key press, before the
+                    // next key is read: what is typed right after ⌘K lands
+                    // in its search field, not in the editor (the trip
+                    // through the editor's command queue took a turn).
+                    let _ = (args, class);
+                    let state = self.menu_state.borrow().clone().unwrap_or_default();
+                    // Development builds: key press to an open, accepting palette.
+                    let pressed = self.events.get(&token).map(|e| e.timestamp());
+                    self.open_palette(&state);
+                    if cfg!(debug_assertions)
+                        && std::env::var_os("PM_NATIVE_PALETTE_TRACE").is_some()
+                        && let Some(pressed) = pressed
+                    {
+                        let now = objc2_foundation::NSProcessInfo::processInfo().systemUptime();
+                        eprintln!("palette.key_to_open {:.2} ms", (now - pressed) * 1000.);
+                    }
+                    self.events.remove(&token);
+                    // Done: keys queued behind it go on (to the palette, now key).
+                    let next = self.resolver.resolve(token, true);
+                    self.effects(next);
+                }
                 Effect::Dispatch {
                     token,
                     command,
@@ -3195,6 +3242,19 @@ impl Host {
             // The tabs stay, as in v1's title bar on Home.
             if matches!(name.as_str(), "tools" | "add" | "export" | "panelLibrary") {
                 item.setHidden(aside);
+            }
+            // The gear reads pressed while Settings is the tab showing, and
+            // says what a press does.
+            if name == "settings" {
+                let shown = self.shown_page().as_deref() == Some("settings");
+                let (sym, label) = if shown {
+                    ("gearshape.fill", "Close Settings")
+                } else {
+                    ("gearshape", "Open Settings")
+                };
+                item.setImage(Some(&toolbar_symbol(sym, "Settings", &self.tokens)));
+                item.setToolTip(Some(&NSString::from_str(label)));
+                item.setLabel(&NSString::from_str(label));
             }
         }
     }
@@ -4892,6 +4952,9 @@ pub struct Popup {
     /// The command sent when the menu closes with nothing chosen.
     dismiss: Option<String>,
     picked: bool,
+    /// What the rows were last built from: an open over the same rows
+    /// reuses them (building 160 palette rows took a frame or more).
+    built: Option<u64>,
 }
 impl Popup {
     fn new(
@@ -4999,6 +5062,7 @@ impl Popup {
             anchor: None,
             dismiss: None,
             picked: false,
+            built: None,
         }));
         let target: Retained<PopupTarget> = unsafe {
             msg_send![
@@ -5037,7 +5101,31 @@ impl Popup {
     }
     /// Lays the rows out again for the query: sections under their headings,
     /// the panel as tall as its results (to `max_height`), its top edge kept.
+    /// The rows' identity: the choices shown, in order, and the width.
+    fn rows_key(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for i in self.model.filtered() {
+            let c = &self.model.choices[i];
+            (&c.label, &c.command, &c.category, c.checked, &c.font).hash(&mut h);
+        }
+        self.model.unlisted().hash(&mut h);
+        (self.window.frame().size.width as i64).hash(&mut h);
+        h.finish()
+    }
+    /// Builds the rows unless they already show these choices.
+    fn refresh_if_changed(&mut self) {
+        if self.built != Some(self.rows_key()) || self.rows.is_empty() {
+            self.refresh();
+        } else if let Some(first) = self.rows.first() {
+            // Reopened over the same rows: from the top, as a fresh list.
+            let mut rect = first.rect;
+            rect.origin.y = 0.;
+            self.list.scrollRectToVisible(rect);
+        }
+    }
     fn refresh(&mut self) {
+        self.built = Some(self.rows_key());
         for part in self.parts.drain(..) {
             part.removeFromSuperview();
         }
@@ -5405,6 +5493,7 @@ impl Popup {
             self.hide();
             return;
         }
+        let started = std::time::Instant::now();
         self.row_focus = false;
         self.model.open = true;
         self.model.search(String::new());
@@ -5413,7 +5502,7 @@ impl Popup {
         self.lit = false;
         self.glider.setAlphaValue(0.);
         self.picked = false;
-        self.refresh();
+        self.refresh_if_changed();
         let p = self.parent.frame();
         let s = self.window.frame().size;
         let origin = match self.anchor {
@@ -5459,7 +5548,16 @@ impl Popup {
         // Only while the app is active, never over other apps (P-CHILD).
         gpui_macos::child_window::show(&self.window, true);
         self.window.makeFirstResponder(Some(&self.search));
-        animate(&self.window, true, &self.tokens, &mut self.spring);
+        animate_as(&self.window, true, true, &self.tokens, &mut self.spring);
+        // Development builds: what an open costs (`PM_NATIVE_PALETTE_TRACE`).
+        if cfg!(debug_assertions) && std::env::var_os("PM_NATIVE_PALETTE_TRACE").is_some() {
+            eprintln!(
+                "palette.open {:.2} ms, {} rows, fade {:.0} ms",
+                started.elapsed().as_secs_f64() * 1000.,
+                self.rows.len(),
+                self.tokens.motion.menu_fade * 1000.
+            );
+        }
     }
     fn hide(&mut self) {
         self.model.open = false;
@@ -5477,7 +5575,7 @@ impl Popup {
         self.dismiss = None;
         self.rest();
         gpui_macos::child_window::forget(&self.window);
-        let duration = animate(&self.window, false, &self.tokens, &mut self.spring);
+        let duration = animate_as(&self.window, false, true, &self.tokens, &mut self.spring);
         unsafe {
             let _: () = msg_send![&*self.window,performSelector:sel!(orderOut:),withObject:std::ptr::null::<AnyObject>(),afterDelay:duration];
         }
@@ -5562,13 +5660,33 @@ impl Popup {
         }
     }
 }
+/// A command the shell carries out inside the key press that asked for it
+/// (see `Host::effects`): the command palette, so typing straight after its
+/// shortcut is never lost.
+pub fn opens_in_place(command: &str) -> bool {
+    command == "palette"
+}
 fn animate(
     w: &NSWindow,
     enter: bool,
     t: &Tokens,
     state: &mut Option<(std::time::Instant, pm_design::motion::Analytic)>,
 ) -> f64 {
-    let duration = if t.accessibility.reduce_motion {
+    animate_as(w, enter, false, t, state)
+}
+/// `menu`: the command palette and pop-up menus. They fade in and out over
+/// `motion.menu_fade`, eased, with no spring: there at once, as Spotlight
+/// and the system's menus, and never in the way of typing.
+fn animate_as(
+    w: &NSWindow,
+    enter: bool,
+    menu: bool,
+    t: &Tokens,
+    state: &mut Option<(std::time::Instant, pm_design::motion::Analytic)>,
+) -> f64 {
+    let duration = if menu {
+        t.motion.menu_fade
+    } else if t.accessibility.reduce_motion {
         t.motion.reduced
     } else if enter {
         t.motion.enter
@@ -5590,9 +5708,16 @@ fn animate(
                 let _: () = msg_send![a,setFromValue:f];
                 let _: () = msg_send![a,setToValue:to];
                 let _: () = msg_send![a,setDuration:duration];
+                if menu {
+                    let curve = NSString::from_str(if enter { "easeOut" } else { "easeIn" });
+                    let timing: *mut AnyObject = msg_send![objc2::class!(CAMediaTimingFunction),functionWithName:&*curve];
+                    let _: () = msg_send![a,setTimingFunction:timing];
+                    // No spring: a scale left from an earlier open goes too.
+                    let _: () = msg_send![&*layer,removeAnimationForKey:&*NSString::from_str("pm.shell.scale")];
+                }
                 layer.setOpacity(if enter { 1. } else { 0. });
                 let _: () = msg_send![&*layer,addAnimation:a,forKey:&*NSString::from_str("pm.shell.opacity")];
-                if enter && !t.accessibility.reduce_motion {
+                if enter && !menu && !t.accessibility.reduce_motion {
                     let allocated: *mut AnyObject =
                         msg_send![objc2::class!(CASpringAnimation), alloc];
                     let spring: *mut AnyObject = msg_send![allocated,initWithPerceptualDuration:t.motion.enter,bounce:t.motion.bounce];
@@ -6222,5 +6347,48 @@ mod agent_status_tests {
             ..working
         };
         assert_eq!(asking.tooltip(), "Agent needs your answer");
+    }
+}
+
+/// The keys a control the pointer left the keyboard with keeps: Return and
+/// the arrows. Space is the editor's (play), as in Electron, where only a
+/// field types it.
+fn control_keeps(chord: &str) -> bool {
+    matches!(chord, "enter" | "up" | "down" | "left" | "right")
+}
+#[cfg(test)]
+mod key_owner_tests {
+    #[test]
+    fn a_clicked_control_keeps_return_and_arrows_and_space_plays() {
+        for chord in ["enter", "up", "down", "left", "right"] {
+            assert!(super::control_keeps(chord), "{chord}");
+        }
+        for chord in ["space", "shift+space", "j", "k", "l", "home", "b"] {
+            assert!(!super::control_keeps(chord), "{chord}");
+        }
+    }
+}
+/// A first responder that is no longer on screen: a view out of its window
+/// or hidden (with a hidden ancestor), or the field editor of one.
+fn stray_responder(responder: &NSResponder) -> bool {
+    unsafe {
+        let mut view: *mut AnyObject = responder as *const NSResponder as *mut AnyObject;
+        let text: bool = msg_send![&*view, isKindOfClass: NSTextView::class()];
+        if text {
+            let editor: bool = msg_send![&*view, isFieldEditor];
+            if editor {
+                let delegate: *mut AnyObject = msg_send![&*view, delegate];
+                if !delegate.is_null() {
+                    view = delegate;
+                }
+            }
+        }
+        let is_view: bool = msg_send![&*view, isKindOfClass: NSView::class()];
+        if !is_view {
+            return false;
+        }
+        let window: *mut AnyObject = msg_send![&*view, window];
+        let hidden: bool = msg_send![&*view, isHiddenOrHasHiddenAncestor];
+        window.is_null() || hidden
     }
 }

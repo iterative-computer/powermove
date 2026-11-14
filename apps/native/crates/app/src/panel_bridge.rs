@@ -965,6 +965,7 @@ fn layout_plan(
                 tabs: vec![pid.into()],
                 active: 0,
                 size: size.map(|s| s as f32),
+                collapsed: false,
             });
         }
         docks.push(layout::Dock {
@@ -1003,6 +1004,7 @@ fn layout_plan(
                 tabs: vec!["layer-effects".into()],
                 active: 0,
                 size: Some(350.),
+                collapsed: false,
             },
         );
     }

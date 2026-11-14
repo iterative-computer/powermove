@@ -16,7 +16,8 @@ export interface ViewerModel {
   selectionCount: number;
   /** Present when the composition has Studio 3D layers: the preview tier. */
   studio?: {
-    tier: "live" | "refine";
+    /** `fast` the raster preview (default), `live` the path tracer, `refine` Quality. */
+    tier: "fast" | "live" | "refine";
     tool?: "move" | "rotate" | "scale" | "orbit" | "pan" | "zoom" | "light";
     look?: "camera" | "free";
     /** Handles follow the scene's axes or the object's own. */
@@ -111,7 +112,7 @@ export function snapshot(value: unknown): ViewerSnapshot {
     if (m.effectiveQuality < 0.25 || m.effectiveQuality > 1)
       throw new RangeError("Invalid effective quality");
     if (m.studio !== undefined && m.studio !== null)
-      oneOf(record(m.studio).tier, ["live", "refine"]);
+      oneOf(record(m.studio).tier, ["fast", "live", "refine"]);
     finite(m.selectionCount);
     if (!Number.isSafeInteger(m.selectionCount) || m.selectionCount < 0)
       throw new RangeError("Invalid selection count");
@@ -164,6 +165,12 @@ export const channelViews = [
   { v: "viewer.showBlue", label: "Blue" },
   { v: "viewer.showAlpha", label: "Alpha" },
   { v: "viewer.showAlphaOverlay", label: "Alpha Overlay" },
+];
+/** How the viewer draws a 3D scene; exports always render in full. */
+export const studioTiers = [
+  { v: "fast", label: "Fast" },
+  { v: "live", label: "Rendered" },
+  { v: "refine", label: "Quality" },
 ];
 export const zoomPresets = [0.05, 0.125, 0.25, 0.5, 1, 2, 4, 8] as const;
 export const resolutions = [
