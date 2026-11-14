@@ -8,6 +8,38 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use zeroize::Zeroizing;
 
+pub const LEGACY_SERVICE: &str = "Powermove Safe Storage";
+// Electron's OSCrypt appends " Key" to the product name.
+pub const LEGACY_ACCOUNT: &str = "Powermove Key";
+
+#[derive(Debug, Clone, Copy)]
+pub struct KeychainError(pub i32);
+impl KeychainError {
+    pub fn message(self) -> &'static str {
+        match self.0 {
+            -25300 => {
+                "The original app’s sign-in key wasn’t found in your Keychain. Open the original app and sign in, then try again."
+            }
+            -25308 => {
+                "macOS couldn’t show the Keychain request. Unlock your Mac and login Keychain, then try again with this window in front."
+            }
+            -25293 | -128 => {
+                "The Keychain request was declined or cancelled. Try again and choose Allow or Always Allow in the macOS request."
+            }
+            -25291 => {
+                "Your Keychain is unavailable. Unlock your login Keychain in Keychain Access, then try again."
+            }
+            _ => "macOS couldn’t read the sign-in key. Try again, or continue and sign in here.",
+        }
+    }
+}
+impl std::fmt::Display for KeychainError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} (OSStatus {})", self.message(), self.0)
+    }
+}
+impl std::error::Error for KeychainError {}
+
 pub const PROMPT: &str = "Powermove can keep your extension secrets and sign-ins. Continue to allow one macOS Keychain request for Powermove Safe Storage. Your original app stays unchanged.";
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -126,11 +158,31 @@ pub fn decrypt_mac(password: &[u8], ciphertext: &[u8]) -> Result<Zeroizing<Vec<u
 #[cfg(target_os = "macos")]
 pub struct MacKeychain {
     service: String,
+    reader: Option<Box<dyn FnMut() -> Result<Zeroizing<Vec<u8>>> + Send>>,
 }
 #[cfg(target_os = "macos")]
 impl MacKeychain {
+    /// Marshals just the legacy read to the host's main thread. The coordinator
+    /// still validates the migration and records AccessStarted before calling it.
+    pub fn with_legacy_reader(
+        reader: impl FnMut() -> Result<Zeroizing<Vec<u8>>> + Send + 'static,
+    ) -> Self {
+        let mut access = Self::after_user_consent();
+        access.reader = Some(Box::new(reader));
+        access
+    }
+    /// Host calls only after consent, on the main thread with the window key.
+    pub fn read_on_main_thread() -> Result<Zeroizing<Vec<u8>>> {
+        let status = unsafe { mac::SecKeychainSetUserInteractionAllowed(true) };
+        eprintln!("PM_KEYCHAIN operation=allow-ui OSStatus={status}");
+        if status != 0 {
+            return Err(KeychainError(status).into());
+        }
+        Self::after_user_consent().legacy_password()
+    }
     pub fn after_user_consent() -> Self {
         Self {
+            reader: None,
             service: format!("{} migration secrets", crate::BETA_BUNDLE_ID),
         }
     }
@@ -142,6 +194,7 @@ mod mac {
     type Item = *mut c_void;
     #[link(name = "Security", kind = "framework")]
     unsafe extern "C" {
+        pub(super) fn SecKeychainSetUserInteractionAllowed(allowed: bool) -> i32;
         fn SecKeychainFindGenericPassword(
             keychain: Item,
             service_len: u32,
@@ -181,10 +234,13 @@ mod mac {
                 ptr::null_mut(),
             )
         };
+        eprintln!("PM_KEYCHAIN operation=find OSStatus={status}");
         if status == -25300 {
             return Ok(None);
         }
-        ensure!(status == 0, "Keychain access failed (OSStatus {status})");
+        if status != 0 {
+            return Err(KeychainError(status).into());
+        }
         let bytes = if len == 0 {
             Zeroizing::new(Vec::new())
         } else {
@@ -200,8 +256,10 @@ mod mac {
     }
     impl SecretAccess for MacKeychain {
         fn legacy_password(&mut self) -> Result<Zeroizing<Vec<u8>>> {
-            find("Powermove Safe Storage", "Powermove")?
-                .ok_or_else(|| anyhow::anyhow!("Powermove Safe Storage item not found"))
+            if let Some(reader) = self.reader.as_mut() {
+                return reader();
+            }
+            find(LEGACY_SERVICE, LEGACY_ACCOUNT)?.ok_or_else(|| KeychainError(-25300).into())
         }
         fn put_native(&mut self, id: &str, plaintext: &[u8]) -> Result<()> {
             let account = blake3::hash(id.as_bytes()).to_hex().to_string();
@@ -225,10 +283,10 @@ mod mac {
                     ptr::null_mut(),
                 )
             };
-            ensure!(
-                status == 0,
-                "native Keychain publication failed (OSStatus {status})"
-            );
+            eprintln!("PM_KEYCHAIN operation=publish OSStatus={status}");
+            if status != 0 {
+                return Err(KeychainError(status).into());
+            }
             Ok(())
         }
     }

@@ -380,8 +380,9 @@ fn job_diagnostic(row: serde_json::Value) {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "why", rename_all = "camelCase")]
 enum Dispute {
-    /// Its registry answered a question with another face.
-    Differ(String),
+    /// Its registry answered a question with another face: why, and the
+    /// job's question (to name its font and text).
+    Differ(String, Option<pm_text::answers::Query>),
     /// Its fonts are not the ones the job was asked to draw with any more
     /// (or it has no registry): nothing can be compared.
     Moved(String),
@@ -1034,6 +1035,7 @@ pub fn run_child() -> Result<()> {
                 replies: face_replies.clone(),
                 next: AtomicU64::new(1),
                 differ: AtomicBool::new(false),
+                disputed: Mutex::default(),
             }),
         }))
     });
@@ -1064,6 +1066,8 @@ pub fn run_child() -> Result<()> {
     broker.set_generation(font_service.generation());
     let fonts = pm_render::text::host::RenderFonts::new(broker.clone());
     let job_id = request.job.clone();
+    // A failure names the text layers it is about.
+    let document = request.document.clone();
     // Low disk: refuse to start, then watch the volume while frames land.
     let reserve = request.disk_reserve;
     if free_bytes(&request.destination)? < reserve {
@@ -1385,17 +1389,15 @@ pub fn run_child() -> Result<()> {
                 .is_some_and(|fonts| fonts.changed.load(Ordering::Acquire)) =>
         {
             let differ = fenced.as_ref().and_then(|fonts| fonts.faces.as_ref());
-            let why = match differ.is_some_and(|faces| faces.differ.load(Ordering::Acquire)) {
-                true => FACES_DIFFER,
-                false => FONTS_CHANGED,
+            let why = match differ.filter(|faces| faces.differ.load(Ordering::Acquire)) {
+                Some(faces) => faces_differ_message(
+                    faces.disputed.lock().unwrap().as_ref(),
+                    &faces.resolved.lock().unwrap(),
+                    &document,
+                ),
+                None => FONTS_CHANGED.into(),
             };
-            emit(status(
-                &job_id,
-                JobState::Failed,
-                0.,
-                None,
-                Some(why.into()),
-            ))?
+            emit(status(&job_id, JobState::Failed, 0., None, Some(why)))?
         }
         Err(ref e) if let Some(refusal) = e.downcast_ref::<OfflineRefusal>() => emit(JobStatus {
             error: Some(refusal.error(&job_id)),
@@ -1456,6 +1458,8 @@ struct Faces {
     next: AtomicU64,
     /// The app's registry answered something else.
     differ: AtomicBool,
+    /// The job's question it answered otherwise.
+    disputed: Mutex<Option<pm_text::answers::Query>>,
 }
 impl Faces {
     /// Whether the app's registry answers everything this job's answered
@@ -1476,7 +1480,7 @@ impl Faces {
             }
             pm_text::answers::Answers {
                 faces: resolved.faces.clone(),
-                answers: new,
+                answers: with_resolving(new, &agreed.answers),
             }
         };
         let id = self.next.fetch_add(1, Ordering::Relaxed);
@@ -1500,14 +1504,128 @@ impl Faces {
                 agreed.merge(&ask);
                 Ok(())
             }
-            Ok(Err(Dispute::Differ(why))) => {
+            Ok(Err(Dispute::Differ(why, query))) => {
                 self.differ.store(true, Ordering::Release);
+                *self.disputed.lock().unwrap() = query;
                 Err(why)
             }
             Ok(Err(Dispute::Moved(why))) => Err(why),
             Err(_) => Err("the app did not compare the job's faces".to_owned()),
         }
     }
+}
+/// [`FACES_DIFFER`], naming the font, the character and the text layers of
+/// `document` (canonical JSON) it is in: what a person can change or install.
+pub(crate) fn faces_differ_message(
+    query: Option<&pm_text::answers::Query>,
+    answers: &pm_text::answers::Answers,
+    document: &str,
+) -> String {
+    use pm_text::answers::Query;
+    let Some(query) = query else {
+        return FACES_DIFFER.into();
+    };
+    // A face by the family the job asked for it by, else its own name.
+    let family_of = |id: pm_text::font::FaceId| {
+        answers
+            .answers
+            .iter()
+            .find_map(|a| match &a.query {
+                Query::Family { name, .. } if a.face == Some(id) => Some(name.clone()),
+                _ => None,
+            })
+            .or_else(|| face_name(answers, id).map(|f| f.5))
+    };
+    let (font, ch) = match query {
+        Query::Family { name, .. } | Query::Variable { family: name } => (Some(name.clone()), None),
+        Query::Fallback { primary, ch, .. } => (family_of(*primary), char::from_u32(*ch)),
+        Query::EmAdvance { face, .. } | Query::SbixMetric { face, .. } => (family_of(*face), None),
+        Query::Standard { .. } | Query::LastResort { .. } => (None, None),
+    };
+    let layers = serde_json::from_str::<serde_json::Value>(document)
+        .map(|doc| text_layers_with(&doc, font.as_deref(), ch))
+        .unwrap_or_default();
+    let mut what = match (ch, &font) {
+        (Some(c), Some(f)) => format!("\u{201c}{c}\u{201d} in {f}"),
+        (Some(c), None) => format!("\u{201c}{c}\u{201d}"),
+        (None, Some(f)) => f.clone(),
+        (None, None) => "the default font".into(),
+    };
+    match layers.as_slice() {
+        [] => {}
+        [one] => what += &format!(" (layer \u{201c}{one}\u{201d})"),
+        [first, rest @ ..] => {
+            what += &format!(" (layer \u{201c}{first}\u{201d} and {} more)", rest.len())
+        }
+    }
+    format!("{}: {what}.", FACES_DIFFER.trim_end_matches('.'))
+}
+/// The names of the text layers in `doc` set in `font` (when known) whose
+/// text has `ch` (when asked), in document order.
+fn text_layers_with(doc: &serde_json::Value, font: Option<&str>, ch: Option<char>) -> Vec<String> {
+    fn text_of(v: Option<&serde_json::Value>) -> String {
+        match v {
+            Some(serde_json::Value::String(s)) => s.clone(),
+            Some(serde_json::Value::Object(o)) => text_of(o.get("v")),
+            _ => String::new(),
+        }
+    }
+    fn walk(v: &serde_json::Value, font: Option<&str>, ch: Option<char>, out: &mut Vec<String>) {
+        match v {
+            serde_json::Value::Object(o) => {
+                if o.get("type").and_then(|t| t.as_str()) == Some("text")
+                    && let Some(d) = o.get("d")
+                {
+                    let in_font = font.is_none_or(|f| text_of(d.get("font")) == f);
+                    let has = ch.is_none_or(|c| text_of(d.get("text")).contains(c));
+                    // A character's own layer even if its font is another
+                    // (the fallback came after the family's face).
+                    let named = o.get("name").and_then(|n| n.as_str()).unwrap_or("Text");
+                    if has && (in_font || ch.is_some()) && !out.iter().any(|n| n == named) {
+                        out.push(named.to_owned());
+                    }
+                }
+                o.values().for_each(|v| walk(v, font, ch, out));
+            }
+            serde_json::Value::Array(a) => a.iter().for_each(|v| walk(v, font, ch, out)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    walk(doc, font, ch, &mut out);
+    out
+}
+/// The face a question is asked about (a fallback after it, its advance).
+fn asked_about(query: &pm_text::answers::Query) -> Option<pm_text::font::FaceId> {
+    use pm_text::answers::Query;
+    match query {
+        Query::Fallback { primary, .. } => Some(*primary),
+        Query::EmAdvance { face, .. } | Query::SbixMetric { face, .. } => Some(*face),
+        _ => None,
+    }
+}
+/// `new` answers with the already agreed ones that resolved the faces they
+/// are asked about, and theirs in turn: the app matches a question about a
+/// face only after it matched that face, and a comparison starts afresh
+/// (a fallback after a face resolved in an earlier frame's comparison was
+/// "a face the app never resolved").
+fn with_resolving(
+    mut new: Vec<pm_text::answers::Answer>,
+    agreed: &[pm_text::answers::Answer],
+) -> Vec<pm_text::answers::Answer> {
+    let mut i = 0;
+    while i < new.len() {
+        if let Some(face) = asked_about(&new[i].query)
+            && !new
+                .iter()
+                .any(|a| a.face == Some(face) && asked_about(&a.query) != Some(face))
+            && let Some(resolving) = agreed.iter().find(|a| a.face == Some(face))
+        {
+            new.push(resolving.clone());
+        }
+        i += 1;
+    }
+    new
 }
 /// A registry whose answers are kept as it gives them.
 struct Recorded<'a, S> {
@@ -1627,10 +1745,13 @@ fn same_faces(
             .map(|answer| (answer, in_app_terms(&answer.query, &ours)))
             .partition(|(_, query)| query.is_some());
         if asked.is_empty() {
-            return Err(Dispute::Differ(format!(
-                "the job asked about a face the app never resolved: {:?}",
-                later[0].0.query
-            )));
+            return Err(Dispute::Differ(
+                format!(
+                    "the job asked about a face the app never resolved: {:?}",
+                    later[0].0.query
+                ),
+                Some(later[0].0.query.clone()),
+            ));
         }
         let queries = asked.iter().filter_map(|(_, q)| q.clone()).collect();
         let reply = broker
@@ -1663,12 +1784,15 @@ fn same_faces(
                         .map(|f| format!("{} (face {} of {})", f.5, f.1, f.0))
                         .unwrap_or_else(|| "nothing".into())
                 };
-                return Err(Dispute::Differ(format!(
-                    "{:?}: the job's font registry answered {}, the app's {}",
-                    theirs.query,
-                    named(child, theirs.face),
-                    named(&reply.answers, mine.face),
-                )));
+                return Err(Dispute::Differ(
+                    format!(
+                        "{:?}: the job's font registry answered {}, the app's {}",
+                        theirs.query,
+                        named(child, theirs.face),
+                        named(&reply.answers, mine.face),
+                    ),
+                    Some(theirs.query.clone()),
+                ));
             }
         }
         left = later.into_iter().map(|(answer, _)| answer).collect();
@@ -2436,6 +2560,84 @@ impl pm_export::render::GpuGate for ChildGate {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn answer(query: pm_text::answers::Query, face: Option<u32>) -> pm_text::answers::Answer {
+        pm_text::answers::Answer {
+            query,
+            face,
+            advance: None,
+            rect: None,
+        }
+    }
+    fn family(name: &str) -> pm_text::answers::Query {
+        pm_text::answers::Query::Family {
+            name: name.into(),
+            weight: 400,
+            italic: false,
+            size: 21,
+        }
+    }
+    fn fallback(ch: char, primary: u32) -> pm_text::answers::Query {
+        pm_text::answers::Query::Fallback {
+            weight: 400,
+            italic: false,
+            size: 21,
+            ch: ch as u32,
+            primary,
+            emoji: false,
+        }
+    }
+
+    /// A later frame's fallback after a face an earlier frame's comparison
+    /// already matched is compared with the answer that resolved that face
+    /// (and the one before it, for a fallback after a fallback): the app
+    /// matches the face first. Without it the app was asked about a face it
+    /// "never resolved", and an export of a project whose text first meets
+    /// a symbol late failed.
+    #[test]
+    fn a_comparison_carries_the_answers_that_resolved_the_faces_it_asks_about() {
+        let agreed = vec![
+            answer(family("SF Pro Text"), Some(1)),
+            answer(fallback('\u{2318}', 1), Some(2)),
+            answer(family("Unrelated"), Some(3)),
+        ];
+        let new = vec![answer(fallback('\u{21e7}', 2), Some(4))];
+        let sent = with_resolving(new.clone(), &agreed);
+        assert_eq!(sent[0], new[0]);
+        assert!(sent.contains(&agreed[1]), "the face it falls back after");
+        assert!(
+            sent.contains(&agreed[0]),
+            "and the face that one fell back after"
+        );
+        assert!(!sent.contains(&agreed[2]), "nothing else");
+        // Already in the batch: not sent twice.
+        let both = vec![agreed[0].clone(), answer(fallback('\u{21e7}', 1), Some(4))];
+        assert_eq!(with_resolving(both.clone(), &agreed), both);
+    }
+
+    /// A real mismatch names the character, the font and the text layer.
+    #[test]
+    fn a_face_mismatch_names_the_font_the_character_and_the_layer() {
+        let answers = pm_text::answers::Answers {
+            faces: Vec::new(),
+            answers: vec![answer(family("SF Pro Text"), Some(1))],
+        };
+        let doc = serde_json::json!({"document":{"comps":[{"layers":[
+            {"type":"text","name":"Title","d":{"text":"Hello","font":"SF Pro Text"}},
+            {"type":"text","name":"Shortcut \u{21e7} A","d":{"text":{"v":"\u{21e7} A"},"font":"SF Pro Text"}},
+            {"type":"shape","name":"Box \u{21e7}","d":{"text":"\u{21e7}"}}
+        ]}]}})
+        .to_string();
+        assert_eq!(
+            faces_differ_message(Some(&fallback('\u{21e7}', 1)), &answers, &doc),
+            "Rendering stopped because a font resolved to another face than in the viewer: \u{201c}\u{21e7}\u{201d} in SF Pro Text (layer \u{201c}Shortcut \u{21e7} A\u{201d})."
+        );
+        assert_eq!(
+            faces_differ_message(Some(&family("SF Pro Text")), &answers, &doc),
+            "Rendering stopped because a font resolved to another face than in the viewer: SF Pro Text (layer \u{201c}Title\u{201d} and 1 more)."
+        );
+        assert_eq!(faces_differ_message(None, &answers, &doc), FACES_DIFFER);
+    }
 
     /// Within the quiet period a submission fits the budget, or is one
     /// unit; bands that cost a whole frame give way to whole frames.

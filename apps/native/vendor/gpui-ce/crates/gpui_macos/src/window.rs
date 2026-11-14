@@ -3192,11 +3192,12 @@ unsafe extern "C" fn handle_key_equivalent(
     native_event: ObjcId,
 ) -> Bool {
     // Powermove: while a native text view edits (a hosted field's editor is
-    // the window's first responder), a bare function key (arrows, Home/End,
-    // Page Up/Down) is the field's, not a key equivalent: AppKit offers such
-    // keys to every view's performKeyEquivalent: before the first responder,
-    // and a GPUI element listening for keys would take an arrow a number
-    // field steps with.
+    // the window's first responder), every key without Command or Control is
+    // the field's, not a key equivalent: AppKit offers keys such as the
+    // arrows and Return to every view's performKeyEquivalent: before the
+    // first responder, and a GPUI element listening for keys would take an
+    // arrow a number field steps with, or the Return that commits a rename
+    // (the row answered it first, and the commit landed on a stale tree).
     unsafe {
         let window: ObjcId = msg_send![this, window];
         if !window.is_null() {
@@ -3209,11 +3210,7 @@ unsafe extern "C" fn handle_key_equivalent(
             let flags: NSUInteger = msg_send![native_event, modifierFlags];
             const COMMAND: NSUInteger = 1 << 20;
             const CONTROL: NSUInteger = 1 << 18;
-            const FUNCTION: NSUInteger = 1 << 23;
-            if editing.as_bool()
-                && flags & FUNCTION != 0
-                && flags & (COMMAND | CONTROL) == 0
-            {
+            if editing.as_bool() && flags & (COMMAND | CONTROL) == 0 {
                 return Bool::new(false);
             }
         }
