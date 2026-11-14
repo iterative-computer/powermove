@@ -185,6 +185,13 @@ impl DiskMediaRecord {
     }
 }
 
+/// Whether a regular file is at `path`, local or kept in iCloud (dataless).
+/// Metadata only: never opens it, so it never starts a download. Linking a
+/// cloud-only original is right: the app downloads it when it opens it, as
+/// the original app did.
+pub fn is_present(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|m| m.is_file())
+}
 /// Metadata-only check before identifying a source link. Returns false for a
 /// missing or cloud-only file; reading one would start a download.
 pub fn is_resident(path: &Path) -> Result<bool> {
