@@ -1775,11 +1775,23 @@ impl MediaCache {
         // Both decode the same pixels: one decoder policy serves playback,
         // pause, scrub and export.
         let deinterlaced = timing.deinterlaced();
+        // A frame of the file that does not decode is damaged: named by the
+        // file and its time, for the person (`DamagedFrame`).
+        let damaged = |e: &dyn std::fmt::Display| {
+            MediaFailure::Failed(
+                crate::DamagedFrame {
+                    file: path.to_path_buf(),
+                    seconds,
+                    reason: e.to_string(),
+                }
+                .message(),
+            )
+        };
         let (n, frame, fields) = if source_exact && !deinterlaced {
             let fetched = self
                 .source_viewer
                 .fetch(&src, instance, n, Want::Exact)
-                .map_err(|e| MediaFailure::Failed(e.to_string()))?;
+                .map_err(|e| damaged(&e))?;
             (n, fetched.frame, None)
         } else if export || deinterlaced {
             let purpose = if export {
@@ -1792,14 +1804,10 @@ impl MediaCache {
                 .session(&src, instance, purpose)
                 .map_err(|e| MediaFailure::Failed(e.to_string()))?;
             if deinterlaced {
-                let f = session
-                    .fields(n)
-                    .map_err(|e| MediaFailure::Failed(e.to_string()))?;
+                let f = session.fields(n).map_err(|e| damaged(&e))?;
                 (n, f.cur.clone(), Some(f))
             } else {
-                let f = session
-                    .frame(n)
-                    .map_err(|e| MediaFailure::Failed(e.to_string()))?;
+                let f = session.frame(n).map_err(|e| damaged(&e))?;
                 (n, f, None)
             }
         } else {

@@ -67,6 +67,49 @@ pub struct SvgFallback {
     pub reason: String,
 }
 
+/// A source frame that could not be read: a damaged file (a bad copy, a
+/// failing card), named by its file and its time in it. It travels as a
+/// [`LayerFailure`]'s message, so every reader of failures keeps working,
+/// and [`DamagedFrame::parse`] reads it back for the person's sentence.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DamagedFrame {
+    pub file: std::path::PathBuf,
+    /// The frame's time in the file, in seconds.
+    pub seconds: f64,
+    /// What the decoder said.
+    pub reason: String,
+}
+
+const DAMAGED: &str = "a damaged frame at ";
+const DAMAGED_OF: &str = " s of ";
+const DAMAGED_WHY: &str = " could not be read (";
+
+impl DamagedFrame {
+    /// "a damaged frame at 0.292 s of /clips/take 3.mov could not be read
+    /// (decode: …)".
+    pub fn message(&self) -> String {
+        format!(
+            "{DAMAGED}{:.3}{DAMAGED_OF}{}{DAMAGED_WHY}{})",
+            self.seconds,
+            self.file.display(),
+            self.reason
+        )
+    }
+
+    /// The damaged frame a failure's message names, if it names one.
+    pub fn parse(message: &str) -> Option<DamagedFrame> {
+        let rest = message.strip_prefix(DAMAGED)?;
+        let (seconds, rest) = rest.split_once(DAMAGED_OF)?;
+        let at = rest.rfind(DAMAGED_WHY)?;
+        let reason = rest[at + DAMAGED_WHY.len()..].strip_suffix(')')?;
+        Some(DamagedFrame {
+            file: rest[..at].into(),
+            seconds: seconds.parse().ok()?,
+            reason: reason.to_owned(),
+        })
+    }
+}
+
 /// A layer that failed while the rest of the frame rendered (section 8,
 /// "Isolation": a failing node marks its layer failed and outputs
 /// transparency).
@@ -76,4 +119,24 @@ pub struct LayerFailure {
     pub composition: String,
     pub layer: String,
     pub message: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DamagedFrame;
+
+    #[test]
+    fn a_damaged_frame_reads_back_from_its_message() {
+        let damaged = DamagedFrame {
+            file: "/clips/take 3: final.mov".into(),
+            seconds: 12.5,
+            reason: "decode: sample 300 (pts 3584) failed to decode: status -12909".into(),
+        };
+        assert_eq!(
+            damaged.message(),
+            "a damaged frame at 12.500 s of /clips/take 3: final.mov could not be read (decode: sample 300 (pts 3584) failed to decode: status -12909)"
+        );
+        assert_eq!(DamagedFrame::parse(&damaged.message()), Some(damaged));
+        assert_eq!(DamagedFrame::parse("media for asset A is offline"), None);
+    }
 }

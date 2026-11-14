@@ -65,6 +65,10 @@ pub enum JobError {
     Render(String),
     #[error("audio failed: {0}")]
     Audio(String),
+    /// A source frame could not be read: the person's sentence, naming the
+    /// export frame, the clip, the file and where in it.
+    #[error("{0}")]
+    Damaged(String),
     #[error(transparent)]
     Export(Error),
 }
@@ -629,6 +633,59 @@ pub fn start_timecode(timeline: &Timeline) -> crate::settings::TimecodeSpec {
         format,
         reel: None,
     }
+}
+
+/// "Frame 00:00:00:19 couldn't be exported: “Interview” reads a damaged
+/// frame of interview.mov at 00:00:00.292. Replace or trim the clip, then
+/// export again."
+fn damaged_sentence(
+    document: &Document,
+    failure: &pm_render::LayerFailure,
+    damaged: &pm_render::DamagedFrame,
+    rate: Rate,
+    tick: i64,
+) -> String {
+    let (num, den) = (i128::from(rate.num()), i128::from(rate.den()));
+    let unit = den * i128::from(TICKS_PER_SECOND);
+    let frame = (2 * i128::from(tick) * num + unit).div_euclid(2 * unit);
+    let at = pm_time::TimecodeFormat::for_rate(rate).timecode_of(frame as i64);
+    let layer = layer_name(document, &failure.composition, &failure.layer)
+        .unwrap_or_else(|| failure.layer.clone());
+    let file = damaged.file.file_name().map_or_else(
+        || damaged.file.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    );
+    let ms = (damaged.seconds.max(0.) * 1000.).round() as u64;
+    let source = format!(
+        "{:02}:{:02}:{:02}.{:03}",
+        ms / 3_600_000,
+        ms / 60_000 % 60,
+        ms / 1000 % 60,
+        ms % 1000
+    );
+    format!(
+        "Frame {at} couldn't be exported: “{layer}” reads a damaged frame of {file} at {source}. Replace or trim the clip, then export again."
+    )
+}
+
+/// The name of layer `layer` of composition `composition`.
+fn layer_name(document: &Document, composition: &str, layer: &str) -> Option<String> {
+    use pm_eval::node;
+    let root = document.root()?;
+    let string = |n: Option<&Node>| node::js_value_opt(n).to_js_string().to_string_lossy();
+    let open = node::string(node::member(Some(root), "compId"))
+        .or_else(|| node::string(node::member(Some(root), "id")))
+        .map(|s| s.to_string_lossy());
+    let comp = if open.as_deref() == Some(composition) {
+        root
+    } else {
+        node::member(node::member(Some(root), "comps"), composition)?
+    };
+    node::array(node::member(Some(comp), "layers"))?
+        .iter()
+        .find(|l| string(node::member(Some(l), "id")) == layer)
+        .map(|l| string(node::member(Some(l), "name")))
+        .filter(|name| !name.is_empty())
 }
 
 fn rate_of(settings: &ExportSettings) -> Result<Rate, JobError> {
@@ -1772,6 +1829,21 @@ where
                     .iter()
                     .any(|clip| asset == Some(clip.asset.as_str()))
             });
+            // A damaged source frame stops the export, said where; nothing
+            // stands in for it.
+            if let Some((failure, damaged)) = f
+                .failures
+                .iter()
+                .find_map(|l| pm_render::DamagedFrame::parse(&l.message).map(|d| (l, d)))
+            {
+                return Err(JobError::Damaged(damaged_sentence(
+                    &document,
+                    failure,
+                    &damaged,
+                    timeline.rate,
+                    timeline.tick(n).get(),
+                )));
+            }
             if !f.failures.is_empty() {
                 return Err(JobError::Unsupported(
                     f.failures
