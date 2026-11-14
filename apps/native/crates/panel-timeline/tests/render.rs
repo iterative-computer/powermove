@@ -338,6 +338,35 @@ fn the_transform_box_frames_two_selected_keys_and_scales_as_v1() {
 }
 
 #[test]
+fn the_playhead_marks_each_curve_with_its_value_as_v1() {
+    use pm_panel_timeline::graph_render::*;
+    let t = tokens();
+    let v = viewport(&t);
+    let area = Rect::new(v.layer_column, 220., v.width - v.layer_column, 220.);
+    let g = graph(false, false);
+    let curve = &g.curves()[0];
+    // Held before and after the keys; on the eased segment between.
+    assert_eq!(curve.value_at(0.), Some(0.));
+    assert_eq!(curve.value_at(9.), Some(1.));
+    let mid = curve.value_at(2.).unwrap();
+    assert!((mid - 0.5).abs() < 1e-6, "{mid}");
+    let early = curve.value_at(1.25).unwrap();
+    assert!(early > 0. && early < 0.25, "{early}");
+    // A head on the plot: a dot on the curve in its ink, the value beside it.
+    let time = v.scroll_time + 200. / v.pps;
+    let marks = g.playhead_marks(v, area, time, &t);
+    assert_eq!(marks.len(), 1);
+    let m = &marks[0];
+    assert_eq!(m.color, t.graph_curve("position.x", 0));
+    assert_eq!(m.text, value_text(curve.value_at(time).unwrap()));
+    assert!((m.label.unwrap() - (m.y - 7.).clamp(area.y + 10., area.y + area.height - 3.)).abs() < 1e-9);
+    // None within 35 points of the layer column or 40 of the right edge.
+    let at = |x: f64| v.scroll_time + (x - v.layer_column) / v.pps;
+    assert!(g.playhead_marks(v, area, at(v.layer_column + 20.), &t).is_empty());
+    assert!(g.playhead_marks(v, area, at(v.width - 20.), &t).is_empty());
+}
+
+#[test]
 fn transport_repaints_visible_diamonds_from_shared_key_indexes() {
     let t = tokens();
     let f = scene(&t).prepare(viewport(&t), &t).unwrap();

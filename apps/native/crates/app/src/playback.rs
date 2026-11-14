@@ -343,7 +343,12 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                             let foot=bar.max(metrics.inset);
                             let tall=(r.h-y-foot).max(0.) as f64;
                             if let Some(p)=&mut playhead {
-                                if head_shown { p.place(r.x as f64+offset,seconds*pps,r.x as f64+column,height-(r.y+r.h-foot)as f64,metrics.playhead as f64,tall,metrics.ruler as f64,playing,&host.tokens); }
+                                if head_shown {
+                                    p.place(r.x as f64+offset,seconds*pps,r.x as f64+column,height-(r.y+r.h-foot)as f64,metrics.playhead as f64,tall,metrics.ruler as f64,playing,&host.tokens);
+                                    // The Value Graph's readouts ride on the head (v1).
+                                    let marks=v.builtins.timeline.as_ref().map(|t|t.read(cx).graph_marks(seconds)).unwrap_or_default();
+                                    p.marks(&marks,height,scale,&host.tokens);
+                                }
                                 else { p.hide(); }
                             }
                         }

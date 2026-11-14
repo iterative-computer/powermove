@@ -1112,6 +1112,24 @@ impl TimelineSurface {
         self.pump(cx);
     }
     /// The bottom bar's height: what the body keeps under the tracks.
+    /// The graph's values at the playhead `time` (v1's dots and readouts on
+    /// the head), in window points; none while the graph is not shown.
+    pub fn graph_marks(&self, time: f64) -> Vec<graph_render::Mark> {
+        let (Some(area), Some(v), Some(graph)) = (self.graph_area(), self.viewport(), self.graph.as_ref())
+        else {
+            return vec![];
+        };
+        let (dx, dy) = (
+            f32::from(self.bounds.origin.x) as f64,
+            f32::from(self.bounds.origin.y) as f64,
+        );
+        let mut marks = graph.playhead_marks(v, area, time, &self.tokens);
+        for m in &mut marks {
+            (m.x, m.y) = (m.x + dx, m.y + dy);
+            m.label = m.label.map(|l| l + dy);
+        }
+        marks
+    }
     pub fn bar_height(&self) -> f64 {
         f32::from(self.body.size.height - self.bounds.size.height).max(0.) as f64
     }

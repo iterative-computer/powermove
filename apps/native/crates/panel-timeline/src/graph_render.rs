@@ -71,6 +71,64 @@ pub struct Graph {
     /// The values the graph plots in Speed mode are rates.
     pub speed: bool,
 }
+/// A curve's value where the playhead stands (v1 `drawGraphTime`): a dot on
+/// the curve in its ink at `(x, y)` and the value written right of the head,
+/// its baseline at `label` (`None`: no room for it).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Mark {
+    pub x: f64,
+    pub y: f64,
+    pub color: u32,
+    pub text: String,
+    pub label: Option<f64>,
+}
+impl Curve {
+    /// The plotted value at composition `seconds`: held before the first
+    /// segment and after the last (and across a gap), on the segment's line
+    /// or Bézier between.
+    pub fn value_at(&self, seconds: f64) -> Option<f64> {
+        let Some(first) = self.segments.first() else {
+            return self.points.first().map(|p| p.point.value);
+        };
+        if seconds <= first.from.seconds {
+            return Some(first.from.value);
+        }
+        let mut held = first.from.value;
+        for s in &self.segments {
+            if seconds < s.from.seconds {
+                return Some(held);
+            }
+            if seconds <= s.to.seconds {
+                let span = s.to.seconds - s.from.seconds;
+                if span <= 1e-12 {
+                    return Some(s.to.value);
+                }
+                let Some([a, b]) = s.controls else {
+                    let u = (seconds - s.from.seconds) / span;
+                    return Some(s.from.value + (s.to.value - s.from.value) * u);
+                };
+                let cubic = |p0: f64, p1: f64, p2: f64, p3: f64, u: f64| {
+                    let v = 1. - u;
+                    v * v * v * p0 + 3. * v * v * u * p1 + 3. * v * u * u * p2 + u * u * u * p3
+                };
+                // Time runs forward along a segment: bisect for its parameter.
+                let (mut lo, mut hi) = (0., 1.);
+                for _ in 0..48 {
+                    let mid = (lo + hi) / 2.;
+                    if cubic(s.from.seconds, a.seconds, b.seconds, s.to.seconds, mid) < seconds {
+                        lo = mid;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                let u = (lo + hi) / 2.;
+                return Some(cubic(s.from.value, a.value, b.value, s.to.value, u));
+            }
+            held = s.to.value;
+        }
+        Some(held)
+    }
+}
 /// A grip of the transform box (v1 graph-selection.ts, After Effects' "Show
 /// Transform Box"): a corner scales time and value together, an edge one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -545,6 +603,55 @@ impl Graph {
             time: span(|p| p.seconds),
             value: span(|p| p.value),
         })
+    }
+    /// Each curve's value at the playhead `time`, as v1 marks it over a graph
+    /// drawn into `bounds`: none in a merged graph or with the head within
+    /// 35 points of the layer column or 40 of the right edge; a dot only
+    /// where the value is inside the plot; labels kept 13 points apart.
+    pub fn playhead_marks(&self, v: Viewport, bounds: Rect, time: f64, t: &Tokens) -> Vec<Mark> {
+        let x = v.x(time);
+        if !time.is_finite()
+            || self.curves.iter().any(|c| c.path.is_empty())
+            || x < v.layer_column + 35.
+            || x >= v.width - 40.
+        {
+            return vec![];
+        }
+        let (top, bottom) = (bounds.y, bounds.y + bounds.height);
+        let mut taken: Vec<f64> = vec![];
+        let near = |taken: &[f64], y: f64| taken.iter().any(|t| (t - y).abs() < 13.);
+        let mut marks = vec![];
+        for curve in &self.curves {
+            let Some(value) = curve.value_at(time) else {
+                continue;
+            };
+            let y = self.screen(v, bounds, Point { seconds: time, value })[1];
+            if !y.is_finite() || y < top || y > bottom {
+                continue;
+            }
+            let mut label = (y - 7.).clamp(top + 10., (bottom - 3.).max(top + 10.));
+            while near(&taken, label) && label < bottom - 16. {
+                label += 13.;
+            }
+            if near(&taken, label) {
+                label = y - 20.;
+                while near(&taken, label) {
+                    label -= 13.;
+                }
+            }
+            let label = (label >= top + 10.).then(|| {
+                taken.push(label);
+                label
+            });
+            marks.push(Mark {
+                x,
+                y,
+                color: t.graph_curve(&curve.path, curve.index),
+                text: value_text(value),
+                label,
+            });
+        }
+        marks
     }
     /// Value change for a vertical pointer travel across `height` points.
     pub fn value_per_point(&self, height: f64) -> f64 {
