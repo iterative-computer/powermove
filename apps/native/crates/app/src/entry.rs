@@ -42,7 +42,8 @@ impl Global for Entries {}
 pub fn receive(urls: Vec<String>, cx: &mut App) {
     for raw in urls {
         // Development builds: on-screen reviews reach a menu command without
-        // pressing a menu item (which could bring the app forward).
+        // pressing a menu item (which could bring the app forward);
+        // `review/command/<name>/<arg>/…` passes string arguments.
         #[cfg(debug_assertions)]
         if let Some(command) = raw.strip_prefix("powermove://review/command/") {
             pm_shell::send_menu_command(command);

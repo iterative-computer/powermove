@@ -137,10 +137,13 @@ fn active_send(command: Command) {
     }
 }
 /// Sends `name` to the current editor exactly as its menu item would.
+/// `name`, or `name/arg/arg…` for a command with string arguments (an
+/// item such as View ▸ 2D / 3D, `studio.view/look/toggle`).
 pub fn send_menu_command(name: &str) {
+    let mut parts = name.split('/');
     active_send(Command {
-        name: name.into(),
-        args: vec![],
+        name: parts.next().unwrap_or_default().into(),
+        args: parts.map(serde_json::Value::from).collect(),
         token: None,
     });
 }

@@ -226,13 +226,19 @@ for (const [name, change] of cases) {
               ...(state.host.source
                 ? ["viewer.source.close"]
                 : [
+                    // 2D | 3D leads the bar (its checked segment takes focus).
+                    nodes.find(
+                      (n) => n.props.role === "radio" && n.props.label === "2D",
+                    )?.props.id,
+                    ...[
                     "gotoStart",
                     "prevFrame",
                     "play",
                     "nextFrame",
                     "gotoEnd",
                     "loop",
-                  ].map((id) => `viewer.transport.${id}`)),
+                  ].map((id) => `viewer.transport.${id}`),
+                  ]),
               "viewer.channels",
               "viewer.zoom",
               "viewer.quality",
