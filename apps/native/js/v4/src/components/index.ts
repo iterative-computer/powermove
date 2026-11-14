@@ -145,6 +145,13 @@ export interface Option {
   /** A checkmark beside the row (a pull-down showing several settings). */
   checked?: boolean;
 }
+/** Rows the host fills when a pop-up's menu opens, so a long list (every
+ * layer a layer can be parented to) is never built or sent with the panel's
+ * tree. `options` then holds only what the closed button shows (the current
+ * row). Any panel may use these, built-in or not. */
+export type HostRows =
+  | { source: "layer-parents"; layer: string }
+  | { source: "layer-mattes"; layer: string };
 export function PopUpButton(
   props: Omit<Bound<Json>, "options"> & {
     label?: string;
@@ -152,12 +159,13 @@ export function PopUpButton(
     widthSample?: string;
     /** The button's title when it differs from the selected row. */
     display?: string;
+    rows?: HostRows;
   },
 ) {
   // Inside an InspectorRow a pop-up is a `field`-high value well; standalone
   // it is a `control`-high button (language.md §9).
   const inRow = useContext(Label) !== undefined;
-  const { widthSample, display, options, ...rest } = props;
+  const { widthSample, display, options, rows, ...rest } = props;
   return field("pop-up-button", "select", "button", {
     ...rest,
     // Keep the frozen primitive option shape. Native NSMenu presentation lives
@@ -179,6 +187,7 @@ export function PopUpButton(
       menu: json(options),
       ...(widthSample === undefined ? {} : { widthSample }),
       ...(display === undefined ? {} : { display }),
+      ...(rows === undefined ? {} : { rows: rows as unknown as Json }),
     }),
     style: {
       height: token(inRow ? "metrics.field" : "metrics.control"),

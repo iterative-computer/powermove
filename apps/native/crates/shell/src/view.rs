@@ -512,6 +512,8 @@ impl Editor {
                 _ => self.layout.show_panel(rest, &panels),
             },
             ("panel", "close") => {
+                // The frame that shows it closed: its feel line (`PM_FEEL_TRACE`).
+                gpui_macos::feel::note_now("panel.close");
                 self.parked.remove(rest);
                 self.layout.close_panel(rest)
             }

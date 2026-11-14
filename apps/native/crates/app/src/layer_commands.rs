@@ -317,6 +317,88 @@ impl Facts {
         found
     }
 }
+/// The rows a pop-up lists when its menu opens (the kit's `HostRows`):
+/// `layer-parents`, every layer `layer` (with the selection it is part of)
+/// can be parented to, as Properties' Parent offers; `layer-mattes`, every
+/// layer that can be its track matte. `None` first. Read from the layer list
+/// and the kernel's relation queries, each layer resolved once.
+pub fn host_rows(
+    published: &Published,
+    source: &serde_json::Value,
+) -> Option<Vec<serde_json::Value>> {
+    use serde_json::json;
+    let layer = source.get("layer")?.as_str()?;
+    let root = published.snapshot.root()?;
+    let layers = list_layers(root, None);
+    let at = |id: &str| pm_kernel::model::find_layer(root, id);
+    let mut mirror = pm_kernel::QueryMirror::new(published);
+    let mut asks = |loc: &pm_kernel::model::LayerLoc, op: &str, key: &str, other: &str| {
+        let mut request = Map::new();
+        request.insert("op", Value::String(op.into()));
+        request.insert("layer", Value::Number(loc.index as f64));
+        request.insert(
+            "comp",
+            Value::String(loc.comp_id.clone().unwrap_or_default().into()),
+        );
+        request.insert(key, Value::String(other.into()));
+        mirror
+            .queries()
+            .query(&Value::Object(request))
+            .ok()
+            .and_then(|v| v.as_bool())
+            == Some(true)
+    };
+    let label = |l: &LayerInfo| {
+        if l.name.is_empty() {
+            l.id.clone()
+        } else {
+            l.name.clone()
+        }
+    };
+    let mut rows = vec![json!({"v": null, "label": "None"})];
+    match source.get("source")?.as_str()? {
+        "layer-parents" => {
+            // Parenting acts on the selection the layer belongs to
+            // (LayerOptions), never on audio.
+            let chosen = published.selection.layers();
+            let selected = chosen.iter().any(|c| c == layer);
+            let children: Vec<&LayerInfo> = layers
+                .iter()
+                .filter(|l| {
+                    if selected {
+                        chosen.contains(&l.id)
+                    } else {
+                        l.id == layer
+                    }
+                })
+                .filter(|l| l.kind != "audio")
+                .collect();
+            let locs: Vec<_> = children.iter().filter_map(|c| at(&c.id)).collect();
+            for candidate in &layers {
+                if candidate.kind == "audio" || children.iter().any(|c| c.id == candidate.id) {
+                    continue;
+                }
+                if locs
+                    .iter()
+                    .any(|loc| asks(loc, "wouldCycle", "parent", &candidate.id))
+                {
+                    continue;
+                }
+                rows.push(json!({"v": candidate.id, "label": label(candidate)}));
+            }
+        }
+        "layer-mattes" => {
+            let loc = at(layer)?;
+            for candidate in &layers {
+                if asks(&loc, "validMatteSource", "id", &candidate.id) {
+                    rows.push(json!({"v": candidate.id, "label": label(candidate)}));
+                }
+            }
+        }
+        _ => return None,
+    }
+    Some(rows)
+}
 /// A kernel relation question about `layer` (`wouldCycle`, `validMatteSource`).
 fn relation(
     mirror: &mut pm_kernel::QueryMirror,
