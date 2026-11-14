@@ -104,6 +104,20 @@ struct Capture {
     target: Id,
     button: u64,
 }
+/// A scroller that follows its end: new content keeps it at the end while
+/// the reader is there; scrolling up lets them read, and the panel hears it
+/// (a `scroll` event, `{away}`) so it can offer the way back.
+#[derive(Default)]
+struct Follow {
+    on: bool,
+    /// `data-pm-follow-token`: a new value goes back to the end (the
+    /// panel's Scroll to Latest).
+    token: Value,
+    away: bool,
+}
+/// How far from the end still counts as at the end (the original panel's
+/// jump threshold).
+const FOLLOW_SLACK: f32 = 48.;
 /// A publication compiled off the main thread, waiting to install.
 struct Compiled {
     ticket: u64,
@@ -135,6 +149,9 @@ pub struct SurfaceView {
     anchors: Rc<RefCell<HashMap<Id, Bounds<Pixels>>>>,
     /// The height a sheet's body wants, measured as it is laid out.
     sheet_fit: Rc<std::cell::Cell<f32>>,
+    /// Scrollers that follow their end (`data-pm-follow="end"`: a
+    /// conversation), by node.
+    follow: RefCell<HashMap<Id, Follow>>,
     /// While an agent tool draws (`agent::probe`), controls record where they
     /// were drawn so a panel point maps to the control under it.
     probing: bool,
@@ -207,6 +224,7 @@ impl SurfaceView {
             origin: Rc::new(Cell::new(Point::default())),
             anchors: Default::default(),
             sheet_fit: Default::default(),
+            follow: Default::default(),
             probing: false,
             targets: Default::default(),
             capture: None,
@@ -813,6 +831,22 @@ impl SurfaceView {
                     TextEvent::Cancelled => {
                         if this.prepared.node(id).is_some_and(|n| n.cancel_change) {
                             this.change(id, json!(""), cx);
+                        }
+                    }
+                    // Escape in a composer reaches its panel as the key
+                    // (the Agent's shortcuts menu, then its popover).
+                    TextEvent::Key("escape") => {
+                        if this
+                            .publication
+                            .surface
+                            .node(id)
+                            .is_some_and(|n| n.listeners.contains_key("keydown"))
+                        {
+                            let detail = EventDetail {
+                                key: Some("Escape".into()),
+                                ..Default::default()
+                            };
+                            this.send(id, "keydown", detail, cx);
                         }
                     }
                     // Canvas editors only.
@@ -1662,6 +1696,60 @@ impl SurfaceView {
             if node.scroll_y {
                 element = element.overflow_y_scroll();
             }
+            let props = self.publication.surface.node(id).map(|n| &n.props);
+            if props.and_then(|p| p.get("data-pm-follow")).and_then(Value::as_str) == Some("end") {
+                let token = props
+                    .and_then(|p| p.get("data-pm-follow-token"))
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                let mut follow = self.follow.borrow_mut();
+                let f = follow.entry(id).or_insert_with(|| Follow {
+                    on: true,
+                    token: token.clone(),
+                    away: false,
+                });
+                if f.token != token {
+                    f.token = token;
+                    f.on = true;
+                }
+                if f.on {
+                    // Applied when the scroller is laid out, after this
+                    // frame's content has its height.
+                    scroll.scroll_to_bottom();
+                }
+                element = element.on_scroll_wheel(cx.listener(move |_, _, window, cx| {
+                    cx.defer_in(window, move |v, _, cx| {
+                        let Some(scroll) = v.scrolls.get(&id) else {
+                            return;
+                        };
+                        let distance =
+                            f32::from(scroll.max_offset().y) + f32::from(scroll.offset().y);
+                        let away = distance > FOLLOW_SLACK;
+                        let changed = {
+                            let mut follow = v.follow.borrow_mut();
+                            let f = follow.entry(id).or_default();
+                            f.on = !away;
+                            std::mem::replace(&mut f.away, away) != away
+                        };
+                        let listens = v
+                            .publication
+                            .surface
+                            .node(id)
+                            .is_some_and(|n| n.listeners.contains_key("scroll"));
+                        if changed && listens {
+                            v.send(
+                                id,
+                                "scroll",
+                                EventDetail {
+                                    value: Some(json!({ "away": away })),
+                                    ..Default::default()
+                                },
+                                cx,
+                            );
+                        }
+                    });
+                }));
+            }
             if node.scroll_x {
                 element = element.overflow_x_scroll();
             }
@@ -2411,6 +2499,9 @@ impl SurfaceView {
         if let Some(text) = &node.text {
             element = element.child(text.clone());
         }
+        if let Some(rich) = &node.rich {
+            element = element.child(rich_text(rich, t));
+        }
         if let Some(number) = node.number.filter(|_| self.draws_number(node)) {
             let shown = self
                 .scrub_shown
@@ -2589,6 +2680,10 @@ impl Render for Tooltip {
             .px(px(t.metrics.gap))
             .py(px(t.metrics.inner_radius))
             .bg(rgb(t.colors.floating))
+            // A hairline keeps it legible over a surface of its own fill
+            // (the Agent popover is `floating` too).
+            .border(px(t.metrics.border))
+            .border_color(rgb(t.colors.hairline))
             .rounded(px(t.metrics.inner_radius))
             .text_size(px(t.typography.minimum))
             .text_color(rgb(t.colors.text))
@@ -2619,6 +2714,30 @@ pub(crate) fn status_announcements(
     };
     *seen = Some(current);
     messages
+}
+/// A paragraph of styled runs: bold and italic as the system font draws
+/// them, code on a quiet fill, links in the accent's text ink.
+fn rich_text(rich: &crate::v4_compile::Rich, t: &pm_design::Tokens) -> StyledText {
+    use crate::v4_compile::Rich;
+    let ink = |c: u32| gpui::rgb_to_hsla(rgb(c));
+    let highlights = rich.runs.iter().map(|(range, bits)| {
+        let mut style = HighlightStyle::default();
+        if bits & Rich::BOLD != 0 {
+            style.font_weight = Some(FontWeight(t.typography.display_weight));
+        }
+        if bits & Rich::ITALIC != 0 {
+            style.font_style = Some(FontStyle::Italic);
+        }
+        if bits & Rich::CODE != 0 {
+            style.background_color = Some(ink(t.colors.fill));
+            style.color = Some(ink(t.colors.text));
+        }
+        if bits & Rich::LINK != 0 {
+            style.color = Some(ink(t.colors.accent_text));
+        }
+        (range.clone(), style)
+    });
+    StyledText::new(rich.text.clone()).with_highlights(highlights.collect::<Vec<_>>())
 }
 /// A segmented control's segments as the native control takes them (a label,
 /// and a symbol where the segment is a glyph), the selected one's index (-1

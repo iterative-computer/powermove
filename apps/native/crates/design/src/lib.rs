@@ -285,6 +285,11 @@ pub struct Metrics {
     pub popover_radius: f32,
     pub sheet_width: f32,
     pub agent_width: f32,
+    /// The Agent popover's height when the window has room (the original
+    /// app's 680 pt conversation).
+    pub agent_height: f32,
+    /// Space between turns in the Agent conversation (`space.xl`).
+    pub agent_gap: f32,
     /// Indent per outline level.
     pub tree_indent: f32,
     /// Layer-kind badge square (timeline, Project list).
@@ -727,7 +732,11 @@ impl Tokens {
                 popover_width: 260.,
                 popover_radius: radius.xl,
                 sheet_width: 480.,
-                agent_width: 360.,
+                // The original app's popover: room for a reply beside a
+                // tool group's mono chips without wrapping every line.
+                agent_width: 440.,
+                agent_height: 680.,
+                agent_gap: space.xl,
                 tree_indent: 16.,
                 kind_badge: 18.,
                 thumbnail_min: 120.,

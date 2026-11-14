@@ -112,7 +112,7 @@ impl TextField {
     /// The lines a multi-line field shows: its text as it wraps in the
     /// field's width, between two and [`MULTILINE_MOST`] (a line of source
     /// counts from one). Past the most, the editor scrolls.
-    fn lines(&self, window: &mut Window) -> f32 {
+    fn lines(&self, window: &mut Window, least: usize) -> f32 {
         let text = self.slot.value();
         let size = px(self.tokens.typography.body);
         let room = self.width.get() - 2. * MULTILINE_TEXT_ORIGIN.0;
@@ -145,8 +145,8 @@ impl TextField {
                 lines += (f32::from(width) / room).floor() as usize;
             }
         }
-        let least = if self.code.is_some() { 1 } else { 2 };
-        lines.clamp(least, MULTILINE_MOST) as f32
+        let least = if self.code.is_some() { 1 } else { least };
+        lines.clamp(least, MULTILINE_MOST.max(least)) as f32
     }
     /// A multiline editor in `family` (code editors use the mono face) that
     /// fills its parent's height.
@@ -296,7 +296,11 @@ impl Render for TextField {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let slot = self.slot.clone();
         let multiline = (self.kind == TextKind::Multiline && !self.fill && !self.bare)
-            .then(|| self.lines(window));
+            .then(|| self.lines(window, 2));
+        // A composer grows with its wrapped lines too, not only its returns:
+        // a long request stays in view while it is typed.
+        let composer =
+            (self.kind == TextKind::Composer && !self.fill).then(|| self.lines(window, 1));
         let seen = self.width.clone();
         let entity = cx.entity().downgrade();
         let dense = matches!(self.kind, TextKind::DenseText | TextKind::DenseNumber);
@@ -322,7 +326,10 @@ impl Render for TextField {
             .when(!self.fill, |d| {
                 d.h(px(if self.kind == TextKind::Composer {
                     // Grows with its lines, up to the composer's limit.
-                    let lines = (self.value.lines().count().max(1) as f32)
+                    let lines = composer
+                        .unwrap_or(1.)
+                        .max(self.value.lines().count() as f32)
+                        .max(1.)
                         .min(self.tokens.metrics.composer_max_lines);
                     (lines * self.tokens.typography.body * 1.35 + 10.).max(self.tokens.metrics.hit)
                 } else if bare {

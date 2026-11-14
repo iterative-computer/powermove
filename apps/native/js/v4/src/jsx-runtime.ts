@@ -49,6 +49,12 @@ export interface SurfaceProps {
   "data-pm-variant"?: "inline" | "band";
   /** Files dropped from Finder land on this target. */
   "data-pm-drop"?: "files";
+  /** A scroller that follows its end while the reader is there (a
+   * conversation); it reports `scroll` `{away}` when they leave or return. */
+  "data-pm-follow"?: "end";
+  /** A new value takes a following scroller back to its end. */
+  "data-pm-follow-token"?: string | number;
+  onScroll?: (event: SurfaceEvent) => void;
   "data-pm-system-placement"?: "system";
   "data-pm-dismiss-outside"?: boolean;
   "data-pm-live-edit"?: boolean;
