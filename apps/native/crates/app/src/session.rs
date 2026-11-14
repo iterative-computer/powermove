@@ -2266,9 +2266,13 @@ impl Controller {
             end: Some((self.duration() * TICKS_PER_SECOND as f64) as i64),
             audio: true,
         };
+        // Placed with the window's resources, so its first frame already
+        // holds while the window's extensions load.
         let placed = match &old {
-            Some(old) => self.engine.replace_viewer(old, config),
-            None => self.engine.viewer(config),
+            Some(old) => self
+                .engine
+                .replace_viewer_fed(old, config, &self.resource_feed),
+            None => self.engine.viewer_fed(config, &self.resource_feed),
         };
         match placed {
             Ok(viewer) => {
@@ -2276,9 +2280,6 @@ impl Controller {
                 let _ = viewer.adapt_drags(true);
                 let _ = viewer.skim_audio(self.skimming.on && self.skimming.audio);
                 self.skimming.at = None;
-                if let Err(error) = self.resource_feed.attach(&viewer) {
-                    self.message = error.to_string();
-                }
                 self.viewer = Some(viewer)
             }
             Err(e) => {

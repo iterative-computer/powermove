@@ -1546,7 +1546,31 @@ impl EngineService {
         self.shared.device.lock().unwrap().clone()
     }
     pub fn viewer(&self, config: ViewerConfig) -> Result<Viewer> {
-        self.place(config, None)
+        self.place(config, None, Arc::default())
+    }
+    /// A viewer of a window whose resources come from `feed`: its first
+    /// frame already draws the feed's latest snapshot, and it follows the
+    /// feed from then on. A viewer placed and attached in two steps could
+    /// draw a frame in between without the window's extensions, so one
+    /// opened while they load would show the project once without its
+    /// effects.
+    pub fn viewer_fed(
+        &self,
+        config: ViewerConfig,
+        feed: &resources::ResourceFeed,
+    ) -> Result<Viewer> {
+        feed.place(|resources| self.place(config, None, resources))
+    }
+    /// [`Self::replace_viewer`] for a viewer that follows `feed` ([`Self::viewer_fed`]).
+    pub fn replace_viewer_fed(
+        &self,
+        old: &Viewer,
+        config: ViewerConfig,
+        feed: &resources::ResourceFeed,
+    ) -> Result<Viewer> {
+        let viewer = feed.place(|resources| self.place(config, Some(old.id), resources))?;
+        old.retired();
+        Ok(viewer)
     }
     /// `old`'s place shows `config` from now on (another composition of its
     /// document, or another document). The two change places in one step: a
@@ -1554,11 +1578,16 @@ impl EngineService {
     /// caches, programs, override answers and background fill, and the worker
     /// keeps its device. On an error `old` is still in place.
     pub fn replace_viewer(&self, old: &Viewer, config: ViewerConfig) -> Result<Viewer> {
-        let viewer = self.place(config, Some(old.id))?;
+        let viewer = self.place(config, Some(old.id), Arc::default())?;
         old.retired();
         Ok(viewer)
     }
-    fn place(&self, config: ViewerConfig, replaces: Option<u64>) -> Result<Viewer> {
+    fn place(
+        &self,
+        config: ViewerConfig,
+        replaces: Option<u64>,
+        resources: Arc<resources::ResourceSnapshot>,
+    ) -> Result<Viewer> {
         config.output.validate()?;
         ensure!(
             config.rate.exact_frame_ticks().is_some(),
@@ -1638,7 +1667,7 @@ impl EngineService {
                 waiting_definitions: false,
                 pipeline: Default::default(),
                 mastering: Default::default(),
-                resources: Arc::default(),
+                resources,
                 quality: Quality::Auto,
                 studio_preview: studio::Preview::debug_default().map_err(anyhow::Error::msg)?,
                 studio_view: studio::ViewCamera::Active,

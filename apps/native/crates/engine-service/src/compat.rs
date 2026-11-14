@@ -1403,10 +1403,7 @@ mod tests {
         // A coarser frame (playback at half resolution) draws the finer
         // window when its crop, taken to the window's pixels, lies inside.
         assert_eq!(byte_of(ask(crop(10, 5, 20, 15), 0.5)), Some(7));
-        assert!(matches!(
-            ask(crop(5, 5, 20, 15), 0.5),
-            CompatAnswer::Native
-        ));
+        assert!(matches!(ask(crop(5, 5, 20, 15), 0.5), CompatAnswer::Native));
         store.end_frame();
         // A whole raster stands in for any crop and scale, as before.
         let mut whole = at("x", 1.2);

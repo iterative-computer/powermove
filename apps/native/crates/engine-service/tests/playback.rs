@@ -770,13 +770,17 @@ fn every_viewer_of_a_window_follows_its_extensions_as_they_load_and_reload() {
     // The window's extensions are loading when both viewers open.
     publish(1, vec![], true);
     let editor = service
-        .viewer(config(project(), MediaCatalog::default(), output(320, 180)))
+        .viewer_fed(
+            config(project(), MediaCatalog::default(), output(320, 180)),
+            &feed,
+        )
         .unwrap();
-    feed.attach(&editor).unwrap();
     let popout = service
-        .viewer(config(project(), MediaCatalog::default(), output(320, 180)))
+        .viewer_fed(
+            config(project(), MediaCatalog::default(), output(320, 180)),
+            &feed,
+        )
         .unwrap();
-    feed.attach(&popout).unwrap();
     let start = Instant::now();
     while start.elapsed() < Duration::from_millis(600) {
         for v in [&editor, &popout] {
@@ -834,9 +838,11 @@ fn every_viewer_of_a_window_follows_its_extensions_as_they_load_and_reload() {
     popout.retire();
     publish(5, vec![], false);
     let late = service
-        .viewer(config(project(), MediaCatalog::default(), output(320, 180)))
+        .viewer_fed(
+            config(project(), MediaCatalog::default(), output(320, 180)),
+            &feed,
+        )
         .unwrap();
-    feed.attach(&late).unwrap();
     late.capture_next().unwrap();
     let bypassed = wait(&late, "the late viewer draws", |s| {
         s.frame.as_ref().is_some_and(|f| f.pixels.is_some())
@@ -847,6 +853,43 @@ fn every_viewer_of_a_window_follows_its_extensions_as_they_load_and_reload() {
             .iter()
             .any(|m| m.effect == "ext.invert"),
         "{bypassed:?}"
+    );
+}
+
+/// A viewer opened while its window's extensions load holds from its first
+/// frame: it is placed with the window's resources, never drawing in between
+/// (placed, then attached, it could draw once without the extensions' effects
+/// and report them missing: the window-feed test above failed now and then).
+#[test]
+fn a_viewer_opened_while_extensions_load_never_draws_without_them() {
+    let project = snapshot(&format!(
+        r##"{{"id":"P","name":"P","compId":"C","compName":"C","w":640,"h":360,"fps":30,"dur":3,"bg":"#000000",
+        "layers":[{}],"comps":{{}},"assets":{{}},"markers":[],"work":[0,3],"params":{{}}}}"##,
+        shape("top", "#FF0000", 320.).replace(
+            r#""fx":[]"#,
+            r#""fx":[{"id":"e1","type":"ext.invert","on":true,"p":{}}]"#
+        )
+    ));
+    let service = service("fed-placement");
+    let feed = pm_engine_service::resources::ResourceFeed::new(Arc::new(
+        pm_engine_service::resources::ResourceSnapshot {
+            generation: 1,
+            pending: true,
+            ..Default::default()
+        },
+    ));
+    let viewer = service
+        .viewer_fed(
+            config(project, MediaCatalog::default(), output(320, 180)),
+            &feed,
+        )
+        .unwrap();
+    // Time enough for any frame the viewer would draw on its own.
+    std::thread::sleep(Duration::from_millis(400));
+    let status = viewer.status();
+    assert!(
+        status.frame.is_none() && status.missing_effects.is_empty(),
+        "held from the first frame: {status:?}"
     );
 }
 
