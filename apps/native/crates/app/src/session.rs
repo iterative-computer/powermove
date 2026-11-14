@@ -2688,6 +2688,16 @@ impl Controller {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        // Flying (Shift+`) holds every shortcut: Escape/cancel ends the
+        // flight where it began, the rest wait (no play, scrub or edits).
+        if let Some(g) = self.builtins.gizmos.clone()
+            && g.read(cx).studio_flying()
+        {
+            if matches!(cmd.name.as_str(), "deselect" | "cancel") {
+                cx.defer(move |cx| g.update(cx, |g, cx| g.studio_fly_end(false, cx)));
+            }
+            return true;
+        }
         if crate::generated_panel::pick(self, &cmd.name, cx) {
             return true;
         }

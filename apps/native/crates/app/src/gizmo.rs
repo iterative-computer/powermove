@@ -16,6 +16,8 @@ mod marquee;
 pub mod pen;
 #[path = "snap.rs"]
 mod snap;
+#[path = "fly.rs"]
+pub mod fly;
 #[path = "gizmo3d.rs"]
 pub mod studio3d;
 #[path = "viewer_rulers.rs"]
@@ -357,6 +359,8 @@ pub struct GizmoSurface {
     /// View ▸ Show Rulers and Show Grid, and the guides pulled from a ruler.
     rulers: viewer_rulers::Rulers,
     cursor: CursorStyle,
+    /// Holds the keyboard while flying, so held keys report their release.
+    focus: Option<FocusHandle>,
     refreshing: bool,
     /// A Shape tool drag: where it started and the box drawn so far.
     sketch: Option<Sketch>,
@@ -621,6 +625,7 @@ impl GizmoSurface {
             space_panned: false,
             rulers: Default::default(),
             cursor: CursorStyle::Arrow,
+            focus: None,
             refreshing: false,
             sketch: None,
             text_sketch: None,
@@ -1116,6 +1121,11 @@ impl GizmoSurface {
             .map(|(i, _)| Hit::Handle(i))
     }
     fn on_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // Flying: a click keeps the flight (Blender's Fly).
+        if self.studio_flying() {
+            self.studio_fly_end(true, cx);
+            return;
+        }
         let Some(frame) = self.host.frame(self.bounds, cx) else {
             return;
         };
@@ -1287,6 +1297,11 @@ impl GizmoSurface {
     /// Secondary press: selects what is under the pointer, locked layers
     /// included, then opens the shared layer menu on it.
     fn on_context(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // Flying: a right-click cancels and returns to where it began.
+        if self.studio_flying() {
+            self.studio_fly_end(false, cx);
+            return;
+        }
         let Some(frame) = self.host.frame(self.bounds, cx) else {
             return;
         };
@@ -1441,6 +1456,16 @@ impl GizmoSurface {
         .detach();
     }
     fn on_wheel(&mut self, event: &ScrollWheelEvent, line: Pixels, cx: &mut Context<Self>) {
+        // Flying: the wheel changes speed, a notch (or ~20 pt) a step.
+        if self.studio_flying() {
+            let dy = f32::from(event.delta.pixel_delta(line).y) as f64;
+            let notches = match event.delta {
+                ScrollDelta::Lines(l) => l.y as f64,
+                ScrollDelta::Pixels(_) => dy / 20.,
+            };
+            self.studio_fly_scroll(notches);
+            return;
+        }
         if self.studio_wheel(event, line, cx) {
             return;
         }
@@ -1465,6 +1490,10 @@ impl GizmoSurface {
         }
     }
     fn on_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        if self.studio_flying() {
+            self.studio_fly_pointer(event.position);
+            return;
+        }
         if self.rulers.dragging.is_some()
             && let Some(frame) = self.host.frame(self.bounds, cx)
             && self.rulers_move(event.position, frame)
@@ -2672,14 +2701,26 @@ fn overlay(poses: &[Pose], frame: ViewFrame, t: &pm_design::Tokens) -> Vec<Overl
     lines
 }
 impl Render for GizmoSurface {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let this = cx.entity().downgrade();
+        let focus = self.focus.get_or_insert_with(|| cx.focus_handle()).clone();
+        // Flying holds the keyboard so a released key stops its move.
+        if self.studio_flying() && !focus.is_focused(window) {
+            window.focus(&focus, cx);
+        }
         // Media held over the viewer: an accent ring where it will land.
         let accent = rgb(self.tokens.colors.accent);
         let ring = px(self.tokens.metrics.border * 2.);
         div()
             .id("viewer-gizmos")
             .size_full()
+            .track_focus(&focus)
+            .on_key_up(cx.listener(|s, event: &KeyUpEvent, _, cx| {
+                s.studio_fly_key(&event.keystroke, false, cx);
+            }))
+            .on_modifiers_changed(cx.listener(|s, event: &ModifiersChangedEvent, _, _| {
+                s.studio_fly_modifiers(event.modifiers);
+            }))
             .cursor(self.cursor)
             .on_drag_over::<ExternalPaths>(move |style, _, _, _| {
                 style.border(ring).border_color(accent)

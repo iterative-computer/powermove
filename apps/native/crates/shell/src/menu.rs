@@ -107,6 +107,8 @@ pub fn view3d() -> Vec<Item> {
         ("Zoom", "tool", "zoom"),
         ("Light", "tool", "light"),
         ("", "", ""),
+        ("Fly Navigation", "fly", ""),
+        ("", "", ""),
         ("Scene Axes", "axes", "scene"),
         ("Object Axes", "axes", "object"),
         ("Frame", "frame", ""),
@@ -126,7 +128,8 @@ pub fn view3d() -> Vec<Item> {
         } else {
             Item {
                 args: vec![json!(group), json!(value)],
-                ..Item::command(label, "studio.view", "")
+                // Blender's Fly navigation keeps Blender's Shift+`.
+                ..Item::command(label, "studio.view", if *group == "fly" { "shift+`" } else { "" })
             }
         }
     })

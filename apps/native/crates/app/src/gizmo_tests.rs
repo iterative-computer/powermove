@@ -2516,3 +2516,92 @@ fn files_dropped_on_the_viewer_are_imported_there(cx: &mut TestAppContext) {
     s.vcx.run_until_parked();
     assert_eq!(*s.recorder.files.borrow(), paths);
 }
+
+/// Fly navigation (Shift+`, Blender's Fly) through the shot camera: confirm
+/// stores the flight on the camera as one Undo (the camera and its point of
+/// interest move together, so it looks where the flight ended).
+#[gpui::test]
+fn flying_through_the_camera_stores_the_flight_as_one_undo(cx: &mut TestAppContext) {
+    let mut s = studio_stage(cx);
+    let before = stored(&s, "cam");
+    s.surface.update(&mut s.vcx, |g, cx| g.studio_setting("fly", "", cx));
+    assert!(s.surface.read_with(&s.vcx, |g, _| g.studio_flying()));
+    s.surface
+        .update(&mut s.vcx, |g, cx| g.studio_fly_advance(3., 1., cx));
+    s.surface.update(&mut s.vcx, |g, cx| g.studio_fly_end(true, cx));
+    let kernel = s.rig.kernel.clone();
+    let z0 = before["p"]["position.z"].clone();
+    settle(cx, move |_| {
+        let p = kernel.published(PROJECT).unwrap();
+        let root = pm_scene3d::from_model(&p.snapshot.root().unwrap().to_value()).unwrap();
+        root.to_string().contains("\"cam\"") && {
+            fn find(v: &serde_json::Value) -> Option<serde_json::Value> {
+                match v {
+                    serde_json::Value::Object(o) if o.get("id").and_then(|i| i.as_str()) == Some("cam") && o.contains_key("p") => Some(v.clone()),
+                    serde_json::Value::Object(o) => o.values().find_map(find),
+                    serde_json::Value::Array(a) => a.iter().find_map(find),
+                    _ => None,
+                }
+            }
+            find(&root).is_some_and(|c| c["p"]["position.z"] != z0)
+        }
+    });
+    let after = stored(&s, "cam");
+    let num = |v: &serde_json::Value| v.as_f64().or(v["v"].as_f64()).unwrap();
+    // It flew forward, toward what it looked at (−Z from z = 6).
+    assert!(num(&after["p"]["position.z"]) < num(&before["p"]["position.z"]), "{after}");
+    // The point of interest moved with it: the camera still looks straight ahead.
+    let dz_cam = num(&after["p"]["position.z"]) - num(&before["p"]["position.z"]);
+    let t = |l: &serde_json::Value| num(&l["d"]["data"]["camera"]["p"]["targetZ"]);
+    assert!((t(&after) - t(&before) - dz_cam).abs() < 1e-6, "{} {}", t(&after), dz_cam);
+    assert!(!s.surface.read_with(&s.vcx, |g, _| g.studio_free()), "back to the shot");
+    undo_3d(&mut s, cx);
+    assert_eq!(stored(&s, "cam")["p"]["position.z"], before["p"]["position.z"]);
+}
+/// Cancel returns exactly to where the flight began and writes nothing.
+#[gpui::test]
+fn cancelling_a_flight_restores_the_view_and_writes_nothing(cx: &mut TestAppContext) {
+    let mut s = studio_stage(cx);
+    let doc = |s: &Stage| s.rig.kernel.published(PROJECT).unwrap().snapshot.root().unwrap().to_value();
+    let before = doc(&s);
+    s.surface.update(&mut s.vcx, |g, cx| g.studio_setting("fly", "", cx));
+    s.surface
+        .update(&mut s.vcx, |g, cx| g.studio_fly_advance(4., 1., cx));
+    s.surface.update(&mut s.vcx, |g, cx| g.studio_fly_end(false, cx));
+    cx.run_until_parked();
+    assert!(!s.surface.read_with(&s.vcx, |g, _| g.studio_flying()));
+    assert!(!s.surface.read_with(&s.vcx, |g, _| g.studio_free()), "back to the shot");
+    assert_eq!(doc(&s), before);
+}
+/// In the editor view, a kept flight moves only the view.
+#[gpui::test]
+fn flying_the_editor_view_never_writes_the_project(cx: &mut TestAppContext) {
+    let mut s = studio_stage(cx);
+    let at = s.point_of([320., 180.]);
+    s.vcx.simulate_event(gpui::ScrollWheelEvent {
+        position: at,
+        delta: gpui::ScrollDelta::Pixels(point(px(30.), px(0.))),
+        modifiers: Modifiers::none(),
+        touch_phase: gpui::TouchPhase::Moved,
+    });
+    cx.run_until_parked();
+    let doc = |s: &Stage| s.rig.kernel.published(PROJECT).unwrap().snapshot.root().unwrap().to_value();
+    let before = doc(&s);
+    let start = s.surface.read_with(&s.vcx, |g, _| g.studio_free_pose()).unwrap();
+    s.surface.update(&mut s.vcx, |g, cx| g.studio_setting("fly", "", cx));
+    s.surface
+        .update(&mut s.vcx, |g, cx| g.studio_fly_advance(2., 1., cx));
+    s.surface.update(&mut s.vcx, |g, cx| g.studio_fly_end(true, cx));
+    cx.run_until_parked();
+    let end = s.surface.read_with(&s.vcx, |g, _| g.studio_free_pose()).unwrap();
+    assert_ne!(end.position, start.position, "the view flew");
+    assert!(s.surface.read_with(&s.vcx, |g, _| g.studio_free()));
+    assert_eq!(doc(&s), before);
+}
+/// Shift+` does nothing in a 2D composition.
+#[gpui::test]
+fn fly_needs_a_3d_composition(cx: &mut TestAppContext) {
+    let mut s = stage(cx);
+    s.surface.update(&mut s.vcx, |g, cx| g.studio_setting("fly", "", cx));
+    assert!(!s.surface.read_with(&s.vcx, |g, _| g.studio_flying()));
+}

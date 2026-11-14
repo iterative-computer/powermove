@@ -153,6 +153,19 @@ struct LightOrbit {
     active: bool,
     time: f64,
 }
+/// A flight: the model, where it began, and the hooks that hold the
+/// keyboard and the frame clock while it lasts.
+pub(super) struct FlyRun {
+    pub(super) fly: super::fly::Fly,
+    /// It began looking through the shot camera: confirm stores the flight
+    /// on that camera; otherwise only the editor view moves.
+    camera: bool,
+    was_free: bool,
+    prev_free: Option<View>,
+    last: std::time::Instant,
+    _keys: Option<Subscription>,
+    _clock: Option<Task<()>>,
+}
 #[derive(Default)]
 pub struct State {
     pub scene: Option<Arc<Scene>>,
@@ -179,6 +192,8 @@ pub struct State {
     /// drags it around what it lights.
     pub light_aim: String,
     light_orbit: Option<LightOrbit>,
+    /// Fly navigation in progress (Shift+`).
+    fly: Option<FlyRun>,
     /// The handle under the pointer, drawn in text colour (§5).
     pub(super) hover: Option<Handle>,
     nav: Option<NavDrag>,
@@ -241,7 +256,7 @@ impl State {
         self.scene.is_some()
     }
     pub fn busy(&self) -> bool {
-        self.nav.is_some() || self.drag.is_some() || self.light_orbit.is_some()
+        self.nav.is_some() || self.drag.is_some() || self.light_orbit.is_some() || self.fly.is_some()
     }
     fn view(&self) -> Option<View> {
         let scene = self.scene.as_ref()?;
@@ -382,6 +397,7 @@ impl GizmoSurface {
         };
         let (key, allowed) = match group {
             "frame" => return self.studio_frame(cx),
+            "fly" => return self.studio_fly_start(cx),
             "look" => ("studioLook", LOOKS),
             "tool" => ("studioTool", TOOLS),
             "axes" => ("studioAxes", AXES_),
@@ -408,7 +424,10 @@ impl GizmoSurface {
     /// Looking through Free View in a 3D composition: the viewer fills its
     /// whole body with the editor view.
     pub fn studio_free(&self) -> bool {
-        self.studio.active() && self.studio.free_look
+        // Flying through the shot camera keeps the shot's framing.
+        self.studio.active()
+            && self.studio.free_look
+            && !self.studio.fly.as_ref().is_some_and(|run| run.camera)
     }
     /// Where a light's marker and its ◆ target sit, in composition pixels,
     /// with the whole composition in view (tests drive them as a person would).
@@ -429,6 +448,177 @@ impl GizmoSurface {
     #[cfg(test)]
     pub(crate) fn studio_free_pose(&self) -> Option<View> {
         self.studio.free_look.then_some(self.studio.free).flatten()
+    }
+    /// Tests: speed up `notches` and fly `seconds` without the frame clock.
+    #[cfg(test)]
+    pub(crate) fn studio_fly_advance(&mut self, notches: f64, seconds: f64, cx: &mut Context<Self>) {
+        if let Some(run) = self.studio.fly.as_mut() {
+            run.fly.accelerate(notches);
+            run.fly.tick(seconds.min(0.1));
+            for _ in 1..(seconds / 0.1).round() as usize {
+                run.fly.tick(0.1);
+            }
+            self.studio.free = Some(run.fly.pose());
+            self.studio_push_view(cx);
+        }
+    }
+    /// Flying (Shift+`): every other shortcut waits.
+    pub fn studio_flying(&self) -> bool {
+        self.studio.fly.is_some()
+    }
+    /// Shift+`: start flying from the view on screen, the shot camera's or
+    /// the editor view's (Blender's Fly navigation).
+    pub fn studio_fly_start(&mut self, cx: &mut Context<Self>) {
+        if self.studio.fly.is_some() || self.studio.busy() {
+            return;
+        }
+        let Some(scene) = self.studio.scene.clone() else {
+            return;
+        };
+        let start = self.studio.view().unwrap_or(scene.shot);
+        let (was_free, prev_free) = (self.studio.free_look, self.studio.free);
+        // Fly in the editor view; through the camera it is stored on confirm.
+        self.studio.free_look = true;
+        self.studio.look_pending = Some(true);
+        self.studio.free = Some(start);
+        let this = cx.entity().downgrade();
+        let keys = cx.intercept_keystrokes(move |event, _, cx| {
+            if let Some(this) = this.upgrade() {
+                this.update(cx, |s, cx| s.studio_fly_key(&event.keystroke, true, cx));
+                cx.stop_propagation();
+            }
+        });
+        let clock = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(16))
+                    .await;
+                let Ok(going) = this.update(cx, |s, cx| s.studio_fly_tick(cx)) else {
+                    break;
+                };
+                if !going {
+                    break;
+                }
+            }
+        });
+        self.studio.fly = Some(FlyRun {
+            fly: super::fly::Fly::new(start),
+            camera: !was_free,
+            was_free,
+            prev_free,
+            last: std::time::Instant::now(),
+            _keys: Some(keys),
+            _clock: Some(clock),
+        });
+        self.cursor = CursorStyle::Crosshair;
+        // The viewer shows the keys while flying (UI state, not the document).
+        self.studio_ui("studioFly", "on", cx);
+        self.studio_push_view(cx);
+        self.draw(cx);
+        cx.notify();
+    }
+    fn studio_fly_tick(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(run) = self.studio.fly.as_mut() else {
+            return false;
+        };
+        let now = std::time::Instant::now();
+        run.fly.tick(now.duration_since(run.last).as_secs_f64());
+        run.last = now;
+        self.studio.free = Some(run.fly.pose());
+        self.studio_push_view(cx);
+        self.draw(cx);
+        true
+    }
+    /// A key while flying. Down: W/S (and ↑/↓) change speed, A/D (←/→)
+    /// strafe, E/R climb, Q/F descend, Enter confirms, Esc cancels, +/−
+    /// change speed. Up releases a held move.
+    pub(super) fn studio_fly_key(&mut self, key: &Keystroke, down: bool, cx: &mut Context<Self>) {
+        let Some(run) = self.studio.fly.as_mut() else {
+            return;
+        };
+        run.fly.fast = key.modifiers.shift;
+        run.fly.slow = key.modifiers.alt;
+        let held = &mut run.fly.held;
+        match (key.key.as_str(), down) {
+            ("w" | "up" | "+" | "=", true) => run.fly.accelerate(1.),
+            ("s" | "down" | "-", true) => run.fly.accelerate(-1.),
+            ("a" | "left", d) => held.left = d,
+            ("d" | "right", d) => held.right = d,
+            ("e" | "r", d) => held.up = d,
+            ("q" | "f", d) => held.down = d,
+            ("enter", true) => return self.studio_fly_end(true, cx),
+            ("escape", true) => return self.studio_fly_end(false, cx),
+            _ => {}
+        }
+    }
+    /// Shift and Option while flying (pressed or released alone).
+    pub(super) fn studio_fly_modifiers(&mut self, m: Modifiers) {
+        if let Some(run) = self.studio.fly.as_mut() {
+            run.fly.fast = m.shift;
+            run.fly.slow = m.alt;
+        }
+    }
+    /// The pointer while flying: its offset from the viewer's centre steers.
+    pub(super) fn studio_fly_pointer(&mut self, at: Point<Pixels>) {
+        let b = self.bounds;
+        let Some(run) = self.studio.fly.as_mut() else {
+            return;
+        };
+        let (w, h) = (f32::from(b.size.width) as f64, f32::from(b.size.height) as f64);
+        if w <= 0. || h <= 0. {
+            return;
+        }
+        run.fly.pointer = [
+            ((f32::from(at.x - b.origin.x) as f64) - w / 2.) / (w / 2.),
+            ((f32::from(at.y - b.origin.y) as f64) - h / 2.) / (h / 2.),
+        ];
+    }
+    /// Scroll while flying: each notch is one speed step.
+    pub(super) fn studio_fly_scroll(&mut self, notches: f64) {
+        if let Some(run) = self.studio.fly.as_mut() {
+            run.fly.accelerate(notches);
+        }
+    }
+    /// Confirm (click, Enter) keeps the flight; cancel (Esc, right-click)
+    /// returns to exactly where it began. Through the shot camera, confirm
+    /// stores the flight on the camera as one Undo, "Fly Camera".
+    pub fn studio_fly_end(&mut self, keep: bool, cx: &mut Context<Self>) {
+        let Some(run) = self.studio.fly.take() else {
+            return;
+        };
+        let end = run.fly.pose();
+        if keep && run.camera {
+            let time = self.host.time(cx);
+            let stored = self
+                .kernel
+                .published(&self.project)
+                .ok_or_else(|| "Project closed".to_string())
+                .and_then(|p| {
+                    pm_panel_studio3d::properties::fly_camera(&p, time, run.fly.start, end)
+                        .map_err(|e| e.to_string())
+                });
+            match stored {
+                Ok((_, commands)) => {
+                    self.queue.push_back(Job::Transact("Fly Camera", commands, None));
+                    self.pump(cx);
+                }
+                Err(e) => self.host.report(e, cx),
+            }
+        }
+        // Kept in the editor view, the view simply stays where it flew to.
+        // Otherwise back to the look it began in: the shot (now carrying the
+        // flight, on confirm) or the editor view exactly as it was.
+        if !(keep && !run.camera) {
+            self.studio.free_look = run.was_free;
+            self.studio.look_pending = Some(run.was_free);
+            self.studio.free = run.prev_free;
+            self.studio_ui("studioLook", if run.was_free { "free" } else { "camera" }, cx);
+        }
+        self.cursor = CursorStyle::Arrow;
+        self.studio_ui("studioFly", "off", cx);
+        self.studio_push_view(cx);
+        self.draw(cx);
+        cx.notify();
     }
     /// Whether the composition shows Studio 3D layers (F frames them).
     pub fn studio_active(&self) -> bool {
@@ -454,6 +644,21 @@ impl GizmoSurface {
     /// end): handles first, then the selected lights' emitter and aim, the
     /// light markers, and last the shot camera's frustum.
     pub(super) fn studio_lines(&self, frame: ViewFrame) -> Vec<OverlayLine> {
+        // Flying: only a small crosshair at the centre, where the view heads.
+        if self.studio.fly.is_some() {
+            let v = self.studio_visible(frame);
+            let (c, s) = ([(v[0] + v[2]) / 2., (v[1] + v[3]) / 2.], 9. / frame.scale);
+            let [w, h] = frame.size;
+            let ink = rgb(self.tokens.colors.text);
+            let line = |a: [f64; 2], b: [f64; 2]| OverlayLine {
+                ends: [a[0] / w, a[1] / h, b[0] / w, b[1] / h].map(|x| x as f32),
+                color: ink,
+            };
+            return vec![
+                line([c[0] - s, c[1]], [c[0] + s, c[1]]),
+                line([c[0], c[1] - s], [c[0], c[1] + s]),
+            ];
+        }
         let mut lines = self.studio_handle_lines(frame);
         let (selected, markers, camera) = self.studio_light_lines(frame);
         lines.extend(selected);

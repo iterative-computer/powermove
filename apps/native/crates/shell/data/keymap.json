@@ -2601,5 +2601,18 @@
     "in_fields": false,
     "repeat": false,
     "loose": false
+  },
+  {
+    "id": "native.fly",
+    "chord": "shift+`",
+    "command": "studio.view",
+    "args": [
+      "fly",
+      ""
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
   }
 ]

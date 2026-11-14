@@ -358,8 +358,40 @@ export function ViewerPanel({
       style={{ fontSize: token("typography.body"), flexShrink: 0 }}
     />
   );
+  // Fly navigation (Shift+`, Blender's Fly): its keys while it lasts.
+  const flyHint = m.studio?.fly ? (
+    <div
+      id="viewer.studio.flyHint"
+      role="status"
+      label="Fly navigation"
+      style={{
+        position: "absolute",
+        left: token("metrics.inset"),
+        right: token("metrics.inset"),
+        bottom: token("metrics.inset"),
+        display: "flex",
+        flexDirection: "row",
+        justifyContent: "center",
+      }}
+    >
+      <text
+        style={{
+          color: token("colors.secondary"),
+          fontSize: token("typography.body"),
+          background: token("colors.floating"),
+          borderRadius: token("metrics.pill_radius"),
+          paddingLeft: token("metrics.inset"),
+          paddingRight: token("metrics.inset"),
+          whiteSpace: "nowrap",
+        }}
+      >
+        Fly · Steer with the pointer · W S or scroll: speed · A D: sideways · E Q: up and down · ⇧ faster · ⌥ slower · Click or Return: keep · Esc or right-click: cancel
+      </text>
+    </div>
+  ) : null;
   // Focus and full screen have no bar: there, one control returns.
-  const viewCamera = free && state.host.presentation !== "Docked" ? (
+  const viewCamera =
+    free && !m.studio?.fly && state.host.presentation !== "Docked" ? (
     <div
       id="viewer.studio.return"
       role="group"
@@ -560,6 +592,7 @@ export function ViewerPanel({
           style={{ position: "absolute", inset: "fill" }}
         />
         {viewCamera}
+        {flyHint}
         {capsule}
       </div>
       {!source && m.canvasLost && (

@@ -220,12 +220,13 @@ const NATIVE_BINDINGS: &[(&str, &str, &str, &str)] = &[
         "studio.view",
         r#"["look","toggle"]"#,
     ),
+    ("native.fly", "shift+`", "studio.view", r#"["fly",""]"#),
 ];
 #[test]
 fn every_shipped_binding_under_seven_routing_contexts() {
     let c = pm_acceptance::catalog::Catalog::embedded().unwrap();
     let shipped = keyboard::production::shipped();
-    assert_eq!(shipped.len(), 251);
+    assert_eq!(shipped.len(), 252);
     assert_eq!(c.bindings.len() + NATIVE_BINDINGS.len(), shipped.len());
     for real in &shipped {
         let binding = match c.bindings.iter().find(|b| b.id == real.id) {
