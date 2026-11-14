@@ -1294,7 +1294,7 @@ fn pq_and_hlg_stills_keep_their_light_in_an_hdr_project() {
         let path = d.join(format!("{name}.png"));
         std::fs::write(&path, with_chunk(&raw, b"cICP", &[9, transfer, 0, 1])).unwrap();
         let hdr = serde_json::json!({ "mode": "hdr" });
-        let (px, ..) = render_in(&mut renderer, &path, Some(hdr));
+        let (px, ..) = render_in(&mut renderer, &path, Some(hdr.clone()));
         for (i, (code, nits)) in levels.iter().enumerate() {
             let got = f64::from(pm_color::transfer::display_decode_f32(px[i * 4 + 1]));
             let want = nits / 203.0;
@@ -1304,9 +1304,11 @@ fn pq_and_hlg_stills_keep_their_light_in_an_hdr_project() {
                 "{name} {code}: {got} vs {want}"
             );
         }
-        // The same samples as a HEIC ImageIO writes in BT.2100: ImageIO's
-        // reader labels its samples SDR, so the still is refused with its
-        // reason rather than drawn wrong (listed in the colour notes).
+        // The same samples as a HEIC ImageIO writes in BT.2100 are drawn
+        // as HDR with the same light, within what lossy HEVC keeps of three
+        // neighbouring pixels (it blends them a few percent into each
+        // other); hdr_stills.rs holds HEIC PQ and HLG light to one code on
+        // flat 64×36 fixtures.
         let heic = d.join(format!("{name}.heic"));
         imageio_write(
             &path,
@@ -1317,11 +1319,17 @@ fn pq_and_hlg_stills_keep_their_light_in_an_hdr_project() {
                 ..Default::default()
             },
         );
-        assert!(
-            unsupported(&heic).contains("HEIF PQ/HLG stills"),
-            "{name}.heic: {}",
-            unsupported(&heic)
-        );
+        assert!(probe_image(&heic).is_ok(), "{name}.heic is drawn");
+        let (px, ..) = render_in(&mut renderer, &heic, Some(hdr));
+        for (i, (code, nits)) in levels.iter().enumerate() {
+            let got = f64::from(pm_color::transfer::display_decode_f32(px[i * 4 + 1]));
+            let want = nits / 203.0;
+            eprintln!("{name}.heic {code:.4}: {got:.4} (want {want:.4})");
+            assert!(
+                (got - want).abs() <= 0.05 * want.max(1.0),
+                "{name}.heic {code}: {got} vs {want}"
+            );
+        }
     }
     std::fs::remove_dir_all(&d).ok();
 }
