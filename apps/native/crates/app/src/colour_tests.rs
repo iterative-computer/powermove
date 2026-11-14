@@ -450,3 +450,62 @@ fn a_cdl_is_imported_onto_color_wheels_and_exported_back() {
     assert!(error.contains("outside what Color Wheels hold"), "{error}");
     actor.shutdown();
 }
+
+/// The numbers an agent reads off the Scopes panel: shares, histogram
+/// bands and their lit range, the waveform's range per band and the
+/// vectorscope's centre and hue, from counts known by construction.
+#[test]
+fn an_agent_reads_what_the_scopes_counted() {
+    let (levels, columns, bins) = (8usize, 4usize, 5usize);
+    let config = ScopeConfig {
+        levels: levels as u32,
+        columns: columns as u32,
+        vector_bins: bins as u32,
+        stage: ScopeStage::Output,
+        ..ScopeConfig::PANEL
+    };
+    // Ten pixels: four at level 2 in column 0, six at level 7 in column 3.
+    let mut waveform = vec![0u32; levels * columns];
+    waveform[2 * columns] = 4;
+    waveform[7 * columns + 3] = 6;
+    let mut luma = vec![0u32; levels];
+    luma[2] = 4;
+    luma[7] = 6;
+    // All ten at Cb = -0.25, Cr = +0.25 (bins 1 and 3 of 5): hue 135°.
+    let mut vectorscope = vec![0u32; bins * bins];
+    vectorscope[3 * bins + 1] = 10;
+    let frame = ScopeFrame {
+        config,
+        pixels: 10,
+        waveform,
+        parade: [
+            vec![0; levels * columns],
+            vec![0; levels * columns],
+            vec![0; levels * columns],
+        ],
+        vectorscope,
+        luma_histogram: luma.clone(),
+        histogram: [luma.clone(), luma.clone(), luma],
+        under: 1,
+        over: 3,
+        outside: 0,
+        invalid: 0,
+    };
+    let s = scope_summary(&frame);
+    assert_eq!(s["stage"], "Output");
+    assert_eq!(s["overPercent"], 30.0);
+    assert_eq!(s["underPercent"], 10.0);
+    assert_eq!(s["luma"]["lowest"], 28.6);
+    assert_eq!(s["luma"]["highest"], 100.0);
+    assert_eq!(s["luma"]["bands"][7], 60.0);
+    let bands = s["waveformBands"].as_array().unwrap();
+    assert_eq!(bands.len(), 4);
+    assert_eq!(
+        (bands[0]["low"].clone(), bands[0]["high"].clone()),
+        (serde_json::json!(28.6), serde_json::json!(28.6))
+    );
+    assert_eq!(bands[3]["high"], 100.0);
+    assert!(bands[1]["low"].is_null());
+    assert_eq!(s["vectorscope"]["meanHueDegrees"], 135.0);
+    assert_eq!(s["vectorscope"]["meanCb"], -0.25);
+}
