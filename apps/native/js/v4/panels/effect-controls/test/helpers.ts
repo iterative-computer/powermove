@@ -13,12 +13,16 @@ import type { Platform, Projection } from "../contract";
 export function platform() {
   const focus: string[] = [],
     announcements: string[] = [],
+    commands: string[] = [],
     errors: unknown[] = [];
   const api: Platform = {
     effectMenu: async () => null,
     contextMenu: async () => null,
     focus: (id) => {
       focus.push(id);
+    },
+    command: (name) => {
+      commands.push(name);
     },
     announce: (message) => {
       announcements.push(message);
@@ -27,7 +31,7 @@ export function platform() {
       errors.push(error);
     },
   };
-  return { api, focus, announcements, errors };
+  return { api, focus, announcements, commands, errors };
 }
 export async function fixture(value: Projection) {
   const kit = platform();

@@ -701,6 +701,13 @@ impl Target {
         }
     }
 }
+/// One project per window (owner decision, 2026-11-14): an editor window is
+/// never a tab of another, whatever the system's tab preference, so a window
+/// showing Home never stands in a tab bar as a "Home" tab (H3).
+pub fn one_project_per_window(window: &NSWindow) {
+    window.setTabbingIdentifier(&NSString::from_str("com.powermove.native.editor"));
+    window.setTabbingMode(NSWindowTabbingMode::Disallowed);
+}
 fn join_tab_group(leader: u64, window: &NSWindow) -> bool {
     let mtm = MainThreadMarker::new().unwrap();
     let number = WINDOW_IDS.with(|m| {
@@ -720,7 +727,20 @@ fn join_tab_group(leader: u64, window: &NSWindow) -> bool {
     lead.addTabbedWindow_ordered(window, NSWindowOrderingMode::Above);
     hide_system_tab_bar(&lead);
     hide_system_tab_bar(window);
-    gpui_macos::child_window::present(window, true);
+    if app.isActive() {
+        gpui_macos::child_window::present(window, true);
+    } else {
+        // Opened while another app is in front (a file opened from Finder or
+        // a launcher): it is the tab shown and the key window when the app
+        // is brought forward, not the tab that was key before (U3).
+        unsafe {
+            let group: *mut AnyObject = msg_send![window, tabGroup];
+            if !group.is_null() {
+                let _: () = msg_send![group, setSelectedWindow: window];
+            }
+        }
+        window.makeKeyWindow();
+    }
     true
 }
 /// `SEL *` out-parameter of `menuHasKeyEquivalent:forEvent:target:action:`
@@ -2133,10 +2153,7 @@ impl Host {
         window.makeFirstResponder(Some(&gpui));
         window.setTitle(&NSString::from_str("Untitled"));
         window.setSubtitle(&NSString::from_str(""));
-        window.setTabbingIdentifier(&NSString::from_str("com.powermove.native.editor"));
-        // One project per window (owner decision, 2026-11-14): never a tab
-        // of another window, whatever the system's tab preference.
-        window.setTabbingMode(NSWindowTabbingMode::Disallowed);
+        one_project_per_window(&window);
         // Frames, tabs and workspaces restore from the shell session (multiple
         // windows); AppKit's autosave name is one-per-window and would collide.
         window.setRestorable(false);
@@ -3515,6 +3532,20 @@ impl Host {
     pub fn set_viewer_label(&self, label: &str) {
         self.viewer
             .setAccessibilityLabel(Some(&NSString::from_str(label)));
+    }
+    /// Where the pointer is now, in the window content's points (top-left),
+    /// read from AppKit: GPUI's last pointer position is stale when the
+    /// pointer came in without the window seeing it move (an app switch).
+    pub fn pointer(&self) -> (f32, f32) {
+        let p = self
+            .gpui
+            .convertPoint_fromView(self.window.mouseLocationOutsideOfEventStream(), None);
+        let y = if self.gpui.isFlipped() {
+            p.y
+        } else {
+            self.gpui.bounds().size.height - p.y
+        };
+        (p.x as f32, y as f32)
     }
     pub fn toolbar_inset(&self) -> f32 {
         (self.gpui.bounds().size.height - self.window.contentLayoutRect().size.height).max(0.)

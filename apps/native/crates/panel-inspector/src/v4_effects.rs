@@ -33,10 +33,40 @@ struct FlatRow {
     effect: usize,
     parameter: Option<(PropertyId, String, Option<crate::ParamDefinition>)>,
     action: Option<crate::effect_definitions::ColorAction>,
+    /// Parameters shown as one summary row (a colour wheel's master and
+    /// channels, a curve's points): its key, its label, and its members.
+    group: Option<(String, String, Vec<Member>)>,
+}
+type Member = (PropertyId, String, Option<crate::ParamDefinition>);
+
+/// The summary a grade instrument's parameters fold into in Effect Controls
+/// (the Color panel draws the instrument itself): a wheel's master and red,
+/// green and blue, a curve's point count and points.
+fn grade_group(definition: &str, key: &str) -> Option<(&'static str, &'static str)> {
+    match definition {
+        "colorWheels" => ["lift", "gamma", "gain", "offset"]
+            .into_iter()
+            .zip(["Lift", "Gamma", "Gain", "Offset"])
+            .find(|(wheel, _)| {
+                key.strip_prefix(wheel)
+                    .is_some_and(|c| ["Master", "Red", "Green", "Blue"].contains(&c))
+            }),
+        "colorCurves" => {
+            let point = key == "count"
+                || key
+                    .strip_prefix(['x', 'y'])
+                    .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+            point.then_some(("curve", "Curve"))
+        }
+        _ => None,
+    }
 }
 #[derive(Default)]
 pub struct EffectsPanel {
     pub presentation: Presentation,
+    /// Effect Controls: a grade instrument's parameters fold into summary
+    /// rows (the Color panel, which asks for every row, leaves this off).
+    pub fold_grades: bool,
     range: Range<usize>,
     cache_key: Option<(u64, u64, String, Vec<bool>)>,
     cached_definitions: HashMap<String, crate::EffectDefinition>,
@@ -60,6 +90,11 @@ impl Plan {
     }
 }
 impl EffectsPanel {
+    /// Folds grade instruments into summary rows (Effect Controls).
+    pub fn folding_grades(mut self, fold: bool) -> Self {
+        self.fold_grades = fold;
+        self
+    }
     pub fn new(presentation: Presentation, range: Range<usize>) -> Self {
         Self {
             presentation,
@@ -103,6 +138,7 @@ impl EffectsPanel {
                 effect: index,
                 parameter: None,
                 action: None,
+                group: None,
             });
             if !open[index] {
                 continue;
@@ -118,17 +154,50 @@ impl EffectsPanel {
                     effect: index,
                     parameter: None,
                     action: Some(action),
+                    group: None,
                 });
             }
             match model.effect_parameters(layer, id) {
-                Ok(params) => self
-                    .flat
-                    .extend(params.into_iter().map(|(id, param)| FlatRow {
-                        id: pm_model::json::to_canonical_string(&id.value()),
-                        effect: index,
-                        parameter: Some((id, param.key.clone(), Some(param))),
-                        action: None,
-                    })),
+                Ok(params) => {
+                    let definition = text(effect, "type");
+                    for (property, param) in params {
+                        let key = param.key.clone();
+                        let group = self
+                            .fold_grades
+                            .then(|| grade_group(definition, &key))
+                            .flatten();
+                        let Some((group, label)) = group else {
+                            self.flat.push(FlatRow {
+                                id: pm_model::json::to_canonical_string(&property.value()),
+                                effect: index,
+                                parameter: Some((property, key, Some(param))),
+                                action: None,
+                                group: None,
+                            });
+                            continue;
+                        };
+                        // Members join the summary row where the first one was.
+                        let row_id = format!("summary:{id}:{group}");
+                        match self.flat.iter_mut().rev().find(|r| r.id == row_id) {
+                            Some(row) => {
+                                if let Some((.., members)) = &mut row.group {
+                                    members.push((property, key, Some(param)));
+                                }
+                            }
+                            None => self.flat.push(FlatRow {
+                                id: row_id,
+                                effect: index,
+                                parameter: None,
+                                action: None,
+                                group: Some((
+                                    group.into(),
+                                    label.into(),
+                                    vec![(property, key, Some(param))],
+                                )),
+                            }),
+                        }
+                    }
+                }
                 Err(InspectorError::MissingDefinition(_)) => {
                     if let Some(params) = effect.get("p").and_then(Value::as_object) {
                         self.flat.extend(params.iter().map(|(key, _)| {
@@ -142,6 +211,7 @@ impl EffectsPanel {
                                 ),
                                 effect: index,
                                 action: None,
+                                group: None,
                                 parameter: Some((
                                     PropertyId::new(
                                         layer,
@@ -164,6 +234,132 @@ impl EffectsPanel {
         self.cached_definition_generation = model.definition_generation;
         self.cache_key = Some(key);
         Ok(())
+    }
+    /// One parameter as a row shows it: its value at `time`, its keys, and
+    /// how its control reads (step, unit, precision, options, bounds).
+    fn parameter_value(
+        &self,
+        model: &mut Inspector,
+        effect: &Value,
+        member: &Member,
+        time: f64,
+        layer: &str,
+        id: &str,
+    ) -> Result<Value, InspectorError> {
+        let (property, key, param) = member;
+        let saved_display = model.saved_parameter_presentation(effect, key);
+        let display = saved_display.as_ref().or_else(|| {
+            self.presentation
+                .parameters
+                .get(&(text(effect, "type").into(), key.clone()))
+        });
+        let raw = effect
+            .get("p")
+            .and_then(|p| p.get(key))
+            .cloned()
+            .unwrap_or(Value::Null);
+        let state = if param.is_some() {
+            Some(model.binding_state(&Binding::Property(property.clone()), time)?)
+        } else {
+            None
+        };
+        let mut p = object([
+            (
+                "id",
+                pm_model::json::to_canonical_string(&property.value()).into(),
+            ),
+            ("effect", id.into()),
+            ("key", key.clone().into()),
+            (
+                "label",
+                display
+                    .map(|d| d.label.clone())
+                    .unwrap_or_else(|| pm_surface::humanize(key))
+                    .into(),
+            ),
+            (
+                "binding",
+                format!(
+                    "effect-parameter:{}:{}",
+                    model.document_id(),
+                    pm_model::json::to_canonical_string(&property.value())
+                )
+                .into(),
+            ),
+            (
+                "value",
+                state
+                    .as_ref()
+                    .map(|s| s.value.clone())
+                    .unwrap_or(raw.clone()),
+            ),
+            (
+                "control",
+                if param.is_none() {
+                    "opaque"
+                } else {
+                    display.map(|d| d.control.as_str()).unwrap_or("opaque")
+                }
+                .into(),
+            ),
+            (
+                "animated",
+                state.as_ref().is_some_and(|s| s.animated).into(),
+            ),
+            (
+                "keyAtPlayhead",
+                state.as_ref().is_some_and(|s| s.key_at_playhead).into(),
+            ),
+            ("mixed", state.as_ref().is_some_and(|s| s.mixed).into()),
+            (
+                "readonly",
+                (param.is_none()
+                    || !model.editable(layer)
+                    || display.is_none_or(|d| d.control == "opaque"))
+                .into(),
+            ),
+        ]);
+        let fields = p.as_object_mut().expect("parameter");
+        // Without a definition the stored data is kept whole in `value`;
+        // `display` is what the row shows: the value at rest, or
+        // Animated when keyed.
+        if state.is_none() {
+            let keyed = raw
+                .get("kf")
+                .and_then(Value::as_array)
+                .is_some_and(|k| !k.is_empty());
+            let display = match raw.get("v") {
+                Some(_) if keyed => Some(Value::String("Animated".into())),
+                Some(v) => Some(v.clone()),
+                None => None,
+            };
+            if let Some(display) = display {
+                fields.insert("display", display);
+            }
+        }
+        if let Some(d) = display {
+            if let Some(step) = d.step {
+                fields.insert("step", step.into());
+            }
+            if let Some(unit) = &d.unit {
+                fields.insert("unit", unit.clone().into());
+            }
+            if let Some(precision) = d.precision {
+                fields.insert("precision", (precision as f64).into());
+            }
+            if !d.options.is_empty() {
+                fields.insert("options", Value::Array(d.options.clone()));
+            }
+        }
+        if let Some(d) = param {
+            if let Some(min) = d.min {
+                fields.insert("min", min.into());
+            }
+            if let Some(max) = d.max {
+                fields.insert("max", max.into());
+            }
+        }
+        Ok(p)
     }
     /// Values are evaluated only for the requested flattened header/parameter window.
     pub fn project(&mut self, model: &mut Inspector, time: f64) -> Result<Value, InspectorError> {
@@ -279,119 +475,25 @@ impl EffectsPanel {
                 ]));
                 continue;
             }
-            if let Some((property, key, param)) = &entry.parameter {
-                let saved_display = model.saved_parameter_presentation(effect, key);
-                let display = saved_display.as_ref().or_else(|| {
-                    self.presentation
-                        .parameters
-                        .get(&(text(effect, "type").into(), key.clone()))
-                });
-                let raw = effect
-                    .get("p")
-                    .and_then(|p| p.get(key))
-                    .cloned()
-                    .unwrap_or(Value::Null);
-                let state = if param.is_some() {
-                    Some(model.binding_state(&Binding::Property(property.clone()), time)?)
-                } else {
-                    None
-                };
-                let mut p = object([
-                    (
-                        "id",
-                        pm_model::json::to_canonical_string(&property.value()).into(),
-                    ),
+            if let Some((group, title, members)) = &entry.group {
+                let mut parameters = Vec::with_capacity(members.len());
+                for member in members {
+                    parameters.push(self.parameter_value(model, effect, member, time, &layer, id)?);
+                }
+                rows.push(object([
+                    ("kind", "summary".into()),
+                    ("id", entry.id.clone().into()),
                     ("effect", id.into()),
-                    ("key", key.clone().into()),
-                    (
-                        "label",
-                        display
-                            .map(|d| d.label.clone())
-                            .unwrap_or_else(|| pm_surface::humanize(key))
-                            .into(),
-                    ),
-                    (
-                        "binding",
-                        format!(
-                            "effect-parameter:{}:{}",
-                            model.document_id(),
-                            pm_model::json::to_canonical_string(&property.value())
-                        )
-                        .into(),
-                    ),
-                    (
-                        "value",
-                        state
-                            .as_ref()
-                            .map(|s| s.value.clone())
-                            .unwrap_or(raw.clone()),
-                    ),
-                    (
-                        "control",
-                        if param.is_none() {
-                            "opaque"
-                        } else {
-                            display.map(|d| d.control.as_str()).unwrap_or("opaque")
-                        }
-                        .into(),
-                    ),
-                    (
-                        "animated",
-                        state.as_ref().is_some_and(|s| s.animated).into(),
-                    ),
-                    (
-                        "keyAtPlayhead",
-                        state.as_ref().is_some_and(|s| s.key_at_playhead).into(),
-                    ),
-                    ("mixed", state.as_ref().is_some_and(|s| s.mixed).into()),
-                    (
-                        "readonly",
-                        (param.is_none()
-                            || !model.editable(&layer)
-                            || display.is_none_or(|d| d.control == "opaque"))
-                        .into(),
-                    ),
-                ]);
-                let fields = p.as_object_mut().expect("parameter");
-                // Without a definition the stored data is kept whole in `value`;
-                // `display` is what the row shows: the value at rest, or
-                // Animated when keyed.
-                if state.is_none() {
-                    let keyed = raw
-                        .get("kf")
-                        .and_then(Value::as_array)
-                        .is_some_and(|k| !k.is_empty());
-                    let display = match raw.get("v") {
-                        Some(_) if keyed => Some(Value::String("Animated".into())),
-                        Some(v) => Some(v.clone()),
-                        None => None,
-                    };
-                    if let Some(display) = display {
-                        fields.insert("display", display);
-                    }
-                }
-                if let Some(d) = display {
-                    if let Some(step) = d.step {
-                        fields.insert("step", step.into());
-                    }
-                    if let Some(unit) = &d.unit {
-                        fields.insert("unit", unit.clone().into());
-                    }
-                    if let Some(precision) = d.precision {
-                        fields.insert("precision", (precision as f64).into());
-                    }
-                    if !d.options.is_empty() {
-                        fields.insert("options", Value::Array(d.options.clone()));
-                    }
-                }
-                if let Some(d) = param {
-                    if let Some(min) = d.min {
-                        fields.insert("min", min.into());
-                    }
-                    if let Some(max) = d.max {
-                        fields.insert("max", max.into());
-                    }
-                }
+                    ("group", group.clone().into()),
+                    ("label", title.clone().into()),
+                    ("parameters", Value::Array(parameters)),
+                    ("effectLabel", label.into()),
+                    ("enabled", enabled.into()),
+                ]));
+                continue;
+            }
+            if let Some(member @ (property, _, _)) = &entry.parameter {
+                let p = self.parameter_value(model, effect, member, time, &layer, id)?;
                 rows.push(object([
                     ("kind", "parameter".into()),
                     (

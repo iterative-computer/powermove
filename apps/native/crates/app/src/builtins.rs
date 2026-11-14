@@ -951,6 +951,11 @@ impl Controller {
             let outline = natives.outline.clone();
             let view =
                 cx.new(|cx| SurfaceView::new(runtime, publication, tokens, natives, window, cx));
+            // Side panels' bodies scroll (`panel_body`): the panel grows
+            // with its content. The viewer and the timeline fit their slot.
+            if !matches!(id, "viewer" | "timeline") {
+                view.update(cx, |v, _| v.grows = true);
+            }
             if id == "timeline" {
                 outline.bind(view.downgrade());
                 let wake = self.playback_wake.clone();
@@ -1095,10 +1100,10 @@ impl Controller {
                             cx.notify();
                         }))
                         // As tall as its content, at least its slot.
-                        .child(
-                            view.clone()
-                                .cached(StyleRefinement::default().w_full().min_h(px(body))),
-                        )
+                        .child({
+                            let content = view.read(cx).in_body(body);
+                            view.clone().cached(content)
+                        })
                         .child(keep),
                 )
                 .children(thumb)

@@ -289,7 +289,8 @@ test("a Color Space Transform's rows stand under Input and Output", async () => 
   } as Projection);
   const groups = [...root.host.nodes.values()].filter(
     (n) =>
-      n.props.role === "group" && ["Input", "Output"].includes(n.props.label),
+      n.props.role === "group" &&
+      ["Input", "Output"].includes(String(n.props.label)),
   );
   expect(groups.map((g) => g.props.label)).toEqual(["Input", "Output"]);
   // A row no part names is still shown.
