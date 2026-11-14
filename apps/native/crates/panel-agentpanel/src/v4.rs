@@ -130,17 +130,22 @@ impl Window {
             }
             Access::Project => "auto",
         };
-        value["settings"] = json!({"provider":session.settings.provider.name(),"model":session.settings.model,
-            "effort":session.settings.effort,"access":access,"scope":session.settings.scope});
-        let choices = input::slash_choices(
+        // The pickers name the model and effort that run, never a blank
+        // "Default"; a model with no effort levels lists none (no picker).
+        let catalog = &session.catalog;
+        let model = &session.settings.model;
+        value["settings"] = json!({"provider":session.settings.provider.name(),"model":catalog.resolve(model),
+            "effort":catalog.resolve_effort(model, &session.settings.effort),"access":access,"scope":session.settings.scope});
+        let choices = input::slash_choices_for(
             &text,
             &session.catalog,
+            model,
             session.run.is_some(),
             session.applying,
         );
         value["slash"] = json!({"visible":session.slash.visible(&text,session.applying,&choices),
             "index":session.slash.index,"choices":choices.iter().map(|c|json!({"id":c.id,"value":c.value})).collect::<Vec<_>>()});
-        value["catalog"] = json!({"models":session.catalog.models,"providers":session.catalog.providers,"efforts":session.catalog.efforts_for(&session.settings.model)});
+        value["catalog"] = json!({"models":session.catalog.models,"providers":session.catalog.providers,"efforts":catalog.effort_choices(model)});
         Ok(value)
     }
 }
@@ -686,11 +691,33 @@ mod tests {
         let mut p = panel();
         draft(&mut p);
         act(&mut p, json!({"type":"submit"})).unwrap();
-        p.receive("thread","run",1,Update::Trace(json!({"kind":"answer","text":"I'll check the project."})),11).unwrap();
-        p.receive("thread","run",2,Update::Complete { text: "Added the title layer.".into(), error: false, cancelled: false },20).unwrap();
+        p.receive(
+            "thread",
+            "run",
+            1,
+            Update::Trace(json!({"kind":"answer","text":"I'll check the project."})),
+            11,
+        )
+        .unwrap();
+        p.receive(
+            "thread",
+            "run",
+            2,
+            Update::Complete {
+                text: "Added the title layer.".into(),
+                error: false,
+                cancelled: false,
+            },
+            20,
+        )
+        .unwrap();
         let texts = |p: &Panel| -> Vec<String> {
-            snapshot(p)["rows"]["items"].as_array().unwrap().iter()
-                .filter_map(|r| r["value"]["text"].as_str().map(str::to_owned)).collect()
+            snapshot(p)["rows"]["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|r| r["value"]["text"].as_str().map(str::to_owned))
+                .collect()
         };
         assert!(texts(&p).iter().any(|t| t == "Added the title layer."));
         // A streamed reply (the app server) is not repeated.
@@ -704,9 +731,33 @@ mod tests {
             catalogs: &|_| Default::default(),
         };
         dispatch(&mut p, "thread", &json!({"type":"submit"}), ctx).unwrap();
-        p.receive("thread","run-2",1,Update::Trace(json!({"kind":"answer","text":"Done: the title is in."})),31).unwrap();
-        p.receive("thread","run-2",2,Update::Complete { text: "Done: the title is in.".into(), error: false, cancelled: false },40).unwrap();
-        assert_eq!(texts(&p).iter().filter(|t| t.as_str() == "Done: the title is in.").count(), 1);
+        p.receive(
+            "thread",
+            "run-2",
+            1,
+            Update::Trace(json!({"kind":"answer","text":"Done: the title is in."})),
+            31,
+        )
+        .unwrap();
+        p.receive(
+            "thread",
+            "run-2",
+            2,
+            Update::Complete {
+                text: "Done: the title is in.".into(),
+                error: false,
+                cancelled: false,
+            },
+            40,
+        )
+        .unwrap();
+        assert_eq!(
+            texts(&p)
+                .iter()
+                .filter(|t| t.as_str() == "Done: the title is in.")
+                .count(),
+            1
+        );
     }
     #[test]
     fn a_question_still_open_after_its_run_is_answered_through_its_archived_row() {
@@ -717,18 +768,47 @@ mod tests {
         act(&mut p, json!({"type":"submit"})).unwrap();
         p.receive("thread","run",1,Update::Trace(json!({"kind":"question","itemId":"q","transport":"message",
             "questions":[{"id":"title","question":"Which title?","allowOther":true,"options":[{"label":"A"},{"label":"B"}]}]})),11).unwrap();
-        p.receive("thread","run",2,Update::Complete { text: "Waiting for your choice.".into(), error: false, cancelled: false },20).unwrap();
+        p.receive(
+            "thread",
+            "run",
+            2,
+            Update::Complete {
+                text: "Waiting for your choice.".into(),
+                error: false,
+                cancelled: false,
+            },
+            20,
+        )
+        .unwrap();
         let v = snapshot(&p);
-        let row = v["rows"]["items"].as_array().unwrap().iter()
-            .find(|r| r["value"]["kind"] == "question").unwrap().clone();
+        let row = v["rows"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["value"]["kind"] == "question")
+            .unwrap()
+            .clone();
         assert_eq!(row["value"]["status"], "open");
         let step = row["commandId"].as_str().unwrap();
-        act(&mut p, json!({"type":"chooseAnswer","step":step,"question":"title","option":"B"})).unwrap();
+        act(
+            &mut p,
+            json!({"type":"chooseAnswer","step":step,"question":"title","option":"B"}),
+        )
+        .unwrap();
         let v = snapshot(&p);
-        let row = v["rows"]["items"].as_array().unwrap().iter()
-            .find(|r| r["value"]["kind"] == "question").unwrap().clone();
+        let row = v["rows"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["value"]["kind"] == "question")
+            .unwrap()
+            .clone();
         assert_eq!(row["chosen"]["title"], json!(["B"]));
-        assert!(act(&mut p, json!({"type":"answer","step":step,"skip":false})).unwrap().is_some());
+        assert!(
+            act(&mut p, json!({"type":"answer","step":step,"skip":false}))
+                .unwrap()
+                .is_some()
+        );
     }
     #[test]
     fn try_again_sends_the_failed_turns_request_and_keeps_the_composer_draft() {

@@ -125,6 +125,8 @@ fn slash_choices_follow_phase_and_provider_catalog_without_new_copy() {
         efforts: vec!["high".into()],
         model_efforts: vec![],
         claude: true,
+        resolves: vec![],
+        default_efforts: vec![],
     };
     assert_eq!(slash_choices("/", &catalog, false, false).len(), 6);
     assert_eq!(slash_choices("/", &catalog, true, false).len(), 7);
@@ -324,9 +326,19 @@ fn each_model_offers_its_own_efforts() {
             ("deep".into(), vec!["low".into(), "xhigh".into()]),
         ],
         claude: false,
+        resolves: vec![],
+        default_efforts: vec![],
     };
     assert_eq!(catalog.efforts_for("fast"), vec!["", "low"]);
     assert_eq!(catalog.efforts_for("deep"), vec!["", "low", "xhigh"]);
-    // The provider's default model takes any listed effort.
-    assert_eq!(catalog.efforts_for(""), vec!["", "low", "xhigh"]);
+    // No choice is the provider's default model, with its own efforts: the
+    // flagged default, else the first listed.
+    assert_eq!(catalog.efforts_for(""), vec!["", "low"]);
+    let flagged = Catalog {
+        resolves: vec![("".into(), "deep".into())],
+        ..catalog.clone()
+    };
+    assert_eq!(flagged.efforts_for(""), vec!["", "low", "xhigh"]);
+    // An unlisted model takes any listed effort.
+    assert_eq!(catalog.efforts_for("other"), vec!["", "low", "xhigh"]);
 }
