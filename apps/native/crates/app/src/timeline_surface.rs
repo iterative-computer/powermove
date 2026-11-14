@@ -3363,13 +3363,17 @@ impl Render for TimelineSurface {
                                 // on through the graph: it reads the same time.
                                 let through = op.id.starts_with("grid:")
                                     || op.id.starts_with("marker-guide:");
+                                // A track op (a strip may start before the
+                                // view) is placed by its clip, which starts
+                                // at the layer column.
+                                let left = op.clip.map_or(op.bounds.x, |c| c.x.max(op.bounds.x));
                                 match above.filter(|_| !through) {
                                     // Wholly under the graph: not painted.
                                     Some(mask)
-                                        if op.bounds.x >= column - 1.
+                                        if left >= column - 1.
                                             && bounds.origin.y + px(op.bounds.y as f32)
                                                 >= mask.bottom() => {}
-                                    Some(mask) if op.bounds.x >= column - 1. => window
+                                    Some(mask) if left >= column - 1. => window
                                         .with_content_mask(
                                             Some(ContentMask {
                                                 bounds: mask,
