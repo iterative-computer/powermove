@@ -52,6 +52,8 @@ pub struct Host {
     /// v4 extensions' viewer overlays (`overlays.viewer`).
     pub overlays: Option<Entity<crate::viewer_overlays::ViewerOverlays>>,
     clock: crate::playback::PanelClock,
+    /// The frame (ticks) Properties last followed while playing.
+    followed: Option<i64>,
     headers: BTreeMap<String, Entity<crate::v4_view::HeaderView>>,
     pub(crate) ready: BTreeSet<String>,
     generations: BTreeMap<String, u64>,
@@ -447,8 +449,9 @@ impl Controller {
             "agentPopover":self.builtins.opening_windows.contains("agent")
                 || self.builtins.windows.get("agent").is_some_and(|w| cx.windows().contains(w))})
     }
-    /// Paused, panels follow the playhead. Playing, nothing reaches V8 or GPUI:
-    /// the playhead and timecode are CALayers fed from the display link.
+    /// Paused, panels follow the playhead. Playing, only Properties does
+    /// (`follow_playback`): the playhead and timecode are CALayers fed from
+    /// the display link.
     pub fn tick_builtins(&mut self, cx: &mut Context<Self>) {
         let (playing, time) = (self.playing(), self.time());
         // Extensions follow playback themselves; the host coalesces the updates.
@@ -457,12 +460,76 @@ impl Controller {
         }
         self.sync_viewer_stage();
         if !self.builtins.clock.due(time, playing) {
+            if playing {
+                self.follow_playback(time, cx);
+            }
             return;
         }
         if let Some(gizmos) = &self.builtins.gizmos {
             gizmos.update(cx, |g, cx| g.refresh(cx));
         }
         self.update_builtins(cx);
+    }
+    /// Playing, Properties shows the values of each frame the viewer shows
+    /// (v1's inspector refreshed at 15 Hz): only that panel publishes, once
+    /// per new frame, one update at a time off the main thread, so it keeps
+    /// the picture's pace up to the display's and skips a frame while an
+    /// update is under way rather than queueing behind playback.
+    fn follow_playback(&mut self, time: f64, cx: &mut Context<Self>) {
+        const PANEL: &str = "inspector";
+        let Some(frame) = crate::session::frame_start_at(self.rate, time) else {
+            return;
+        };
+        if self.builtins.updating
+            || self.builtins.followed == Some(frame)
+            || !self.builtins.open.contains(PANEL)
+            || !self.builtins.ready.contains(PANEL)
+        {
+            return;
+        }
+        let Some(runtime) = self.builtins.runtime.clone() else {
+            return;
+        };
+        self.builtins.followed = Some(frame);
+        let time = frame as f64 / pm_protocol::common::TICKS_PER_SECOND as f64;
+        self.builtins.updating = true;
+        let check = runtime.clone();
+        let started = std::time::Instant::now();
+        cx.spawn(async move |this, cx| {
+            let ticket = cx
+                .background_executor()
+                .spawn(async move { runtime.follow_time(PANEL, time, true) })
+                .await;
+            if let Some(Err(error)) = match ticket {
+                Some(Ok(ticket)) => Some(ticket.await.map(|_| ())),
+                Some(Err(error)) => Some(Err(error)),
+                None => None,
+            } {
+                eprintln!("Panel {PANEL} update: {error}");
+            }
+            let _ = this.update(cx, |v, cx| {
+                if !v
+                    .builtins
+                    .runtime
+                    .as_ref()
+                    .is_some_and(|r| Arc::ptr_eq(r, &check))
+                {
+                    return;
+                }
+                v.builtins.updating = false;
+                {
+                    let _span = crate::diag::span("follow.drain");
+                    v.drain_builtins(cx);
+                }
+                crate::diag::line(
+                    json!({"follow": PANEL, "ms": started.elapsed().as_secs_f64() * 1000.}),
+                );
+                if std::mem::take(&mut v.builtins.again) {
+                    v.update_builtins(cx);
+                }
+            });
+        })
+        .detach();
     }
     /// Escape during a drag restores through the kernel gesture that drag owns.
     pub fn cancel_gesture(&mut self, cx: &mut Context<Self>) -> bool {
