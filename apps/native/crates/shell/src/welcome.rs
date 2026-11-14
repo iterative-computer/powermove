@@ -20,6 +20,8 @@ pub enum Severity {
     Warning,
     Danger,
     Note,
+    /// Finished well: a check, in the success colour.
+    Success,
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct Row {

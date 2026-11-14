@@ -253,6 +253,10 @@ pub enum HistoryCall {
     },
     /// Drops the pending entry, keeps the edits.
     Cancel,
+    /// Closes the open entry as one undo step whoever still holds it (a
+    /// close or quit that cannot wait for an edit whose owner never ends
+    /// it). `false` when nothing was open or nothing changed.
+    Seal,
     /// `history.do`'s throw path (the realm-run callback threw): reverts the
     /// entry owner's operations (selectively) and closes the entry.
     Rollback,
@@ -1443,6 +1447,7 @@ impl Project {
                 self.entry = None;
                 Reply::Unit
             }
+            HistoryCall::Seal => Reply::Bool(self.close_entry(None)),
             HistoryCall::Rollback => {
                 let notice = self.cancel_scope(Scope::Writer(writer));
                 self.entry = None;

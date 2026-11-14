@@ -303,7 +303,7 @@ impl TimelineSurface {
         offline: BTreeSet<String>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let layer_column = tokens.metrics.layer_column as f64;
+        let layer_column = default_layer_column(&tokens.metrics);
         let view = Viewed {
             pps: 100.,
             scroll_time: 0.,
@@ -419,6 +419,9 @@ impl TimelineSurface {
             self.view.scroll_y = y.max(0.);
         }
         if let Some(column) = number("nativeLayerColumn").filter(|c| c.is_finite()) {
+            // A width saved narrower than a row's least (before it had one)
+            // opens at the least.
+            let column = column.max(least_layer_column(&self.tokens.metrics));
             self.view.layer_column = column;
             self.view.column_chosen = true;
             self.outline.column.set(column as f32);
@@ -453,8 +456,8 @@ impl TimelineSurface {
             // A layer column the person never dragged follows the theme's
             // (workspace timeline chrome); a dragged one stays.
             let (old, new) = (
-                self.tokens.metrics.layer_column as f64,
-                tokens.metrics.layer_column as f64,
+                default_layer_column(&self.tokens.metrics),
+                default_layer_column(&tokens.metrics),
             );
             let follows = (self.view.layer_column - old).abs() < 0.5 && old != new;
             self.tokens = tokens;
@@ -1243,7 +1246,7 @@ impl TimelineSurface {
         let column = self.view.layer_column;
         if (x - column).abs() <= m.hit as f64 / 4. && y >= m.ruler as f64 {
             if event.click_count == 2 {
-                self.view.layer_column = m.layer_column as f64;
+                self.view.layer_column = default_layer_column(&m);
                 self.view.column_chosen = false;
                 self.changed(true, cx);
             } else {
@@ -1655,8 +1658,11 @@ impl TimelineSurface {
                 let m = self.tokens.metrics;
                 let width = f32::from(self.bounds.size.width) as f64;
                 let x = f32::from(event.position.x - self.bounds.origin.x) as f64;
-                self.view.layer_column =
-                    x.clamp(m.layer_column as f64 / 2., (width - m.hit as f64).max(1.));
+                // Never past the row's least width (its switches always fit);
+                // never past the panel's edge, unless the panel is narrower.
+                self.view.layer_column = x
+                    .min((width - m.hit as f64).max(1.))
+                    .max(least_layer_column(&m));
                 self.view.column_chosen = true;
                 self.changed(false, cx);
             }
@@ -3499,4 +3505,22 @@ fn playhead_pin(area: Bounds<Pixels>) -> PathBuilder {
     path.line_to(point(l, shoulder));
     path.close();
     path
+}
+
+/// The layer column a timeline opens with: the theme's, at least the least.
+pub fn default_layer_column(m: &pm_design::Metrics) -> f64 {
+    (m.layer_column as f64).max(least_layer_column(m))
+}
+/// v1's least layer column (`GUTTER_MIN`, 320 pt).
+const V1_LEAST_LAYER_COLUMN: f64 = 320.;
+/// The narrowest the layer column goes: a layer row's number, disclosure,
+/// kind badge, three slots of name and its five switches, with its insets
+/// and gaps, and never narrower than v1's. The name truncates first; the
+/// switches always fit.
+pub fn least_layer_column(m: &pm_design::Metrics) -> f64 {
+    let (gap, hit) = (m.gap as f64, m.hit as f64);
+    // Insets and the gaps between number, disclosure, badge and name.
+    let room = 2. * gap + 4. * gap;
+    let row = room + hit + hit + m.kind_badge as f64 + 3. * hit + 5. * hit;
+    row.max(V1_LEAST_LAYER_COLUMN).ceil()
 }
