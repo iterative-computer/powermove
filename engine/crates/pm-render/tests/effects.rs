@@ -1768,7 +1768,7 @@ fn extension_pixels_and_bilinear_taps_match_electron_at_each_output_size() {
 
 /// An identity effect with undeclared reach deliberately selects the uncropped
 /// reference path. The optimized path must retain the original owner UVs and
-/// shadow reach, including on a partly offscreen zoomed legacy shape.
+/// shadow reach, including on a partly offscreen resting legacy shape.
 #[test]
 fn raster_crop_preserves_owner_gradient_and_shadow() {
     let _gpu = gpu();
@@ -1788,12 +1788,12 @@ fn raster_crop_preserves_owner_gradient_and_shadow() {
             "paper",
             "shape",
             json!({"shape":"rect","w":1000,"h":800,"radius":17,"stroke":0,"color":"#FFFFFF"}),
-            -1800.25,
-            -1400.75,
+            -350.25,
+            -250.75,
             2.,
         );
-        set(&mut shape, "scale.x", json!(400));
-        set(&mut shape, "scale.y", json!(400));
+        set(&mut shape, "scale.x", json!(100));
+        set(&mut shape, "scale.y", json!(100));
         let mut effects = vec![fx(
             "gradient",
             "gradient",

@@ -3,6 +3,17 @@
 use kurbo::{Affine, Rect};
 use pm_vector::render::scene::PixelRect;
 
+/// Preserve the legacy resting glyph look near 100%, but do not magnify or
+/// rotate a sampled bitmap. Reflections, nonuniform scales and skew use exact
+/// device coverage. 3D callers retain their existing plane policy separately.
+pub(crate) fn at_rest(m: &[f64; 6]) -> bool {
+    m.iter().all(|v| v.is_finite())
+        && m[1].abs() <= 1e-8
+        && m[2].abs() <= 1e-8
+        && (m[0] - m[3]).abs() <= 1e-6
+        && (m[0] - 1.).abs() <= 0.05
+}
+
 /// The source texels read by a target rectangle through a LINEAR sampler.
 /// Singular or invalid transforms retain the original source conservatively.
 /// The extra two texels cover both the filter footprint and f32 vertex roundoff.
@@ -96,6 +107,20 @@ mod tests {
             let a = original * kurbo::Point::new(p.0 + r.x as f64, p.1 + r.y as f64);
             let b = cropped * kurbo::Point::from(p);
             assert!((a.x - b.x).abs() < 1e-9 && (a.y - b.y).abs() < 1e-9);
+        }
+    }
+    #[test]
+    fn raster_gate_retains_resting_text_and_rejects_zoom_rotation_skew_and_flip() {
+        assert!(at_rest(&[1., 0., 0., 1., 0.375, 12.5]));
+        assert!(at_rest(&[1.025, 0., 0., 1.025, 0., 0.]));
+        for m in [
+            [12., 0., 0., 12., 0., 0.],
+            [1., 0.12, -0.12, 1., 0., 0.],
+            [1., 0., 0.01, 1., 0., 0.],
+            [-1., 0., 0., 1., 0., 0.],
+            [1., 0., 0., 1.01, 0., 0.],
+        ] {
+            assert!(!at_rest(&m));
         }
     }
 }
