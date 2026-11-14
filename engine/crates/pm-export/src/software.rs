@@ -995,6 +995,7 @@ fn probe_and_verify(
         pixels,
         picture,
         notes,
+        dolby_vision: None,
         hardware_encoder: Some(false),
         bytes: fs::metadata(path).map_err(io)?.len(),
         mix: None,

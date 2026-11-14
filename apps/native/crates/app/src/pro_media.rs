@@ -488,6 +488,9 @@ struct State {
     /// Runtime facts, independent of the saved project and user proxy intent.
     preview_checked: HashSet<String>,
     preview_large: HashSet<String>,
+    /// Contents whose generated movie renditions from before the proxy
+    /// recipe that tags colour were checked this run ([`earlier_recipe`]).
+    recipe_checked: HashSet<String>,
     /// Originals the sequence watch follows, with the (project, asset)s
     /// that use each.
     watched: HashMap<PathBuf, BTreeSet<(String, String)>>,
@@ -569,6 +572,56 @@ fn load(profile: &Path, objects: &Path) -> Index {
         });
     index.retire_earlier_sequences(objects);
     index
+}
+
+/// Retires the generated movie renditions of `content` that a proxy recipe
+/// before colour tagging (`pm_proxy::ProxyRecipe::VERSION` 4) made, when they
+/// can be wrong, and returns their kinds to be made again. A copy is read as
+/// its original reads (`pm_render::footage::for_copy`), so the copy of a
+/// Y′CbCr original, which holds the original's codes, reads right whatever
+/// its tags said, and is kept. The copy of an R′G′B′ original was converted
+/// to Y′CbCr by the earlier generator, with a matrix it chose (Rec. 709 or
+/// BT.2020, or swscale's Rec. 601 for the packed and paletted layouts it did
+/// not know were R′G′B′), often left untagged by VideoToolbox, while the copy
+/// keeps its own matrix: retired. Attached files and sequences (retired at
+/// load) are never touched. Checked once per content per run; runs on the
+/// file worker.
+fn earlier_recipe(inner: &Inner, content: &str, original: &Path) -> Vec<Rendition> {
+    let stale = |state: &State| -> Vec<Rendition> {
+        let Some(record) = state.index.contents.get(content) else {
+            return vec![];
+        };
+        [Rendition::Proxy, Rendition::Optimized]
+            .into_iter()
+            .filter(|kind| {
+                record.get(*kind).is_some_and(|f| {
+                    !f.attached
+                        && f.sequence == 0
+                        && !content.starts_with("seq:")
+                        && f.recipe < pm_proxy::ProxyRecipe::VERSION
+                })
+            })
+            .collect()
+    };
+    {
+        let mut state = inner.state.lock().unwrap();
+        if stale(&state).is_empty() || !state.recipe_checked.insert(content.to_owned()) {
+            return vec![];
+        }
+    }
+    let rgb = pm_media::probe::probe(original)
+        .ok()
+        .and_then(|p| p.probe.video.map(|v| v.codec.is_rgb()))
+        == Some(true);
+    if !rgb {
+        return vec![];
+    }
+    let mut state = inner.state.lock().unwrap();
+    let kinds = stale(&state);
+    for kind in &kinds {
+        state.index.take(content, *kind);
+    }
+    kinds
 }
 
 /// The FFmpeg pair pm-proxy encodes with.
@@ -1419,6 +1472,16 @@ impl Inner {
                         }
                     }
                 }
+                // A movie rendition an earlier proxy recipe made of an
+                // R′G′B′ original: its matrix may be wrong; made again.
+                for kind in earlier_recipe(inner, &content, path) {
+                    let title = match kind {
+                        Rendition::Proxy => "Update proxy",
+                        Rendition::Optimized => "Update optimized media",
+                    };
+                    renew.push((kind, (asset.clone(), title.into(), path.clone())));
+                    changed = true;
+                }
                 // Retired at load: an earlier sequence pipeline made it.
                 {
                     let mut state = inner.state.lock().unwrap();
@@ -1565,6 +1628,7 @@ impl ProMedia {
                     jobs: BTreeMap::new(),
                     waiting: None,
                     preview_checked: HashSet::new(),
+                    recipe_checked: HashSet::new(),
                     preview_large: HashSet::new(),
                     watched: HashMap::new(),
                 }),
@@ -2994,6 +3058,138 @@ mod tests {
             serde_json::json!(pm_proxy::SEQUENCE_PIPELINE)
         );
         assert!(attached.is_file());
+    }
+
+    /// Movie proxies an earlier build made (before the recipe that tags
+    /// colour): the proxy of an R′G′B′ original, whose Y′CbCr matrix the
+    /// earlier generator chose, is retired and made again when the project
+    /// identifies its media; the proxy of a Y′CbCr original holds the
+    /// original's codes, reads right as its original reads, and is kept; a
+    /// proxy the person attached is never touched.
+    #[test]
+    fn a_movie_proxy_an_earlier_recipe_made_of_rgb_footage_is_made_again() {
+        let Some((ffmpeg, _)) = ffmpeg() else {
+            eprintln!("NOT RUN: no FFmpeg pair (PM_FFMPEG_DIR/bin)");
+            return;
+        };
+        pm_proxy::set_test_disk_reserve(Some(1 << 30));
+        let (dir, media) = service();
+        let profile = dir.path().join("profile");
+        let objects = crate::media::objects_dir(&profile);
+        let clip = |name: &str, codec: &[&str], frames: &str| {
+            let path = dir.path().join(name);
+            let made = std::process::Command::new(&ffmpeg)
+                .args([
+                    "-v",
+                    "error",
+                    "-y",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "testsrc2=size=64x36:rate=25",
+                ])
+                .args(["-frames:v", frames])
+                .args(codec)
+                .arg(&path)
+                .status()
+                .unwrap();
+            assert!(made.success(), "ffmpeg wrote {name}");
+            path
+        };
+        let rgb = clip("graphics.mov", &["-c:v", "qtrle", "-pix_fmt", "rgb24"], "4");
+        let ycbcr = clip("camera.mkv", &["-c:v", "ffv1", "-pix_fmt", "yuv420p"], "4");
+        let mine = clip("titles.mov", &["-c:v", "qtrle", "-pix_fmt", "argb"], "5");
+        let assets = [
+            ("r", rgb.as_path()),
+            ("y", ycbcr.as_path()),
+            ("m", mine.as_path()),
+        ];
+        identify(&media, "p", &assets);
+        let prefs = media.preferences();
+        media
+            .create(
+                "p",
+                Rendition::Proxy,
+                &prefs,
+                vec![
+                    ("r".into(), "graphics".into(), rgb.clone()),
+                    ("y".into(), "camera".into(), ycbcr.clone()),
+                ],
+            )
+            .unwrap();
+        finish_tasks(&media);
+        let content =
+            |media: &ProMedia, path: &Path| media.inner.state.lock().unwrap().known[path].clone();
+        let (r, y, m) = (
+            content(&media, &rgb),
+            content(&media, &ycbcr),
+            content(&media, &mine),
+        );
+        let proxy = |media: &ProMedia, content: &str| {
+            media.inner.state.lock().unwrap().index.contents[content]
+                .proxy
+                .clone()
+                .unwrap()
+        };
+        let (r_proxy, y_proxy) = (proxy(&media, &r).path, proxy(&media, &y).path);
+        drop(media);
+
+        // As the earlier build recorded them: generated files with no recipe,
+        // and the person's own proxy of the third clip.
+        let attached = dir.path().join("mine-proxy.mov");
+        std::fs::copy(&r_proxy, &attached).unwrap();
+        let index = index_path(&profile);
+        let mut saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&index).unwrap()).unwrap();
+        for c in [&r, &y] {
+            saved["contents"][c]["proxy"]
+                .as_object_mut()
+                .unwrap()
+                .remove("recipe");
+        }
+        saved["contents"][&m]["proxy"] = serde_json::json!({"path": attached, "attached": true});
+        saved["stamps"] = serde_json::json!([]);
+        std::fs::write(&index, serde_json::to_vec(&saved).unwrap()).unwrap();
+
+        // The next launch identifies the project's media.
+        let media = ProMedia::new(profile.clone(), objects, Arc::new(AtomicBool::new(false)));
+        identify(&media, "p", &assets);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while media
+            .inner
+            .tasks
+            .lock()
+            .unwrap()
+            .snapshot(WINDOW)
+            .is_empty()
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the R′G′B′ clip's proxy is not made again"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        finish_tasks(&media);
+        let remade = proxy(&media, &r);
+        assert_eq!(
+            remade.recipe,
+            pm_proxy::ProxyRecipe::VERSION,
+            "the R′G′B′ clip's proxy is made again"
+        );
+        assert!(remade.path.is_file());
+        let kept = proxy(&media, &y);
+        assert_eq!(
+            (kept.recipe, &kept.path),
+            (0, &y_proxy),
+            "the Y′CbCr clip's proxy is kept"
+        );
+        assert!(y_proxy.is_file());
+        let own = proxy(&media, &m);
+        assert!(own.attached && own.path == attached && attached.is_file());
+        // Checked once: identifying again keeps the Y′CbCr proxy as it is.
+        identify(&media, "p", &assets);
+        finish_tasks(&media);
+        assert_eq!(proxy(&media, &y).recipe, 0);
     }
 
     #[test]

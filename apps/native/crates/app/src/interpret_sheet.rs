@@ -93,6 +93,10 @@ fn origin(origin: &Origin, automatic: &str) -> String {
         Origin::File { source } => format!("From the file ({source})."),
         Origin::Default { rule } => format!("The file doesn’t say: {rule}."),
         Origin::Override => format!("Set here. Automatic is {automatic}."),
+        Origin::PowermoveOne { file: Some(file) } => {
+            format!("As Powermove 1 showed it; the file says {file}.")
+        }
+        Origin::PowermoveOne { file: None } => "As Powermove 1 showed it.".into(),
     }
 }
 
@@ -106,16 +110,22 @@ fn popup<T: PartialEq + std::fmt::Debug>(
     read: Option<(&T, &Origin)>,
 ) -> Field {
     let automatic = read.map(|(value, _)| label(choices, value));
+    // A v1 project's asset reads as Powermove 1 showed it until a value is
+    // chosen here.
+    let first = match read {
+        Some((_, Origin::PowermoveOne { .. })) => "As in Powermove 1",
+        _ => "Automatic",
+    };
     // The pop-up names the value short ("Automatic (Limited)"); the line
     // under it says it whole.
     let mut values = vec![automatic.as_ref().map_or_else(
-        || "Automatic".to_owned(),
+        || first.to_owned(),
         |automatic| {
             let short = automatic
                 .rsplit_once(" (")
                 .filter(|_| automatic.ends_with(')'))
                 .map_or(automatic.as_str(), |(name, _)| name);
-            format!("Automatic ({short})")
+            format!("{first} ({short})")
         },
     )];
     values.extend(choices.iter().map(|(label, _)| (*label).to_owned()));
@@ -324,11 +334,44 @@ impl Chosen {
     }
 }
 
-/// Worker: the file as the engine reads it under `chosen`.
-fn video_reading(path: &Path, chosen: &Interpretation) -> Option<VideoReading> {
+/// Worker: the file as the engine reads it under `chosen` (`sequence`: the
+/// asset is an image sequence).
+fn video_reading(path: &Path, chosen: &Interpretation, sequence: bool) -> Option<VideoReading> {
     let probed = pm_media::probe::probe(path).ok()?;
     let video = probed.probe.video.as_ref()?;
-    Some(pm_media::interpret::resolve_video(video, chosen))
+    let mut reading = pm_media::interpret::resolve_video(video, chosen);
+    if chosen.electron_color {
+        as_in_powermove_1(&mut reading, video, sequence);
+    }
+    Some(reading)
+}
+
+/// What a v1 project's asset is read with when nothing is chosen here: the
+/// reading Powermove 1 showed (the renderer's own rule), naming the file's.
+fn as_in_powermove_1(
+    reading: &mut VideoReading,
+    video: &pm_media::probe::VideoProbe,
+    sequence: bool,
+) {
+    let v1 =
+        pm_media::probe::color::electron_frame_reading(&video.color, &video.codec.codec, sequence);
+    fn adopt<T: PartialEq + Copy + std::fmt::Debug>(
+        field: &mut Read<T>,
+        v1: T,
+        choices: &[(&str, T)],
+    ) {
+        let file = field.automatic;
+        field.automatic = v1;
+        if !field.origin.is_override() {
+            field.value = v1;
+            field.origin = Origin::PowermoveOne {
+                file: (file != v1).then(|| label(choices, &file)),
+            };
+        }
+    }
+    adopt(&mut reading.primaries, v1.primaries, &PRIMARIES);
+    adopt(&mut reading.transfer, v1.transfer, &TRANSFERS);
+    adopt(&mut reading.matrix, v1.matrix, &MATRICES);
 }
 
 impl Controller {
@@ -353,10 +396,11 @@ impl Controller {
                     .and_then(|n| n.to_value().as_str().map(str::to_owned))
                     .unwrap_or_else(|| asset.clone());
                 let chosen = pm_render::footage::interpretation(record).unwrap_or_default();
-                (asset, kind == "video", name, chosen)
+                let sequence = pm_render::footage::is_sequence(record);
+                (asset, kind == "video", name, chosen, sequence)
             })
         });
-        let Some((asset, video, name, chosen)) = record else {
+        let Some((asset, video, name, chosen, sequence)) = record else {
             self.message = SELECT.into();
             cx.notify();
             return;
@@ -370,7 +414,7 @@ impl Controller {
                     let chosen = chosen.clone();
                     async move {
                         path.filter(|_| video)
-                            .and_then(|p| video_reading(&p, &chosen))
+                            .and_then(|p| video_reading(&p, &chosen, sequence))
                     }
                 })
                 .await;
@@ -728,6 +772,92 @@ mod tests {
         let field = |id: &str| still.fields.iter().find(|f| f.id == id).unwrap();
         assert!(!field("matrix").enabled && !field("range").enabled);
         assert!(field("alpha").enabled);
+    }
+
+    /// A v1 project's asset (`videoColor`) is read as Powermove 1 showed it:
+    /// the sheet says so, names the file's own reading, and a value chosen
+    /// here still wins. An untagged HD FFV1 clip: Rec. 601 in v1, Rec. 709
+    /// natively.
+    #[test]
+    fn a_v1_asset_shows_the_reading_as_in_powermove_1() {
+        let dir = tempfile::tempdir().unwrap();
+        let clip = dir.path().join("untagged.mkv");
+        let ffmpeg = std::path::PathBuf::from(
+            std::env::var_os("PM_FFMPEG_DIR").expect("source the native env before this test"),
+        )
+        .join("bin/ffmpeg");
+        let status = std::process::Command::new(ffmpeg)
+            .args([
+                "-v",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=1280x720:rate=30",
+            ])
+            .args(["-frames:v", "1", "-c:v", "ffv1", "-pix_fmt", "yuv420p"])
+            .arg(&clip)
+            .status()
+            .unwrap();
+        assert!(status.success(), "ffmpeg wrote the clip");
+        let (id, owner) = ids();
+        let shown = |chosen: &Interpretation| {
+            let reading = video_reading(&clip, chosen, false).unwrap();
+            let surface = surface(
+                id.clone(),
+                owner.clone(),
+                "Clip.mkv",
+                true,
+                chosen,
+                Some(&reading),
+            );
+            let field = |name: &str| {
+                surface
+                    .fields
+                    .iter()
+                    .find(|f| f.id == name)
+                    .unwrap()
+                    .clone()
+            };
+            (field("matrix"), field("primaries"))
+        };
+        let native = Interpretation::default();
+        let (matrix, _) = shown(&native);
+        assert_eq!(matrix.values[0], "Automatic (Rec. 709)");
+        let v1 = Interpretation {
+            electron_color: true,
+            ..Default::default()
+        };
+        let (matrix, primaries) = shown(&v1);
+        assert_eq!(matrix.values[0], "As in Powermove 1 (Rec. 601)");
+        assert_eq!(matrix.selected, 0);
+        assert_eq!(
+            matrix.description.as_deref(),
+            Some("As Powermove 1 showed it; the file says Rec. 709.")
+        );
+        assert_eq!(
+            primaries.description.as_deref(),
+            Some("As Powermove 1 showed it."),
+            "{primaries:?}"
+        );
+        // Chosen here: the choice is in force, and Automatic is the v1 reading.
+        let chosen = Interpretation {
+            matrix: Some(MatrixCoefficients::Bt709),
+            ..v1
+        };
+        let (matrix, _) = shown(&chosen);
+        assert_eq!(
+            matrix.selected,
+            1 + MATRICES
+                .iter()
+                .position(|(_, m)| *m == MatrixCoefficients::Bt709)
+                .unwrap()
+        );
+        assert_eq!(
+            matrix.description.as_deref(),
+            Some("Set here. Automatic is Rec. 601.")
+        );
     }
 
     #[test]

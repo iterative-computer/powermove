@@ -29,6 +29,9 @@ pub struct Expected {
     /// `chroma_sample_loc_type` of a 4:2:0 stream's chroma.
     pub chroma_location: u32,
     pub hdr: Option<crate::settings::HdrMetadata>,
+    /// HLG HEVC: whether the file carries Dolby Vision 8.4 (`None`: other
+    /// outputs, which are not held to it).
+    pub dolby_vision: Option<bool>,
     pub alpha: AlphaOutput,
     pub frames: u64,
     pub timing: VideoTiming,
@@ -50,6 +53,13 @@ impl Expected {
             cicp: spec.tags.cicp(),
             chroma_location: spec.tags.chroma_location().sample_loc_type(),
             hdr: spec.tags.hdr_metadata(),
+            dolby_vision: match (spec.codec, spec.tags) {
+                (
+                    Codec::Hevc { .. },
+                    crate::settings::ColorTags::Rec2100Hlg { dolby_vision, .. },
+                ) => Some(dolby_vision),
+                _ => None,
+            },
             alpha: spec.alpha,
             frames: spec.frames,
             timing,
@@ -164,6 +174,8 @@ pub struct VerifyReport {
     /// What the person is told with the file kept: differences that are a
     /// matter of degree (fine detail a low data rate does not keep).
     pub notes: Vec<String>,
+    /// The Dolby Vision configuration the file carries.
+    pub dolby_vision: Option<crate::mp4box::Dovi>,
     /// Whether VideoToolbox reported a hardware encoder.
     pub hardware_encoder: Option<bool>,
     /// Bytes delivered (every file of a PNG sequence).
@@ -430,6 +442,21 @@ pub fn examine(
             fail(format!("clli {:?}, expected {:?}", visual.clli, hdr.clli()));
         }
     }
+    // Dolby Vision 8.4 on HLG HEVC: profile 8, HLG compatible, an RPU and
+    // no enhancement layer, or nothing when it was turned off.
+    match (expected.dolby_vision, visual.dolby_vision) {
+        (Some(true), Some(d))
+            if d.profile == 8
+                && d.compatibility == 4
+                && d.rpu
+                && d.base_layer
+                && !d.enhancement_layer => {}
+        (Some(true), found) => fail(format!(
+            "Dolby Vision {found:?}, expected profile 8.4 (HLG compatible)"
+        )),
+        (Some(false), Some(d)) => fail(format!("Dolby Vision {d:?}, expected none")),
+        _ => {}
+    }
     let mut full_range = visual
         .colr
         .as_ref()
@@ -635,6 +662,7 @@ pub fn examine(
         pixels,
         picture,
         notes,
+        dolby_vision: visual.dolby_vision,
         hardware_encoder: None,
         bytes: 0,
         mix: None,

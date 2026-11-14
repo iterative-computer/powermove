@@ -171,6 +171,10 @@ const ROLES: &[(&str, &str)] = &[
     ),
     ("metrics.window_width", "Default window width"),
     ("metrics.window_height", "Default window height"),
+    (
+        "metrics.message_inset",
+        "Leading room beside a person's message in the Agent conversation",
+    ),
     ("metrics.channel_strip", "Mixer channel strip width"),
     ("metrics.fader_knob", "Mixer fader knob height"),
     ("metrics.welcome_width", "Welcome window width"),

@@ -115,6 +115,27 @@ pub fn current_qos() -> &'static str {
 mod tests {
     use super::*;
 
+    /// Why the render thread sets its class through pthread: a thread that
+    /// is already running keeps its class when `NSThread.qualityOfService`
+    /// is set on it.
+    #[cfg(target_vendor = "apple")]
+    #[test]
+    fn a_running_thread_takes_the_interactive_class_from_pthread_only() {
+        let (started, through_nsthread, through_pthread) = std::thread::spawn(|| {
+            let started = current_qos();
+            objc2_foundation::NSThread::currentThread()
+                .setQualityOfService(objc2_foundation::NSQualityOfService::UserInteractive);
+            let through_nsthread = current_qos();
+            set_interactive_qos();
+            (started, through_nsthread, current_qos())
+        })
+        .join()
+        .unwrap();
+        assert_eq!(started, "default");
+        assert_eq!(through_nsthread, "default");
+        assert_eq!(through_pthread, "userInteractive");
+    }
+
     #[test]
     fn threads_do_not_inherit_qos_but_engine_threads_get_their_class() {
         let (parent, plain, engine, interactive) = std::thread::spawn(|| {

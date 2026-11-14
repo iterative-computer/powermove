@@ -1211,6 +1211,7 @@ pub fn verify_webm(
         pixels,
         picture,
         notes,
+        dolby_vision: None,
         hardware_encoder: Some(false),
         bytes: 0,
         mix: None,

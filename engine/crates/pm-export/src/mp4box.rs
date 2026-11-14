@@ -134,8 +134,36 @@ pub struct Visual {
     pub mdcv: Option<[u8; 24]>,
     /// `clli`: the content light level.
     pub clli: Option<[u8; 4]>,
+    /// `dvcC`/`dvvC`: the Dolby Vision configuration record.
+    pub dolby_vision: Option<Dovi>,
     /// The sample entry's child boxes, in order (diagnostics).
     pub boxes: Vec<[u8; 4]>,
+}
+
+/// A Dolby Vision decoder configuration record (`dvcC`, `dvvC`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Dovi {
+    pub profile: u8,
+    pub level: u8,
+    pub rpu: bool,
+    pub enhancement_layer: bool,
+    pub base_layer: bool,
+    /// `dv_bl_signal_compatibility_id`: 4 is HLG.
+    pub compatibility: u8,
+}
+
+impl Dovi {
+    fn parse(d: &[u8]) -> Option<Dovi> {
+        let flags = u16::from_be_bytes([*d.get(2)?, *d.get(3)?]);
+        Some(Dovi {
+            profile: (flags >> 9) as u8,
+            level: ((flags >> 3) & 0x3f) as u8,
+            rpu: flags & 0b100 != 0,
+            enhancement_layer: flags & 0b10 != 0,
+            base_layer: flags & 0b1 != 0,
+            compatibility: d.get(4)? >> 4,
+        })
+    }
 }
 
 /// An audio sample entry.
@@ -522,6 +550,7 @@ fn parse_visual(d: &[u8], e: BoxRef) -> Option<Visual> {
             b"gama" => v.gamma = be32(d, k.start).map(|g| g as f64 / 65536.0),
             b"mdcv" => v.mdcv = d.get(k.start..k.end)?.try_into().ok(),
             b"clli" => v.clli = d.get(k.start..k.end)?.try_into().ok(),
+            b"dvcC" | b"dvvC" => v.dolby_vision = Dovi::parse(d.get(k.start..k.end)?),
             b"hvcC" => {
                 let b = |o: usize| d.get(k.start + o).copied();
                 let mut hevc = Hevc {

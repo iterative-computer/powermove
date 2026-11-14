@@ -19,7 +19,6 @@ use pm_mcp::{
         ThreadArchive, VideoExportRequest,
     },
 };
-use pm_media::preview::PreviewReader;
 use pm_model::json::to_canonical_string;
 use pm_protocol::{
     color::{OutputColor, Precision},
@@ -357,7 +356,7 @@ impl EngineJobs {
         look: bool,
         preview: bool,
         studio_quality: Option<serde_json::Value>,
-        studio_render_scale:Option<f32>,
+        studio_render_scale: Option<f32>,
         resources: Resources,
     ) -> AnyResult<ExportHandle> {
         let media = crate::media::for_session(
@@ -403,6 +402,32 @@ impl EngineJobs {
         ExportHandle::start_scheduled(&self.executable, session, self.activity.clone())
     }
 }
+/// An agent's export as the Export sheet's options: today's defaults, with
+/// the sheet's options the agent gave laid over them, checked by the same
+/// planner as a person's export.
+fn sheet_options(
+    project: &serde_json::Value,
+    agent: &pm_mcp::services::VideoOptions,
+) -> Result<pm_promedia::export_panel::Options> {
+    let mut sheet = json!({
+        "format": agent.format,
+        "scale": 1,
+        "width": project["w"],
+        "height": project["h"],
+        "fps": project["fps"],
+        "range": agent.range,
+        "quality": "high",
+        "mblur": agent.motion_blur,
+        "audio": agent.audio,
+        "alpha": agent.alpha,
+        "captionsBurn": false,
+        "captionsSidecar": "none",
+    });
+    for (key, value) in &agent.sheet {
+        sheet[key] = value.clone();
+    }
+    pm_builtins::delivery::options(&sheet).map_err(Error::invalid)
+}
 fn failed(error: impl std::fmt::Display) -> Error {
     Error {
         code: "export_failed".into(),
@@ -411,11 +436,16 @@ fn failed(error: impl std::fmt::Display) -> Error {
     }
 }
 fn finish(handle: ExportHandle) -> Result<PathBuf> {
+    finished(handle).map(|(path, _)| path)
+}
+/// A finished export's file and what the person is told with it.
+fn finished(handle: ExportHandle) -> Result<(PathBuf, Vec<String>)> {
     let status = handle.wait().map_err(failed)?;
+    let notes = status.notes;
     match status.state {
         JobState::Done => status
             .path
-            .map(PathBuf::from)
+            .map(|path| (PathBuf::from(path), notes))
             .ok_or_else(|| failed("Export completed without an output path")),
         _ => Err(failed(status.error.map(|e| e.message).unwrap_or_else(
             || "Powermove lost contact with the export engine. Try again.".into(),
@@ -438,25 +468,11 @@ fn file_name(name: &str, extension: &str) -> String {
     format!("{stem}-{}.{extension}", pm_kernel::new_id("export"))
 }
 impl ExportChild for EngineJobs {
-    fn video(&self, request: &VideoExportRequest) -> Result<PathBuf> {
+    fn video(&self, request: &VideoExportRequest) -> Result<pm_mcp::services::VideoDelivered> {
         let frozen = &request.snapshot;
         let published = self.published(frozen)?;
         let project = &frozen.project;
-        let options = pm_builtins::delivery::options(&json!({
-            "format": request.options.format,
-            "scale": 1,
-            "width": project["w"],
-            "height": project["h"],
-            "fps": project["fps"],
-            "range": request.options.range,
-            "quality": "high",
-            "mblur": request.options.motion_blur,
-            "audio": request.options.audio,
-            "alpha": request.options.alpha,
-            "captionsBurn": false,
-            "captionsSidecar": "none",
-        }))
-        .map_err(Error::invalid)?;
+        let options = sheet_options(project, &request.options)?;
         let time = project["time"].as_f64().unwrap_or(0.);
         let plan = pm_builtins::delivery::plan(&published.snapshot, &options, time)
             .map_err(Error::invalid)?;
@@ -464,6 +480,8 @@ impl ExportChild for EngineJobs {
             .settings
             .clone()
             .ok_or_else(|| Error::invalid("Missing render settings"))?;
+        // What the file is: the agent may have chosen its size and rate.
+        let (settings_size, settings_rate) = (settings.size, settings.frame_rate);
         std::fs::create_dir_all(&request.directory)?;
         let name = request
             .options
@@ -536,7 +554,31 @@ impl ExportChild for EngineJobs {
             task.finish(Err("cancelled".into()));
             return Err(cancelled());
         }
-        let result = finish(handle);
+        let size = (settings_size.width, settings_size.height);
+        let fps = settings_rate.num as f64 / settings_rate.den as f64;
+        let result = finished(handle).and_then(|(path, notes)| {
+            // Caption files beside the video, as a person's export writes them.
+            let sidecar = match options.captions_sidecar.as_str() {
+                "srt" => Some(pm_captions::CaptionFormat::Srt),
+                "vtt" => Some(pm_captions::CaptionFormat::Vtt),
+                _ => None,
+            };
+            if let Some(format) = sidecar.filter(|_| plan.captions > 0) {
+                crate::export_coordinator::write_sidecars(
+                    &published,
+                    &options.range,
+                    format,
+                    &path,
+                )
+                .map_err(failed)?;
+            }
+            Ok(pm_mcp::services::VideoDelivered {
+                path,
+                size: Some(size),
+                fps: Some(fps),
+                notes,
+            })
+        });
         task.finish(result.as_ref().map(|_| ()).map_err(|e| e.message.clone()));
         result
     }
@@ -1355,13 +1397,21 @@ impl EngineHook for EngineJobs {
     fn capture(&self, _: &CaptureRequest) -> Result<Value> {
         Err(Error::invalid("Frame capture needs a frozen project"))
     }
-    fn scene3d_assets(&self, frozen: &FrozenProject) -> Result<Arc<dyn pm_scene3d::geometry::AssetGeometry>> {
+    fn scene3d_assets(
+        &self,
+        frozen: &FrozenProject,
+    ) -> Result<Arc<dyn pm_scene3d::geometry::AssetGeometry>> {
         let published = self.published(frozen)?;
         let media = crate::media::for_session(
-            &published.snapshot, &published.media, published.path.as_deref(),
+            &published.snapshot,
+            &published.media,
+            published.path.as_deref(),
             &crate::media::cache_root(&self.profile),
-        ).map_err(failed)?;
-        Ok(Arc::new(pm_scene3d::geometry::FileAssets::new(media.catalog.originals.into_iter().collect())))
+        )
+        .map_err(failed)?;
+        Ok(Arc::new(pm_scene3d::geometry::FileAssets::new(
+            media.catalog.originals.into_iter().collect(),
+        )))
     }
     fn capture_snapshot(&self, request: &CaptureRequest, frozen: &FrozenProject) -> Result<Value> {
         let published = self.published(frozen)?;
@@ -1456,24 +1506,16 @@ impl EngineHook for EngineJobs {
         })
     }
     fn sample(&self, request: &FrameRequest) -> Result<Vec<Image>> {
-        let mut reader = self.reader(&request.request)?;
-        request
-            .frames
+        let times: Vec<f64> = request.frames.iter().map(|f| f.source).collect();
+        self.source_frames(&request.request, &times, (request.width, request.height))?
             .iter()
-            .map(|frame| {
-                let rgba = source_frame(&mut reader, frame.source).map_err(failed)?;
-                let pixels = fit(&rgba, request.width, request.height);
-                image(&pixels, request.width, request.height)
-            })
+            .map(|(pixels, w, h)| image(pixels, *w, *h))
             .collect()
     }
     fn sheet(&self, request: &SheetRequest) -> Result<Image> {
-        let mut reader = self.reader(&request.request)?;
-        let cells = request
-            .cells
-            .iter()
-            .map(|cell| source_frame(&mut reader, cell.source).map_err(failed))
-            .collect::<Result<Vec<_>>>()?;
+        let times: Vec<f64> = request.cells.iter().map(|c| c.source).collect();
+        let size = (request.plan.cell_width, request.plan.cell_height);
+        let cells = self.source_frames(&request.request, &times, size)?;
         sheet(&cells, &request.plan)
     }
     /// Each cell is a full engine job, so a long sheet returns a finished prefix.
@@ -1637,17 +1679,6 @@ fn sheet(cells: &[Rgba], plan: &SheetPlan) -> Result<Image> {
     }
     image(&canvas, width, height)
 }
-fn source_frame(reader: &mut PreviewReader, time: f64) -> AnyResult<Rgba> {
-    let frame = reader.frame_at(time)?;
-    let decoded = frame.decoded();
-    let (width, height) = (decoded.format.width as u32, decoded.format.height as u32);
-    let unit = pm_media::image::imageio::rgba_unit(decoded)?;
-    let pixels = unit
-        .iter()
-        .map(|v| (v.clamp(0., 1.) * 255.).round() as u8)
-        .collect();
-    Ok((pixels, width, height))
-}
 impl EngineJobs {
     fn original(&self, request: &MediaRequest) -> Result<PathBuf> {
         let asset = request
@@ -1668,17 +1699,59 @@ impl EngineJobs {
         .remove(asset)
         .ok_or_else(|| Error::invalid("This media's original is offline. Relink it first."))
     }
-    /// Source times read as the asset's layers read them (its `timing`).
-    fn reader(&self, request: &MediaRequest) -> Result<PreviewReader> {
-        let timing = pm_media::clip::ClipTiming::of_asset(
-            request
-                .asset
-                .as_ref()
-                .and_then(|asset| asset["timing"].as_f64()),
-        );
-        Ok(PreviewReader::open(&self.original(request)?)
-            .map_err(failed)?
-            .with_timing(timing))
+    /// The asset's source frames at `times` (seconds of its source, as its
+    /// layers read them), `width` × `height`, drawn by the renderer the way
+    /// every other path reads the file: Interpret Footage, a v1 project's
+    /// video reading (`videoColor`), the asset's timing and the image
+    /// sequence rule (`pm_render::footage`). Straight RGBA8 for the PNG.
+    fn source_frames(
+        &self,
+        request: &MediaRequest,
+        times: &[f64],
+        (width, height): (u32, u32),
+    ) -> Result<Vec<Rgba>> {
+        let path = self.original(request)?;
+        let id = request
+            .asset
+            .as_ref()
+            .and_then(|a| a["id"].as_str())
+            .unwrap_or_default();
+        let published = self.published(&request.snapshot)?;
+        let record = published
+            .snapshot
+            .root()
+            .and_then(|root| root.get("assets"))
+            .and_then(|assets| assets.get(id));
+        let interpretation = record.and_then(pm_render::footage::interpretation);
+        let sequence = record.is_some_and(pm_render::footage::is_sequence);
+        let mut renderer = pm_render::Renderer::headless().map_err(failed)?;
+        times
+            .iter()
+            .map(|seconds| {
+                let time = Ticks::saturating_from_i128(
+                    (seconds * pm_protocol::common::TICKS_PER_SECOND as f64).round() as i128,
+                );
+                let mut pixels = renderer
+                    .source_rgba8_export(
+                        &path,
+                        time,
+                        Size::new(width, height),
+                        pm_protocol::snapshot::SourceFit::Stretch,
+                        interpretation.as_ref(),
+                        sequence,
+                    )
+                    .map_err(failed)?;
+                for px in pixels.chunks_exact_mut(4) {
+                    let a = u32::from(px[3]);
+                    if a > 0 && a < 255 {
+                        for c in &mut px[..3] {
+                            *c = ((u32::from(*c) * 255 + a / 2) / a).min(255) as u8;
+                        }
+                    }
+                }
+                Ok((pixels, width, height))
+            })
+            .collect()
     }
 }
 fn seconds(micros: Option<i64>) -> Option<f64> {
@@ -1692,6 +1765,85 @@ fn decibels(level: f64) -> f64 {
 mod tests {
     use super::*;
     use pm_engine_service::resources::ResourceSnapshot;
+
+    /// Every Export sheet option an agent gives reaches the export as the
+    /// sheet sets it; absent ones keep today's defaults.
+    #[test]
+    fn an_agents_export_options_are_the_sheets() {
+        use pm_promedia::export_panel::{
+            AudioCoding, Codec, ColorTag, DynamicRange, Profile, Scale,
+        };
+        let project = json!({"w": 1920, "h": 1080, "fps": 29.97});
+        let agent = |args: Value| {
+            let options = pm_mcp::services::VideoOptions::parse(&args).unwrap();
+            sheet_options(&project, &options)
+        };
+        let plain = agent(json!({})).unwrap();
+        assert_eq!(
+            (plain.scale.clone(), plain.width, plain.height, plain.fps),
+            (Scale::Preset(1.), 1920, 1080, 29.97)
+        );
+        assert_eq!(
+            (plain.quality.as_str(), plain.range.as_str()),
+            ("high", "all")
+        );
+        assert!(!plain.use_proxies && !plain.captions_burn);
+        let prores = agent(json!({
+            "format": "prores",
+            "profile": "422hq",
+            "colorTag": "rec709",
+            "timecode": "01:00:00;00",
+            "audioCoding": "pcmFloat",
+            "fps": 23.976,
+            "useProxies": true,
+            "captionsBurn": true,
+            "captionsSidecar": "vtt",
+            "dynamicRange": "hlg",
+            "scale": "custom",
+            "width": 1280,
+            "height": 720,
+            "motionBlur": false,
+            "range": "work",
+        }))
+        .unwrap();
+        assert_eq!(prores.profile, Profile::Hq);
+        assert_eq!(prores.color_tag, ColorTag::Rec709);
+        assert_eq!(prores.timecode, "01:00:00;00");
+        assert_eq!(prores.audio_coding, AudioCoding::PcmFloat);
+        assert_eq!(prores.fps, 23.976);
+        assert!(prores.use_proxies && prores.captions_burn && !prores.mblur);
+        assert_eq!(prores.captions_sidecar, "vtt");
+        assert_eq!(prores.dynamic_range, DynamicRange::Hlg);
+        assert_eq!(
+            (
+                prores.scale,
+                prores.width,
+                prores.height,
+                prores.range.as_str()
+            ),
+            (Scale::Custom("custom".into()), 1280, 720, "work")
+        );
+        let hlg = agent(json!({"dynamicRange": "hlg", "dolbyVision": false})).unwrap();
+        assert!(!hlg.dolby_vision && plain.dolby_vision);
+        let mp4 = agent(json!({"codec": "hevc", "quality": "draft", "scale": 0.5})).unwrap();
+        assert_eq!(
+            (mp4.codec, mp4.quality.as_str(), mp4.scale),
+            (Codec::Hevc, "draft", Scale::Preset(0.5))
+        );
+        // A choice the sheet does not offer is refused, as the sheet would.
+        assert!(agent(json!({"quality": "best"})).is_err());
+        let refused = pm_mcp::services::VideoOptions::parse(&json!({"width": 1280})).unwrap_err();
+        assert!(
+            refused.message.contains("custom size"),
+            "{}",
+            refused.message
+        );
+        let refused = pm_mcp::services::VideoOptions::parse(
+            &json!({"format": "prores", "profile": "422", "alpha": true}),
+        )
+        .unwrap_err();
+        assert!(refused.message.contains("4444"), "{}", refused.message);
+    }
     /// A capture's pin from its window alone (production adds the pageless
     /// host for a project with no window).
     fn window_pin(
@@ -1971,6 +2123,105 @@ mod relink_tests {
             .filter(|(_, at)| left[*at - 2..*at + 3].iter().any(|v| v.abs() > 0.2))
             .map(|(k, _)| k)
             .collect()
+    }
+
+    /// The agent's source frames read the file as every other path does:
+    /// an untagged HD FFV1 clip as a v1 project showed it (Rec. 601, with
+    /// `videoColor`), natively (Rec. 709), and with a matrix chosen in
+    /// Interpret Footage over the v1 reading (the native picture again).
+    #[test]
+    fn the_agents_source_frames_follow_interpret_footage_and_the_v1_reading() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let clip = root.join("untagged.mkv");
+        let made = std::process::Command::new(ffmpeg_path())
+            .args([
+                "-v",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=1280x720:rate=25",
+            ])
+            .args(["-frames:v", "2", "-c:v", "ffv1", "-pix_fmt", "yuv420p"])
+            .arg(&clip)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let actor = KernelActor::spawn(KernelConfig {
+            journal_root: Some(root.join("journals")),
+            ..Default::default()
+        });
+        let kernel = actor.handle();
+        kernel
+            .shell(ShellCall::AttachLibrary {
+                profile: root.clone(),
+                format: DiskFormat::V1_2,
+                electron_profile: None,
+            })
+            .wait()
+            .unwrap()
+            .unwrap();
+        let asset = |id: &str, extra: Value| {
+            let mut a = json!({"id":id,"name":"untagged.mkv","kind":"video","format":"mkv",
+                "w":1280,"h":720,"dur":0.08,"fps":25,"timing":2,"sourcePath":clip});
+            for (k, v) in extra.as_object().unwrap() {
+                a[k] = v.clone();
+            }
+            a
+        };
+        let project = json!({"id":"p","name":"Film","compId":"c","w":64,"h":36,"fps":25,"dur":1,
+        "bg":"#000000","comps":{},"layers":[],"assets":{
+            "native": asset("native", json!({})),
+            "v1": asset("v1", json!({"videoColor":"electron"})),
+            "chosen": asset("chosen", json!({"videoColor":"electron","interpret":{"matrix":"bt709"}})),
+        }});
+        kernel
+            .shell(ShellCall::Open {
+                id: "p".into(),
+                source: SessionSource::New(pm_model::json::parse(&project.to_string()).unwrap()),
+                electron_profile: None,
+            })
+            .wait()
+            .unwrap()
+            .unwrap();
+        let jobs = EngineJobs::new(
+            kernel.clone(),
+            PathBuf::new(),
+            Default::default(),
+            root.clone(),
+            OverrideWindows::default(),
+        );
+        let frames = |id: &str| -> Vec<u8> {
+            let (published, project) = root_of(&kernel);
+            let request = MediaRequest {
+                operation: pm_mcp::services::MediaOperation::SampleFrames,
+                snapshot: FrozenProject {
+                    project_id: "p".into(),
+                    document_id: published.snapshot.doc_id,
+                    revision: published.revision(),
+                    project,
+                },
+                arguments: json!({}),
+                asset: Some(json!({"id": id})),
+                layer: None,
+            };
+            let times = [0.0];
+            jobs.source_frames(&request, &times, (64, 36))
+                .unwrap()
+                .remove(0)
+                .0
+        };
+        let apart =
+            |a: &[u8], b: &[u8]| a.iter().zip(b).map(|(x, y)| x.abs_diff(*y)).max().unwrap();
+        let (native, v1, chosen) = (frames("native"), frames("v1"), frames("chosen"));
+        assert!(apart(&native, &v1) > 8, "the v1 reading is another picture");
+        assert!(
+            apart(&native, &chosen) <= 1,
+            "a chosen matrix wins over the v1 reading"
+        );
+        actor.shutdown();
     }
 
     /// An agent loads a LUT as Apply LUT… does: `import_media` reads and

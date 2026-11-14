@@ -103,6 +103,7 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `metrics.media_badge_opacity` | Opacity of the media badge fill | 0.55 | 0.55 | 0.55 | 0.55 |
 | `metrics.menu_inset` | Menu and palette row inset | 12 | 12 | 12 | 12 |
 | `metrics.menu_row` | Palette row height | 30 | 30 | 30 | 30 |
+| `metrics.message_inset` | Leading room beside a person's message in the Agent conversation | 52 | 52 | 52 | 52 |
 | `metrics.min_center` | Smallest viewer extent | 180 | 180 | 180 | 180 |
 | `metrics.min_height` | Minimum window height | 640 | 640 | 640 | 640 |
 | `metrics.min_panel` | Smallest panel extent | 72 | 72 | 72 | 72 |

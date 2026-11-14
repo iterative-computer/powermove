@@ -13,6 +13,8 @@ struct Params {
     to_2020_0: vec4<f32>,
     to_2020_1: vec4<f32>,
     to_2020_2: vec4<f32>,
+    // Output stage (x), its tone's source and target peaks (y, z), tone (w).
+    output: vec4<f32>,
 };
 
 @group(0) @binding(0) var frame: texture_2d<f32>;
@@ -42,9 +44,17 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         atomicAdd(&counters[totals + 3u], 1u);
         return;
     }
+    // Output: the project's output tone, as the export applies it.
+    if (P.output.x > 0.5 && P.output.w > 0.5) {
+        rgb = pm_tone_map_output(vec4<f32>(rgb, 1.0), P.output.y, P.output.z).rgb;
+    }
     if (P.a.w == 1u) {
         let to_2020 = mat3x3<f32>(P.to_2020_0.xyz, P.to_2020_1.xyz, P.to_2020_2.xyz);
         rgb = pm_pq_inverse_eotf(to_2020 * pm_e_decode3(rgb) * 203.0);
+    }
+    // Output: what a file of the signal holds.
+    if (P.output.x > 0.5) {
+        rgb = clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0));
     }
     if (any(rgb < vec3<f32>(0.0))) {
         atomicAdd(&counters[totals], 1u);

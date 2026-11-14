@@ -2,6 +2,12 @@
 //! textures each scene renders alone: animated shapes in nested
 //! compositions draw the same pixels with batching on and off, with fewer
 //! GPU passes and bind groups per frame. Headless Metal, no window.
+//!
+//! Level 2 shapes are covered in device space, so every move is a new
+//! scene: the batching tests use them. Level 1 shapes keep the legacy
+//! Canvas source raster (`docs/engine/vector.md`): a move, a turn or an
+//! opacity change samples the same local raster, which batching and the
+//! unbatched path reuse alike.
 #![cfg(feature = "kernel")]
 use pm_perf::Counter;
 use pm_protocol::{
@@ -105,7 +111,18 @@ fn shapes(prefix: &str, n: usize, w: u32, h: u32) -> Vec<Value> {
         .collect()
 }
 
-fn document() -> Arc<pm_model::Document> {
+/// Every shape layer of `project` at compatibility level `level`.
+fn at_level(project: &mut Value, level: u32) {
+    for comp in project["comps"].as_object_mut().unwrap().values_mut() {
+        for layer in comp["layers"].as_array_mut().unwrap() {
+            if layer["type"] == "shape" {
+                layer["compat"] = json!(level);
+            }
+        }
+    }
+}
+
+fn document(level: u32) -> Arc<pm_model::Document> {
     let mut inner = shapes("i", 10, 120, 80);
     // A shape past the inner composition's corner: clipped on both sides.
     inner.push(layer(
@@ -157,11 +174,12 @@ fn document() -> Arc<pm_model::Document> {
             &[],
         ),
     ];
-    let project = json!({"id":"vector-batch","name":"vector batch","compId":"main",
+    let mut project = json!({"id":"vector-batch","name":"vector batch","compId":"main",
         "comps":{"inner":comp("inner",120,80,inner),"outer":comp("outer",200,120,outer),
             "main":comp("main",320,180,main)},
         "assets":{},"colorDepth":8,"color":{"mode":"standard","linearBlending":false},
         "params":{},"revision":0,"edits":[],"created":0});
+    at_level(&mut project, level);
     Arc::new(
         pm_kernel::DocumentStore::new_untitled(
             pm_model::json::parse(&project.to_string()).unwrap(),
@@ -204,7 +222,7 @@ fn draw(
 
 #[test]
 fn batched_vector_scenes_draw_the_unbatched_pixels_with_less_gpu_setup() {
-    let doc = document();
+    let doc = document(2);
     for precision in [Precision::Unorm8, Precision::Float16, Precision::Float32] {
         let gpu = pm_gpu::Gpu::new("vector batch on").unwrap();
         let mut batched = Renderer::new(gpu.device, gpu.queue);
@@ -307,7 +325,7 @@ fn batched_vector_scenes_draw_the_unbatched_pixels_with_less_gpu_setup() {
 
 /// A 1280×720 composition of 60 larger animated shapes: more coverage than
 /// one sub-batch holds, so a frame batches in several sub-batches.
-fn large_document() -> Arc<pm_model::Document> {
+fn large_document(level: u32) -> Arc<pm_model::Document> {
     let palette = ["#ED6A5A", "#F4B942", "#5BC0BE", "#6395F2", "#A57BE8"];
     let layers: Vec<Value> = (0..60)
         .map(|i| {
@@ -332,10 +350,11 @@ fn large_document() -> Arc<pm_model::Document> {
             )
         })
         .collect();
-    let project = json!({"id":"vector-batch-large","name":"vector batch large","compId":"main",
+    let mut project = json!({"id":"vector-batch-large","name":"vector batch large","compId":"main",
         "comps":{"main":comp("main",1280,720,layers)},
         "assets":{},"colorDepth":8,"color":{"mode":"standard","linearBlending":false},
         "params":{},"revision":0,"edits":[],"created":0});
+    at_level(&mut project, level);
     Arc::new(
         pm_kernel::DocumentStore::new_untitled(
             pm_model::json::parse(&project.to_string()).unwrap(),
@@ -349,7 +368,7 @@ fn large_document() -> Arc<pm_model::Document> {
 
 #[test]
 fn sub_batched_and_split_batches_draw_the_unbatched_pixels() {
-    let doc = large_document();
+    let doc = large_document(2);
     let draw_large = |renderer: &mut Renderer, seconds: f64| {
         let before = pm_perf::snapshot();
         let ticks = Ticks::new((seconds * TICKS_PER_SECOND as f64).round() as i64).unwrap();
@@ -462,4 +481,41 @@ fn benchmark_fixture_frames_draw_the_unbatched_pixels() {
         assert_eq!(off.get(Counter::VectorCacheMisses), 240);
         assert!(on.get(Counter::VectorBatchedScenes) > 0);
     }
+}
+
+/// Level 1 shapes keep their local source raster: the first frame makes
+/// it (batched or alone, the same misses), and later frames that move, turn
+/// and fade the shapes reuse it unless their scale crosses a quarter-step
+/// density; batching and the unbatched path draw the same pixels and count
+/// the same misses and hits every frame.
+#[test]
+fn level1_source_rasters_are_reused_alike_batched_or_alone() {
+    let doc = document(1);
+    let gpu = pm_gpu::Gpu::new("vector batch level 1 on").unwrap();
+    let mut batched = Renderer::new(gpu.device, gpu.queue);
+    let gpu = pm_gpu::Gpu::new("vector batch level 1 off").unwrap();
+    let mut alone = Renderer::new(gpu.device, gpu.queue);
+    alone.set_vector_batching(false);
+    let mut hits = 0;
+    for seconds in [0.0, 0.7333, 1.4, 2.2667, 2.9667] {
+        let (a, on) = draw(&mut batched, &doc, seconds, Precision::Float16);
+        let (b, off) = draw(&mut alone, &doc, seconds, Precision::Float16);
+        assert!(
+            a.iter().zip(&b).all(|(x, y)| x.to_bits() == y.to_bits()),
+            "level 1 at {seconds}s: batched and alone differ"
+        );
+        for counter in [Counter::VectorCacheMisses, Counter::VectorCacheHits] {
+            assert_eq!(
+                on.get(counter),
+                off.get(counter),
+                "level 1 at {seconds}s: {counter:?}"
+            );
+        }
+        if seconds == 0.0 {
+            // The two instances of the outer composition share its rasters.
+            assert!(off.get(Counter::VectorCacheMisses) >= 10, "{off:?}");
+        }
+        hits += off.get(Counter::VectorCacheHits);
+    }
+    assert!(hits > 0, "a moving shape reuses its local raster");
 }

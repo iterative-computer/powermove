@@ -8,6 +8,8 @@ use std::time::Instant;
 
 mod chrome;
 mod footage;
+#[cfg(test)]
+mod image_budget_tests;
 mod layer_raster;
 mod media_prepare;
 mod material_capture;
@@ -15,6 +17,8 @@ pub use material_capture::{MaterialCaptureRequest,MaterialPixels,MaterialCapture
 mod source;
 mod source_video;
 pub use footage::FrameFootage;
+#[cfg(test)]
+mod still_wait_tests;
 pub use layer_raster::{LayerPixels, LayerRaster};
 pub use media_prepare::MediaPreparation;
 
@@ -1403,6 +1407,7 @@ impl Renderer {
         self.media.image_bytes()
     }
 
+
     /// Explicit viewer opt-in, for stills and for video: a copy at the
     /// view's resolution instead of the source's. CLI exact/reference and
     /// export paths keep native source resolution and precision by default.
@@ -1425,6 +1430,16 @@ impl Renderer {
         let media = &self.media;
         self.pyramids
             .retain_own(|texture| media.holds_image(texture));
+    }
+    /// Critical memory pressure: after each frame is submitted, its stills
+    /// too go down to the image budget.
+    pub fn set_memory_pressure(&mut self, critical: bool) {
+        self.media.set_image_pressure(critical);
+    }
+    /// The last frame's own stills exceeded the image budget: their bytes
+    /// and the budget (an over-budget frame, kept while it drew).
+    pub fn image_over_budget(&self) -> Option<(u64, u64)> {
+        self.media.image_over_budget()
     }
     pub fn set_converted_frame_budget(&mut self, bytes: u64) {
         self.media.trim_frames(bytes);
@@ -1519,6 +1534,13 @@ impl Renderer {
     /// [`Rendered::stand_ins`]; a viewer draws the exact frame once it stops.
     pub fn set_playback(&mut self, deadline: Option<std::time::Instant>) {
         self.media.playback = deadline;
+    }
+
+    /// Viewer frames: a frame that waits for a still being read stops
+    /// waiting once `interrupt` moves past the value it carries (the frame
+    /// is superseded or its viewer closed). `None` outside viewer frames.
+    pub fn set_interrupt(&mut self, interrupt: Option<crate::media::Interrupt>) {
+        self.media.interrupt = interrupt;
     }
 
     /// Viewer frames: a layer this renderer cannot draw becomes a
@@ -2211,6 +2233,13 @@ impl Renderer {
         if !build.compat_missing.is_empty() {
             return Err(RenderError::CompatPending(build.compat_missing));
         }
+        // A still an earlier frame gave up waiting for is still being read:
+        // held before any of the frame is drawn, so a retry costs a plan.
+        if !request.export
+            && media_prepare::any_still(&plan, &mut |path| self.media.still_held(path))
+        {
+            return Err(RenderError::MediaPending);
+        }
         let footage = self.footage_of(&plan, w, h);
         let region = request.region.map(|r| Region {
             x: r.x,
@@ -2350,7 +2379,8 @@ impl Renderer {
             let held = exec.effects.watchdog.take_held();
             // A frame that gave way never reaches the caller's target.
             let abandoned = exec.effects.slices.as_ref().is_some_and(|s| s.stopped());
-            let complete = exec.unsupported.is_empty()
+            let complete = !exec.media.still_pending
+                && exec.unsupported.is_empty()
                 && exec.fallback_pending.is_empty()
                 && exec.effects.fallback.pending.is_empty()
                 && exec.effects.fallback.fatal.is_none()
@@ -2437,7 +2467,11 @@ impl Renderer {
         }
         let mut scene3d_meta = crate::scene3d::metadata::collect(&plan, &self.scene3d);
         if prefix {
-            if unsupported.is_empty() && pending.is_empty() && !abandoned {
+            if unsupported.is_empty()
+                && pending.is_empty()
+                && !abandoned
+                && !self.media.still_pending
+            {
                 self.prefix.remember(std::mem::take(&mut plan.draws));
             } else {
                 self.prefix.clear(&mut self.pool);
@@ -2492,6 +2526,9 @@ impl Renderer {
                 pending.iter().map(|r| (**r).clone()).collect(),
             ));
         }
+        if self.media.still_pending {
+            return Err(RenderError::MediaPending);
+        }
         Ok(Rendered {
             scene3d_meta,
             quads,
@@ -2529,6 +2566,7 @@ impl Renderer {
                 }])
             }
             crate::media::MediaFailure::Failed(m) => RenderError::Media(m),
+            crate::media::MediaFailure::Pending => RenderError::MediaPending,
         })
     }
 

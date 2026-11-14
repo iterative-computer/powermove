@@ -806,3 +806,571 @@ fn a_corrected_range_is_read_the_same_in_the_viewer_and_the_export() {
         viewer.retire();
     }
 }
+
+/// The v1 tests' clip: 1280×720 FFV1 with no colour tag, four saturated
+/// bands (R′G′B′ codes converted by FFmpeg to 4:2:0 Y′CbCr). HD, so the
+/// native reading takes Rec.709 and a v1 project's (Electron's) Rec.601.
+const V1: (u32, u32) = (64, 36);
+fn untagged_hd_clip(dir: &Path) -> PathBuf {
+    let (w, h) = (1280usize, 720usize);
+    let colours = [
+        [200u8, 40, 40],
+        [40, 200, 40],
+        [40, 40, 200],
+        [180, 160, 60],
+    ];
+    let mut row = Vec::with_capacity(w * 3);
+    for x in 0..w {
+        row.extend(colours[x * 4 / w]);
+    }
+    let input = dir.join("hd.rgb");
+    std::fs::write(&input, row.repeat(h * 12)).unwrap();
+    let output = dir.join("Untagged.mkv");
+    let status = std::process::Command::new(ffmpeg_bin())
+        .args(["-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24"])
+        .args(["-s", "1280x720", "-r", "30", "-i"])
+        .arg(&input)
+        .args(["-c:v", "ffv1", "-pix_fmt", "yuv420p"])
+        .arg(&output)
+        .status()
+        .unwrap();
+    assert!(status.success(), "ffmpeg wrote the clip");
+    output
+}
+
+/// A v1 project around that clip, as v1.2 stored it: the asset has no
+/// `timing` and no colour marker.
+fn v1_project(clip: &Path) -> Value {
+    let (w, h) = V1;
+    json!({
+        "id": "P", "name": "Synthetic v1", "compId": "root", "compName": "Main", "w": w, "h": h,
+        "fps": 30, "dur": 3, "bg": "#000000", "work": [0, 3],
+        "layers": [clip_layer(w, h, f64::from(w) / 2., f64::from(h) / 2.)],
+        "assets": {"clip": {"id": "clip", "name": "Untagged.mkv", "kind": "video", "format": "mkv",
+            "w": 1280, "h": 720, "dur": 0.4, "fps": 30, "sourcePath": clip}},
+        "comps": {}
+    })
+}
+
+/// The paused, exact frame of `snapshot` at [`AT`], as display-encoded Rec.709.
+fn still_frame(
+    engine: &mut Headless,
+    snapshot: &Snapshot,
+    media: pm_export::render::MediaPaths,
+) -> Vec<[f64; 3]> {
+    let (w, h) = V1;
+    let scene = Scene {
+        doc: snapshot.document.clone(),
+        comp: snapshot.open_comp().unwrap(),
+        media: std::sync::Arc::new(media),
+        content: 1,
+    };
+    let output = Output {
+        width: w,
+        height: h,
+        display: 0,
+        headroom: 1.,
+        crop: None,
+    };
+    let pixels = engine
+        .frame_spec_settled(
+            &scene,
+            FrameSpec::exact(Ticks::new(AT).unwrap(), output),
+            &Default::default(),
+        )
+        .unwrap();
+    encoded_rec709(&pixels)
+}
+
+/// A v1 project reads its video the same whether it is opened from the v1
+/// library or from a `.pmv` file it was saved to: both carry the v1 video
+/// reading (`videoColor`), so a Save As and reopen never changes the picture.
+#[test]
+fn a_v1_project_reads_its_video_the_same_from_the_library_and_from_its_file() {
+    use pm_kernel::{
+        Kernel, KernelConfig,
+        persistence::{DiskFormat, encode_disk_value},
+        session::{SessionSource, ShellCall, ShellReply},
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let clip = untagged_hd_clip(dir.path());
+    let store = dir.path().join("store");
+    std::fs::create_dir(&store).unwrap();
+    let slot = json!({"v": "1.2.0", "proj": v1_project(&clip)});
+    let slot = pm_model::json::parse(&slot.to_string()).unwrap();
+    std::fs::write(
+        store.join("project.P.json"),
+        encode_disk_value(&slot, DiskFormat::V1_2).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        store.join("projects.json"),
+        r#"[{"id":"P","name":"Synthetic v1"}]"#,
+    )
+    .unwrap();
+    std::fs::write(
+        store.join("projectHistory.P.json"),
+        r#"{"version":1,"paths":[],"index":0,"entries":[]}"#,
+    )
+    .unwrap();
+    let opened = |k: &mut Kernel, id: &str, source: SessionSource| match k
+        .shell(ShellCall::Open {
+            id: id.into(),
+            source,
+            electron_profile: None,
+        })
+        .unwrap()
+    {
+        ShellReply::Opened { session, .. } => session,
+        other => panic!("{other:?}"),
+    };
+    let mut k = Kernel::new(KernelConfig::default());
+    k.shell(ShellCall::AttachLibrary {
+        profile: dir.path().to_path_buf(),
+        format: DiskFormat::V1_2,
+        electron_profile: None,
+    })
+    .unwrap();
+    let session = opened(
+        &mut k,
+        "P",
+        SessionSource::Library {
+            profile: dir.path().to_path_buf(),
+            project: "P".into(),
+        },
+    );
+    let from_library = k.project("P").unwrap().store().snapshot();
+    let file = dir.path().join("Saved.pmv");
+    k.shell(ShellCall::SaveAs {
+        session: session.clone(),
+        path: file.clone(),
+        replace: false,
+    })
+    .unwrap();
+    k.shell(ShellCall::Close(session)).unwrap();
+    drop(k);
+    let mut k = Kernel::new(KernelConfig::default());
+    opened(&mut k, "F", SessionSource::File(file));
+    let from_file = k.project("F").unwrap().store().snapshot();
+
+    let mut media = MediaCatalog::default();
+    media.originals.insert("clip".into(), clip.clone());
+    let mut engine = Headless::new().unwrap();
+    let library = still_frame(&mut engine, &from_library, media.export_paths(false));
+    let reopened = still_frame(&mut engine, &from_file, media.export_paths(false));
+    let (worst, _) = difference(&library, &reopened);
+    assert!(worst < 1e-6, "library against the saved file: {worst:e}");
+    let marker = |s: &Snapshot| {
+        let doc = pm_model::canonical::realize_project(s.document.to_value().unwrap());
+        doc.get("assets")
+            .and_then(|a| a.get("clip"))
+            .and_then(|c| c.get("videoColor"))
+            .and_then(|v| v.as_str().map(str::to_owned))
+    };
+    assert_eq!(
+        marker(&from_library).as_deref(),
+        Some("electron"),
+        "from the library"
+    );
+    assert_eq!(
+        marker(&from_file).as_deref(),
+        Some("electron"),
+        "from the file"
+    );
+
+    // The reading that would have been shown natively is another picture.
+    let native = pm_kernel::document::DocumentStore::new_untitled(
+        pm_model::json::parse(
+            &{
+                let mut p = v1_project(&clip);
+                p["assets"]["clip"]["timing"] = json!(2);
+                p
+            }
+            .to_string(),
+        )
+        .unwrap(),
+    )
+    .snapshot();
+    let native = still_frame(&mut engine, &native, media.export_paths(false));
+    let (apart, _) = difference(&library, &native);
+    assert!(
+        apart > 0.03,
+        "the v1 reading differs from the native one: {apart}"
+    );
+}
+
+/// A proxy really made from `original` by the app's generator (ProRes Proxy
+/// at full size).
+fn proxy_of(dir: &Path, original: &Path) -> PathBuf {
+    use pm_protocol::priority::{ProxyFormat, ProxySize};
+    let codecs = PathBuf::from(std::env::var_os("PM_FFMPEG_DIR").unwrap()).join("bin");
+    let store = pm_proxy::ProxyStore::open(dir.join("proxies")).unwrap();
+    let cancel = std::sync::atomic::AtomicBool::new(false);
+    let hash = blake3::hash(&std::fs::read(original).unwrap())
+        .to_hex()
+        .to_string();
+    pm_proxy::generate_with_disk_probe(
+        pm_proxy::GenerationRequest {
+            source: original,
+            source_hash: &hash,
+            format: ProxyFormat::ProResProxy,
+            size: ProxySize::Full,
+            ffmpeg: &codecs.join("ffmpeg"),
+            ffprobe: &codecs.join("ffprobe"),
+            store: &store,
+            control: pm_proxy::GenerationControl {
+                cancel: &cancel,
+                pause: &|| false,
+                on_pause: &|_| {},
+                on_progress: &|_| {},
+            },
+        },
+        &|_: &Path| -> pm_proxy::Result<(u64, u64)> { Ok((40 << 30, 100 << 30)) },
+    )
+    .unwrap()
+    .stored
+    .path
+}
+
+/// A clip read as in Powermove 1 (`videoColor: "electron"`, the asset of a
+/// loaded v1 project) shows one picture everywhere: the paused viewer, a
+/// playing frame, the frame the disk render cache stores, the clip drawn
+/// from its generated proxy (Proxy Preferred/Only) and the exported 16-bit
+/// PNG. Measured on 2026-11-13 (debug, Metal): see the eprintln lines.
+#[test]
+fn a_clip_read_as_in_powermove_1_is_the_same_in_the_viewer_the_cache_the_proxy_and_the_export() {
+    let dir = tempfile::tempdir().unwrap();
+    let clip = untagged_hd_clip(dir.path());
+    let mut project = v1_project(&clip);
+    project["assets"]["clip"]["videoColor"] = json!("electron");
+    project["requiresEngine"] = json!("native");
+    let snapshot = pm_kernel::document::DocumentStore::new_untitled(
+        pm_model::json::parse(&project.to_string()).unwrap(),
+    )
+    .snapshot();
+    let mut media = MediaCatalog::default();
+    media.originals.insert("clip".into(), clip.clone());
+    let (w, h) = V1;
+    let at = Ticks::new(AT).unwrap();
+    let exe = Path::new(env!("CARGO_BIN_EXE_pm-engine-service"));
+
+    let png = dir.path().join("v1.png");
+    export_sized(
+        &snapshot,
+        &media,
+        &png,
+        ExportFormat::PngStill { sixteen_bit: true },
+        OutputColor::SrgbImage,
+        AlphaOutput::None,
+        V1,
+    );
+    let raw = ffmpeg(
+        &["-f", "rawvideo", "-pix_fmt", "rgba64le"],
+        &png,
+        &dir.path().join("v1.raw"),
+    );
+    let code = |bytes: &[u8]| f64::from(u16::from_le_bytes([bytes[0], bytes[1]])) / 65535.;
+    let exported: Vec<[f64; 3]> = raw
+        .chunks_exact(8)
+        .map(|p| [code(p), code(&p[2..]), code(&p[4..])])
+        .collect();
+    let mut engine = Headless::new().unwrap();
+    // The export shows the v1 reading, not the native one.
+    let native = {
+        let mut p = project.clone();
+        p["assets"]["clip"]
+            .as_object_mut()
+            .unwrap()
+            .remove("videoColor");
+        p["assets"]["clip"]["timing"] = json!(2);
+        pm_kernel::document::DocumentStore::new_untitled(
+            pm_model::json::parse(&p.to_string()).unwrap(),
+        )
+        .snapshot()
+    };
+    let native = still_frame(&mut engine, &native, media.export_paths(false));
+    let (apart, _) = difference(&exported, &native);
+    assert!(apart > 0.03, "the export reads the clip as in v1: {apart}");
+
+    // The middle of each band, away from edges and chroma transitions.
+    let bands = |pixels: &[[f64; 3]]| -> Vec<[f64; 3]> {
+        (0..4)
+            .map(|band| pixels[(h as usize / 2) * w as usize + band * 16 + 8])
+            .collect()
+    };
+    // The paused viewer.
+    let service = EngineService::start(pm_gpu::Gpu::new("v1-reading").unwrap()).unwrap();
+    let disk = service.render_cache();
+    disk.set_storage(Some((dir.path().join("frames"), 1 << 30)))
+        .unwrap();
+    let output = Output {
+        width: w,
+        height: h,
+        display: 0,
+        headroom: 1.,
+        crop: None,
+    };
+    let viewer = service
+        .viewer(ViewerConfig {
+            composition: snapshot.open_comp().unwrap(),
+            snapshot: snapshot.clone(),
+            media: media.clone(),
+            output,
+            layer: None,
+            rate: pm_time::Rate::FPS_30,
+            end: Some(3 * TICKS_PER_SECOND),
+            audio: false,
+        })
+        .unwrap();
+    viewer.quality(Quality::Full).unwrap();
+    viewer
+        .command(C::Seek {
+            time: at,
+            mode: SeekMode::Exact,
+        })
+        .unwrap();
+    wait(&viewer, "the playhead three frames in", |f| f.time == at);
+    viewer.capture_next().unwrap();
+    let paused = wait(&viewer, "a paused frame", |f| {
+        f.time == at && f.moment == Moment::Paused && f.pixels.is_some() && f.scale >= 1.
+    });
+    let paused = encoded_rec709(&paused.pixels.unwrap());
+    let (worst, mean) = difference(&paused, &exported);
+    eprintln!("paused viewer vs PNG: worst {worst:.5}, mean {mean:.6}");
+    assert!(
+        worst < 0.0005,
+        "the paused viewer against the PNG: {worst:.5}"
+    );
+
+    // A playing frame.
+    let scene = Scene {
+        doc: snapshot.document.clone(),
+        comp: snapshot.open_comp().unwrap(),
+        media: std::sync::Arc::new(media.export_paths(false)),
+        content: 1,
+    };
+    let playing = engine
+        .frame_spec_settled(
+            &scene,
+            FrameSpec {
+                moment: Moment::Playing,
+                exact: false,
+                ..FrameSpec::exact(at, output)
+            },
+            &Default::default(),
+        )
+        .unwrap();
+    // A playing frame may take a cheaper resampler for this 20:1 reduction
+    // (band edges move by a few hundredths); the reading is what is compared,
+    // in the middle of each band.
+    let (worst, _) = difference(&bands(&encoded_rec709(&playing)), &bands(&paused));
+    eprintln!("playing vs paused (band centres): worst {worst:e}");
+    assert!(
+        worst < 1e-6,
+        "the playing frame against the paused one: {worst:e}"
+    );
+
+    // The frame the disk render cache stores.
+    let start = Instant::now();
+    while disk
+        .start_fill(0., 1., exe, jobs::Activity::default(), |_| {})
+        .is_err()
+    {
+        assert!(start.elapsed() < Duration::from_secs(30), "scene not read");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    while disk.bars().running || disk.bars().done == 0 {
+        assert!(
+            start.elapsed() < Duration::from_secs(120),
+            "{:?}",
+            disk.bars()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(disk.bars().error, None);
+    let rendered = disk.observed_scene().expect("the composition is observed");
+    let stored = disk
+        .stored_frame(&rendered, at)
+        .expect("the frame three frames in is on disk");
+    let cached: Vec<[f64; 3]> = stored
+        .chunks_exact(8)
+        .map(|p| {
+            let value = |c: usize| f64::from(half::f16::from_le_bytes([p[c * 2], p[c * 2 + 1]]));
+            [value(0), value(1), value(2)]
+        })
+        .collect();
+    let (worst, mean) = difference(&cached, &exported);
+    eprintln!("cached frame vs PNG: worst {worst:.6}, mean {mean:.7}");
+    assert!(
+        worst < 1. / 65535.,
+        "the cached frame against the PNG: {worst:.6}"
+    );
+    viewer.retire();
+
+    // The clip drawn from its generated proxy, which is tagged with the
+    // native reading; in the middle of each band, away from chroma edges.
+    let proxy = proxy_of(dir.path(), &clip);
+    let mut proxied = media.clone();
+    proxied.proxies.insert("clip".into(), proxy);
+    let from_proxy = still_frame(&mut engine, &snapshot, proxied.export_paths(true));
+    let (worst, _) = difference(&bands(&from_proxy), &bands(&exported));
+    eprintln!("proxy vs PNG (band centres): worst {worst:.5}");
+    // ProRes Proxy on flat bands, then the v1 reading's 8-bit upload.
+    assert!(worst < 0.012, "the proxy against the PNG: {worst:.5}");
+}
+
+/// The scopes read what the export writes when they read Output: a graded
+/// picture with light above white (Color Wheels' gain on a 16-bit project,
+/// half float in the viewer and the export alike),
+/// counted in the real viewer's tap, against the same counts of the exported
+/// 16-bit PNG, which stops at white. Read as Picture the same frame counts
+/// its light above white as Over, which the file no longer holds.
+#[test]
+fn the_output_scopes_count_what_the_export_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut grade = layer("grade", "adjustment", json!({}), 0., 0., 100.);
+    let gain = |v: f64| channel(json!(v));
+    grade["fx"] = json!([{"id": "wheels", "type": "colorWheels", "version": 1, "on": true,
+        "p": {"gainMaster": gain(2.5), "gainRed": gain(1.2)}, "inputs": {}}]);
+    let value = json!({
+        "id": "P", "name": "P", "compId": "root", "compName": "P", "w": W, "h": H,
+        "fps": 30, "dur": 3, "bg": "#000000", "work": [0, 3], "colorDepth": 16,
+        "backgroundFill": {"type": "linear", "angle": 20, "stops": [
+            {"id": "a", "color": "#05060A", "position": 0},
+            {"id": "b", "color": "#7F6040", "position": 60},
+            {"id": "c", "color": "#E8E8F2", "position": 100}]},
+        "requiresEngine": "native",
+        "layers": [grade], "assets": {}, "comps": {}
+    });
+    let snapshot = pm_kernel::document::DocumentStore::new_untitled(
+        pm_model::json::parse(&value.to_string()).unwrap(),
+    )
+    .snapshot();
+    let media = MediaCatalog::default();
+    let png = dir.path().join("scopes.png");
+    export(
+        &snapshot,
+        &media,
+        &png,
+        ExportFormat::PngStill { sixteen_bit: true },
+        OutputColor::SrgbImage,
+        AlphaOutput::None,
+    );
+    let raw = ffmpeg(
+        &["-f", "rawvideo", "-pix_fmt", "rgba64le"],
+        &png,
+        &dir.path().join("scopes.raw"),
+    );
+    let code = |bytes: &[u8]| f64::from(u16::from_le_bytes([bytes[0], bytes[1]])) / 65535.;
+    let exported: Vec<[f64; 3]> = raw
+        .chunks_exact(8)
+        .map(|p| [code(p), code(&p[2..]), code(&p[4..])])
+        .collect();
+    let white = exported
+        .iter()
+        .filter(|p| p.iter().any(|v| *v >= 1.))
+        .count();
+    assert!(
+        white > 100,
+        "the grade puts light above white: {white} pixels at white"
+    );
+
+    let service = EngineService::start(pm_gpu::Gpu::new("scope-output").unwrap()).unwrap();
+    let viewer = service
+        .viewer(ViewerConfig {
+            composition: snapshot.open_comp().unwrap(),
+            snapshot: snapshot.clone(),
+            media: media.clone(),
+            output: Output {
+                width: W,
+                height: H,
+                display: 0,
+                headroom: 1.,
+                crop: None,
+            },
+            layer: None,
+            rate: pm_time::Rate::FPS_30,
+            end: Some(3 * TICKS_PER_SECOND),
+            audio: false,
+        })
+        .unwrap();
+    viewer.quality(Quality::Full).unwrap();
+    let at = Ticks::new(AT).unwrap();
+    viewer
+        .command(C::Seek {
+            time: at,
+            mode: SeekMode::Exact,
+        })
+        .unwrap();
+    wait(&viewer, "the playhead", |f| f.time == at);
+    let read = |stage: pm_render::scopes::ScopeStage| {
+        let (taps, counted) = async_channel::bounded(1);
+        let config = pm_render::scopes::ScopeConfig {
+            stage,
+            ..pm_render::scopes::ScopeConfig::PANEL
+        };
+        viewer.scopes(Some((config, taps))).unwrap();
+        viewer.capture_next().unwrap();
+        wait(&viewer, "a paused frame at full size", |f| {
+            f.time == at && f.moment == Moment::Paused && f.pixels.is_some() && f.scale >= 1.
+        });
+        // The tap's newest count: the frame drawn at full size.
+        let start = Instant::now();
+        let mut latest = None;
+        while start.elapsed() < Duration::from_secs(2) || latest.is_none() {
+            if let Ok(frame) = counted.try_recv() {
+                latest = Some(frame.unwrap());
+            }
+            assert!(start.elapsed() < Duration::from_secs(20), "no scope frame");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        viewer.scopes(None).unwrap();
+        let frame: pm_render::scopes::ScopeFrame = latest.unwrap();
+        assert_eq!(frame.pixels, u64::from(W * H), "a full-size frame");
+        frame
+    };
+    let config = pm_render::scopes::ScopeConfig::PANEL;
+    let reference = pm_color::scopes::compute(
+        &exported,
+        W as usize,
+        H as usize,
+        pm_color::scopes::ScopeConfig {
+            columns: config.columns as usize,
+            levels: config.levels as usize,
+            vector_bins: config.vector_bins as usize,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let pixels = u64::from(W * H);
+    let output = read(pm_render::scopes::ScopeStage::Output);
+    assert_eq!((output.over, output.under), (0, 0));
+    let luma = moved(
+        &output.luma_histogram,
+        &reference.luma_histogram.bins,
+        pixels,
+    );
+    let waveform = moved(&output.waveform, &reference.waveform, pixels);
+    let vector = moved(&output.vectorscope, &reference.vectorscope, pixels);
+    eprintln!(
+        "Output scopes vs PNG: luma {luma:.4}, waveform {waveform:.4}, vectorscope {vector:.4}"
+    );
+    assert!(luma < 0.005 && waveform < 0.005 && vector < 0.005);
+    for c in 0..3 {
+        let channel = moved(&output.histogram[c], &reference.histogram[c].bins, pixels);
+        let parade = moved(&output.parade[c], &reference.parade[c], pixels);
+        assert!(
+            channel < 0.005 && parade < 0.005,
+            "channel {c}: {channel:.4} {parade:.4}"
+        );
+    }
+    let picture = read(pm_render::scopes::ScopeStage::Picture);
+    eprintln!("Picture over: {} of {pixels}", picture.over);
+    assert!(
+        u64::from(picture.over) > 100,
+        "Picture counts the light above white"
+    );
+    let waveform = moved(&picture.waveform, &reference.waveform, pixels);
+    assert!(waveform > 0.005, "Picture is not the file: {waveform:.4}");
+    viewer.retire();
+}

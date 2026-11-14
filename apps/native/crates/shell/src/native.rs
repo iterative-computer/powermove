@@ -5177,8 +5177,6 @@ impl Popup {
         gpui_macos::child_window::attach(&self.window, &self.parent);
         // Only while the app is active, never over other apps (P-CHILD).
         gpui_macos::child_window::show(&self.window, true);
-        #[cfg(debug_assertions)]
-        gpui_macos::child_window::review_show(&self.window, &self.parent);
         self.window.makeFirstResponder(Some(&self.search));
         animate(&self.window, true, &self.tokens, &mut self.spring);
     }

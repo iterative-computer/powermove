@@ -51,6 +51,100 @@ fn subsampled_still_then_exact_read_matches_an_independent_full_read() {
     assert_eq!(media.image_bytes(), 0);
 }
 
+/// One still read at two sizes keeps both: a frame that draws it at each
+/// (two layers, or a preview and an exact read) decodes it once per size,
+/// not once per draw per frame.
+#[test]
+fn a_still_keeps_each_size_it_was_read_at() {
+    let gpu = pm_gpu::Gpu::new("still sizes kept").unwrap();
+    let pipelines = Pipelines::new(&gpu.device);
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/still-red.png");
+    let mut media = MediaCache::new(&gpu.device);
+    let mut read = |edge| {
+        let before = pm_perf::snapshot();
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        let target = media
+            .image_scaled(
+                &gpu.device,
+                &gpu.queue,
+                &pipelines,
+                &mut encoder,
+                &path,
+                WorkingEncoding::Standard,
+                Precision::Float16,
+                None,
+                edge,
+            )
+            .unwrap();
+        gpu.queue.submit([encoder.finish()]);
+        let work = pm_perf::snapshot().since(&before);
+        (
+            read_f32(&gpu.device, &gpu.queue, &target.texture).unwrap(),
+            work.get(pm_perf::Counter::StillDecodes),
+        )
+    };
+    let (small, decoded) = read(Some(16));
+    assert!(decoded > 0);
+    let (full, decoded) = read(None);
+    assert!(decoded > 0);
+    for _ in 0..3 {
+        assert_eq!(read(Some(16)), (small.clone(), 0), "the preview is kept");
+        assert_eq!(read(None), (full.clone(), 0), "the exact read is kept");
+    }
+}
+
+/// A still larger than the whole image budget stays while frames keep
+/// drawing it (it was decoded again for every frame), goes once frames
+/// passed without it, and a budget of zero releases it at once.
+#[test]
+fn a_still_larger_than_the_budget_stays_while_frames_draw_it() {
+    let gpu = pm_gpu::Gpu::new("still over budget").unwrap();
+    let pipelines = Pipelines::new(&gpu.device);
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/still-red.png");
+    let mut media = MediaCache::new(&gpu.device);
+    media.trim_images(1);
+    let frame = |media: &mut MediaCache, draw: bool| {
+        media.begin_frame(false);
+        let before = pm_perf::snapshot();
+        if draw {
+            let mut encoder = gpu.device.create_command_encoder(&Default::default());
+            media
+                .image_scaled(
+                    &gpu.device,
+                    &gpu.queue,
+                    &pipelines,
+                    &mut encoder,
+                    &path,
+                    WorkingEncoding::Standard,
+                    Precision::Float16,
+                    None,
+                    None,
+                )
+                .unwrap();
+            gpu.queue.submit([encoder.finish()]);
+        }
+        pm_perf::snapshot()
+            .since(&before)
+            .get(pm_perf::Counter::StillDecodes)
+    };
+    assert!(frame(&mut media, true) > 0);
+    assert!(media.image_bytes() > 1, "kept beyond the budget");
+    for _ in 0..4 {
+        assert_eq!(frame(&mut media, true), 0, "drawn again without a decode");
+    }
+    // Two frames without it: the budget applies again.
+    frame(&mut media, false);
+    frame(&mut media, false);
+    media.trim_images(1);
+    assert_eq!(media.image_bytes(), 0);
+    assert!(
+        frame(&mut media, true) > 0,
+        "decoded again once it had gone"
+    );
+    media.trim_images(0);
+    assert_eq!(media.image_bytes(), 0, "a budget of zero releases at once");
+}
+
 #[test]
 fn preview_video_conversion_does_not_replace_the_exact_source() {
     let gpu = pm_gpu::Gpu::new("preview source isolation").unwrap();
@@ -954,6 +1048,166 @@ fn packed_still_fusion_matches_separate_normalization_byte_for_byte() {
             }
         }
     }
+}
+
+/// `n` distinct 256x256 PNG stills in a directory of their own.
+fn distinct_stills(n: u8) -> (tempfile::TempDir, Vec<PathBuf>) {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = (0..n)
+        .map(|i| {
+            let path = dir.path().join(format!("still-{i}.png"));
+            let rgba: Vec<u8> = (0..256u32 * 256)
+                .flat_map(|p| [i.wrapping_mul(37), (p % 256) as u8, (p / 256) as u8, 255])
+                .collect();
+            let mut encoder = png::Encoder::new(std::fs::File::create(&path).unwrap(), 256, 256);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder
+                .write_header()
+                .unwrap()
+                .write_image_data(&rgba)
+                .unwrap();
+            path
+        })
+        .collect();
+    (dir, paths)
+}
+
+/// One frame of the media cache reading `paths`: the stills it decoded.
+fn image_frame(
+    gpu: &pm_gpu::Gpu,
+    pipelines: &Pipelines,
+    media: &mut MediaCache,
+    paths: &[&PathBuf],
+) -> u64 {
+    media.begin_frame(false);
+    let before = pm_perf::snapshot();
+    let mut encoder = gpu.device.create_command_encoder(&Default::default());
+    for path in paths {
+        media
+            .image(
+                &gpu.device,
+                &gpu.queue,
+                pipelines,
+                &mut encoder,
+                path,
+                WorkingEncoding::Standard,
+                Precision::Float16,
+                None,
+            )
+            .unwrap();
+    }
+    gpu.queue.submit([encoder.finish()]);
+    media.flush();
+    pm_perf::snapshot()
+        .since(&before)
+        .get(pm_perf::Counter::StillDecodes)
+}
+
+/// Over a small budget, the stills kept are the frame being drawn's own:
+/// the frame before gives way (two adjacent frames that read different
+/// stills do not keep both sets), a frame that reads the same stills again
+/// decodes nothing, and a frame whose own stills exceed the budget says so.
+#[test]
+fn over_budget_only_the_frame_being_drawn_keeps_its_stills() {
+    let gpu = pm_gpu::Gpu::new("image floor").unwrap();
+    let pipelines = Pipelines::new(&gpu.device);
+    let (_dir, s) = distinct_stills(4);
+    let mut media = MediaCache::new(&gpu.device);
+    media.trim_images(1);
+    assert!(image_frame(&gpu, &pipelines, &mut media, &[&s[0], &s[1]]) > 0);
+    let one = media.image_bytes() / 2;
+    assert!(one > 1);
+    assert_eq!(media.image_over_budget(), Some((2 * one, 1)));
+    assert!(image_frame(&gpu, &pipelines, &mut media, &[&s[2], &s[3]]) > 0);
+    assert_eq!(
+        media.image_bytes(),
+        2 * one,
+        "the frame before kept its stills beside this frame's"
+    );
+    assert_eq!(
+        image_frame(&gpu, &pipelines, &mut media, &[&s[2], &s[3]]),
+        0,
+        "the next frame reads them again without a decode"
+    );
+    // Within the budget nothing is said, and the frame before stays.
+    media.trim_images(64 * one);
+    assert!(image_frame(&gpu, &pipelines, &mut media, &[&s[0]]) > 0);
+    assert_eq!(media.image_over_budget(), None);
+    assert!(image_frame(&gpu, &pipelines, &mut media, &[&s[1]]) > 0);
+    assert_eq!(
+        image_frame(&gpu, &pipelines, &mut media, &[&s[0], &s[1]]),
+        0
+    );
+}
+
+/// Under critical memory pressure a frame's stills, its own too, go down to
+/// the budget once its commands are submitted.
+#[test]
+fn critical_pressure_lets_go_of_stills_after_the_frame() {
+    let gpu = pm_gpu::Gpu::new("image pressure").unwrap();
+    let pipelines = Pipelines::new(&gpu.device);
+    let (_dir, s) = distinct_stills(2);
+    let mut media = MediaCache::new(&gpu.device);
+    media.trim_images(1);
+    media.set_image_pressure(true);
+    assert!(image_frame(&gpu, &pipelines, &mut media, &[&s[0], &s[1]]) > 0);
+    assert_eq!(media.image_bytes(), 0);
+    assert!(
+        media.image_over_budget().is_some(),
+        "still an over-budget frame"
+    );
+    media.set_image_pressure(false);
+    assert!(image_frame(&gpu, &pipelines, &mut media, &[&s[0]]) > 0);
+    assert!(media.image_bytes() > 0, "kept while frames draw it");
+}
+
+/// What the still prefetch holds is counted and goes with a budget of zero
+/// and with an idle release, like the converted stills.
+#[test]
+fn the_still_prefetch_hold_goes_at_budget_zero_and_at_rest() {
+    let gpu = pm_gpu::Gpu::new("prefetch hold").unwrap();
+    let (_dir, s) = distinct_stills(2);
+    let mut media = MediaCache::new(&gpu.device);
+    let hold = |media: &mut MediaCache| {
+        for path in &s {
+            media.prepare_image(path, None, false);
+        }
+        media.wait_for_stills();
+        assert!(media.still_prefetch_bytes() > 0, "the hold is counted");
+    };
+    hold(&mut media);
+    media.trim_images(0);
+    assert_eq!(media.still_prefetch_bytes(), 0, "budget zero");
+    media.trim_images(48 << 20);
+    hold(&mut media);
+    media.release_idle_frames();
+    assert_eq!(media.still_prefetch_bytes(), 0, "at rest");
+}
+
+/// A frame draws its newest still first (the top layer): caching it must
+/// not push out the frame before's stills this frame reads next. Over the
+/// budget they stay until the frame is submitted, and only those it did not
+/// read again go then.
+#[test]
+fn a_new_still_never_pushes_out_stills_the_frame_reads_next() {
+    let gpu = pm_gpu::Gpu::new("image floor order").unwrap();
+    let pipelines = Pipelines::new(&gpu.device);
+    let (_dir, s) = distinct_stills(4);
+    let mut media = MediaCache::new(&gpu.device);
+    media.trim_images(1);
+    assert!(image_frame(&gpu, &pipelines, &mut media, &[&s[0], &s[1]]) > 0);
+    let one = media.image_bytes() / 2;
+    let before = pm_perf::snapshot();
+    image_frame(&gpu, &pipelines, &mut media, &[&s[2], &s[1], &s[0]]);
+    let decoded = pm_perf::snapshot()
+        .since(&before)
+        .get(pm_perf::Counter::MediaCacheMisses);
+    assert_eq!(decoded, 1, "only the new still is decoded");
+    assert_eq!(media.image_bytes(), 3 * one);
+    // The next frame reads one new still: the others go once it is submitted.
+    image_frame(&gpu, &pipelines, &mut media, &[&s[3]]);
+    assert_eq!(media.image_bytes(), one);
 }
 
 #[test]

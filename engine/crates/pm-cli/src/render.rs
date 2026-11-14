@@ -569,6 +569,7 @@ fn settings(options: &Options, loaded: &Loaded) -> Result<ExportSettings, Failur
                 })
                 .flatten(),
             compat: Vec::new(),
+            without_dolby_vision: false,
         },
     })
 }

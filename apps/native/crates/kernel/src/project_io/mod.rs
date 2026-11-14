@@ -530,7 +530,10 @@ pub fn open_project(path: &Path, options: OpenOptions) -> Result<OpenedProject, 
 /// Legacy files predate native colour management. Keep their preview intent
 /// on each asset so saving to PMV4 does not lose it, and native imports keep
 /// their tagged/HDR reading. Explicit Interpret Footage fields still win.
-fn adopt_electron_rendering(project: &mut Value, legacy_container: bool) {
+/// Projects read from a v1 library slot take the same rule as a PMV4 file
+/// (`LibraryStore::load`), so a project reads its video the same however it
+/// is opened, and a Save As and reopen never changes the picture.
+pub(crate) fn adopt_electron_rendering(project: &mut Value, legacy_container: bool) {
     let has_3d = |comp: &Value| {
         comp.get("layers")
             .and_then(Value::as_array)
@@ -563,23 +566,30 @@ fn adopt_electron_rendering(project: &mut Value, legacy_container: bool) {
         return;
     };
     for (_, asset) in assets.iter_mut() {
-        let Some(asset) = asset.as_object_mut() else {
-            continue;
-        };
-        if asset.get("kind").and_then(Value::as_str) == Some("video")
-            && !asset.contains_key("videoColor")
-            // New native imports write timing:2. Older Electron PMV4 files
-            // have the same container version as native, so the asset's own
-            // legacy timing provenance identifies their preview reading.
-            && (legacy_container
-                || !asset.contains_key("timing")
-                    && asset
-                        .get("interpret")
-                        .and_then(Value::as_object)
-                        .is_none_or(|p| p.is_empty()))
-        {
-            asset.insert("videoColor", Value::from("electron"));
-        }
+        adopt_electron_asset(asset, legacy_container);
+    }
+}
+
+/// One asset record as [`adopt_electron_rendering`] leaves it: a v1 video
+/// asset gains `videoColor: "electron"`. Also applied to the asset records
+/// an imported Undo history restores (`History::import`).
+pub(crate) fn adopt_electron_asset(asset: &mut Value, legacy_container: bool) {
+    let Some(asset) = asset.as_object_mut() else {
+        return;
+    };
+    if asset.get("kind").and_then(Value::as_str) == Some("video")
+        && !asset.contains_key("videoColor")
+        // New native imports write timing:2. Older Electron PMV4 files
+        // have the same container version as native, so the asset's own
+        // legacy timing provenance identifies their preview reading.
+        && (legacy_container
+            || !asset.contains_key("timing")
+                && asset
+                    .get("interpret")
+                    .and_then(Value::as_object)
+                    .is_none_or(|p| p.is_empty()))
+    {
+        asset.insert("videoColor", Value::from("electron"));
     }
 }
 

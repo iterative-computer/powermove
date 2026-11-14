@@ -1968,13 +1968,20 @@ impl Render for SurfaceWindow {
         let sidebar = self.panel == "settings";
         let (mut fill, mut band) = (0, 0.);
         let mut ground = None;
-        let body = self.owner.update(cx, |v, cx| {
+        let (head, body) = self.owner.update(cx, |v, cx| {
             let (header, colour, titlebar) = {
                 let t = &v.host.borrow().tokens;
                 if sidebar {
                     ground = Some((t.ground(), t.metrics.settings_sidebar));
                 }
-                (t.metrics.header, t.colors.panel, t.metrics.titlebar)
+                // The popover's content, its header too, is on solid
+                // `floating` inside the glass frame (agent-panel.md §8).
+                let colour = if popover {
+                    t.colors.floating
+                } else {
+                    t.colors.panel
+                };
+                (t.metrics.header, colour, t.metrics.titlebar)
             };
             fill = colour;
             // Windows with a transparent title bar keep their content below
@@ -1984,25 +1991,26 @@ impl Render for SurfaceWindow {
             } else {
                 titlebar
             };
-            v.builtin_panel(
-                &panel,
-                pm_shell::layout::Rect {
-                    x: 0.,
-                    y: 0.,
-                    w: f32::from(size.width),
-                    h: f32::from(size.height) + header - band,
-                },
-                window,
-                cx,
-            )
+            // A panel's header row is the dock's; the popover has no dock, so
+            // it shows the panel's header (Thread, New Thread, Pin) itself.
+            let rect = pm_shell::layout::Rect {
+                x: 0.,
+                y: 0.,
+                w: f32::from(size.width),
+                h: f32::from(size.height) + if popover { 0. } else { header } - band,
+            };
+            let head = popover
+                .then(|| v.builtin_header(&panel, rect, false, window, cx))
+                .flatten();
+            (head, v.builtin_panel(&panel, rect, window, cx))
         });
-        // The agent popover's material is native (glass); other panel
-        // windows paint the solid panel colour.
+        // The agent popover's frame is native glass with its content on
+        // solid `floating`; other panel windows paint the panel colour.
         div()
             .size_full()
             .overflow_hidden()
             .pt(px(band))
-            .when(!popover && !sidebar, |d| d.bg(rgb(fill)))
+            .when(!sidebar, |d| d.bg(rgb(fill)))
             .when_some(ground, |d, ((colour, alpha), side)| {
                 d.child(
                     div()
@@ -2014,6 +2022,7 @@ impl Render for SurfaceWindow {
                         .bg(gpui::rgba((colour << 8) | (alpha * 255.).round() as u32)),
                 )
             })
+            .children(head)
             .children(body)
     }
 }
