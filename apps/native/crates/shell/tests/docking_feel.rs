@@ -375,3 +375,60 @@ fn a_short_window_shrinks_the_timeline_too() {
         assert!(timeline.h >= least_height(&["timeline".to_owned()], &t) - 0.5 || h < 520.);
     }
 }
+
+/// The window's top edge docks too, as After Effects' window edges do (Final
+/// Cut Pro has no free docking): a band across the timeline's row above the
+/// columns. Just below the edge, a header still takes tabs.
+#[test]
+fn the_top_edge_docks_a_band_above_the_columns() {
+    let t = tokens();
+    let bounds = SIZES[1];
+    let l = Layout::preset("design");
+    let g = l.geometry(bounds, &t);
+    let viewer = rect_of(&l, bounds, "viewer");
+    let mid = viewer.x + viewer.w / 2.;
+    let at = |y: f32| {
+        l.drop_target_for(&g, bounds, (mid, y), &t, "fxbrowser", false)
+            .map(|p| p.target)
+    };
+    assert_eq!(at(bounds.y + 2.), Some(DropTarget::Edge(Edge::Top)));
+    // Overshooting into the toolbar band above still counts.
+    assert_eq!(at(bounds.y - 20.), Some(DropTarget::Edge(Edge::Top)));
+    // A little lower is the viewer's own header (it joins no stack: above).
+    assert!(matches!(at(bounds.y + 14.), Some(DropTarget::Split { .. })));
+    let mut top = l.clone();
+    top.move_panel_to("fxbrowser", DropTarget::Edge(Edge::Top))
+        .unwrap();
+    sound(&top, bounds, "top band");
+    let band = rect_of(&top, bounds, "fxbrowser");
+    let viewer = rect_of(&top, bounds, "viewer");
+    let timeline = rect_of(&top, bounds, "timeline");
+    assert_eq!(band.y, bounds.y);
+    assert!(viewer.y > band.y + band.h, "the columns start below it");
+    assert!((band.w - timeline.w).abs() < 0.5, "it spans the timeline's row");
+    // Its divider and every other resize and drop behave in this layout too.
+    let g = top.geometry(bounds, &t);
+    for divider in &g.dividers {
+        let before: Vec<Rect> = g.panels.iter().map(|p| p.rect).collect();
+        for delta in [-5000., -80., 80., 5000.] {
+            let mut l = top.clone();
+            l.resize(divider, delta, bounds, &t);
+            sound(&l, bounds, &format!("top layout, {divider:?} by {delta}"));
+        }
+        let mut back = top.clone();
+        back.resize(divider, 0., bounds, &t);
+        for (a, b) in before.iter().zip(back.geometry(bounds, &t).panels.iter()) {
+            assert!(close(*a, b.rect), "{divider:?}: {a:?} came back as {:?}", b.rect);
+        }
+    }
+    for target in &g.panels {
+        for (zone, x, y) in spots(target.rect, &t) {
+            if let Some(p) = top.drop_target_for(&g, bounds, (x, y), &t, "inspector", false) {
+                let mut next = top.clone();
+                next.move_panel_to("inspector", p.target).unwrap();
+                sound(&next, bounds, zone);
+                assert!(close(rect_of(&next, bounds, "inspector"), p.rect), "{zone}");
+            }
+        }
+    }
+}
