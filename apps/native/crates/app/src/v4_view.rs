@@ -170,6 +170,9 @@ pub struct SurfaceView {
     /// opened or closed: the chevron and the group's content follow the
     /// press in the next frame, the panel's own work after it.
     pub(crate) disclosures: HashMap<Id, bool>,
+    /// A text field to focus once it is mounted (the Agent composer when its
+    /// popover opens) and what was typed before it was.
+    ready_text: Option<(String, String, std::time::Instant)>,
     /// The control the left button is down on: it shows pressed (a deeper
     /// wash than hover) until the button comes up, as a Mac button does.
     pressed: Option<Id>,
@@ -262,6 +265,7 @@ impl SurfaceView {
             focus: BTreeMap::new(),
             motion: Default::default(),
             pressed: None,
+            ready_text: None,
             presence: HashMap::new(),
             subscriptions: BTreeMap::new(),
             origin: Rc::new(Cell::new(Point::default())),
@@ -438,6 +442,7 @@ impl SurfaceView {
             self.reconcile(window, cx);
         }
         self.try_focus_text(cx);
+        self.take_ready(cx);
         self.try_reveal(cx);
         if let Some(installed) = &self.installed {
             let _ = installed.try_send(());
@@ -1334,6 +1339,68 @@ impl SurfaceView {
     pub fn focus_text(&mut self, layer: String, cx: &mut Context<Self>) {
         self.focus_text = Some((layer, std::time::Instant::now()));
         self.try_focus_text(cx);
+        self.take_ready(cx);
+    }
+    /// Focuses the text field `semantic` as soon as it is mounted; keys typed
+    /// before then (`type_early`) land in it, in order, as typing does.
+    pub(crate) fn focus_when_ready(&mut self, semantic: &str, cx: &mut Context<Self>) {
+        self.ready_text = Some((semantic.into(), String::new(), std::time::Instant::now()));
+        self.take_ready(cx);
+    }
+    /// Text typed while the field asked for is not mounted yet; false when
+    /// nothing is waiting for it (a field that never came, after 2 s, waits
+    /// no more: keys go where they would).
+    pub(crate) fn type_early(&mut self, text: &str) -> bool {
+        if self
+            .ready_text
+            .as_ref()
+            .is_some_and(|(_, _, asked)| asked.elapsed() > std::time::Duration::from_secs(2))
+        {
+            self.ready_text = None;
+        }
+        match &mut self.ready_text {
+            Some((_, typed, _)) => {
+                typed.push_str(text);
+                true
+            }
+            None => false,
+        }
+    }
+    fn take_ready(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self
+            .ready_text
+            .as_ref()
+            .and_then(|(semantic, _, _)| self.prepared.semantics.get(semantic).copied())
+        else {
+            return;
+        };
+        let Some(field) = self.fields.get(&id).cloned() else {
+            return;
+        };
+        let Some((_, typed, _)) = self.ready_text.take() else {
+            return;
+        };
+        let value = field.update(cx, |f, cx| {
+            f.begin_editing(cx);
+            if typed.is_empty() {
+                return None;
+            }
+            let value = format!("{}{typed}", f.editing_text());
+            f.replace_text(&value, cx);
+            Some(value)
+        });
+        // The panel's model hears it as it hears typing.
+        if let Some(value) = value {
+            self.send(
+                id,
+                "input",
+                EventDetail {
+                    value: Some(json!(value)),
+                    ..Default::default()
+                },
+                cx,
+            );
+        }
     }
     fn try_focus_text(&mut self, cx: &mut Context<Self>) {
         if self

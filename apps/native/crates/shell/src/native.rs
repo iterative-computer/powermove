@@ -437,8 +437,33 @@ pub fn popover_frame(w: &gpui::Window, t: &Tokens) {
     }
     content.addSubview_positioned_relativeTo(&mat, NSWindowOrderingMode::Below, Some(&gpui));
     window.invalidateShadow();
-    // The half-bounce entrance (plan §3.10), as the palette and field menu.
-    animate(&window, true, t, &mut None);
+    // Opens as the palette and field menus do now: a short eased fade and
+    // no spring, so it is there at once and never delays typing (a 320 ms
+    // linear fade with a scale spring settling at ~470 ms read as sluggish).
+    quick_fade(&window);
+}
+/// The palette's and menus' fade (100 ms, eased, no spring). Switch to
+/// `motion.menu_fade` once that token lands (design lane, 3135b0d60).
+const POPOVER_FADE: f64 = 0.1;
+fn quick_fade(w: &NSWindow) {
+    let Some(layer) = w.contentView().and_then(|v| {
+        v.setWantsLayer(true);
+        v.layer()
+    }) else {
+        return;
+    };
+    unsafe {
+        let a: *mut AnyObject = msg_send![objc2::class!(CABasicAnimation),animationWithKeyPath:&*NSString::from_str("opacity")];
+        let from: *mut AnyObject = msg_send![objc2::class!(NSNumber),numberWithDouble:0.0f64];
+        let to: *mut AnyObject = msg_send![objc2::class!(NSNumber),numberWithDouble:1.0f64];
+        let _: () = msg_send![a,setFromValue:from];
+        let _: () = msg_send![a,setToValue:to];
+        let _: () = msg_send![a,setDuration:POPOVER_FADE];
+        let ease: *mut AnyObject = msg_send![objc2::class!(CAMediaTimingFunction),functionWithName:&*NSString::from_str("easeOut")];
+        let _: () = msg_send![a,setTimingFunction:ease];
+        layer.setOpacity(1.);
+        let _: () = msg_send![&*layer,addAnimation:a,forKey:&*NSString::from_str("pm.shell.opacity")];
+    }
 }
 pub fn contents(v: &NSView) -> Retained<NSView> {
     unsafe {

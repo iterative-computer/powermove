@@ -1341,6 +1341,16 @@ impl Controller {
                 v.builtins.opening_windows.remove(&id);
                 match result {
                     Ok(handle) => {
+                        // The popover opens ready to type: its composer
+                        // takes the keys once mounted, those typed before it
+                        // included (`SurfaceView::focus_when_ready`).
+                        if id == "agent"
+                            && let Some(view) = v.builtins.views.get("agent").cloned()
+                        {
+                            view.update(cx, |view, cx| {
+                                view.focus_when_ready("agent-composer-text", cx)
+                            });
+                        }
                         v.builtins.windows.insert(id, handle.into());
                         // The panel learns where it is shown now (the
                         // popover's header has Pin, the docked one does not).
@@ -2564,6 +2574,19 @@ impl Render for SurfaceWindow {
                         if PopoverKeys::dismisses(e) && this.drag.is_some_and(|d| d.moved) {
                             cx.stop_propagation();
                             this.cancel_drag(window, cx);
+                            return;
+                        }
+                        // Typed before the composer was there to take it:
+                        // kept for it (nothing inside has focus yet).
+                        let m = e.keystroke.modifiers;
+                        if !(m.platform || m.control || m.function)
+                            && let Some(text) = e.keystroke.key_char.clone()
+                            && !text.chars().any(char::is_control)
+                            && let Some(view) =
+                                this.owner.read(cx).builtins.views.get("agent").cloned()
+                            && view.update(cx, |v, _| v.type_early(&text))
+                        {
+                            cx.stop_propagation();
                             return;
                         }
                         if PopoverKeys::dismisses(e) {
