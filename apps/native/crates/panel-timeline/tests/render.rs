@@ -632,3 +632,23 @@ fn summary_marks_are_drawn_inside_their_strip_and_clipped_to_it() {
         );
     }
 }
+
+/// A layer a tenth of a second long, zoomed out to a few points a second (a
+/// Text-tool layer made with the playhead past the composition's end lasts
+/// that long), still has a strip a person can see, select and trim: v1 drew
+/// every clip at least 4 px wide.
+#[test]
+fn a_very_short_layer_keeps_a_visible_strip_at_any_zoom() {
+    let t = tokens();
+    let mut short = clip("short");
+    short.from = 3.;
+    short.duration = 0.1;
+    for pps in [4., 10., 100.] {
+        let v = Viewport { pps, ..viewport(&t) };
+        let f = scene_with(&t, short.clone()).prepare(v, &t).unwrap();
+        let strip = f.ops.iter().find(|o| o.id == "clip:short").expect("a strip");
+        assert!(strip.bounds.width >= 4., "{pps}: {}", strip.bounds.width);
+        let start = v.layer_column + (3. - v.scroll_time) * pps;
+        assert!((strip.bounds.x - (start + t.strip_gap() as f64 / 2.)).abs() < 1e-9);
+    }
+}

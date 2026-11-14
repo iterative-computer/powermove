@@ -173,10 +173,13 @@ pub struct MeshInstance {
 }
 
 /// Equal-sized sRGB RGBA8 map-array layers, already oriented to mesh UVs.
+#[derive(Clone, PartialEq, Eq)]
 pub struct TextureMaps {
     pub width: u32,
     pub height: u32,
-    pub layers: Vec<Vec<u8>>,
+    /// Shared with decoded images and the uploaded map identity. Equality
+    /// still compares bytes when the allocations differ.
+    pub layers: Vec<Arc<Vec<u8>>>,
 }
 
 /// Evaluated view values the original Rust prototype did not carry.

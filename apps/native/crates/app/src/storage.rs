@@ -205,6 +205,9 @@ pub(crate) struct Original {
     /// Media this library reads in place from inside this folder.
     pub linked_items: u64,
     pub linked_bytes: u64,
+    /// Its extensions: new or changed since they were brought in, and all
+    /// it has. `None` when its extension folder couldn't be read.
+    pub extensions: Option<(usize, usize)>,
 }
 pub(crate) fn measure(native: &Path, original: Option<&Path>) -> Report {
     let library = sum(&children(
@@ -245,6 +248,14 @@ pub(crate) fn measure(native: &Path, original: Option<&Path>) -> Report {
                 .collect(),
             linked_items: inside.map_or(0, |f| f.items),
             linked_bytes: inside.map_or(0, |f| f.bytes),
+            // Read-only: hashes extension folders, compiles nothing.
+            extensions: pm_first_launch::extension_transfer::scan(&pm_first_launch::Config {
+                electron_profile: root.to_owned(),
+                native_profile: native.to_owned(),
+            })
+            .ok()
+            .filter(|scan| scan.source_issue.is_none())
+            .map(|scan| (scan.new + scan.changed, scan.found)),
         }
     });
     Report {
@@ -338,6 +349,20 @@ pub(crate) fn rows(generated: Option<u64>, original_running: bool) -> Vec<Value>
         } else {
             "The Powermove you used before. Removing these never touches its projects or the media they use."
         }}));
+    // The re-offer after Not Now at startup, and for anything added since.
+    match original.extensions {
+        Some((offered, _)) if offered > 0 => rows.push(json!({
+            "id":"storage.original.extensions","section":"storage","group":GROUP,
+            "label":"Extensions","control":"action","action":"storage.extensions",
+            "actionLabel":"Bring In Extensions…",
+            "value": if offered == 1 { "1 not in Powermove".to_owned() } else { format!("{offered} not in Powermove") },
+            "detail":"Extensions you made or installed in the original app. Bringing them in copies only the extensions. Your projects, settings and sign-ins stay as they are."})),
+        Some((0, found)) if found > 0 => rows.push(json!({
+            "id":"storage.original.extensions","section":"storage","group":GROUP,
+            "label":"Extensions","control":"status","value":"All in Powermove",
+            "detail":"Every extension from the original app is here. New ones you add there show up here to bring in."})),
+        _ => {}
+    }
     let adopting = *ADOPTING.lock().unwrap();
     if original.linked_items > 0 || adopting.is_some() {
         let (value, detail) = match adopting {
@@ -436,12 +461,30 @@ impl crate::session::Controller {
                 }
             }
             "storage.adopt" => self.confirm_adopt(cx),
+            "storage.extensions" => self.bring_in_extensions(cx),
             _ => {
                 if let Some(id) = action.strip_prefix("storage.delete.") {
                     self.confirm_storage_delete(id, cx);
                 }
             }
         }
+    }
+    /// Bring In Extensions…: the startup step in its own window. Afterwards
+    /// every open window rescans its extensions, and Storage measures again.
+    fn bring_in_extensions(&mut self, cx: &mut gpui::Context<Self>) {
+        let Some(original) = self.electron.clone() else {
+            return;
+        };
+        let this = cx.entity().downgrade();
+        crate::extension_transfer::open_from_settings(
+            original,
+            self.profile.clone(),
+            move |cx| {
+                pm_compat_runner::host::rescan_all();
+                let _ = this.update(cx, |v, cx| v.refresh_storage(cx));
+            },
+            cx,
+        );
     }
     /// The Settings window, for sheets about rows pressed there.
     fn settings_window(
@@ -598,10 +641,24 @@ mod tests {
                 parts: vec![("backups", 9_000_000_000)],
                 linked_items: 1161,
                 linked_bytes: 20_028_248_489,
+                extensions: Some((45, 46)),
             }),
             ..Report::default()
         });
         let rows = rows(None, false);
+        // After Not Now at startup, Storage offers the extensions again,
+        // with a button, even while the original app runs.
+        let offer = |rows: &[Value]| {
+            rows.iter()
+                .find(|r| r["id"] == "storage.original.extensions")
+                .cloned()
+        };
+        let extensions = offer(&rows).unwrap();
+        assert_eq!(extensions["action"], "storage.extensions");
+        assert_eq!(extensions["actionLabel"], "Bring In Extensions…");
+        assert_eq!(extensions["value"], "45 not in Powermove");
+        assert_eq!(extensions["group"], "Original App");
+        assert!(offer(&super::rows(None, true)).unwrap()["disabled"].is_null());
         let linked = rows
             .iter()
             .find(|r| r["id"] == "storage.original.linked")
@@ -622,6 +679,20 @@ mod tests {
             .unwrap();
         assert_eq!(moving["value"], "Moving… 5.0 GB of 20.0 GB");
         assert_eq!(moving["disabled"], true);
+        // Everything brought in: a status, no button. Unreadable: no row.
+        for (extensions, expected) in [(Some((0, 46)), Some("All in Powermove")), (None, None)] {
+            if let Some(original) = LATEST
+                .lock()
+                .unwrap()
+                .as_mut()
+                .and_then(|r| r.original.as_mut())
+            {
+                original.extensions = extensions;
+            }
+            let row = offer(&super::rows(None, false));
+            assert_eq!(row.as_ref().and_then(|r| r["value"].as_str()), expected);
+            assert!(row.is_none_or(|r| r["control"] == "status"));
+        }
         *ADOPTING.lock().unwrap() = None;
         *LATEST.lock().unwrap() = None;
     }

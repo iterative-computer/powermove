@@ -464,6 +464,46 @@ fn fail_task(task: &ProtocolObject<dyn WKURLSchemeTask>) {
     }
 }
 
+// The shared page's web view. It spans the whole window under the native
+// panels and, once a person has clicked an extension panel, holds the
+// keyboard: AppKit then sent it every plain mouse move in the window, so the
+// timeline, the viewer and every native panel lost their hover (no whiter rim,
+// no trim grip, no row switches) and WebKit's cursor reset to an arrow over
+// them, until the next click elsewhere. A move or cursor update over the
+// window's own content (outside the extension panels, where the native view
+// answers the hit test) goes to that view instead; over a panel it is
+// WebKit's.
+define_class!(
+    #[unsafe(super(WKWebView))]
+    #[thread_kind=MainThreadOnly]
+    #[name="PMCompatWebView"]
+    struct PageView;
+    impl PageView {
+        #[unsafe(method(mouseMoved:))]
+        fn mouse_moved(&self, event: &NSEvent) {
+            match self.native_under(event) {
+                Some(view) => unsafe { msg_send![&*view, mouseMoved: event] },
+                None => unsafe { msg_send![super(self), mouseMoved: event] },
+            }
+        }
+        #[unsafe(method(cursorUpdate:))]
+        fn cursor_update(&self, event: &NSEvent) {
+            if self.native_under(event).is_none() {
+                unsafe { msg_send![super(self), cursorUpdate: event] }
+            }
+        }
+    }
+);
+impl PageView {
+    /// The native view under `event`'s pointer, when it is not this page
+    /// (the pointer is outside every extension panel).
+    fn native_under(&self, event: &NSEvent) -> Option<Retained<NSView>> {
+        let window = self.window()?;
+        let hit = window.contentView()?.hitTest(event.locationInWindow())?;
+        (!hit.isDescendantOf(self)).then_some(hit)
+    }
+}
+
 // A shared full-window page with an exact mask and identical native hit geometry.
 define_class!(
     #[unsafe(super(NSView))]
@@ -613,8 +653,10 @@ impl MacDomHost {
                 .setJavaScriptCanOpenWindowsAutomatically(!trust.is_store());
         }
         let frame = NSRect::new(NSPoint::ZERO, NSSize::new(1., 1.));
-        let web = unsafe {
-            WKWebView::initWithFrame_configuration(WKWebView::alloc(mtm), frame, &config)
+        let web: Retained<WKWebView> = unsafe {
+            let page: Retained<PageView> =
+                msg_send![PageView::alloc(mtm), initWithFrame: frame, configuration: &*config];
+            Retained::into_super(page)
         };
         unsafe {
             web.setNavigationDelegate(Some(ProtocolObject::from_ref(&*bridge)));

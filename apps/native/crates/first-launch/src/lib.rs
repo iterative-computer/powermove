@@ -6,6 +6,8 @@ mod closure;
 mod delta;
 mod disk;
 mod extension_import;
+pub mod extension_transfer;
+pub use extension_transfer::import_extensions;
 pub mod recovery;
 pub mod report;
 pub mod secrets;
@@ -456,32 +458,7 @@ fn run_inner(
     let mut state: State = if native.join("migration.json").exists() {
         disk::json(&native.join("migration.json"))?
     } else {
-        let state = State {
-            version: 1,
-            bundle_id: BETA_BUNDLE_ID.into(),
-            source: source.clone(),
-            checkpoint_hash: None,
-            availability_hash: None,
-            completed: BTreeSet::new(),
-            imported_projects: BTreeSet::new(),
-            imported_keys: BTreeSet::new(),
-            imported_files: BTreeSet::new(),
-            history_refusals: BTreeSet::new(),
-            missing_projects: BTreeSet::new(),
-            secrets: SecretStep::NotStarted,
-            imported_secrets: BTreeSet::new(),
-            receipts: Default::default(),
-            delta_base: None,
-            extensions_imported: false,
-            extension_receipts: Default::default(),
-            extension_provenance: Default::default(),
-            conflicts: BTreeSet::new(),
-            source_stamp: None,
-            latest_pass: None,
-            latest_pass_base: None,
-            folder_access: None,
-            folder_outcomes: Default::default(),
-        };
+        let state = empty_state(source.clone());
         publish(&native, &state)?;
         state
     };
@@ -1319,4 +1296,33 @@ pub fn retry_secret_consent_in_library(
     state.secrets = SecretStep::Complete;
     finish(&native, &mut state, Step::Secrets, &mut hook)?;
     Ok(SecretRetryOutcome::Complete)
+}
+
+fn empty_state(source: PathBuf) -> State {
+    State {
+        version: 1,
+        bundle_id: BETA_BUNDLE_ID.into(),
+        source,
+        checkpoint_hash: None,
+        availability_hash: None,
+        completed: BTreeSet::new(),
+        imported_projects: BTreeSet::new(),
+        imported_keys: BTreeSet::new(),
+        imported_files: BTreeSet::new(),
+        history_refusals: BTreeSet::new(),
+        missing_projects: BTreeSet::new(),
+        secrets: SecretStep::NotStarted,
+        imported_secrets: BTreeSet::new(),
+        receipts: Default::default(),
+        delta_base: None,
+        extensions_imported: false,
+        extension_receipts: Default::default(),
+        extension_provenance: Default::default(),
+        conflicts: BTreeSet::new(),
+        source_stamp: None,
+        latest_pass: None,
+        latest_pass_base: None,
+        folder_access: None,
+        folder_outcomes: Default::default(),
+    }
 }
