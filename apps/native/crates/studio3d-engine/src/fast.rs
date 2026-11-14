@@ -35,6 +35,8 @@ pub struct Raster {
     maps: Option<TextureMaps>,
     texture: Option<wgpu::Texture>,
     sampler: wgpu::Sampler,
+    #[cfg(test)]
+    test_depth: Option<wgpu::Texture>,
 }
 fn buffer(device: &wgpu::Device, bytes: &[u8], usage: wgpu::BufferUsages) -> wgpu::Buffer {
     device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -187,6 +189,8 @@ impl Raster {
             maps: None,
             texture: None,
             sampler,
+            #[cfg(test)]
+            test_depth: None,
         }
     }
     fn mesh(&mut self, i: &MeshInstance, materials: usize) -> Result<usize, String> {
@@ -261,21 +265,38 @@ impl Raster {
             .maps
             .as_ref()
             .map_or((1, 1, 1), |m| (m.width, m.height, m.layers.len() as u32));
-        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Studio Fast maps"),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: layers,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
+        let reuse = self.texture.as_ref().is_some_and(|t| {
+            t.width() == width && t.height() == height && t.depth_or_array_layers() == layers
         });
+        if !reuse {
+            self.texture = Some(self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("Studio Fast maps"),
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: layers,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            }));
+        }
+        let texture = self.texture.as_ref().unwrap();
         for layer in 0..layers {
+            if reuse
+                && self
+                    .maps
+                    .as_ref()
+                    .zip(input.maps.as_ref())
+                    .is_some_and(|(old, new)| {
+                        old.layers[layer as usize] == new.layers[layer as usize]
+                    })
+            {
+                continue;
+            }
             let bytes = input
                 .maps
                 .as_ref()
@@ -304,7 +325,6 @@ impl Raster {
                 },
             );
         }
-        self.texture = Some(texture);
         self.maps = input.maps.clone();
     }
     pub fn render_oriented(
@@ -340,12 +360,34 @@ impl Raster {
                 continue;
             }
             i.world.validate()?;
+            // Extraction marks vertex-tinted material slots on the Full path;
+            // preserve that same policy without building a BVH for Fast.
+            if !i.mesh.colors.is_empty()
+                || i.attributes.as_ref().is_some_and(|a| !a.colors.is_empty())
+            {
+                let slots =
+                    i.mesh.triangle_materials.iter().copied().map(Some).chain(
+                        std::iter::once(None).filter(|_| i.mesh.triangle_materials.is_empty()),
+                    );
+                for slot in slots {
+                    let slot = match (slot, &i.material_palette) {
+                        (None, _) => i.material,
+                        (Some(n), Some(p)) => *p.get(n).ok_or("Fast material palette index")?,
+                        (Some(n), None) => n,
+                    };
+                    let m = materials.get_mut(slot).ok_or("Fast material index")?;
+                    m.policy[1] = (m.policy[1] as u32 | 16) as f32;
+                }
+            }
             let mesh = self.mesh(i, materials.len())?;
             let world = glam::Mat4::from_cols_array(&i.world.0);
             let normal = world.inverse().transpose();
             let mut matrices = [[0.; 4]; 8];
             matrices[..4].copy_from_slice(&world.to_cols_array_2d());
             matrices[4..].copy_from_slice(&normal.to_cols_array_2d());
+            // Three/Full preserve authored facing under reflected transforms.
+            // This unused affine-normal element carries orientation to the shader.
+            matrices[7][3] = world.determinant().signum();
             let instance = instances.len() as u32;
             instances.push(matrices);
             if !layers.contains(&i.layer) {
@@ -425,8 +467,8 @@ impl Raster {
                 },
             ],
         });
-        let depth = self.target(request, wgpu::TextureFormat::Depth32Float);
-        let depth = depth.create_view(&Default::default());
+        let depth_texture = self.target(request, wgpu::TextureFormat::Depth32Float);
+        let depth = depth_texture.create_view(&Default::default());
         let mut encoder = self.device.create_command_encoder(&Default::default());
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -494,6 +536,10 @@ impl Raster {
             outputs.push(LayerTexture { layer, texture });
         }
         self.queue.submit([encoder.finish()]);
+        #[cfg(test)]
+        {
+            self.test_depth = Some(depth_texture);
+        }
         // Keep only geometry used by the current immutable scene.
         let used: std::collections::HashSet<_> = draws.iter().map(|(_, m, _)| *m).collect();
         let mut index = 0;
@@ -568,9 +614,7 @@ fn camera(input: &SceneInput, r: &SceneRequest, flip: bool) -> [[f32; 4]; 7] {
             u8::from(input.view.orthographic_span.is_some()) as f32,
             if flip { -1. } else { 1. },
         ],
-        input
-            .view
-            .ambient
+        (input.view.ambient + (input.scene.environment.0 + input.scene.environment.1) * 0.5)
             .to4(input.scene.gpu_lights().len() as f32),
         input.scene.backdrop.to4(1.),
     ]
@@ -598,5 +642,185 @@ impl FastRenderer for Raster {
         request: &SceneRequest,
     ) -> Result<RenderedScene, String> {
         self.render_oriented(input, request, true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        extract::{SceneSource, Transform, View},
+        math::{Vec3, v3},
+        scene::{Camera, Material},
+        service::{StudioService, Tier},
+    };
+    struct Planes {
+        mesh: Arc<crate::mesh::Mesh>,
+        clip: [f32; 2],
+        mirrored: bool,
+    }
+    impl SceneSource for Planes {
+        fn scene(&self, _: &SceneRequest) -> Result<SceneInput, String> {
+            let mut scene = crate::swatch::scene(Material::dielectric(Vec3::splat(0.5), 1.));
+            scene.camera = Camera::lens(v3(0., 0., 5.), Vec3::ZERO, 32., 0.);
+            scene.shadow_catcher = false;
+            scene.materials = vec![Material::dielectric(Vec3::splat(0.5), 1.)];
+            let instances = [("front", 0.5, 0.), ("rear", 2., -1.)]
+                .into_iter()
+                .map(|(layer, width, z)| {
+                    let mut world = Transform::default();
+                    world.0[0] = width * if self.mirrored { -1. } else { 1. };
+                    world.0[14] = z;
+                    MeshInstance {
+                        layer: layer.into(),
+                        mesh: self.mesh.clone(),
+                        attributes: None,
+                        material: 0,
+                        material_palette: None,
+                        primary_visible: true,
+                        world,
+                    }
+                })
+                .collect();
+            let mut materials = scene.gpu_materials();
+            materials[0].policy[1] = (materials[0].policy[1] as u32 & !4) as f32;
+            Ok(SceneInput {
+                scene,
+                instances,
+                materials: Some(materials),
+                maps: None,
+                view: View {
+                    clip_planes: Some(self.clip),
+                    ..Default::default()
+                },
+            })
+        }
+    }
+    fn read_depth(device: &wgpu::Device, queue: &wgpu::Queue, texture: &wgpu::Texture) -> Vec<f32> {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Fast test depth read"),
+            source: wgpu::ShaderSource::Wgsl(
+                r#"
+@group(0) @binding(0) var depth:texture_depth_2d;
+@group(0) @binding(1) var<storage,read_write> result:array<f32>;
+@compute @workgroup_size(1) fn main(@builtin(global_invocation_id) id:vec3u) {
+ let coords=array<vec2i,2>(vec2i(32,24),vec2i(45,24));
+ result[id.x]=textureLoad(depth,coords[id.x],0);
+}"#
+                .into(),
+            ),
+        });
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Fast test depth read"),
+            layout: None,
+            module: &shader,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let result = buffer(
+            device,
+            bytemuck::cast_slice(&[0f32; 2]),
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        );
+        let view = texture.create_view(&Default::default());
+        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: result.as_entire_binding(),
+                },
+            ],
+        });
+        let read = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: 8,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &group, &[]);
+            pass.dispatch_workgroups(2, 1, 1);
+        }
+        encoder.copy_buffer_to_buffer(&result, 0, &read, 0, 8);
+        queue.submit([encoder.finish()]);
+        let (send, receive) = std::sync::mpsc::channel();
+        read.slice(..)
+            .map_async(wgpu::MapMode::Read, move |r| send.send(r).unwrap());
+        device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        receive.recv().unwrap().unwrap();
+        let mapped = read.slice(..).get_mapped_range().unwrap();
+        mapped
+            .chunks_exact(4)
+            .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+            .collect()
+    }
+    #[test]
+    fn fast_depth_and_clip_planes_match_full_surface_queries() {
+        let gpu = pm_gpu::Gpu::new("Fast depth regression").unwrap();
+        let mut full =
+            StudioService::with_device(gpu.device.clone(), gpu.queue.clone(), 64, 48).unwrap();
+        let mut fast = Raster::new(gpu.device.clone(), gpu.queue.clone());
+        let mesh = Arc::new(crate::mesh::Mesh {
+            positions: vec![
+                v3(-1., -1., 0.),
+                v3(1., -1., 0.),
+                v3(1., 1., 0.),
+                v3(-1., 1., 0.),
+            ],
+            normals: vec![v3(0., 0., 1.); 4],
+            uvs: vec![[0.; 2]; 4],
+            indices: vec![[0, 1, 2], [0, 2, 3]],
+            ..Default::default()
+        });
+        let request = SceneRequest {
+            composition: "depth".into(),
+            revision: 1,
+            ticks: 0,
+            width: 64,
+            height: 48,
+        };
+        for (clip, mirrored) in [[0.1, 100.], [0.1, 5.5], [5.5, 100.]]
+            .into_iter()
+            .flat_map(|clip| [false, true].map(|mirrored| (clip, mirrored)))
+        {
+            let source = Planes {
+                mesh: mesh.clone(),
+                clip,
+                mirrored,
+            };
+            let input = source.scene(&request).unwrap();
+            fast.render(&input, &request).unwrap();
+            let depth = read_depth(&gpu.device, &gpu.queue, fast.test_depth.as_ref().unwrap());
+            for (index, x) in [32.5, 45.5].into_iter().enumerate() {
+                let hit = full
+                    .pick_surface(
+                        &source,
+                        request.clone(),
+                        Tier::QualityLive,
+                        x / 64.,
+                        24.5 / 48.,
+                    )
+                    .unwrap();
+                let expected = hit.as_ref().map_or(1., |h| {
+                    let z = 5. - h.point[2];
+                    clip[1] * (z - clip[0]) / ((clip[1] - clip[0]) * z)
+                });
+                assert!(
+                    (depth[index] - expected).abs() < 1e-5,
+                    "clip={clip:?}, pixel={x}, raster={}, Full={expected}, hit={hit:?}",
+                    depth[index]
+                );
+            }
+        }
     }
 }

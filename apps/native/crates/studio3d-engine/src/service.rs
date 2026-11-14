@@ -148,7 +148,9 @@ impl StudioService {
         if !x.is_finite() || !y.is_finite() || !(0. ..=1.).contains(&x) || !(0. ..=1.).contains(&y) {
             return Err("Surface coordinates must be finite and in 0..=1".into());
         }
-        if tier == Tier::Fast { return Err("Surface picking requires the Studio scene".into()); }
+        // Picking still queries the same scene in Fast; this prepares geometry
+        // for a single surface query and never renders/refines the preview.
+        let tier = if tier == Tier::Fast { Tier::QualityLive } else { tier };
         let prepared = self.prepare_scene(source, request.clone(), tier)?;
         if self.previous.as_ref().is_none_or(|(r,k)| *r != request || *k != prepared.key) || self.previous_tier != Some(tier) {
             // Querying another view must not let its GPU state masquerade as
@@ -171,7 +173,6 @@ impl StudioService {
             .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
             && std::env::var_os("STUDIO_NO_RT").is_none();
         Ok(Self {
-            fast: Some(Box::new(crate::fast::Raster::new(device.clone(), queue.clone()))),
             renderer: Some(Renderer::with_device(
                 device,
                 queue,
@@ -412,6 +413,8 @@ impl StudioService {
         if request.width == 0 || request.height == 0 {return Err("Studio output is empty".into())}
         if tier == Tier::Fast {
             let input = source.scene(&request)?;
+            // Lazily attach on every construction path, keeping Full-only
+            // workers free of raster pipelines and preview resources.
             if self.fast.is_none() {
                 if self.renderer.is_none() { self.renderer = Some(Renderer::new(request.width, request.height)?); }
                 let r = self.renderer.as_ref().unwrap();
