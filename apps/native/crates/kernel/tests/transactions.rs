@@ -380,6 +380,48 @@ fn s5_history_cancel_keeps_edits_and_drops_the_entry() {
     assert!(p.open_entry().is_none());
 }
 
+/// An edit whose owner never ended it (a lost release, a panel that threw)
+/// held its entry open: Undo folded into it and Quit could never close the
+/// project. Seal, from anyone, records it as one undoable step.
+#[test]
+fn an_entry_its_owner_never_ended_is_sealed_as_one_undo_step() {
+    let mut p = project();
+    call(
+        &mut p,
+        page(),
+        HistoryCall::Begin {
+            label: "Move".into(),
+        },
+    );
+    call(
+        &mut p,
+        page(),
+        Call::DirectWrite {
+            ops: rename_ops("moved"),
+        },
+    );
+    let before = entries(&p);
+    let sealed = call(&mut p, native(), HistoryCall::Seal);
+    assert!(matches!(sealed.reply, Reply::Bool(true)));
+    assert!(p.open_entry().is_none());
+    assert_eq!(entries(&p), before + 1, "one step");
+    // The owner's late commit finds nothing open and changes nothing.
+    let late = call(&mut p, page(), HistoryCall::Commit { label: None });
+    assert!(matches!(late.reply, Reply::Bool(false)));
+    assert_eq!(entries(&p), before + 1);
+    call(&mut p, native(), HistoryCall::Undo);
+    assert_ne!(
+        name_of(&p, "layer0"),
+        "moved",
+        "Undo takes the sealed edit back"
+    );
+    // Nothing open: nothing to seal.
+    assert!(matches!(
+        call(&mut p, native(), HistoryCall::Seal).reply,
+        Reply::Bool(false)
+    ));
+}
+
 #[test]
 fn s5_open_begin_never_blocks_live_mutate_refuses_owner_failure_seals() {
     let mut p = project();
