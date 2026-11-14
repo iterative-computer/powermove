@@ -1493,6 +1493,17 @@ impl Engine {
         scopes.flush(&self.gpu.device, &self.gpu.queue)
     }
     pub fn export(&mut self, scene: &Scene, time: Ticks, size: Size) -> Result<Vec<f32>> {
+        self.export_toned(scene, time, size, None)
+    }
+    /// [`Self::export`] with a delivery's output tone, as an export job's
+    /// request carries it (`pm_export::render::frame_request`).
+    pub fn export_toned(
+        &mut self,
+        scene: &Scene,
+        time: Ticks,
+        size: Size,
+        output_tone: Option<pm_render::OutputTone>,
+    ) -> Result<Vec<f32>> {
         self.renderer.clear_scrub_mark();
         self.renderer.set_preview_media(false, false);
         self.last_frame = Instant::now();
@@ -1502,6 +1513,7 @@ impl Engine {
         let mut request = pm_render::RenderRequest::sized(size, Precision::Float16);
         request.export = true;
         request.output_kind = pm_render::OutputKind::Final;
+        request.output_tone = output_tone;
         self.renderer.set_draw_reuse(false);
         let f = pm_export::render::render_frame(
             &mut self.renderer,
@@ -3412,6 +3424,77 @@ mod viewer_output_tests {
             captured.iter().zip(edr).all(|(c, e)| (*c - e).abs() < 0.01),
             "a capture is the engine's frame: {captured:?} vs {edr:?}"
         );
+    }
+    /// An HDR project's views show what its deliveries write: light above
+    /// the mastering peak (white pushed one stop, 406 cd/m², in a 300 cd/m²
+    /// master) over a black-to-white gradient, drawn in the SDR view against the
+    /// frame an SDR delivery renders (its output tone, then the SDR file's
+    /// range), and in the EDR view against the frame a PQ delivery renders,
+    /// each tone chosen as pm-export chooses it.
+    #[test]
+    fn an_hdr_projects_views_show_what_its_deliveries_render() {
+        let mut engine = Engine::new(Gpu::new("hdr-delivery-view-test").unwrap()).unwrap();
+        // A gradient from black to white behind the pushed columns: every
+        // level, not only black and clipped white.
+        let project = r##""color":{"mode":"hdr","masteringPeak":300},"colorDepth":16,
+            "backgroundFill":{"type":"linear","angle":0,"stops":[
+                {"id":"a","color":"#000000","position":0},{"id":"b","color":"#FFFFFF","position":100}]},"##;
+        let scene = columns_in(2, 16., project);
+        let (w, h) = (64u32, 36u32);
+        let spec = FrameSpec::exact(Ticks::ZERO, Output { headroom: 4., ..output(w, h) });
+        let content = pm_render::media::hdr_content(&scene.doc, &scene.comp, scene.media.as_ref());
+        let delivered = |engine: &mut Engine, hdr: bool| {
+            let tone = pm_render::OutputTone::for_target(content.peak_nits as f32, 300., hdr);
+            let rgba = engine.export_toned(&scene, Ticks::ZERO, Size::new(w, h), tone).unwrap();
+            rgba.chunks_exact(4)
+                .map(|p| [p[0], p[1], p[2]].map(|v| f64::from(pm_color::transfer::display_decode_f32(v))))
+                .collect::<Vec<_>>()
+        };
+        let to_709 = pm_color::primaries::conversion(
+            pm_protocol::color::Primaries::DisplayP3,
+            pm_protocol::color::Primaries::Bt709,
+        )
+        .unwrap();
+        let shown = |engine: &mut Engine, mastering| {
+            engine.mastering = mastering;
+            let sub = engine
+                .frame(&scene, spec, None, &Default::default(), true, Arc::default())
+                .unwrap()
+                .unwrap();
+            sub.commit();
+            sub.complete().unwrap();
+            // The SDR view presents its delivery's clip; the EDR view shows
+            // the engine's frame as it is.
+            sub.presented
+                .as_ref()
+                .map_or_else(|| sub.pixels(), |b| halves(b, (w * h) as usize))
+                .into_iter()
+                .map(|p| pm_color::primaries::apply(&to_709, p))
+                .collect::<Vec<_>>()
+        };
+        let worst = |a: &[[f64; 3]], b: &[[f64; 3]]| {
+            a.iter()
+                .zip(b)
+                .flat_map(|(x, y)| (0..3).map(move |c| (x[c] - y[c]).abs() / y[c].abs().max(1.)))
+                .fold(0f64, f64::max)
+        };
+        // SDR: the file holds 0..1 of the toned frame.
+        let sdr_file: Vec<[f64; 3]> = delivered(&mut engine, false)
+            .into_iter()
+            .map(|p| p.map(|v| v.clamp(0., 1.)))
+            .collect();
+        let sdr_view = shown(&mut engine, Mastering::LinearP3);
+        let d = worst(&sdr_view, &sdr_file);
+        eprintln!("SDR view against the SDR delivery's frame: {d:e}");
+        assert!(d < 2e-3, "SDR view {d:e}");
+        // EDR: the PQ file holds the toned frame's light.
+        let hdr_file = delivered(&mut engine, true);
+        let edr_view = shown(&mut engine, Mastering::Edr);
+        let d = worst(&edr_view, &hdr_file);
+        eprintln!("EDR view against the PQ delivery's frame: {d:e}");
+        assert!(d < 2e-3, "EDR view {d:e}");
+        let lit = hdr_file[(h as usize / 2) * w as usize + 8];
+        eprintln!("a pushed column in the PQ delivery's frame: {lit:?} (1.0 = 203 cd/m²)");
     }
     /// The trace's picture hash reads the picture presented, as stored: in
     /// an SDR view that is the clipped picture on screen, not the engine's

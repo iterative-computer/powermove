@@ -143,11 +143,13 @@ pub fn gamut(index: usize) -> Chromaticities {
             [0.095612, -0.084589],
             D65,
         ),
+        // Blackmagic gives its white to seven digits (D65 rounded to four is
+        // 3e-5 off in the matrix); the LUT effect reads the same.
         11 => c(
             [0.7177215, 0.3171181],
             [0.2280410, 0.8615690],
             [0.1005841, -0.0820452],
-            D65,
+            [0.3127170, 0.3290312],
         ),
         _ => tagged(Primaries::Bt709),
     }
@@ -514,6 +516,83 @@ fn tone_map(l: [f64; 3], s: &Settings) -> [f64; 3] {
     }
 }
 
+/// An HDR source in an SDR project (Interpret Footage › Tone Mapping):
+/// BT.2020 display light in cd/m² to SDR relative light by `method` (a
+/// `TONE_MAPPING` index), from `source_peak`. Method 1 (BT.2390 per
+/// channel) is the default, `tonemap::to_sdr`.
+pub fn tone_to_sdr(nits: [f64; 3], method: usize, source_peak: f64, desaturation: f64) -> [f64; 3] {
+    let s = Settings {
+        tone: method,
+        source_peak,
+        desaturation,
+        ..Settings::default()
+    };
+    tone_map(nits.map(|c| c / SDR_WHITE), &s)
+}
+
+/// WGSL of [`tone_to_sdr`] for the source pass: `pm_cst_tone_sdr(nits,
+/// method, source_peak, desaturation)`. Needs `tonemap::wgsl()` before it.
+pub fn tone_wgsl() -> &'static str {
+    r#"
+fn pm_cst_channels(n: vec3<f32>, sp: f32, tp: f32) -> vec3<f32> {
+    let m = pm_pq_eotf(pm_eetf(pm_pq_inverse_eotf(max(n, vec3<f32>(0.0))), sp, tp));
+    return select(m, n, n <= vec3<f32>(0.0));
+}
+fn pm_cst_scaled(n: vec3<f32>, k: f32, sp: f32, tp: f32) -> vec3<f32> {
+    if (k <= 0.0) { return n; }
+    return n * (pm_cst_channels(vec3<f32>(k), sp, tp).x / k);
+}
+fn pm_cst_2446a(n: vec3<f32>, lh: f32) -> vec3<f32> {
+    let rh = 1.0 + 32.0 * pow(lh / 10000.0, 1.0 / 2.4);
+    let rs = 1.0 + 32.0 * pow(0.01, 1.0 / 2.4);
+    let p = pow(clamp(n / lh, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(1.0 / 2.4));
+    let y = dot(p, vec3<f32>(0.2627, 0.6780, 0.0593));
+    let yp = log(1.0 + (rh - 1.0) * y) / log(rh);
+    var yc = 0.5 * yp + 0.5;
+    if (yp <= 0.7399) { yc = 1.077 * yp; } else if (yp < 0.9909) { yc = -1.151 * yp * yp + 2.7811 * yp - 0.6302; }
+    let ys = (pow(rs, yc) - 1.0) / (rs - 1.0);
+    let f = select(0.0, ys / (1.1 * y), y > 0.0);
+    let cb = f * (p.b - y) / 1.8814;
+    let cr = f * (p.r - y) / 1.4746;
+    let yt = ys - max(0.1 * cr, 0.0);
+    let r = yt + 1.4746 * cr;
+    let b = yt + 1.8814 * cb;
+    let g = (yt - 0.2627 * r - 0.0593 * b) / 0.6780;
+    return pow(max(vec3<f32>(r, g, b), vec3<f32>(0.0)), vec3<f32>(2.4));
+}
+fn pm_cst_2446c(n: vec3<f32>, a: f32) -> vec3<f32> {
+    let k1 = 0.83802;
+    let k3 = 0.74204;
+    let ip = 100.0 * pow(0.8, 2.4) / k1;
+    let k2 = k1 * (1.0 - k3) * ip;
+    let k4 = k1 * ip - k2 * log(1.0 - k3);
+    let ct = mat3x3<f32>(vec3<f32>(1.0 - 2.0 * a, a, a), vec3<f32>(a, 1.0 - 2.0 * a, a), vec3<f32>(a, a, 1.0 - 2.0 * a));
+    let tx = mat3x3<f32>(vec3<f32>(0.6370, 0.2627, 0.0), vec3<f32>(0.1446, 0.6780, 0.0281), vec3<f32>(0.1689, 0.0593, 1.0610));
+    let tr = mat3x3<f32>(vec3<f32>(1.7167, -0.6667, 0.0176), vec3<f32>(-0.3557, 1.6165, -0.0428), vec3<f32>(-0.2534, 0.0158, 0.9421));
+    let xyz = tx * (ct * max(n, vec3<f32>(0.0)));
+    if (xyz.y <= 0.0 || xyz.x + xyz.y + xyz.z <= 0.0) { return vec3<f32>(0.0); }
+    let yh = xyz.y;
+    var ys = k1 * yh;
+    if (yh >= ip) { ys = k2 * log(yh / ip - k3) + k4; }
+    let rgb = tr * (xyz * (ys / yh));
+    let sr = rgb.r + rgb.g + rgb.b;
+    return (rgb - vec3<f32>(a * sr)) / (1.0 - 3.0 * a) / 100.0;
+}
+fn pm_cst_tone_sdr(n: vec3<f32>, method: u32, sp: f32, desat: f32) -> vec3<f32> {
+    let t = 203.0;
+    let d = clamp(desat / 100.0, 0.0, 1.0);
+    if (method == 0u || (method <= 3u && sp <= t)) { return n / t; }
+    if (method == 1u) { return pm_cst_channels(n, sp, t) / t; }
+    if (method == 2u || method == 3u) {
+        let k = select(max(n.r, max(n.g, n.b)), dot(n, vec3<f32>(0.2627, 0.6780, 0.0593)), method == 2u);
+        return mix(pm_cst_scaled(n, k, sp, t), pm_cst_channels(n, sp, t), d) / t;
+    }
+    if (method == 4u) { return pm_cst_2446a(n, sp); }
+    return pm_cst_2446c(n, 0.33 * d);
+}
+"#
+}
+
 /// Whether `s` leaves every value as it is.
 pub fn is_identity(s: &Settings) -> bool {
     s.input_gamut == s.output_gamut
@@ -700,9 +779,8 @@ mod tests {
             let m = conversion(0, g);
             for j in 0..3 {
                 for i in 0..3 {
-                    // The LUT's Blackmagic matrix came from a white given to
-                    // more digits; they differ by 3e-5 at most.
-                    assert!((m[i][j] - n[j * 3 + i]).abs() < 5e-5, "{}", GAMUTS[g]);
+                    // Both from the published primaries and white.
+                    assert!((m[i][j] - n[j * 3 + i]).abs() < 2e-9, "{}", GAMUTS[g]);
                 }
             }
         }

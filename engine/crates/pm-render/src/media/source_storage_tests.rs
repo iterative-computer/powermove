@@ -571,6 +571,7 @@ fn hdr_projects_keep_bt2100_light_and_sdr_projects_tone_map_it() {
     color.tone_map = Some(ToneMap {
         transfer: Transfer::Pq,
         peak_nits: 1000.0,
+        method: 1,
     });
     let neutral: Vec<[f32; 4]> = (0..21)
         .map(|i| {

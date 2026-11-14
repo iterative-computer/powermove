@@ -311,7 +311,13 @@ struct Answers {
     per_need: Option<Duration>,
     /// Override layers in the last look-ahead frame, and the last frame it asked.
     layers: usize,
-    horizon: Option<i64>,
+    /// Override layers in the last frame the look-ahead looked at (zero when
+    /// it had none).
+    ahead_layers: usize,
+    /// The last frame the look-ahead asked for, and the scale it asked at:
+    /// answers at another scale cover nothing (a windowed raster stands in
+    /// only at its own scale).
+    horizon: Option<(i64, u64)>,
 }
 struct Unavailable {
     attempts: u32,
@@ -396,8 +402,11 @@ impl Drop for Wakes {
 }
 /// Whether `answer` (to the need `key`) can stand in for a frame at `scale`
 /// and `crop`: a whole raster always can; one holding only a window
-/// ([`CompatRaster::window`]) only at the same scale for a crop inside its
-/// window (elsewhere it is transparent, and the frame would show holes).
+/// ([`CompatRaster::window`]) only for a crop inside its window (elsewhere it
+/// is transparent, and the frame would show holes), at its own scale or a
+/// coarser frame's (playback at a reduced resolution): the frame's crop is
+/// then taken to the answer's pixels, and the finer answer is sampled down,
+/// never up.
 fn stands_in(key: &NeedKey, answer: &CompatAnswer, scale: f64, crop: Option<PixelRect>) -> bool {
     let CompatAnswer::Raster(raster) = answer else {
         return true;
@@ -406,14 +415,25 @@ fn stands_in(key: &NeedKey, answer: &CompatAnswer, scale: f64, crop: Option<Pixe
         return true;
     }
     let [x, y, w, h] = raster.held();
-    key.3 == scale.to_bits()
-        && crop.is_some_and(|c| {
-            let (right, bottom) = (
-                (c.x.saturating_add(c.width)).min(raster.width),
-                (c.y.saturating_add(c.height)).min(raster.height),
-            );
-            x <= c.x && y <= c.y && x + w >= right && y + h >= bottom
-        })
+    let answered = f64::from_bits(key.3);
+    if key.3 != scale.to_bits() && !(scale > 0. && answered > scale) {
+        return false;
+    }
+    let k = if key.3 == scale.to_bits() {
+        1.
+    } else {
+        answered / scale
+    };
+    crop.is_some_and(|c| {
+        let at = |v: u32| (f64::from(v) * k).floor() as u32;
+        let end = |v: u32| (f64::from(v) * k).ceil() as u32;
+        let (left, top) = (at(c.x), at(c.y));
+        let (right, bottom) = (
+            end(c.x.saturating_add(c.width)).min(raster.width),
+            end(c.y.saturating_add(c.height)).min(raster.height),
+        );
+        x <= left && y <= top && x + w >= right && y + h >= bottom
+    })
 }
 impl Answers {
     /// A late layer's stand-in: its nearest answered frame at or before
@@ -629,7 +649,7 @@ impl CompatStore {
     /// realm's measured time for a batch) and how many frames the batch
     /// covers, about [`BATCH_TARGET`] of realm time. `None` while a batch is
     /// in flight or the last one still covers the frames ahead.
-    pub(crate) fn ahead(&self, now: i64, speed: f64) -> Option<(Duration, usize)> {
+    pub(crate) fn ahead(&self, now: i64, speed: f64, scale: f64) -> Option<(Duration, usize)> {
         let answers = self.answers.lock().unwrap();
         if !answers.producing || !answers.free() || !answers.queued.is_empty() {
             return None;
@@ -645,7 +665,8 @@ impl CompatStore {
         // The last batch still covers the playhead for longer than a new one
         // would take to land.
         let lead_ticks = lead.as_secs_f64() * speed * TICKS_PER_SECOND as f64;
-        if let Some(horizon) = answers.horizon
+        if let Some((horizon, at)) = answers.horizon
+            && at == scale.to_bits()
             && (horizon - now) as f64 * speed.signum() > lead_ticks.abs()
         {
             return None;
@@ -658,7 +679,9 @@ impl CompatStore {
     pub(crate) fn request_ahead(&self, needs: Vec<CompatNeed>, at: i64, frames: usize, step: i64) {
         let frames = frames.max(1) as i64;
         let mut answers = self.answers.lock().unwrap();
-        answers.horizon = Some(at + (frames - 1) * step);
+        let scale = needs.first().map_or(0, |need| need.scale.to_bits());
+        answers.horizon = Some((at + (frames - 1) * step, scale));
+        answers.ahead_layers = needs.len();
         if !needs.is_empty() {
             answers.layers = needs.len();
         }
@@ -699,6 +722,11 @@ impl CompatStore {
     /// The realm's measured time per need, the batch in flight (its age and
     /// size), the needs waiting behind it and the override layers of the
     /// last look-ahead frame: a traced viewer's after-frame row.
+    /// Whether the frames ahead of the playhead draw layers only an
+    /// extension draws (as the look-ahead last found them).
+    pub(crate) fn overrides_ahead(&self) -> bool {
+        self.answers.lock().unwrap().ahead_layers > 0
+    }
     pub(crate) fn trace(&self) -> serde_json::Value {
         let answers = self.answers.lock().unwrap();
         serde_json::json!({
@@ -1361,6 +1389,13 @@ mod tests {
             ask(crop(20, 10, 40, 30), 2.),
             CompatAnswer::Missing
         ));
+        // A coarser frame (playback at half resolution) draws the finer
+        // window when its crop, taken to the window's pixels, lies inside.
+        assert_eq!(byte_of(ask(crop(10, 5, 20, 15), 0.5)), Some(7));
+        assert!(matches!(
+            ask(crop(5, 5, 20, 15), 0.5),
+            CompatAnswer::Missing
+        ));
         store.end_frame();
         // A whole raster stands in for any crop and scale, as before.
         let mut whole = at("x", 1.2);
@@ -1471,24 +1506,31 @@ mod tests {
         let asked = asking(&store);
         store.set_state(true, 7, 1);
         // Unmeasured: one frame.
-        assert_eq!(store.ahead(0, 1.), Some((Duration::ZERO, 1)));
+        assert_eq!(store.ahead(0, 1., 1.), Some((Duration::ZERO, 1)));
         let frame = 29_400_000; // 24 fps
         store.request_ahead(vec![at("x", 1.), at("y", 1.)], ticks(1.), 1, frame);
         assert_eq!(*asked.lock().unwrap(), vec![(1, 2)]);
         // In flight: nothing more.
-        assert_eq!(store.ahead(0, 1.), None);
+        assert_eq!(store.ahead(0, 1., 1.), None);
         std::thread::sleep(Duration::from_millis(20));
         store.answer_all(7, 1, vec![(at("x", 1.), draw(1)), (at("y", 1.), draw(1))]);
         // About 10 ms a need, two layers: 20 ms a frame, five frames a batch.
-        let (lead, frames) = store.ahead(ticks(1.), 1.).unwrap();
+        let (lead, frames) = store.ahead(ticks(1.), 1., 1.).unwrap();
         assert!((3..=5).contains(&frames), "{frames}");
         assert!(lead >= Duration::from_millis(60), "{lead:?}");
         store.request_ahead(vec![at("x", 2.), at("y", 2.)], ticks(2.), frames, frame);
         assert_eq!(asked.lock().unwrap()[1], (1, 2 * frames));
         store.answer_all(7, 1, vec![]);
         // The batch covers the frames ahead: nothing new until the playhead nears its end.
-        assert_eq!(store.ahead(ticks(1.5), 1.), None);
-        assert!(store.ahead(ticks(2.) + frames as i64 * frame, 1.).is_some());
+        assert_eq!(store.ahead(ticks(1.5), 1., 1.), None);
+        assert!(
+            store
+                .ahead(ticks(2.) + frames as i64 * frame, 1., 1.)
+                .is_some()
+        );
+        // Playback that changes scale (Auto going to half resolution) asks
+        // again at once: the batch at the old scale covers none of its frames.
+        assert!(store.ahead(ticks(1.5), 1., 0.5).is_some());
     }
     fn ticks(seconds: f64) -> i64 {
         pm_render::compat::ticks_of(seconds).get()

@@ -263,6 +263,11 @@ pub fn spawn(spec: ProcessSpec, mut machine: Machine, initial: Vec<Value>) -> Ha
                 }
             }
         });
+        // Exec reads piped stdin to EOF before resolving its argv prompt.
+        // This is startup input completion, not the turn-exit deadline in apply.
+        if matches!(&machine, Machine::CodexExec { .. }) {
+            let _ = wtx.try_send(None);
+        }
         let start = Instant::now();
         let now = || start.elapsed().as_millis().min(u64::MAX as u128) as u64;
         let mut lines = Lines::new(1024 * 1024);
@@ -271,9 +276,6 @@ pub fn spawn(spec: ProcessSpec, mut machine: Machine, initial: Vec<Value>) -> Ha
         let mut eof = false;
         let mut initial = Effects {
             outgoing: initial,
-            // Exec receives its prompt in argv, but reads non-terminal stdin
-            // to EOF before starting. It has no streaming input protocol.
-            close_stdin: matches!(&machine, Machine::CodexExec { .. }),
             ..Effects::default()
         };
         if let Machine::Codex(c) = &mut machine {
