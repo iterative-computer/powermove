@@ -202,6 +202,25 @@ Proxy and at most 0.24 CV for every other flavor.
   1-13-1 with `setparams` because VideoToolbox takes primaries and transfer from frame
   attachments.
 
+### Dolby Vision and HDR10+
+
+HLG HEVC carries Dolby Vision Profile 8.4 unless the person turns it off (the Export
+sheet's "Dolby Vision 8.4" row; `DeliveryOptions::without_dolby_vision`): macOS's encoder
+adds a `dvvC` record and an RPU on every frame in its default HDR metadata mode, and the
+file check holds the record (profile 8, HLG compatibility id 4, RPU, no enhancement layer).
+The HLG base layer decodes the same either way (`tests/dolby_vision.rs`). An imported 8.4
+clip is read as its HLG base layer and named in the Project panel and Interpret Footage.
+
+HDR10+ (ST 2094-40) is not preserved, and not generated. Tried on macOS 27 with a
+conformant HDR10+ stream (FFmpeg reads its SEI): the documented per-frame key
+(`kCMSampleAttachmentKey_HDR10PlusPerFrameData`) is written by neither AVAssetWriter
+(on encoded samples) nor VideoToolbox (on input buffers or frame properties). Apple's
+decoder puts each frame's bytes on the decoded buffer under an undocumented attachment,
+`HDR10PlusData`, and its encoder writes those back exactly when the session is tagged PQ
+with insertion mode Auto, also on buffers the app makes. Preserving it on untouched
+footage would rest on that undocumented key and needs a real HDR10+ source to prove the
+whole path (decode, render of an untouched clip, encode); neither is in place.
+
 ## Open items
 
 - The GPU encoder-input pass (pm-render) is not part of this lane; `convert.rs` is
