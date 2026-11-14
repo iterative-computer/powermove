@@ -182,6 +182,9 @@ impl Controller {
                 let window = self.account_window(cx);
                 crate::cloud::delete_account(window, cx)
             }
+            // As the gear does Settings: the Store showing closes, back to
+            // the tab it came forward over; otherwise it comes forward.
+            "store" if self.pages.toggle_closes("store") => self.close_tab_page("store", cx),
             "store" => self.open_tab_page("store", cx),
             _ => return false,
         }

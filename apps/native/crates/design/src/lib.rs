@@ -248,6 +248,14 @@ pub struct Metrics {
     pub settings_width: f32,
     pub settings_height: f32,
     pub settings_sidebar: f32,
+    /// Greatest width of the Settings form column, its side insets
+    /// included: the group cards stay a readable 640 pt and centre in the
+    /// sheet however wide the window (the original app's 608 pt column with
+    /// cards hanging 14 pt past it).
+    pub settings_column: f32,
+    /// Greatest width of the Store's content column (the original app's
+    /// 960 pt), centred in its sheet.
+    pub store_column: f32,
     pub menu_inset: f32,
     pub menu_row: f32,
     /// Inner radius for a control nested in a control (segment in a segmented control).
@@ -749,6 +757,8 @@ impl Tokens {
                 settings_width: 760.,
                 settings_height: 520.,
                 settings_sidebar: 200.,
+                settings_column: 680.,
+                store_column: 960.,
                 menu_inset: 12.,
                 menu_row: 30.,
                 inner_radius: radius.sm,

@@ -3196,6 +3196,19 @@ impl Host {
             if matches!(name.as_str(), "tools" | "add" | "export" | "panelLibrary") {
                 item.setHidden(aside);
             }
+            // The gear reads pressed while Settings is the tab showing, and
+            // says what a press does.
+            if name == "settings" {
+                let shown = self.shown_page().as_deref() == Some("settings");
+                let (sym, label) = if shown {
+                    ("gearshape.fill", "Close Settings")
+                } else {
+                    ("gearshape", "Open Settings")
+                };
+                item.setImage(Some(&toolbar_symbol(sym, "Settings", &self.tokens)));
+                item.setToolTip(Some(&NSString::from_str(label)));
+                item.setLabel(&NSString::from_str(label));
+            }
         }
     }
     /// The width of the sidebar column under Home or the page showing.
