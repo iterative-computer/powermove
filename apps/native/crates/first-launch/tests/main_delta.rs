@@ -524,7 +524,24 @@ fn current_main_profile_records_migrate_with_every_project_field_and_the_checkpo
         "proj",
         &mut changed,
     );
-    assert_eq!(changed, ["proj.id"], "migration changed main's project");
+    // Loading legacy video preserves the picture main displayed. This is the
+    // same explicit adoption marker checked by kernel's main-current tests.
+    assert_eq!(
+        project
+            .project
+            .get("assets")
+            .unwrap()
+            .get("linked")
+            .unwrap()
+            .get("videoColor")
+            .and_then(pm_model::Value::as_str),
+        Some("electron")
+    );
+    assert_eq!(
+        changed,
+        ["proj.assets.linked.videoColor", "proj.id"],
+        "migration changed main's project beyond its id and legacy video reading"
+    );
     let history = project.history.expect("main's session history");
     let history = pm_model::json::to_canonical_string(&history);
     assert!(history.contains("Renamed then undone"), "{history}");
