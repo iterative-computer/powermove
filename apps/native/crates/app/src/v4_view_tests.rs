@@ -1097,3 +1097,79 @@ fn a_tooltip_never_repeats_the_text_in_view(cx: &mut TestAppContext) {
         "no tooltip repeats the view or stands over a value's menu; icons keep theirs"
     );
 }
+/// A section heading pressed closes its group in the next frame, before the
+/// panel's script has answered; the publication that agrees takes over, and
+/// expanding shows the open chevron at once while the content follows.
+#[gpui::test]
+fn a_disclosure_press_shows_in_the_next_frame(cx: &mut TestAppContext) {
+    let rig = rig("viewer", 1);
+    let _ = publication(&rig);
+    let tree = |open: bool| {
+        let mut ops = node_ops(
+            1,
+            0,
+            "div",
+            json!({"style":{"width":200,"height":200}}),
+            &[],
+        );
+        ops.extend(node_ops(
+            2,
+            1,
+            "div",
+            json!({"data-pm-component":"disclosure-group","role":"group"}),
+            &[],
+        ));
+        ops.extend(node_ops(
+            3,
+            2,
+            "button",
+            json!({"id":"heading","data-pm-component":"disclosure-button","aria-expanded":open,
+                "label":"Transform","style":{"width":120,"height":20}}),
+            &["click"],
+        ));
+        if open {
+            ops.extend(node_ops(
+                4,
+                2,
+                "div",
+                json!({"id":"content","style":{"width":120,"height":60}}),
+                &[],
+            ));
+        }
+        ops
+    };
+    let (view, mut vcx) = window(cx, &rig, synthetic(&rig, tree(true)), Default::default());
+    vcx.run_until_parked();
+    let at = bounds(&mut vcx, "heading").center();
+    assert!(vcx.debug_bounds("content").is_some());
+    vcx.simulate_click(at, Modifiers::none());
+    // The next frame: closed, with no publication in between.
+    vcx.update(|window, _| window.refresh());
+    vcx.run_until_parked();
+    assert!(!view.read_with(&vcx, |v, _| v.disclosure_open(3)));
+    assert!(
+        vcx.debug_bounds("content").is_none(),
+        "the group closed at once"
+    );
+    assert!(
+        events(&view, &mut vcx).contains(&(3, "click".to_owned())),
+        "the script still hears it"
+    );
+    // The script's own publication agrees: it shows, and the stand-in goes.
+    view.update(&mut vcx, |v, cx| {
+        v.publish(synthetic(&rig, tree(false)), cx)
+    });
+    settle(cx, |_| true);
+    vcx.run_until_parked();
+    assert!(view.read_with(&vcx, |v, _| v.disclosures.is_empty()));
+    assert!(!view.read_with(&vcx, |v, _| v.disclosure_open(3)));
+    // Opening: the chevron turns now; the content comes with the publication.
+    vcx.simulate_click(at, Modifiers::none());
+    vcx.run_until_parked();
+    assert!(view.read_with(&vcx, |v, _| v.disclosure_open(3)));
+    view.update(&mut vcx, |v, cx| v.publish(synthetic(&rig, tree(true)), cx));
+    settle(cx, |_| true);
+    vcx.run_until_parked();
+    assert!(vcx.debug_bounds("content").is_some());
+    assert!(view.read_with(&vcx, |v, _| v.disclosures.is_empty()));
+}

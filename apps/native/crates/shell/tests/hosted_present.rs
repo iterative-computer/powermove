@@ -16,6 +16,7 @@ fn main() {
     macos::drawables();
     macos::paints(mtm);
     macos::rows();
+    macos::host_rows();
     macos::viewer_slot(mtm);
     println!("hosted_present: ok");
 }
@@ -212,6 +213,60 @@ mod macos {
         assert!(slot.wrapper().isHidden());
         drop(slot);
         probe::forget(&gpui);
+    }
+
+    /// A pop-up whose rows the host lists (Parent: every layer) shows only
+    /// its current row until its menu is about to show; then it lists them
+    /// all with the current row still selected, and a choice is that row.
+    pub fn host_rows() {
+        let row = |v: serde_json::Value, label: &str| json!({ "v": v, "label": label });
+        let shown = [row(json!(null), "None"), row(json!("b"), "Layer B")];
+        let rows = PopupRows::new(&shown);
+        rows.popup.selectItemAtIndex(1);
+        let asked = std::rc::Rc::new(std::cell::Cell::new(0));
+        let source = {
+            let asked = asked.clone();
+            std::rc::Rc::new(move || {
+                asked.set(asked.get() + 1);
+                let mut all = vec![json!({ "v": null, "label": "None" })];
+                for id in ["a", "b", "c", "d"] {
+                    all.push(json!({ "v": id, "label": format!("Layer {}", id.to_uppercase()) }));
+                }
+                all
+            }) as pm_shell::native_control::RowSource
+        };
+        rows.fill_rows(Some(source));
+        assert_eq!(
+            rows.popup.numberOfItems(),
+            2,
+            "nothing is listed before the menu opens"
+        );
+        assert_eq!(asked.get(), 0);
+        rows.menu_will_show();
+        assert_eq!(asked.get(), 1);
+        assert_eq!(rows.popup.numberOfItems(), 5);
+        assert_eq!(
+            rows.popup.indexOfSelectedItem(),
+            2,
+            "Layer B stays selected"
+        );
+        rows.popup.selectItemAtIndex(4);
+        rows.act();
+        assert_eq!(rows.chosen.try_recv().ok(), Some(json!("d")));
+        // The next publication shows the closed button's rows again.
+        rows.update(
+            &[row(json!(null), "None"), row(json!("d"), "Layer D")],
+            &json!("d"),
+        );
+        assert_eq!(rows.popup.numberOfItems(), 2);
+        // A source that no longer offers the current row keeps it listed.
+        let gone = std::rc::Rc::new(|| vec![json!({ "v": null, "label": "None" })])
+            as pm_shell::native_control::RowSource;
+        rows.popup.selectItemAtIndex(1);
+        rows.fill_rows(Some(gone));
+        rows.menu_will_show();
+        assert_eq!(rows.popup.numberOfItems(), 2);
+        assert_eq!(rows.popup.indexOfSelectedItem(), 1);
     }
 
     /// A pop-up's rows while its menu is open.

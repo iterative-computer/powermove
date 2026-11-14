@@ -959,6 +959,7 @@ impl Controller {
             }
             p = Arc::new(next);
             self.published = Some(p.clone());
+            self.builtins.natives.published.replace(Some(p.clone()));
             self.bind_composition();
             self.apply_viewer_options();
             self.rebuild_popout_viewer();
@@ -1043,6 +1044,7 @@ impl Controller {
                 .as_deref()
                 .filter(|_| p.history.can_redo),
         );
+        self.builtins.natives.published.replace(Some(p.clone()));
         self.published = Some(p);
         // A changed Views setting splits the viewer now, not at the next
         // frame (a paused viewer has none): read from the publication just stored.
@@ -1962,6 +1964,7 @@ impl Controller {
                 }
                 v.session = None;
                 v.published = None;
+                v.builtins.natives.published.replace(None);
                 v.mirror = None;
                 v.mcp.bind_window(v.window_key, None);
                 v.reopening_stopped = true;
@@ -2893,7 +2896,10 @@ impl Controller {
             "agent" => self.toggle_agent(window, cx),
             "bringWorkspace" => self.bring_workspace(window, cx),
             "quit" => cx.defer(crate::lifecycle::begin_quit),
-            "closeWindow" | "closeTab" => self.request_close(crate::lifecycle::Intent::Window, cx),
+            "closeWindow" | "closeTab" => {
+                gpui_macos::feel::note_now("tab.close");
+                self.request_close(crate::lifecycle::Intent::Window, cx)
+            }
             "cancel" | "deselect" if self.importing.is_some() => {
                 if let Some(cancel) = &self.importing {
                     cancel.store(true, std::sync::atomic::Ordering::Release);
