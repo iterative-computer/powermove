@@ -61,6 +61,9 @@ pub struct Model {
     /// Other ids the provider accepts for this model (Claude's resolved
     /// `claude-opus-5-5` for `opus`), so a saved one still reads as its name.
     pub aliases: Vec<String>,
+    /// The reasoning effort the provider runs this model at when none is
+    /// chosen, when it says (Codex does; Claude Code does not).
+    pub default_effort: Option<String>,
 }
 struct Slot {
     status: Status,
@@ -416,6 +419,7 @@ fn chatgpt_models(peer: &mut Peer) -> Result<Vec<Model>, String> {
                     .collect(),
                 default: entry["isDefault"] == true,
                 aliases: vec![],
+                default_effort: text(&entry["defaultReasoningEffort"], 16),
             });
         }
         cursor = text(&page["nextCursor"], 500).filter(|c| !seen.contains(c));
@@ -581,6 +585,7 @@ fn claude_listing<'a>(entries: impl Iterator<Item = &'a Value>) -> Vec<Model> {
             efforts,
             default: is_default,
             aliases: resolved.into_iter().collect(),
+            default_effort: None,
         });
     }
     // A default no listed row names still shows, under its own id.
@@ -597,6 +602,7 @@ fn claude_listing<'a>(entries: impl Iterator<Item = &'a Value>) -> Vec<Model> {
                 efforts,
                 default: true,
                 aliases: vec![],
+                default_effort: None,
             },
         );
     }

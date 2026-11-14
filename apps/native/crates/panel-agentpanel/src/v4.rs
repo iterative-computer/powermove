@@ -130,18 +130,22 @@ impl Window {
             }
             Access::Project => "auto",
         };
-        // The picker names the model that runs, never a blank "Default".
-        value["settings"] = json!({"provider":session.settings.provider.name(),"model":session.catalog.resolve(&session.settings.model),
-            "effort":session.settings.effort,"access":access,"scope":session.settings.scope});
-        let choices = input::slash_choices(
+        // The pickers name the model and effort that run, never a blank
+        // "Default"; a model with no effort levels lists none (no picker).
+        let catalog = &session.catalog;
+        let model = &session.settings.model;
+        value["settings"] = json!({"provider":session.settings.provider.name(),"model":catalog.resolve(model),
+            "effort":catalog.resolve_effort(model, &session.settings.effort),"access":access,"scope":session.settings.scope});
+        let choices = input::slash_choices_for(
             &text,
             &session.catalog,
+            model,
             session.run.is_some(),
             session.applying,
         );
         value["slash"] = json!({"visible":session.slash.visible(&text,session.applying,&choices),
             "index":session.slash.index,"choices":choices.iter().map(|c|json!({"id":c.id,"value":c.value})).collect::<Vec<_>>()});
-        value["catalog"] = json!({"models":session.catalog.models,"providers":session.catalog.providers,"efforts":session.catalog.efforts_for(&session.settings.model)});
+        value["catalog"] = json!({"models":session.catalog.models,"providers":session.catalog.providers,"efforts":catalog.effort_choices(model)});
         Ok(value)
     }
 }

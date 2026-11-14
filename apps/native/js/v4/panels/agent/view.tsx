@@ -253,6 +253,7 @@ function Trigger({
   disabled,
   open,
   tone = "colors.secondary",
+  fixed,
 }: {
   id: string;
   label: string;
@@ -260,6 +261,8 @@ function Trigger({
   disabled?: boolean;
   open: (anchor: number) => void;
   tone?: string;
+  /** A short label (an effort) keeps its width; the model's name gives way. */
+  fixed?: boolean;
 }) {
   return (
     <UI.ToolbarItem
@@ -272,7 +275,7 @@ function Trigger({
       }}
       style={{
         ...row,
-        ...shrink,
+        ...(fixed ? { flexShrink: 0 } : shrink),
         gap: t("metrics.pill_inset"),
         paddingLeft: t("metrics.gap"),
         paddingRight: t("metrics.gap"),
@@ -1749,10 +1752,11 @@ function Composer({
     s.settings.model,
     named(s.catalog.providers, s.settings.provider),
   );
-  const modelText =
-    s.catalog.efforts.length > 1 && s.settings.effort
-      ? `${modelName} · ${effortLabel(s.settings.effort)}`
-      : modelName;
+  // The model's reasoning effort is its own picker beside the model's; a
+  // model with no effort levels lists none, and the picker is not shown.
+  const efforts = s.catalog.efforts.filter((e) => e && e !== "default");
+  const effortName = s.settings.effort ? effortLabel(s.settings.effort) : "";
+  const choicesLocked = !menu || working || s.composerDisabled;
   const sendLabel = working ? "Send direction" : "Send";
   // The shortcuts menu hangs from the composer, once per draft that asks
   // for it (the window's searchable menu); closing it unchosen leaves the
@@ -2046,13 +2050,13 @@ function Composer({
       >
         {/* The original's three run choices and its access mode, each a
             trigger for the window's searchable menu. */}
-        {/* Provider, model and effort in one menu: "{model} · {effort}"
-            (agent-panel.md §3). */}
+        {/* Provider and model in one menu, the model's reasoning effort in
+            its own beside it: two siblings, each naming what runs. */}
         <Trigger
           id="agent-model"
-          label={`Model and reasoning effort, ${modelText}`}
-          text={modelText}
-          disabled={!menu || working || s.composerDisabled}
+          label={`Model, ${modelName}`}
+          text={modelName}
+          disabled={choicesLocked}
           open={(anchor) =>
             void menu?.({
               anchor,
@@ -2074,14 +2078,6 @@ function Composer({
                     category: "Model",
                   }),
                 ),
-                ...(s.catalog.efforts.length > 1
-                  ? s.catalog.efforts.map((v) => ({
-                      label: effortLabel(v),
-                      value: `effort:${v}`,
-                      checked: v === s.settings.effort,
-                      category: "Reasoning Effort",
-                    }))
-                  : []),
               ],
             }).then((choice) => {
               if (typeof choice !== "string") return;
@@ -2089,21 +2085,45 @@ function Composer({
               const [kind, value] = [choice.slice(0, at), choice.slice(at + 1)];
               if (kind === "provider")
                 send({ type: "setProvider", provider: value });
+              // The effort shown goes along: the new model keeps it when it
+              // takes it, else runs at its own default.
               else if (kind === "model")
                 send({
                   type: "setModel",
                   model: value,
                   effort: s.settings.effort,
                 });
-              else if (kind === "effort")
-                send({
-                  type: "setModel",
-                  model: s.settings.model,
-                  effort: value,
-                });
             })
           }
         />
+        {efforts.length > 0 && (
+          <Trigger
+            id="agent-effort"
+            label={`Reasoning effort, ${effortName}`}
+            text={effortName}
+            fixed
+            disabled={choicesLocked}
+            open={(anchor) =>
+              void menu?.({
+                anchor,
+                placeholder: "Search",
+                options: efforts.map((v) => ({
+                  label: effortLabel(v),
+                  value: v,
+                  checked: v === s.settings.effort,
+                  category: "Reasoning Effort",
+                })),
+              }).then((choice) => {
+                if (typeof choice === "string" && choice !== s.settings.effort)
+                  send({
+                    type: "setModel",
+                    model: s.settings.model,
+                    effort: choice,
+                  });
+              })
+            }
+          />
+        )}
         <div style={{ flexGrow: 1 }} />
         <Trigger
           id="agent-access"
