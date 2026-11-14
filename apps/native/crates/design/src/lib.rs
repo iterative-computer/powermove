@@ -341,6 +341,10 @@ pub struct Metrics {
     pub drag_opacity: f32,
     /// Opacity of `colors.media_badge` fills over media.
     pub media_badge_opacity: f32,
+    /// The leading room a person's own message leaves free in the Agent
+    /// conversation, so it reads as theirs (at most 84 % of the popover's
+    /// content).
+    pub message_inset: f32,
     /// Mixer channel strip width.
     pub channel_strip: f32,
     /// Mixer fader knob height.
@@ -775,6 +779,7 @@ impl Tokens {
                 },
                 drag_opacity: 0.5,
                 media_badge_opacity: 0.55,
+                message_inset: 52.,
                 channel_strip: 72.,
                 fader_knob: 14.,
                 welcome_width: 900.,

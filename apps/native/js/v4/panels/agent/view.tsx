@@ -108,6 +108,20 @@ function Push({
     />
   );
 }
+/** Steps a turn's work is made of: tools, tasks and thinking. */
+const STEPS = new Set(["tool", "task", "thought"]);
+type Part = { work: Row[] } | { row: Row };
+/** Consecutive steps fold into one work line per turn (agent-panel.md §3). */
+function parts(rows: Row[]): Part[] {
+  const out: Part[] = [];
+  for (const row of rows) {
+    const last = out[out.length - 1];
+    if (!STEPS.has(str(row.value.kind))) out.push({ row });
+    else if (last && "work" in last) last.work.push(row);
+    else out.push({ work: [row] });
+  }
+  return out;
+}
 function Rows({
   s,
   n,
@@ -117,6 +131,7 @@ function Rows({
   n: NativeFacts;
   send: (a: Action) => void;
 }) {
+  const all = parts(s.rows.items);
   return (
     <UI.List
       id="agent-conversation"
@@ -127,6 +142,9 @@ function Rows({
         count: s.rows.count,
         range: s.rows.range,
         textSelected: n.textSelected,
+        // Bottom anchored: new content keeps the latest in view unless the
+        // person scrolled up.
+        scrollAnchor: "end",
       }}
       state={{ keyboardFocus: n.keyboardFocus === "conversation" }}
       style={{
@@ -135,10 +153,207 @@ function Rows({
         minHeight: t("metrics.hit"),
       }}
     >
-      {s.rows.items.map((row) => (
-        <Message key={row.id} row={row} n={n} send={send} />
-      ))}
+      {all.map((part, index) =>
+        "work" in part ? (
+          <Work
+            key={`work-${part.work[0].id}`}
+            rows={part.work}
+            live={
+              (s.runId !== null && index === all.length - 1) ||
+              part.work.some(
+                (r) => r.value.status === "running" || r.value.live === true,
+              )
+            }
+            n={n}
+            send={send}
+          />
+        ) : (
+          <Message key={part.row.id} row={part.row} n={n} send={send} />
+        ),
+      )}
     </UI.List>
+  );
+}
+const num = (value: unknown) =>
+  typeof value === "number" && Number.isFinite(value) ? value : undefined;
+/** `3.2 s` under a minute, `m:ss` after. */
+function span(ms: number) {
+  return ms < 60_000 ? `${(ms / 1000).toFixed(1)} s` : elapsed(ms);
+}
+/** A step's symbol (SF Symbols), by what the tool does. */
+function stepSymbol(v: Row["value"]) {
+  if (v.kind === "thought") return "brain";
+  if (v.kind === "task") return "person.2";
+  const name = `${str(v.toolName)} ${str(v.label)}`.toLowerCase();
+  const by: [RegExp, string][] = [
+    [/command|shell|bash|\brun\b/, "terminal"],
+    [/edit|patch|write|file_?change/, "pencil"],
+    [/search|web/, "magnifyingglass"],
+    [/frame|media|video|render/, "film"],
+    [/read|file/, "doc.text"],
+    [/sleep|wait/, "clock"],
+    [/agent|delegate|task/, "person.2"],
+    [/image|photo/, "photo"],
+    [/computer|click|screen/, "cursorarrow.rays"],
+  ];
+  return (
+    by.find(([pattern]) => pattern.test(name))?.[1] ?? "wrench.and.screwdriver"
+  );
+}
+/** One turn's steps: a quiet line, `{n} steps · {elapsed}`, open while the
+ * turn runs and folded once it is done (the person may open it). */
+function Work({
+  rows,
+  live,
+  n,
+  send,
+}: {
+  key?: string;
+  rows: Row[];
+  live: boolean;
+  n: NativeFacts;
+  send: (a: Action) => void;
+}) {
+  const [chosen, choose] = useState<boolean | null>(null);
+  const open = chosen ?? live;
+  const starts = rows
+    .map((r) => num(r.value.startedAt))
+    .filter((v) => v !== undefined);
+  const ends = rows
+    .map((r) => num(r.value.endedAt))
+    .filter((v) => v !== undefined);
+  const took =
+    starts.length && ends.length
+      ? Math.max(0, Math.max(...ends) - Math.min(...starts))
+      : undefined;
+  const label = `${rows.length} ${rows.length === 1 ? "step" : "steps"}${
+    took === undefined ? "" : ` · ${span(took)}`
+  }`;
+  return (
+    <div
+      role="group"
+      label={label}
+      style={{ display: "flex", flexDirection: "column" }}
+    >
+      <UI.ListItem
+        id={`${rows[0].id}-work`}
+        label={`${label}, ${open ? "expanded" : "collapsed"}`}
+        onSelect={() => choose(!open)}
+        style={line(muted.color)}
+      >
+        <div
+          metadata={{ symbol: open ? "chevron.down" : "chevron.right" }}
+          style={glyph(muted.color)}
+        />
+        <text style={muted}>{label}</text>
+      </UI.ListItem>
+      {open &&
+        rows.map((row) => <Step key={row.id} row={row} n={n} send={send} />)}
+    </div>
+  );
+}
+/** A row's content laid on one line: glyph, words, trailing state. */
+const line = (color: ReturnType<typeof t>) =>
+  ({
+    display: "flex",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: t("metrics.gap"),
+    color,
+  }) as const;
+const glyph = (color: ReturnType<typeof t>) => ({
+  color,
+  symbolSize: t("metrics.symbol_inline"),
+  flexShrink: 0,
+});
+const STATE: Record<string, string> = {
+  error: "Failed",
+  stopped: "Stopped",
+  waiting: "Waiting",
+  continued: "Continued",
+};
+/** One step: tool symbol, label, trailing state; it discloses its result. */
+function Step({
+  row,
+  n,
+  send,
+}: {
+  key?: string;
+  row: Row;
+  n: NativeFacts;
+  send: (a: Action) => void;
+}) {
+  const v = row.value;
+  const thought = v.kind === "thought";
+  const status = str(v.status);
+  const label = thought
+    ? v.live === true
+      ? "Thinking…"
+      : num(v.endedAt) !== undefined && num(v.startedAt) !== undefined
+        ? `Thought for ${Math.max(1, Math.round(((v.endedAt as number) - (v.startedAt as number)) / 1000))} s`
+        : "Thought"
+    : str(v.title) || str(v.label) || str(v.toolName) || str(v.text);
+  const result = thought
+    ? str(v.label)
+    : [str(v.detail), str(v.output)].filter(Boolean).join("\n\n");
+  const state = STATE[status];
+  return (
+    <div style={{ display: "flex", flexDirection: "column" }}>
+      <UI.ListItem
+        id={row.id}
+        label={label}
+        onSelect={() => {
+          if (result)
+            send({ type: "disclose", id: row.commandId, open: !row.open });
+        }}
+        state={{ hover: n.hoverRow === row.id }}
+        style={line(body.color)}
+      >
+        <div metadata={{ symbol: stepSymbol(v) }} style={glyph(muted.color)} />
+        <text style={{ ...body, flexShrink: 1 }}>{label}</text>
+        <div style={{ flexGrow: 1 }} />
+        {state && (
+          <div
+            metadata={
+              status === "error" ? { symbol: "xmark.circle.fill" } : undefined
+            }
+            style={line(
+              t(status === "error" ? "colors.danger" : "colors.muted"),
+            )}
+          >
+            <text
+              style={
+                status === "error"
+                  ? { ...body, color: t("colors.danger") }
+                  : muted
+              }
+            >
+              {state}
+            </text>
+          </div>
+        )}
+        {status === "running" && !thought && (
+          <UI.ToolbarItem
+            label={`Stop ${label}`}
+            onClick={() => send({ type: "stopTask", id: row.commandId })}
+            style={{ color: t("colors.accent_text") }}
+          >
+            Stop
+          </UI.ToolbarItem>
+        )}
+      </UI.ListItem>
+      {row.open && result && (
+        <div
+          style={{
+            background: t("colors.field"),
+            borderRadius: t("metrics.control_radius"),
+            padding: t("metrics.text_padding"),
+          }}
+        >
+          <text style={body}>{result}</text>
+        </div>
+      )}
+    </div>
   );
 }
 const str = (value: unknown) => (typeof value === "string" ? value : "");
@@ -199,13 +414,21 @@ function Message({
         role="listitem"
         label={`You said: ${text}`}
         metadata={{ rowId: row.id, apiGap: "richText" }}
-        style={{ display: "flex", flexDirection: "row", justifyContent: "end" }}
+        style={{
+          display: "flex",
+          flexDirection: "row",
+          justifyContent: "end",
+          // agent-panel.md §3: the message takes at most 84 % of the width.
+          paddingLeft: t("metrics.message_inset"),
+        }}
       >
         <div
           style={{
             ...reading,
             background: t("colors.field"),
             borderRadius: t("metrics.panel_radius"),
+            paddingTop: t("metrics.text_padding"),
+            paddingBottom: t("metrics.text_padding"),
             paddingLeft: t("metrics.inset"),
             paddingRight: t("metrics.inset"),
           }}
@@ -213,24 +436,6 @@ function Message({
           <text>{text}</text>
         </div>
       </div>
-    );
-  if (kind === "thought")
-    return (
-      <UI.DisclosureGroup
-        id={row.id}
-        label={
-          v.live === true
-            ? "Thinking…"
-            : typeof v.endedAt === "number" && typeof v.startedAt === "number"
-              ? `Thought for ${Math.max(1, Math.round((v.endedAt - v.startedAt) / 1000))} s`
-              : "Thought"
-        }
-        open={row.open}
-        onChange={(open) => send({ type: "disclose", id: row.commandId, open })}
-        style={muted}
-      >
-        <text style={body}>{text}</text>
-      </UI.DisclosureGroup>
     );
   if (kind === "question")
     return (
@@ -371,62 +576,26 @@ function Message({
       <div
         role="listitem"
         label={text}
-        metadata={{ rowId: row.id, symbol: "exclamationmark.triangle.fill" }}
+        metadata={{ rowId: row.id }}
+        style={{ ...vertical, gap: t("metrics.gap"), alignItems: "start" }}
       >
-        <text style={{ ...body, color: t("colors.text") }}>{text}</text>
+        {/* The triangle in the danger colour leads the message (§3 Error item). */}
+        <div
+          metadata={{ symbol: "exclamationmark.triangle.fill" }}
+          style={{
+            display: "flex",
+            flexDirection: "row",
+            alignItems: "center",
+            gap: t("metrics.gap"),
+            color: t("colors.danger"),
+            fontSize: t("typography.body"),
+          }}
+        >
+          <text style={{ ...body, color: t("colors.text") }}>{text}</text>
+        </div>
         <Push label="Try Again" />
       </div>
     );
-  if (kind === "tool" || kind === "task") {
-    const label = str(v.title) || str(v.label) || str(v.toolName) || text;
-    const status = str(v.status);
-    const state = (
-      {
-        error: "Failed",
-        stopped: "Stopped",
-        waiting: "Waiting",
-        continued: "Continued",
-      } as Record<string, string>
-    )[status];
-    return (
-      <UI.DisclosureGroup
-        id={row.id}
-        label={label}
-        open={row.open}
-        onChange={(open) => send({ type: "disclose", id: row.commandId, open })}
-        state={{ hover: n.hoverRow === row.id }}
-        style={{
-          color: t("colors.secondary"),
-          fontSize: t("typography.body"),
-          ...(n.hoverRow === row.id ? { background: t("colors.hover") } : {}),
-        }}
-      >
-        <text style={body}>{str(v.output)}</text>
-        {state && (
-          <text
-            style={
-              status === "error"
-                ? { ...body, color: t("colors.danger") }
-                : muted
-            }
-            metadata={
-              status === "error" ? { symbol: "xmark.circle.fill" } : undefined
-            }
-          >
-            {state}
-          </text>
-        )}
-        {status === "running" && (
-          <UI.ToolbarItem
-            label={`Stop ${label}`}
-            onClick={() => send({ type: "stopTask", id: row.commandId })}
-          >
-            Stop
-          </UI.ToolbarItem>
-        )}
-      </UI.DisclosureGroup>
-    );
-  }
   if (v.nativeResult || kind === "result")
     return (
       <Placeholder gap="preview" label="Rendered result">
@@ -569,8 +738,10 @@ export function AgentView({
       <div
         style={{
           ...vertical,
-          // The conversation takes the free height; the composer stays at the foot.
+          // The conversation takes the free height and scrolls inside it;
+          // the composer stays at the foot.
           flexGrow: 1,
+          overflow: "hidden",
           paddingLeft: t("metrics.inset"),
           paddingRight: t("metrics.inset"),
         }}
