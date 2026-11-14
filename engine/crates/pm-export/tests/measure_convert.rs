@@ -83,6 +83,7 @@ pub fn measure() {
         white_nits: 203,
         peak_nits: 1000,
         metadata: None,
+        dolby_vision: true,
     };
     let sdr = ColorTags::Rec709QuickTime;
     let cases = [
@@ -175,6 +176,7 @@ fn measure_uhd_hdr_exports() {
         white_nits: 203,
         peak_nits: 1000,
         metadata: None,
+        dolby_vision: true,
     };
     let dir = std::env::temp_dir().join(format!("pm-export-hdr-speed-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();

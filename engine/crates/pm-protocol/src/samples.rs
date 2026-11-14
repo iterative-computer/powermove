@@ -548,6 +548,7 @@ pub fn export_settings() -> ExportSettings {
             preview: true,
             sequence_name: None,
             compat: vec![crate::snapshot::CompatSource::RasterOverride],
+            without_dolby_vision: false,
         },
     }
 }

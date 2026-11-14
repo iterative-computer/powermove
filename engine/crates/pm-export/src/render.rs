@@ -755,6 +755,7 @@ fn tags_of(color: OutputColor, peak_nits: u16) -> Result<ColorTags, JobError> {
             white_nits: HDR_WHITE_NITS,
             peak_nits: peak_nits.clamp(400, 4000),
             metadata: None,
+            dolby_vision: true,
         }),
         OutputColor::Rec709Broadcast => Ok(ColorTags::Rec709Broadcast),
         OutputColor::Rec709QuickTime {
@@ -1343,6 +1344,9 @@ fn plan_export_checked(
         .unwrap_or(pm_protocol::color::ProjectColor::DEFAULT);
     let hdr_project = project.mode == pm_protocol::color::ColorMode::Hdr;
     let mut tags = tags_of(s.color, project.mastering_peak)?;
+    if let ColorTags::Rec2100Hlg { dolby_vision, .. } = &mut tags {
+        *dolby_vision = !s.delivery.without_dolby_vision;
+    }
     if tags.is_hdr() && !hdr_project {
         return Err(JobError::Invalid(
             "HDR delivery needs an HDR project".into(),

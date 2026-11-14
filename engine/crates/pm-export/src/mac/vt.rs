@@ -227,6 +227,21 @@ impl Encoder {
                 &any_str(matrix),
                 false,
             )?;
+            // HLG HEVC carries Dolby Vision 8.4 unless the person turned
+            // it off (Auto inserts it, macOS computing the RPUs).
+            if let crate::settings::ColorTags::Rec2100Hlg {
+                dolby_vision: false,
+                ..
+            } = spec.tags
+                && matches!(spec.codec, crate::settings::Codec::Hevc { .. })
+            {
+                set(
+                    &session,
+                    kVTCompressionPropertyKey_HDRMetadataInsertionMode,
+                    &any_str(kVTHDRMetadataInsertionMode_None),
+                    false,
+                )?;
+            }
             if let Some(hdr) = spec.tags.hdr_metadata() {
                 set(
                     &session,

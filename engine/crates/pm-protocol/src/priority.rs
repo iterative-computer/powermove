@@ -543,6 +543,11 @@ pub struct DeliveryOptions {
     /// PNG sequences: the name frame files start with (`<name>_00000.png`),
     /// usually the destination folder's name. A bare name.
     pub sequence_name: Option<String>,
+    /// HLG HEVC: leave out the Dolby Vision Profile 8.4 metadata macOS's
+    /// encoder adds (on by default; players without Dolby Vision show the
+    /// HLG picture either way).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub without_dolby_vision: bool,
     /// Compatibility producers the exporting window has (a `raster`
     /// override): the job asks the host for those layers' pixels at each
     /// frame (`Request::CompatFrame`). Empty: every layer is the engine's.

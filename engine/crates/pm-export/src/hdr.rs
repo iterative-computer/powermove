@@ -319,6 +319,7 @@ mod tests {
                 white_nits: 203,
                 peak_nits: 1000,
                 metadata: None,
+                dolby_vision: true,
             },
         ];
         for tags in tagss {
@@ -370,6 +371,7 @@ mod tests {
                 white_nits: 203,
                 peak_nits: 1000,
                 metadata: None,
+                dolby_vision: true,
             },
         );
         assert!((c[0] - 0.75).abs() < 0.001);
@@ -388,7 +390,8 @@ mod tests {
             validate(ColorTags::Rec2100Hlg {
                 white_nits: 203,
                 peak_nits: 200,
-                metadata: None
+                metadata: None,
+                dolby_vision: true,
             })
             .is_err()
         );
