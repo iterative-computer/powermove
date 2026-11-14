@@ -113,6 +113,8 @@ fn name(k: &Kernel, id: &str) -> String {
 #[derive(Clone)]
 enum Opens {
     File(std::path::PathBuf),
+    /// A file under its own project id (the app's ids come from the path).
+    FileAs(std::path::PathBuf, String),
     Library(std::path::PathBuf, String),
 }
 
@@ -121,6 +123,7 @@ enum Opens {
 fn launch_of(k: &mut Kernel, opens: &Opens, choice: RecoveryDecision) -> (Option<String>, String) {
     let (id, source) = match opens {
         Opens::File(path) => ("file".to_owned(), SessionSource::File(path.clone())),
+        Opens::FileAs(path, id) => (id.clone(), SessionSource::File(path.clone())),
         Opens::Library(profile, slot) => (
             slot.clone(),
             SessionSource::Library {
@@ -185,6 +188,40 @@ fn kill_before_first_checkpoint(folder: &Path) {
     for e in std::fs::read_dir(&session).unwrap().flatten() {
         if e.file_name().to_string_lossy().starts_with("checkpoint-") {
             std::fs::remove_file(e.path()).unwrap();
+        }
+    }
+}
+
+/// A copy of `session` kept aside, to put back where it was: the on-disk
+/// state of a kill before the session replacing it wrote checkpoint 0 (the
+/// replaced one is retired only once that checkpoint is durable).
+struct Kept {
+    at: std::path::PathBuf,
+    copy: std::path::PathBuf,
+}
+fn keep(session: &Path, root: &TempDir) -> Kept {
+    fn copy_dir(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for e in std::fs::read_dir(from).unwrap().flatten() {
+            let path = e.path();
+            if path.is_dir() {
+                copy_dir(&path, &to.join(e.file_name()));
+            } else {
+                std::fs::copy(&path, to.join(e.file_name())).unwrap();
+            }
+        }
+    }
+    let copy = root.path("kept").join(session.file_name().unwrap());
+    copy_dir(session, &copy);
+    Kept {
+        at: session.to_path_buf(),
+        copy,
+    }
+}
+impl Kept {
+    fn put_back(&self) {
+        if !self.at.exists() {
+            std::fs::rename(&self.copy, &self.at).unwrap();
         }
     }
 }
@@ -397,5 +434,311 @@ fn unrecoverable_work_is_described_and_kept() {
     assert!(
         kept.join("journal-00000000.log").exists(),
         "set aside, kept"
+    );
+}
+
+/// The project file with `document`'s content saved by another writer whose
+/// own history holds one undone step (its redo), `name` set and taken back.
+fn other_writers_file(path: &Path, from: &Path) {
+    let mut store =
+        DocumentStore::open(pm_kernel::project_io::open_project(from, Default::default()).unwrap());
+    store
+        .execute(
+            Command::SetLayerName {
+                layer_id: "none".into(),
+                name: "x".into(),
+            },
+            Origin::Interface,
+        )
+        .ok();
+    let comp = pm_kernel::CompCommand::Set {
+        patch: Box::new(pm_kernel::commands::comps::CompPatch {
+            name: Some("Their edit".into()),
+            ..Default::default()
+        }),
+    };
+    store.execute(comp.into(), Origin::Interface).unwrap();
+    store.undo().unwrap();
+    let other = path.with_extension("other.pmv");
+    common::save_as(&mut store, &other).unwrap();
+    drop(store);
+    std::fs::rename(&other, path).unwrap();
+}
+
+/// Review w32, finding 1. Saved A; an edit, killed; Recover, another edit,
+/// killed after its checkpoint. Meanwhile another writer saves the file
+/// with the same document A and a history of its own (a redo step). The
+/// recovered session inherited A only as a document: adopting the file in
+/// place would replace that other history on the next save. It is offered
+/// as a copy, as before the ancestors were carried.
+#[test]
+fn an_inherited_base_needs_the_history_it_had() {
+    let root = TempDir::new("recovery-inherited-history");
+    let path = saved_file(&root, value());
+    for round in 1..=2 {
+        let mut k = kernel(&root.0);
+        let (id, offered) = launch(&mut k, &path, RecoveryDecision::Recover);
+        let id = id.unwrap_or_else(|| panic!("round {round}: {offered}"));
+        rename(&mut k, &id, &format!("Edit {round}"));
+        k.durability_barrier().unwrap();
+    }
+    let original = root.path("original-copy.pmv");
+    std::fs::copy(&path, &original).unwrap();
+    other_writers_file(&path, &original);
+    let mut k = kernel(&root.0);
+    let (_, offered) = launch(&mut k, &path, RecoveryDecision::OpenAsCopy);
+    assert!(offered.starts_with("OfferCopy"), "{offered}");
+}
+
+/// Review w32, finding 2. A recoverable session S1; then a kill while the
+/// replacement session was being created, before its header: an empty
+/// newest session. The open still finds S1's work and offers it.
+#[test]
+fn a_half_created_session_hides_nothing() {
+    let root = TempDir::new("recovery-half-created");
+    let path = saved_file(&root, value());
+    {
+        let mut k = kernel(&root.0);
+        let (id, offered) = launch(&mut k, &path, RecoveryDecision::Recover);
+        let id = id.unwrap_or_else(|| panic!("{offered}"));
+        rename(&mut k, &id, "Edited");
+        k.durability_barrier().unwrap();
+    }
+    let folder = root.path("journals/file");
+    // What an older build left: the folder made, no header yet; and what this
+    // build would leave: its staging folder.
+    std::fs::create_dir_all(folder.join("s999999999999999999999999-0000000001")).unwrap();
+    std::fs::create_dir_all(folder.join(".creating-s999999999999999999999999-0000000002")).unwrap();
+    let mut k = kernel(&root.0);
+    let (id, offered) = launch(&mut k, &path, RecoveryDecision::Recover);
+    let id = id.unwrap_or_else(|| panic!("{offered}"));
+    assert_eq!(offered, "Recovered { truncated: false }");
+    assert_eq!(name(&k, &id), "Edited");
+}
+
+/// A session's last segment ends in a torn line (killed mid-append).
+fn tear_tail(session: &Path) {
+    use std::io::Write;
+    let mut segments: Vec<_> = std::fs::read_dir(session)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("journal-")
+        })
+        .collect();
+    segments.sort();
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .open(segments.last().unwrap())
+        .unwrap();
+    f.write_all(b"0123456789abcdef {\"t\":\"rev\",\"b\":")
+        .unwrap();
+}
+
+/// Review w32, finding 4, the trigger. S1 recovered with a torn tail
+/// (accepted as truncated); Recover, an edit in S2, killed before S2's first
+/// checkpoint. S2 continues from S1's accepted prefix, which replays to
+/// exactly what S2 adopted: both come back.
+#[test]
+fn a_torn_tail_recovered_then_killed_again_recovers() {
+    let root = TempDir::new("recovery-torn");
+    let path = saved_file(&root, value());
+    let folder = root.path("journals/file");
+    {
+        let mut k = kernel(&root.0);
+        let (id, offered) = launch(&mut k, &path, RecoveryDecision::Recover);
+        let id = id.unwrap_or_else(|| panic!("{offered}"));
+        rename(&mut k, &id, "Before the tear");
+        k.durability_barrier().unwrap();
+    }
+    let s1 = journal::sessions(&folder).pop().unwrap();
+    tear_tail(&s1);
+    let kept = keep(&s1, &root);
+    {
+        let mut k = kernel(&root.0);
+        let (id, offered) = launch(&mut k, &path, RecoveryDecision::Recover);
+        let id = id.unwrap_or_else(|| panic!("{offered}"));
+        assert_eq!(offered, "Recovered { truncated: true }");
+        widen(&mut k, &id, 333.0);
+        k.durability_barrier().unwrap();
+    }
+    kill_before_first_checkpoint(&folder);
+    kept.put_back();
+    let mut k = kernel(&root.0);
+    let (id, offered) = launch(&mut k, &path, RecoveryDecision::Recover);
+    let id = id.unwrap_or_else(|| panic!("{offered}"));
+    assert_eq!(name(&k, &id), "Before the tear");
+    assert_eq!(width(&k, &id), 333.0);
+}
+
+/// Review w32, finding 4. Work that cannot be replayed, whose session
+/// continues from an earlier one (killed before its first checkpoint):
+/// Open Saved Version sets both aside, and a clean close of the saved
+/// version deletes neither.
+#[test]
+fn open_saved_version_keeps_what_the_set_aside_session_needs() {
+    let root = TempDir::new("recovery-archive-chain");
+    let path = saved_file(&root, value());
+    let folder = root.path("journals/file");
+    {
+        let mut k = kernel(&root.0);
+        let (id, offered) = launch(&mut k, &path, RecoveryDecision::Recover);
+        let id = id.unwrap_or_else(|| panic!("{offered}"));
+        rename(&mut k, &id, "First");
+        k.durability_barrier().unwrap();
+    }
+    let s1 = journal::sessions(&folder).pop().unwrap();
+    let kept = keep(&s1, &root);
+    {
+        let mut k = kernel(&root.0);
+        let (id, offered) = launch(&mut k, &path, RecoveryDecision::Recover);
+        let id = id.unwrap_or_else(|| panic!("{offered}"));
+        rename(&mut k, &id, "Second");
+        k.durability_barrier().unwrap();
+    }
+    kill_before_first_checkpoint(&folder);
+    kept.put_back();
+    let s2 = journal::sessions(&folder).pop().unwrap();
+    assert_ne!(s1, s2);
+    // S2's records no longer apply (a revision gap): unrecoverable.
+    let segment = s2.join("journal-00000000.log");
+    let text = std::fs::read_to_string(&segment).unwrap();
+    let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
+    let rev = lines
+        .iter()
+        .position(|l| l.contains("\"t\":\"rev\""))
+        .expect("a rev record");
+    let json = lines[rev]
+        .split_once(' ')
+        .unwrap()
+        .1
+        .replace("\"b\":", "\"b\":9");
+    let sum = &pm_model::hash::sha256_hex(json.as_bytes())[..16];
+    lines[rev] = format!("{sum} {json}");
+    std::fs::write(&segment, lines.join("\n") + "\n").unwrap();
+    let mut k = kernel(&root.0);
+    let reply = k
+        .shell(ShellCall::PrepareOpen {
+            id: "file".into(),
+            source: SessionSource::File(path.clone()),
+            electron_profile: None,
+        })
+        .unwrap();
+    let ShellReply::RecoveryRequired { ticket, recovery } = reply else {
+        panic!("{reply:?}");
+    };
+    assert!(
+        matches!(recovery, RecoveryResult::Unrecoverable { .. }),
+        "{recovery:?}"
+    );
+    let ShellReply::Opened { session, .. } = k
+        .shell(ShellCall::DecideRecovery {
+            ticket,
+            decision: RecoveryDecision::OpenSavedVersion,
+        })
+        .unwrap()
+    else {
+        panic!("the saved version did not open");
+    };
+    k.shell(ShellCall::Close(session)).unwrap();
+    drop(k);
+    let discarded = folder.join("discarded");
+    for s in [&s1, &s2] {
+        assert!(
+            discarded
+                .join(s.file_name().unwrap())
+                .join("journal-00000000.log")
+                .exists(),
+            "{s:?} kept beside the other"
+        );
+    }
+}
+
+/// Review w32, finding 3. Work journalled for file A, killed; A moved to
+/// another volume while closed (other bytes' inode, the old path gone).
+/// Opening the moved file B offers that work; Recover, an edit, killed
+/// before B's first checkpoint. Opening B again brings back both.
+#[test]
+fn a_moved_files_recovery_continues_across_projects() {
+    let root = TempDir::new("recovery-moved");
+    let a = saved_file(&root, value());
+    let opens_a = Opens::FileAs(a.clone(), "fileA".into());
+    {
+        let mut k = kernel(&root.0);
+        let (id, offered) = launch_of(&mut k, &opens_a, RecoveryDecision::Recover);
+        let id = id.unwrap_or_else(|| panic!("{offered}"));
+        rename(&mut k, &id, "Before the move");
+        k.durability_barrier().unwrap();
+    }
+    let kept = keep(
+        &journal::sessions(&root.path("journals/fileA"))
+            .pop()
+            .unwrap(),
+        &root,
+    );
+    let other = root.path("elsewhere");
+    std::fs::create_dir_all(&other).unwrap();
+    let b = other.join("project.pmv");
+    std::fs::copy(&a, &b).unwrap();
+    std::fs::remove_file(&a).unwrap();
+    let opens_b = Opens::FileAs(b.clone(), "fileB".into());
+    {
+        let mut k = kernel(&root.0);
+        let (id, offered) = launch_of(&mut k, &opens_b, RecoveryDecision::Recover);
+        let id = id.unwrap_or_else(|| panic!("{offered}"));
+        assert!(offered.starts_with("FromOtherFile"), "{offered}");
+        assert_eq!(name(&k, &id), "Before the move");
+        widen(&mut k, &id, 444.0);
+        k.durability_barrier().unwrap();
+    }
+    kill_before_first_checkpoint(&root.path("journals/fileB"));
+    kept.put_back();
+    let mut k = kernel(&root.0);
+    let (id, offered) = launch_of(&mut k, &opens_b, RecoveryDecision::Recover);
+    let id = id.unwrap_or_else(|| panic!("{offered}"));
+    assert_eq!(name(&k, &id), "Before the move");
+    assert_eq!(width(&k, &id), 444.0);
+}
+
+/// Review w32, finding 5. Work recovered into a copy is durable in the
+/// copy: the journal it came from is retired, not kept in `discarded/`.
+#[test]
+fn a_materialised_copy_retires_its_source_journal() {
+    let root = TempDir::new("recovery-copy-retired");
+    let path = saved_file(&root, value());
+    let folder = root.path("journals/file");
+    {
+        let mut k = kernel(&root.0);
+        let (id, offered) = launch(&mut k, &path, RecoveryDecision::Recover);
+        let id = id.unwrap_or_else(|| panic!("{offered}"));
+        rename(&mut k, &id, "Edited");
+        k.durability_barrier().unwrap();
+    }
+    let crashed = journal::sessions(&folder).pop().unwrap();
+    std::fs::remove_file(&path).unwrap();
+    let mut other = value();
+    other
+        .as_object_mut()
+        .unwrap()
+        .insert("name", Value::from("Elsewhere"));
+    let mut store = DocumentStore::new_untitled(other);
+    common::save_as(&mut store, &path).unwrap();
+    drop(store);
+    let mut k = kernel(&root.0);
+    let (id, offered) = launch(&mut k, &path, RecoveryDecision::OpenAsCopy);
+    let id = id.unwrap_or_else(|| panic!("{offered}"));
+    assert!(offered.starts_with("OfferCopy"), "{offered}");
+    assert_eq!(name(&k, &id), "Edited — Recovered");
+    assert!(!crashed.exists(), "the source session is retired");
+    assert!(
+        !folder
+            .join("discarded")
+            .join(crashed.file_name().unwrap())
+            .exists(),
+        "not archived"
     );
 }

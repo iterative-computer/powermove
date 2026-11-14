@@ -558,6 +558,93 @@ pub fn sessions(project_dir: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// The prefix of a session folder still being created.
+const STAGING: &str = ".creating-";
+
+/// How a session of `project_dir` names `old`, the session it continues:
+/// its folder name in the same project, `../<project>/<session>` in another
+/// project under the same journal root, `None` elsewhere.
+fn continuation_name(project_dir: &Path, old: &Path) -> Option<String> {
+    let name = old.file_name()?.to_str()?;
+    let parent = old.parent()?;
+    if parent == project_dir {
+        return Some(name.to_owned());
+    }
+    (parent.parent()? == project_dir.parent()?)
+        .then(|| Some(format!("../{}/{name}", parent.file_name()?.to_str()?)))
+        .flatten()
+}
+
+/// A session with a header that verifies, or a checkpoint: one a kill left
+/// half created (an older build, before the staging folder) is neither.
+fn published(session: &Path) -> bool {
+    !numbered(session, "checkpoint-", ".json").is_empty()
+        || numbered(session, "journal-", ".log")
+            .first()
+            .and_then(|&n| segment_head(&session.join(segment_name(n))))
+            .is_some()
+}
+
+/// `session` and every session it continues from (its checkpoint 0 never
+/// landed): what replaying it needs, newest first.
+pub(crate) fn chain(session: &Path) -> Vec<PathBuf> {
+    let mut out = vec![session.to_path_buf()];
+    while let Some(earlier) = out.last().and_then(|s| continued(s)) {
+        if out.contains(&earlier) || out.len() > 64 {
+            break;
+        }
+        out.push(earlier);
+    }
+    out
+}
+
+/// Sets `session` aside with every session it continues from, all in its
+/// project's `discarded/`, where they still resolve one another and no
+/// retirement deletes them.
+pub(crate) fn archive_chain(mut session: PathBuf) -> io::Result<()> {
+    archive_predecessors(&session)?;
+    archive_path(&mut session)
+}
+
+/// Moves the sessions `session` continues from into the `discarded/` it is
+/// (or is about to be) in, the oldest first.
+fn archive_predecessors(session: &Path) -> io::Result<()> {
+    let Some(parent) = session.parent() else {
+        return Ok(());
+    };
+    let archive = if parent.file_name() == Some(std::ffi::OsStr::new("discarded")) {
+        parent.to_path_buf()
+    } else {
+        parent.join("discarded")
+    };
+    for old in chain(session).into_iter().skip(1).rev() {
+        if old.parent() == Some(archive.as_path()) {
+            continue;
+        }
+        fs::create_dir_all(&archive)?;
+        sync_dir(archive.parent().expect("project directory"))?;
+        let destination = archive.join(old.file_name().expect("session name"));
+        if destination.exists() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "Journal archive exists",
+            ));
+        }
+        let from = old.parent().expect("session parent").to_path_buf();
+        fs::rename(&old, &destination)?;
+        sync_dir(&from)?;
+    }
+    Ok(())
+}
+
+/// Deletes `session` and every session it continues from: their work is
+/// durable elsewhere now (a recovery copy).
+pub(crate) fn retire_chain(session: &Path) {
+    for old in chain(session) {
+        let _ = fs::remove_dir_all(old);
+    }
+}
+
 impl Journal {
     /// Starts a session under `project_dir` for a document whose canonical
     /// hash is `base`, checkpointing `initial` in the background.
@@ -581,9 +668,20 @@ impl Journal {
         saved: bool,
         ancestors: Vec<Ancestor>,
     ) -> io::Result<Journal> {
-        let dir = project_dir.join(session_name());
-        fs::create_dir_all(&dir)?;
-        sync_dir(project_dir)?;
+        // Built under a name recovery never reads, and published under its
+        // session name only once its header is durable: a kill in between
+        // leaves no empty newest session to hide (and later delete) the
+        // sessions before it.
+        let name = session_name();
+        let dir = project_dir.join(&name);
+        let staging = project_dir.join(format!("{STAGING}{name}"));
+        // What a kill left half created holds nothing yet (no header).
+        for e in fs::read_dir(project_dir).into_iter().flatten().flatten() {
+            if e.file_name().to_string_lossy().starts_with(STAGING) {
+                let _ = fs::remove_dir_all(e.path());
+            }
+        }
+        fs::create_dir_all(&staging)?;
         // Recovered work also descends from what the session it replaces
         // descended from (the file it was opened on, the saves it made): a
         // later crash on that unchanged file recovers in place, not as a copy.
@@ -596,17 +694,19 @@ impl Journal {
         // Adopted recovered work starts from checkpoint 0, not the base.
         // Until that lands, the session it supersedes here still holds the
         // state, and recovery continues from it.
-        let start = (!saved && !supersedes.is_empty()).then(|| {
+        // Another project's session (a file moved while closed, recovered
+        // here) is named relative to this project's folder.
+        let continues: Option<String> = (!saved && !supersedes.is_empty()).then(|| {
             supersedes
                 .iter()
-                .filter(|old| old.parent() == Some(project_dir))
-                .filter_map(|old| old.file_name()?.to_str())
+                .filter_map(|old| continuation_name(project_dir, old))
                 .max()
-                .unwrap_or("")
+                .unwrap_or_default()
         });
+        let start = continues.as_deref();
         let (file, target) = open_segment(
             durability,
-            &dir,
+            &staging,
             Head {
                 project,
                 base,
@@ -616,6 +716,8 @@ impl Journal {
                 revision: initial.revision,
             },
         )?;
+        fs::rename(&staging, &dir)?;
+        sync_dir(project_dir)?;
         let checkpoint_bytes = Arc::new(AtomicU64::new(0));
         let mut deferred = None;
         if saved {
@@ -838,15 +940,13 @@ impl Journal {
     }
 
     /// Call only after the durability barrier, with no concurrent writer.
+    /// Sets this session aside with the sessions it continues from. No
+    /// checkpoint writer may still reference these paths: the actor must
+    /// pass its barrier first.
     pub(crate) fn archive(&mut self) -> io::Result<()> {
+        archive_predecessors(&self.dir)?;
         archive_path(&mut self.dir)
     }
-}
-
-/// Archive rather than delete rejected recovery work. No checkpoint writer
-/// may still reference this path: the actor must pass its barrier first.
-pub(crate) fn archive_session(mut path: PathBuf) -> io::Result<()> {
-    archive_path(&mut path)
 }
 
 fn archive_path(path: &mut PathBuf) -> io::Result<()> {
@@ -1404,7 +1504,11 @@ pub fn recover_from(
     current_base: Option<&str>,
     base: Option<Base>,
 ) -> Recovery {
-    let Some(session) = sessions(project_dir).pop() else {
+    let Some(session) = sessions(project_dir)
+        .into_iter()
+        .rev()
+        .find(|s| published(s))
+    else {
         return Recovery::Nothing;
     };
     if let Some(head) = numbered(&session, "journal-", ".log")
@@ -1465,8 +1569,23 @@ fn continued(session: &Path) -> Option<PathBuf> {
         return None;
     }
     let name = head.get("continues")?.as_str()?;
-    let earlier = session.parent()?.join(name);
-    (!name.is_empty() && !name.contains('/') && earlier.is_dir()).then_some(earlier)
+    let parent = session.parent()?;
+    let parts: Vec<&str> = name.split('/').collect();
+    let plain = |p: &str| !p.is_empty() && p != "." && p != ".." && !p.contains('\\');
+    let leaf = match parts.as_slice() {
+        [leaf] if plain(leaf) => *leaf,
+        ["..", project, leaf] if plain(project) && plain(leaf) => {
+            let earlier = parent.parent()?.join(project).join(leaf);
+            if earlier.is_dir() {
+                return Some(earlier);
+            }
+            *leaf
+        }
+        _ => return None,
+    };
+    // Beside it: the same project, or both set aside in `discarded/`.
+    let earlier = parent.join(leaf);
+    earlier.is_dir().then_some(earlier)
 }
 
 fn segment_head(path: &Path) -> Option<Map> {
@@ -1604,7 +1723,11 @@ fn recover_session(session: &Path, base: Option<Base>) -> Result<Recovered, Stri
             // still holds its start state.
             let earlier = recover_session(&earlier, base)?;
             let revision = head.get("revision").and_then(Value::as_f64).unwrap_or(0.0) as u64;
-            if earlier.truncated || earlier.revision != revision {
+            // A torn tail the first recovery left behind is fine when what it
+            // replays to is exactly what this session adopted.
+            let verified =
+                || earlier.document.canonical_hash().as_deref() == Some(session_base.as_str());
+            if earlier.revision != revision || (earlier.truncated && !verified()) {
                 return Err("the session's first checkpoint never landed".into());
             }
             (
