@@ -57,6 +57,9 @@ pub trait Delegate: 'static {
     fn painters_revision(&self, _cx: &App) -> u64 {
         0
     }
+    /// The time under the panel moved (scroll, zoom, a resize): the native
+    /// playhead, drawn outside GPUI, is placed again.
+    fn view_moved(&self, _cx: &mut App) {}
     /// The skimmer moved to `seconds` (`None`: it left the timeline).
     fn skim(&self, _seconds: Option<f64>, _cx: &mut App) {}
     /// Whether skimming is on (View ▸ Skimming).
@@ -864,7 +867,8 @@ impl TimelineSurface {
         })
     }
     fn prepared(&mut self, bounds: Bounds<Pixels>, cx: &mut Context<Self>) -> Option<Arc<Frame>> {
-        if self.bounds != bounds {
+        let mut moved = self.bounds != bounds;
+        if moved {
             self.bounds = bounds;
             self.frame = None;
             if !self.fitted && self.model.index.duration > 0. {
@@ -873,7 +877,9 @@ impl TimelineSurface {
             self.clamp_scroll();
         }
         if self.frame.is_none() {
-            self.shown = (self.view.pps, self.view.scroll_time, self.view.layer_column);
+            let shown = (self.view.pps, self.view.scroll_time, self.view.layer_column);
+            moved |= shown != self.shown;
+            self.shown = shown;
             let (scene, viewport) = (self.scene.as_ref()?, self.viewport()?);
             let _span = crate::diag::span("timeline.prepare");
             self.frame = scene.prepare(viewport, &self.tokens).ok().map(Arc::new);
@@ -881,6 +887,12 @@ impl TimelineSurface {
                 self.ask_painters(&frame, cx);
             }
             self.tell_service(cx);
+        }
+        if moved {
+            // Paused, nothing else moves the playhead layer: it stayed put
+            // on screen while the ruler and clips scrolled under it.
+            let delegate = self.delegate.clone();
+            cx.defer(move |cx| delegate.view_moved(cx));
         }
         self.frame.clone()
     }
