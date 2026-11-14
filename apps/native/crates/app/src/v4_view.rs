@@ -877,8 +877,31 @@ impl SurfaceView {
     #[cfg(debug_assertions)]
     pub fn review_send(&mut self, semantic: &str, event: &str, cx: &mut Context<Self>) {
         // `semantic=<json>` carries a value (a pop-up's choice, a switch's state).
+        // A link carries spaces and quotes percent-encoded (`="Make%20it%20so"`).
+        let decode = |value: &str| {
+            let bytes = value.as_bytes();
+            let mut out = Vec::with_capacity(bytes.len());
+            let mut i = 0;
+            while i < bytes.len() {
+                let hex = bytes
+                    .get(i + 1..i + 3)
+                    .and_then(|h| std::str::from_utf8(h).ok())
+                    .and_then(|h| u8::from_str_radix(h, 16).ok());
+                match (bytes[i], hex) {
+                    (b'%', Some(byte)) => {
+                        out.push(byte);
+                        i += 3;
+                    }
+                    (byte, _) => {
+                        out.push(byte);
+                        i += 1;
+                    }
+                }
+            }
+            String::from_utf8_lossy(&out).into_owned()
+        };
         let (semantic, value) = match semantic.split_once('=') {
-            Some((semantic, value)) => (semantic, serde_json::from_str(value).ok()),
+            Some((semantic, value)) => (semantic, serde_json::from_str(&decode(value)).ok()),
             None => (semantic, None),
         };
         let id = self
@@ -1664,6 +1687,20 @@ impl SurfaceView {
                 element.flex_1()
             };
             element = element.min_h(px(0.)).track_scroll(scroll);
+            // `metadata.scrollAnchor: "end"` (a conversation): a scroller that
+            // was at its end stays there as content grows; once scrolled up,
+            // it stays where the person left it.
+            let follows = self
+                .publication
+                .surface
+                .node(id)
+                .and_then(|n| n.props.get("metadata"))
+                .and_then(|m| m.get("scrollAnchor"))
+                .and_then(|a| a.as_str())
+                == Some("end");
+            if follows && scroll.offset().y <= -scroll.max_offset().y + px(1.) {
+                scroll.scroll_to_bottom();
+            }
             if node.scroll_y {
                 element = element.overflow_y_scroll();
             }
@@ -2212,11 +2249,7 @@ impl SurfaceView {
         // A tooltip says what is not already in view: one that repeats the
         // text the element shows (an effect's name, a row's label) only
         // covers its neighbours.
-        if let Some(title) = node
-            .title
-            .clone()
-            .filter(|title| title.trim() != self.shown_text(node.id, 3).trim())
-        {
+        if let Some(title) = self.tooltip_title(node.id) {
             let tokens = self.table.tokens.clone();
             element = element.tooltip(move |_, cx| {
                 let (title, tokens) = (title.clone(), tokens.clone());
@@ -2329,27 +2362,31 @@ impl SurfaceView {
                 }
                 element = element.child(chip);
             }
-            Kit::Progress(value) => {
+            Kit::Progress(None) => {
+                let tokens = t.clone();
+                element = element.child(if t.accessibility.reduce_motion {
+                    pm_shell::welcome_view::spinner(0., &tokens).into_any_element()
+                } else {
+                    div()
+                        .flex_none()
+                        .with_animation(
+                            "progress",
+                            Animation::new(std::time::Duration::from_secs(1)).repeat(),
+                            move |this, turn| {
+                                this.child(pm_shell::welcome_view::spinner(turn as f64, &tokens))
+                            },
+                        )
+                        .into_any_element()
+                });
+            }
+            Kit::Progress(Some(value)) => {
                 let track = div()
                     .h(px(t.metrics.inner_radius))
                     .w_full()
                     .rounded(px(t.metrics.inner_radius / 2.))
                     .overflow_hidden()
-                    .bg(rgb(t.colors.field));
-                let track = match value {
-                    Some(value) => {
-                        track.child(div().h_full().w(relative(*value)).bg(rgb(t.colors.accent)))
-                    }
-                    None => track.child(
-                        div().size_full().bg(rgb(t.colors.muted)).with_animation(
-                            "progress",
-                            Animation::new(std::time::Duration::from_secs(1))
-                                .repeat()
-                                .with_easing(pulsating_between(0.3, 1.)),
-                            |this, delta| this.opacity(delta),
-                        ),
-                    ),
-                };
+                    .bg(rgb(t.colors.field))
+                    .child(div().h_full().w(relative(*value)).bg(rgb(t.colors.accent)));
                 element = element.child(track);
             }
             Kit::Gizmo {
@@ -2788,6 +2825,43 @@ impl HeaderView {
     }
 }
 impl SurfaceView {
+    /// The tooltip a node shows, if any: never one that repeats what is in
+    /// view (its own words, the label of the row it sits in), and none on a
+    /// control that opens a menu and shows its value (its menu says the rest,
+    /// and a tooltip would stand over the open menu).
+    pub(crate) fn tooltip_title(&self, id: Id) -> Option<SharedString> {
+        let node = self.prepared.node(id)?;
+        let shown = self.shown_text(id, 3);
+        let props = self.publication.surface.node(id).map(|n| &n.props);
+        let menu_value = props.is_some_and(|p| p.contains_key("aria-haspopup"))
+            && (!shown.trim().is_empty()
+                || props.is_some_and(|p| p.get("value").is_some_and(|v| !v.is_null())));
+        node.title
+            .clone()
+            .filter(|title| title.trim() != shown.trim())
+            .filter(|title| self.row_label(id).as_deref() != Some(title.trim()))
+            .filter(|_| !menu_value)
+    }
+    /// The label of the row (kit `InspectorRow`) a node sits in, which the
+    /// row shows beside it.
+    fn row_label(&self, id: Id) -> Option<String> {
+        let mut at = self.prepared.node(id)?.parent;
+        while let Some(parent) = at {
+            let node = self.prepared.node(parent)?;
+            if node.component == Some(Component::InspectorRow) {
+                return self
+                    .publication
+                    .surface
+                    .node(parent)?
+                    .props
+                    .get("label")
+                    .and_then(Value::as_str)
+                    .map(|l| l.trim().to_owned());
+            }
+            at = node.parent;
+        }
+        None
+    }
     /// The words a node shows: its own text and its descendants' (to
     /// `depth` levels), in order, without controls' values.
     pub(crate) fn shown_text(&self, id: Id, depth: usize) -> String {

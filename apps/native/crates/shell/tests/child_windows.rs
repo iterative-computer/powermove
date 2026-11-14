@@ -129,6 +129,34 @@ fn main() {
     waiting.orderOut(None);
     assert!(!waiting.isVisible());
 
+    // A pop-up asked for over a window on screen while the app is inactive
+    // (the Agent popover from a review link or a tool): AppKit orders a new
+    // child in with its visible parent at once, and hiding it then took the
+    // editor window off screen too. It waits unattached and joins its
+    // parent only when it shows.
+    let host = window(NSWindowStyleMask::Titled);
+    host.orderBack(None);
+    assert!(host.isVisible());
+    let pop = panel(NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel);
+    attach(&pop, &host);
+    assert!(follows_policy(&pop), "a waiting child keeps the policy");
+    assert!(
+        !pop.isVisible() && pop.parentWindow().is_none(),
+        "not ordered in with its parent"
+    );
+    show(&pop, false);
+    assert!(!pop.isVisible() && is_pending(&pop) && host.isVisible());
+    show_pending();
+    assert!(pop.isVisible() && host.isVisible());
+    assert!(
+        pop.parentWindow()
+            .is_some_and(|p| std::ptr::eq(&*p, &*host)),
+        "joins its parent when it shows"
+    );
+    assert!(follows_policy(&pop));
+    pop.orderOut(None);
+    host.orderOut(None);
+
     // SHEETS. A normal launch: a sheet asked for while the app is inactive
     // begins at once, exactly as AppKit does (the behaviour before the lane
     // gate existed); nothing waits and nothing is cancelled.
