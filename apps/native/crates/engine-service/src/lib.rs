@@ -516,6 +516,10 @@ struct View {
     /// field or wheel being dragged). Its frames are drag frames, and each
     /// one is shown when it lands although the drag has moved on.
     editing: bool,
+    /// The open edit has rested on this revision (text being typed, a drag
+    /// held still): it is drawn as a resting picture, which the next step
+    /// interrupts like any paused one.
+    edit_rested: bool,
     /// The skimmer (Final Cut's): while paused the viewer shows this time,
     /// and the playhead stays where it is.
     skim: Option<Ticks>,
@@ -601,6 +605,7 @@ impl View {
     fn set_editing(&mut self, on: bool) {
         if self.editing != on {
             self.editing = on;
+            self.edit_rested = false;
             self.stamp.sequence += 1;
             self.dirty = true;
         }
@@ -846,8 +851,8 @@ impl Viewer {
                 };
                 v.config.snapshot = snapshot;
                 // A drag's frame in flight is finished and shown, not
-                // abandoned for the next step.
-                if !v.editing {
+                // abandoned for the next step; a resting picture gives way.
+                if !v.editing || std::mem::take(&mut v.edit_rested) {
                     self.shared.supersede();
                 }
                 v.stamp.revision = v.config.snapshot.revision;
@@ -1673,6 +1678,7 @@ impl EngineService {
                 studio_view: studio::ViewCamera::Active,
                 adapt_drags: false,
                 editing: false,
+                edit_rested: false,
                 skim: None,
                 skim_input: None,
                 skim_rate: pm_protocol::common::PlaybackRate::NORMAL,
@@ -2940,6 +2946,15 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 }
                 r.transport.command(cmd, (now * 1e6) as i64);
             }
+            // A settled picture being drawn for a stamp the viewer has left
+            // is never shown: it gives the worker back to the next picture
+            // (an edit moving again after a rest).
+            if let Some(job) = settling
+                .as_ref()
+                .filter(|job| job.id == id && job.stamp != v.stamp)
+            {
+                job.cancel.store(true, std::sync::atomic::Ordering::Release);
+            }
             if let Some(solo) = v.monitor.take() {
                 r.transport.monitor(solo);
             }
@@ -3047,6 +3062,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             if !playing && r.refine_at.is_some_and(|at| now >= at) {
                 r.refine_at = None;
                 r.scrub = false;
+                v.edit_rested = v.editing;
                 v.stamp.sequence += 1;
                 bump_site(line!(), "");
                 v.dirty = true;
@@ -3079,8 +3095,9 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             if let Some((owed, at)) = r.settle_at
                 && now >= at
             {
-                let rests =
-                    v.quality.scale(&r.auto, Moment::Paused) == 1. && !r.scrub && !v.editing;
+                // An open edit that rests (text being typed, a drag held
+                // still) settles too: its drag frames are for while it moves.
+                let rests = v.quality.scale(&r.auto, Moment::Paused) == 1. && !r.scrub;
                 if owed != v.stamp || r.transport.running() || !rests {
                     r.settle_at = None;
                 } else if v.dirty {
@@ -3175,7 +3192,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             v.dirty = false;
             let moment = if playing {
                 Moment::Playing
-            } else if r.scrub || v.editing {
+            } else if r.scrub || (v.editing && !v.edit_rested) {
                 Moment::Scrub
             } else {
                 Moment::Paused
@@ -3587,7 +3604,15 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                             // Every dragged frame settles: once the playhead
                             // rests, the same time is drawn again exact.
                             if spec.moment == Moment::Scrub {
-                                r.refine_at = Some(trace::now() + policy::SCRUB_SETTLE_SECONDS);
+                                // An open edit rests a little longer: its
+                                // exact picture is not interrupted by the
+                                // next step (a key typed at a person's pace).
+                                let rest = if v.editing {
+                                    policy::SETTLE_IDLE_SECONDS
+                                } else {
+                                    policy::SCRUB_SETTLE_SECONDS
+                                };
+                                r.refine_at = Some(trace::now() + rest);
                             }
                             if capture {
                                 r.capture_waiting = None;
@@ -5033,6 +5058,34 @@ mod worker_tests {
             "{:?}",
             &drawn()[from..]
         );
+    }
+
+    /// An edit left resting with its gesture still open (text being typed,
+    /// a drag held still) settles its picture as a release does: the
+    /// reduced drag frames are for while it moves.
+    #[test]
+    fn an_open_edit_that_rests_settles_its_picture() {
+        let service = EngineService::start(pm_gpu::Gpu::new("edit-settle-test").unwrap()).unwrap();
+        let config = shapes_config(None);
+        let snapshot = config.snapshot.clone();
+        let v = service.viewer(config).unwrap();
+        let settling = || service.shared.settling.lock().unwrap().clone();
+        wait_for(&v, "the first settled picture", |_| !settling().is_empty());
+        v.editing(true).unwrap();
+        v.snapshot(Snapshot {
+            revision: 2,
+            document: Arc::new(pm_model::Document::new(snapshot.document.to_value(), 2)),
+            ..snapshot
+        })
+        .unwrap();
+        wait_for(&v, "the settled picture of the resting edit", |s| {
+            settling().iter().any(|(_, stamp, _, _)| stamp.revision == 2)
+                && s.frame.as_ref().is_some_and(|f| f.settled)
+        });
+        // And it stays put: no drag frame drawn again and again.
+        let presented = v.status().presented;
+        std::thread::sleep(Duration::from_millis(1000));
+        assert_eq!(v.status().presented, presented, "a resting edit draws nothing more");
     }
 
     /// A settled picture is one whole final frame on the worker, which
