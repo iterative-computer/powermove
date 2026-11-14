@@ -445,6 +445,9 @@ function Layer({
           // The field takes the name's place across the column while it
           // edits (a field has no width of its own).
           <UI.TextField
+            // Its own identity: its commit is carried to the newest tree
+            // when the panel has published another on the way.
+            id={`timeline:rename:${row.id}`}
             label={row.label}
             value={row.nameEditor.value}
             binding={row.nameEditor.binding}
