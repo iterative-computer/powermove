@@ -87,6 +87,9 @@ unsafe extern "C" {
     static kCGColorSpaceExtendedLinearSRGB: CFStringRef;
     fn CGColorSpaceCreateWithICCData(data: CFTypeRef) -> CGColorSpaceRef;
     fn CGColorSpaceGetNumberOfComponents(space: CGColorSpaceRef) -> usize;
+    fn CGColorSpaceGetBaseColorSpace(space: CGColorSpaceRef) -> CGColorSpaceRef;
+    fn CGColorSpaceGetColorTableCount(space: CGColorSpaceRef) -> usize;
+    fn CGColorSpaceGetColorTable(space: CGColorSpaceRef, table: *mut u8);
     fn CGDataProviderCreateWithCFData(data: CFTypeRef) -> *mut c_void;
     fn CGDataProviderRelease(provider: *mut c_void);
     fn CGImageCreate(
@@ -599,8 +602,15 @@ fn read_frame_inner(
     {
         // Untagged RGB palette entries are sRGB samples. Drawing their
         // device RGB base through ColorSync would silently assign a profile.
-        let table = super::raster::tiff_palette(path)?
-            .ok_or_else(|| MediaError::Image("missing TIFF RGB palette".into()))?;
+        // TIFF's 16-bit map is read from the file; other formats' (TGA's)
+        // entries from the image's color table.
+        let table = if format == ImageFormat::Tiff {
+            super::raster::tiff_palette(path)?
+                .ok_or_else(|| MediaError::Image("missing TIFF RGB palette".into()))?
+        } else {
+            unsafe { color_table(space) }
+                .ok_or_else(|| MediaError::Image("missing RGB palette".into()))?
+        };
         let data = unsafe { Cf::from_create(CGDataProviderCopyData(CGImageGetDataProvider(p))) }
             .ok_or_else(|| MediaError::Image("no palette indices".into()))?;
         let bytes = unsafe { cf_data_bytes(data.as_ptr()) }
@@ -752,9 +762,43 @@ unsafe fn draw_linear(img: CGImageRef, w: usize, h: usize) -> Result<Vec<f32>> {
 }
 
 /// Whether the file embeds an ICC profile ImageIO converts from (TIFF tag
-/// 34675; other containers' CMYK readings always carry their own).
+/// 34675; TGA has no profile; other containers' CMYK readings always carry
+/// their own).
 fn embedded_profile(path: &Path, format: ImageFormat) -> Result<bool> {
-    Ok(format != ImageFormat::Tiff || super::raster::tiff_icc(path)?.is_some())
+    Ok(match format {
+        ImageFormat::Tiff => super::raster::tiff_icc(path)?.is_some(),
+        ImageFormat::Tga => false,
+        _ => true,
+    })
+}
+
+/// The RGB entries of an indexed color space, widened to 16 bits; `None`
+/// when its base is not RGB or it has no table.
+///
+/// # Safety
+/// `space` is an indexed color space (or null).
+unsafe fn color_table(space: CGColorSpaceRef) -> Option<Vec<[u16; 3]>> {
+    if space.is_null() {
+        return None;
+    }
+    unsafe {
+        let base = CGColorSpaceGetBaseColorSpace(space);
+        if base.is_null() || CGColorSpaceGetNumberOfComponents(base) != 3 {
+            return None;
+        }
+        let count = CGColorSpaceGetColorTableCount(space);
+        if count == 0 {
+            return None;
+        }
+        let mut table = vec![0u8; count * 3];
+        CGColorSpaceGetColorTable(space, table.as_mut_ptr());
+        Some(
+            table
+                .chunks_exact(3)
+                .map(|e| [e[0], e[1], e[2]].map(|v| u16::from(v) * 257))
+                .collect(),
+        )
+    }
 }
 
 /// Expands MSB-first packed indices without changing their RGB entries.
