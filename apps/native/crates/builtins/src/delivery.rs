@@ -812,6 +812,17 @@ impl MediaProbes {
     }
 }
 pub(crate) fn probe_media(path: &Path, kind: &str) -> Result<(), String> {
+    // A sequence read in place is ready when its first file on disk reads
+    // as a still (each frame is checked again when it is drawn).
+    if kind == "video"
+        && let Some(sequence) = pm_render::media::native_sequence(path)
+    {
+        let first = (sequence.first..=sequence.last)
+            .map(|n| sequence.file(n))
+            .find(|f| f.is_file())
+            .ok_or("No file of the image sequence is in its folder")?;
+        return probe_media(&first, "image");
+    }
     match kind {
         "image" => pm_render::media::probe_image(path).map_err(|issue| match issue {
             pm_render::media::ProbeIssue::Unreadable(message) => message,
