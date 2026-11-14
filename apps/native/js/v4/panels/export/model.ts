@@ -688,6 +688,11 @@ export class ExportModel {
       await this.cancel();
       return true;
     }
+    // A failed export's sheet: Escape is its Close, as Return is its Retry.
+    if (key === "Escape" && this.current.run.phase === "failed") {
+      await this.closeFailure();
+      return true;
+    }
     if (meta && key === "." && isProgress(this.current.run)) {
       await this.cancel();
       return true;

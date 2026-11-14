@@ -745,10 +745,11 @@ async fn execute_inner(
         .filter(|v| *v)
         .map(|_| 0.75);
     let mut session = pm_engine_service::jobs::JobSession::new(request);
-    // Its raster overrides answer from this publication, whatever is edited meanwhile.
-    if let Some(overrides) = engine.overrides {
-        overrides.pin(&mut session, &frozen.publication, false);
-    }
+    // Its raster overrides answer from this publication, whatever is edited
+    // meanwhile; while their extensions are slow, the sheet says what for.
+    let waiting = engine
+        .overrides
+        .map(|overrides| overrides.pin(&mut session, &frozen.publication, false));
     let handle = pm_engine_service::jobs::ExportHandle::start_scheduled(
         &std::env::current_exe().map_err(|e| e.to_string())?,
         session,
@@ -757,6 +758,7 @@ async fn execute_inner(
     .map_err(|e| e.to_string())?;
     *job.handle.lock().unwrap() = Some(handle);
     let started = std::time::Instant::now();
+    let mut pace = Pace::default();
     let mut cancellation_sent = false;
     loop {
         if job.cancel.load(Ordering::Acquire) && !cancellation_sent {
@@ -830,10 +832,17 @@ async fn execute_inner(
             let elapsed = started.elapsed().as_secs_f64();
             let mut run =
                 json!({"phase":"rendering","frame":frame,"total":planned.frames,"elapsed":elapsed});
-            // The sheet says "About N min left" from the pace so far (it
-            // waits for a few frames before trusting it).
-            if frame > 0 && frame < planned.frames {
-                run["eta"] = json!(elapsed / frame as f64 * (planned.frames - frame) as f64);
+            if let Some(note) = waiting.as_ref().and_then(|w| w.lock().unwrap().clone()) {
+                let mut note = note.chars();
+                run["extra"] = json!(
+                    note.next()
+                        .map(|c| c.to_uppercase().chain(note).collect::<String>())
+                        .unwrap_or_default()
+                );
+            }
+            // The sheet says "About N min left" from the measured pace.
+            if let Some(eta) = pace.left(frame, planned.frames, std::time::Instant::now()) {
+                run["eta"] = json!(eta);
             }
             run
         } else {
@@ -841,6 +850,49 @@ async fn execute_inner(
         };
         observe(runtime, run).await;
         executor.timer(std::time::Duration::from_millis(50)).await;
+    }
+}
+/// The time an export has left, from the pace it has kept: frames finished
+/// over time since its first frame landed, once a few have. The start (the
+/// export's extensions starting, the first frame's media opening) is not a
+/// frame's cost: counted in, a 9 s export was "About 59 min left" at frame 14.
+#[derive(Default)]
+struct Pace {
+    /// When the first frame was seen done, and how many were.
+    first: Option<(std::time::Instant, u64)>,
+}
+/// Frames measured before the pace is trusted, and for at least this long.
+const PACE_FRAMES: u64 = 8;
+const PACE_TIME: std::time::Duration = std::time::Duration::from_millis(500);
+impl Pace {
+    fn left(&mut self, frame: u64, total: u64, now: std::time::Instant) -> Option<f64> {
+        if frame == 0 || frame >= total {
+            return None;
+        }
+        let (at, from) = *self.first.get_or_insert((now, frame));
+        let done = frame.checked_sub(from)?;
+        let took = now.duration_since(at);
+        (done >= PACE_FRAMES && took >= PACE_TIME)
+            .then(|| took.as_secs_f64() / done as f64 * (total - frame) as f64)
+    }
+}
+#[cfg(test)]
+mod pace_tests {
+    use super::*;
+    /// A slow start is not the pace: 20 frames in after 60 s of starting, at
+    /// 30 frames a second since, a 270-frame export has seconds left, not an hour.
+    #[test]
+    fn time_left_comes_from_the_pace_since_the_first_frame() {
+        let start = std::time::Instant::now();
+        let at = |ms: u64| start + std::time::Duration::from_millis(60_000 + ms);
+        let mut pace = Pace::default();
+        assert_eq!(pace.left(0, 270, at(0)), None, "nothing done yet");
+        assert_eq!(pace.left(1, 270, at(0)), None, "the first frame starts the clock");
+        assert_eq!(pace.left(5, 270, at(133)), None, "too few frames to trust");
+        assert_eq!(pace.left(14, 270, at(433)), None, "measured too briefly");
+        let left = pace.left(20, 270, at(633)).unwrap();
+        assert!((left - 8.33).abs() < 0.05, "about 8.3 s left: {left}");
+        assert_eq!(pace.left(270, 270, at(9_000)), None, "done");
     }
 }
 #[cfg(test)]

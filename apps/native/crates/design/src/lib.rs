@@ -231,6 +231,9 @@ pub struct Metrics {
     pub sidebar: f32,
     pub border: f32,
     pub min_panel: f32,
+    /// How far a dock divider's grab reaches into the panels on each side
+    /// of its gap: the gap alone is too thin to find by hand.
+    pub splitter_reach: f32,
     pub min_center: f32,
     pub keyboard_step: f32,
     pub drag_threshold: f32,
@@ -280,10 +283,16 @@ pub struct Metrics {
     /// The least width of two colour wheels side by side on their plates
     /// (each wheel and its plate's padding, and the gap between them).
     pub grade_pair: f32,
+    /// A colour wheel's master field, centred under the wheel: its number is
+    /// subordinate to the instrument.
+    pub grade_field: f32,
     /// The curve editor's least graph height; it grows square with the
     /// panel's width up to `curve_editor_max`.
     pub curve_editor: f32,
     pub curve_editor_max: f32,
+    /// The curve editor's greatest width: a wide panel shows the graph at
+    /// 16:9 on the rows' inset, not stretched across it.
+    pub curve_editor_wide: f32,
     pub layer_column: f32,
     /// Timeline clip bar corners (v1–3's `chrome.timeline.clipRadius`).
     pub clip_radius: f32,
@@ -725,6 +734,7 @@ impl Tokens {
                 sidebar: 224.,
                 border: 1.,
                 min_panel: 72.,
+                splitter_reach: 4.,
                 min_center: 180.,
                 keyboard_step: 10.,
                 drag_threshold: 3.,
@@ -759,8 +769,10 @@ impl Tokens {
                 grade_wheel: 112.,
                 grade_wheel_max: 220.,
                 grade_pair: 2. * (112. + 2. * space.sm) + space.sm,
+                grade_field: 72.,
                 curve_editor: 200.,
                 curve_editor_max: 360.,
+                curve_editor_wide: 640.,
                 layer_column: 320.,
                 clip_radius: radius.sm,
                 playhead: 1.,

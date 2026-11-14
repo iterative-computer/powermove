@@ -334,6 +334,7 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                             let top=b.y+(metrics.header-slot.h)/2.;
                             let _:()=msg_send![&*viewer_time,setFrame:NSRect::new(NSPoint::new((b.x+metrics.inset) as f64,height-(top+slot.h) as f64),NSSize::new(slot.w as f64,slot.h as f64))];
                         }
+                        if geometry.is_none() && let Some(p)=&mut playhead { p.hide(); }
                         if let Some((r,y))=geometry {
                             // The timeline's head sits over the layer column, beside the
                             // ruler and under the tab row (`y`): play, then the time.
@@ -348,6 +349,11 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                         }
                         let _:()=msg_send![objc2::class!(CATransaction),commit];
                     }
+                } else if v.builtins.timeline_place.is_none() {
+                    // No clock yet (or none any more): still nothing of a
+                    // timeline that is not on screen.
+                    unsafe {let _:()=msg_send![&*layers.timecode,setHidden:true];}
+                    if let Some(p)=&mut playhead { p.hide(); }
                 }
             }).is_err(){break;}
         }

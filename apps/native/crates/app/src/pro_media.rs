@@ -2165,7 +2165,7 @@ impl crate::session::Controller {
             crate::panels::folder_access_prompt(&folders),
             vec![
                 Button::new("Continue", true).default(),
-                Button::new("Not Now", false),
+                Button::new("Not Now", false).cancel(),
             ],
         )
         .sheet(&window);

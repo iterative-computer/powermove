@@ -227,7 +227,7 @@ fn offer(metadata: FeedMetadata, current: &str, window: &NSWindow, cx: &mut App)
         format!("{} is now available. You have {current}.", metadata.name),
         vec![
             Button::new("Install Update", Choice::Install).default(),
-            Button::new("Remind Me Later", Choice::Later),
+            Button::new("Remind Me Later", Choice::Later).cancel(),
             Button::new("Skip This Version", Choice::Skip),
         ],
     );
@@ -385,7 +385,7 @@ fn whats_new(claim: ReleaseClaim, previous: &str, window: &NSWindow, cx: &mut Ap
         format!("What’s New in Powermove {}", claim.current),
         format!("Powermove updated from {previous} to {}.", claim.current),
         vec![
-            Button::new("Continue", false).default(),
+            Button::new("Continue", false).default().cancel(),
             Button::new("View on GitHub", true),
         ],
     );

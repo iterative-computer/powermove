@@ -32,6 +32,18 @@ export const WHEEL_SECTIONS: { title: string; keys: string[] }[] = [
   })),
 ];
 
+/** Color Space Transform's controls under its definition's own groups:
+ * which gamut and transfer are the input and which the output. */
+export const CST_SECTIONS: { title: string; keys: string[] }[] = [
+  { title: "Input", keys: ["inputGamut", "inputTransfer"] },
+  { title: "Output", keys: ["outputGamut", "outputTransfer"] },
+  {
+    title: "Tone Mapping",
+    keys: ["toneMapping", "sourcePeak", "targetPeak", "desaturation"],
+  },
+  { title: "Gamut Mapping", keys: ["gamutMapping"] },
+];
+
 export interface GradeEffect {
   header: EffectHeader;
   parameters: ParameterRow[];

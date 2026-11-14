@@ -4384,16 +4384,17 @@ fn the_color_panel_lists_the_grade_and_writes_through_its_controls() {
         })
         .collect();
     // Every grade in the order it applies, each under its own name (an
-    // extension's included), and the panel's Add actions.
+    // extension's included), and the panel's header actions: Add Grade (a
+    // menu of Color Wheels, Curve, Color Space Transform, LUT…, CDL…) and
+    // CDL (Import, Export).
     for label in [
         "Amount",
         "Input Space",
         "Color Wheels",
         "Lift",
         "Temperature",
-        "Add Curve",
-        "Load LUT…",
-        "Add Color Space Transform",
+        "Add Grade",
+        "CDL",
         "Synthetic Look",
         "Strength",
         "Remove Color Wheels",

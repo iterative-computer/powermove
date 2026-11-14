@@ -662,6 +662,44 @@ fn a_secondary_press_reaches_pointerdown_with_its_button(cx: &mut TestAppContext
     assert_eq!(log[0].1, "pointerdown");
     assert_eq!(log[0].2.button, Some(2));
 }
+/// E3: a sheet that just opened has nothing focused; its window hands Return
+/// and Escape to the panel's root, where the sheet presses its default
+/// button or cancels.
+#[gpui::test]
+fn a_key_the_window_hands_over_reaches_the_panels_root(cx: &mut TestAppContext) {
+    let rig = rig("viewer", 1);
+    let _ = publication(&rig);
+    let ops = node_ops(
+        1,
+        0,
+        "div",
+        json!({"id":"sheet","style":{"width":100,"height":40}}),
+        &["keydown"],
+    );
+    let (view, mut vcx) = window(cx, &rig, synthetic(&rig, ops), Default::default());
+    vcx.run_until_parked();
+    for key in ["enter", "escape"] {
+        let event = gpui::KeyDownEvent {
+            keystroke: gpui::Keystroke::parse(key).unwrap(),
+            is_held: false,
+            prefer_character_input: false,
+        };
+        vcx.update(|window, cx| view.update(cx, |v, cx| v.root_key_down(&event, window, cx)));
+    }
+    vcx.run_until_parked();
+    let log = view.update(&mut vcx, |v, _| std::mem::take(&mut v.log));
+    let keys: Vec<_> = log
+        .iter()
+        .map(|(id, e, d)| (*id, e.clone(), d.key.clone()))
+        .collect();
+    assert_eq!(
+        keys,
+        [
+            (1, "keydown".to_owned(), Some("Enter".to_owned())),
+            (1, "keydown".to_owned(), Some("Escape".to_owned())),
+        ]
+    );
+}
 /// S3: a real panel and its real V8 worker under the production gate.
 #[gpui::test]
 fn playback_never_reaches_a_panel_between_its_start_and_end(cx: &mut TestAppContext) {

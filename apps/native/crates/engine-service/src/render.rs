@@ -1797,7 +1797,13 @@ impl Engine {
             found
         } else {
             let uploading = std::time::Instant::now();
-            let surface = self.cache_surface_for(size, spec.moment == Moment::Playing && !spec.exact)?;
+            // Playing video gets the bytes of frames already passed back for
+            // its decoders; a picture without video (a still, text, shapes on
+            // a loop) keeps them, so its loop is presented from memory.
+            let surface = self.cache_surface_for(
+                size,
+                spec.moment == Moment::Playing && !spec.exact && self.renderer.reads_video(),
+            )?;
             if let Some((_, pixels)) = disk {
                 self.upload(&surface, size, &pixels);
                 if let Some(error) = self.failed.lock().unwrap().take() {

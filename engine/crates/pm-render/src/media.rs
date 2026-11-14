@@ -2647,6 +2647,12 @@ impl MediaCache {
         self.media_usage()
     }
 
+    /// Whether recent frames read video for display (`video_seen`): the
+    /// playing picture has a decoder working set to keep.
+    pub fn reads_video(&self) -> bool {
+        !self.video_seen.is_empty()
+    }
+
     /// What the decode service holds (frame cache, decoders, sessions),
     /// with the stills decoded ahead counted as frames.
     pub fn media_usage(&self) -> MediaUsage {

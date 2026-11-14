@@ -49,8 +49,36 @@ impl Batches {
     }
 }
 const STALE: Duration = Duration::from_secs(10);
-/// How long an export frame waits for the realm.
+/// How long a one-frame look waits for the window's realm.
 const EXPORT_WAIT: Duration = Duration::from_secs(60);
+/// An export waits for its extensions as long as they make progress (a
+/// script runs, an extension starts, an answer lands): a loaded machine is
+/// slow, not stopped. This long with no step at all, they have stopped.
+const EXPORT_STALL: Duration = Duration::from_secs(120);
+/// What an export is waiting for while its extensions are slow to answer
+/// (`waiting for …`), for the export sheet; `None` while nothing is late.
+pub(crate) type ExportWaiting = Arc<Mutex<Option<String>>>;
+/// Past this the sheet says what the export waits for.
+const WAITING_SHOWN: Duration = Duration::from_secs(2);
+/// When an export's extensions last made progress (a step of
+/// `RasterInbox::export_progress`), against [`EXPORT_STALL`].
+struct Progress {
+    steps: Option<u64>,
+    at: Instant,
+}
+impl Progress {
+    fn new(now: Instant) -> Self {
+        Self { steps: None, at: now }
+    }
+    /// The realm has taken `steps` by `now`: whether nothing moved for `stall`.
+    fn stalled(&mut self, steps: u64, now: Instant, stall: Duration) -> bool {
+        if self.steps != Some(steps) {
+            self.steps = Some(steps);
+            self.at = now;
+        }
+        now.duration_since(self.at) >= stall
+    }
+}
 
 pub(crate) struct Overrides {
     rasters: Option<Arc<pm_engine_service::compat::LayerRasters>>,
@@ -337,9 +365,15 @@ impl JobOverrides {
     /// on. Answers wait on the job's reader thread (never the main thread)
     /// until they come, the job is cancelled, the window's extensions stop,
     /// or a minute passes.
-    pub(crate) fn pin(&self, session: &mut JobSession, published: &Arc<Published>, look: bool) {
+    pub(crate) fn pin(
+        &self,
+        session: &mut JobSession,
+        published: &Arc<Published>,
+        look: bool,
+    ) -> ExportWaiting {
+        let waiting = ExportWaiting::default();
         if !self.store.producing_now() {
-            return;
+            return waiting;
         }
         let job = session.request.job.as_str().to_owned();
         let revision = session.request.revision;
@@ -357,7 +391,15 @@ impl JobOverrides {
         {
             let _ = realm.export(&job, frozen.clone(), cancel.clone());
         }
-        session.answer_overrides(self.answers(job, revision, frozen, look, cancel));
+        session.answer_overrides(self.answers(
+            job,
+            revision,
+            frozen,
+            look,
+            cancel,
+            waiting.clone(),
+        ));
+        waiting
     }
     /// [`Self::pin`] from the project as it is published now (background
     /// rendering's fills, frozen from the viewer's scene a moment ago).
@@ -367,7 +409,7 @@ impl JobOverrides {
             .published(&self.project)
             .filter(|p| p.snapshot.doc_id == self.doc_id)
         {
-            self.pin(session, &published, false);
+            let _ = self.pin(session, &published, false);
         }
     }
     /// What answers job `job`'s needs (see [`Self::pin`]).
@@ -378,6 +420,7 @@ impl JobOverrides {
         frozen: Option<Arc<Published>>,
         look: bool,
         cancel: Arc<AtomicBool>,
+        waiting: ExportWaiting,
     ) -> OverrideAnswers {
         let (batches, realm) = (self.batches.clone(), self.realm.clone());
         Box::new(move |needs: &[CompatJobNeed]| {
@@ -402,18 +445,47 @@ impl JobOverrides {
             let ask = |ask: Value| -> Result<Vec<RasterAnswer>, String> {
                 let (tx, rx) = std::sync::mpsc::channel();
                 let batch = batches.lock().unwrap().open(Asker::Export(tx));
+                let export = ask["job"].as_str().map(str::to_owned);
                 realm.ask(batch, wire.clone(), ask);
+                let asked = Instant::now();
+                // The export's own realm: waited for while it makes progress.
+                let mut progress = Progress::new(Instant::now());
                 loop {
                     if cancel.load(Ordering::Acquire) {
                         batches.lock().unwrap().open.remove(&batch);
+                        *waiting.lock().unwrap() = None;
                         return Err("cancelled".into());
                     }
                     match rx.recv_timeout(Duration::from_millis(50)) {
-                        Ok(answers) => return Ok(answers),
-                        Err(RecvTimeoutError::Timeout) if Instant::now() < deadline => {}
+                        Ok(answers) => {
+                            *waiting.lock().unwrap() = None;
+                            return Ok(answers);
+                        }
                         Err(RecvTimeoutError::Timeout) => {
-                            batches.lock().unwrap().open.remove(&batch);
-                            return Err("The extension did not draw the layer in time".into());
+                            let Some(job) = &export else {
+                                if Instant::now() < deadline {
+                                    continue;
+                                }
+                                batches.lock().unwrap().open.remove(&batch);
+                                return Err(
+                                    "The project's extensions did not draw the frame in time"
+                                        .into(),
+                                );
+                            };
+                            let (steps, note) = realm
+                                .export_progress(job)
+                                .unwrap_or((0, "waiting for the export's extensions".into()));
+                            if asked.elapsed() >= WAITING_SHOWN {
+                                *waiting.lock().unwrap() = Some(note.clone());
+                            }
+                            if progress.stalled(steps, Instant::now(), EXPORT_STALL) {
+                                batches.lock().unwrap().open.remove(&batch);
+                                *waiting.lock().unwrap() = None;
+                                return Err(format!(
+                                    "The export stopped {note}: nothing moved for {} s",
+                                    EXPORT_STALL.as_secs()
+                                ));
+                            }
                         }
                         Err(RecvTimeoutError::Disconnected) => {
                             return Err("The project's extensions stopped during the export".into());
@@ -588,6 +660,28 @@ mod tests {
             if settings.delivery.compat.contains(&pm_protocol::snapshot::CompatSource::RasterOverride))
     }
 
+    /// An export waits for its extensions while they make progress, however
+    /// long that takes on a loaded machine (the fixed minute it had failed
+    /// exports whose realm was still starting); it gives up only when nothing
+    /// at all moved for the whole stall.
+    #[test]
+    fn an_export_waits_while_its_extensions_make_progress() {
+        let start = Instant::now();
+        let at = |s: u64| start + Duration::from_secs(s);
+        let mut slow = Progress::new(start);
+        // A step every 30 s, for ten minutes: never stalled.
+        for (i, s) in (0..600).step_by(30).enumerate() {
+            assert!(!slow.stalled(i as u64, at(s), EXPORT_STALL), "at {s} s");
+            assert!(!slow.stalled(i as u64, at(s + 29), EXPORT_STALL));
+        }
+        // No step at all: stalled once the whole stall has passed, not before.
+        let mut stopped = Progress::new(start);
+        assert!(!stopped.stalled(7, at(0), EXPORT_STALL));
+        assert!(!stopped.stalled(7, at(119), EXPORT_STALL));
+        assert!(stopped.stalled(7, at(120), EXPORT_STALL));
+        // A step resets it.
+        assert!(!stopped.stalled(8, at(121), EXPORT_STALL));
+    }
     /// A project no window has open is answered by the host its jobs run;
     /// a window that opens it takes over with its own state untouched, and
     /// once that window has closed the jobs' host answers again.
@@ -686,6 +780,7 @@ mod tests {
             Some(published.clone()),
             false,
             pinned.cancellation(),
+            ExportWaiting::default(),
         );
         drop(reloaded);
         assert!(windows.of(doc_id).is_none());
