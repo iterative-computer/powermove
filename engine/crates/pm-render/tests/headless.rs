@@ -1031,13 +1031,10 @@ fn frame_time_at_1080p() {
     }
 }
 
-/// A 24-bit uncompressed TGA of `w` × `h` (a container the renderer does
-/// not draw: it decodes, through ImageIO, as an unrecognized format).
-fn tga(w: u16, h: u16) -> Vec<u8> {
-    let mut b = vec![0u8, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-    b.extend_from_slice(&w.to_le_bytes());
-    b.extend_from_slice(&h.to_le_bytes());
-    b.extend_from_slice(&[24, 0x20]);
+/// A binary Netpbm (PPM) of `w` × `h` (a container the renderer does not
+/// draw: it decodes, through ImageIO, as an unrecognized format).
+fn ppm(w: u16, h: u16) -> Vec<u8> {
+    let mut b = format!("P6\n{w} {h}\n255\n").into_bytes();
     b.extend(std::iter::repeat_n(0x80u8, w as usize * h as usize * 3));
     b
 }
@@ -1075,12 +1072,12 @@ fn exec_time_unsupported_media_leaves_the_target_untouched() {
         rendered.failures
     );
     let before = pm_gpu::readback::read_raw(r.device(), r.queue(), &target.texture).unwrap();
-    // The document records a PNG; the file is a TGA: only the media probe
+    // The document records a PNG; the file is a PPM: only the media probe
     // at exec time can tell.
     let dir = std::env::temp_dir().join(format!("pm-render-exec-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let still = dir.join("still.png");
-    std::fs::write(&still, tga(160, 90)).unwrap();
+    std::fs::write(&still, ppm(160, 90)).unwrap();
     let mut bad = MapResolver {
         paths: resolver.paths.clone(),
         ..Default::default()
