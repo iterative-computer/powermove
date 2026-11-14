@@ -3389,7 +3389,8 @@ fn type_settings_list_a_variable_fonts_axes_and_saved_axes_of_a_missing_font() {
     let project = pm_model::json::parse(r##"{"id":"synthetic","name":"Synthetic Film","compId":"c","w":640,"h":360,"fps":30,"dur":10,"bg":"#000000","assets":{},"comps":{},"layers":[
       {"id":"skia","type":"text","name":"Variable","from":0,"dur":10,"on":true,"lock":false,"p":{"opacity":{"v":100,"kf":[]}},"d":{"text":"A","font":"Skia","color":"#112233"},"fx":[]},
       {"id":"plain","type":"text","name":"Static","from":0,"dur":10,"on":true,"lock":false,"p":{"opacity":{"v":100,"kf":[]}},"d":{"text":"B","font":"Helvetica","color":"#112233"},"fx":[]},
-      {"id":"gone","type":"text","name":"Missing","from":0,"dur":10,"on":true,"lock":false,"p":{"opacity":{"v":100,"kf":[]}},"d":{"text":"C","font":"No Such Family 7f3a","color":"#112233","fontAxis.wdth":{"v":88.62,"kf":[],"expr":null}},"fx":[]}]}"##).unwrap();
+      {"id":"gone","type":"text","name":"Missing","from":0,"dur":10,"on":true,"lock":false,"p":{"opacity":{"v":100,"kf":[]}},"d":{"text":"C","font":"No Such Family 7f3a","color":"#112233","fontAxis.wdth":{"v":88.62,"kf":[],"expr":null}},"fx":[]},
+      {"id":"system","type":"text","name":"Default","from":0,"dur":10,"on":true,"lock":false,"p":{"opacity":{"v":100,"kf":[]}},"d":{"text":"D","font":"SF Pro Display","color":"#112233"},"fx":[]}]}"##).unwrap();
     kernel
         .open("synthetic", OpenSource::Untitled(project))
         .wait()
@@ -3466,6 +3467,9 @@ fn type_settings_list_a_variable_fonts_axes_and_saved_axes_of_a_missing_font() {
             .any(|r| r["control"]["kind"] == "status" && r["control"]["value"] == "Not installed")
     );
     assert_eq!(gone["action"], "refresh-fonts");
+    // New text's font, SF Pro Display, is one of the Mac's own fonts, as in
+    // v1, also where Apple's download is not installed: not "missing".
+    assert!(section("system", &mut presenter).0.is_none());
 }
 
 /// 3d-studio.md §8 through the Properties presenter: each role's sections,
