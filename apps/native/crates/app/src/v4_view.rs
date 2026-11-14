@@ -55,6 +55,13 @@ impl Outline {
                 true
             })
     }
+    /// A layer name pressed: the surface may lift it into a reorder (the
+    /// row still takes the click).
+    fn press_layer(&self, layer: &str, at: Point<Pixels>, cx: &mut App) {
+        if let Some(surface) = self.surface.borrow().as_ref().and_then(|s| s.upgrade()) {
+            surface.update(cx, |s, _| s.press_layer_row(layer.into(), at));
+        }
+    }
     pub fn set_scene(&self, scene: Option<Arc<pm_panel_timeline::render::Scene>>) {
         *self.scene.borrow_mut() = scene;
     }
@@ -2631,6 +2638,13 @@ impl SurfaceView {
                     cx.stop_propagation();
                 }),
             );
+        }
+        if let Some(layer) = node.timeline_layer_drag.clone() {
+            let outline = self.natives.outline.clone();
+            element =
+                element.on_mouse_down(MouseButton::Left, move |event: &MouseDownEvent, _, cx| {
+                    outline.press_layer(&layer, event.position, cx)
+                });
         }
         if let Some((layer, path)) = node.timeline_scrub.clone() {
             let outline = self.natives.outline.clone();

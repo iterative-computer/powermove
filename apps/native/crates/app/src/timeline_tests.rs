@@ -358,6 +358,140 @@ fn a_marquee_over_layer_bars_selects_their_layers(cx: &mut TestAppContext) {
     s.idle(cx);
     assert!(selected(&s).is_empty());
 }
+/// v1's work-area handles: a 12 pt zone over the ruler's height takes the
+/// press before the scrub (no seek), and dragging moves that edge.
+#[gpui::test]
+fn a_work_area_handle_takes_the_press_and_moves_its_edge_without_seeking(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    let v = s
+        .surface
+        .read_with(&s.vcx, |t, _| t.frame().unwrap().viewport);
+    let origin = s.origin();
+    let x_of =
+        |seconds: f64| origin.x + px((v.layer_column + (seconds - v.scroll_time) * v.pps) as f32);
+    let y = origin.y + px(tokens().metrics.ruler / 2.);
+    // 5 pt inside the in edge (at 0 s), well within its reach.
+    let from = point(x_of(0.) + px(5.), y);
+    let to = point(x_of(2.), y);
+    s.drag(cx, from, to, Modifiers::none());
+    let work = s
+        .surface
+        .read_with(&s.vcx, |t, _| t.scene().unwrap().work_area);
+    assert!((work.0 - 2.).abs() < 0.05, "{work:?}");
+    assert!(
+        s.recorder.seeks.borrow().is_empty(),
+        "{:?}",
+        s.recorder.seeks.borrow()
+    );
+}
+/// Layer ids in stacking order (top first), and each layer's group.
+fn stack(s: &Stage) -> Vec<(String, Option<String>)> {
+    s.surface.read_with(&s.vcx, |t, _| {
+        t.model()
+            .index
+            .layers
+            .iter()
+            .map(|l| (l.id.clone(), l.group.clone()))
+            .collect()
+    })
+}
+fn ids(s: &Stage) -> Vec<String> {
+    stack(s).into_iter().map(|(id, _)| id).collect()
+}
+/// A layer row's top (panel space) and height.
+fn layer_row(s: &Stage, layer: &str) -> (f32, f32) {
+    let (frame, scene) = s
+        .surface
+        .read_with(&s.vcx, |t, _| (t.frame().unwrap(), t.scene().unwrap()));
+    let id = pm_panel_timeline::v4::row_id(&pm_panel_timeline::RowId::Layer(layer.into()));
+    let top =
+        tokens().metrics.ruler as f64 + scene.scroll_for(&id).unwrap() - frame.viewport.scroll_y;
+    (top as f32, tokens().metrics.track_row)
+}
+/// v1's reorder: press `layer`'s name, drag to `fraction` down `onto`'s
+/// row (past the disclosure), release.
+fn drag_layer(s: &mut Stage, cx: &mut TestAppContext, layer: &str, onto: &str, fraction: f32) {
+    let origin = s.origin();
+    let (top, height) = layer_row(s, layer);
+    let from = point(origin.x + px(120.), origin.y + px(top + height / 2.));
+    s.surface
+        .update(&mut s.vcx, |t, _| t.press_layer_row(layer.into(), from));
+    let x = s.at(0, 1.).x;
+    s.vcx.simulate_mouse_move(
+        point(x, from.y + px(8.)),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    s.idle(cx);
+    let (top, height) = layer_row(s, onto);
+    let to = point(x, origin.y + px(top + height * fraction));
+    s.vcx
+        .simulate_mouse_move(to, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    s.vcx
+        .simulate_mouse_up(to, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    assert!(
+        s.recorder.reports.borrow().is_empty(),
+        "{:?}",
+        s.recorder.reports.borrow()
+    );
+}
+/// v1: a layer dragged by its name to the top half of another row lands
+/// before it, as one undo step; its clip moves with its row.
+#[gpui::test]
+fn a_layer_dragged_by_its_name_reorders_and_undoes_in_one_step(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 3);
+    assert_eq!(ids(&s), ["l0", "l1", "l2"]);
+    drag_layer(&mut s, cx, "l2", "l0", 0.2);
+    assert_eq!(ids(&s), ["l2", "l0", "l1"]);
+    s.undo(cx);
+    assert_eq!(ids(&s), ["l0", "l1", "l2"]);
+}
+/// v1: the middle of a group's row takes a layer into the group; the top of
+/// the group's row takes a member back out, before the group.
+#[gpui::test]
+fn a_layer_dragged_onto_a_group_joins_it_and_back_out_leaves_it(cx: &mut TestAppContext) {
+    let project = crate::v4_view_tests::project_json(2).replacen(
+        r#""layers":[{"#,
+        r#""layers":[{"id":"g","type":"group","name":"Group","collapsed":false,"from":0,"dur":2,"on":true,"p":{"opacity":{"v":100,"kf":[]}},"d":{},"fx":[]},{"#,
+        1,
+    );
+    let mut s = stage_project(cx, project);
+    assert_eq!(ids(&s), ["g", "l0", "l1"]);
+    drag_layer(&mut s, cx, "l1", "g", 0.5);
+    assert!(
+        stack(&s).contains(&("l1".into(), Some("g".into()))),
+        "{:?}",
+        stack(&s)
+    );
+    drag_layer(&mut s, cx, "l1", "g", 0.1);
+    assert_eq!(stack(&s)[0], ("l1".into(), None), "{:?}", stack(&s));
+}
+/// v1: dragging one of several selected layers moves them all, in order.
+#[gpui::test]
+fn a_reorder_moves_every_selected_layer_together(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 3);
+    s.rig
+        .kernel
+        .call(
+            PROJECT,
+            Request::new(
+                Caller::native(),
+                pm_kernel::SelectionCall::Layers {
+                    ids: vec!["l1".into(), "l2".into()],
+                    add: false,
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    s.surface.update(&mut s.vcx, |t, cx| t.published(cx));
+    s.idle(cx);
+    drag_layer(&mut s, cx, "l2", "l0", 0.2);
+    assert_eq!(ids(&s), ["l1", "l2", "l0"]);
+}
 #[gpui::test]
 fn graph_view_drags_a_key_in_value_and_undo_restores_it(cx: &mut TestAppContext) {
     let mut s = stage(cx, 1);
@@ -585,9 +719,9 @@ fn the_column_splitter_stops_where_a_rows_switches_still_fit(cx: &mut TestAppCon
     let mut s = stage(cx, 2);
     let m = tokens().metrics;
     let least = crate::timeline_surface::least_layer_column(&m);
-    // Number, disclosure, badge, three slots of name and five switches.
+    // Number, disclosure, badge, three slots of name and three switches.
     let gap = m.gap as f64;
-    let row = 6. * gap + 10. * m.hit as f64 + m.kind_badge as f64;
+    let row = 6. * gap + 8. * m.hit as f64 + m.kind_badge as f64;
     assert!(least >= row && least >= 320., "{least} < {row}");
     let column = s.surface.read_with(&s.vcx, |t, _| t.layer_column());
     assert!(column >= least);

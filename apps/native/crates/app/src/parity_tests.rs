@@ -447,6 +447,7 @@ fn the_layer_menu_has_the_shipped_rows_in_the_shipped_order() {
             "-",
             "Hide",
             "Solo",
+            "Shy",
             "Lock",
             "-",
             "Delete"
