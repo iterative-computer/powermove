@@ -196,9 +196,13 @@ impl AgentLink {
             saved
                 .choices()
                 .into_iter()
-                .map(|id| pm_agents::account::Model {
+                .enumerate()
+                .map(|(at, id)| pm_agents::account::Model {
                     efforts: pm_agents::compatible::efforts(&id),
                     label: id.clone(),
+                    // The configured model (listed first) runs by default.
+                    default: at == 0,
+                    aliases: vec![],
                     id,
                 })
                 .collect()
@@ -229,10 +233,18 @@ impl AgentLink {
             self.accounts()
                 .map_or_else(Vec::new, |accounts| accounts.models(provider))
         };
-        let mut models = vec![(String::new(), "Default".to_owned())];
+        // Only real models: no choice reads as the provider's default model.
+        let mut models = vec![];
+        let mut resolves = vec![];
         let mut efforts = vec![String::new()];
         let mut model_efforts = vec![];
         for model in listed {
+            if model.default {
+                resolves.push((String::new(), model.id.clone()));
+            }
+            for alias in &model.aliases {
+                resolves.push((alias.clone(), model.id.clone()));
+            }
             for effort in &model.efforts {
                 if !efforts.contains(effort) {
                     efforts.push(effort.clone());
@@ -247,6 +259,7 @@ impl AgentLink {
             efforts,
             model_efforts,
             claude: provider == Provider::Claude,
+            resolves,
         }
     }
     /// Republishes the panel's realms (a change made outside an action).

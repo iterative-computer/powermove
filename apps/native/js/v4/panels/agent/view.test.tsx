@@ -276,6 +276,55 @@ test("provider, model and effort share one menu; access has its own; picks reach
   ]);
   root.dispose();
 });
+test("the model picker lists only real models and names the one that runs", async () => {
+  const { root } = mount();
+  const p = fixture();
+  // The model resolves a thread with no choice to the provider's default
+  // model; the catalog has no "Default" row.
+  p.snapshot.catalog = {
+    models: [
+      ["gpt-6.1-sol", "GPT-6.1-Sol"],
+      ["gpt-6-astra", "GPT-6-Astra"],
+    ],
+    providers: [["chatgpt", "ChatGPT"]],
+    efforts: ["", "high"],
+  };
+  p.snapshot.settings.model = "gpt-6.1-sol";
+  p.snapshot.settings.effort = "";
+  const asked: MenuOption[][] = [];
+  const menu: Menu = async (r) => {
+    asked.push(r.options);
+    return null;
+  };
+  await root.render(<AgentView publication={p} menu={menu} send={() => {}} />);
+  expect(byId(root, "agent-model").props.label).toBe(
+    "Model and reasoning effort, GPT-6.1-Sol",
+  );
+  await root.drive(byId(root, "agent-model").id, "click");
+  await Promise.resolve();
+  const models = asked[0]!.filter((o) => o.category === "Model");
+  expect(models.map((o) => [o.label, o.checked])).toEqual([
+    ["GPT-6.1-Sol", true],
+    ["GPT-6-Astra", false],
+  ]);
+  // Before a provider lists its models there is no model to name: the
+  // picker names the provider, and no blank row is added.
+  p.snapshot.catalog.models = [];
+  p.snapshot.settings.model = "";
+  await root.render(<AgentView publication={p} menu={menu} send={() => {}} />);
+  expect(byId(root, "agent-model").props.label).toBe(
+    "Model and reasoning effort, ChatGPT",
+  );
+  await root.drive(byId(root, "agent-model").id, "click");
+  await Promise.resolve();
+  expect(asked[1]!.filter((o) => o.category === "Model")).toEqual([]);
+  expect(
+    asked
+      .flat()
+      .some((o) => o.category === "Model" && /^Default/.test(o.label)),
+  ).toBe(false);
+  root.dispose();
+});
 const turn = (): Row[] => [
   {
     id: "history:u",

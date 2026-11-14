@@ -1706,14 +1706,18 @@ function Conversation({
 
 // ── Composer ─────────────────────────────────────────────────────────────
 
-/** A saved choice the catalog no longer lists stays visible rather than blank. */
-/** The catalog's name for a value (the value itself when unlisted). */
-function named(entries: [string, string][], current: string) {
-  return entries.find(([v]) => v === current)?.[1] || current || "Default";
+/** The catalog's name for a value (the value itself when unlisted). The
+ *  model already names the provider's default model for "no choice"; only
+ *  before a provider lists its models is there none, and then the picker
+ *  names the provider (`fallback`), never a "Default" that is no model. */
+function named(entries: [string, string][], current: string, fallback = "") {
+  return entries.find(([v]) => v === current)?.[1] || current || fallback;
 }
+/** A saved choice the catalog no longer lists stays visible rather than
+ *  missing; no choice is never a row of its own. */
 function pairs(entries: [string, string][], current: string) {
   const options = entries.map(([v, label]) => ({ v, label }));
-  return entries.some(([v]) => v === current)
+  return !current || entries.some(([v]) => v === current)
     ? options
     : [...options, { v: current, label: current }];
 }
@@ -1740,7 +1744,11 @@ function Composer({
       ? "Add direction…"
       : "Describe a change…";
   const hasDraft = s.draft.text.trim().length > 0 || s.attachments.length > 0;
-  const modelName = named(s.catalog.models, s.settings.model);
+  const modelName = named(
+    s.catalog.models,
+    s.settings.model,
+    named(s.catalog.providers, s.settings.provider),
+  );
   const modelText =
     s.catalog.efforts.length > 1 && s.settings.effort
       ? `${modelName} · ${effortLabel(s.settings.effort)}`

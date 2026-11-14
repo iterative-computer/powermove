@@ -149,11 +149,42 @@ pub struct Catalog {
     /// Each listed model's own reasoning efforts (main's per-model choices).
     pub model_efforts: Vec<(String, Vec<String>)>,
     pub claude: bool,
+    /// What a saved choice that is not a listed model stands for: `""` is the
+    /// model the provider runs when none is chosen; an alias (Claude's
+    /// resolved `claude-opus-5-5`) is its listed model.
+    pub resolves: Vec<(String, String)>,
 }
 impl Catalog {
+    /// The listed model a saved choice runs. No choice (`""`, `null` or an
+    /// older `"default"`) is the provider's default model, so a picker always
+    /// names a real model; the saved value itself is left as it was, and the
+    /// provider still picks its own default for it. Unknown values stay as saved.
+    pub fn resolve<'a>(&'a self, model: &'a str) -> &'a str {
+        let key = if model == "default" { "" } else { model };
+        if !key.is_empty() && self.models.iter().any(|(id, _)| id == key) {
+            return model;
+        }
+        self.resolves
+            .iter()
+            .find(|(from, _)| from == key)
+            .map(|(_, to)| to.as_str())
+            .or_else(|| {
+                key.is_empty()
+                    .then(|| self.models.first().map(|(id, _)| id.as_str()))
+                    .flatten()
+            })
+            .unwrap_or(model)
+    }
+    /// A choice a thread may save: a listed model, one it stands for, or none.
+    pub fn accepts(&self, model: &str) -> bool {
+        model.is_empty()
+            || self.models.iter().any(|(m, _)| m == model)
+            || self.resolves.iter().any(|(from, _)| from == model)
+    }
     /// The efforts `model` takes: its own when the provider listed them, else
-    /// every listed effort (the provider's default model). `""` is Default.
+    /// every listed effort. `""` here is the effort's Default.
     pub fn efforts_for(&self, model: &str) -> Vec<String> {
+        let model = self.resolve(model);
         match self.model_efforts.iter().find(|(id, _)| id == model) {
             Some((_, own)) => std::iter::once(String::new())
                 .chain(own.iter().cloned())
