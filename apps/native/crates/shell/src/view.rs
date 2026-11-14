@@ -978,6 +978,60 @@ impl Editor {
         self.save();
         Some(target)
     }
+    /// Ends the drag in progress as a release does: a panel moved lands
+    /// where its preview showed, a resize keeps the sizes it reached.
+    fn end_gesture(&mut self, cx: &mut Context<Self>) {
+        let Some(g) = self.gesture.take() else {
+            return;
+        };
+        if let Gesture::Panel(drag) = g
+            && drag.moved
+            && let Some(p) = drag.preview
+            && let Err(err) = if drag.stack {
+                self.layout.move_stack_to(&drag.id, p.target)
+            } else {
+                self.layout.move_panel_to(&drag.id, p.target)
+            }
+        {
+            self.status = err.to_string();
+        }
+        // A panel let go in a new place travels there.
+        self.slides.armed = true;
+        self.save();
+        cx.notify();
+    }
+    /// While a drag is in progress, the button's real state: a release that
+    /// AppKit delivered elsewhere (or not at all) still ends the drag at
+    /// once, so a dragged panel never stays in flight (owner feedback W4).
+    fn watch_release(&mut self, cx: &mut Context<Self>) {
+        if self.host.is_none() {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(50))
+                    .await;
+                let held = crate::macos::left_button_held();
+                let Ok(going) = this.update(cx, |v, cx| {
+                    if v.gesture.is_none() {
+                        return false;
+                    }
+                    if !held {
+                        v.end_gesture(cx);
+                        return false;
+                    }
+                    true
+                }) else {
+                    return;
+                };
+                if !going {
+                    return;
+                }
+            }
+        })
+        .detach();
+    }
     fn begin_panel_drag(&mut self, id: &str, at: Point<Pixels>, stack: bool) {
         self.maximized_panel = None;
         self.gesture = Some(Gesture::Panel(PanelDrag {
@@ -1631,6 +1685,11 @@ impl Render for Editor {
             .on_mouse_move_all({
                 let listener = cx.listener(|this, e: &MouseMoveEvent, _, cx| {
                     if !e.dragging() {
+                        // The button is up: a release that never reached
+                        // this window ends the drag here, where it showed.
+                        if this.gesture.is_some() {
+                            this.end_gesture(cx);
+                        }
                         return;
                     }
                     match &mut this.gesture {
@@ -1674,25 +1733,8 @@ impl Render for Editor {
                 }
             })
             .on_mouse_up_all({
-                let listener = cx.listener(|this, _: &MouseUpEvent, _, cx| {
-                    if let Some(g) = this.gesture.take() {
-                        if let Gesture::Panel(drag) = g
-                            && drag.moved
-                            && let Some(p) = drag.preview
-                            && let Err(err) = if drag.stack {
-                                this.layout.move_stack_to(&drag.id, p.target)
-                            } else {
-                                this.layout.move_panel_to(&drag.id, p.target)
-                            }
-                        {
-                            this.status = err.to_string();
-                        }
-                        // A panel let go in a new place travels there.
-                        this.slides.armed = true;
-                        this.save();
-                        cx.notify();
-                    }
-                });
+                let listener =
+                    cx.listener(|this, _: &MouseUpEvent, _, cx| this.end_gesture(cx));
                 move |e: &MouseUpEvent, phase, _, w, cx| {
                     if phase == DispatchPhase::Bubble && e.button == MouseButton::Left {
                         listener(e, w, cx);
@@ -1700,6 +1742,11 @@ impl Render for Editor {
                 }
             })
             .capture_any_mouse_down(cx.listener(|this, _, _, cx| {
+                // A drag still in flight (its release never came) ends where
+                // it showed before this press is handled, never on it.
+                if this.gesture.is_some() {
+                    this.end_gesture(cx);
+                }
                 if this.ringed_panel.take().is_some() {
                     cx.notify();
                 }
@@ -1865,6 +1912,7 @@ impl Render for Editor {
                     MouseButton::Left,
                     cx.listener(move |this, e: &MouseDownEvent, window, cx| {
                         this.begin_panel_drag(&header_id, e.position, true);
+                        this.watch_release(cx);
                         window.focus(&this.focus, cx);
                         cx.notify();
                     }),
@@ -1987,6 +2035,7 @@ impl Render for Editor {
                                 cx.stop_propagation();
                                 this.layout.docks[p.dock].groups[p.group].active = ti;
                                 this.begin_panel_drag(&tabid, e.position, false);
+                        this.watch_release(cx);
                                 window.focus(&this.focus, cx);
                                 cx.notify();
                             }),
@@ -2240,6 +2289,7 @@ impl Render for Editor {
                                 e.position,
                                 this.layout.clone(),
                             ));
+                            this.watch_release(cx);
                             window.focus(&this.focus, cx);
                             cx.notify();
                         }),
@@ -2785,6 +2835,125 @@ mod tests {
                 );
             })
             .unwrap();
+    }
+
+    /// A drag whose release never reaches the window (AppKit delivered it
+    /// elsewhere, owner feedback W4) ends at the next sign the button is up:
+    /// a move with no button lands the panel where its preview showed, and a
+    /// new press lands it first and then does its own work.
+    #[gpui::test]
+    fn a_drag_whose_release_is_lost_still_lands_and_never_eats_the_next_press(
+        cx: &mut TestAppContext,
+    ) {
+        use gpui::{Modifiers, MouseButton, point, px};
+        let tokens = Tokens::new(pm_design::Scheme::Dark, Default::default());
+        let (view, cx) = cx.add_window_view(|_, cx| Editor::new(tokens, None, cx));
+        cx.run_until_parked();
+        let none = Modifiers::none();
+        let header = |v: &Editor, id: &str| {
+            let (d, g, _) = v.layout.find(id).unwrap();
+            let r = v
+                .geometry
+                .panels
+                .iter()
+                .find(|p| (p.dock, p.group) == (d, g))
+                .unwrap()
+                .rect;
+            (r.x + r.w * 0.6, r.y + v.tokens.metrics.header / 2.)
+        };
+        let drag = |cx: &mut gpui::VisualTestContext, from: (f32, f32), to: (f32, f32)| {
+            cx.simulate_mouse_move(point(px(from.0), px(from.1)), None, none);
+            cx.simulate_mouse_down(point(px(from.0), px(from.1)), MouseButton::Left, none);
+            for s in 1..=8 {
+                let t = s as f32 / 8.;
+                let at = (from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t);
+                cx.simulate_mouse_move(point(px(at.0), px(at.1)), MouseButton::Left, none);
+            }
+        };
+        // 1. Properties dragged onto the viewer's right edge; no release.
+        let before = view.read_with(cx, |v, _| v.layout.clone());
+        let from = view.read_with(cx, |v, _| header(v, "inspector"));
+        let viewer = view.read_with(cx, |v, _| {
+            let (d, g, _) = v.layout.find("viewer").unwrap();
+            v.geometry
+                .panels
+                .iter()
+                .find(|p| (p.dock, p.group) == (d, g))
+                .unwrap()
+                .rect
+        });
+        let to = (viewer.x + viewer.w * 0.92, viewer.y + viewer.h * 0.6);
+        drag(cx, from, to);
+        let previewed = view.read_with(cx, |v, _| match &v.gesture {
+            Some(super::Gesture::Panel(d)) => d.preview.map(|p| p.target),
+            _ => None,
+        });
+        assert!(previewed.is_some(), "the drag shows where it will land");
+        // The pointer moves on with the button up: the panel lands there.
+        cx.simulate_mouse_move(point(px(to.0 - 20.), px(to.1)), None, none);
+        view.read_with(cx, |v, _| {
+            assert!(v.gesture.is_none(), "the drag ended");
+            assert_ne!(v.layout, before, "the panel landed");
+            assert!(v.layout.find("inspector").is_some());
+        });
+        // 2. Again, and the next thing is a press on a splitter: the panel
+        // lands first and the press starts the splitter's own drag.
+        let landed = view.read_with(cx, |v, _| v.layout.clone());
+        let from = view.read_with(cx, |v, _| header(v, "fxbrowser"));
+        // Onto the left dock's middle: it joins that stack.
+        let left = view.read_with(cx, |v, _| v.geometry.panels[0].rect);
+        drag(cx, from, (left.x + left.w / 2., left.y + left.h / 2.));
+        assert!(
+            view.read_with(cx, |v, _| matches!(
+                &v.gesture,
+                Some(super::Gesture::Panel(d)) if d.preview.is_some()
+            )),
+            "the second drag shows where it will land"
+        );
+        let divider = view.read_with(cx, |v, _| {
+            v.geometry
+                .dividers
+                .iter()
+                .find(|d| !d.horizontal)
+                .unwrap()
+                .rect
+        });
+        let at = point(
+            px(divider.x + divider.w / 2.),
+            px(divider.y + divider.h / 2.),
+        );
+        cx.simulate_mouse_down(at, MouseButton::Left, none);
+        view.read_with(cx, |v, _| {
+            assert_ne!(v.layout, landed, "the stale drag landed before the press");
+            assert!(
+                matches!(v.gesture, Some(super::Gesture::Resize(..))),
+                "the press is the splitter's own"
+            );
+        });
+        cx.simulate_mouse_up(at, MouseButton::Left, none);
+        // 3. A splitter drag whose release is lost keeps the size it reached.
+        let divider = view.read_with(cx, |v, _| {
+            v.geometry
+                .dividers
+                .iter()
+                .find(|d| !d.horizontal)
+                .unwrap()
+                .rect
+        });
+        let x = divider.x + divider.w / 2.;
+        let y = divider.y + divider.h / 2.;
+        let widths = |v: &Editor| v.layout.docks.iter().map(|d| d.size).collect::<Vec<_>>();
+        let start = view.read_with(cx, |v, _| widths(v));
+        cx.simulate_mouse_move(point(px(x), px(y)), None, none);
+        cx.simulate_mouse_down(point(px(x), px(y)), MouseButton::Left, none);
+        cx.simulate_mouse_move(point(px(x - 60.), px(y)), MouseButton::Left, none);
+        let reached = view.read_with(cx, |v, _| widths(v));
+        assert_ne!(reached, start, "the splitter moved while held");
+        cx.simulate_mouse_move(point(px(x - 40.), px(y + 30.)), None, none);
+        view.read_with(cx, |v, _| {
+            assert!(v.gesture.is_none(), "the resize ended");
+            assert_eq!(widths(v), reached, "it kept the size it reached");
+        });
     }
 
     #[gpui::test]
