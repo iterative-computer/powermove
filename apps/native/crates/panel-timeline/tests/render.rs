@@ -556,8 +556,14 @@ fn hidden_layers_draw_at_half_strength_and_keys_mark_their_span_ends() {
 /// every mark is clipped to the strip so nothing hangs under or beside it.
 #[test]
 fn summary_marks_are_drawn_inside_their_strip_and_clipped_to_it() {
-    for scheme in [Scheme::Light, Scheme::Dark] {
-        let t = Tokens::new(scheme, Accessibility::default());
+    // Both appearances, at the least, the default and the most row height a
+    // workspace may set (22, 30 and 48 points).
+    for (scheme, height) in [Scheme::Light, Scheme::Dark]
+        .into_iter()
+        .flat_map(|s| [22., 30., 48.].map(|h| (s, h)))
+    {
+        let mut t = Tokens::new(scheme, Accessibility::default());
+        t.apply_patch([("metrics.track_row", height)]).unwrap();
         let mut short = clip("short");
         short.from = 2.;
         short.duration = 1.;
