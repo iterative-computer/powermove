@@ -74,23 +74,30 @@ pub struct SvgFallback {
 #[derive(Debug, Clone, PartialEq)]
 pub struct DamagedFrame {
     pub file: std::path::PathBuf,
-    /// The frame's time in the file, in seconds.
-    pub seconds: f64,
+    /// The frame's time in the file, in seconds (`None`: the file is one
+    /// frame, as an image sequence's files are).
+    pub seconds: Option<f64>,
     /// What the decoder said.
     pub reason: String,
 }
 
-const DAMAGED: &str = "a damaged frame at ";
+const DAMAGED: &str = "a damaged frame ";
+const DAMAGED_AT: &str = "at ";
 const DAMAGED_OF: &str = " s of ";
+const DAMAGED_FILE: &str = "of ";
 const DAMAGED_WHY: &str = " could not be read (";
 
 impl DamagedFrame {
     /// "a damaged frame at 0.292 s of /clips/take 3.mov could not be read
-    /// (decode: …)".
+    /// (decode: …)", or for a file that is one frame "a damaged frame of
+    /// /frames/shot.0004.png could not be read (…)".
     pub fn message(&self) -> String {
+        let at = self.seconds.map_or_else(
+            || DAMAGED_FILE.to_owned(),
+            |s| format!("{DAMAGED_AT}{s:.3}{DAMAGED_OF}"),
+        );
         format!(
-            "{DAMAGED}{:.3}{DAMAGED_OF}{}{DAMAGED_WHY}{})",
-            self.seconds,
+            "{DAMAGED}{at}{}{DAMAGED_WHY}{})",
             self.file.display(),
             self.reason
         )
@@ -99,12 +106,18 @@ impl DamagedFrame {
     /// The damaged frame a failure's message names, if it names one.
     pub fn parse(message: &str) -> Option<DamagedFrame> {
         let rest = message.strip_prefix(DAMAGED)?;
-        let (seconds, rest) = rest.split_once(DAMAGED_OF)?;
+        let (seconds, rest) = match rest.strip_prefix(DAMAGED_AT) {
+            Some(timed) => {
+                let (seconds, rest) = timed.split_once(DAMAGED_OF)?;
+                (Some(seconds.parse().ok()?), rest)
+            }
+            None => (None, rest.strip_prefix(DAMAGED_FILE)?),
+        };
         let at = rest.rfind(DAMAGED_WHY)?;
         let reason = rest[at + DAMAGED_WHY.len()..].strip_suffix(')')?;
         Some(DamagedFrame {
             file: rest[..at].into(),
-            seconds: seconds.parse().ok()?,
+            seconds,
             reason: reason.to_owned(),
         })
     }
@@ -129,7 +142,7 @@ mod tests {
     fn a_damaged_frame_reads_back_from_its_message() {
         let damaged = DamagedFrame {
             file: "/clips/take 3: final.mov".into(),
-            seconds: 12.5,
+            seconds: Some(12.5),
             reason: "decode: sample 300 (pts 3584) failed to decode: status -12909".into(),
         };
         assert_eq!(
@@ -137,6 +150,16 @@ mod tests {
             "a damaged frame at 12.500 s of /clips/take 3: final.mov could not be read (decode: sample 300 (pts 3584) failed to decode: status -12909)"
         );
         assert_eq!(DamagedFrame::parse(&damaged.message()), Some(damaged));
+        let member = DamagedFrame {
+            file: "/frames/shot.0004.png".into(),
+            seconds: None,
+            reason: "invalid media: frame 0 of 0".into(),
+        };
+        assert_eq!(
+            member.message(),
+            "a damaged frame of /frames/shot.0004.png could not be read (invalid media: frame 0 of 0)"
+        );
+        assert_eq!(DamagedFrame::parse(&member.message()), Some(member));
         assert_eq!(DamagedFrame::parse("media for asset A is offline"), None);
     }
 }

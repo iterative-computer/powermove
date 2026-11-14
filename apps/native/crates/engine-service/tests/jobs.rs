@@ -1012,6 +1012,39 @@ fn centres(movie: &Path) -> Vec<[u16; 3]> {
 /// and ProRes with each of its files at its own times (15 fps into 30: file
 /// n on frames 2(n-1) and 2(n-1)+1); a file deleted from its folder fails
 /// the export naming it, and no movie is published.
+/// A file of an image sequence that is there but cannot be read (a bad
+/// copy) stops the export naming that file, as a damaged frame of a movie
+/// does; nothing stands in for it and no movie is published.
+#[test]
+fn a_damaged_file_of_an_image_sequence_stops_the_export_naming_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let frames = dir.path().join("frames");
+    std::fs::create_dir(&frames).unwrap();
+    let (project, media) = with_sequence(&frames);
+    std::fs::write(frames.join("shot.0004.png"), vec![0x5a; 4096]).unwrap();
+    let destination = dir.path().join("damaged.mov");
+    let mut request = request_for(&project, destination.clone(), 1);
+    request.originals = media.originals.clone();
+    let JobSpec::Export { settings, .. } = &mut request.spec else {
+        unreachable!()
+    };
+    settings.format = ExportFormat::ProRes {
+        profile: pm_protocol::priority::ProResProfile::Hq,
+    };
+    settings.color = OutputColor::Rec709QuickTime {
+        candidate: pm_protocol::color::QuickTimeTag::Cicp1_13_1,
+    };
+    settings.alpha = AlphaOutput::None;
+    settings.range.end = Ticks::new(Ticks::from_whole_seconds(2).get() / 5).unwrap();
+    let status = finish(request);
+    assert_eq!(status.state, JobState::Failed, "{status:?}");
+    let message = status.error.unwrap().message;
+    for part in ["couldn't be exported", "damaged", "shot.0004.png"] {
+        assert!(message.contains(part), "{part} in: {message}");
+    }
+    assert!(!message.contains("cannot render this yet"), "{message}");
+    assert!(!destination.exists());
+}
 #[test]
 fn an_image_sequence_read_in_place_exports_its_frames_at_their_times() {
     use pm_protocol::{color::QuickTimeTag, priority::ProResProfile};

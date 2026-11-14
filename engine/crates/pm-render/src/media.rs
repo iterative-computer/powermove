@@ -1983,7 +1983,7 @@ impl MediaCache {
             MediaFailure::Failed(
                 crate::DamagedFrame {
                     file: path.to_path_buf(),
-                    seconds,
+                    seconds: Some(seconds),
                     reason: e.to_string(),
                 }
                 .message(),

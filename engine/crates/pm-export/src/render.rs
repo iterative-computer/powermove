@@ -655,17 +655,25 @@ fn damaged_sentence(
         || damaged.file.display().to_string(),
         |n| n.to_string_lossy().into_owned(),
     );
-    let ms = (damaged.seconds.max(0.) * 1000.).round() as u64;
-    let source = format!(
-        "{:02}:{:02}:{:02}.{:03}",
-        ms / 3_600_000,
-        ms / 60_000 % 60,
-        ms / 1000 % 60,
-        ms % 1000
-    );
-    format!(
-        "Frame {at} couldn't be exported: “{layer}” reads a damaged frame of {file} at {source}. Replace or trim the clip, then export again."
-    )
+    match damaged.seconds {
+        Some(seconds) => {
+            let ms = (seconds.max(0.) * 1000.).round() as u64;
+            let source = format!(
+                "{:02}:{:02}:{:02}.{:03}",
+                ms / 3_600_000,
+                ms / 60_000 % 60,
+                ms / 1000 % 60,
+                ms % 1000
+            );
+            format!(
+                "Frame {at} couldn't be exported: “{layer}” reads a damaged frame of {file} at {source}. Replace or trim the clip, then export again."
+            )
+        }
+        // A file that is one frame (an image sequence's).
+        None => format!(
+            "Frame {at} couldn't be exported: “{layer}” reads a damaged file, {file}. Replace the file or trim the clip, then export again."
+        ),
+    }
 }
 
 /// The name of layer `layer` of composition `composition`.
