@@ -412,3 +412,29 @@ fn values_outside_the_controls_are_held_to_their_range() {
         bits(curve(0, &[(0.0, 0.0), (0.5, 2.0), (1.0, 1.0)])),
     );
 }
+
+/// A CDL read from a file into Color Wheels grades as the ASC CDL says (its
+/// own reference, `pm_color::cdl::apply`), on the whole field.
+#[test]
+fn a_cdl_file_in_color_wheels_grades_as_the_cdl() {
+    use pm_color::cdl;
+    let text = r#"<ColorDecisionList xmlns="urn:ASC:CDL:v1.01"><ColorDecision>
+      <ColorCorrection id="shot"><SOPNode><Slope>1.1 0.98 0.9</Slope>
+      <Offset>-0.02 0 0.015</Offset><Power>0.95 1.0 1.05</Power></SOPNode>
+      <SATNode><Saturation>1.2</Saturation></SATNode></ColorCorrection>
+    </ColorDecision></ColorDecisionList>"#;
+    let correction = cdl::parse(text).unwrap();
+    let mut p = Map::new();
+    for (key, value) in cdl::to_wheels(&correction).unwrap() {
+        p.insert(key, json!(value));
+    }
+    let mut renderer = Renderer::headless().unwrap();
+    let input = draw(&mut renderer, None);
+    let output = draw(
+        &mut renderer,
+        Some(effect("colorWheels", &Value::Object(p))),
+    );
+    let d = worst(&input, &output, |x| cdl::apply(&correction, x));
+    eprintln!("CDL file in Color Wheels: {d:e} from the CDL");
+    assert!(d < 2e-5, "{d:e}");
+}
