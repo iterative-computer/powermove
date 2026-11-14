@@ -252,10 +252,11 @@ function Head({ frame: f, send }: { frame: TimelineFrame; send: Send }) {
               fontVariantNumeric: "tabular-nums",
             }}
           >
-            {/* While playing, the native timecode layer draws the time in
-                this fixed-width slot every frame; the readout steps aside
-                (S3: panels hear only play start and stop). */}
-            {f.playing ? "" : f.timecode}
+            {/* The native timecode layer draws the time in this fixed-width
+                slot, paused and playing: the panel hears play start and stop
+                only after the transport has moved (S3), so handing the time
+                back and forth showed two readouts, or none, for a frame. */}
+            {""}
           </UI.ToolbarItem>
         )}
       </div>

@@ -27,8 +27,8 @@ pub struct Slot {
     pub h: f32,
 }
 /// The native timecode layer's box: exactly the width of `00:00:00:00` in the
-/// timecode font (tabular digits, so every time fits), so its opaque ground
-/// covers the paused readout and never the frame rate beside it.
+/// timecode font (tabular digits, so every time fits), the slot the timeline's
+/// readout keeps for it, never over the frame rate beside it.
 pub fn timecode_slot(t: &pm_design::Tokens) -> Slot {
     let font = objc2_app_kit::NSFont::monospacedDigitSystemFontOfSize_weight(
         t.typography.timecode as f64,
@@ -276,11 +276,13 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                         let bar=v.builtins.timeline.as_ref().map_or(0.,|t|t.read(cx).bar_height()) as f32;
                         let seconds=clock.media_time.get()as f64/pm_protocol::common::TICKS_PER_SECOND as f64;
                         let offset=column+(seconds-scroll_time)*pps;
-                        // A clear ground: the panel hides its paused readout while playing
-                        // (it hears only play start and stop), so the translucent header
-                        // shows through unchanged.
+                        // A clear ground over the translucent header. The time is this
+                        // layer's paused too: the panel hears play start and stop only
+                        // later, so trading the readout back and forth showed both times
+                        // at once, or neither. Only the open time field takes its place.
                         let _:()=msg_send![&*layers.timecode,setBackgroundColor:&*crate::playhead::colour(colors.panel, 0.)];
-                        let _:()=msg_send![&*layers.timecode,setHidden:geometry.is_none()||!playing];
+                        let typing=v.builtins.views.get("timeline").is_some_and(|t|t.read(cx).field_open("timeline:time"));
+                        let _:()=msg_send![&*layers.timecode,setHidden:geometry.is_none()||typing];
                         let viewer_bar=v.builtins.viewer_place;
                         let text:*mut AnyObject=msg_send![&*layers.timecode,string];
                         let _:()=msg_send![&*viewer_time,setString:text];
@@ -289,7 +291,8 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                         let _:()=msg_send![&*viewer_time,setForegroundColor:&*cg!(colors.text)];
                         // With a timeline on screen its head shows the time: the viewer shows none.
                         let _:()=msg_send![&*viewer_time,setHidden:viewer_bar.is_none()||!playing||geometry.is_some()||v.timeline_shown==Some(true)];
-                        let _:()=msg_send![&*layers.playhead,setHidden:geometry.is_none_or(|(r,_)|offset<column||offset>r.w as f64)];
+                        let head_shown=geometry.is_some_and(|(r,_)|offset>=column&&offset<=r.w as f64);
+                        let _:()=msg_send![&*layers.playhead,setHidden:!head_shown];
                         // Measured once per timecode size, never per tick.
                         if measured.as_ref().is_none_or(|(size,_)|*size!=host.tokens.typography.timecode) {
                             measured=Some((host.tokens.typography.timecode,timecode_slot(&host.tokens)));
@@ -307,7 +310,8 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                             let foot=bar.max(metrics.inset);
                             let tall=(r.h-y-foot).max(0.) as f64;
                             if let Some(p)=&mut playhead {
-                                p.place(r.x as f64+offset,height-(r.y+r.h-foot)as f64,metrics.playhead as f64,tall,metrics.ruler as f64,playing,&host.tokens);
+                                if head_shown { p.place(r.x as f64+offset,seconds*pps,r.x as f64+column,height-(r.y+r.h-foot)as f64,metrics.playhead as f64,tall,metrics.ruler as f64,playing,&host.tokens); }
+                                else { p.hide(); }
                             }
                         }
                         let _:()=msg_send![objc2::class!(CATransaction),commit];

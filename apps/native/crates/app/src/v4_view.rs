@@ -166,6 +166,9 @@ pub struct SurfaceView {
     focus_text: Option<(String, std::time::Instant)>,
     /// A semantic id to scroll into view once a publication has it.
     reveal: Option<(String, std::time::Instant)>,
+    /// Told when a new tree is installed: the timeline's native timecode
+    /// layer steps aside while its time field is open, and back after.
+    pub(crate) installed: Option<async_channel::Sender<()>>,
     #[cfg(test)]
     pub renders: usize,
     #[cfg(test)]
@@ -223,6 +226,7 @@ impl SurfaceView {
             requested: None,
             focus_text: None,
             reveal: None,
+            installed: None,
             #[cfg(test)]
             renders: 0,
             #[cfg(test)]
@@ -317,7 +321,19 @@ impl SurfaceView {
         self.reconcile(window, cx);
         self.try_focus_text(cx);
         self.try_reveal(cx);
+        if let Some(installed) = &self.installed {
+            let _ = installed.try_send(());
+        }
         cx.notify();
+    }
+    /// Whether the node with this semantic id is an open text field (the
+    /// timeline's time while someone types one), rather than its readout.
+    pub fn field_open(&self, semantic: &str) -> bool {
+        self.prepared
+            .semantics
+            .get(semantic)
+            .and_then(|id| self.prepared.node(*id))
+            .is_some_and(|node| node.cancel_change)
     }
     /// A new generation (an extension reloaded, a fork swapped in) reuses node
     /// ids, so nothing bound to the old tree may carry over.
