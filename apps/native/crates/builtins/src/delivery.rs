@@ -317,10 +317,15 @@ pub fn save_preset(stored: Option<Value>, name: &str, mut options: Value) -> Res
 /// Export the current project into a separate PMV4 document; the source session,
 /// history and dirty state remain untouched. Every persisted asset must resolve
 /// to an original. Proxy maps are deliberately absent from this interface.
+/// `replace`: the person said Replace. The file there is copied into the
+/// export archive, then replaced by the verified save; a save that fails
+/// leaves it in place (and the archive holds a spare copy). Without it an
+/// existing file is never replaced.
 pub fn portable(
     snapshot: &Snapshot,
     originals: &BTreeMap<String, PathBuf>,
     destination: &Path,
+    replace: bool,
     cancel: &AtomicBool,
 ) -> Result<PathBuf, String> {
     use pm_kernel::{
@@ -371,13 +376,16 @@ pub fn portable(
         .prepare_save(
             SaveTarget::SaveAs {
                 path: destination.into(),
-                replace: false,
+                replace,
             },
             SaveOptions::default(),
         )
         .map_err(|e| e.to_string())?;
     if cancel.load(Ordering::Acquire) {
         return Err("cancelled".into());
+    }
+    if replace {
+        pm_export::atomic::archive_existing(destination).map_err(|e| e.to_string())?;
     }
     let receipt = plan.run().map_err(|e| e.to_string())?;
     // Publication already happened. Cancellation after this boundary reports
@@ -733,10 +741,10 @@ mod tests {
         root.as_object_mut().unwrap().insert("assets",pm_model::json::parse(r#"{"asset":{"name":"Original","type":"image","mimeType":"application/octet-stream"}}"#).unwrap());
         let s = DocumentStore::new_untitled(root).snapshot();
         let dest = dir.join("Film.pmv");
-        assert!(portable(&s, &BTreeMap::new(), &dest, &AtomicBool::new(false)).is_err());
+        assert!(portable(&s, &BTreeMap::new(), &dest, false, &AtomicBool::new(false)).is_err());
         assert!(!dest.exists());
         let originals = BTreeMap::from([("asset".into(), source.clone())]);
-        portable(&s, &originals, &dest, &AtomicBool::new(false)).unwrap();
+        portable(&s, &originals, &dest, false, &AtomicBool::new(false)).unwrap();
         let reopened = pm_kernel::project_io::open_project(&dest, Default::default()).unwrap();
         let copied = dir.join("copied.bin");
         reopened
@@ -748,9 +756,18 @@ mod tests {
             .unwrap();
         assert_eq!(std::fs::read(copied).unwrap(), b"synthetic original");
         let saved = std::fs::read(&dest).unwrap();
-        assert!(portable(&s, &originals, &dest, &AtomicBool::new(false)).is_err());
-        assert_eq!(std::fs::read(dest).unwrap(), saved);
-        assert_eq!(std::fs::read(source).unwrap(), b"synthetic original");
+        assert!(portable(&s, &originals, &dest, false, &AtomicBool::new(false)).is_err());
+        assert_eq!(std::fs::read(&dest).unwrap(), saved);
+        assert_eq!(std::fs::read(&source).unwrap(), b"synthetic original");
+        // Told to replace: a new save, the old one kept in the export archive.
+        std::fs::write(&dest, b"the last export").unwrap();
+        portable(&s, &originals, &dest, true, &AtomicBool::new(false)).unwrap();
+        assert!(pm_kernel::project_io::open_project(&dest, Default::default()).is_ok());
+        let archived: Vec<Vec<u8>> = std::fs::read_dir(dir.join(".powermove-export-archive"))
+            .unwrap()
+            .map(|e| std::fs::read(e.unwrap().path()).unwrap())
+            .collect();
+        assert_eq!(archived, vec![b"the last export".to_vec()]);
     }
     #[test]
     fn cancelled_portable_job_does_not_publish_a_file() {
@@ -761,6 +778,7 @@ mod tests {
                 &fixture(""),
                 &BTreeMap::new(),
                 &dest,
+                false,
                 &AtomicBool::new(true)
             )
             .is_err()

@@ -262,7 +262,7 @@ fn pq_and_hlg_are_encoded_and_tagged_as_bt2100() {
             white_nits: 203,
             peak_nits: 1000,
             metadata: None,
-            dolby_vision: true,
+            dolby_vision: false,
         },
     ] {
         let t = Temp::new();
@@ -493,6 +493,30 @@ fn unsupported_hevc_alpha_and_eight_bit_hdr_fail_before_work() {
     assert!(s.validate().is_err());
     assert_eq!(std::fs::read_dir(&t.0).unwrap().count(), 0);
 }
+/// The software encoder cannot write Dolby Vision: asking for it is refused
+/// before any work, never delivered as plain HLG.
+#[test]
+fn dolby_vision_the_software_sink_cannot_write_is_refused() {
+    let t = Temp::new();
+    let mut s = spec(
+        &t.0,
+        Codec::Hevc {
+            bitrate_bps: 16_000_000,
+            ten_bit: true,
+        },
+        Container::Mp4,
+    );
+    s.tags = ColorTags::Rec2100Hlg {
+        white_nits: 203,
+        peak_nits: 1000,
+        metadata: None,
+        dolby_vision: true,
+    };
+    s.working = WorkingEncoding::Linear;
+    let refused = software::SoftwareSink::new(&s).err().expect("refused");
+    assert!(refused.to_string().contains("Dolby Vision"), "{refused}");
+    assert_eq!(std::fs::read_dir(&t.0).unwrap().count(), 0);
+}
 #[test]
 fn mov_timecode_is_carried_to_delivery() {
     if !codecs_available(&["prores_ks"], &["prores"]) {
@@ -640,7 +664,7 @@ fn hdr_neutral_highlights_decode_to_standard_signal_values() {
                 white_nits: 203,
                 peak_nits: 1000,
                 metadata: None,
-                dolby_vision: true,
+                dolby_vision: false,
             },
             [0.0, 1.0, 1000.0 / 203.0],
             [0.0, 0.75, 1.0],
