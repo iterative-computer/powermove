@@ -8,6 +8,15 @@ export interface Row {
   /** Choices made on an open question, by question id. */
   chosen: Record<string, string[]>;
   open: boolean;
+  /** An archived step's run: its trace message, how long it worked and
+   * whether it was steering (the view folds a finished turn's work). */
+  trace?: { id: string; durationMs: number | null; steering: boolean };
+}
+export interface ThreadSummary {
+  id: string;
+  title: string;
+  busy: boolean;
+  updatedAt: number;
 }
 export type Access = "editor" | "supervised" | "auto" | "full";
 export interface Snapshot {
@@ -23,6 +32,10 @@ export interface Snapshot {
   saveError: string | null;
   stopError: string | null;
   elapsedMs: number | null;
+  /** What the run is doing before its first step lands. */
+  activity?: string;
+  /** The thread picker's rows. */
+  threads?: ThreadSummary[];
   showJump: boolean;
   draft: { text: string; selection: [number, number]; armed: string | null };
   attachments: {
@@ -53,6 +66,8 @@ export interface Snapshot {
 /** These facts belong to the shell/provider/native input coordinator, not Panel. */
 export interface NativeFacts {
   connection: "checking" | "waiting" | "connected" | "unavailable";
+  /** Unavailable because nobody is signed in: offer to connect. */
+  signedOut?: boolean;
   /** What to tell the user when `connection` isn't "connected". */
   reason: string;
   presentation: "popover" | "docked";
@@ -91,8 +106,11 @@ export type Action =
         | "newThread"
         | "openSettings"
         | "keepResult"
-        | "undoResult";
+        | "undoResult"
+        | "connect";
     }
+  /** Try Again: the request before this failed turn (or the last one). */
+  | { type: "retry"; id?: string }
   | {
       type: "shell";
       action: "open" | "close" | "pin" | "beginDrag" | "cancelDrag";
