@@ -1185,31 +1185,33 @@ impl crate::composite::EffectHost for Effects {
                         .get(&(kind, DefinitionId::from(ty)))
                         .is_some_and(|e| e.physical);
             }
-            // Owner-bound main definitions scale their own kernels.
-            let owned = kind == DefinitionKind::Effect
-                && self.versioned_builtins
-                && def.glsl.as_ref().is_some_and(|g| {
-                    g.source.contains("u_layerUV") || g.source.contains("u_temporalOwnerUV")
-                });
-            if owned {
-                return false;
-            }
-            final_output
+            let grid = final_output
                 || self
                     .entries
                     .get(&(kind, DefinitionId::from(ty)))
-                    .is_some_and(|e| e.physical)
+                    .is_some_and(|e| e.physical);
+            // Owner-bound main definitions scale their own kernels (read
+            // from the source only when the grid would otherwise be needed:
+            // this runs for every layer of every level of every frame).
+            grid && !(kind == DefinitionKind::Effect
+                && self.versioned_builtins
+                && def.glsl.as_ref().is_some_and(|g| {
+                    g.source.contains("u_layerUV") || g.source.contains("u_temporalOwnerUV")
+                }))
         };
-        if scope.has_renderable_effects(layer, time)? {
-            for fx in node::array_or_empty(node::member(Some(layer), "fx"))? {
-                if node::member(Some(fx), "on").is_some_and(|on| !node::truthy(Some(on))) {
-                    continue;
-                }
-                if let Some(ty) = node::string(node::member(Some(fx), "type"))
-                    && needs(DefinitionKind::Effect, &ty.to_string_lossy())
-                {
+        // An effect that would need the grid first, then whether the layer
+        // draws its effects at all: most layers stop at the first test.
+        for fx in node::array_or_empty(node::member(Some(layer), "fx"))? {
+            if node::member(Some(fx), "on").is_some_and(|on| !node::truthy(Some(on))) {
+                continue;
+            }
+            if let Some(ty) = node::string(node::member(Some(fx), "type"))
+                && needs(DefinitionKind::Effect, &ty.to_string_lossy())
+            {
+                if scope.has_renderable_effects(layer, time)? {
                     return Ok(true);
                 }
+                break;
             }
         }
         for key in ["transitionIn", "transitionOut"] {

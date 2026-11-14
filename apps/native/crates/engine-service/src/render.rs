@@ -2436,6 +2436,27 @@ pub fn picture_hash(width: u32, height: u32, bytes: &[u8]) -> u64 {
 }
 
 impl Submission {
+    /// Diagnostic: the picture read back, averaged over `step`×`step`
+    /// blocks, clamped to 0..1, as an 8-bit binary PPM.
+    pub fn write_picture(&self, path: &std::path::Path, step: u32) -> std::io::Result<()> {
+        let rgb = self.pixels();
+        let (w, h, s) = (self.width as usize, self.height as usize, step.max(1) as usize);
+        let (ow, oh) = (w / s, h / s);
+        let mut out = format!("P6\n{ow} {oh}\n255\n").into_bytes();
+        for y in 0..oh {
+            for x in 0..ow {
+                let mut sum = [0f64; 3];
+                for dy in 0..s {
+                    for dx in 0..s {
+                        let p = rgb[(y * s + dy) * w + x * s + dx];
+                        (0..3).for_each(|c| sum[c] += p[c]);
+                    }
+                }
+                out.extend(sum.map(|v| ((v / (s * s) as f64).clamp(0., 1.) * 255. + 0.5) as u8));
+            }
+        }
+        std::fs::write(path, out)
+    }
     pub fn pixels(&self) -> Vec<[f64; 3]> {
         let b = self.readback.as_ref().unwrap();
         let values = unsafe {
