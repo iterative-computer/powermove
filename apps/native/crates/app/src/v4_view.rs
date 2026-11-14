@@ -799,7 +799,10 @@ impl SurfaceView {
                     quiet: crate::v4_compile::variant(node) == Some("quiet"),
                     tint: None,
                     symbol: None,
-                    glass: false,
+                    // `data-pm-variant="glass"`: a segmented control in the
+                    // system's capsule at the large size.
+                    glass: crate::v4_compile::variant(node) == Some("glass")
+                        && matches!(kind, crate::v4_control::Kind::Segmented),
                 },
                 &tokens,
                 window,

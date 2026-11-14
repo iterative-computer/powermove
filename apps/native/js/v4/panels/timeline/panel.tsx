@@ -166,6 +166,7 @@ function Header({ frame: f, send }: { frame: TimelineFrame; send: Send }) {
           <UI.SegmentedControl
             id="timeline:mode"
             label="Timeline mode"
+            data-pm-variant="glass"
             value={f.mode}
             options={[
               { id: "Layers", label: "Layers" },
