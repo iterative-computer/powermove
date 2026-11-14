@@ -1113,7 +1113,7 @@ impl crate::composite::EffectHost for Effects {
         prefix: Option<usize>,
         measure: Option<&mut dyn pm_eval::text_geom::TextMeasure>,
     ) -> pm_eval::JsResult<Result<Option<crate::composite::PreparedEffects>, crate::Feature>> {
-        let steps = match plan::effect_steps_frame(
+        let mut steps = match plan::effect_steps_frame(
             scope,
             self,
             layer,
@@ -1127,6 +1127,15 @@ impl crate::composite::EffectHost for Effects {
             Ok(steps) => steps,
             Err(f) => return Ok(Err(f)),
         };
+        // A viewer frame at a reduced (or raised) resolution is the full
+        // picture resampled: an extension's cells, radii and offsets in
+        // pixels keep their composition size. Only final output keeps
+        // Electron's output raster.
+        if !frame.final_output {
+            for step in &mut steps {
+                step.raster_space = false;
+            }
+        }
         if steps.is_empty() {
             return Ok(Ok(None));
         }
@@ -1163,13 +1172,18 @@ impl crate::composite::EffectHost for Effects {
             let Some(def) = self.get(kind, ty) else {
                 return false;
             };
-            // Electron extensions run on the requested output grid, including
-            // physical texels. Resampling a composition-sized result changes
-            // their radius and smooths bitmap glyphs.
+            // Electron extensions run on the requested output grid in final
+            // output, including physical texels. In a viewer frame one that
+            // addresses physical texels cannot follow the frame's density,
+            // so its level draws at the composition's (Full) and resamples.
             if kind == DefinitionKind::Effect
                 && def.origin != pm_protocol::definitions::DefinitionOrigin::BuiltIn
             {
-                return false;
+                return !final_output
+                    && self
+                        .entries
+                        .get(&(kind, DefinitionId::from(ty)))
+                        .is_some_and(|e| e.physical);
             }
             // Owner-bound main definitions scale their own kernels.
             let owned = kind == DefinitionKind::Effect

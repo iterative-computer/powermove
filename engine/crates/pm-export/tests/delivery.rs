@@ -933,6 +933,15 @@ fn sdr_outputs_deliver_one_picture_of_light_out_of_range() {
         })
         .collect();
     let doc = project(96, 32, 1.0, solid_fill("#000000"), layers);
+    // Every colour depth: an 8-bit project (v1's default) as well as float.
+    let docs: Vec<(u32, Value)> = [8u32, 16, 32]
+        .into_iter()
+        .map(|depth| {
+            let mut doc = doc.clone();
+            doc["colorDepth"] = json!(depth);
+            (depth, doc)
+        })
+        .collect();
     // Encoded 8-bit hex of each colour, doubled, then the delivery rule.
     let want: Vec<[f64; 3]> = colors
         .iter()
@@ -965,7 +974,10 @@ fn sdr_outputs_deliver_one_picture_of_light_out_of_range() {
             0.01,
         ),
     ];
-    for (name, format, tolerance) in cases {
+    for ((name, format, tolerance), (depth, doc)) in cases
+        .iter()
+        .flat_map(|case| docs.iter().map(move |doc| (*case, doc)))
+    {
         let mut s = settings(format, WireAlpha::None, 1.0);
         s.size = Size::new(96, 32);
         let ext = if format.is_image() {
@@ -975,10 +987,10 @@ fn sdr_outputs_deliver_one_picture_of_light_out_of_range() {
         } else {
             "mov"
         };
-        let path = dir.join(format!("{name}.{ext}"));
+        let path = dir.join(format!("{name}-{depth}.{ext}"));
         let delivered = export_to(
             &mut renderer,
-            &job(&doc, MediaPaths::default(), s, path.clone()),
+            &job(doc, MediaPaths::default(), s, path.clone()),
         );
         let input = if format.is_image() {
             pm_export::png::read(&delivered.path, true)
@@ -999,7 +1011,7 @@ fn sdr_outputs_deliver_one_picture_of_light_out_of_range() {
             for c in 0..3 {
                 assert!(
                     (got[c] - want[c]).abs() <= tolerance,
-                    "{name} patch {i}: {got:?} vs {want:?}"
+                    "{name} {depth}-bit project, patch {i}: {got:?} vs {want:?}"
                 );
             }
         }

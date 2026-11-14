@@ -655,6 +655,42 @@ fn an_effect_still_loading_is_waited_for_never_bypassed() {
     );
 }
 
+/// Once loading is over, an effect whose extension is installed but provides
+/// nothing now is bypassed and the viewer names that extension and why, not
+/// "not installed".
+#[test]
+fn the_viewer_names_the_installed_extension_that_provides_nothing_now() {
+    let tinted = snapshot(&format!(
+        r##"{{"id":"P","name":"P","compId":"C","compName":"C","w":640,"h":360,"fps":30,"dur":3,"bg":"#000000",
+        "layers":[{}],"comps":{{}},"assets":{{}},"markers":[],"work":[0,3],"params":{{}}}}"##,
+        shape("top", "#FF0000", 320.).replace(
+            r#""fx":[]"#,
+            r#""fx":[{"id":"e1","type":"ext.invert","on":true,"p":{}}]"#
+        )
+    ));
+    let service = service("effect-owner-off");
+    let v = service
+        .viewer(config(tinted, MediaCatalog::default(), output(320, 180)))
+        .unwrap();
+    v.resources(Arc::new(pm_engine_service::resources::ResourceSnapshot {
+        generation: 1,
+        unavailable: vec![pm_engine_service::resources::Unavailable {
+            id: "ext".into(),
+            name: "Acme Effects".into(),
+            why: "is off until Powermove restarts".into(),
+        }],
+        ..Default::default()
+    }))
+    .unwrap();
+    let drawn = wait(&v, "drawn without it", |s| {
+        s.frame.as_ref().is_some_and(|f| f.gpu_ok) && !s.missing_effects.is_empty()
+    });
+    assert_eq!(
+        drawn.notice().as_deref(),
+        Some("Acme Effects is off until Powermove restarts: ext.invert is bypassed on 1 layer")
+    );
+}
+
 /// A frame that waited long for an extension's effect is drawn the moment the
 /// effect registers, not after the backoff its retries reached (up to a
 /// second; it delayed the first picture of a project with extension effects).
@@ -1068,4 +1104,65 @@ fn a_looping_frame_follows(save: impl Fn(&std::path::Path)) {
         .unwrap();
     assert_eq!(now, shown(&fresh_inbox));
     assert_eq!(v.status().error, None);
+}
+
+/// A layer dragged in the viewer: every pointer step is a new revision, and
+/// a real pointer sends them faster than a frame renders. Each frame that
+/// lands is shown (the picture follows the drag), not dropped as stale or
+/// abandoned for the next step, which left the picture still until release.
+#[test]
+fn a_dragged_edit_shows_frames_while_the_drag_goes_on() {
+    let store = |x: f64| {
+        snapshot(&format!(
+            r##"{{"id":"P","name":"P","compId":"C","compName":"C","w":3840,"h":2160,"fps":30,"dur":3,"bg":"#101820",
+            "layers":[{}],"comps":{{}},"assets":{{}},"markers":[],"work":[0,3],"params":{{}}}}"##,
+            shape("top", "#FF0000", x)
+        ))
+    };
+    let first = store(100.);
+    let doc = first.doc_id;
+    let service = service("drag");
+    let v = service
+        .viewer(config(
+            first.clone(),
+            MediaCatalog::default(),
+            output(3840, 2160),
+        ))
+        .unwrap();
+    wait(&v, "the first picture", |s| s.frame.is_some());
+    v.editing(true).unwrap();
+    let step = |revision: u64| {
+        let mut s = store(100. + revision as f64);
+        s.doc_id = doc;
+        s.revision = revision;
+        s
+    };
+    // A step every millisecond for a second: faster than any frame here.
+    let mut shown = std::collections::BTreeSet::new();
+    let started = Instant::now();
+    let mut revision = first.revision;
+    while started.elapsed() < Duration::from_secs(1) {
+        revision += 1;
+        v.snapshot(step(revision)).unwrap();
+        if let Some(f) = v.status().frame {
+            shown.insert(f.stamp.revision);
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let during: Vec<_> = shown
+        .iter()
+        .filter(|r| **r > first.revision && **r < revision)
+        .collect();
+    assert!(
+        during.len() >= 3,
+        "pictures of {} steps shown during the drag: {during:?}",
+        revision - first.revision
+    );
+    // Release: the resting picture of the last step.
+    v.editing(false).unwrap();
+    wait(&v, "the picture where the drag ended", |s| {
+        s.frame
+            .as_ref()
+            .is_some_and(|f| f.stamp.revision == revision && f.moment == Moment::Paused)
+    });
 }

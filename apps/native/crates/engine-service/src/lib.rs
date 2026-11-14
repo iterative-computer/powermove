@@ -378,6 +378,9 @@ pub struct ViewerStatus {
     /// Effects the project uses whose provider isn't installed. Their
     /// layers draw without them (bypassed, as After Effects does).
     pub missing_effects: Vec<pm_render::effects::versions::MissingEffect>,
+    /// The installed extensions that would provide `missing_effects` but
+    /// provide nothing now, with why: the notice names them.
+    pub unavailable: Vec<resources::Unavailable>,
     /// Playing frames with a stand-in for a decode that missed its allowance.
     pub stand_in_frames: u64,
     /// Frames whose own stills exceeded the engine's image grant: drawn, and
@@ -430,12 +433,32 @@ impl ViewerStatus {
             ));
         }
         let missing = self.missing_effects.first()?;
+        let owner = self
+            .unavailable
+            .iter()
+            .find(|u| resources::provides(&u.id, &missing.effect));
+        if let (None, Some(owner)) = (&missing.revision, owner) {
+            return Some(format!(
+                "{} {}: {} is bypassed on {}{}",
+                owner.name,
+                owner.why,
+                missing.effect,
+                layers(missing.layers),
+                more(self.missing_effects.len() - 1)
+            ));
+        }
         let what = match &missing.revision {
             Some(revision) => format!(
                 "Effect saved by a newer Powermove: {} version {revision}",
                 missing.effect
             ),
-            None => format!("Effect not installed: {}", missing.effect),
+            None => match resources::named_extension(&missing.effect) {
+                Some(extension) => format!(
+                    "Effect not installed: {} (extension “{extension}”)",
+                    missing.effect
+                ),
+                None => format!("Effect not installed: {}", missing.effect),
+            },
         };
         Some(format!(
             "{what}, bypassed on {}{}",
@@ -489,6 +512,10 @@ struct View {
     /// Auto draws dragged frames of a slow project reduced (an editor's
     /// viewer); otherwise every paused frame is exact.
     adapt_drags: bool,
+    /// An edit is in progress (a kernel gesture is open: a layer, clip,
+    /// field or wheel being dragged). Its frames are drag frames, and each
+    /// one is shown when it lands although the drag has moved on.
+    editing: bool,
     /// The skimmer (Final Cut's): while paused the viewer shows this time,
     /// and the playhead stays where it is.
     skim: Option<Ticks>,
@@ -554,17 +581,30 @@ fn only_moved(v: &View, stamp: Stamp, moves: u64, moment: Moment, capture: bool)
     // 1: only playhead moves since the frame's stamp. 2: the same content
     // (generation, document, revision); a drag picture may carry the
     // previous overlay or quality for one frame, never another document.
+    // While an edit is dragged every step is a new revision: its picture of
+    // an earlier step is shown, the newest drawn next (else a drag faster
+    // than a frame renders showed nothing until release).
     let mode = pm_media::decode::diag::knob("PM_FIX_PRESENT_STALE").or(Some(2));
     moment == Moment::Scrub
         && !capture
         && matches!(mode, Some(1 | 2))
         && v.stamp.generation == stamp.generation
         && v.stamp.doc_id == stamp.doc_id
-        && v.stamp.revision == stamp.revision
-        && (mode == Some(2)
-            || v.stamp.sequence.wrapping_sub(stamp.sequence) == v.moves.wrapping_sub(moves))
+        && ((v.editing && stamp.revision <= v.stamp.revision)
+            || (v.stamp.revision == stamp.revision
+                && (mode == Some(2)
+                    || v.stamp.sequence.wrapping_sub(stamp.sequence)
+                        == v.moves.wrapping_sub(moves))))
 }
 impl View {
+    /// A drag ends: the resting picture of where it ended is drawn next.
+    fn set_editing(&mut self, on: bool) {
+        if self.editing != on {
+            self.editing = on;
+            self.stamp.sequence += 1;
+            self.dirty = true;
+        }
+    }
     fn set_studio_preview(&mut self, preview: studio::Preview) {
         if self.studio_preview != preview {
             self.studio_preview = preview;
@@ -748,7 +788,16 @@ impl Viewer {
                 p.publication_work.as_secs_f64() * 1000.,
             )),
             Some(preview),
+            Some(p.entry.is_some()),
         )
+    }
+    /// An edit is being dragged (`publish` says so from the kernel's open
+    /// gesture): its frames are drag frames and none waits for the next.
+    pub fn editing(&self, on: bool) -> Result<()> {
+        self.edit(|v| {
+            v.set_editing(on);
+            Ok(())
+        })
     }
     /// Attach an event origin before dispatching an asynchronous kernel edit.
     /// Keep it pending until a new revision; playback of the old revision
@@ -761,13 +810,14 @@ impl Viewer {
         }
     }
     pub fn snapshot(&self, snapshot: Snapshot) -> Result<()> {
-        self.snapshot_traced(snapshot, None, None)
+        self.snapshot_traced(snapshot, None, None, None)
     }
     fn snapshot_traced(
         &self,
         snapshot: Snapshot,
         spans: Option<(f64, f64)>,
         preview: Option<studio::Preview>,
+        editing: Option<bool>,
     ) -> Result<()> {
         self.edit(|v| {
             ensure!(
@@ -781,6 +831,9 @@ impl Viewer {
             if let Some(preview) = preview {
                 v.set_studio_preview(preview);
             }
+            if let Some(editing) = editing {
+                v.set_editing(editing);
+            }
             if snapshot.revision > v.stamp.revision {
                 if let Some(input) = v.pending_input.take() {
                     v.input.get_or_insert(input);
@@ -792,7 +845,11 @@ impl Viewer {
                     publication_ms,
                 };
                 v.config.snapshot = snapshot;
-                self.shared.supersede();
+                // A drag's frame in flight is finished and shown, not
+                // abandoned for the next step.
+                if !v.editing {
+                    self.shared.supersede();
+                }
                 v.stamp.revision = v.config.snapshot.revision;
                 v.stamp.sequence += 1;
                 bump_site(line!(), "");
@@ -1586,6 +1643,7 @@ impl EngineService {
                 studio_preview: studio::Preview::debug_default().map_err(anyhow::Error::msg)?,
                 studio_view: studio::ViewCamera::Active,
                 adapt_drags: false,
+                editing: false,
                 skim: None,
                 skim_input: None,
                 skim_rate: pm_protocol::common::PlaybackRate::NORMAL,
@@ -2988,7 +3046,8 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             if let Some((owed, at)) = r.settle_at
                 && now >= at
             {
-                let rests = v.quality.scale(&r.auto, Moment::Paused) == 1. && !r.scrub;
+                let rests =
+                    v.quality.scale(&r.auto, Moment::Paused) == 1. && !r.scrub && !v.editing;
                 if owed != v.stamp || r.transport.running() || !rests {
                     r.settle_at = None;
                 } else if v.dirty {
@@ -3083,7 +3142,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             v.dirty = false;
             let moment = if playing {
                 Moment::Playing
-            } else if r.scrub {
+            } else if r.scrub || v.editing {
                 Moment::Scrub
             } else {
                 Moment::Paused
@@ -3433,6 +3492,21 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 }
                 if v.status.missing_effects != engine.missing_effects {
                     v.status.missing_effects = engine.missing_effects.clone();
+                }
+                let owners: Vec<_> = v
+                    .resources
+                    .unavailable
+                    .iter()
+                    .filter(|u| {
+                        engine
+                            .missing_effects
+                            .iter()
+                            .any(|m| resources::provides(&u.id, &m.effect))
+                    })
+                    .cloned()
+                    .collect();
+                if v.status.unavailable != owners {
+                    v.status.unavailable = owners;
                 }
                 // A capture asked for belongs to the next frame that lands.
                 if v.stamp != stamp && !only_moved(v, stamp, moves, spec.moment, capture) {
@@ -4478,7 +4552,20 @@ mod worker_tests {
         };
         assert_eq!(
             status.notice().as_deref(),
-            Some("Effect not installed: acme.glow, bypassed on 4 layers (and 1 more)")
+            Some("Effect not installed: acme.glow (extension “acme”), bypassed on 4 layers (and 1 more)")
+        );
+        // Installed, but providing nothing now: named, with why.
+        let off = ViewerStatus {
+            unavailable: vec![resources::Unavailable {
+                id: "acme".into(),
+                name: "Acme Effects".into(),
+                why: "is turned off".into(),
+            }],
+            ..status.clone()
+        };
+        assert_eq!(
+            off.notice().as_deref(),
+            Some("Acme Effects is turned off: acme.glow is bypassed on 4 layers (and 1 more)")
         );
         let newer = ViewerStatus {
             missing_effects: vec![pm_render::effects::versions::MissingEffect {

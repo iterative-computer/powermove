@@ -358,11 +358,9 @@ impl DefinitionsPending {
     /// every extension still loading when one isn't so named.
     pub(crate) fn new(effects: &[&str], loading: &[(String, String)]) -> Self {
         let owner = |effect: &str| {
-            loading.iter().find(|(id, _)| {
-                effect
-                    .strip_prefix(id.as_str())
-                    .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
-            })
+            loading
+                .iter()
+                .find(|(id, _)| crate::resources::provides(id, effect))
         };
         let mut names: Vec<&str> = vec![];
         let all_owned = effects.iter().all(|effect| owner(effect).is_some());
