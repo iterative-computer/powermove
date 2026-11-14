@@ -877,8 +877,31 @@ impl SurfaceView {
     #[cfg(debug_assertions)]
     pub fn review_send(&mut self, semantic: &str, event: &str, cx: &mut Context<Self>) {
         // `semantic=<json>` carries a value (a pop-up's choice, a switch's state).
+        // A link carries spaces and quotes percent-encoded (`="Make%20it%20so"`).
+        let decode = |value: &str| {
+            let bytes = value.as_bytes();
+            let mut out = Vec::with_capacity(bytes.len());
+            let mut i = 0;
+            while i < bytes.len() {
+                let hex = bytes
+                    .get(i + 1..i + 3)
+                    .and_then(|h| std::str::from_utf8(h).ok())
+                    .and_then(|h| u8::from_str_radix(h, 16).ok());
+                match (bytes[i], hex) {
+                    (b'%', Some(byte)) => {
+                        out.push(byte);
+                        i += 3;
+                    }
+                    (byte, _) => {
+                        out.push(byte);
+                        i += 1;
+                    }
+                }
+            }
+            String::from_utf8_lossy(&out).into_owned()
+        };
         let (semantic, value) = match semantic.split_once('=') {
-            Some((semantic, value)) => (semantic, serde_json::from_str(value).ok()),
+            Some((semantic, value)) => (semantic, serde_json::from_str(&decode(value)).ok()),
             None => (semantic, None),
         };
         let id = self
@@ -1664,6 +1687,20 @@ impl SurfaceView {
                 element.flex_1()
             };
             element = element.min_h(px(0.)).track_scroll(scroll);
+            // `metadata.scrollAnchor: "end"` (a conversation): a scroller that
+            // was at its end stays there as content grows; once scrolled up,
+            // it stays where the person left it.
+            let follows = self
+                .publication
+                .surface
+                .node(id)
+                .and_then(|n| n.props.get("metadata"))
+                .and_then(|m| m.get("scrollAnchor"))
+                .and_then(|a| a.as_str())
+                == Some("end");
+            if follows && scroll.offset().y <= -scroll.max_offset().y + px(1.) {
+                scroll.scroll_to_bottom();
+            }
             if node.scroll_y {
                 element = element.overflow_y_scroll();
             }
@@ -2325,27 +2362,31 @@ impl SurfaceView {
                 }
                 element = element.child(chip);
             }
-            Kit::Progress(value) => {
+            Kit::Progress(None) => {
+                let tokens = t.clone();
+                element = element.child(if t.accessibility.reduce_motion {
+                    pm_shell::welcome_view::spinner(0., &tokens).into_any_element()
+                } else {
+                    div()
+                        .flex_none()
+                        .with_animation(
+                            "progress",
+                            Animation::new(std::time::Duration::from_secs(1)).repeat(),
+                            move |this, turn| {
+                                this.child(pm_shell::welcome_view::spinner(turn as f64, &tokens))
+                            },
+                        )
+                        .into_any_element()
+                });
+            }
+            Kit::Progress(Some(value)) => {
                 let track = div()
                     .h(px(t.metrics.inner_radius))
                     .w_full()
                     .rounded(px(t.metrics.inner_radius / 2.))
                     .overflow_hidden()
-                    .bg(rgb(t.colors.field));
-                let track = match value {
-                    Some(value) => {
-                        track.child(div().h_full().w(relative(*value)).bg(rgb(t.colors.accent)))
-                    }
-                    None => track.child(
-                        div().size_full().bg(rgb(t.colors.muted)).with_animation(
-                            "progress",
-                            Animation::new(std::time::Duration::from_secs(1))
-                                .repeat()
-                                .with_easing(pulsating_between(0.3, 1.)),
-                            |this, delta| this.opacity(delta),
-                        ),
-                    ),
-                };
+                    .bg(rgb(t.colors.field))
+                    .child(div().h_full().w(relative(*value)).bg(rgb(t.colors.accent)));
                 element = element.child(track);
             }
             Kit::Gizmo {
