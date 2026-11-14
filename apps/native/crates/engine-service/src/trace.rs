@@ -39,6 +39,9 @@ pub struct Trace {
     pub enter_ms: f64,
     pub disk_upload_ms: f64,
     pub gpu_ok: bool,
+    /// The frame's own stills exceeded the image grant: their bytes and the
+    /// grant (an over-budget frame; kept while it drew).
+    pub images_over: Option<(u64, u64)>,
 }
 pub fn now() -> f64 {
     objc2_quartz_core::CACurrentMediaTime()

@@ -355,6 +355,9 @@ impl Exec<'_> {
                 layer: draw.layer.clone(),
                 message,
             }),
+            // The media cache marked the frame: it is held, not drawn
+            // without the layer.
+            MediaFailure::Pending => {}
         }
     }
 
