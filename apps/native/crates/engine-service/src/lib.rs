@@ -1695,9 +1695,6 @@ struct Runtime {
     /// A clock that stops on its own still owes the exact stopped frame.
     was_playing: bool,
     auto: policy::AutoQuality,
-    /// A playing frame at reduced resolution was just held for extension
-    /// layers (Auto plays the next at full resolution).
-    held_for_overrides: bool,
     /// A transient refusal: draw again no earlier than this.
     not_before: f64,
     /// Frames in a row the layer gave no drawable (`nextDrawable` returned
@@ -2824,7 +2821,6 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                     full_for: None,
                     was_playing: false,
                     auto: Default::default(),
-                    held_for_overrides: false,
                     not_before: 0.,
                     drawable_misses: 0,
                     refusals: 0,
@@ -3127,11 +3123,6 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             let budget = frame.max(interval);
             let full = FrameSpec::paused_full_scale(&scene, &v.config.output);
             let settling = r.full_for == Some(v.stamp);
-            // Extension layers ahead play at full resolution (Auto).
-            r.auto.overrides(
-                engine.compat().is_some_and(|s| s.overrides_ahead()) || r.held_for_overrides,
-            );
-            r.held_for_overrides = false;
             let quality = if capture {
                 1.
             } else {
@@ -3624,14 +3615,6 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                                 },
                             )
                         });
-                        if spec.moment == Moment::Playing && pending.is_some() && spec.scale < 1. {
-                            // Override answers are per resolution: at a
-                            // reduced one there is no earlier answer to draw
-                            // these layers from, so playback goes back to full.
-                            if let Some(r) = runtime.get_mut(&id) {
-                                r.held_for_overrides = true;
-                            }
-                        }
                         if spec.moment == Moment::Playing && pending.is_some() {
                             // A playing frame held for its override layers
                             // is gone by when they land: the realm is asked
