@@ -357,7 +357,7 @@ impl EngineJobs {
         look: bool,
         preview: bool,
         studio_quality: Option<serde_json::Value>,
-        studio_render_scale:Option<f32>,
+        studio_render_scale: Option<f32>,
         resources: Resources,
     ) -> AnyResult<ExportHandle> {
         let media = crate::media::for_session(
@@ -403,6 +403,32 @@ impl EngineJobs {
         ExportHandle::start_scheduled(&self.executable, session, self.activity.clone())
     }
 }
+/// An agent's export as the Export sheet's options: today's defaults, with
+/// the sheet's options the agent gave laid over them, checked by the same
+/// planner as a person's export.
+fn sheet_options(
+    project: &serde_json::Value,
+    agent: &pm_mcp::services::VideoOptions,
+) -> Result<pm_promedia::export_panel::Options> {
+    let mut sheet = json!({
+        "format": agent.format,
+        "scale": 1,
+        "width": project["w"],
+        "height": project["h"],
+        "fps": project["fps"],
+        "range": agent.range,
+        "quality": "high",
+        "mblur": agent.motion_blur,
+        "audio": agent.audio,
+        "alpha": agent.alpha,
+        "captionsBurn": false,
+        "captionsSidecar": "none",
+    });
+    for (key, value) in &agent.sheet {
+        sheet[key] = value.clone();
+    }
+    pm_builtins::delivery::options(&sheet).map_err(Error::invalid)
+}
 fn failed(error: impl std::fmt::Display) -> Error {
     Error {
         code: "export_failed".into(),
@@ -442,21 +468,7 @@ impl ExportChild for EngineJobs {
         let frozen = &request.snapshot;
         let published = self.published(frozen)?;
         let project = &frozen.project;
-        let options = pm_builtins::delivery::options(&json!({
-            "format": request.options.format,
-            "scale": 1,
-            "width": project["w"],
-            "height": project["h"],
-            "fps": project["fps"],
-            "range": request.options.range,
-            "quality": "high",
-            "mblur": request.options.motion_blur,
-            "audio": request.options.audio,
-            "alpha": request.options.alpha,
-            "captionsBurn": false,
-            "captionsSidecar": "none",
-        }))
-        .map_err(Error::invalid)?;
+        let options = sheet_options(project, &request.options)?;
         let time = project["time"].as_f64().unwrap_or(0.);
         let plan = pm_builtins::delivery::plan(&published.snapshot, &options, time)
             .map_err(Error::invalid)?;
@@ -536,7 +548,24 @@ impl ExportChild for EngineJobs {
             task.finish(Err("cancelled".into()));
             return Err(cancelled());
         }
-        let result = finish(handle);
+        let result = finish(handle).and_then(|path| {
+            // Caption files beside the video, as a person's export writes them.
+            let sidecar = match options.captions_sidecar.as_str() {
+                "srt" => Some(pm_captions::CaptionFormat::Srt),
+                "vtt" => Some(pm_captions::CaptionFormat::Vtt),
+                _ => None,
+            };
+            if let Some(format) = sidecar.filter(|_| plan.captions > 0) {
+                crate::export_coordinator::write_sidecars(
+                    &published,
+                    &options.range,
+                    format,
+                    &path,
+                )
+                .map_err(failed)?;
+            }
+            Ok(path)
+        });
         task.finish(result.as_ref().map(|_| ()).map_err(|e| e.message.clone()));
         result
     }
@@ -1258,13 +1287,21 @@ impl EngineHook for EngineJobs {
     fn capture(&self, _: &CaptureRequest) -> Result<Value> {
         Err(Error::invalid("Frame capture needs a frozen project"))
     }
-    fn scene3d_assets(&self, frozen: &FrozenProject) -> Result<Arc<dyn pm_scene3d::geometry::AssetGeometry>> {
+    fn scene3d_assets(
+        &self,
+        frozen: &FrozenProject,
+    ) -> Result<Arc<dyn pm_scene3d::geometry::AssetGeometry>> {
         let published = self.published(frozen)?;
         let media = crate::media::for_session(
-            &published.snapshot, &published.media, published.path.as_deref(),
+            &published.snapshot,
+            &published.media,
+            published.path.as_deref(),
             &crate::media::cache_root(&self.profile),
-        ).map_err(failed)?;
-        Ok(Arc::new(pm_scene3d::geometry::FileAssets::new(media.catalog.originals.into_iter().collect())))
+        )
+        .map_err(failed)?;
+        Ok(Arc::new(pm_scene3d::geometry::FileAssets::new(
+            media.catalog.originals.into_iter().collect(),
+        )))
     }
     fn capture_snapshot(&self, request: &CaptureRequest, frozen: &FrozenProject) -> Result<Value> {
         let published = self.published(frozen)?;
@@ -1595,6 +1632,83 @@ fn decibels(level: f64) -> f64 {
 mod tests {
     use super::*;
     use pm_engine_service::resources::ResourceSnapshot;
+
+    /// Every Export sheet option an agent gives reaches the export as the
+    /// sheet sets it; absent ones keep today's defaults.
+    #[test]
+    fn an_agents_export_options_are_the_sheets() {
+        use pm_promedia::export_panel::{
+            AudioCoding, Codec, ColorTag, DynamicRange, Profile, Scale,
+        };
+        let project = json!({"w": 1920, "h": 1080, "fps": 29.97});
+        let agent = |args: Value| {
+            let options = pm_mcp::services::VideoOptions::parse(&args).unwrap();
+            sheet_options(&project, &options)
+        };
+        let plain = agent(json!({})).unwrap();
+        assert_eq!(
+            (plain.scale.clone(), plain.width, plain.height, plain.fps),
+            (Scale::Preset(1.), 1920, 1080, 29.97)
+        );
+        assert_eq!(
+            (plain.quality.as_str(), plain.range.as_str()),
+            ("high", "all")
+        );
+        assert!(!plain.use_proxies && !plain.captions_burn);
+        let prores = agent(json!({
+            "format": "prores",
+            "profile": "422hq",
+            "colorTag": "rec709",
+            "timecode": "01:00:00;00",
+            "audioCoding": "pcmFloat",
+            "fps": 23.976,
+            "useProxies": true,
+            "captionsBurn": true,
+            "captionsSidecar": "vtt",
+            "dynamicRange": "hlg",
+            "scale": "custom",
+            "width": 1280,
+            "height": 720,
+            "motionBlur": false,
+            "range": "work",
+        }))
+        .unwrap();
+        assert_eq!(prores.profile, Profile::Hq);
+        assert_eq!(prores.color_tag, ColorTag::Rec709);
+        assert_eq!(prores.timecode, "01:00:00;00");
+        assert_eq!(prores.audio_coding, AudioCoding::PcmFloat);
+        assert_eq!(prores.fps, 23.976);
+        assert!(prores.use_proxies && prores.captions_burn && !prores.mblur);
+        assert_eq!(prores.captions_sidecar, "vtt");
+        assert_eq!(prores.dynamic_range, DynamicRange::Hlg);
+        assert_eq!(
+            (
+                prores.scale,
+                prores.width,
+                prores.height,
+                prores.range.as_str()
+            ),
+            (Scale::Custom("custom".into()), 1280, 720, "work")
+        );
+        let mp4 = agent(json!({"codec": "hevc", "quality": "draft", "scale": 0.5})).unwrap();
+        assert_eq!(
+            (mp4.codec, mp4.quality.as_str(), mp4.scale),
+            (Codec::Hevc, "draft", Scale::Preset(0.5))
+        );
+        // A choice the sheet does not offer is refused, as the sheet would.
+        assert!(agent(json!({"quality": "best"})).is_err());
+        let refused = pm_mcp::services::VideoOptions::parse(&json!({"width": 1280})).unwrap_err();
+        assert!(
+            refused.message.contains("custom size"),
+            "{}",
+            refused.message
+        );
+        let refused = pm_mcp::services::VideoOptions::parse(
+            &json!({"format": "prores", "profile": "422", "alpha": true}),
+        )
+        .unwrap_err();
+        assert!(refused.message.contains("4444"), "{}", refused.message);
+    }
     /// A capture's pin from its window alone (production adds the pageless
     /// host for a project with no window).
     fn window_pin(

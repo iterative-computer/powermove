@@ -87,8 +87,29 @@ pub struct VideoOptions {
     pub motion_blur: bool,
     pub alpha: bool,
     pub studio_quality: Option<Value>,
-    pub studio_render_scale:Option<f32>,
+    pub studio_render_scale: Option<f32>,
+    /// The Export sheet's own options an agent gave, under the sheet's
+    /// names: laid over this export's defaults and checked by the same
+    /// planner as a person's export.
+    pub sheet: serde_json::Map<String, Value>,
 }
+/// The Export sheet's options an agent gives under the sheet's own names.
+pub const SHEET_OPTIONS: [&str; 14] = [
+    "profile",
+    "codec",
+    "quality",
+    "scale",
+    "width",
+    "height",
+    "fps",
+    "dynamicRange",
+    "colorTag",
+    "timecode",
+    "audioCoding",
+    "useProxies",
+    "captionsBurn",
+    "captionsSidecar",
+];
 impl VideoOptions {
     pub fn parse(a: &Value) -> Result<Self> {
         let format = a["format"].as_str().unwrap_or("mp4").to_owned();
@@ -96,10 +117,38 @@ impl VideoOptions {
         if alpha && format != "prores" {
             return Err(Error::invalid("Transparent video requires ProRes."));
         }
-        let studio_render_scale=a.get("studioRenderScale").map(|v|
-            v.as_f64().filter(|v|v.is_finite() && *v>0. && *v<=1.).map(|v|v as f32).filter(|v|*v>0.)
-                .ok_or_else(||Error::invalid("Studio render scale must be greater than zero and at most one"))
-        ).transpose()?;
+        if alpha && !a["profile"].as_str().unwrap_or("4444").starts_with("4444") {
+            return Err(Error::invalid(
+                "Transparent video requires ProRes 4444 or 4444 XQ.",
+            ));
+        }
+        let sheet: serde_json::Map<String, Value> = SHEET_OPTIONS
+            .iter()
+            .filter_map(|k| a.get(*k).map(|v| ((*k).to_owned(), v.clone())))
+            .collect();
+        let sized = sheet.contains_key("width") || sheet.contains_key("height");
+        let custom = sheet.get("scale").and_then(Value::as_str) == Some("custom");
+        if (sized || custom) && !(custom || !sheet.contains_key("scale"))
+            || (sized || custom) && !(sheet.contains_key("width") && sheet.contains_key("height"))
+        {
+            return Err(Error::invalid(
+                "A custom size takes scale \"custom\" with both width and height.",
+            ));
+        }
+        let studio_render_scale = a
+            .get("studioRenderScale")
+            .map(|v| {
+                v.as_f64()
+                    .filter(|v| v.is_finite() && *v > 0. && *v <= 1.)
+                    .map(|v| v as f32)
+                    .filter(|v| *v > 0.)
+                    .ok_or_else(|| {
+                        Error::invalid(
+                            "Studio render scale must be greater than zero and at most one",
+                        )
+                    })
+            })
+            .transpose()?;
         Ok(Self {
             name: a["name"].as_str().map(str::to_owned),
             format,
@@ -109,6 +158,7 @@ impl VideoOptions {
             alpha,
             studio_quality: a.get("studioQuality").cloned(),
             studio_render_scale,
+            sheet,
         })
     }
 }

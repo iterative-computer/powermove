@@ -515,15 +515,16 @@ struct TaskAdmission<'a> {
 /// Caption files beside the exported video (today's delivery sidecars):
 /// "Film.mp4" gets "Film.srt", or "Film.en.srt", "Film.fr.srt" with several
 /// captions layers, in times from the start of the exported range.
-fn write_sidecars(
-    frozen: &Frozen,
+pub(crate) fn write_sidecars(
+    publication: &pm_kernel::Published,
+    exported_range: &str,
     format: pm_captions::CaptionFormat,
     video: &std::path::Path,
-) -> Result<(), Failure> {
-    let Some(doc) = crate::captions_panel::read(&frozen.publication) else {
+) -> Result<(), String> {
+    let Some(doc) = crate::captions_panel::read(publication) else {
         return Ok(());
     };
-    let range = match doc.work.filter(|_| frozen.options.range == "work") {
+    let range = match doc.work.filter(|_| exported_range == "work") {
         Some(work) => work,
         None => [0., doc.duration],
     };
@@ -598,8 +599,13 @@ async fn execute_inner(
         .get("studioQuality")
         .filter(|q| q.as_str().is_some_and(|q| q != "composition"))
         .cloned();
-    request.studio_render_scale=frozen.options.opaque.get("studioReducedSize")
-        .and_then(serde_json::Value::as_bool).filter(|v|*v).map(|_|0.75);
+    request.studio_render_scale = frozen
+        .options
+        .opaque
+        .get("studioReducedSize")
+        .and_then(serde_json::Value::as_bool)
+        .filter(|v| *v)
+        .map(|_| 0.75);
     let mut session = pm_engine_service::jobs::JobSession::new(request);
     // Its raster overrides answer from this publication, whatever is edited meanwhile.
     if let Some(overrides) = engine.overrides {
@@ -648,7 +654,12 @@ async fn execute_inner(
                         .path
                         .ok_or("Export completed without an output path")?;
                     if let Some(format) = sidecar {
-                        write_sidecars(frozen, format, std::path::Path::new(&path))?;
+                        write_sidecars(
+                            &frozen.publication,
+                            &frozen.options.range,
+                            format,
+                            std::path::Path::new(&path),
+                        )?;
                     }
                     Ok(path)
                 }
@@ -675,7 +686,8 @@ async fn execute_inner(
             json!({"phase":"checking","frame":checked,"total":planned.frames,"elapsed":started.elapsed().as_secs_f64()})
         } else if status.state == JobState::Running {
             let elapsed = started.elapsed().as_secs_f64();
-            let mut run = json!({"phase":"rendering","frame":frame,"total":planned.frames,"elapsed":elapsed});
+            let mut run =
+                json!({"phase":"rendering","frame":frame,"total":planned.frames,"elapsed":elapsed});
             // The sheet says "About N min left" from the pace so far (it
             // waits for a few frames before trusting it).
             if frame > 0 && frame < planned.frames {
