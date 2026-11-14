@@ -346,9 +346,10 @@ function Layer({
 }) {
   // As v1: every row keeps its switches' columns at its trailing edge, so
   // names truncate at the same place on every row and nothing moves under
-  // the pointer. Visibility and the parent link always show; Shy, Solo and
-  // Lock show when set, or under the pointer, keyboard focus or a single
-  // selected layer.
+  // the pointer. Visibility and the parent link always show; Lock shows
+  // when set, or under the pointer, keyboard focus or a single selected
+  // layer. Shy and Solo are the Layer menu's and the row menu's (the owner
+  // took their row buttons out).
   const show = row.hovered || row.focused || (row.selected && single);
   // In column order, the last at the row's trailing edge.
   const switches = [
@@ -364,22 +365,6 @@ function Layer({
           },
         ]
       : []),
-    {
-      name: "shy" as const,
-      on: row.shy === true,
-      label: "Toggle Shy",
-      symbol: row.shy ? "face.dashed.fill" : "face.dashed",
-      active: row.shy === true,
-      always: false,
-    },
-    {
-      name: "solo" as const,
-      on: row.solo,
-      label: "Toggle Solo",
-      symbol: row.solo ? "s.circle.fill" : "s.circle",
-      active: row.solo,
-      always: false,
-    },
     {
       name: "lock" as const,
       on: row.locked,
@@ -495,6 +480,9 @@ function Layer({
             // host carries an event to the newest tree only by its id.
             id={`timeline:name:${row.id}`}
             title={row.label}
+            // v1: dragging a name reorders the layer (the native surface
+            // takes the gesture past its threshold; a click still selects).
+            metadata={{ timelineLayerDrag: { layer: row.layer } }}
             style={{
               ...text,
               flexGrow: 1,

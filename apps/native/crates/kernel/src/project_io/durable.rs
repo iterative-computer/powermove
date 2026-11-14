@@ -116,7 +116,81 @@ pub struct FileVersion {
     /// while open), so the session can follow it and its embedded media can
     /// still be copied out. Not part of the version's identity.
     pub held: Option<Arc<HeldFile>>,
+    /// The wall clock (ns) sampled before the reads this version was made
+    /// from (an open's first read, a save's last stat). Not part of the
+    /// version's identity.
+    pub(crate) stat_taken: i64,
 }
+
+/// The wall clock in ns since the epoch (0 if before it).
+pub(crate) fn wall_ns() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos() as i64)
+}
+
+/// The tick of a volume whose timestamps carry nanoseconds (APFS: distinct
+/// stamps for writes ~4 µs apart, measured 2026-11-14), with margin.
+const FINE_TICK_NS: i128 = 10_000;
+
+/// Whether a file's timestamps have fine resolution: at least one of them
+/// is not a whole number of microseconds. Stamps that are whole seconds,
+/// milliseconds or microseconds (HFS+, FAT, exFAT, many network and sync
+/// volumes) are coarse, and so are stamps that cannot be told apart from
+/// coarse ones.
+pub(crate) fn fine_timestamps(stat: &FileStat) -> bool {
+    #[cfg(test)]
+    if test_hooks::coarse(&stat_key(stat)) {
+        return false;
+    }
+    stat.mtime_ns % 1_000 != 0 || stat.ctime_ns % 1_000 != 0
+}
+
+#[cfg(test)]
+fn stat_key(stat: &FileStat) -> (u64, u64) {
+    (stat.dev, stat.ino)
+}
+
+/// Test-only: files treated as on a coarse-timestamp volume, and how often
+/// a clean save read a file to prove its bytes.
+#[cfg(test)]
+pub(crate) mod test_hooks {
+    use std::collections::{HashMap, HashSet};
+    use std::sync::Mutex;
+    static COARSE: Mutex<Option<HashSet<(u64, u64)>>> = Mutex::new(None);
+    static READS: Mutex<Option<HashMap<std::path::PathBuf, usize>>> = Mutex::new(None);
+    pub(crate) fn treat_as_coarse(stat: &super::FileStat) {
+        COARSE
+            .lock()
+            .unwrap()
+            .get_or_insert_with(Default::default)
+            .insert(super::stat_key(stat));
+    }
+    pub(crate) fn coarse(key: &(u64, u64)) -> bool {
+        COARSE
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|c| c.contains(key))
+    }
+    pub(crate) fn note_read(path: &std::path::Path) {
+        *READS
+            .lock()
+            .unwrap()
+            .get_or_insert_with(Default::default)
+            .entry(path.to_owned())
+            .or_default() += 1;
+    }
+    pub(crate) fn reads(path: &std::path::Path) -> usize {
+        READS
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|r| r.get(path).copied())
+            .unwrap_or(0)
+    }
+}
+
 impl PartialEq for FileVersion {
     fn eq(&self, other: &Self) -> bool {
         self.path == other.path && self.stat == other.stat && self.hash == other.hash
@@ -183,9 +257,22 @@ pub(crate) fn lstat_file(path: &Path) -> Result<Option<FileStat>, ProjectIoError
 }
 
 impl FileVersion {
+    /// Whether finding this exact stat on the file later proves it still
+    /// holds this version's bytes (git's rule for racily clean files): only
+    /// on a volume whose timestamps have fine resolution, and only when the
+    /// clock was sampled after the tick of the newest stamp, before the
+    /// reads the version was made from. On a coarse volume another writer
+    /// can rewrite the file in place within one stamp and leave identity,
+    /// size and times equal, so nothing but the bytes proves them.
+    pub fn stat_proves_content(&self) -> bool {
+        let newest = self.stat.mtime_ns.max(self.stat.ctime_ns);
+        fine_timestamps(&self.stat) && self.stat_taken as i128 - newest > FINE_TICK_NS
+    }
+
     /// `fileVersion`: stats and hashes `path`, refusing a file that changes
     /// while it is being hashed. `Ok(None)` when nothing is there.
     pub fn read(path: &Path) -> Result<Option<FileVersion>, ProjectIoError> {
+        let taken = wall_ns();
         let Some(info) = lstat_file(path)? else {
             return Ok(None);
         };
@@ -205,6 +292,7 @@ impl FileVersion {
             stat: info,
             hash,
             held: Some(HeldFile::new(file)),
+            stat_taken: taken,
         }))
     }
 
@@ -255,6 +343,7 @@ impl FileVersion {
         let Some(path) = self.held.as_ref().and_then(|held| held.current_path()) else {
             return Ok(None);
         };
+        let taken = wall_ns();
         let Some(at) = lstat_file(&path).ok().flatten() else {
             return Ok(None);
         };
@@ -270,6 +359,7 @@ impl FileVersion {
             stat: at,
             hash: self.hash.clone(),
             held: self.held.clone(),
+            stat_taken: taken,
         }))
     }
 
@@ -1603,6 +1693,8 @@ fn private_sibling(entry: &str, name: &str, suffix: &str) -> bool {
 pub(crate) struct Installed {
     pub file: File,
     pub stat: FileStat,
+    /// The wall clock sampled before `stat` was taken.
+    pub taken: i64,
 }
 
 /// The file `destination` names now, opened, if it is the file a save just
@@ -1620,6 +1712,7 @@ fn installed_at(
 ) -> Option<Installed> {
     let named = lstat_file(destination).ok().flatten()?;
     let file = File::open(destination).ok()?;
+    let taken = wall_ns();
     let stat = stat_of(&file.metadata().ok()?);
     if !stat.same_identity(&named) {
         return None;
@@ -1630,7 +1723,7 @@ fn installed_at(
         || (stat.size == size
             && hash_reader(&file, destination).is_ok_and(|h| hex(&h.finalize()) == new_hash)
             && file.metadata().is_ok_and(|after| stat_of(&after) == stat));
-    ours.then_some(Installed { file, stat })
+    ours.then_some(Installed { file, stat, taken })
 }
 
 /// After the install: the path must hold the file just installed, and the
@@ -3300,4 +3393,45 @@ mod tests {
         assert_eq!(a.len(), 36);
         assert_eq!(&a[14..15], "4");
     }
+}
+
+/// Review w31 clean save, finding 3: an equal stat proves a version's bytes
+/// only on a volume with fine timestamps, sampled after the newest stamp's
+/// tick; on a coarse volume never, however old the sample.
+#[cfg(test)]
+#[test]
+fn a_stat_proves_content_only_with_fine_stamps_after_their_tick() {
+    let version = |mtime: i128, ctime: i128, taken: i128| FileVersion {
+        path: PathBuf::new(),
+        stat: FileStat {
+            dev: 1,
+            ino: 1,
+            size: 1,
+            mode: 0,
+            uid: 0,
+            gid: 0,
+            mtime_ns: mtime,
+            ctime_ns: ctime,
+        },
+        hash: String::new(),
+        held: None,
+        stat_taken: taken as i64,
+    };
+    let s = 1_000_000_000i128;
+    // Coarse stamps (whole seconds, milliseconds, microseconds): never,
+    // even sampled long after.
+    let t = 1_794_000_000 * s;
+    for coarse in [t, t + 125_000_000, t + 123_456_000] {
+        assert!(!version(coarse, coarse, coarse + 3600 * s).stat_proves_content());
+    }
+    // Nanosecond stamps (APFS): after a 10 µs tick.
+    let f = t + 123_456_789;
+    assert!(!version(f, f, f + 5_000).stat_proves_content());
+    assert!(version(f, f, f + 20_000).stat_proves_content());
+    // The newer stamp counts; one fine stamp makes the volume fine.
+    assert!(!version(f - s, f, f + 5_000).stat_proves_content());
+    assert!(version(t, f, f + 20_000).stat_proves_content());
+    // Sampled before the stamps (a clock set back) or unknown: never.
+    assert!(!version(f, f, f - s).stat_proves_content());
+    assert!(!version(f, f, 0).stat_proves_content());
 }

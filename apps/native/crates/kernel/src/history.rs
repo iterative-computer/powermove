@@ -169,6 +169,17 @@ impl StoredOps {
 }
 
 /// One undoable step.
+/// The undo history a save writes, by step: the ids of the document steps
+/// in order, redo steps included, and how many are applied. A record is
+/// never changed in place and its id is never reused, so equal steps are
+/// an equal saved history; any new, dropped or trimmed step, or a moved
+/// cursor, is a different one.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SavedSteps {
+    ids: Vec<u64>,
+    applied: usize,
+}
+
 #[derive(Clone, Debug)]
 pub struct HistoryRecord {
     /// Unique for the process, never reused. Also names the document state
@@ -969,6 +980,22 @@ impl History {
             )));
         }
         pm_model::hash::sha256_hex(text.as_bytes())
+    }
+
+    /// The steps a save writes, by identity: see [`SavedSteps`].
+    pub(crate) fn saved_steps(&self) -> SavedSteps {
+        SavedSteps {
+            ids: self
+                .entries
+                .iter()
+                .filter(|r| r.is_document())
+                .map(|r| r.id)
+                .collect(),
+            applied: self.entries[..self.cursor]
+                .iter()
+                .filter(|r| r.is_document())
+                .count(),
+        }
     }
 
     /// A copy for a save on another thread (records are shared, not copied).

@@ -508,7 +508,8 @@ mod tests {
         let path = dir.path(name);
         let mut store = DocumentStore::new_untitled(project);
         let mut plan = plan(&mut store, &path);
-        plan.history = super::super::HistoryToWrite::Raw(history);
+        plan.history =
+            super::super::HistoryToWrite::Raw(crate::history::CompactJson::new(&history));
         let before = to_canonical_string(store.root().unwrap());
         run(&mut store, plan);
         assert_eq!(to_canonical_string(store.root().unwrap()), before);
@@ -611,6 +612,19 @@ mod tests {
             r#"{"type":"future-layer","object":{"material":{"p":{"clearcoat":1}}},"requiresEngine":"not-project-metadata"}"#,
         );
         let path = save(&dir, "opaque-extension.pmv", project(&layer), Value::Null);
+        assert_marked(&path, false);
+        cases.push((path, false));
+        // An export frame rate the person chose: its record is the Export
+        // sheet's, kept across save and reopen, and nothing a reader needs.
+        let mut chosen = project(r#"{"id":"L","type":"text"}"#);
+        chosen.as_object_mut().unwrap().insert(
+            "exportDefaults",
+            parse(
+                r#"{"format":"mp4","scale":1,"fps":30,"fpsChosen":true,"range":"work","quality":"high","mblur":true,"audio":true,"alpha":false}"#,
+            )
+            .unwrap(),
+        );
+        let path = save(&dir, "chosen-export-rate.pmv", chosen, Value::Null);
         assert_marked(&path, false);
         cases.push((path, false));
         oracle(&cases);
@@ -930,7 +944,10 @@ mod tests {
             .unwrap();
         // Explicitly clear history in the frozen plan. Otherwise Undo of the
         // replace still needs the original future layer and must keep its guard.
-        failed.history = super::super::HistoryToWrite::Raw(Value::Null);
+        failed.history =
+            super::super::HistoryToWrite::Raw(crate::history::CompactJson::new(&Value::Null));
+        // The store is clean: these hand-edited plans must write, not skip.
+        failed.unchanged = None;
         assert!(
             std::thread::spawn(move || failed.run())
                 .join()
@@ -941,7 +958,9 @@ mod tests {
         let mut append = store
             .prepare_save(SaveTarget::InPlace, SaveOptions::default())
             .unwrap();
-        append.history = super::super::HistoryToWrite::Raw(Value::Null);
+        append.history =
+            super::super::HistoryToWrite::Raw(crate::history::CompactJson::new(&Value::Null));
+        append.unchanged = None;
         assert_eq!(run(&mut store, append), SaveLayout::Appended);
         assert_marked(&path, false);
         let mut compact = store
@@ -953,7 +972,9 @@ mod tests {
                 },
             )
             .unwrap();
-        compact.history = super::super::HistoryToWrite::Raw(Value::Null);
+        compact.history =
+            super::super::HistoryToWrite::Raw(crate::history::CompactJson::new(&Value::Null));
+        compact.unchanged = None;
         assert_eq!(run(&mut store, compact), SaveLayout::Compacted);
         assert_marked(&path, false);
         oracle(&[(path, false)]);

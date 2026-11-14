@@ -235,7 +235,7 @@ fn win(id: u64, tab: Option<u64>) -> WindowState {
 }
 
 #[test]
-fn session_restores_windows_tabs_and_respects_close_windows_on_quit() {
+fn session_restores_one_window_per_tab_group_and_respects_close_windows_on_quit() {
     let mut s = Session::default();
     s.upsert(win(1, None));
     s.upsert(win(2, Some(1)));
@@ -243,11 +243,18 @@ fn session_restores_windows_tabs_and_respects_close_windows_on_quit() {
     s.upsert(win(4, Some(1)));
     s.key = Some(3);
     assert_eq!(s.next_id(), 5);
+    // One project per window: a session saved with window tabs (an earlier
+    // version) reopens one window per tab group, untabbed, showing the
+    // group's first project when the key window was elsewhere ...
     let all = s.restore_plan(true);
-    assert_eq!(all.len(), 4);
-    // Leaders before their tabs.
-    let pos = |id| all.iter().position(|w| w.id == id).unwrap();
-    assert!(pos(1) < pos(2) && pos(1) < pos(4));
+    assert_eq!(all.iter().map(|w| w.id).collect::<Vec<_>>(), [1, 3]);
+    assert!(all.iter().all(|w| w.tab_group.is_none()));
+    // ... and the project that was in front when the key window was a tab.
+    let mut front = s.clone();
+    front.key = Some(4);
+    let plan = front.restore_plan(true);
+    assert_eq!(plan.iter().map(|w| w.project.as_str()).collect::<Vec<_>>(), ["p4", "p3"]);
+    assert!(plan.iter().all(|w| w.tab_group.is_none()));
     // "Close windows when quitting": only the key window, untabbed.
     let one = s.restore_plan(false);
     assert_eq!(one.len(), 1);
@@ -358,10 +365,12 @@ fn display_only_menu_items_carry_the_old_apps_registry_shortcuts() {
         let item = all.iter().find(|i| i.command == command).unwrap();
         assert_eq!(menu::accelerator(&item.chord), menu::accelerator(chord));
     }
-    // Window-tab, workspace and panel menus exist (HIG placement). The
-    // toolbar draws the project tabs, so there is no Show Tab Bar item.
-    assert!(all.iter().all(|i| i.command != "toggleTabBar:"));
-    for c in ["newTab", "mergeAllWindows:", "panels", "workspaces"] {
+    // Workspace and panel menus exist (HIG placement). One project per
+    // window: no window tabs, so no tab items at all.
+    for c in ["toggleTabBar:", "newTab", "mergeAllWindows:", "nextTab", "moveTabToNewWindow"] {
+        assert!(all.iter().all(|i| i.command != c), "{c}");
+    }
+    for c in ["panels", "workspaces"] {
         assert!(all.iter().any(|i| i.command == c), "{c}");
     }
 }
@@ -420,4 +429,29 @@ fn palette_ranks_prefix_word_substring_then_subsequence() {
     assert_eq!(rank("Timeline", "line"), Some(2));
     assert_eq!(rank("Save Layout…", "lay"), Some(1));
     assert_eq!(rank("Zoom", "q"), None);
+}
+
+/// The project name's menu in the bar: every project job, Recent by name
+/// only (the project shown left out, five at most), Close Project last.
+#[test]
+fn the_project_menu_holds_every_project_job_and_names_recent_projects() {
+    let recent: Vec<(String, String)> = (0..8)
+        .map(|i| (format!("id{i}"), format!("Film {i}")))
+        .collect();
+    let entries = pm_shell::project_menu_entries("Film 1", &recent);
+    let labels: Vec<&str> = entries.iter().map(|e| e.label.as_str()).collect();
+    assert_eq!(
+        labels,
+        [
+            "Home", "Open…", "New Project", "New Window", "", "Recent", "Film 0", "Film 2",
+            "Film 3", "Film 4", "Film 5", "", "Rename Project…", "Show in Finder", "",
+            "Close Project",
+        ]
+    );
+    assert!(!entries[5].enabled, "Recent is a heading");
+    assert_eq!(entries[7].command, "openRecentProject:id2");
+    assert_eq!(entries.last().unwrap().command, "closeTab");
+    // No recent projects: no Recent heading.
+    let bare = pm_shell::project_menu_entries("Film", &[]);
+    assert!(bare.iter().all(|e| e.label != "Recent"));
 }

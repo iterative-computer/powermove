@@ -375,6 +375,53 @@ fn set_composition_clamps_like_the_old_command() {
     assert_eq!(e.to_string(), "Color depth must be 8, 16, or 32");
 }
 
+/// The export frame rate follows the composition's while nobody chose it
+/// (v1 kept the rate the project was created at); a chosen one stays, and a
+/// rate already apart from the composition's is not moved.
+#[test]
+fn the_export_rate_follows_the_compositions_unless_chosen() {
+    let set_fps = |s: &mut DocumentStore, fps: f64| {
+        run(
+            s,
+            CompCommand::Set {
+                patch: Box::new(CompPatch {
+                    fps: Some(fps),
+                    ..Default::default()
+                }),
+            },
+        )
+    };
+    let with_defaults = |defaults: &str| {
+        let mut p = parse(PROJECT).unwrap();
+        p.as_object_mut()
+            .unwrap()
+            .insert("exportDefaults", parse(defaults).unwrap());
+        DocumentStore::new_untitled(p)
+    };
+    let export_fps = |s: &DocumentStore| num(&root(s), &["exportDefaults", "fps"]);
+    let mut s = with_defaults(r#"{"format":"mp4","fps":30}"#);
+    set_fps(&mut s, 24.0);
+    assert_eq!(export_fps(&s), 24.0, "followed");
+    s.undo().unwrap();
+    assert_eq!(export_fps(&s), 30.0, "one undo restores both");
+    let mut s = with_defaults(r#"{"format":"mp4","fps":30,"fpsChosen":true}"#);
+    set_fps(&mut s, 24.0);
+    assert_eq!(export_fps(&s), 30.0, "chosen: kept");
+    let mut s = with_defaults(r#"{"format":"mp4","fps":25}"#);
+    set_fps(&mut s, 24.0);
+    assert_eq!(export_fps(&s), 25.0, "already apart: not moved");
+    let mut s = store();
+    set_fps(&mut s, 24.0);
+    assert!(
+        root(&s)
+            .as_object()
+            .unwrap()
+            .get("exportDefaults")
+            .is_none(),
+        "none written where there were none"
+    );
+}
+
 #[test]
 fn work_area_edges_keep_a_frame() {
     let mut s = store();
