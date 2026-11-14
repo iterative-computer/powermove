@@ -202,6 +202,44 @@ pub struct HistoryRecord {
     /// The step's entry exactly as the saved history writes it
     /// ([`Self::saved_text`]), made once and shared by every copy.
     saved_text: Arc<std::sync::OnceLock<SavedText>>,
+    /// The step's entry in the packed history form ([`Self::packed_text`]),
+    /// made once and shared by every copy.
+    packed_text: Arc<std::sync::OnceLock<PackedText>>,
+}
+
+/// One step's saved entry as the packed history form (`pack`) sees it:
+/// each patch written whole, or a record array's metadata and the canonical
+/// text of each item it holds, all kept once, compressed. A save assigns
+/// record ids across steps from these texts instead of re-serializing every
+/// layer of every step.
+#[derive(Debug)]
+pub(crate) struct PackedText {
+    data: Box<[u8]>,
+    len: usize,
+    /// Forward then backward: what each patch is.
+    sides: [Vec<PackedPiece>; 2],
+}
+#[derive(Debug)]
+enum PackedPiece {
+    /// `{"patch": <text>}`.
+    Whole(std::ops::Range<usize>),
+    /// `{"patch": <meta>, "refs": [ids of items]}`.
+    Records {
+        meta: std::ops::Range<usize>,
+        items: Vec<std::ops::Range<usize>>,
+    },
+}
+impl PackedText {
+    fn text(&self) -> String {
+        let bytes = zstd::bulk::decompress(&self.data, self.len).expect("internal history bytes");
+        String::from_utf8(bytes).expect("canonical history text")
+    }
+    fn has_records(&self) -> bool {
+        self.sides
+            .iter()
+            .flatten()
+            .any(|p| matches!(p, PackedPiece::Records { .. }))
+    }
 }
 
 /// One step's saved entry as canonical JSON text, compressed: what
@@ -307,6 +345,7 @@ impl HistoryRecord {
         if self.is_document() {
             self.digest();
             self.saved_text();
+            self.packed_text();
         }
     }
     /// The entry `to_saved` writes for this step, less its label: the
@@ -361,6 +400,52 @@ impl HistoryRecord {
             Some((forward, backward)) => (list(forward), list(backward)),
             None => (self.forward.value(), self.inverse.value()),
         }
+    }
+    /// The step's entry as `pack` reads it, made once.
+    pub(crate) fn packed_text(&self) -> &PackedText {
+        self.packed_text.get_or_init(|| {
+            use pm_model::json::write::write_canonical;
+            let (forward, backward) = self.saved_sides();
+            let mut text = String::new();
+            fn put(text: &mut String, value: &Value) -> std::ops::Range<usize> {
+                let start = text.len();
+                write_canonical(value, text);
+                start..text.len()
+            }
+            let side = |list: &Value, text: &mut String| -> Vec<PackedPiece> {
+                list.as_array()
+                    .map(|patches| {
+                        patches
+                            .iter()
+                            .map(|patch| {
+                                if !record_array_patch(patch) {
+                                    return PackedPiece::Whole(put(text, patch));
+                                }
+                                let mut meta = patch.as_object().expect("checked").clone();
+                                let values = meta.remove("value").expect("checked");
+                                let meta = put(text, &Value::Object(meta));
+                                let items = values
+                                    .as_array()
+                                    .expect("checked")
+                                    .iter()
+                                    .map(|item| put(text, item))
+                                    .collect();
+                                PackedPiece::Records { meta, items }
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
+            let sides = [side(&forward, &mut text), side(&backward, &mut text)];
+            let len = text.len();
+            PackedText {
+                data: zstd::bulk::compress(text.as_bytes(), 3)
+                    .expect("history compression")
+                    .into(),
+                len,
+                sides,
+            }
+        })
     }
     /// What `History::import` makes of this step's saved entry.
     pub(crate) fn import_facts(&self) -> Result<ImportFacts, String> {
@@ -671,6 +756,7 @@ impl History {
             digest: Default::default(),
             assets: Default::default(),
             saved_text: Default::default(),
+            packed_text: Default::default(),
         });
         self.total_bytes += bytes;
         self.cursor = self.entries.len();
@@ -705,6 +791,7 @@ impl History {
             digest: Default::default(),
             assets: Default::default(),
             saved_text: Default::default(),
+            packed_text: Default::default(),
         });
         self.total_bytes += bytes;
         self.cursor = self.entries.len();
@@ -736,6 +823,7 @@ impl History {
             digest: Default::default(),
             assets: Default::default(),
             saved_text: Default::default(),
+            packed_text: Default::default(),
         });
         self.total_bytes += bytes;
         self.cursor = self.entries.len();
@@ -1080,6 +1168,7 @@ impl History {
                 digest: Default::default(),
                 assets: Default::default(),
                 saved_text: Default::default(),
+                packed_text: Default::default(),
             });
             history.total_bytes += bytes;
         }
@@ -1326,6 +1415,115 @@ impl HistorySnapshot {
         sink.push_str("}");
     }
 
+    /// Writes exactly `write_canonical(&self.to_saved_packed())`: the packed
+    /// history form the old app's library used, which every reader of the
+    /// file reads (`unpackHistory`, `History::import`). Each distinct item of
+    /// a layer or edit-log array is written once, in the order `pack` meets
+    /// it, from the text each step made once ([`HistoryRecord::packed_text`]).
+    pub fn write_saved_packed<S: pm_model::json::write::Sink>(&self, sink: &mut S) {
+        use pm_model::json::write::write_canonical;
+        let documents: Vec<&HistoryRecord> =
+            self.records.iter().filter(|r| r.is_document()).collect();
+        // `pack` keeps the plain form when nothing is packable.
+        if !documents.iter().any(|r| r.packed_text().has_records()) {
+            return self.write_saved(sink);
+        }
+        let applied = self.records[..self.cursor]
+            .iter()
+            .filter(|r| r.is_document())
+            .count();
+        let mut ids: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut records: Vec<String> = Vec::new();
+        let number = |n: usize, sink: &mut S| write_canonical(&Value::Number(n as f64), sink);
+        // Keys in canonical order: format, history (entries, index, paths,
+        // version), records, version.
+        sink.push_str("{\"format\":");
+        write_canonical(&Value::from(DICTIONARY_FORMAT), sink);
+        sink.push_str(",\"history\":{\"entries\":[");
+        for (i, r) in documents.iter().enumerate() {
+            let packed = r.packed_text();
+            let text = packed.text();
+            // Ids are given forward first, then backward (`pack`'s order);
+            // an entry writes backward first (canonical key order).
+            let mut refs: [Vec<Vec<usize>>; 2] = [Vec::new(), Vec::new()];
+            for (side, pieces) in packed.sides.iter().enumerate() {
+                for piece in pieces {
+                    if let PackedPiece::Records { items, .. } = piece {
+                        let ids_of = items
+                            .iter()
+                            .map(|range| {
+                                let item = &text[range.clone()];
+                                match ids.get(item) {
+                                    Some(id) => *id,
+                                    None => {
+                                        let id = records.len();
+                                        records.push(item.to_owned());
+                                        ids.insert(item.to_owned(), id);
+                                        id
+                                    }
+                                }
+                            })
+                            .collect();
+                        refs[side].push(ids_of);
+                    }
+                }
+            }
+            if i > 0 {
+                sink.push_str(",");
+            }
+            for (n, (key, side)) in [("backward", 1), ("forward", 0)].into_iter().enumerate() {
+                sink.push_str(if n == 0 { "{\"" } else { ",\"" });
+                sink.push_str(key);
+                sink.push_str("\":[");
+                let mut refs = refs[side].iter();
+                for (j, piece) in packed.sides[side].iter().enumerate() {
+                    if j > 0 {
+                        sink.push_str(",");
+                    }
+                    match piece {
+                        PackedPiece::Whole(range) => {
+                            sink.push_str("{\"patch\":");
+                            sink.push_str(&text[range.clone()]);
+                            sink.push_str("}");
+                        }
+                        PackedPiece::Records { meta, .. } => {
+                            sink.push_str("{\"patch\":");
+                            sink.push_str(&text[meta.clone()]);
+                            sink.push_str(",\"refs\":[");
+                            for (k, id) in refs.next().expect("refs").iter().enumerate() {
+                                if k > 0 {
+                                    sink.push_str(",");
+                                }
+                                number(*id, sink);
+                            }
+                            sink.push_str("]}");
+                        }
+                    }
+                }
+                sink.push_str("]");
+            }
+            sink.push_str(",\"label\":");
+            write_canonical(&Value::from(r.label.as_str()), sink);
+            sink.push_str("}");
+        }
+        sink.push_str("],\"index\":");
+        write_canonical(&Value::Number(applied as f64 - 1.0), sink);
+        sink.push_str(",\"paths\":");
+        write_canonical(&Value::from("composition"), sink);
+        sink.push_str(",\"version\":");
+        write_canonical(&Value::Number(1.0), sink);
+        sink.push_str("},\"records\":[");
+        for (i, item) in records.iter().enumerate() {
+            if i > 0 {
+                sink.push_str(",");
+            }
+            sink.push_str(item);
+        }
+        sink.push_str("],\"version\":");
+        write_canonical(&Value::Number(1.0), sink);
+        sink.push_str("}");
+    }
+
     /// The document records in order, the base state's token and how many
     /// are applied: the states the file guard reconstructs. `None` when a
     /// realm's step is on the stack: it changes the document outside the
@@ -1357,6 +1555,18 @@ impl HistorySnapshot {
     }
 }
 
+/// A patch `pack` stores as references into its records table: one that
+/// sets a whole layer or edit-log array.
+fn record_array_patch(patch: &Value) -> bool {
+    patch.as_object().is_some_and(|p| {
+        p.get("exists") == Some(&Value::Bool(true))
+            && p.get("path")
+                .and_then(Value::as_array)
+                .is_some_and(|path| is_record_array_path(path))
+            && p.get("value").and_then(Value::as_array).is_some()
+    })
+}
+
 /// `packHistory`.
 pub fn pack(saved: Value) -> Value {
     use std::collections::HashMap;
@@ -1370,14 +1580,7 @@ pub fn pack(saved: Value) -> Value {
     let mut ids: HashMap<String, usize> = HashMap::new();
     let mut pack_patch = |patch: &Value| -> Value {
         let mut out = Map::new();
-        let record_array = patch.as_object().is_some_and(|p| {
-            p.get("exists") == Some(&Value::Bool(true))
-                && p.get("path")
-                    .and_then(Value::as_array)
-                    .is_some_and(|path| is_record_array_path(path))
-                && p.get("value").and_then(Value::as_array).is_some()
-        });
-        if !record_array {
+        if !record_array_patch(patch) {
             out.insert("patch", patch.clone());
             return Value::Object(out);
         }

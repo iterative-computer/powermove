@@ -202,7 +202,7 @@ pub(crate) fn write_document(parts: &DocumentParts<'_>, sink: &mut impl Sink) {
     sink.push_str(":");
     match parts.history {
         HistoryPart::Value(history) => write_canonical(history, sink),
-        HistoryPart::Session(snapshot) => snapshot.write_saved(sink),
+        HistoryPart::Session(snapshot) => snapshot.write_saved_packed(sink),
     }
     sink.push_str(",");
     key(sink, "ws");

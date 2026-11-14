@@ -145,12 +145,12 @@ pub struct SaveOptions {
     pub compact_min_dead_bytes: Option<u64>,
     #[doc(hidden)]
     pub fault: Option<WriteFault>,
-    /// Tests: write the history as `to_saved()` builds it and judge it with
-    /// the file guard's full replay (the writer before step texts), to
-    /// prove the two write the same bytes.
+    /// Tests: write the history from a whole rebuilt value and judge it with
+    /// the file guard's full replay: as the writer before the packed form
+    /// wrote it, or as `pack(to_saved())`, to prove what this writer writes.
     #[cfg(any(test, feature = "save-reference"))]
     #[doc(hidden)]
-    pub reference_writer: bool,
+    pub reference_writer: Option<ReferenceWriter>,
     #[doc(hidden)]
     pub hooks: durable::PublishHooks,
     /// The profile folder of the instance that saves: a save's record names
@@ -813,21 +813,38 @@ impl SavePlan {
         lap.mark("kept media copied");
 
         // The document record.
-        // Each session step is written from text it made once; a raw
-        // preserved history is written as read.
+        // A session's steps are written in the packed history form from text
+        // each made once. A history kept as read is packed too: `pack` keeps
+        // every member and `unpackHistory` gives it back whole; the guard
+        // judges it as read.
         #[cfg(any(test, feature = "save-reference"))]
         let reference = match (&self.history, self.options.reference_writer) {
-            (HistoryToWrite::Session(snapshot), true) => Some(snapshot.to_saved()),
+            (HistoryToWrite::Session(snapshot), Some(ReferenceWriter::Unpacked)) => {
+                Some((snapshot.to_saved(), None))
+            }
+            (HistoryToWrite::Session(snapshot), Some(ReferenceWriter::Packed)) => {
+                Some((crate::history::pack(snapshot.to_saved()), None))
+            }
+            (HistoryToWrite::Raw(value), Some(ReferenceWriter::Unpacked)) => {
+                Some((value.clone(), None))
+            }
+            (HistoryToWrite::Raw(value), Some(ReferenceWriter::Packed)) => {
+                Some((crate::history::pack(value.clone()), Some(value)))
+            }
             _ => None,
         };
         #[cfg(not(any(test, feature = "save-reference")))]
-        let reference: Option<Value> = None;
-        let (history, guard) = match (&self.history, &reference) {
-            (_, Some(value)) => (
+        let reference: Option<(Value, Option<&Value>)> = None;
+        let raw_packed = match (&self.history, &reference) {
+            (HistoryToWrite::Raw(value), None) => Some(crate::history::pack(value.clone())),
+            _ => None,
+        };
+        let (history, guard) = match (&self.history, &reference, &raw_packed) {
+            (_, Some((value, raw)), _) => (
                 HistoryPart::Value(value),
-                file_guard::GuardHistory::Value(value),
+                file_guard::GuardHistory::Value(raw.unwrap_or(value)),
             ),
-            (HistoryToWrite::Session(snapshot), None) => (
+            (HistoryToWrite::Session(snapshot), None, _) => (
                 HistoryPart::Session(snapshot),
                 file_guard::GuardHistory::Session {
                     snapshot,
@@ -835,7 +852,11 @@ impl SavePlan {
                     outside_writes: self.outside_writes,
                 },
             ),
-            (HistoryToWrite::Raw(value), None) => (
+            (HistoryToWrite::Raw(value), None, Some(packed)) => (
+                HistoryPart::Value(packed),
+                file_guard::GuardHistory::Value(value),
+            ),
+            (HistoryToWrite::Raw(value), None, None) => (
                 HistoryPart::Value(value),
                 file_guard::GuardHistory::Value(value),
             ),
@@ -1110,9 +1131,9 @@ mod history_text_tests;
 #[doc(hidden)]
 impl SavePlan {
     /// This plan, written by the reference writer or by step texts.
-    pub fn with_reference_writer(&self, on: bool) -> SavePlan {
+    pub fn with_reference_writer(&self, writer: Option<ReferenceWriter>) -> SavePlan {
         let mut plan = self.clone();
-        plan.options.reference_writer = on;
+        plan.options.reference_writer = writer;
         plan
     }
     /// This plan saved to `twin` instead, which holds a copy of what the
@@ -1124,6 +1145,18 @@ impl SavePlan {
         plan.publish = None;
         plan
     }
+}
+
+/// The history writers kept to prove this one (tests and the
+/// `save-reference` example only).
+#[cfg(any(test, feature = "save-reference"))]
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReferenceWriter {
+    /// `to_saved()` as a whole value: the writer before the packed form.
+    Unpacked,
+    /// `pack(to_saved())` as a whole value.
+    Packed,
 }
 
 /// Phase times of one save attempt on stderr (`PM_SAVE_TRACE=1`).
