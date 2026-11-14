@@ -4935,6 +4935,9 @@ pub struct Popup {
     /// The command sent when the menu closes with nothing chosen.
     dismiss: Option<String>,
     picked: bool,
+    /// What the rows were last built from: an open over the same rows
+    /// reuses them (building 160 palette rows took a frame or more).
+    built: Option<u64>,
 }
 impl Popup {
     fn new(
@@ -5042,6 +5045,7 @@ impl Popup {
             anchor: None,
             dismiss: None,
             picked: false,
+            built: None,
         }));
         let target: Retained<PopupTarget> = unsafe {
             msg_send![
@@ -5080,7 +5084,31 @@ impl Popup {
     }
     /// Lays the rows out again for the query: sections under their headings,
     /// the panel as tall as its results (to `max_height`), its top edge kept.
+    /// The rows' identity: the choices shown, in order, and the width.
+    fn rows_key(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for i in self.model.filtered() {
+            let c = &self.model.choices[i];
+            (&c.label, &c.command, &c.category, c.checked, &c.font).hash(&mut h);
+        }
+        self.model.unlisted().hash(&mut h);
+        (self.window.frame().size.width as i64).hash(&mut h);
+        h.finish()
+    }
+    /// Builds the rows unless they already show these choices.
+    fn refresh_if_changed(&mut self) {
+        if self.built != Some(self.rows_key()) || self.rows.is_empty() {
+            self.refresh();
+        } else if let Some(first) = self.rows.first() {
+            // Reopened over the same rows: from the top, as a fresh list.
+            let mut rect = first.rect;
+            rect.origin.y = 0.;
+            self.list.scrollRectToVisible(rect);
+        }
+    }
     fn refresh(&mut self) {
+        self.built = Some(self.rows_key());
         for part in self.parts.drain(..) {
             part.removeFromSuperview();
         }
@@ -5457,7 +5485,7 @@ impl Popup {
         self.lit = false;
         self.glider.setAlphaValue(0.);
         self.picked = false;
-        self.refresh();
+        self.refresh_if_changed();
         let p = self.parent.frame();
         let s = self.window.frame().size;
         let origin = match self.anchor {
