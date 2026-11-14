@@ -2412,7 +2412,13 @@ fn sequence_frame<'d>(
         let message = match other_size {
             _ if missing => format!("frame {number} of the image sequence is missing: {file}"),
             Some((w, h)) => other_size_message(Some(number), (w, h), (sw, sh), &file),
-            None => format!("frame {number} of the image sequence can't be read: {file}"),
+            // There, but it does not read: a damaged file.
+            None => crate::DamagedFrame {
+                file: path.clone(),
+                seconds: None,
+                reason: format!("frame {number} of the image sequence can't be read"),
+            }
+            .message(),
         };
         b.failures.push(LayerFailure {
             composition: scope.comp.id().to_string_lossy(),

@@ -481,6 +481,105 @@ fn going_without_offline_clips_never_drops_sound_the_export_would_hear() {
         assert_eq!(error.code, pm_protocol::error::ErrorCode::ExportFailed);
     }
 }
+/// A stereo 16-bit WAV of a full-scale 440 Hz square, `seconds` long.
+fn loud_wav(path: &Path, seconds: u32) {
+    let rate = 48_000u32;
+    let frames = rate * seconds;
+    let mut bytes = Vec::with_capacity(44 + frames as usize * 4);
+    let data = frames * 4;
+    bytes.extend_from_slice(b"RIFF");
+    bytes.extend_from_slice(&(36 + data).to_le_bytes());
+    bytes.extend_from_slice(b"WAVEfmt ");
+    bytes.extend_from_slice(&16u32.to_le_bytes());
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&2u16.to_le_bytes());
+    bytes.extend_from_slice(&rate.to_le_bytes());
+    bytes.extend_from_slice(&(rate * 4).to_le_bytes());
+    bytes.extend_from_slice(&4u16.to_le_bytes());
+    bytes.extend_from_slice(&16u16.to_le_bytes());
+    bytes.extend_from_slice(b"data");
+    bytes.extend_from_slice(&data.to_le_bytes());
+    for i in 0..frames {
+        let v: i16 = if (i * 440 / rate) % 2 == 0 {
+            i16::MAX
+        } else {
+            i16::MIN + 1
+        };
+        bytes.extend_from_slice(&v.to_le_bytes());
+        bytes.extend_from_slice(&v.to_le_bytes());
+    }
+    std::fs::write(path, bytes).unwrap();
+}
+
+/// A finished export whose mixed sound went over full scale tells the
+/// person so with its file: clipped in 24-bit PCM, kept in a float track;
+/// and the check of the written file reports its progress on the way.
+#[test]
+fn a_finished_export_says_its_sound_was_clipped_or_kept() {
+    let dir = tempfile::tempdir().unwrap();
+    let wav = dir.path().join("loud.wav");
+    loud_wav(&wav, 1);
+    let mut project: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/shapes.json")).unwrap();
+    let mut layer = project["layers"][0].clone();
+    layer["id"] = "Lloud".into();
+    layer["type"] = "audio".into();
+    layer["name"] = "Loud".into();
+    // Four times full scale: 12 dB over.
+    layer["d"] = serde_json::json!({"asset":"Aloud","gain":4,"trim":0,"fadeIn":0,"fadeOut":0});
+    project["layers"].as_array_mut().unwrap().push(layer);
+    project["assets"] =
+        serde_json::json!({"Aloud":{"name":"loud.wav","type":"audio","format":"wav","dur":1}});
+    for (coding, word) in [
+        (None, "Audio clipped:"),
+        (
+            Some(pm_protocol::priority::AudioCoding::PcmFloat),
+            "Audio over full scale:",
+        ),
+    ] {
+        let mut request = request_for(
+            &project.to_string(),
+            dir.path().join(format!("loud-{word}.mov")),
+            1,
+        );
+        request.originals.insert("Aloud".into(), wav.clone());
+        let JobSpec::Export { settings, .. } = &mut request.spec else {
+            unreachable!()
+        };
+        settings.format = ExportFormat::ProRes {
+            profile: pm_protocol::priority::ProResProfile::Hq,
+        };
+        settings.color = OutputColor::Rec709QuickTime {
+            candidate: pm_protocol::color::QuickTimeTag::Cicp1_13_1,
+        };
+        settings.alpha = AlphaOutput::None;
+        settings.audio = true;
+        settings.delivery.audio_coding = coding;
+        // Every status until the end: the written file's check is reported
+        // as it reads the file.
+        let handle =
+            ExportHandle::start(Path::new(env!("CARGO_BIN_EXE_pm-engine-service")), request)
+                .unwrap();
+        let mut status = handle.status();
+        let mut checked = vec![];
+        while !matches!(
+            status.state,
+            JobState::Done | JobState::Failed | JobState::Cancelled
+        ) {
+            status = handle.next_status(&status);
+            checked.extend(status.checking);
+        }
+        let status = handle.wait().unwrap();
+        assert!(!checked.is_empty(), "no check progress");
+        assert_eq!(status.state, JobState::Done, "{status:?}");
+        assert!(
+            status.notes.iter().any(|n| n.starts_with(word)),
+            "{word} {:?}",
+            status.notes
+        );
+    }
+}
+
 /// The fixture's first layer with an effect no installed extension provides.
 fn with_uninstalled_effect(on: bool) -> String {
     let mut project: serde_json::Value =
@@ -803,6 +902,7 @@ fn a_child_message_the_parent_cannot_use_fails_the_export_at_once() {
         error: None,
         preview: None,
         checking: None,
+        notes: vec![],
     })
     .unwrap();
     another["type"] = "status".into();
@@ -912,6 +1012,39 @@ fn centres(movie: &Path) -> Vec<[u16; 3]> {
 /// and ProRes with each of its files at its own times (15 fps into 30: file
 /// n on frames 2(n-1) and 2(n-1)+1); a file deleted from its folder fails
 /// the export naming it, and no movie is published.
+/// A file of an image sequence that is there but cannot be read (a bad
+/// copy) stops the export naming that file, as a damaged frame of a movie
+/// does; nothing stands in for it and no movie is published.
+#[test]
+fn a_damaged_file_of_an_image_sequence_stops_the_export_naming_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let frames = dir.path().join("frames");
+    std::fs::create_dir(&frames).unwrap();
+    let (project, media) = with_sequence(&frames);
+    std::fs::write(frames.join("shot.0004.png"), vec![0x5a; 4096]).unwrap();
+    let destination = dir.path().join("damaged.mov");
+    let mut request = request_for(&project, destination.clone(), 1);
+    request.originals = media.originals.clone();
+    let JobSpec::Export { settings, .. } = &mut request.spec else {
+        unreachable!()
+    };
+    settings.format = ExportFormat::ProRes {
+        profile: pm_protocol::priority::ProResProfile::Hq,
+    };
+    settings.color = OutputColor::Rec709QuickTime {
+        candidate: pm_protocol::color::QuickTimeTag::Cicp1_13_1,
+    };
+    settings.alpha = AlphaOutput::None;
+    settings.range.end = Ticks::new(Ticks::from_whole_seconds(2).get() / 5).unwrap();
+    let status = finish(request);
+    assert_eq!(status.state, JobState::Failed, "{status:?}");
+    let message = status.error.unwrap().message;
+    for part in ["couldn't be exported", "damaged", "shot.0004.png"] {
+        assert!(message.contains(part), "{part} in: {message}");
+    }
+    assert!(!message.contains("cannot render this yet"), "{message}");
+    assert!(!destination.exists());
+}
 #[test]
 fn an_image_sequence_read_in_place_exports_its_frames_at_their_times() {
     use pm_protocol::{color::QuickTimeTag, priority::ProResProfile};

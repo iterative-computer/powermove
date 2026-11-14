@@ -87,8 +87,30 @@ pub struct VideoOptions {
     pub motion_blur: bool,
     pub alpha: bool,
     pub studio_quality: Option<Value>,
-    pub studio_render_scale:Option<f32>,
+    pub studio_render_scale: Option<f32>,
+    /// The Export sheet's own options an agent gave, under the sheet's
+    /// names: laid over this export's defaults and checked by the same
+    /// planner as a person's export.
+    pub sheet: serde_json::Map<String, Value>,
 }
+/// The Export sheet's options an agent gives under the sheet's own names.
+pub const SHEET_OPTIONS: [&str; 15] = [
+    "profile",
+    "codec",
+    "quality",
+    "scale",
+    "width",
+    "height",
+    "fps",
+    "dynamicRange",
+    "colorTag",
+    "timecode",
+    "audioCoding",
+    "useProxies",
+    "captionsBurn",
+    "captionsSidecar",
+    "dolbyVision",
+];
 impl VideoOptions {
     pub fn parse(a: &Value) -> Result<Self> {
         let format = a["format"].as_str().unwrap_or("mp4").to_owned();
@@ -96,10 +118,38 @@ impl VideoOptions {
         if alpha && format != "prores" {
             return Err(Error::invalid("Transparent video requires ProRes."));
         }
-        let studio_render_scale=a.get("studioRenderScale").map(|v|
-            v.as_f64().filter(|v|v.is_finite() && *v>0. && *v<=1.).map(|v|v as f32).filter(|v|*v>0.)
-                .ok_or_else(||Error::invalid("Studio render scale must be greater than zero and at most one"))
-        ).transpose()?;
+        if alpha && !a["profile"].as_str().unwrap_or("4444").starts_with("4444") {
+            return Err(Error::invalid(
+                "Transparent video requires ProRes 4444 or 4444 XQ.",
+            ));
+        }
+        let sheet: serde_json::Map<String, Value> = SHEET_OPTIONS
+            .iter()
+            .filter_map(|k| a.get(*k).map(|v| ((*k).to_owned(), v.clone())))
+            .collect();
+        let sized = sheet.contains_key("width") || sheet.contains_key("height");
+        let custom = sheet.get("scale").and_then(Value::as_str) == Some("custom");
+        if (sized || custom) && !(custom || !sheet.contains_key("scale"))
+            || (sized || custom) && !(sheet.contains_key("width") && sheet.contains_key("height"))
+        {
+            return Err(Error::invalid(
+                "A custom size takes scale \"custom\" with both width and height.",
+            ));
+        }
+        let studio_render_scale = a
+            .get("studioRenderScale")
+            .map(|v| {
+                v.as_f64()
+                    .filter(|v| v.is_finite() && *v > 0. && *v <= 1.)
+                    .map(|v| v as f32)
+                    .filter(|v| *v > 0.)
+                    .ok_or_else(|| {
+                        Error::invalid(
+                            "Studio render scale must be greater than zero and at most one",
+                        )
+                    })
+            })
+            .transpose()?;
         Ok(Self {
             name: a["name"].as_str().map(str::to_owned),
             format,
@@ -109,6 +159,7 @@ impl VideoOptions {
             alpha,
             studio_quality: a.get("studioQuality").cloned(),
             studio_render_scale,
+            sheet,
         })
     }
 }
@@ -162,8 +213,29 @@ pub trait Speech: Send + Sync {
 pub trait ThreadArchive: Send + Sync {
     fn read(&self, tool: &str, project: Option<&str>, args: &Value) -> Result<Value>;
 }
+/// What an engine export delivered.
+#[derive(Clone, Debug)]
+pub struct VideoDelivered {
+    pub path: PathBuf,
+    /// The file's size and frame rate (`None`: the project's).
+    pub size: Option<(u32, u32)>,
+    pub fps: Option<f64>,
+    /// What the person would be told with the file: sound clipped, fine
+    /// detail the data rate did not keep.
+    pub notes: Vec<String>,
+}
+impl From<PathBuf> for VideoDelivered {
+    fn from(path: PathBuf) -> Self {
+        Self {
+            path,
+            size: None,
+            fps: None,
+            notes: vec![],
+        }
+    }
+}
 pub trait ExportChild: Send + Sync {
-    fn video(&self, request: &VideoExportRequest) -> Result<PathBuf>;
+    fn video(&self, request: &VideoExportRequest) -> Result<VideoDelivered>;
     fn video_progress(&self, _: &FrozenProject) -> Option<crate::export_jobs::Progress> {
         None
     }
@@ -173,7 +245,7 @@ pub trait ExportChild: Send + Sync {
 }
 pub struct NativeExportChild;
 impl ExportChild for NativeExportChild {
-    fn video(&self, _: &VideoExportRequest) -> Result<PathBuf> {
+    fn video(&self, _: &VideoExportRequest) -> Result<VideoDelivered> {
         Err(Error::unavailable(
             "pm-engine-service export child, original media resolver, fonts and extension definitions",
         ))
@@ -527,7 +599,8 @@ pub fn captions(layer: &Value, format: &str) -> Result<String> {
 }
 
 pub(crate) fn run_video(child: &dyn ExportChild, request: &VideoExportRequest) -> Result<Value> {
-    let path = child.video(request)?;
+    let delivered = child.video(request)?;
+    let path = &delivered.path;
     let canonical = std::fs::canonicalize(&path)?;
     let directory = std::fs::canonicalize(&request.directory)?;
     if !canonical.starts_with(directory)
@@ -538,7 +611,17 @@ pub(crate) fn run_video(child: &dyn ExportChild, request: &VideoExportRequest) -
             "Export produced no saved file in the explicit export directory.",
         ));
     }
-    Ok(
-        json!({"path":path,"projectId":request.snapshot.project_id,"width":request.snapshot.project["w"],"height":request.snapshot.project["h"],"fps":request.snapshot.project["fps"]}),
-    )
+    let project = &request.snapshot.project;
+    let (width, height) = delivered
+        .size
+        .map_or((project["w"].clone(), project["h"].clone()), |(w, h)| {
+            (json!(w), json!(h))
+        });
+    let fps = delivered.fps.map_or(project["fps"].clone(), |f| json!(f));
+    let mut result = json!({"path":path,"projectId":request.snapshot.project_id,"width":width,"height":height,"fps":fps});
+    // v1's result, with what the person would be told when there is any.
+    if !delivered.notes.is_empty() {
+        result["notes"] = json!(delivered.notes);
+    }
+    Ok(result)
 }

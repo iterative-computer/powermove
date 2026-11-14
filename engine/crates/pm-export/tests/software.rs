@@ -262,6 +262,7 @@ fn pq_and_hlg_are_encoded_and_tagged_as_bt2100() {
             white_nits: 203,
             peak_nits: 1000,
             metadata: None,
+            dolby_vision: true,
         },
     ] {
         let t = Temp::new();
@@ -639,6 +640,7 @@ fn hdr_neutral_highlights_decode_to_standard_signal_values() {
                 white_nits: 203,
                 peak_nits: 1000,
                 metadata: None,
+                dolby_vision: true,
             },
             [0.0, 1.0, 1000.0 / 203.0],
             [0.0, 0.75, 1.0],

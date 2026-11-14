@@ -390,6 +390,7 @@ impl Sink for PngSink {
             pixels,
             picture: Default::default(),
             notes: vec![],
+            dolby_vision: None,
             hardware_encoder: None,
             bytes,
             mix: None,
