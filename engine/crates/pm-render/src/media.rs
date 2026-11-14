@@ -564,7 +564,7 @@ struct SourceLight {
     content_light: Option<ContentLight>,
 }
 
-/// Summarizes the HDR video `composition` can show, through its precomps and
+/// Summarizes the HDR video and stills `composition` can show, through its precomps and
 /// read through Interpret Footage. Comp-wide rather than per frame, so the tone
 /// map doesn't move between shots. Only headers are read, one file per thread
 /// up to four, once per file stamp.
@@ -582,11 +582,13 @@ pub fn hdr_content(
         .into_iter()
         .filter_map(|id| {
             let record = node::member(node::member(Some(root), "assets"), &id);
-            if !node::is_str(node::member(record, "kind"), "video") {
+            let kind = node::member(record, "kind");
+            let still = node::is_str(kind, "image");
+            if !still && !node::is_str(kind, "video") {
                 return None;
             }
             let path = resolver.path(&id, record)?;
-            Some((path, record.and_then(crate::footage::interpretation)))
+            Some((path, record.and_then(crate::footage::interpretation), still))
         })
         .collect();
     let lights: Vec<_> = std::thread::scope(|scope| {
@@ -596,7 +598,10 @@ pub fn hdr_content(
                 scope.spawn(move || {
                     clips
                         .iter()
-                        .filter_map(|(path, interpret)| source_light(path, interpret.as_ref()))
+                        .filter_map(|(path, interpret, still)| match still {
+                            true => still_light(path, interpret.as_ref()),
+                            false => source_light(path, interpret.as_ref()),
+                        })
                         .collect::<Vec<_>>()
                 })
             })
@@ -623,6 +628,25 @@ pub fn hdr_content(
         max_fall: levels.1,
     });
     content
+}
+
+/// An HDR still's light, as it is drawn: the content peak of its tone map
+/// (a gain map's headroom, a PQ still's stated peak, HLG's 1000 cd/m²).
+/// `None` for SDR stills, a gain-map still read for its SDR base, and
+/// unreadable files.
+fn still_light(path: &Path, interp: Option<&Interpretation>) -> Option<SourceLight> {
+    let facts = still_facts(path).ok()?;
+    let none = Interpretation::default();
+    let interp = interp.unwrap_or(&none);
+    if facts.color.gain_map && interp.gain_map == Some(pm_media::image::Rendition::SdrBase) {
+        return None;
+    }
+    let tone = still_reading(&facts, interp).ok()?.color.tone_map?;
+    Some(SourceLight {
+        peak_nits: tone.peak_nits,
+        mastering: None,
+        content_light: None,
+    })
 }
 
 /// `None` for SDR sources and unreadable files.

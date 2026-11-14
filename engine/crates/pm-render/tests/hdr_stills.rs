@@ -184,3 +184,51 @@ fn a_gain_map_still_read_for_its_sdr_base_is_an_sdr_still() {
         assert_eq!(explicit, drawn(&path, "standard", None), "{name}");
     }
 }
+
+/// What a document's HDR content holds (the delivery's light levels and the
+/// viewer's peak) counts its HDR stills by the light they are drawn with: a
+/// gain-map still its headroom (609 cd/m²), a PQ HEIC its 1000 cd/m², and
+/// nothing for a gain-map still read for its SDR base.
+#[test]
+fn a_documents_hdr_content_counts_its_hdr_stills() {
+    use support::doc::*;
+    for (name, interpret, peak) in [
+        ("still-gainmap.heic", None, 609.0),
+        ("still-hdr-pq.heic", None, 1000.0),
+        ("still-hdr-hlg.heic", None, 1000.0),
+        (
+            "still-gainmap.jpg",
+            Some(json!({ "gainMap": "sdrBase" })),
+            0.0,
+        ),
+    ] {
+        let mut value = project(
+            64,
+            36,
+            1.0,
+            no_fill(),
+            vec![layer(
+                "still",
+                "image",
+                json!({"asset":"clip","w":64,"h":36}),
+                32.0,
+                18.0,
+                1.0,
+            )],
+        );
+        value["color"] = json!({ "mode": "hdr" });
+        let ext = name.rsplit('.').next().unwrap();
+        asset(&mut value, "clip", "image", ext, 64, 36, 1.0);
+        if let Some(i) = interpret {
+            value["assets"]["clip"]["interpret"] = i;
+        }
+        let mut resolver = pm_render::MapResolver::default();
+        resolver.paths.insert("clip".into(), fixture(name));
+        let content = pm_render::media::hdr_content(&load(&value), "Ptest-root", &resolver);
+        assert!(
+            (content.peak_nits - peak).abs() < 3.0,
+            "{name}: {} cd/m², {peak} expected",
+            content.peak_nits
+        );
+    }
+}
