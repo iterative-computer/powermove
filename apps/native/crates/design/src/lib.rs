@@ -237,6 +237,29 @@ pub struct Metrics {
     pub min_center: f32,
     pub keyboard_step: f32,
     pub drag_threshold: f32,
+    /// How far a panel's header or tab travels before it is dragged (the
+    /// original app's 5 pt).
+    pub panel_drag_threshold: f32,
+    /// The least height of a docked panel (the original app's 88 pt floor).
+    pub panel_least: f32,
+    /// A side column's narrowest and widest (the original app's 200–760 pt).
+    pub column_least: f32,
+    pub column_most: f32,
+    /// The timeline's dock is at least this tall and leaves this much above it.
+    pub band_least: f32,
+    pub band_room: f32,
+    /// Drop strips along the docking area's edges where no dock stands yet:
+    /// the side ones' width and the bottom one's height.
+    pub edge_strip: f32,
+    pub edge_strip_bottom: f32,
+    /// How far outside a dock a dragged panel still drops into it.
+    pub dock_reach: f32,
+    /// How far a splitter between two panels moves before it resizes.
+    pub splitter_dead_zone: f32,
+    /// The glow that follows the pointer along a splitter: its length and
+    /// thickness.
+    pub splitter_glow: f32,
+    pub splitter_glow_width: f32,
     pub window_width: f32,
     pub window_height: f32,
     pub min_width: f32,
@@ -750,6 +773,18 @@ impl Tokens {
                 min_center: 180.,
                 keyboard_step: 10.,
                 drag_threshold: 3.,
+                panel_drag_threshold: 5.,
+                panel_least: 88.,
+                column_least: 200.,
+                column_most: 760.,
+                band_least: 120.,
+                band_room: 160.,
+                edge_strip: 96.,
+                edge_strip_bottom: 56.,
+                dock_reach: 28.,
+                splitter_dead_zone: 2.,
+                splitter_glow: 180.,
+                splitter_glow_width: 4.,
                 window_width: 1440.,
                 window_height: 900.,
                 min_width: 980.,

@@ -69,11 +69,15 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `metrics.agent_height` | Agent popover height when the window has room | 680 | 680 | 680 | 680 |
 | `metrics.agent_width` | Default agent panel width | 440 | 440 | 440 | 440 |
 | `metrics.anchor_mark` | Anchor point crosshair circle | 11 | 11 | 11 | 11 |
+| `metrics.band_least` | Least height of the timeline's dock | 120 | 120 | 120 | 120 |
+| `metrics.band_room` | Height the timeline's dock leaves above it | 160 | 160 | 160 | 160 |
 | `metrics.border` | Separator thickness (Increase Contrast doubles it) | 1 | 1 | 2 | 2 |
 | `metrics.capsule_radius` | Toolbar capsule radius (height ÷ 2) | 17 | 17 | 17 | 17 |
 | `metrics.channel_strip` | Mixer channel strip width | 72 | 72 | 72 | 72 |
 | `metrics.checker` | Transparency checkerboard square | 8 | 8 | 8 | 8 |
 | `metrics.clip_radius` | Timeline clip bar corner radius | 6 | 6 | 6 | 6 |
+| `metrics.column_least` | Narrowest side column | 200 | 200 | 200 | 200 |
+| `metrics.column_most` | Widest side column | 760 | 760 | 760 | 760 |
 | `metrics.composer_max_lines` | Agent composer grows to this many lines, then scrolls | 10 | 10 | 10 | 10 |
 | `metrics.control` | Standalone control height (buttons, popups) | 28 | 28 | 28 | 28 |
 | `metrics.control_radius` | Control radius inside a panel (panel radius − gap) | 8 | 8 | 8 | 8 |
@@ -81,9 +85,12 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `metrics.curve_editor_max` | The curve editor's greatest graph height in a wide panel | 360 | 360 | 360 | 360 |
 | `metrics.curve_editor_wide` | The curve editor's greatest width in a wide panel | 640 | 640 | 640 | 640 |
 | `metrics.dock_gap` | Space between docked panels and to the window edge | 8 | 8 | 8 | 8 |
+| `metrics.dock_reach` | How far outside a dock a dragged panel still drops into it | 28 | 28 | 28 | 28 |
 | `metrics.drag_opacity` | Opacity of a drag source left in place | 0.5 | 0.5 | 0.5 | 0.5 |
 | `metrics.drag_threshold` | Pointer travel before a drag starts | 3 | 3 | 3 | 3 |
 | `metrics.drop_stroke` | Drop-target inner stroke | 1.5 | 1.5 | 2 | 2 |
+| `metrics.edge_strip` | Width of a side drop strip where no dock stands | 96 | 96 | 96 | 96 |
+| `metrics.edge_strip_bottom` | Height of the bottom drop strip where no dock stands | 56 | 56 | 56 | 56 |
 | `metrics.fader_knob` | Mixer fader knob height | 14 | 14 | 14 | 14 |
 | `metrics.field` | Value well height inside a row | 22 | 22 | 22 | 22 |
 | `metrics.field_menu_height` | Field menu maximum height | 280 | 280 | 280 | 280 |
@@ -117,6 +124,8 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `metrics.min_width` | Minimum window width | 980 | 980 | 980 | 980 |
 | `metrics.palette_height` | Command palette maximum height | 360 | 360 | 360 | 360 |
 | `metrics.palette_width` | Command palette width | 520 | 520 | 520 | 520 |
+| `metrics.panel_drag_threshold` | Travel before a panel header or tab drags | 5 | 5 | 5 | 5 |
+| `metrics.panel_least` | Least height of a docked panel | 88 | 88 | 88 | 88 |
 | `metrics.panel_radius` | Panel corner radius | 12 | 12 | 12 | 12 |
 | `metrics.pasteboard_opacity` | Opacity of selected layers drawn outside the frame | 0.35 | 0.35 | 0.35 | 0.35 |
 | `metrics.pill_inset` | Track-to-segment padding and segment gap | 2 | 2 | 2 | 2 |
@@ -140,6 +149,9 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `metrics.sheet_width` | Default sheet width | 480 | 480 | 480 | 480 |
 | `metrics.sheet_width_wide` | Width of wide sheets: Export, Expression | 600 | 600 | 600 | 600 |
 | `metrics.sidebar` | Sidebar width of Home and Settings | 224 | 224 | 224 | 224 |
+| `metrics.splitter_dead_zone` | Travel before a splitter between panels resizes | 2 | 2 | 2 | 2 |
+| `metrics.splitter_glow` | Length of the glow that follows the pointer along a splitter | 180 | 180 | 180 | 180 |
+| `metrics.splitter_glow_width` | Thickness of the splitter glow | 4 | 4 | 4 | 4 |
 | `metrics.splitter_reach` | How far a dock divider's grab reaches into the panels beside its gap | 4 | 4 | 4 | 4 |
 | `metrics.status` | Status bar height | 24 | 24 | 24 | 24 |
 | `metrics.status_dot` | Attention dot and drop insertion-line end circle | 6 | 6 | 6 | 6 |
