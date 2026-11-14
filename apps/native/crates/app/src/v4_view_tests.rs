@@ -1285,3 +1285,44 @@ fn a_disclosure_press_shows_in_the_next_frame(cx: &mut TestAppContext) {
     assert!(vcx.debug_bounds("content").is_some());
     assert!(view.read_with(&vcx, |v, _| v.disclosures.is_empty()));
 }
+
+/// A press on a panel's item gives the keyboard to the nearest focusable
+/// node holding it, as a click does on the web and in AppKit: the Project
+/// panel's cards (pressed, so the press stopped there) left its list without
+/// focus, and Space and the arrow keys went to the app instead of the grid.
+#[gpui::test]
+fn a_press_focuses_the_item_it_lands_in(cx: &mut TestAppContext) {
+    let rig = rig("viewer", 1);
+    let _ = publication(&rig);
+    let mut ops = node_ops(
+        1,
+        0,
+        "div",
+        json!({"id":"list","role":"listbox","tabIndex":0,"style":{"width":200,"height":80}}),
+        &["keydown"],
+    );
+    ops.extend(node_ops(
+        2,
+        1,
+        "div",
+        json!({"id":"card","role":"cell","tabIndex":-1,"style":{"width":60,"height":40}}),
+        &["pointerdown"],
+    ));
+    ops.extend(node_ops(
+        3,
+        2,
+        "div",
+        json!({"id":"name","style":{"width":40,"height":10}}),
+        &["pointerdown"],
+    ));
+    let (view, mut vcx) = window(cx, &rig, synthetic(&rig, ops), Default::default());
+    vcx.run_until_parked();
+    let at = bounds(&mut vcx, "name").center();
+    vcx.simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
+    vcx.simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+    vcx.run_until_parked();
+    let focused = view.update_in(&mut vcx, |v, window, _| v.focused_node(window));
+    // The card (tabIndex -1, no control) is not a focus target here; its
+    // list is, and the panel's model knows which card was pressed.
+    assert_eq!(focused, Some(1), "the list holding the pressed card");
+}
