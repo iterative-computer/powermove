@@ -268,7 +268,9 @@ impl StudioService {
         let geometry_changed = self.geometry_uploads == 0
             || geometry_key.as_ref().is_some_and(|key| *key != self.geometry_key);
         let epoch = self.geometry_uploads + u64::from(geometry_changed);
-        let (mut key, resource_start) = content(&input, &extracted, epoch);
+        let textures_changed = self.texture_uploads == 0 || self.uploaded_maps != input.maps;
+        let texture_epoch = self.texture_uploads + u64::from(textures_changed);
+        let (mut key, resource_start) = content(&input, &extracted, epoch, texture_epoch);
         key.extend_from_slice(format!("{auxiliary:?}").as_bytes());
         let mut outputs: Vec<_> = extracted
             .layers
@@ -338,7 +340,7 @@ impl StudioService {
                 shape: GeometryIdentity::shape(&extracted), instances: input.instances.clone(),
             });
         }
-        if self.texture_uploads == 0 || self.uploaded_maps != input.maps {
+        if textures_changed {
             if let Some(maps) = &input.maps {
                 let pixels: Vec<_> = maps.layers.iter().flat_map(|m| m.iter()).copied().collect();
                 r.set_maps(&pixels, maps.width, maps.height, maps.layers.len() as u32);
@@ -611,7 +613,7 @@ impl StudioService {
     }
 }
 
-fn content(input: &SceneInput, e: &Extracted, geometry_epoch: u64) -> (Vec<u8>, usize) {
+fn content(input: &SceneInput, e: &Extracted, geometry_epoch: u64, texture_epoch: u64) -> (Vec<u8>, usize) {
     let p = &e.prepared;
     let mut key = format!(
         "{:?}{:?}{:?}{:?}{:?}{}{}:{}",
@@ -631,6 +633,10 @@ fn content(input: &SceneInput, e: &Extracted, geometry_epoch: u64) -> (Vec<u8>, 
     // never a partial hash. Keep only the changing TLAS here, not another copy
     // of every vertex, triangle and BLAS node in the scene.
     key.extend_from_slice(&geometry_epoch.to_le_bytes());
+    // Exact equality of the shared pixels advances this epoch above. A
+    // second copy of every map in each frame's identity costs both memory
+    // and a large byte copy on the interactive worker at Play.
+    key.extend_from_slice(&texture_epoch.to_le_bytes());
     for data in [
         bytemuck::cast_slice(&p.nodes[..e.tlas_capacity]),
         bytemuck::cast_slice(&p.materials),
@@ -638,13 +644,6 @@ fn content(input: &SceneInput, e: &Extracted, geometry_epoch: u64) -> (Vec<u8>, 
     ] {
         key.extend_from_slice(&(data.len() as u64).to_le_bytes());
         key.extend_from_slice(data);
-    }
-    if let Some(maps) = &input.maps {
-        key.extend_from_slice(&maps.width.to_le_bytes());
-        key.extend_from_slice(&maps.height.to_le_bytes());
-        for map in &maps.layers {
-            key.extend_from_slice(map);
-        }
     }
     (key, resource_start)
 }
