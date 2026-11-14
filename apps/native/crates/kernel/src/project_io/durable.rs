@@ -116,7 +116,52 @@ pub struct FileVersion {
     /// while open), so the session can follow it and its embedded media can
     /// still be copied out. Not part of the version's identity.
     pub held: Option<Arc<HeldFile>>,
+    /// The wall clock (ns) no later than when `stat` was taken, raised when
+    /// the bytes are proven again by their hash ([`Self::proven_at`]). Not
+    /// part of the version's identity; shared by every copy.
+    pub(crate) stat_taken: StatTaken,
 }
+
+/// When a version's stat was taken (see [`FileVersion::stat_proves_content`]).
+#[derive(Clone, Debug, Default)]
+pub struct StatTaken(Arc<std::sync::atomic::AtomicI64>);
+impl StatTaken {
+    /// The wall clock now, for a stat about to be taken.
+    pub(crate) fn now() -> StatTaken {
+        StatTaken(Arc::new(std::sync::atomic::AtomicI64::new(wall_ns())))
+    }
+    pub(crate) fn get(&self) -> i64 {
+        self.0.load(std::sync::atomic::Ordering::Acquire)
+    }
+    fn raise(&self, ns: i64) {
+        self.0.fetch_max(ns, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
+/// The wall clock in ns since the epoch (0 if before it).
+pub(crate) fn wall_ns() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos() as i64)
+}
+
+/// How far apart two moments must be for a volume's timestamps to tell them
+/// apart, from the stamps themselves: the largest unit (1 s down to 1 µs)
+/// both are whole multiples of, doubled (2 s on a volume with 1 s or 2 s
+/// stamps); on a volume whose stamps carry nanoseconds (APFS: distinct
+/// stamps for writes ~4 µs apart, measured 2026-11-14), 10 µs.
+pub(crate) fn timestamp_granularity_ns(stat: &FileStat) -> i128 {
+    const FINE: i128 = 10_000;
+    let mut unit = 1_000_000_000;
+    while unit >= 1_000 {
+        if stat.mtime_ns % unit == 0 && stat.ctime_ns % unit == 0 {
+            return (2 * unit).max(FINE);
+        }
+        unit /= 10;
+    }
+    FINE
+}
+
 impl PartialEq for FileVersion {
     fn eq(&self, other: &Self) -> bool {
         self.path == other.path && self.stat == other.stat && self.hash == other.hash
@@ -183,9 +228,28 @@ pub(crate) fn lstat_file(path: &Path) -> Result<Option<FileStat>, ProjectIoError
 }
 
 impl FileVersion {
+    /// Whether finding this exact stat on the file later proves it still
+    /// holds this version's bytes: git's rule for racily clean files. Only
+    /// when the stat was taken (or the bytes proven again) after the tick of
+    /// its newest timestamp; otherwise another writer could rewrite the file
+    /// in place within that tick and leave identity, size and times equal.
+    pub fn stat_proves_content(&self) -> bool {
+        let newest = self.stat.mtime_ns.max(self.stat.ctime_ns);
+        self.stat_taken.get() as i128 - newest > timestamp_granularity_ns(&self.stat)
+    }
+    /// The bytes were proven to be this version's again, by their hash, by a
+    /// read whose stat (equal to this one) was taken at `taken`.
+    pub(crate) fn proven_at(&self, taken: i64) {
+        self.stat_taken.raise(taken);
+    }
+    pub(crate) fn stat_taken_ns(&self) -> i64 {
+        self.stat_taken.get()
+    }
+
     /// `fileVersion`: stats and hashes `path`, refusing a file that changes
     /// while it is being hashed. `Ok(None)` when nothing is there.
     pub fn read(path: &Path) -> Result<Option<FileVersion>, ProjectIoError> {
+        let taken = StatTaken::now();
         let Some(info) = lstat_file(path)? else {
             return Ok(None);
         };
@@ -205,6 +269,7 @@ impl FileVersion {
             stat: info,
             hash,
             held: Some(HeldFile::new(file)),
+            stat_taken: taken,
         }))
     }
 
@@ -255,6 +320,7 @@ impl FileVersion {
         let Some(path) = self.held.as_ref().and_then(|held| held.current_path()) else {
             return Ok(None);
         };
+        let taken = StatTaken::now();
         let Some(at) = lstat_file(&path).ok().flatten() else {
             return Ok(None);
         };
@@ -270,6 +336,7 @@ impl FileVersion {
             stat: at,
             hash: self.hash.clone(),
             held: self.held.clone(),
+            stat_taken: taken,
         }))
     }
 
@@ -1603,6 +1670,8 @@ fn private_sibling(entry: &str, name: &str, suffix: &str) -> bool {
 pub(crate) struct Installed {
     pub file: File,
     pub stat: FileStat,
+    /// No later than when `stat` was taken.
+    pub taken: StatTaken,
 }
 
 /// The file `destination` names now, opened, if it is the file a save just
@@ -1620,6 +1689,7 @@ fn installed_at(
 ) -> Option<Installed> {
     let named = lstat_file(destination).ok().flatten()?;
     let file = File::open(destination).ok()?;
+    let taken = StatTaken::now();
     let stat = stat_of(&file.metadata().ok()?);
     if !stat.same_identity(&named) {
         return None;
@@ -1630,7 +1700,7 @@ fn installed_at(
         || (stat.size == size
             && hash_reader(&file, destination).is_ok_and(|h| hex(&h.finalize()) == new_hash)
             && file.metadata().is_ok_and(|after| stat_of(&after) == stat));
-    ours.then_some(Installed { file, stat })
+    ours.then_some(Installed { file, stat, taken })
 }
 
 /// After the install: the path must hold the file just installed, and the
@@ -3300,4 +3370,58 @@ mod tests {
         assert_eq!(a.len(), 36);
         assert_eq!(&a[14..15], "4");
     }
+}
+
+/// Review w31 clean save, finding 3: an equal stat proves a version's bytes
+/// only when it was taken after the tick of the file's newest timestamp,
+/// judged by the volume's granularity read from the stamps themselves.
+#[cfg(test)]
+#[test]
+fn a_stat_proves_content_only_after_its_timestamps_tick() {
+    let version = |mtime: i128, ctime: i128, taken: i128| FileVersion {
+        path: PathBuf::new(),
+        stat: FileStat {
+            dev: 1,
+            ino: 1,
+            size: 1,
+            mode: 0,
+            uid: 0,
+            gid: 0,
+            mtime_ns: mtime,
+            ctime_ns: ctime,
+        },
+        hash: String::new(),
+        held: None,
+        stat_taken: StatTaken(Arc::new(std::sync::atomic::AtomicI64::new(taken as i64))),
+    };
+    let s = 1_000_000_000i128;
+    // Whole-second stamps (HFS+, many shares) and FAT's 2 s ones: 2 s.
+    let t = 1_794_000_000 * s;
+    assert!(!version(t, t, t + s / 2).stat_proves_content());
+    assert!(!version(t, t, t + 2 * s).stat_proves_content());
+    assert!(version(t, t, t + 2 * s + 1).stat_proves_content());
+    assert!(!version(t + 2 * s, t + 2 * s, t + 3 * s).stat_proves_content());
+    // Millisecond stamps: 2 ms.
+    let m = t + 125_000_000;
+    assert!(!version(m, m, m + 1_000_000).stat_proves_content());
+    assert!(version(m, m, m + 3_000_000).stat_proves_content());
+    // Nanosecond stamps (APFS): 10 µs.
+    let f = t + 123_456_789;
+    assert!(!version(f, f, f + 5_000).stat_proves_content());
+    assert!(version(f, f, f + 20_000).stat_proves_content());
+    // The newer stamp counts.
+    assert!(!version(f - s, f, f + 5_000).stat_proves_content());
+    // Nanosecond digits in either stamp make the volume fine (a modified
+    // time set to a whole second by hand on APFS).
+    assert!(version(t, f, f + 20_000).stat_proves_content());
+    // Taken before the stamps (a clock set back) or unknown: never.
+    assert!(!version(f, f, f - s).stat_proves_content());
+    assert!(!version(f, f, 0).stat_proves_content());
+    // Proven again later: raised for every copy, never lowered.
+    let v = version(f, f, f + 5_000);
+    let copy = v.clone();
+    v.proven_at((f + 1_000_000) as i64);
+    assert!(copy.stat_proves_content());
+    v.proven_at(0);
+    assert!(v.stat_proves_content());
 }

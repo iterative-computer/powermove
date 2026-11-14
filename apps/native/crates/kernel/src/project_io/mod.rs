@@ -509,6 +509,7 @@ pub fn open_project(path: &Path, options: OpenOptions) -> Result<OpenedProject, 
         Vec::new()
     };
     let hash = hash_project_file(&file, path, before.size, &verify)?;
+    let taken = durable::StatTaken::now();
     let after = durable::stat_of(&file.metadata().map_err(|e| io_err(path, e))?);
     if before.size != after.size
         || before.mtime_ns != after.mtime_ns
@@ -523,6 +524,7 @@ pub fn open_project(path: &Path, options: OpenOptions) -> Result<OpenedProject, 
         stat: after,
         hash,
         held: file.try_clone().ok().map(durable::HeldFile::new),
+        stat_taken: taken,
     });
     from_container(container, Some(path.to_owned()), Some(version))
 }

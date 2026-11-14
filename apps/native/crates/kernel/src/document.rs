@@ -263,10 +263,18 @@ pub struct DocumentStore {
     metadata_token: u64,
     saved_metadata_token: u64,
     save_metadata_token: u64,
-    /// The file version came from elsewhere since this store last wrote:
-    /// followed to where it was moved, or inherited by a recovered session.
-    /// Its next save in place writes even with nothing unsaved.
+    /// The file no longer is what this store last read or wrote: followed
+    /// to where it was moved, inherited by a recovered session, or opened
+    /// and upgraded (old 3D objects). Its next save in place writes even with
+    /// nothing unsaved.
     file_followed: bool,
+    /// The undo history, by step, as last read from or written to the file:
+    /// a save that would write other steps (a redo branch kept by an undo
+    /// back to the saved state) writes.
+    saved_steps: crate::history::SavedSteps,
+    /// The workspace (`ws`) as last read from or written to the file; the
+    /// pending one is `file.envelope.workspace`.
+    saved_workspace: Option<Value>,
     log: VecDeque<Arc<Change>>,
     listeners: Vec<(u64, Listener)>,
     next_listener: u64,
@@ -373,6 +381,8 @@ impl DocumentStore {
         }
         let queries = QueryContext::new(&current);
         let token = history.state_token();
+        let saved_steps = history.saved_steps();
+        let saved_workspace = file.envelope.workspace.clone();
         DocumentStore {
             runtime_state: None,
             text_host: None,
@@ -392,7 +402,9 @@ impl DocumentStore {
             metadata_token: 0,
             saved_metadata_token: 0,
             save_metadata_token: 0,
-            file_followed: false,
+            file_followed: upgraded_on_open,
+            saved_steps,
+            saved_workspace,
             log: VecDeque::new(),
             listeners: Vec::new(),
             next_listener: 1,
@@ -1408,14 +1420,20 @@ impl DocumentStore {
         target: SaveTarget,
         options: SaveOptions,
     ) -> Result<SavePlan, ProjectIoError> {
-        // Cmd-S with nothing to save writes nothing, when the file is still
-        // the one this store last read or wrote (the plan checks it again
-        // when it runs). Never for Save As or an export, a file followed to
-        // where it was moved, nor a file this build would write in another
-        // form (read as PMV3 or bare JSON: the save is where it becomes PMV4).
+        // Cmd-S with nothing to save writes nothing: no unsaved change, the
+        // undo history (redo steps too) and the workspace are the ones last
+        // read from or written to the file, and the file is still the one
+        // this store last read or wrote (the plan checks it again when it
+        // runs). Never for Save As or an export, a file followed to where it
+        // was moved or upgraded on open, nor a file this build would write
+        // in another form (read as PMV3 or bare JSON: the save is where it
+        // becomes PMV4).
+        let history_steps = self.history.saved_steps();
         let unchanged = (matches!(target, SaveTarget::InPlace)
             && !options.portable
             && !self.needs_save()
+            && history_steps == self.saved_steps
+            && self.file.envelope.workspace == self.saved_workspace
             && !self.file_followed
             && self.file.format == pm_model::container::ContainerFormat::Pmv4
             && self.file.envelope.wrapped)
@@ -1552,6 +1570,7 @@ impl DocumentStore {
             replace_existing,
             reuse_previous,
             unchanged,
+            history_steps,
             options,
             ticket,
         })
@@ -1574,6 +1593,8 @@ impl DocumentStore {
         self.file.version = Some(receipt.version.clone());
         self.file.envelope.wrapped = true;
         self.file_followed = false;
+        self.saved_steps = receipt.history_steps.clone();
+        self.saved_workspace = receipt.workspace.clone();
         // Keep the raw history until it is changed, including across repeated
         // saves. Changed stacks archive their input in prepare_save.
         for entry in receipt.media.iter() {

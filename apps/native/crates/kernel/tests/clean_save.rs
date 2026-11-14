@@ -250,24 +250,40 @@ fn a_file_changed_on_disk_then_save_writes() {
     assert_eq!(on_disk(&path), replaced, "the other file stays as it is");
 }
 
-/// A session whose edits were undone back to the saved state has journal
-/// records; a skipped Cmd-S retires them as a written save does, so a
-/// crash after it offers no recovery.
+/// A session that undid and redid back to the saved state (the same steps
+/// the file holds) has journal records; a skipped Cmd-S retires that
+/// journal session as a written save does (a fresh one, based on the file,
+/// takes its place), and a crash after it offers no recovery. Without the
+/// save the session with those records is still there.
 #[test]
 fn a_skipped_save_retires_the_journal() {
     for save_it in [false, true] {
         let root = TempDir::new("clean-save-journal");
         let (mut k, s) = fixture(&root);
         let path = root.path("project.pmv");
+        let journals = root.path("journals/p");
         rename(&mut k, "Edited");
+        save(&mut k, &s);
         call(&mut k, HistoryCall::Undo);
+        call(&mut k, HistoryCall::Redo);
         assert!(!dirty(&k));
+        k.durability_barrier().unwrap();
+        let with_records = journal::sessions(&journals);
+        assert!(!with_records.is_empty());
         let before = on_disk(&path);
         if save_it {
             save(&mut k, &s);
             assert_eq!(on_disk(&path), before, "the clean save wrote");
         }
         k.durability_barrier().unwrap();
+        let now = journal::sessions(&journals);
+        for old in &with_records {
+            assert_eq!(
+                now.contains(old),
+                !save_it,
+                "saved: {save_it}: {old:?} in {now:?}"
+            );
+        }
         drop(k); // a crash: no quit, no close
         let mut k = kernel(&root.0);
         let reply = k
@@ -277,17 +293,16 @@ fn a_skipped_save_retires_the_journal() {
                 electron_profile: None,
             })
             .unwrap();
-        match (save_it, reply) {
-            (true, ShellReply::Opened { .. }) => {}
-            (false, ShellReply::RecoveryRequired { .. }) => {}
-            (save_it, other) => panic!("saved: {save_it}: {other:?}"),
-        }
+        assert!(
+            matches!(reply, ShellReply::Opened { .. }),
+            "saved: {save_it}: {reply:?}"
+        );
     }
 }
 
 /// The app's Cmd-S: the actor prepares the save, a worker runs it, the actor
 /// finishes it. Clean, it writes nothing, says it saved, and retires the
-/// journal records of an edit undone back to the saved state.
+/// journal records of an edit undone and redone back to the saved state.
 #[test]
 fn the_apps_clean_save_writes_nothing_and_retires_the_journal() {
     let root = TempDir::new("clean-save-actor");
@@ -318,7 +333,11 @@ fn the_apps_clean_save_writes_nothing_and_retires_the_journal() {
             .unwrap();
     };
     request(rename_call("Edited"));
+    let plan = k.prepare_save(s.clone(), None).wait().unwrap().unwrap();
+    let completion = plan.run();
+    k.finish_save(completion).wait().unwrap().unwrap();
     request(HistoryCall::Undo.into());
+    request(HistoryCall::Redo.into());
     let before = on_disk(&path);
     for _ in 0..3 {
         let plan = k.prepare_save(s.clone(), None).wait().unwrap().unwrap();
@@ -339,4 +358,189 @@ fn the_apps_clean_save_writes_nothing_and_retires_the_journal() {
         })
         .unwrap();
     assert!(matches!(reply, ShellReply::Opened { .. }), "{reply:?}");
+}
+
+/// "Finish Edit" seals an edit left open into a step: unsaved work, so the
+/// Cmd-S after it writes. (A save is refused while the edit is open.) An
+/// edit left open that changed nothing seals to no step and leaves the
+/// project clean: that Cmd-S writes nothing.
+#[test]
+fn a_save_after_finish_edit_writes() {
+    let root = TempDir::new("clean-save-sealed");
+    let (mut k, s) = fixture(&root);
+    let path = root.path("project.pmv");
+    let before = on_disk(&path);
+    let begin = |k: &mut Kernel| {
+        call(
+            k,
+            GestureCall::Begin {
+                label: "Move".into(),
+            },
+        )
+    };
+    // Changed nothing: no step, still clean, nothing written.
+    begin(&mut k);
+    assert!(matches!(
+        call(&mut k, HistoryCall::Seal),
+        Reply::Bool(false)
+    ));
+    assert!(!dirty(&k));
+    save(&mut k, &s);
+    assert_eq!(on_disk(&path), before);
+    // An edit left open, then Finish Edit: written.
+    begin(&mut k);
+    rename(&mut k, "Moved");
+    assert!(
+        k.shell(ShellCall::Save(s.clone())).is_err(),
+        "a save waits for the open edit"
+    );
+    assert!(matches!(call(&mut k, HistoryCall::Seal), Reply::Bool(true)));
+    assert!(dirty(&k), "the sealed edit is unsaved work");
+    save(&mut k, &s);
+    assert!(!dirty(&k));
+    assert_ne!(
+        on_disk(&path).bytes,
+        before.bytes,
+        "Cmd-S after Finish Edit was skipped"
+    );
+    k.shell(ShellCall::Close(s)).unwrap();
+    opened(
+        k.shell(ShellCall::Open {
+            id: "p".into(),
+            source: SessionSource::File(path),
+            electron_profile: None,
+        })
+        .unwrap(),
+    );
+    assert_eq!(
+        k.project("p").unwrap().store().history().labels().last(),
+        Some(&"Move")
+    );
+}
+
+fn name_of(k: &Kernel) -> Option<Value> {
+    let root = k.project("p").unwrap().store().root().cloned();
+    root.and_then(|r| r.get("name").map(|n| n.to_value()))
+}
+
+/// Save, change the project, Undo back to the saved state, Cmd-S: the
+/// document is as saved but the undone change is a redo step only memory
+/// and the journal hold. The save writes it, and after a crash the reopened
+/// file can Redo it (review w31 clean save, finding 1).
+#[test]
+fn a_save_after_undo_keeps_the_redo_step() {
+    let root = TempDir::new("clean-save-redo");
+    let (mut k, s) = fixture(&root);
+    let path = root.path("project.pmv");
+    let before = on_disk(&path);
+    rename(&mut k, "Redo me");
+    call(&mut k, HistoryCall::Undo);
+    assert!(!dirty(&k));
+    save(&mut k, &s);
+    assert_ne!(
+        on_disk(&path).bytes,
+        before.bytes,
+        "the redo step was not written"
+    );
+    k.durability_barrier().unwrap();
+    drop(k); // a crash
+    let mut k = kernel(&root.0);
+    opened(
+        k.shell(ShellCall::Open {
+            id: "p".into(),
+            source: SessionSource::File(path),
+            electron_profile: None,
+        })
+        .unwrap(),
+    );
+    assert_eq!(name_of(&k), Some(Value::from("Base")));
+    let redo = call(&mut k, HistoryCall::Redo);
+    assert_eq!(name_of(&k), Some(Value::from("Redo me")), "{redo:?}");
+}
+
+/// Undo then Redo back to the saved state, nothing else changed: the same
+/// steps and the same applied count as the file holds, so Cmd-S may skip.
+#[test]
+fn undo_then_redo_back_to_the_saved_state_skips() {
+    let root = TempDir::new("clean-save-redo-back");
+    let (mut k, s) = fixture(&root);
+    let path = root.path("project.pmv");
+    rename(&mut k, "Edited");
+    save(&mut k, &s);
+    let written = on_disk(&path);
+    call(&mut k, HistoryCall::Undo);
+    call(&mut k, HistoryCall::Redo);
+    assert!(!dirty(&k));
+    save(&mut k, &s);
+    assert_eq!(on_disk(&path), written);
+}
+
+fn workspace(k: &mut Kernel) -> Value {
+    match call(k, WorkspaceCall::Get) {
+        Reply::Workspace(w) => w,
+        other => panic!("{other:?}"),
+    }
+}
+
+/// Rearranged panels and nothing else: Cmd-S writes the new layout into the
+/// file, so the file opened in another profile has it (review w31 clean
+/// save, finding 2). Setting the same layout again skips.
+#[test]
+fn a_layout_change_is_written_by_cmd_s() {
+    let root = TempDir::new("clean-save-layout");
+    let (mut k, s) = fixture(&root);
+    let path = root.path("project.pmv");
+    let before = on_disk(&path);
+    let expected = workspace(&mut k);
+    let mut next = match &expected {
+        Value::Object(map) => map.clone(),
+        _ => pm_model::Map::new(),
+    };
+    next.insert("rearranged", Value::from(true));
+    let next = Value::Object(next);
+    call(
+        &mut k,
+        WorkspaceCall::Replace {
+            expected,
+            next: next.clone(),
+        },
+    );
+    assert!(!dirty(&k), "a layout change is not an edit");
+    save(&mut k, &s);
+    let written = on_disk(&path);
+    assert_ne!(
+        written.bytes, before.bytes,
+        "the new layout was not written"
+    );
+    // The same layout again: nothing to write.
+    let current = workspace(&mut k);
+    call(
+        &mut k,
+        WorkspaceCall::Replace {
+            expected: current,
+            next: next.clone(),
+        },
+    );
+    save(&mut k, &s);
+    assert_eq!(on_disk(&path), written);
+    k.shell(ShellCall::Close(s)).unwrap();
+    drop(k);
+    // Another profile, which never saw this project: the file's layout.
+    let other = TempDir::new("clean-save-layout-fresh");
+    let copy = other.path("project.pmv");
+    fs::copy(&path, &copy).unwrap();
+    let mut k = kernel(&other.0);
+    opened(
+        k.shell(ShellCall::Open {
+            id: "p".into(),
+            source: SessionSource::File(copy),
+            electron_profile: None,
+        })
+        .unwrap(),
+    );
+    assert_eq!(
+        workspace(&mut k).get("rearranged"),
+        Some(&Value::from(true)),
+        "the fresh profile opened the old layout"
+    );
 }

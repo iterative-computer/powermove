@@ -209,6 +209,9 @@ pub struct SavePlan {
     /// the destination is still exactly that file when the save runs, the
     /// save writes nothing; otherwise it writes as any save.
     pub(crate) unchanged: Option<Arc<FileVersion>>,
+    /// The undo history this save writes, by step (the store's baseline
+    /// once it finishes).
+    pub(crate) history_steps: crate::history::SavedSteps,
     pub options: SaveOptions,
     /// Alive while a plan or its receipt exists: the store refuses a second
     /// concurrent save to the same document.
@@ -241,6 +244,10 @@ pub enum SaveLayout {
 /// What a successful save produced.
 #[derive(Clone, Debug)]
 pub struct SaveReceipt {
+    /// What the file holds now of the undo history and the workspace (the
+    /// store's baseline for the next save in place).
+    pub(crate) history_steps: crate::history::SavedSteps,
+    pub(crate) workspace: Option<Value>,
     /// Export receipts must not replace the live document's association.
     pub portable: bool,
     /// These sources were already offline when portable export began. Callers
@@ -664,11 +671,23 @@ impl SavePlan {
     /// change times), and every media item the plan would write is already a
     /// range of that file. Bytes held anywhere else (library media found for
     /// assets the file lacks, an import, legacy base64 media) are written.
+    ///
+    /// The equal stat proves the bytes only when it was taken after the tick
+    /// of the file's newest timestamp ([`FileVersion::stat_proves_content`]);
+    /// otherwise the file is read and its hash must be the version's (once:
+    /// the proof is kept on the version), or the save writes.
     fn unchanged_receipt(&self) -> Option<SaveReceipt> {
         let version = self.unchanged.as_ref()?;
         let now = lstat_file(&self.destination).ok().flatten()?;
         if !now.same_file(&version.stat) || version.path != self.destination {
             return None;
+        }
+        if !version.stat_proves_content() {
+            let read = FileVersion::read(&self.destination).ok().flatten()?;
+            if !read.stat.same_file(&version.stat) || read.hash != version.hash {
+                return None;
+            }
+            version.proven_at(read.stat_taken_ns());
         }
         let in_file = |entry: &MediaEntry| match &entry.source {
             MediaSource::Embedded { file, .. } => {
@@ -680,6 +699,8 @@ impl SavePlan {
             return None;
         }
         Some(SaveReceipt {
+            history_steps: self.history_steps.clone(),
+            workspace: self.workspace.clone(),
             portable: false,
             unavailable_links: Vec::new(),
             path: self.destination.clone(),
@@ -732,8 +753,13 @@ impl SavePlan {
         let publish = match publish {
             Publish::Replace(v) => {
                 durable::check_version(dest, Some(&v), false)?;
+                let stat_taken = durable::StatTaken::now();
                 let stat = lstat_file(dest)?.ok_or(ProjectIoError::ChangedOnDisk)?;
-                Publish::Replace(FileVersion { stat, ..v })
+                Publish::Replace(FileVersion {
+                    stat,
+                    stat_taken,
+                    ..v
+                })
             }
             Publish::CreateNew => {
                 durable::check_version(dest, None, false)?;
@@ -1099,6 +1125,7 @@ impl SavePlan {
             stat: installed.stat,
             hash: file_hash.clone(),
             held: Some(durable::HeldFile::new(installed.file)),
+            stat_taken: installed.taken,
         });
         let reused_media_bytes: u64 = records[..reused_count].iter().map(|r| r.length).sum();
         let mut table = MediaTable::default();
@@ -1116,6 +1143,8 @@ impl SavePlan {
             });
         }
         let receipt = SaveReceipt {
+            history_steps: self.history_steps.clone(),
+            workspace: self.workspace.clone(),
             portable: self.options.portable,
             unavailable_links,
             path: dest.clone(),
