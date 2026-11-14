@@ -364,6 +364,24 @@ impl SessionGuard<'_> {
         self.session.as_mut().unwrap().set_skip_disposable(on);
     }
 
+    /// Presented frame `n` when this session's run has already passed it
+    /// and neither the cache nor the session keeps it: (samples back from
+    /// the run's position, samples a seek back to it decodes again). A
+    /// playing viewer weighs the two: on a long GOP (a clip with one sync
+    /// sample) a seek back decodes the clip from its start again.
+    pub fn passed(&self, n: usize) -> Option<(usize, usize)> {
+        let sample = self.source.index.frames.get(n)?.sample;
+        let key = FrameKey {
+            source: self.source.id,
+            sample,
+            purpose: self.key.purpose,
+        };
+        if self.service.cache.contains(&key) {
+            return None;
+        }
+        self.session.as_ref().unwrap().passed(sample)
+    }
+
     /// Presented frame `n`, through the cache.
     pub fn frame(&mut self, n: usize) -> Result<DecodedFrame> {
         match self.frame_with(n, &mut |_| false)? {
@@ -720,6 +738,15 @@ impl DecodeService {
             source: source.clone(),
             session: Some(session),
         })
+    }
+
+    /// Drops the frames idle sessions keep besides the cache (as a decoder
+    /// share that is over does).
+    #[cfg(test)]
+    pub(crate) fn clear_idle_windows(&self) {
+        for s in self.idle.lock().unwrap().values_mut().flatten() {
+            s.clear_window();
+        }
     }
 
     /// A new session for `source` (counted as open).
