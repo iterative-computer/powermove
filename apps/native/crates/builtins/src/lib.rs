@@ -987,6 +987,13 @@ impl Builtins {
             _ => Err("This effect can't be added here.".into()),
         }
     }
+    /// The Project panel's selected assets, in its order.
+    pub fn project_selection(&self) -> Vec<String> {
+        self.backend(PROJECT_PANEL)
+            .ok()
+            .map(|b| b.shared().native.project.panel.selected_assets().to_vec())
+            .unwrap_or_default()
+    }
     /// What the Project panel is dragging (its `dragstart`): the items the
     /// timeline or the viewer places when it is dropped there.
     pub fn project_drag(&self) -> Option<pm_panel_media::Drag> {

@@ -1469,6 +1469,21 @@ impl Controller {
                                 pm_panel_media::Effect::Renditions { action, assets } => {
                                     self.renditions(action, assets, cx)
                                 }
+                                // Space on the selection: Quick Look, as in Finder.
+                                pm_panel_media::Effect::TogglePreview(id)
+                                | pm_panel_media::Effect::ShowPreview(id) => {
+                                    let selection = self
+                                        .builtins
+                                        .runtime
+                                        .as_ref()
+                                        .map(|r| r.project_selection())
+                                        .unwrap_or_default();
+                                    crate::quick_look::toggle(quick_look_files(
+                                        &selection,
+                                        &id,
+                                        &self.media_base.originals,
+                                    ));
+                                }
                                 pm_panel_media::Effect::Focus(_)
                                 | pm_panel_media::Effect::ClearPreview => {}
                                 other => {
@@ -2854,5 +2869,56 @@ mod project_view_tests {
         assert_eq!(view("b", Some("grid")), "grid");
         assert_eq!(view("a", None), "list");
         assert!(super::project_view(&path, Some("a"), Some("tiles".into())).is_err());
+    }
+}
+
+/// The files Quick Look shows for Space on `pressed`: the whole selection
+/// when it holds that item (the arrow keys then move through it), else that
+/// item; each asset's original, an image sequence as its first frame.
+fn quick_look_files(
+    selection: &[String],
+    pressed: &str,
+    originals: &std::collections::BTreeMap<String, std::path::PathBuf>,
+) -> Vec<std::path::PathBuf> {
+    let ids: Vec<&str> = if selection.iter().any(|s| s == pressed) {
+        selection.iter().map(String::as_str).collect()
+    } else {
+        vec![pressed]
+    };
+    ids.into_iter()
+        .filter_map(|id| originals.get(id))
+        .map(
+            |path| match pm_media::image::sequence::Manifest::read(path) {
+                Ok(Some(sequence)) => (sequence.first..=sequence.last)
+                    .map(|n| sequence.file(n))
+                    .find(|f| f.is_file())
+                    .unwrap_or_else(|| path.clone()),
+                _ => path.clone(),
+            },
+        )
+        .collect()
+}
+
+#[cfg(test)]
+mod quick_look_tests {
+    /// Space on a selected item shows the selection's originals in order;
+    /// on an item outside the selection, that item alone; items without an
+    /// original (compositions) are left out.
+    #[test]
+    fn quick_look_shows_the_selections_originals() {
+        let originals: std::collections::BTreeMap<String, std::path::PathBuf> = [
+            ("a".to_owned(), "/m/a.mov".into()),
+            ("b".to_owned(), "/m/b.png".into()),
+        ]
+        .into();
+        let selection = ["b".to_owned(), "c".to_owned(), "a".to_owned()];
+        assert_eq!(
+            super::quick_look_files(&selection, "a", &originals),
+            [std::path::PathBuf::from("/m/b.png"), "/m/a.mov".into()]
+        );
+        assert_eq!(
+            super::quick_look_files(&["b".to_owned()], "a", &originals),
+            [std::path::PathBuf::from("/m/a.mov")]
+        );
     }
 }
