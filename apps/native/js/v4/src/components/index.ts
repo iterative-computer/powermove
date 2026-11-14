@@ -712,9 +712,9 @@ export function ColorWheel(props: ColorWheelProps) {
           : {}),
       }),
     },
+    // Across its group; the host makes it as tall as it is wide, between
+    // the least and greatest wheel (past the greatest, centred).
     {
-      width: token("metrics.grade_wheel"),
-      height: token("metrics.grade_wheel"),
       minWidth: token("metrics.grade_wheel"),
       minHeight: token("metrics.grade_wheel"),
     },
@@ -742,8 +742,9 @@ export function CurveEditor(props: CurveEditorProps) {
       control: "curve-editor",
       metadata: kitMetadata(props, { channel }),
     },
+    // Across its group; the host makes it as tall as it is wide, between
+    // the least and greatest graph.
     {
-      height: token("metrics.curve_editor"),
       minHeight: token("metrics.curve_editor"),
     },
   );

@@ -4,10 +4,13 @@
 //! properties, transform or layer fields (`$selection` is the first selected
 //! layer), or a local `stateKey` kept in the workspace record. Numbers, text
 //! and colours are typed in a small sheet, a select opens its options as a
-//! menu, toggles and buttons act on click. Each document edit is one Undo
-//! step named for its control; a `stateKey` edit is tool state, no Undo step
-//! (v1's `local` edit mode). A sheet or menu edits the layer its control
-//! targeted when it opened. A binding V2 can't write yet shows disabled with why.
+//! menu, toggles and buttons act on click. Rows are the inspector's: the
+//! label in its column and a value well (a toggle as Off and On segments, a
+//! slider filled to its place), a gradient's colours as one ramp above
+//! them. Each document edit is one Undo step named for its control; a
+//! `stateKey` edit is tool state, no Undo step (v1's `local` edit mode). A
+//! sheet or menu edits the layer its control targeted when it opened. A
+//! binding V2 can't write yet shows disabled with why.
 use crate::session::Controller;
 use gpui::{prelude::*, *};
 use objc2_app_kit::NSAccessibility;
@@ -41,10 +44,11 @@ pub fn panel(
     v: &mut Controller,
     id: &str,
     rect: pm_shell::layout::Rect,
+    window: &Window,
     cx: &mut Context<Controller>,
 ) -> Option<AnyElement> {
     let (_, _, def) = section(v, id)?;
-    Some(render(v, id, &def, rect, cx))
+    Some(render(v, id, &def, rect, window, cx))
 }
 
 /// What a control reads and writes.
@@ -600,15 +604,32 @@ fn readout(v: &Controller, source: &str) -> String {
     }
 }
 
+/// The control a gradient ramp's end edits: v1's `startColor` / `endColor`
+/// (a colour control named so by its state key, parameter or label).
+fn ramp_end(controls: &[Value], end: &str) -> Option<usize> {
+    controls.iter().position(|c| {
+        let name: String = [&c["stateKey"], &c["param"], &c["label"]]
+            .into_iter()
+            .find_map(Value::as_str)
+            .unwrap_or("")
+            .chars()
+            .filter(char::is_ascii_alphanumeric)
+            .collect();
+        c["type"] == "color" && name.eq_ignore_ascii_case(end)
+    })
+}
+
 fn render(
     v: &mut Controller,
     id: &str,
     def: &Value,
     rect: pm_shell::layout::Rect,
+    window: &Window,
     cx: &mut Context<Controller>,
 ) -> AnyElement {
+    use pm_shell::kit::ink;
     let t = v.host.borrow().tokens.clone();
-    let (c, m, ty) = (&t.colors, &t.metrics, &t.typography);
+    let (c, m, ty, tr) = (&t.colors, &t.metrics, &t.typography, &t.translucency);
     let Some(controls) = def["controls"].as_array() else {
         let title = def["title"].as_str().unwrap_or("Controls");
         return pm_shell::view::empty_state(
@@ -629,71 +650,134 @@ fn render(
         .flex_col()
         .w_full()
         .h(px((rect.h - m.header).max(0.)))
-        .p(px(m.gap))
-        .gap(px(m.gap / 2.))
+        .py(px(m.gap))
         .overflow_y_scroll()
         .text_size(px(ty.body));
     if let Some(note) = def["note"].as_str().filter(|n| !n.is_empty()) {
         body = body.child(
             div()
-                .text_size(px(ty.minimum))
+                .px(px(m.inset))
+                .pb(px(m.gap))
+                .text_size(px(ty.label))
                 .text_color(rgb(c.muted))
                 .child(note.to_owned()),
         );
     }
-    let field = |eid: String, label: String, text: String, enabled: bool| {
+    // The inspector's row: the label in its column, the value well taking
+    // the rest (the kit's InspectorRow and value well).
+    let row = |label: &str| {
+        div()
+            .flex()
+            .items_center()
+            .gap(px(m.gap))
+            .h(px(m.row))
+            .flex_none()
+            .px(px(m.inset))
+            .child(
+                div()
+                    .w(px(m.label_column))
+                    .flex_shrink(1.)
+                    .min_w(px(0.))
+                    .truncate()
+                    .text_size(px(ty.label))
+                    .text_color(rgb(c.secondary))
+                    .child(label.to_owned()),
+            )
+    };
+    let well = |eid: String, label: String, enabled: bool| {
         div()
             .id(SharedString::from(eid))
             .role(Role::Button)
             .aria_label(label)
-            .flex_none()
-            .min_w(px(m.control * 2.))
-            .h(px(m.control))
-            .px(px(m.inset))
+            .relative()
+            .flex_1()
+            .min_w(px(m.value_column.min(m.control * 2.)))
+            .h(px(m.field))
+            .px(px(m.gap))
             .flex()
             .items_center()
+            .gap(px(m.gap))
+            .overflow_hidden()
             .rounded(px(m.control_radius))
-            .bg(rgb(c.field))
-            .when(enabled, |d| d.hover_style(|s| s.bg(rgb(c.hover))))
+            .bg(ink(c.text, tr.hover))
             .text_color(rgb(if enabled { c.text } else { c.muted }))
-            .child(text)
+    };
+    // A gradient's two colours as one ramp above their rows (v1's RampField);
+    // each half opens its colour.
+    if let (Some(start), Some(end)) = (
+        ramp_end(controls, "startcolor"),
+        ramp_end(controls, "endcolor"),
+    ) && let (Ok(a), Ok(b)) = (
+        value(v, def, &controls[start]),
+        value(v, def, &controls[end]),
+    ) {
+        let colour = |x: &Value| {
+            crate::v4_compile::parse_hex(x.as_str().unwrap_or("")).unwrap_or(c.text)
+        };
+        let (from, to) = (colour(&a), colour(&b));
+        let half = |eid: &str, index: usize, text: Value| {
+            let panel = id.to_owned();
+            let text = shown(&text);
+            div()
+                .id(SharedString::from(format!("generated-{id}-{eid}")))
+                .role(Role::Button)
+                .aria_label(controls[index]["label"].as_str().unwrap_or("").to_owned())
+                .flex_1()
+                .h_full()
+                .on_click(cx.listener(move |v, _, _, cx| {
+                    v.generated_edit(panel.clone(), index, text.clone(), cx)
+                }))
+        };
+        body = body.child(
+            div().px(px(m.inset)).pb(px(m.gap)).child(
+                div()
+                    .flex()
+                    .h(px(m.control))
+                    .rounded(px(m.control_radius))
+                    .border_1()
+                    .border_color(ink(c.text, tr.edge))
+                    .bg(linear_gradient(
+                        90.,
+                        linear_color_stop(rgb(from), 0.),
+                        linear_color_stop(rgb(to), 1.),
+                    ))
+                    .child(half("ramp-start", start, a))
+                    .child(half("ramp-end", end, b)),
+            ),
+        );
+    }
+    let chevron = |window: &Window| {
+        pm_shell::symbol::symbol(
+            "chevron.up.chevron.down",
+            m.symbol_inline,
+            pm_shell::symbol::Weight::Semibold,
+            c.secondary,
+            window,
+        )
     };
     for (index, control) in controls.iter().enumerate() {
         let kind = control["type"].as_str().unwrap_or("");
         let label = control["label"].as_str().unwrap_or("").to_owned();
         let panel = id.to_owned();
         let eid = format!("generated-{id}-{index}");
-        let row = div()
-            .flex()
-            .items_center()
-            .gap(px(m.gap))
-            .min_h(px(m.row))
-            .child(
+        let element = match kind {
+            "note" => div()
+                .px(px(m.inset))
+                .py(px(m.gap / 2.))
+                .text_size(px(ty.label))
+                .text_color(rgb(c.muted))
+                .child(control["text"].as_str().unwrap_or(&label).to_owned()),
+            "readout" => row(&label).child(
                 div()
                     .flex_1()
-                    .min_w_0()
+                    .min_w(px(0.))
                     .truncate()
-                    .text_color(rgb(c.secondary))
-                    .child(label.clone()),
-            );
-        let row = match kind {
-            "note" => {
-                body = body.child(
-                    div()
-                        .text_size(px(ty.minimum))
-                        .text_color(rgb(c.muted))
-                        .child(control["text"].as_str().unwrap_or(&label).to_owned()),
-                );
-                continue;
-            }
-            "readout" => row.child(
-                div()
-                    .text_color(rgb(c.secondary))
+                    .text_color(rgb(c.text))
                     .child(readout(v, control["source"].as_str().unwrap_or(""))),
             ),
             "button" => {
                 let accent = control["primary"] == true && primaries == 1;
-                body = body.child(
+                div().px(px(m.inset)).py(px(m.gap / 2.)).child(
                     div()
                         .id(SharedString::from(eid))
                         .role(Role::Button)
@@ -704,35 +788,62 @@ fn render(
                         .items_center()
                         .justify_center()
                         .rounded(px(m.control_radius))
-                        .bg(rgb(if accent { c.accent } else { c.field }))
-                        .hover_style(|s| s.opacity(0.85))
+                        .bg(if accent {
+                            rgb(c.accent)
+                        } else {
+                            ink(c.text, tr.hover)
+                        })
                         .text_color(rgb(if accent { c.accent_text } else { c.text }))
                         .child(label)
                         .on_click(
                             cx.listener(move |v, _, _, cx| v.generated_press(&panel, index, cx)),
                         ),
-                );
-                continue;
+                )
             }
             _ => match value(v, def, control) {
-                Err(why) => row.child(
-                    field(eid, label.clone(), "—".into(), false)
+                Err(why) => row(&label).child(
+                    well(eid, label.clone(), false)
+                        .child("—")
                         .tooltip(pm_shell::view::tooltip(&t, why.to_owned())),
                 ),
-                Ok(current) => match kind {
+                Ok(current) => row(&label).child(match kind {
+                    // Off and On as two segments (v1's ToggleField): the
+                    // state reads as a word.
                     "toggle" => {
                         let on = current == true;
-                        row.child(
-                            field(
-                                eid,
-                                label.clone(),
-                                if on { "On" } else { "Off" }.into(),
-                                true,
-                            )
-                            .on_click(cx.listener(
-                                move |v, _, _, cx| v.generated_set(&panel, index, json!(!on), cx),
-                            )),
-                        )
+                        let segment = |name: &'static str, is: bool| {
+                            let panel = panel.clone();
+                            div()
+                                .id(SharedString::from(format!("{eid}-{name}")))
+                                .role(Role::RadioButton)
+                                .aria_label(format!("{label} {name}"))
+                                .aria_toggled(if on == is {
+                                    gpui::Toggled::True
+                                } else {
+                                    gpui::Toggled::False
+                                })
+                                .flex_1()
+                                .h_full()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(m.inner_radius))
+                                .when(on == is, |d| {
+                                    d.bg(ink(c.text, tr.selected)).text_color(rgb(c.text))
+                                })
+                                .when(on != is, |d| d.text_color(rgb(c.secondary)))
+                                .child(name)
+                                .on_click(cx.listener(move |v, _, _, cx| {
+                                    if on != is {
+                                        v.generated_set(&panel, index, json!(is), cx)
+                                    }
+                                }))
+                        };
+                        well(eid.clone(), label.clone(), true)
+                            .px(px(2.))
+                            .gap(px(2.))
+                            .child(segment("Off", false))
+                            .child(segment("On", true))
                     }
                     "select" => {
                         let options: Vec<(Value, String)> = control["options"]
@@ -745,8 +856,10 @@ fn render(
                             .iter()
                             .find(|(v, _)| *v == current)
                             .map_or_else(|| shown(&current), |(_, l)| l.clone());
-                        row.child(field(eid, label.clone(), text, true).on_click(cx.listener(
-                            move |v, e: &ClickEvent, _, _| {
+                        well(eid, label.clone(), true)
+                            .child(div().flex_1().min_w(px(0.)).truncate().child(text))
+                            .child(chevron(window))
+                            .on_click(cx.listener(move |v, e: &ClickEvent, _, _| {
                                 v.generated_menu_layer =
                                     bound_layer(v, &control_at(v, &panel, index));
                                 let entries: Vec<_> = options
@@ -766,36 +879,70 @@ fn render(
                                     f32::from(at.x),
                                     f32::from(at.y),
                                 );
-                            },
-                        )))
+                            }))
                     }
                     "slider" | "number" | "text" | "color" => {
                         let text = shown(&current);
-                        let mut f = field(eid, label.clone(), text.clone(), true);
+                        let mut f = well(eid, label.clone(), true);
+                        if kind == "slider"
+                            && let (Some(lo), Some(hi), Some(x)) = (
+                                control["min"].as_f64(),
+                                control["max"].as_f64(),
+                                current.as_f64(),
+                            )
+                            && hi > lo
+                        {
+                            // Filled to its place in the range (v1's
+                            // filled slider), the number over it.
+                            let fraction = ((x - lo) / (hi - lo)).clamp(0., 1.) as f32;
+                            f = f.child(
+                                div()
+                                    .absolute()
+                                    .top_0()
+                                    .left_0()
+                                    .h_full()
+                                    .w(relative(fraction))
+                                    .rounded(px(m.control_radius))
+                                    .bg(ink(c.text, tr.hover)),
+                            );
+                        }
                         if kind == "color"
-                            && let Some(hex) = text
-                                .strip_prefix('#')
-                                .and_then(|h| u32::from_str_radix(h.get(..6)?, 16).ok())
+                            && let Some(hex) = crate::v4_compile::parse_hex(&text)
                         {
                             f = f.child(
                                 div()
-                                    .ml(px(m.gap))
-                                    .size(px(ty.reading))
-                                    .rounded(px(m.inner_radius))
+                                    .flex_none()
+                                    .size(px(m.field - 8.))
+                                    .rounded(px(m.inner_radius / 2.))
+                                    .border_1()
+                                    .border_color(ink(c.text, tr.edge))
                                     .bg(rgb(hex)),
                             );
                         }
-                        row.child(f.on_click(cx.listener(move |v, _, _, cx| {
+                        let unit = control["unit"].as_str().unwrap_or("").to_owned();
+                        f.child(
+                            div()
+                                .relative()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .truncate()
+                                .font_features(pm_shell::kit::tabular())
+                                .child(format!("{text}{unit}")),
+                        )
+                        .on_click(cx.listener(move |v, _, _, cx| {
                             v.generated_edit(panel.clone(), index, text.clone(), cx)
-                        })))
+                        }))
                     }
-                    _ => row.child(field(eid, label.clone(), shown(&current), false).tooltip(
-                        pm_shell::view::tooltip(&t, "This control can’t be edited here yet."),
-                    )),
-                },
+                    _ => well(eid, label.clone(), false)
+                        .child(shown(&current))
+                        .tooltip(pm_shell::view::tooltip(
+                            &t,
+                            "This control can’t be edited here yet.",
+                        )),
+                }),
             },
         };
-        body = body.child(row);
+        body = body.child(element);
     }
     body.into_any_element()
 }

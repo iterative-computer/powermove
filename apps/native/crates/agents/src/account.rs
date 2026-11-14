@@ -378,7 +378,7 @@ fn chatgpt_status(peer: &mut Peer) -> Result<Status, String> {
     Ok(Status {
         state: State::Connected,
         email: text(&account["email"], 320),
-        plan: text(&account["planType"], 80),
+        plan: text(&account["planType"], 80).map(|p| plan_name(&p)),
         detail: None,
     })
 }
@@ -459,6 +459,20 @@ fn wait_for_login(
     }
     Ok(outcome)
 }
+/// A provider's plan id as Settings shows it: "plus" → "Plus", "max" →
+/// "Max", "team_pro" → "Team Pro".
+pub fn plan_name(id: &str) -> String {
+    id.split(['_', '-', ' '])
+        .filter(|w| !w.is_empty())
+        .map(|w| {
+            let mut c = w.chars();
+            c.next()
+                .map(|f| f.to_uppercase().chain(c).collect::<String>())
+                .unwrap_or_default()
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
 fn claude_status(
     binary: &PathBuf,
     vars: &BTreeMap<String, String>,
@@ -475,7 +489,9 @@ fn claude_status(
     Ok(Status {
         state: State::Connected,
         email: text(&value["email"], 320),
-        plan: text(&value["subscriptionType"], 80).or_else(|| text(&value["authMethod"], 80)),
+        // The plan in words; how it signed in (`authMethod`, e.g. a token) is
+        // no plan and never shown.
+        plan: text(&value["subscriptionType"], 80).map(|p| plan_name(&p)),
         detail: None,
     })
 }
@@ -663,6 +679,12 @@ fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_plan_reads_as_words() {
+        assert_eq!(plan_name("plus"), "Plus");
+        assert_eq!(plan_name("max"), "Max");
+        assert_eq!(plan_name("team_pro"), "Team Pro");
+    }
     #[test]
     fn sign_in_urls_stay_on_the_providers_own_https_hosts() {
         assert!(trusted_auth_url("https://auth.openai.com/login").is_ok());

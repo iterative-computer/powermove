@@ -378,6 +378,9 @@ pub struct ViewerStatus {
     /// Effects the project uses whose provider isn't installed. Their
     /// layers draw without them (bypassed, as After Effects does).
     pub missing_effects: Vec<pm_render::effects::versions::MissingEffect>,
+    /// The installed extensions that would provide `missing_effects` but
+    /// provide nothing now, with why: the notice names them.
+    pub unavailable: Vec<resources::Unavailable>,
     /// Playing frames with a stand-in for a decode that missed its allowance.
     pub stand_in_frames: u64,
     /// Frames whose own stills exceeded the engine's image grant: drawn, and
@@ -430,12 +433,32 @@ impl ViewerStatus {
             ));
         }
         let missing = self.missing_effects.first()?;
+        let owner = self
+            .unavailable
+            .iter()
+            .find(|u| resources::provides(&u.id, &missing.effect));
+        if let (None, Some(owner)) = (&missing.revision, owner) {
+            return Some(format!(
+                "{} {}: {} is bypassed on {}{}",
+                owner.name,
+                owner.why,
+                missing.effect,
+                layers(missing.layers),
+                more(self.missing_effects.len() - 1)
+            ));
+        }
         let what = match &missing.revision {
             Some(revision) => format!(
                 "Effect saved by a newer Powermove: {} version {revision}",
                 missing.effect
             ),
-            None => format!("Effect not installed: {}", missing.effect),
+            None => match resources::named_extension(&missing.effect) {
+                Some(extension) => format!(
+                    "Effect not installed: {} (extension “{extension}”)",
+                    missing.effect
+                ),
+                None => format!("Effect not installed: {}", missing.effect),
+            },
         };
         Some(format!(
             "{what}, bypassed on {}{}",
@@ -3434,6 +3457,21 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 if v.status.missing_effects != engine.missing_effects {
                     v.status.missing_effects = engine.missing_effects.clone();
                 }
+                let owners: Vec<_> = v
+                    .resources
+                    .unavailable
+                    .iter()
+                    .filter(|u| {
+                        engine
+                            .missing_effects
+                            .iter()
+                            .any(|m| resources::provides(&u.id, &m.effect))
+                    })
+                    .cloned()
+                    .collect();
+                if v.status.unavailable != owners {
+                    v.status.unavailable = owners;
+                }
                 // A capture asked for belongs to the next frame that lands.
                 if v.stamp != stamp && !only_moved(v, stamp, moves, spec.moment, capture) {
                     if let Some(recorder) = &recorder {
@@ -4478,7 +4516,20 @@ mod worker_tests {
         };
         assert_eq!(
             status.notice().as_deref(),
-            Some("Effect not installed: acme.glow, bypassed on 4 layers (and 1 more)")
+            Some("Effect not installed: acme.glow (extension “acme”), bypassed on 4 layers (and 1 more)")
+        );
+        // Installed, but providing nothing now: named, with why.
+        let off = ViewerStatus {
+            unavailable: vec![resources::Unavailable {
+                id: "acme".into(),
+                name: "Acme Effects".into(),
+                why: "is turned off".into(),
+            }],
+            ..status.clone()
+        };
+        assert_eq!(
+            off.notice().as_deref(),
+            Some("Acme Effects is turned off: acme.glow is bypassed on 4 layers (and 1 more)")
         );
         let newer = ViewerStatus {
             missing_effects: vec![pm_render::effects::versions::MissingEffect {
