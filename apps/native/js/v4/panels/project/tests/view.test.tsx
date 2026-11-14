@@ -541,3 +541,50 @@ test("the search field follows a query the host set, not late answers to typing"
   expect(find(root, "Search media").props.value).toBe("");
   await root.dispose();
 });
+test("the header chooses list or grid; the grid's rows are a column wide each", async () => {
+  const { root, commits } = recorder();
+  const chosen: string[] = [];
+  const widths: number[] = [];
+  const view = projection([asset("a"), asset("b"), asset("c")]);
+  const render = (mode: "list" | "grid") =>
+    root.render(
+      <ProjectView
+        view={view}
+        input={() => {}}
+        menu={() => {}}
+        page={() => {}}
+        native={native}
+        layout={
+          mode === "grid"
+            ? { columns: 2, rowHeight: 140, thumbWidth: 160, thumbHeight: 90 }
+            : { columns: 1, rowHeight: 28 }
+        }
+        viewMode={mode}
+        onViewMode={(m) => chosen.push(m)}
+        onWidth={(w) => widths.push(w)}
+      />,
+    );
+  await render("list");
+  expect(find(root, "List").props["aria-checked"]).toBe(true);
+  expect(find(root, "Grid").props["aria-checked"]).toBe(false);
+  await event(root, find(root, "Grid").id, "click");
+  expect(chosen).toEqual(["grid"]);
+  await render("grid");
+  const list = root.inspect().nodes.find((n) => n.type === "virtual-list")!;
+  expect(list.props.metadata).toEqual({ fixedItems: true });
+  // The host's rangechange carries the grid's width.
+  await event(root, list.id, "rangechange", { range: [0, 2], width: 412 });
+  expect(widths).toEqual([412]);
+  // Three cards in two columns: the short last row keeps a space beside c.
+  const nodes = root.inspect().nodes;
+  const rows = list.children.map((id) => nodes.find((n) => n.id === id)!);
+  expect(rows.map((r) => r.children.length)).toEqual([2, 2]);
+  for (const id of ["a", "b", "c"])
+    expect(card(root, id).props.style).toMatchObject({
+      flexGrow: 1,
+      flexBasis: { token: "metrics.thumbnail_min" },
+    });
+  const report = replay(commits, view).at(-1)!;
+  expect(report.diagnostics).toEqual([]);
+  await root.dispose();
+});

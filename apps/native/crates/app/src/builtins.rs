@@ -366,6 +366,9 @@ impl Controller {
                 state.proxy = status(proxy, &state.proxy);
                 state.optimized = status(optimized, &state.optimized);
                 state.play_original = self.pro_media.plays_original(&project, id);
+                if let Some(key) = self.thumbs.key(id) {
+                    state.poster = Some(key);
+                }
             })
     }
     /// Readiness depends only on the media inputs, so an edit that left them
@@ -699,6 +702,7 @@ impl Controller {
         }
         self.start_builtins(cx);
         self.probe_builtin_media(cx);
+        self.want_thumbnails(cx);
         if self.builtins.updating {
             self.builtins.again = true;
             return;
@@ -1819,6 +1823,32 @@ impl Controller {
                     self.agent_menu(&runtime, &request, cx);
                     continue;
                 }
+                // The Project panel's list/grid choice, kept in the
+                // profile: `{view}` saves it; without one, the saved one
+                // (list until the person chooses).
+                // The Project panel's list/grid choice, kept per project in
+                // the profile (`Project/view.json`: project id to view):
+                // `{view}` saves the open project's; without one, its saved
+                // choice, a grid until the person chooses (v1.2.0's panel was
+                // a grid).
+                "project.view" => {
+                    let path = self.profile.join("Project").join("view.json");
+                    let project = self.session.as_ref().map(|s| s.project.clone());
+                    let view = request.input["view"].as_str().map(str::to_owned);
+                    let runtime = runtime.clone();
+                    let io = cx
+                        .background_executor()
+                        .spawn(async move { project_view(&path, project.as_deref(), view) });
+                    cx.spawn(async move |this, cx| {
+                        let reply = io.await;
+                        if reply.as_deref() == Ok("grid") {
+                            let _ = this.update(cx, |c, cx| c.show_thumbnails(cx));
+                        }
+                        runtime.platform_reply(request.id, reply.map(Value::from));
+                    })
+                    .detach();
+                    continue;
+                }
                 "project.menu" => {
                     let options = request.input["entries"]
                         .as_array()
@@ -2772,5 +2802,57 @@ mod follow_selection_tests {
         let next = last_frame.unwrap() + tick;
         assert!(follow_due(last_frame, last_at, seek, now));
         assert!(!follow_due(last_frame, last_at, next, now));
+    }
+}
+
+/// The Project panel's view for `project` in the per-project choices at
+/// `path`: `set` saves one, else the saved one (a grid until chosen).
+fn project_view(
+    path: &std::path::Path,
+    project: Option<&str>,
+    set: Option<String>,
+) -> Result<String, String> {
+    let mut choices: serde_json::Map<String, Value> = std::fs::read(path)
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    let key = project.unwrap_or("");
+    match set {
+        Some(view) if view == "list" || view == "grid" => {
+            choices.insert(key.to_owned(), Value::from(view.clone()));
+            let _ = std::fs::create_dir_all(path.parent().expect("a folder"));
+            std::fs::write(path, Value::Object(choices).to_string())
+                .map(|()| view)
+                .map_err(|e| format!("The view choice wasn't saved: {e}"))
+        }
+        Some(other) => Err(format!("Unknown Project view {other}")),
+        None => Ok(choices
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|v| *v == "list")
+            .unwrap_or("grid")
+            .to_owned()),
+    }
+}
+
+#[cfg(test)]
+mod project_view_tests {
+    /// Each project keeps its own list/grid choice; one never chosen opens
+    /// as a grid, as v1.2.0's Project panel was.
+    #[test]
+    fn each_project_keeps_its_own_view() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Project/view.json");
+        let view = |project, set: Option<&str>| {
+            super::project_view(&path, Some(project), set.map(str::to_owned)).unwrap()
+        };
+        assert_eq!(view("a", None), "grid");
+        assert_eq!(view("a", Some("list")), "list");
+        assert_eq!(view("b", None), "grid");
+        assert_eq!(view("a", None), "list");
+        assert_eq!(view("b", Some("grid")), "grid");
+        assert_eq!(view("a", None), "list");
+        assert!(super::project_view(&path, Some("a"), Some("tiles".into())).is_err());
     }
 }
