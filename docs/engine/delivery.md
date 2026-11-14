@@ -208,7 +208,13 @@ HLG HEVC carries Dolby Vision Profile 8.4 unless the person turns it off (the Ex
 sheet's "Dolby Vision 8.4" row; `DeliveryOptions::without_dolby_vision`): macOS's encoder
 adds a `dvvC` record and an RPU on every frame in its default HDR metadata mode, and the
 file check holds the record (profile 8, HLG compatibility id 4, RPU, no enhancement layer).
-The HLG base layer decodes the same either way (`tests/dolby_vision.rs`). An imported 8.4
+The HLG base layer decodes the same either way (`tests/dolby_vision.rs`). Both choices set the
+encoder's HDR metadata insertion mode (Auto or None) rather than relying on the
+session's default; an encoder that reports the property unsupported fails the export
+as its session opens, before any frame, with the VideoToolbox error. That has not been
+seen on the macOS 27 encoders tested. The software (FFmpeg) sink writes no RPUs, so it
+refuses Dolby Vision on; native and software file checks share one rule for the record
+(`verify::expected_dolby_vision`, `verify::dolby_vision_problem`). An imported 8.4
 clip is read as its HLG base layer and named in the Project panel and Interpret Footage.
 
 HDR10+ (ST 2094-40) is not preserved, and not generated. Tried on macOS 27 with a

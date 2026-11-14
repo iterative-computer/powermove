@@ -40,6 +40,43 @@ pub struct Expected {
     pub evidence: Evidence,
 }
 
+/// The Dolby Vision record a file of `spec` carries: `Some(true)` the 8.4
+/// record (HLG HEVC with it on), `Some(false)` none, `None` it does not
+/// apply. Every route's file check asks this.
+pub fn expected_dolby_vision(spec: &ExportSpec) -> Option<bool> {
+    match (spec.codec, spec.tags) {
+        (Codec::Hevc { .. }, crate::settings::ColorTags::Rec2100Hlg { dolby_vision, .. }) => {
+            Some(dolby_vision)
+        }
+        _ => None,
+    }
+}
+
+/// What is wrong with the Dolby Vision record `found` against `expected`:
+/// profile 8, HLG compatible, an RPU and no enhancement layer, or nothing
+/// when it was turned off.
+pub fn dolby_vision_problem(
+    expected: Option<bool>,
+    found: Option<crate::mp4box::Dovi>,
+) -> Option<String> {
+    match (expected, found) {
+        (Some(true), Some(d))
+            if d.profile == 8
+                && d.compatibility == 4
+                && d.rpu
+                && d.base_layer
+                && !d.enhancement_layer =>
+        {
+            None
+        }
+        (Some(true), found) => Some(format!(
+            "Dolby Vision {found:?}, expected profile 8.4 (HLG compatible)"
+        )),
+        (Some(false), Some(d)) => Some(format!("Dolby Vision {d:?}, expected none")),
+        _ => None,
+    }
+}
+
 impl Expected {
     pub fn new(
         spec: &ExportSpec,
@@ -53,13 +90,7 @@ impl Expected {
             cicp: spec.tags.cicp(),
             chroma_location: spec.tags.chroma_location().sample_loc_type(),
             hdr: spec.tags.hdr_metadata(),
-            dolby_vision: match (spec.codec, spec.tags) {
-                (
-                    Codec::Hevc { .. },
-                    crate::settings::ColorTags::Rec2100Hlg { dolby_vision, .. },
-                ) => Some(dolby_vision),
-                _ => None,
-            },
+            dolby_vision: expected_dolby_vision(spec),
             alpha: spec.alpha,
             frames: spec.frames,
             timing,
@@ -442,20 +473,8 @@ pub fn examine(
             fail(format!("clli {:?}, expected {:?}", visual.clli, hdr.clli()));
         }
     }
-    // Dolby Vision 8.4 on HLG HEVC: profile 8, HLG compatible, an RPU and
-    // no enhancement layer, or nothing when it was turned off.
-    match (expected.dolby_vision, visual.dolby_vision) {
-        (Some(true), Some(d))
-            if d.profile == 8
-                && d.compatibility == 4
-                && d.rpu
-                && d.base_layer
-                && !d.enhancement_layer => {}
-        (Some(true), found) => fail(format!(
-            "Dolby Vision {found:?}, expected profile 8.4 (HLG compatible)"
-        )),
-        (Some(false), Some(d)) => fail(format!("Dolby Vision {d:?}, expected none")),
-        _ => {}
+    if let Some(problem) = dolby_vision_problem(expected.dolby_vision, visual.dolby_vision) {
+        fail(problem);
     }
     let mut full_range = visual
         .colr

@@ -228,17 +228,20 @@ impl Encoder {
                 false,
             )?;
             // HLG HEVC carries Dolby Vision 8.4 unless the person turned
-            // it off (Auto inserts it, macOS computing the RPUs).
-            if let crate::settings::ColorTags::Rec2100Hlg {
-                dolby_vision: false,
-                ..
-            } = spec.tags
-                && matches!(spec.codec, crate::settings::Codec::Hevc { .. })
-            {
+            // it off: Auto inserts it (macOS computing the RPUs), None
+            // leaves it out. Both are set, never left to the session's
+            // default; an encoder that refuses the property fails the
+            // export here, before any frame.
+            if let Some(dolby_vision) = crate::verify::expected_dolby_vision(spec) {
+                let mode = if dolby_vision {
+                    kVTHDRMetadataInsertionMode_Auto
+                } else {
+                    kVTHDRMetadataInsertionMode_None
+                };
                 set(
                     &session,
                     kVTCompressionPropertyKey_HDRMetadataInsertionMode,
-                    &any_str(kVTHDRMetadataInsertionMode_None),
+                    &any_str(mode),
                     false,
                 )?;
             }
