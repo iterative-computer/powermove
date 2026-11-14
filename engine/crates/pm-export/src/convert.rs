@@ -367,6 +367,9 @@ struct RowCache {
     /// The luma row `fits` was decided on (`usize::MAX`: none yet).
     fits_row: usize,
     acc: Vec<[f64; 2]>,
+    /// An HDR row's transform: its buffers and its values.
+    hdr: crate::hdr::RowScratch,
+    hdr_row: Vec<([f64; 3], f64)>,
 }
 
 impl RowCache {
@@ -381,6 +384,8 @@ impl RowCache {
             fits: vec![false; w / 2],
             fits_row: usize::MAX,
             acc: vec![[0.0; 2]; w / 2],
+            hdr: Default::default(),
+            hdr_row: Vec::new(),
         }
     }
 }
@@ -667,6 +672,8 @@ pub fn convert_tagged(
             rows,
             fits,
             fits_row,
+            hdr,
+            hdr_row,
             ..
         } = cache;
         let row = &mut rows[y & 3];
@@ -676,16 +683,17 @@ pub fn convert_tagged(
             row.alpha[x] = a;
         };
         if tags.is_hdr() {
-            for x in 0..w {
-                put(
-                    x,
-                    crate::hdr::output_ycbcra(
-                        pixel(frame, x, y),
-                        params.working,
-                        params.alpha,
-                        tags,
-                    ),
-                );
+            hdr_row.resize(w, ([0.0; 3], 0.0));
+            crate::hdr::output_row(
+                &frame.rgba[y * w * 4..(y + 1) * w * 4],
+                params.working,
+                params.alpha,
+                tags,
+                hdr,
+                hdr_row,
+            );
+            for (x, value) in hdr_row.iter().enumerate() {
+                put(x, *value);
             }
         } else {
             // The row the blocks of this row are sited on.
@@ -750,18 +758,36 @@ pub fn convert_tagged(
     let planes = match format {
         InputFormat::Y416 => {
             let mut out = vec![0u16; w * h * 4];
-            crate::par::rows(&mut out, w * 4, |y, row| {
-                for x in 0..w {
-                    let (v, a) = ycc(x, y);
-                    let o = &mut row[x * 4..x * 4 + 4];
-                    o[0] = code(a * 65535.0, 0.0, 65535.0) as u16;
-                    o[1] = code(v[0] * 56064.0 + 4096.0 + 16.0 * d(x, y, 0), 256.0, 65264.0) as u16;
-                    o[2] =
-                        code(v[1] * 57344.0 + 32768.0 + 16.0 * d(x, y, 1), 256.0, 65264.0) as u16;
-                    o[3] =
-                        code(v[2] * 57344.0 + 32768.0 + 16.0 * d(x, y, 2), 256.0, 65264.0) as u16;
-                }
-            });
+            crate::par::rows_with(
+                &mut out,
+                w * 4,
+                || (crate::hdr::RowScratch::default(), Vec::new()),
+                |(scratch, hdr_row), y, row| {
+                    // An HDR row's transform, over the whole row at once.
+                    if tags.is_hdr() {
+                        hdr_row.resize(w, ([0.0; 3], 0.0));
+                        crate::hdr::output_row(
+                            &frame.rgba[y * w * 4..(y + 1) * w * 4],
+                            params.working,
+                            params.alpha,
+                            tags,
+                            scratch,
+                            hdr_row,
+                        );
+                    }
+                    for x in 0..w {
+                        let (v, a) = if tags.is_hdr() { hdr_row[x] } else { ycc(x, y) };
+                        let o = &mut row[x * 4..x * 4 + 4];
+                        o[0] = code(a * 65535.0, 0.0, 65535.0) as u16;
+                        o[1] = code(v[0] * 56064.0 + 4096.0 + 16.0 * d(x, y, 0), 256.0, 65264.0)
+                            as u16;
+                        o[2] = code(v[1] * 57344.0 + 32768.0 + 16.0 * d(x, y, 1), 256.0, 65264.0)
+                            as u16;
+                        o[3] = code(v[2] * 57344.0 + 32768.0 + 16.0 * d(x, y, 2), 256.0, 65264.0)
+                            as u16;
+                    }
+                },
+            );
             vec![u16_plane(out, w * 4, h)]
         }
         InputFormat::V216 => {

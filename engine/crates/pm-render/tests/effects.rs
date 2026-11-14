@@ -964,6 +964,71 @@ fn bands_of_a_scaled_frame_equal_the_whole_frame() {
     }
 }
 
+/// A frame drawn in time slices (a paused viewer's settled picture,
+/// `pm_render::slices`) is the frame drawn whole, bit for bit: the same
+/// commands in the same order, submitted in pieces. Where its gate says
+/// stop it gives way: the frame ends abandoned, and the frames after it
+/// draw as ever.
+#[test]
+fn a_frame_drawn_in_slices_is_the_whole_frame_and_gives_way() {
+    use pm_render::slices::Slices;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    let _gpu = gpu();
+    let mut r = builtins();
+    let (doc, res) = document(
+        vec![
+            fx("f1", "blur", json!({ "amount": ch(json!(7)) })),
+            fx("f2", "grain", json!({ "amount": ch(json!(40)) })),
+            fx(
+                "f3",
+                "gradient",
+                json!({ "amount": ch(json!(60)), "dither": ch(json!(4)) }),
+            ),
+        ],
+        Some(crossfade(1.0)),
+    );
+    let mut req = request();
+    req.output_kind = pm_render::OutputKind::Final;
+    let whole = render(&mut r, &doc, &res, 0.5, &req).unwrap();
+    // No budget at all: every layer and every effect pass is its own slice.
+    let asked = Arc::new(AtomicU32::new(0));
+    let count = asked.clone();
+    r.set_slices(Some(Slices::new(
+        Duration::ZERO,
+        Arc::new(move |_| {
+            count.fetch_add(1, Ordering::Relaxed);
+            false
+        }),
+    )));
+    let sliced = render(&mut r, &doc, &res, 0.5, &req).unwrap();
+    assert!(whole == sliced, "{} apart", max_diff(&whole, &sliced));
+    let report = r.slices_mut().unwrap().report();
+    assert!(
+        report.slices >= 5 && !report.stopped,
+        "the layers and effect passes ran as slices: {report:?}"
+    );
+    assert!(asked.load(Ordering::Relaxed) > report.slices);
+    // The gate says stop at the third thing asked: the frame gives way.
+    let asked = Arc::new(AtomicU32::new(0));
+    let count = asked.clone();
+    r.slices_mut().unwrap().set_gate(Arc::new(move |_| {
+        count.fetch_add(1, Ordering::Relaxed) >= 2
+    }));
+    assert!(matches!(
+        render(&mut r, &doc, &res, 0.5, &req),
+        Err(RenderError::Abandoned)
+    ));
+    assert!(r.slices_mut().unwrap().report().stopped);
+    // What it left behind changes nothing: in slices and whole alike.
+    r.slices_mut().unwrap().set_gate(Arc::new(|_| false));
+    let again = render(&mut r, &doc, &res, 0.5, &req).unwrap();
+    assert!(whole == again, "{} apart", max_diff(&whole, &again));
+    r.set_slices(None);
+    let again = render(&mut r, &doc, &res, 0.5, &req).unwrap();
+    assert!(whole == again, "{} apart", max_diff(&whole, &again));
+}
+
 /// A band's padding covers each pass's sampling footprint beyond the
 /// declared spread: the halo declares exactly its kernel radius, and its
 /// half-resolution bilinear taps, downsample and upsample read a few

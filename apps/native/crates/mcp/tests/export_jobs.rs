@@ -44,7 +44,7 @@ impl Child {
     }
 }
 impl ExportChild for Child {
-    fn video(&self, r: &VideoExportRequest) -> Result<PathBuf> {
+    fn video(&self, r: &VideoExportRequest) -> Result<pm_mcp::services::VideoDelivered> {
         self.calls.lock().unwrap().push(r.clone());
         self.gate.wait();
         fs::create_dir_all(&r.directory)?;
@@ -54,7 +54,7 @@ impl ExportChild for Child {
             .create_new(true)
             .open(&path)?;
         out.write_all(b"Synthetic worker output; not a video conformance witness")?;
-        Ok(path)
+        Ok(path.into())
     }
     fn video_progress(&self, _: &FrozenProject) -> Option<Progress> {
         if let Some(signal) = self.progress_started.lock().unwrap().take() {

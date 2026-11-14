@@ -28,14 +28,32 @@ impl ScopeMatrix {
     }
 }
 
+/// What the scopes read of the finished frame.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ScopeStage {
+    /// The graded picture before delivery: light above white and colour
+    /// outside the range are kept and counted as Over and Under.
+    #[default]
+    Picture,
+    /// What a delivered file of the signal holds: the project's output tone
+    /// (an HDR project's BT.2390 roll-off, as the export applies it), then
+    /// the signal's range (an SDR file stops at white, PQ at 10,000 nits).
+    Output,
+}
+
 /// The counters' resolution and what they read.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ScopeConfig {
     pub columns: u32,
     pub levels: u32,
     pub vector_bins: u32,
     pub signal: ScopeSignal,
     pub matrix: ScopeMatrix,
+    pub stage: ScopeStage,
+    /// The output tone an Output reading applies; filled in by whoever knows
+    /// the project (the viewer's engine), `None` when the target holds the
+    /// frame as it is.
+    pub tone: Option<crate::OutputTone>,
 }
 
 impl ScopeConfig {
@@ -45,6 +63,8 @@ impl ScopeConfig {
         vector_bins: 256,
         signal: ScopeSignal::Display,
         matrix: ScopeMatrix::Rec709,
+        stage: ScopeStage::Picture,
+        tone: None,
     };
 
     fn plane(&self) -> usize {
@@ -86,6 +106,8 @@ struct Params {
     a: [u32; 4],
     weights: [f32; 4],
     to_2020: [[f32; 4]; 3],
+    /// Output stage, its tone's source and target peaks, whether it tones.
+    output: [f32; 4],
 }
 
 /// The analysis pipeline.
@@ -162,6 +184,11 @@ impl ScopePass {
             ],
             weights: config.matrix.weights(),
             to_2020: [column(0), column(1), column(2)],
+            output: match (config.stage, config.tone) {
+                (ScopeStage::Picture, _) => [0.; 4],
+                (ScopeStage::Output, None) => [1., 0., 0., 0.],
+                (ScopeStage::Output, Some(t)) => [1., t.source_peak, t.target_peak, 1.],
+            },
         };
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("pm scope params"),
@@ -313,6 +340,8 @@ mod tests {
             vector_bins: 96,
             signal: ScopeSignal::Display,
             matrix: ScopeMatrix::Rec709,
+            stage: ScopeStage::Picture,
+            tone: None,
         };
         let counts = pass
             .analyze(&gpu.device, &gpu.queue, &target.texture, config)
@@ -398,6 +427,8 @@ mod tests {
         let config = ScopeConfig {
             signal: ScopeSignal::Pq,
             matrix: ScopeMatrix::Rec2020,
+            stage: ScopeStage::Picture,
+            tone: None,
             ..ScopeConfig::PANEL
         };
         let counts = pass
@@ -410,5 +441,88 @@ mod tests {
             .position(|v| *v == 16)
             .expect("one level");
         assert_eq!(bin, (0.5807f32 * 255.0).round() as usize);
+    }
+
+    /// Output reads what a delivered file holds: light above white clipped
+    /// as an SDR file stops at white, where Picture counts it Over; with
+    /// the project's output tone, the export's roll-off first.
+    #[test]
+    fn the_output_stage_reads_the_delivered_picture() {
+        let gpu = pm_gpu::Gpu::new("scope stage test").unwrap();
+        let pass = ScopePass::new(&gpu.device);
+        let width = 64u32;
+        let pixels: Vec<[f32; 4]> = (0..64 * 16)
+            .map(|i: u32| {
+                let v = (i % 64) as f32 / 32.0 - 0.25;
+                [v, v * 0.5, 1.5 - v, 1.0]
+            })
+            .collect();
+        let target = frame(&gpu, &pixels, width);
+        let config = |stage, tone| ScopeConfig {
+            columns: 64,
+            levels: 128,
+            vector_bins: 96,
+            signal: ScopeSignal::Display,
+            matrix: ScopeMatrix::Rec709,
+            stage,
+            tone,
+        };
+        let count = |config| {
+            pass.analyze(&gpu.device, &gpu.queue, &target.texture, config)
+                .wait(&gpu.device)
+                .unwrap()
+        };
+        let picture = count(config(ScopeStage::Picture, None));
+        let output = count(config(ScopeStage::Output, None));
+        assert!(picture.over > 0 && picture.under > 0);
+        assert_eq!((output.over, output.under), (0, 0));
+        // The clipped picture, counted by the f64 reference.
+        let clipped: Vec<[f64; 3]> = pixels
+            .iter()
+            .map(|p| [p[0], p[1], p[2]].map(|v| f64::from(v.clamp(0.0, 1.0))))
+            .collect();
+        let expected = reference::compute(
+            &clipped,
+            width as usize,
+            16,
+            reference::ScopeConfig {
+                columns: 64,
+                levels: 128,
+                vector_bins: 96,
+                min: 0.0,
+                max: 1.0,
+                matrix: reference::Matrix::Bt709,
+            },
+        )
+        .unwrap();
+        for c in 0..3 {
+            assert_eq!(output.parade[c], u32s(&expected.parade[c]), "parade {c}");
+            assert_eq!(
+                output.histogram[c],
+                u32s(&expected.histogram[c].bins),
+                "histogram {c}"
+            );
+        }
+        // An HDR project read on PQ: its roll-off to the mastering peak brings
+        // the brightest level down from the content's peak.
+        let pq = |stage, tone| ScopeConfig {
+            signal: ScopeSignal::Pq,
+            ..config(stage, tone)
+        };
+        let top = |c: &ScopeFrame| c.luma_histogram.iter().rposition(|n| *n > 0).unwrap();
+        let untoned = count(pq(ScopeStage::Output, None));
+        let toned = count(pq(
+            ScopeStage::Output,
+            Some(crate::OutputTone {
+                source_peak: 4000.0,
+                target_peak: 300.0,
+            }),
+        ));
+        assert!(
+            top(&toned) < top(&untoned),
+            "{} {}",
+            top(&toned),
+            top(&untoned)
+        );
     }
 }

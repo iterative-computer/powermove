@@ -51,6 +51,9 @@ pub struct Transport {
     pub clock: TransportClock,
     pub audio: Option<AudioLink>,
     awaiting: Option<(i64, Option<u32>, PlaybackRate)>,
+    /// The last wait for the audio clock that ended: how long it took (µs)
+    /// and whether it ended on the host clock instead. Taken by the trace.
+    pub started: Option<(i64, bool)>,
     pub fallback: bool,
     audible: bool,
     /// Latest known vsync (host s) and refresh interval for this viewer.
@@ -79,6 +82,7 @@ impl Transport {
             clock: TransportClock::new(frame_ticks),
             audio: None,
             awaiting: None,
+            started: None,
             fallback: false,
             audible: false,
             grid: None,
@@ -242,13 +246,22 @@ impl Transport {
                 };
                 if accept {
                     self.clock.follow(&s);
-                    self.awaiting = None;
+                    if let Some((deadline, ..)) = self.awaiting.take() {
+                        self.started = Some((
+                            now - (deadline - crate::clock::AUDIO_START_TIMEOUT_US),
+                            false,
+                        ));
+                    }
                 }
             }
             if let Some((deadline, _, rate)) = self.awaiting
                 && (a.failed() || now >= deadline)
             {
                 self.awaiting = None;
+                self.started = Some((
+                    now - (deadline - crate::clock::AUDIO_START_TIMEOUT_US),
+                    true,
+                ));
                 self.clock.apply(TransportCommand::Play { rate }, now);
                 a.send(AudioCtl::Pause);
                 self.fallback = true;
@@ -319,6 +332,37 @@ impl AvMeasurements {
             mean_abs_ms: self.offsets_ms.iter().map(|v| v.abs()).sum::<f64>() / jitter.len() as f64,
             p95_jitter_ms: jitter[(jitter.len() * 95).div_ceil(100) - 1],
         })
+    }
+}
+
+#[cfg(test)]
+mod start_wait_tests {
+    use super::*;
+
+    /// A start that gives up on the audio clock says how long it waited and
+    /// that it fell back to the host clock; the trace takes it once.
+    #[test]
+    fn a_start_that_falls_back_reports_its_wait_once() {
+        let doc = pm_model::Document::new(None, 1);
+        let mut transport = Transport::new(1);
+        transport.audio =
+            Some(AudioLink::start(doc, "C".into(), Default::default(), Box::new(|_| {})).unwrap());
+        let asked = 100;
+        transport.awaiting = Some((
+            asked + crate::clock::AUDIO_START_TIMEOUT_US,
+            None,
+            PlaybackRate::NORMAL,
+        ));
+        transport.poll(asked + 400_000);
+        assert_eq!(transport.started, None, "still waiting");
+        transport.poll(asked + crate::clock::AUDIO_START_TIMEOUT_US + 7);
+        assert_eq!(
+            transport.started.take(),
+            Some((crate::clock::AUDIO_START_TIMEOUT_US + 7, true))
+        );
+        assert!(transport.fallback && transport.clock.is_playing());
+        transport.poll(asked + 2 * crate::clock::AUDIO_START_TIMEOUT_US);
+        assert_eq!(transport.started, None, "reported once");
     }
 }
 

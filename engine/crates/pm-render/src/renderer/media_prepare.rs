@@ -98,6 +98,13 @@ fn visit_stills(plan: &CompPlan, visit: &mut impl FnMut(&std::path::Path, bool, 
 }
 
 /// The video draws of a plan, nested compositions included.
+/// Whether `held` says yes for a still `plan` draws.
+pub(super) fn any_still(plan: &CompPlan, held: &mut impl FnMut(&std::path::Path) -> bool) -> bool {
+    let mut any = false;
+    visit_stills(plan, &mut |path, _, _| any = any || held(path));
+    any
+}
+
 pub(super) fn planned_videos(plan: &CompPlan) -> Vec<crate::media::PlannedVideoDraw> {
     let mut out = Vec::new();
     visit_plan(plan, &mut |layer, source| {

@@ -450,6 +450,9 @@ fn plan_on(
             "set_property" => {
                 let id = target()?;
                 let path = required(&c, "path")?;
+                if let Some((definition, key)) = effect_parameter(state, p.layer(&id), &path) {
+                    check_grade_value(&definition, &key, &c["value"])?;
+                }
                 let mut s =
                     SetProperty::new(&id, &path, model(&c["value"]), number(&c, "time", time)?);
                 s.mode = match c["mode"].as_str() {
@@ -491,6 +494,11 @@ fn plan_on(
             "replace_keyframes" => {
                 let id = target()?;
                 let channel = required(&c, "path")?;
+                if let Some((definition, key)) = effect_parameter(state, p.layer(&id), &channel) {
+                    for k in c["keyframes"].as_array().into_iter().flatten() {
+                        check_grade_value(&definition, &key, &k["value"])?;
+                    }
+                }
                 let keys = c["keyframes"]
                     .as_array()
                     .ok_or_else(|| Error::invalid("keyframes must be an array"))?
@@ -791,6 +799,9 @@ fn plan_on(
                 let id = target()?;
                 let name = required(&c, "effect")?;
                 let definition = definition(state, "effects", &name)?;
+                for (key, value) in c["parameters"].as_object().into_iter().flatten() {
+                    check_grade_value(&definition, key, value)?;
+                }
                 let effect_id = pm_kernel::new_id("f");
                 data = json!({"id":id,"effectId":effect_id});
                 EffectCommand::Add(Box::new(pm_kernel::commands::effects::AddEffect {
@@ -830,7 +841,7 @@ fn plan_on(
                     .ok_or_else(|| Error::invalid("Effect patch must be an object"))?;
                 if object
                     .keys()
-                    .any(|k| !["enabled", "open", "index"].contains(&k.as_str()))
+                    .any(|k| !["enabled", "open", "index", "inputs"].contains(&k.as_str()))
                 {
                     return Err(Error::invalid("Unsupported effect field"));
                 }
@@ -1347,6 +1358,94 @@ fn parameters(definition: &Value) -> Result<Vec<pm_kernel::commands::effects::Pa
         })
         .collect()
 }
+/// A value an agent writes to a grading effect's parameter (one whose
+/// definition says `grade: true`): within the range its control offers, one
+/// of its options, whole where it steps by one. A channel's value and each
+/// key are checked. Other effects keep main's free values.
+fn check_grade_value(definition: &Value, key: &str, value: &Value) -> Result<()> {
+    if definition["grade"] != true {
+        return Ok(());
+    }
+    let Some(param) = definition["params"]
+        .as_array()
+        .and_then(|params| params.iter().find(|p| p["k"] == key))
+    else {
+        return Ok(());
+    };
+    if let Some(channel) = value.as_object().filter(|o| o.contains_key("v")) {
+        check_grade_value(definition, key, &channel["v"])?;
+        for k in channel
+            .get("kf")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            check_grade_value(definition, key, &k["v"])?;
+        }
+        return Ok(());
+    }
+    let label = param["label"].as_str().unwrap_or(key);
+    let Some(options) = param["options"].as_array() else {
+        if param["type"].as_str().is_some_and(|t| t != "number") {
+            return Ok(());
+        }
+        let n = value
+            .as_f64()
+            .filter(|n| n.is_finite())
+            .ok_or_else(|| Error::invalid(format!("{label} takes a number, not {value}.")))?;
+        let (min, max) = (param["min"].as_f64(), param["max"].as_f64());
+        if min.is_some_and(|m| n < m) || max.is_some_and(|m| n > m) || n.abs() > f64::from(f32::MAX)
+        {
+            let range = match (min, max) {
+                (Some(a), Some(b)) => format!("from {a} to {b}"),
+                (Some(a), None) => format!("from {a}"),
+                (None, Some(b)) => format!("up to {b}"),
+                (None, None) => "a finite number".into(),
+            };
+            return Err(Error::invalid(format!(
+                "{label} takes values {range}, not {n}."
+            )));
+        }
+        if param["step"].as_f64() == Some(1.) && n.fract() != 0. {
+            return Err(Error::invalid(format!(
+                "{label} takes a whole number, not {n}."
+            )));
+        }
+        return Ok(());
+    };
+    if options
+        .iter()
+        .any(|o| o["v"] == *value || o["v"].as_f64().is_some_and(|v| Some(v) == value.as_f64()))
+    {
+        return Ok(());
+    }
+    let names: Vec<String> = options
+        .iter()
+        .map(|o| format!("{} ({})", o["v"], o["label"].as_str().unwrap_or("")))
+        .collect();
+    Err(Error::invalid(format!(
+        "{label} takes one of {}, not {value}.",
+        names.join(", ")
+    )))
+}
+
+/// The registered definition of the effect a property `path` ("<effect id>.
+/// <key>") of `layer` belongs to, and the key; None for any other property.
+fn effect_parameter(
+    state: Option<&pm_kernel::state::StateSnapshot>,
+    layer: Option<Value>,
+    path: &str,
+) -> Option<(Value, String)> {
+    let (effect, key) = path.split_once('.')?;
+    let layer = layer?;
+    let instance = layer["fx"]
+        .as_array()?
+        .iter()
+        .find(|fx| fx["id"] == effect)?;
+    let definition = definition(state, "effects", instance["type"].as_str()?).ok()?;
+    Some((definition, key.to_owned()))
+}
+
 /// Each animatable property of the layers (those in `only`, or all) as
 /// `(layer id, property key, property)`. Only those layers are converted.
 fn tracks(project: &Doc, only: Option<&HashSet<String>>) -> Result<Vec<(String, String, Value)>> {

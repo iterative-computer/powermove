@@ -130,6 +130,10 @@ pub struct RuntimeState {
     pub poster: Option<String>,
     #[serde(default)]
     pub progress: Option<DownloadProgress>,
+    /// What a video's light is when it is HDR ("HLG", "HDR10",
+    /// "Dolby Vision 8.4"), as the media worker read it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hdr: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

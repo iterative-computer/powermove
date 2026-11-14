@@ -86,14 +86,19 @@ fn published(k: &KernelHandle) -> Arc<Published> {
 
 #[test]
 fn panel_settings_choose_what_the_engine_counts() {
-    let config = scope_config(true, true);
+    let config = scope_config(true, true, true);
     assert_eq!(config.signal, ScopeSignal::Pq);
     assert_eq!(config.matrix, ScopeMatrix::Rec2020);
-    let config = scope_config(false, false);
+    assert_eq!(config.stage, ScopeStage::Output);
+    let config = scope_config(false, false, false);
     assert_eq!(config.signal, ScopeSignal::Display);
     assert_eq!(config.matrix, ScopeMatrix::Rec709);
-    let more = more_menu(false, false, true);
-    assert_eq!(more.len(), 5);
+    assert_eq!(config.stage, ScopeStage::Picture);
+    let more = more_menu(false, false, false, true);
+    assert_eq!(more.len(), 8);
+    assert_eq!(more[6]["label"], "Read: Picture");
+    assert_eq!(more[6]["checked"], true);
+    assert_eq!(more[7]["checked"], false);
     assert_eq!(more[0]["checked"], true);
     assert_eq!(more[1]["checked"], false);
     assert_eq!(more[4]["disabled"], true);
@@ -337,4 +342,170 @@ fn a_malformed_cube_never_reaches_the_kernel() {
     let path = dir.path().join("Broken.cube");
     std::fs::write(&path, "LUT_3D_SIZE 2\n0 0 0\n").unwrap();
     assert!(retain_lut(dir.path(), &path).is_err());
+}
+
+/// Import CDL… puts the correction on the layer's Color Wheels (adding one
+/// when there is none) in one Undo step; Export CDL… reads the same
+/// correction back at the playhead, and refuses a grade a CDL can't hold.
+#[test]
+fn a_cdl_is_imported_onto_color_wheels_and_exported_back() {
+    let (_dir, actor, _session) = fixture();
+    let k = actor.handle();
+    let cdl = pm_color::cdl::parse(
+        r#"<ColorCorrection id="shot"><SOPNode><Slope>1.1 0.98 0.9</Slope>
+        <Offset>-0.02 0 0.015</Offset><Power>0.95 1 1.05</Power></SOPNode>
+        <SatNode><Saturation>1.2</Saturation></SatNode></ColorCorrection>"#,
+    )
+    .unwrap();
+    let run = |label: &str, commands: Vec<Command>| {
+        let p = published(&k);
+        let ack = k
+            .call_blocking("test", transact(&p, label, commands))
+            .unwrap();
+        assert!(
+            !matches!(ack.reply, pm_kernel::Reply::Throw(_)),
+            "{:?}",
+            ack.reply
+        );
+    };
+    let same = |a: &pm_color::cdl::Cdl, b: &pm_color::cdl::Cdl| {
+        for c in 0..3 {
+            assert!((a.slope[c] - b.slope[c]).abs() < 1e-9, "{a:?} {b:?}");
+            assert!((a.offset[c] - b.offset[c]).abs() < 1e-9, "{a:?} {b:?}");
+            assert!((a.power[c] - b.power[c]).abs() < 1e-9, "{a:?} {b:?}");
+        }
+        assert!((a.saturation - b.saturation).abs() < 1e-9);
+    };
+    assert_eq!(
+        layer_cdl(&published(&k), "solid", 0.).unwrap_err(),
+        "The layer has no Color Wheels to export as a CDL."
+    );
+    // No Color Wheels yet: one is added, holding the correction.
+    run(
+        "Import CDL",
+        cdl_commands(&published(&k), "solid", &cdl, 0.).unwrap(),
+    );
+    let effects = effects_of(&k, "solid");
+    assert_eq!(effects.len(), 1);
+    assert_eq!(effects[0]["type"], "colorWheels");
+    assert_eq!(effects[0]["p"]["gainRed"]["v"], 1.1);
+    let back = layer_cdl(&published(&k), "solid", 0.).unwrap();
+    same(&back, &cdl);
+    assert!(back.id.is_some(), "named after the layer");
+    // A second import sets the same Color Wheels.
+    let other = pm_color::cdl::Cdl {
+        slope: [0.9, 1., 1.2],
+        ..Default::default()
+    };
+    run(
+        "Import CDL",
+        cdl_commands(&published(&k), "solid", &other, 0.).unwrap(),
+    );
+    assert_eq!(effects_of(&k, "solid").len(), 1, "no second Color Wheels");
+    same(&layer_cdl(&published(&k), "solid", 0.).unwrap(), &other);
+    let wheels = effects_of(&k, "solid")[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // A keyed control is read at the playhead, between its keys.
+    let key = |value: f64, time: f64| -> Command {
+        let mut set = pm_kernel::commands::properties::SetProperty::new(
+            "solid",
+            &format!("{wheels}.gainRed"),
+            Value::from(value),
+            time,
+        );
+        set.mode = pm_kernel::commands::properties::KeyMode::Keyframe;
+        pm_kernel::PropertyCommand::Set(set).into()
+    };
+    run("Key", vec![key(1., 0.), key(2., 1.)]);
+    let between = layer_cdl(&published(&k), "solid", 0.5).unwrap();
+    assert!((between.slope[0] - 1.5).abs() < 1e-9, "{between:?}");
+    // Exposure is not a CDL's: export says so.
+    run(
+        "Exposure",
+        vec![
+            pm_kernel::PropertyCommand::Set(pm_kernel::commands::properties::SetProperty::new(
+                "solid",
+                &format!("{wheels}.exposure"),
+                Value::from(1.),
+                0.,
+            ))
+            .into(),
+        ],
+    );
+    let error = layer_cdl(&published(&k), "solid", 0.).unwrap_err();
+    assert!(error.contains("set Exposure to 0"), "{error}");
+    // A correction the wheels can't hold is refused before any edit.
+    let error = cdl_commands(
+        &published(&k),
+        "solid",
+        &pm_color::cdl::Cdl {
+            slope: [9., 1., 1.],
+            ..Default::default()
+        },
+        0.,
+    )
+    .unwrap_err();
+    assert!(error.contains("outside what Color Wheels hold"), "{error}");
+    actor.shutdown();
+}
+
+/// The numbers an agent reads off the Scopes panel: shares, histogram
+/// bands and their lit range, the waveform's range per band and the
+/// vectorscope's centre and hue, from counts known by construction.
+#[test]
+fn an_agent_reads_what_the_scopes_counted() {
+    let (levels, columns, bins) = (8usize, 4usize, 5usize);
+    let config = ScopeConfig {
+        levels: levels as u32,
+        columns: columns as u32,
+        vector_bins: bins as u32,
+        stage: ScopeStage::Output,
+        ..ScopeConfig::PANEL
+    };
+    // Ten pixels: four at level 2 in column 0, six at level 7 in column 3.
+    let mut waveform = vec![0u32; levels * columns];
+    waveform[2 * columns] = 4;
+    waveform[7 * columns + 3] = 6;
+    let mut luma = vec![0u32; levels];
+    luma[2] = 4;
+    luma[7] = 6;
+    // All ten at Cb = -0.25, Cr = +0.25 (bins 1 and 3 of 5): hue 135°.
+    let mut vectorscope = vec![0u32; bins * bins];
+    vectorscope[3 * bins + 1] = 10;
+    let frame = ScopeFrame {
+        config,
+        pixels: 10,
+        waveform,
+        parade: [
+            vec![0; levels * columns],
+            vec![0; levels * columns],
+            vec![0; levels * columns],
+        ],
+        vectorscope,
+        luma_histogram: luma.clone(),
+        histogram: [luma.clone(), luma.clone(), luma],
+        under: 1,
+        over: 3,
+        outside: 0,
+        invalid: 0,
+    };
+    let s = scope_summary(&frame);
+    assert_eq!(s["stage"], "Output");
+    assert_eq!(s["overPercent"], 30.0);
+    assert_eq!(s["underPercent"], 10.0);
+    assert_eq!(s["luma"]["lowest"], 28.6);
+    assert_eq!(s["luma"]["highest"], 100.0);
+    assert_eq!(s["luma"]["bands"][7], 60.0);
+    let bands = s["waveformBands"].as_array().unwrap();
+    assert_eq!(bands.len(), 4);
+    assert_eq!(
+        (bands[0]["low"].clone(), bands[0]["high"].clone()),
+        (serde_json::json!(28.6), serde_json::json!(28.6))
+    );
+    assert_eq!(bands[3]["high"], 100.0);
+    assert!(bands[1]["low"].is_null());
+    assert_eq!(s["vectorscope"]["meanHueDegrees"], 135.0);
+    assert_eq!(s["vectorscope"]["meanCb"], -0.25);
 }

@@ -307,6 +307,25 @@ impl PyramidCache {
         }
     }
 
+    /// Drops the views of stills' own mip chains whose texture `kept`
+    /// does not name any more: the media cache let the still go, and its
+    /// views here would keep the whole texture allocated until they aged
+    /// out.
+    pub fn retain_own(&mut self, kept: impl Fn(&wgpu::Texture) -> bool) {
+        self.own.retain(|pyramid| kept(pyramid.view.texture()));
+    }
+
+    /// Texel bytes of the stills' textures that only the views here still
+    /// own (`kept`: the media cache has the still, and counts it).
+    pub fn orphaned_bytes(&self, kept: impl Fn(&wgpu::Texture) -> bool) -> u64 {
+        self.own
+            .iter()
+            .map(|pyramid| pyramid.view.texture())
+            .filter(|texture| !kept(texture))
+            .map(texture_bytes)
+            .sum()
+    }
+
     /// Drops every kept pyramid.
     pub fn clear(&mut self) {
         self.entries.clear();

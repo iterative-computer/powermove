@@ -183,6 +183,11 @@ impl Sink for OutputSink {
         }
     }
 
+    fn with_mix(mut output: Delivered, mix: Option<verify::MixLevels>) -> Delivered {
+        output.report.mix = mix;
+        output
+    }
+
     fn finish_with_cancel(self, cancel: &AtomicBool) -> Result<Delivered, Error> {
         match self {
             #[cfg(all(feature = "engine", target_os = "macos"))]

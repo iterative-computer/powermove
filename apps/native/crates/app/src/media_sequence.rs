@@ -1,17 +1,19 @@
 //! File ▸ Import Image Sequence… and numbered stills picked or dropped as
-//! media: today's `chooseSequence` sheet, then an import that encodes the
+//! media: today's `chooseSequence` sheet, then an import that reads the
 //! frames into one clip on the import worker (`pm_builtins::media_import`).
 use crate::{platform, session::Controller, sheets::OpenSheet};
 use gpui::Context;
 use pm_builtins::media_import::{ImportRequest, SequenceImport, order_sequence};
 use std::{path::PathBuf, rc::Rc};
 
-/// The picker's filter: `IMAGE_SEQUENCE_ACCEPT`.
-pub const ACCEPT: [&str; 5] = ["png", "jpg", "jpeg", "webp", "bmp"];
+/// The picker's filter: `IMAGE_SEQUENCE_ACCEPT`, and the film scan and
+/// design formats renders come in.
+pub const ACCEPT: [&str; 11] = [
+    "png", "jpg", "jpeg", "webp", "bmp", "tif", "tiff", "exr", "dpx", "tga", "psd",
+];
 const TITLE: &str = "Import Image Sequence";
 const INTRO: &str = "Turn your numbered images into one clip.";
-const SKIPPED: &str =
-    "You can still import. Available images will play consecutively, skipping the missing frames.";
+const SKIPPED: &str = "You can still import. Missing frames show as Media Offline until they are rendered into the folder.";
 
 /// `sequenceCandidate`: two or more files sharing a name and image extension,
 /// each ending in a frame number.
@@ -349,6 +351,13 @@ mod tests {
     fn numbered_stills_are_offered_as_a_sequence_and_anything_else_is_not() {
         assert!(candidate(&paths(&["a_1.png", "a_2.PNG"])));
         assert!(candidate(&paths(&["shot.0001.jpg", "shot.0003.jpg"])));
+        // Film scans and renders from compositing and design tools.
+        for ext in ["dpx", "tga", "psd"] {
+            assert!(candidate(&paths(&[
+                &format!("scan.0001.{ext}"),
+                &format!("scan.0002.{ext}")
+            ])));
+        }
         assert!(!candidate(&paths(&["a_1.png"])));
         assert!(!candidate(&paths(&["a_1.png", "b_2.png"])));
         assert!(!candidate(&paths(&["a_1.png", "a_2.jpg"])));

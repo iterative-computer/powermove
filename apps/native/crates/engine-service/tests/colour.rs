@@ -191,6 +191,52 @@ fn edr_shows_the_delivery_when_the_content_outshines_the_project() {
     assert!(p99 < 2e-3, "PQ against EDR light: p99 {p99}");
 }
 
+/// A clip replaced on disk by one with another HDR peak, the document
+/// unchanged: the viewer's tone follows the new file as its pixels do. The
+/// picture is the one a viewer that never saw the old file shows.
+#[test]
+fn the_tone_follows_a_clip_replaced_on_disk() {
+    let Some(hdr) = hdr_clip() else {
+        eprintln!("hdr/hdr10.mov missing: run the format corpus (skipped)");
+        return;
+    };
+    let sdr = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../engine/fixtures/hevc.mov");
+    let dir = tempfile::tempdir().unwrap();
+    let clip = dir.path().join("clip.mov");
+    std::fs::copy(&hdr, &clip).unwrap();
+    // The content's 1000 nits outshine the project's 600: a source peak.
+    let (_, scene, _) = scene(Some(600), 4, &clip);
+    let mut h = Headless::new().unwrap();
+    h.mastering(color::Mastering::Edr).unwrap();
+    let before = h
+        .frame(&scene, Ticks::ZERO, SIZE, &Default::default())
+        .unwrap();
+    // Another app replaces the clip: another file under the same name.
+    let next = dir.path().join("next.mov");
+    std::fs::copy(&sdr, &next).unwrap();
+    std::fs::rename(&next, &clip).unwrap();
+    // Media is looked at every 2 s.
+    std::thread::sleep(Duration::from_millis(2200));
+    let after = h
+        .frame(&scene, Ticks::ZERO, SIZE, &Default::default())
+        .unwrap();
+    let mut fresh = Headless::new().unwrap();
+    fresh.mastering(color::Mastering::Edr).unwrap();
+    let expected = fresh
+        .frame(&scene, Ticks::ZERO, SIZE, &Default::default())
+        .unwrap();
+    assert_ne!(before, expected, "the two clips are different pictures");
+    let apart = after
+        .iter()
+        .zip(&expected)
+        .flat_map(|(a, b)| a.iter().zip(b).map(|(a, b)| (a - b).abs()))
+        .fold(0.0, f64::max);
+    assert_eq!(
+        apart, 0.,
+        "the new clip is tone-mapped with the peak of the clip it replaced"
+    );
+}
+
 #[test]
 fn the_scope_tap_reports_a_paused_frame_and_stops_when_cleared() {
     let Some(clip) = hdr_clip() else {

@@ -301,6 +301,10 @@ pub enum ColorTags {
         white_nits: u16,
         peak_nits: u16,
         metadata: Option<HdrMetadata>,
+        /// HEVC: the Dolby Vision Profile 8.4 metadata macOS's encoder adds
+        /// to HLG (a `dvvC` box, an RPU on every frame; players without it
+        /// show the HLG picture). On unless the person turns it off.
+        dolby_vision: bool,
     },
     /// CICP 1-1-0, full range RGB: Rec.709 images (PNG `cICP`).
     Rec709Image,

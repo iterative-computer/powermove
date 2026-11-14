@@ -156,17 +156,6 @@ impl Agent {
             .and_then(|p| p["surfaceRevision"].as_u64())
             .unwrap()
     }
-    fn change(&mut self, id: &str, value: &str) {
-        let value = Some(json!(value));
-        self.press(
-            id,
-            "change",
-            EventDetail {
-                value,
-                ..Default::default()
-            },
-        );
-    }
     fn click(&mut self, id: &str) {
         self.press(id, "click", EventDetail::default());
     }
@@ -248,6 +237,57 @@ impl Agent {
             .map(|n| n.text.clone())
             .collect::<Vec<_>>()
             .join("\n")
+    }
+}
+impl Agent {
+    /// The panel's next request of the window (a menu, a confirmation),
+    /// as the app takes it.
+    fn request(&mut self, operation: &str) -> crate::PlatformRequest {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            self.text();
+            if let Some(r) = self
+                .panels
+                .take_platform_requests()
+                .into_iter()
+                .find(|r| r.operation == operation)
+            {
+                return r;
+            }
+            assert!(Instant::now() < deadline, "no {operation} request");
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+    /// Answers an open menu with a row's value and lets the panel act on it.
+    fn pick(
+        &mut self,
+        menu: &crate::PlatformRequest,
+        value: &str,
+        until: impl Fn(&mut Self) -> bool,
+    ) {
+        self.panels.platform_reply(menu.id, Ok(json!(value)));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !until(self) {
+            assert!(Instant::now() < deadline, "the pick of {value} did nothing");
+            thread::sleep(Duration::from_millis(5));
+            self.text();
+        }
+    }
+    /// Chooses a row of the menu a trigger opens (model, access), as a
+    /// person does, and waits for the panel to show the choice.
+    fn choose(&mut self, trigger: &str, value: &str) {
+        self.click(trigger);
+        let menu = self.request("agentMenu");
+        let before = self.revision();
+        self.pick(&menu, value, move |panel| panel.revision() > before);
+    }
+    fn labels(menu: &crate::PlatformRequest) -> Vec<String> {
+        menu.input["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|o| o["label"].as_str().unwrap().to_owned())
+            .collect()
     }
 }
 fn thread_id(agent: &agent_host::SharedAgent) -> String {
@@ -470,7 +510,7 @@ fn claude_question_is_answered_with_the_cards_own_buttons() {
     let actor = actor();
     let mut panel = Agent::mount(&actor, environment(root.path(), "reply"));
     panel.connected(Provider::Claude);
-    panel.change("agent-provider", "claude");
+    panel.choose("agent-model", "provider:claude");
     panel.connected(Provider::Claude);
     panel.send("Style");
     let agent = panel.agent();
@@ -510,8 +550,8 @@ fn supervised_approval_reaches_the_process_and_deny_too() {
         let actor = actor();
         let mut panel = Agent::mount(&actor, environment(root.path(), "approval"));
         panel.connected(Provider::Claude);
-        panel.change("agent-provider", "claude");
-        panel.change("agent-access", "supervised");
+        panel.choose("agent-model", "provider:claude");
+        panel.choose("agent-access", "supervised");
         panel.connected(Provider::Claude);
         panel.send("Build");
         let agent = panel.agent();
@@ -557,9 +597,9 @@ fn composition_run_gets_session_and_edit_tools_and_the_chosen_model() {
     ];
     let mut panel = Agent::mount(&actor, environment);
     panel.connected(Provider::Claude);
-    panel.change("agent-provider", "claude");
-    panel.change("agent-model", "fixture");
-    panel.change("agent-effort", "high");
+    panel.choose("agent-model", "provider:claude");
+    panel.choose("agent-model", "model:fixture");
+    panel.choose("agent-model", "effort:high");
     panel.connected(Provider::Claude);
     panel.send("Go");
     let agent = panel.agent();
@@ -696,7 +736,7 @@ fn signing_in_from_settings_opens_the_browser_and_connects_the_panel() {
     assert_eq!(chatgpt["actionLabel"], "Sign Out");
     assert_eq!(chatgpt["detail"], "user@example.invalid · plus");
     assert!(!panel.text().contains("Connect Your Agent"));
-    panel.change("agent-model", "fixture-5");
+    panel.choose("agent-model", "model:fixture-5");
     panel.send("Hi");
     panel.wait(idle);
     assert!(panel.text().contains("Saw: Hi"));
@@ -716,6 +756,235 @@ fn missing_runtime_reports_no_connection_and_keeps_the_draft() {
     environment.resources = None;
     let mut panel = Agent::mount(&actor, environment);
     assert!(panel.text().contains("runtime is missing"));
+    panel.panels.close();
+}
+#[test]
+fn the_thread_picker_lists_switches_and_deletes_after_asking() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, environment(root.path(), "reply"));
+    panel.connected(Provider::Chatgpt);
+    panel.send("Animate the title");
+    panel.wait(idle);
+    let agent = panel.agent();
+    let first = thread_id(&agent);
+    panel.click("agent-new");
+    let second = thread_id(&agent);
+    assert_ne!(first, second);
+    panel.click("agent-threads");
+    let menu = panel.request("agentMenu");
+    assert_eq!(menu.input["placeholder"], "Search threads…");
+    let labels = Agent::labels(&menu);
+    assert_eq!(labels[0], "New Thread");
+    assert!(
+        labels.iter().any(|l| l == "Animate the title"),
+        "{labels:?}"
+    );
+    let current = menu.input["options"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| o["checked"] == true)
+        .unwrap();
+    assert_eq!(current["value"], json!(format!("thread:{second}")));
+    let (agent2, wanted) = (agent.clone(), first.clone());
+    panel.pick(&menu, &format!("thread:{first}"), move |_| {
+        thread_id(&agent2) == wanted
+    });
+    // Delete asks first (the window's alert), then the history goes.
+    panel.click("agent-threads");
+    let menu = panel.request("agentMenu");
+    assert!(Agent::labels(&menu).contains(&"Delete Thread…".to_owned()));
+    panel
+        .panels
+        .platform_reply(menu.id, Ok(json!(format!("delete:{first}"))));
+    let ask = panel.request("agent.delete");
+    assert_eq!(ask.input["thread"], json!(first));
+    assert_eq!(ask.input["title"], "Animate the title");
+    assert!(
+        agent
+            .lock()
+            .unwrap()
+            .panel
+            .summaries()
+            .iter()
+            .any(|t| t.id == first),
+        "nothing is deleted before the answer"
+    );
+    panel.panels.agent_delete_thread(&first).unwrap();
+    assert!(
+        !agent
+            .lock()
+            .unwrap()
+            .panel
+            .summaries()
+            .iter()
+            .any(|t| t.id == first)
+    );
+    panel.panels.close();
+}
+#[test]
+fn the_model_access_and_slash_menus_change_the_run_settings() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, environment(root.path(), "reply"));
+    panel.connected(Provider::Chatgpt);
+    let agent = panel.agent();
+    let settings = move |agent: &agent_host::SharedAgent| {
+        let state = agent.lock().unwrap();
+        let s = state.panel.session(state.panel.active_id()).unwrap();
+        (
+            s.settings.model.clone(),
+            s.settings.effort.clone(),
+            s.settings.access,
+        )
+    };
+    // Model and effort: what the signed-in provider offers, in one menu.
+    panel.click("agent-model");
+    let menu = panel.request("agentMenu");
+    let categories: Vec<_> = menu.input["options"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o["category"].as_str().unwrap().to_owned())
+        .collect();
+    assert!(categories.contains(&"Provider".to_owned()));
+    assert!(
+        Agent::labels(&menu).contains(&"Fixture 5".to_owned()),
+        "{:?}",
+        Agent::labels(&menu)
+    );
+    let a = agent.clone();
+    panel.pick(&menu, "model:fixture-5", move |_| {
+        settings(&a).0 == "fixture-5"
+    });
+    panel.click("agent-model");
+    let menu = panel.request("agentMenu");
+    assert!(Agent::labels(&menu).contains(&"High".to_owned()));
+    let a = agent.clone();
+    panel.pick(&menu, "effort:high", move |_| settings(&a).1 == "high");
+    // Access: v1's four modes; Full access asks first.
+    panel.click("agent-access");
+    let menu = panel.request("agentMenu");
+    assert_eq!(
+        Agent::labels(&menu),
+        ["Composition only", "Supervised", "Auto", "Full access"]
+    );
+    let a = agent.clone();
+    panel.pick(&menu, "auto", move |_| {
+        settings(&a).2 == pm_agents::Access::Project
+    });
+    panel.click("agent-access");
+    let menu = panel.request("agentMenu");
+    panel.panels.platform_reply(menu.id, Ok(json!("full")));
+    let ask = panel.request("agent.consent");
+    assert_eq!(
+        settings(&agent).2,
+        pm_agents::Access::Project,
+        "not before consent"
+    );
+    panel
+        .panels
+        .agent_consent(ask.input["effect"].as_u64().unwrap(), true)
+        .unwrap();
+    assert_eq!(settings(&agent).2, pm_agents::Access::Computer);
+    // Slash: typing "/" opens the menu of v1's commands; /new starts a
+    // thread (an empty one is reused, so this one has a message).
+    panel.send("Hi");
+    panel.wait(idle);
+    let before = thread_id(&agent);
+    panel.type_text("/");
+    let menu = panel.request("agentMenu");
+    let labels = Agent::labels(&menu);
+    assert!(
+        labels.contains(&"/new".to_owned()) && labels.contains(&"/model".to_owned()),
+        "{labels:?}"
+    );
+    let a = agent.clone();
+    panel.pick(&menu, "new", move |_| thread_id(&a) != before);
+    panel.panels.close();
+}
+#[test]
+fn an_auto_run_reaches_the_provider_and_shows_what_it_did() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, environment(root.path(), "reply"));
+    panel.connected(Provider::Chatgpt);
+    // Auto runs the autonomous CLI (`codex exec`), not the App Server.
+    panel.choose("agent-access", "auto");
+    panel.send("Hi");
+    panel.wait(idle);
+    let text = panel.text();
+    assert!(
+        text.contains("Saw: Hi"),
+        "{text}\n{}",
+        panel.agent().lock().unwrap().panel.raw_archive()
+    );
+    // Its step says what was run, not only that something ran.
+    assert!(text.contains("1 tool call"), "{text}");
+    let work = panel
+        .surface()
+        .surface
+        .nodes()
+        .values()
+        .filter_map(|n| n.props.get("id").and_then(Value::as_str))
+        .find(|id| id.ends_with("-work"))
+        .expect("the turn's work line")
+        .to_owned();
+    panel.click(&work);
+    let text = panel.text();
+    let lines: Vec<&str> = text.lines().map(str::trim).collect();
+    assert!(
+        lines.contains(&"Run") && lines.contains(&"ls -la"),
+        "{text}"
+    );
+    panel.panels.close();
+}
+#[test]
+fn a_quiet_run_still_republishes_its_working_time() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, environment(root.path(), "hold"));
+    panel.connected(Provider::Chatgpt);
+    panel.send("Make the headline");
+    panel.wait(|s| !s.runs.is_empty());
+    assert!(panel.text().contains("Working · 0:0"));
+    // The held run sends nothing; only the clock moves.
+    let before = panel.revision();
+    thread::sleep(Duration::from_millis(2300));
+    assert!(
+        panel.revision() >= before + 2,
+        "{} -> {}",
+        before,
+        panel.revision()
+    );
+    panel.click("agent-stop");
+    panel.wait(idle);
+    panel.panels.close();
+}
+#[test]
+fn the_panel_republishes_as_a_popover_when_its_window_opens() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, environment(root.path(), "reply"));
+    panel.text();
+    let has_pin = |panel: &mut Agent| {
+        panel
+            .surface()
+            .surface
+            .nodes()
+            .values()
+            .any(|n| n.props.get("id").and_then(Value::as_str) == Some("agent-presentation"))
+    };
+    assert!(!has_pin(&mut panel), "docked: no Pin to Workspace");
+    // The app's facts once the popover window opens: nothing else changed,
+    // so only the presentation fact can republish the panel.
+    panel.panels.update_facts(json!({"agentPopover": true}));
+    panel.text();
+    assert!(has_pin(&mut panel), "the popover shows Pin to Workspace");
+    panel.panels.update_facts(json!({"agentPopover": false}));
+    panel.text();
+    assert!(!has_pin(&mut panel), "docked again");
     panel.panels.close();
 }
 #[test]
@@ -1695,7 +1964,7 @@ fn a_connected_model_runs_with_the_powermove_tools_and_streams_its_reply() {
     let actor = actor();
     let model = FakeModel::start(root.path());
     let mut panel = Agent::mount(&actor, compatible_environment(root.path(), &model));
-    panel.change("agent-provider", "compatible");
+    panel.choose("agent-model", "provider:compatible");
     panel.connected(Provider::Compatible);
     assert!(!panel.text().contains("Connect Your Agent"));
     panel.send("Use a tool please");
@@ -1744,7 +2013,7 @@ fn a_connected_model_streams_and_stop_cancels_it() {
     let actor = actor();
     let model = FakeModel::start(root.path());
     let mut panel = Agent::mount(&actor, compatible_environment(root.path(), &model));
-    panel.change("agent-provider", "compatible");
+    panel.choose("agent-model", "provider:compatible");
     panel.connected(Provider::Compatible);
     panel.send("Answer slow");
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -1769,9 +2038,9 @@ fn choosing_another_listed_model_sends_it() {
     let actor = actor();
     let model = FakeModel::start(root.path());
     let mut panel = Agent::mount(&actor, compatible_environment(root.path(), &model));
-    panel.change("agent-provider", "compatible");
+    panel.choose("agent-model", "provider:compatible");
     panel.connected(Provider::Compatible);
-    panel.change("agent-model", "other-model");
+    panel.choose("agent-model", "model:other-model");
     panel.send("Hello there");
     panel.wait(idle);
     assert!(panel.text().contains("Saw: Hello there"));

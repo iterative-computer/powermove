@@ -56,6 +56,8 @@ export type Options = {
   /** Sound coding of a QuickTime export. Absent from older options: read as
    * 24-bit PCM. */
   audioCoding: AudioCoding;
+  /** HLG HEVC: the Dolby Vision 8.4 metadata macOS adds. Absent means on. */
+  dolbyVision?: boolean;
 };
 export type StudioQuality =
   | "composition"

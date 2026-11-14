@@ -323,19 +323,29 @@ fn studio_overlays_preserve_all_main_operations_and_unrelated_contracts() {
             }
             // 19 product-film operations, then the native Studio ones: world,
             // fog, terrain, scatter, material options, render quality,
-            // extrusion and per-surface materials.
+            // extrusion and per-surface materials, then aiming a light and
+            // light presets.
             assert_eq!(
                 studio["properties"]["operation"]["enum"]
                     .as_array()
                     .unwrap()
                     .len(),
-                33
+                35
             );
         } else if tool["name"] == "export_video" {
-            // A per-export 3D quality and render scale; everything else as main.
+            // A per-export 3D quality and render scale, and the Export
+            // sheet's options under its own names (a WebM format beside
+            // main's two); everything else as main.
             let (base, studio) = (&tool["inputSchema"], &actual["inputSchema"]);
             for (field, schema) in base["properties"].as_object().unwrap() {
-                assert_eq!(schema, &studio["properties"][field], "{field}");
+                let mut kept = studio["properties"][field].clone();
+                if let (Some(main), Some(more)) =
+                    (schema["enum"].as_array(), kept["enum"].as_array())
+                {
+                    assert_eq!(&more[..main.len()], &main[..], "{field}");
+                    kept["enum"] = schema["enum"].clone();
+                }
+                assert_eq!(schema, &kept, "{field}");
             }
             for field in ["required", "additionalProperties", "type"] {
                 assert_eq!(base[field], studio[field]);
@@ -346,16 +356,76 @@ fn studio_overlays_preserve_all_main_operations_and_unrelated_contracts() {
                 .keys()
                 .filter(|k| base["properties"].get(k.as_str()).is_none())
                 .collect();
-            assert_eq!(added, ["studioQuality", "studioRenderScale"]);
+            assert_eq!(
+                added,
+                [
+                    "profile",
+                    "codec",
+                    "quality",
+                    "scale",
+                    "width",
+                    "height",
+                    "fps",
+                    "dynamicRange",
+                    "colorTag",
+                    "timecode",
+                    "audioCoding",
+                    "useProxies",
+                    "captionsBurn",
+                    "captionsSidecar",
+                    "dolbyVision",
+                    "studioQuality",
+                    "studioRenderScale",
+                ]
+            );
             assert!(
                 actual["description"]
                     .as_str()
                     .unwrap()
                     .starts_with(tool["description"].as_str().unwrap())
             );
-        } else if tool["name"] == "get_3d_scene" {
-            // Native Studio readback only adds to the description.
-            assert_eq!(tool["inputSchema"], actual["inputSchema"]);
+        } else if ["import_media", "import_media_to_timeline", "replace_media"]
+            .contains(&tool["name"].as_str().unwrap())
+        {
+            // The media importer adds an image sequence's frame rate; main's
+            // fields and description stay.
+            let (base, native) = (&tool["inputSchema"], &actual["inputSchema"]);
+            for (field, schema) in base["properties"].as_object().unwrap() {
+                assert_eq!(schema, &native["properties"][field], "{field}");
+            }
+            for field in ["required", "additionalProperties", "type"] {
+                assert_eq!(base[field], native[field]);
+            }
+            let added: Vec<_> = native["properties"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .filter(|k| base["properties"].get(k.as_str()).is_none())
+                .collect();
+            assert_eq!(added, ["sequence"]);
+            assert_eq!(actual["description"], tool["description"]);
+        } else if tool["name"] == "get_3d_scene" || tool["name"] == "open_project" {
+            // Native Studio readback adds an optional pick point; the native
+            // open_project an explicit recovery choice. Main's fields stay.
+            let (base, native) = (&tool["inputSchema"], &actual["inputSchema"]);
+            for (field, schema) in base["properties"].as_object().unwrap() {
+                assert_eq!(schema, &native["properties"][field], "{field}");
+            }
+            for field in ["required", "additionalProperties", "type"] {
+                assert_eq!(base[field], native[field]);
+            }
+            let added: Vec<_> = native["properties"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .filter(|k| base["properties"].get(k.as_str()).is_none())
+                .collect();
+            let expected_added = if tool["name"] == "get_3d_scene" {
+                "pick"
+            } else {
+                "recovery"
+            };
+            assert_eq!(added, [expected_added]);
             assert!(
                 actual["description"]
                     .as_str()

@@ -1058,7 +1058,7 @@ pub fn stacks(id: &str) -> bool {
     id != VIEWER
 }
 /// Every built-in panel, in Window ▸ Panels order.
-pub const PANELS: [&str; 16] = [
+pub const PANELS: [&str; 17] = [
     "assets",
     "layer-effects",
     "viewer",
@@ -1075,6 +1075,8 @@ pub const PANELS: [&str; 16] = [
     "mixer",
     "captions",
     "workspaces",
+    // Docked when pinned from its popover (agent-panel.md §1).
+    "agent",
 ];
 /// Window edges that can receive a docked panel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

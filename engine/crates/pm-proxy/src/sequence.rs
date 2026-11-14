@@ -80,6 +80,62 @@ pub(crate) fn read_manifest(path: &Path) -> Result<Option<SequenceManifest>> {
     Ok(Some(manifest))
 }
 
+/// A sequence read in place (`pm_media::image::sequence::Manifest`, the
+/// file a sequence asset retains) as its frames' bytes: each number from
+/// the first to the last is hashed once. A number with no file fails,
+/// naming it: a proxy never stands in for a frame that is not there.
+pub(crate) fn in_place(
+    path: &Path,
+    control: &GenerationControl<'_>,
+) -> Result<Option<SequenceManifest>> {
+    let Some(sequence) = pm_media::image::sequence::Manifest::read(path)
+        .map_err(|e| ProxyError::InvalidMedia(e.to_string()))?
+    else {
+        return Ok(None);
+    };
+    let mut frames = Vec::with_capacity(sequence.frames() as usize);
+    for number in sequence.first..=sequence.last {
+        let path = sequence.file(number);
+        let hash = match hash_frame(&path, control) {
+            Err(ProxyError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+                let file = path.file_name().unwrap_or_default().to_string_lossy();
+                return Err(ProxyError::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("frame {number} of the image sequence is missing: {file}"),
+                )));
+            }
+            hash => hash?,
+        };
+        frames.push(SequenceFrame { path, hash });
+    }
+    let [num, den] = sequence.rate;
+    Ok(Some(SequenceManifest {
+        powermove_sequence: 1,
+        rate: crate::manifest::SequenceRate { num, den },
+        frames,
+    }))
+}
+
+/// The identity of a sequence read in place (`pm_media::image::sequence::Manifest`,
+/// the file its asset retains): the aggregate of its frames' bytes and rate
+/// ([`SequenceManifest::content_hash`]), which keys its proxies. `None` for
+/// any other file. Reads every frame: call on a worker. A missing frame
+/// fails, naming it.
+pub fn sequence_identity(
+    path: &std::path::Path,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<Option<String>> {
+    let control = GenerationControl {
+        cancel,
+        pause: &|| false,
+        on_pause: &|_| {},
+        on_progress: &|_| {},
+    };
+    in_place(path, &control)?
+        .map(|manifest| manifest.content_hash())
+        .transpose()
+}
+
 fn wait_for_idle(control: &GenerationControl<'_>) -> Result<()> {
     let mut reported = false;
     loop {
@@ -101,7 +157,18 @@ fn wait_for_idle(control: &GenerationControl<'_>) -> Result<()> {
 }
 
 fn verify_frame(frame: &SequenceFrame, control: &GenerationControl<'_>) -> Result<()> {
-    let mut file = File::open(&frame.path)?;
+    if hash_frame(&frame.path, control)? != frame.hash.to_ascii_lowercase() {
+        return Err(ProxyError::InvalidMedia(
+            "sequence frame content hash changed".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// The BLAKE3 of the file at `path` (lowercase hex), read while no
+/// interactive work asks the encoder to wait.
+fn hash_frame(path: &Path, control: &GenerationControl<'_>) -> Result<String> {
+    let mut file = File::open(path)?;
     let before = file.metadata()?;
     let mut hasher = blake3::Hasher::new();
     let mut buf = [0_u8; 1 << 20];
@@ -113,18 +180,13 @@ fn verify_frame(frame: &SequenceFrame, control: &GenerationControl<'_>) -> Resul
         }
         hasher.update(&buf[..n]);
     }
-    let after = fs::metadata(&frame.path)?;
+    let after = fs::metadata(path)?;
     if before.len() != after.len() || before.modified()? != after.modified()? {
         return Err(ProxyError::InvalidMedia(
             "sequence frame changed while hashing".into(),
         ));
     }
-    if hasher.finalize().to_hex().as_str() != frame.hash.to_ascii_lowercase() {
-        return Err(ProxyError::InvalidMedia(
-            "sequence frame content hash changed".into(),
-        ));
-    }
-    Ok(())
+    Ok(hasher.finalize().to_hex().to_string())
 }
 
 fn verify_frames(manifest: &SequenceManifest, control: &GenerationControl<'_>) -> Result<()> {
@@ -218,8 +280,12 @@ fn direct_color(
     still: &pm_media::image::StillImage,
     _path: &Path,
 ) -> Result<Option<SequenceColor>> {
+    // Associated alpha (OpenEXR, a premultiplied TIFF): FFmpeg would carry
+    // the premultiplied samples into a movie read as straight alpha, and
+    // the edge would darken. The native reader unpremultiplies them.
     if still.color.gamma.is_some()
         || matches!(still.color.icc_class, Some(IccClass::Other))
+        || !matches!(still.color.alpha, AlphaMode::Opaque | AlphaMode::Straight)
         || float_outside_sdr(still)?
     {
         return Ok(None);
@@ -418,12 +484,14 @@ fn source_to_bt2020(still: &pm_media::image::StillImage) -> Result<Mat3> {
     Ok(pm_color::primaries::conversion(source, Primaries::Bt2020).unwrap())
 }
 
-/// ST 2084, treating scene-linear 1.0 as reference white at 100 cd/m².
-/// This maps positive EXR highlights up to 100× reference white without the
-/// sRGB clip. Values beyond PQ's 10,000 cd/m² ceiling saturate at that
-/// display limit, and the original frames remain the source for export.
+/// ST 2084, treating scene-linear 1.0 as reference white at the 203 cd/m²
+/// the renderer reads a PQ movie's white at (`pm_color::tonemap::SDR_WHITE`,
+/// BT.2408), so the proxy shows its originals' levels. This maps positive
+/// EXR highlights up to ~49× reference white without the sRGB clip. Values
+/// beyond PQ's 10,000 cd/m² ceiling saturate at that display limit, and the
+/// original frames remain the source for export.
 fn pq_code(linear: f64) -> f64 {
-    let y = (linear.max(0.0) / 100.0).min(1.0);
+    let y = (linear.max(0.0) * pm_color::tonemap::SDR_WHITE / 10_000.0).min(1.0);
     const M1: f64 = 2610.0 / 16384.0;
     const M2: f64 = 2523.0 / 32.0;
     const C1: f64 = 3424.0 / 4096.0;
@@ -442,7 +510,8 @@ fn source_linear(transfer: Transfer, encoded: f64) -> f64 {
             const C2: f64 = 2413.0 / 128.0;
             const C3: f64 = 2392.0 / 128.0;
             let p = encoded.max(0.0).powf(1.0 / M2);
-            ((p - C1).max(0.0) / (C2 - C3 * p)).max(0.0).powf(1.0 / M1) * 100.0
+            ((p - C1).max(0.0) / (C2 - C3 * p)).max(0.0).powf(1.0 / M1) * 10_000.0
+                / pm_color::tonemap::SDR_WHITE
         }
         Transfer::Hlg => {
             const A: f64 = 0.178_832_77;
@@ -916,6 +985,7 @@ pub(crate) fn generate_sequence(
     request: GenerationRequest<'_>,
     disk_space: &dyn Fn(&Path) -> Result<(u64, u64)>,
     manifest: SequenceManifest,
+    hashed: bool,
 ) -> Result<GeneratedProxy> {
     let hash = manifest.content_hash()?;
     if hash != request.source_hash.to_ascii_lowercase() {
@@ -923,9 +993,15 @@ pub(crate) fn generate_sequence(
             "sequence aggregate content hash changed".into(),
         ));
     }
-    verify_frames(&manifest, &request.control)?;
+    // Frames hashed just now need not be read again before encoding.
+    if !hashed {
+        verify_frames(&manifest, &request.control)?;
+    }
     let (width, height, depth, alpha, color) = frame_facts(&manifest, &request.control)?;
-    let recipe = ProxyRecipe::new(request.format, request.size, width, height, depth, alpha)?;
+    let recipe = ProxyRecipe {
+        sequence: Some(crate::store::SEQUENCE_PIPELINE),
+        ..ProxyRecipe::new(request.format, request.size, width, height, depth, alpha)?
+    };
     match request.store.lookup(&hash, &recipe) {
         Ok(Some(stored)) => {
             return Ok(GeneratedProxy {

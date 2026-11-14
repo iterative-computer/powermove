@@ -1804,6 +1804,135 @@ impl ToolbarDelegate {
     }
 }
 
+/// The toolbar Agent item's state (agent-panel.md §1, v1 launcher status):
+/// idle, working (an accent ring turns around the glyph) or needing an
+/// answer (an accent dot; it wins over the ring), with background runs.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AgentStatus {
+    pub working: bool,
+    pub attention: bool,
+    /// `m:ss` of the run in view, for the tooltip.
+    pub elapsed: Option<String>,
+    pub background: usize,
+}
+impl AgentStatus {
+    pub fn tooltip(&self) -> String {
+        if self.attention {
+            "Agent needs your answer".into()
+        } else if self.working {
+            match &self.elapsed {
+                Some(e) => format!("Agent is working · {e}"),
+                None => "Agent is working".into(),
+            }
+        } else {
+            "Ask the Agent".into()
+        }
+    }
+}
+/// The Agent item's glyph: the toolbar symbol in accent ink with a three-
+/// quarter ring at `turn` (working), or with a dot at its top trailing
+/// corner (attention). Idle is the plain template symbol.
+fn agent_toolbar_image(status: &AgentStatus, turn: f64, t: &Tokens) -> Retained<NSImage> {
+    let glyph = toolbar_symbol("sparkles", "Agent", t);
+    if !status.working && !status.attention {
+        return glyph;
+    }
+    let size = t.metrics.symbol_toolbar as f64 + 8.;
+    let accent = t.colors.accent;
+    let (working, attention) = (status.working && !status.attention, status.attention);
+    let dot = t.metrics.status_dot as f64;
+    let draw = block2::RcBlock::new(move |rect: NSRect| -> objc2::runtime::Bool {
+        let inner = glyph.size();
+        let at = NSRect::new(
+            NSPoint::new(
+                (rect.size.width - inner.width) / 2.,
+                (rect.size.height - inner.height) / 2.,
+            ),
+            inner,
+        );
+        glyph.drawInRect(at);
+        // The glyph in accent ink.
+        native_color(accent).set();
+        NSRectFillUsingOperation(at, NSCompositingOperation::SourceAtop);
+        if working {
+            let path = NSBezierPath::bezierPath();
+            let centre = NSPoint::new(rect.size.width / 2., rect.size.height / 2.);
+            let start = 90. - turn * 360.;
+            path.appendBezierPathWithArcWithCenter_radius_startAngle_endAngle_clockwise(
+                centre,
+                rect.size.width / 2. - 1.,
+                start,
+                start - 270.,
+                true,
+            );
+            path.setLineWidth(1.5);
+            native_color(accent).setStroke();
+            path.stroke();
+        }
+        if attention {
+            let r = NSRect::new(
+                NSPoint::new(rect.size.width - dot, rect.size.height - dot),
+                NSSize::new(dot, dot),
+            );
+            native_color(accent).setFill();
+            NSBezierPath::bezierPathWithOvalInRect(r).fill();
+        }
+        objc2::runtime::Bool::YES
+    });
+    let image =
+        NSImage::imageWithSize_flipped_drawingHandler(NSSize::new(size, size), false, &draw);
+    image.setAccessibilityDescription(Some(&NSString::from_str("Agent")));
+    image
+}
+impl Host {
+    /// Shows the agent's state on the toolbar's Agent item: its glyph (a
+    /// turning ring while working, still under Reduce Motion; a dot when it
+    /// needs an answer) and its tooltip.
+    pub fn set_agent_status(&mut self, status: AgentStatus) {
+        if status == self.agent_status {
+            return;
+        }
+        let Some(item) = self
+            ._toolbar
+            .items()
+            .iter()
+            .find(|i| i.itemIdentifier().to_string() == "agent")
+        else {
+            return;
+        };
+        let tokens = self.tokens.clone();
+        item.setToolTip(Some(&NSString::from_str(&status.tooltip())));
+        let turning = status.working && !status.attention && !tokens.accessibility.reduce_motion;
+        if !turning {
+            if let Some(timer) = self.agent_timer.take() {
+                timer.invalidate();
+            }
+            item.setImage(Some(&agent_toolbar_image(&status, 0., &tokens)));
+        } else if self.agent_timer.is_none() {
+            let started = std::time::Instant::now();
+            let shown = status.clone();
+            let item = item.clone();
+            let step =
+                block2::RcBlock::new(move |_: std::ptr::NonNull<objc2_foundation::NSTimer>| {
+                    let turn = started.elapsed().as_secs_f64() % 1.;
+                    item.setImage(Some(&agent_toolbar_image(&shown, turn, &tokens)));
+                });
+            let timer = unsafe {
+                objc2_foundation::NSTimer::timerWithTimeInterval_repeats_block(
+                    1. / 30.,
+                    true,
+                    &step,
+                )
+            };
+            unsafe {
+                objc2_foundation::NSRunLoop::mainRunLoop()
+                    .addTimer_forMode(&timer, objc2_foundation::NSRunLoopCommonModes);
+            }
+            self.agent_timer = Some(timer);
+        }
+        self.agent_status = status;
+    }
+}
 /// Toolbar subtitle for a document: `Saving…` while a save runs, else
 /// `Edited` when there are unsaved changes, else nothing.
 pub fn document_subtitle(edited: bool, saving: bool) -> &'static str {
@@ -1898,6 +2027,10 @@ pub struct Host {
     /// Last published viewer geometry (`Some(None)` = hidden); `None` before the first frame.
     last_geometry: Option<Option<SlotGeometry>>,
     _toolbar: Retained<NSToolbar>,
+    /// What the toolbar's Agent item shows, and the timer that turns its
+    /// working ring.
+    agent_status: AgentStatus,
+    agent_timer: Option<Retained<objc2_foundation::NSTimer>>,
     _delegate: Retained<ToolbarDelegate>,
     _target: Retained<Target>,
     observer: Option<Retained<ProtocolObject<dyn NSObjectProtocol>>>,
@@ -2060,16 +2193,7 @@ impl Host {
         let choices = base_choices();
         let palette = Popup::new(&window, &t, Surface::Palette, choices.clone(), tx.clone());
         palette.borrow_mut().shortcuts = shortcut_glyphs();
-        let fields = Popup::new(
-            &window,
-            &t,
-            Surface::Menu,
-            ["Position", "Scale", "Rotation", "Opacity"]
-                .iter()
-                .map(|n| Choice::new(*n, format!("field:{n}")))
-                .collect(),
-            tx.clone(),
-        );
+        let fields = Popup::new(&window, &t, Surface::Menu, field_choices(), tx.clone());
         let (tabs, tabs_width) = (
             delegate.ivars().tabs.clone(),
             delegate.ivars().tabs_width.clone(),
@@ -2092,6 +2216,8 @@ impl Host {
             viewer_crop: Rc::new(Cell::new(None)),
             last_geometry: None,
             _toolbar: toolbar,
+            agent_status: AgentStatus::default(),
+            agent_timer: None,
             _delegate: delegate,
             _target: target,
             observer: None,
@@ -3804,8 +3930,50 @@ impl Host {
         if other.borrow().model.open {
             other.borrow_mut().hide();
         }
+        if field && !self.fields.borrow().model.open {
+            let mut p = self.fields.borrow_mut();
+            p.model.choices = field_choices();
+            (p.anchor, p.model.page, p.dismiss) = (None, None, None);
+            p.search
+                .setPlaceholderString(Some(&NSString::from_str(FIELD_PLACEHOLDER)));
+        }
         let p = if field { &self.fields } else { &self.palette };
         p.borrow_mut().toggle();
+    }
+    /// A menu a control of ours opens (the font picker): `choices` under
+    /// the control at `anchor` (this window's GPUI points), `page` rows at a
+    /// time with the search narrowing the rest; `dismiss` is sent if it
+    /// closes with nothing chosen.
+    /// Opens the field menu under `anchor` (in `owner`'s content points, the
+    /// editor window's when `None`). It belongs to that window: it stands
+    /// above it (the Agent popover's own menus) and gives it focus back.
+    pub fn open_menu(
+        &mut self,
+        owner: Option<Retained<NSWindow>>,
+        choices: Vec<Choice>,
+        anchor: Option<crate::layout::Rect>,
+        page: Option<usize>,
+        dismiss: Option<String>,
+        placeholder: &str,
+    ) {
+        if self.palette.borrow().model.open {
+            self.palette.borrow_mut().hide();
+        }
+        if self.fields.borrow().model.open {
+            self.fields.borrow_mut().hide();
+        }
+        let owner = owner.unwrap_or_else(|| self.window.clone());
+        let h = owner
+            .contentView()
+            .map_or(0., |content| content.bounds().size.height);
+        let anchor = anchor.map(|r| owner.convertRectToScreen(rect(r, h)));
+        let mut p = self.fields.borrow_mut();
+        p.parent = owner;
+        p.model.choices = choices;
+        (p.anchor, p.model.page, p.dismiss) = (anchor, page, dismiss);
+        p.search
+            .setPlaceholderString(Some(&NSString::from_str(placeholder)));
+        p.toggle();
     }
     pub fn system(&self, name: &str) -> bool {
         let app = NSApplication::sharedApplication(MainThreadMarker::new().unwrap());
@@ -3998,8 +4166,9 @@ define_class!(
             if let Some(p) = self.ivars().upgrade() {
                 let mut p = p.borrow_mut();
                 let index = sender.tag() as usize;
-                if let Some(c) = p.model.choices.get(index) {
-                    let (name, args) = menu::split_palette_command(&c.command);
+                if let Some(command) = p.model.choices.get(index).map(|c| c.command.clone()) {
+                    p.picked = true;
+                    let (name, args) = menu::split_palette_command(&command);
                     let _ = p.sender.try_send(Command { name: name.to_owned(), args, token: None });
                 }
                 p.hide();
@@ -4503,6 +4672,15 @@ fn popup_material(
 fn popup_highlight(t: &Tokens) -> Retained<NSColor> {
     native_color(t.colors.text).colorWithAlphaComponent(t.translucency.selected as f64)
 }
+/// The field menu's search placeholder (`fieldMenu`).
+const FIELD_PLACEHOLDER: &str = "Search fields";
+/// The field menu's own rows (`fieldMenu`).
+fn field_choices() -> Vec<Choice> {
+    ["Position", "Scale", "Rotation", "Opacity"]
+        .iter()
+        .map(|n| Choice::new(*n, format!("field:{n}")))
+        .collect()
+}
 fn popup_label(text: &str, size: f32, ink: u32, mtm: MainThreadMarker) -> Retained<NSTextField> {
     let label = NSTextField::labelWithString(&NSString::from_str(text), mtm);
     label.setFont(Some(&NSFont::systemFontOfSize(size as f64)));
@@ -4570,6 +4748,12 @@ pub struct Popup {
     /// Tallest the panel may grow (`palette_height` / `field_menu_height`).
     max_height: f32,
     row_focus: bool,
+    /// Where a menu a control opened hangs from (screen points: the
+    /// control's frame); `None` places it as the palette.
+    anchor: Option<NSRect>,
+    /// The command sent when the menu closes with nothing chosen.
+    dismiss: Option<String>,
+    picked: bool,
 }
 impl Popup {
     fn new(
@@ -4618,7 +4802,7 @@ impl Popup {
         search.setPlaceholderString(Some(&NSString::from_str(if surface == Surface::Palette {
             "Search commands"
         } else {
-            "Search fields"
+            FIELD_PLACEHOLDER
         })));
         search.setControlSize(NSControlSize::Large);
         search.setFont(Some(&NSFont::systemFontOfSize(t.typography.title as f64)));
@@ -4674,6 +4858,9 @@ impl Popup {
             previous: None,
             max_height: height,
             row_focus: false,
+            anchor: None,
+            dismiss: None,
+            picked: false,
         }));
         let target: Retained<PopupTarget> = unsafe {
             msg_send![
@@ -4728,6 +4915,8 @@ impl Popup {
             .into_iter()
             .map(|i| (i, self.model.choices[i].clone()))
             .collect();
+        // A long list (every installed font) shows a page; typing narrows it.
+        let more_rows = Some(self.model.unlisted()).filter(|n| *n > 0);
         let width = self.window.frame().size.width;
         let (inset, row_h) = (shape.inset as f64, shape.row as f64);
         let checks = chosen.iter().any(|(_, c)| c.checked.is_some());
@@ -4799,6 +4988,17 @@ impl Popup {
                     .push(Retained::into_super(Retained::into_super(mark)));
             }
             let title = popup_label(&c.label, t.typography.body, t.colors.text, mtm);
+            if let Some(family) = &c.font
+                && let Some(face) = NSFontManager::sharedFontManager(mtm)
+                    .fontWithFamily_traits_weight_size(
+                        &NSString::from_str(family),
+                        NSFontTraitMask::empty(),
+                        5,
+                        t.typography.reading as f64,
+                    )
+            {
+                title.setFont(Some(&face));
+            }
             centred(&title, lead, y, row_h, (trailing - lead).max(0.));
             self.list.addSubview(&title);
             self.parts
@@ -4829,6 +5029,19 @@ impl Popup {
                 rect,
                 button,
             });
+            y += row_h;
+        }
+        if let Some(rest) = more_rows {
+            let note = popup_label(
+                &format!("{rest} more · type to narrow"),
+                caption,
+                t.colors.muted,
+                mtm,
+            );
+            centred(&note, edge, y, row_h, width - edge * 2.);
+            self.list.addSubview(&note);
+            self.parts
+                .push(Retained::into_super(Retained::into_super(note)));
             y += row_h;
         }
         if chosen.is_empty() {
@@ -5061,26 +5274,69 @@ impl Popup {
         self.previous = self.parent.firstResponder();
         self.lit = false;
         self.glider.setAlphaValue(0.);
+        self.picked = false;
         self.refresh();
         let p = self.parent.frame();
         let s = self.window.frame().size;
-        self.window.setFrameOrigin(NSPoint::new(
-            p.origin.x + (p.size.width - s.width) / 2.,
-            p.origin.y + p.size.height - s.height - self.tokens.metrics.toolbar as f64,
-        ));
+        let origin = match self.anchor {
+            // Under the control that opened it, its trailing edge on the
+            // control's (as a field's pop-up menu); above it if there is no
+            // room below; always inside the window.
+            Some(a) => {
+                let gap = self.tokens.metrics.gap as f64;
+                let below = a.origin.y - gap - s.height;
+                let y = if below >= p.origin.y {
+                    below
+                } else {
+                    a.origin.y + a.size.height + gap
+                };
+                let x = (a.origin.x + a.size.width - s.width)
+                    .min(p.origin.x + p.size.width - s.width)
+                    .max(p.origin.x);
+                NSPoint::new(x, y)
+            }
+            None => NSPoint::new(
+                p.origin.x + (p.size.width - s.width) / 2.,
+                p.origin.y + p.size.height - s.height - self.tokens.metrics.toolbar as f64,
+            ),
+        };
+        self.window.setFrameOrigin(origin);
+        // Opens on the current choice, in view (nothing lit).
+        if let Some(row) = self.rows.iter().find(|row| {
+            self.model
+                .filtered()
+                .get(row.place)
+                .is_some_and(|i| self.model.choices.get(*i).and_then(|c| c.checked) == Some(true))
+        }) {
+            let mut rect = row.rect;
+            let room = self.scroll.frame().size.height;
+            rect.origin.y = (rect.origin.y - (room - rect.size.height) / 2.).max(0.);
+            rect.size.height = room;
+            self.list.scrollRectToVisible(rect);
+        }
         unsafe {
             let _: () = msg_send![NSObject::class(),cancelPreviousPerformRequestsWithTarget:&*self.window,selector:sel!(orderOut:),object:std::ptr::null::<AnyObject>()];
         }
         gpui_macos::child_window::attach(&self.window, &self.parent);
         // Only while the app is active, never over other apps (P-CHILD).
         gpui_macos::child_window::show(&self.window, true);
-        #[cfg(debug_assertions)]
-        gpui_macos::child_window::review_show(&self.window, &self.parent);
         self.window.makeFirstResponder(Some(&self.search));
         animate(&self.window, true, &self.tokens, &mut self.spring);
     }
     fn hide(&mut self) {
         self.model.open = false;
+        // Closed with nothing chosen: the one who asked hears so.
+        if !std::mem::take(&mut self.picked)
+            && let Some(name) = self.dismiss.take()
+        {
+            let (name, args) = menu::split_palette_command(&name);
+            let _ = self.sender.try_send(Command {
+                name: name.to_owned(),
+                args,
+                token: None,
+            });
+        }
+        self.dismiss = None;
         self.rest();
         gpui_macos::child_window::forget(&self.window);
         let duration = animate(&self.window, false, &self.tokens, &mut self.spring);
@@ -5095,13 +5351,20 @@ impl Popup {
             self.window.clone(),
             self.previous.clone(),
         );
+        // Only while the app is active (P-CHILD): making a window key in an
+        // inactive app marks it active for a moment, and the next menu then
+        // ordered itself in as a real child that hid with its window.
         let restore = block2::RcBlock::new(move || {
             let app = NSApplication::sharedApplication(MainThreadMarker::new().unwrap());
             let another_window = app.keyWindow().is_some_and(|key| {
                 key.windowNumber() != popup.windowNumber()
                     && key.windowNumber() != parent.windowNumber()
             });
-            if !another_window && parent.isVisible() && parent.attachedSheet().is_none() {
+            if app.isActive()
+                && !another_window
+                && parent.isVisible()
+                && parent.attachedSheet().is_none()
+            {
                 parent.makeKeyWindow();
                 parent.makeFirstResponder(previous.as_deref());
             }
@@ -5146,6 +5409,7 @@ impl Popup {
         };
         let before = self.model.lit();
         if let Some(name) = self.model.navigate(key) {
+            self.picked = true;
             let _ = self.sender.try_send(Command {
                 name,
                 args: vec![],
@@ -5801,5 +6065,24 @@ mod tab_layout_tests {
     #[test]
     fn one_tab_in_no_room_is_still_a_tab() {
         assert_eq!(tab_layout(&[150.], 0, 10.), (0, vec![TAB_MIN], false));
+    }
+}
+#[cfg(test)]
+mod agent_status_tests {
+    use super::AgentStatus;
+    #[test]
+    fn the_agent_item_says_what_the_agent_is_doing_and_attention_wins() {
+        assert_eq!(AgentStatus::default().tooltip(), "Ask the Agent");
+        let working = AgentStatus {
+            working: true,
+            elapsed: Some("1:04".into()),
+            ..Default::default()
+        };
+        assert_eq!(working.tooltip(), "Agent is working · 1:04");
+        let asking = AgentStatus {
+            attention: true,
+            ..working
+        };
+        assert_eq!(asking.tooltip(), "Agent needs your answer");
     }
 }

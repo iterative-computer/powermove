@@ -399,6 +399,10 @@ impl pm_shell::integration::Integration for Bridge {
             v.builtins.viewer_place = None;
             v.sync_extension_panels(open);
             v.sync_parking(open, cx);
+            v.builtins.agent_docked = open.contains(&"agent");
+            if v.builtins.agent_docked {
+                v.builtins.agent_parked = false;
+            }
         });
     }
     fn shown_panels(&self, shown: &[&str], cx: &mut App) {
@@ -2617,6 +2621,14 @@ impl Controller {
         if crate::generated_panel::pick(self, &cmd.name, cx) {
             return true;
         }
+        if let Some(family) = cmd.name.strip_prefix("fontPick:") {
+            self.font_picked(family);
+            return true;
+        }
+        if let Some(index) = cmd.name.strip_prefix("agentPick:") {
+            self.agent_picked(index);
+            return true;
+        }
         match cmd.name.as_str() {
             "shortcuts" => {
                 let action = cmd.args.first().cloned().unwrap_or_default();
@@ -2876,7 +2888,8 @@ impl Controller {
                     }
                 }
             }
-            "settings" | "agent" => self.show_builtin(&cmd.name, window, cx),
+            "settings" => self.show_builtin(&cmd.name, window, cx),
+            "agent" => self.toggle_agent(window, cx),
             "bringWorkspace" => self.bring_workspace(window, cx),
             "quit" => cx.defer(crate::lifecycle::begin_quit),
             "closeWindow" | "closeTab" => self.request_close(crate::lifecycle::Intent::Window, cx),
@@ -3135,6 +3148,22 @@ impl Controller {
                     self.end_run();
                 }
                 self.seek(seconds);
+            }
+            // Import/Export CDL…: a person picks the file; the agent names it.
+            "color.importCdl"
+            | "color.importCdlFile"
+            | "color.exportCdl"
+            | "color.exportCdlFile" => {
+                let path = cmd.args.first().and_then(|v| v.as_str()).map(PathBuf::from);
+                if cmd.name.ends_with("File") && path.is_none() {
+                    self.message = "Give the CDL file’s path.".into();
+                    return false;
+                }
+                if cmd.name.starts_with("color.import") {
+                    self.import_cdl(path, cx);
+                } else {
+                    self.export_cdl(path, cx);
+                }
             }
             "transport.loop" => {
                 let on = cmd.args.first().and_then(|v| v.as_bool()) != Some(false);

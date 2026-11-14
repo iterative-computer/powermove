@@ -178,7 +178,9 @@ fn the_frame_cache_follows_the_lease_share() {
         frame_cache: 512 << 20,
         decoders: usize::MAX,
     });
-    assert_eq!(usage.cache.budget, 512 << 20);
+    // The stills decoded ahead keep their part of the same allowance
+    // (24 MB while nothing plays): the video frames get the rest.
+    assert_eq!(usage.cache.budget, (512 << 20) - (24 << 20));
     let usage = r.apply_media_lease(MediaLease {
         frame_cache: 0,
         decoders: usize::MAX,

@@ -26,12 +26,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
             "id": "timeline:header",
             "style": {
               "alignItems": "stretch",
-              "borderBottom": {
-                "token": "metrics.border",
-              },
-              "borderColor": {
-                "token": "colors.separator",
-              },
               "display": "flex",
               "flexDirection": "row",
               "height": {
@@ -203,9 +197,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         "data-pm-component": "toolbar-item",
                         "id": "timeline:tab:launch",
                         "label": "Launch Film",
-                        "metadata": {
-                          "selectionMark": "rule",
-                        },
                         "role": "tab",
                         "style": {
                           "color": {
@@ -236,20 +227,8 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   "props": {
                     "style": {
                       "alignItems": "center",
-                      "borderBottom": {
-                        "token": "metrics.pill_inset",
-                      },
-                      "borderColor": {
-                        "token": "colors.accent",
-                      },
                       "display": "flex",
                       "flexDirection": "row",
-                      "paddingLeft": {
-                        "token": "metrics.gap",
-                      },
-                      "paddingRight": {
-                        "token": "metrics.gap",
-                      },
                     },
                   },
                   "type": "div",
@@ -437,12 +416,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
             "id": "timeline:header",
             "style": {
               "alignItems": "stretch",
-              "borderBottom": {
-                "token": "metrics.border",
-              },
-              "borderColor": {
-                "token": "colors.separator",
-              },
               "display": "flex",
               "flexDirection": "row",
               "height": {
@@ -486,7 +459,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "label": "Play",
                             "metadata": {
                               "designTodo": "T1",
-                              "requiredSymbol": "play",
+                              "requiredSymbol": "play.fill",
                             },
                             "style": {
                               "color": {
@@ -522,7 +495,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             },
                             "style": {
                               "color": {
-                                "token": "colors.accent_text",
+                                "token": "colors.text",
                               },
                               "fontSize": {
                                 "token": "typography.timecode",
@@ -823,9 +796,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         "data-pm-component": "toolbar-item",
                         "id": "timeline:tab:launch",
                         "label": "Launch Film",
-                        "metadata": {
-                          "selectionMark": "rule",
-                        },
                         "role": "tab",
                         "style": {
                           "color": {
@@ -856,20 +826,8 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   "props": {
                     "style": {
                       "alignItems": "center",
-                      "borderBottom": {
-                        "token": "metrics.pill_inset",
-                      },
-                      "borderColor": {
-                        "token": "colors.accent",
-                      },
                       "display": "flex",
                       "flexDirection": "row",
-                      "paddingLeft": {
-                        "token": "metrics.gap",
-                      },
-                      "paddingRight": {
-                        "token": "metrics.gap",
-                      },
                     },
                   },
                   "type": "div",
@@ -1057,12 +1015,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
             "id": "timeline:header",
             "style": {
               "alignItems": "stretch",
-              "borderBottom": {
-                "token": "metrics.border",
-              },
-              "borderColor": {
-                "token": "colors.separator",
-              },
               "display": "flex",
               "flexDirection": "row",
               "height": {
@@ -1106,7 +1058,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "label": "Play",
                             "metadata": {
                               "designTodo": "T1",
-                              "requiredSymbol": "play",
+                              "requiredSymbol": "play.fill",
                             },
                             "style": {
                               "color": {
@@ -1142,7 +1094,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             },
                             "style": {
                               "color": {
-                                "token": "colors.accent_text",
+                                "token": "colors.text",
                               },
                               "fontSize": {
                                 "token": "typography.timecode",
@@ -1569,9 +1521,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         "data-pm-component": "toolbar-item",
                         "id": "timeline:tab:launch",
                         "label": "Launch Film",
-                        "metadata": {
-                          "selectionMark": "rule",
-                        },
                         "role": "tab",
                         "style": {
                           "color": {
@@ -1602,20 +1551,8 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   "props": {
                     "style": {
                       "alignItems": "center",
-                      "borderBottom": {
-                        "token": "metrics.pill_inset",
-                      },
-                      "borderColor": {
-                        "token": "colors.accent",
-                      },
                       "display": "flex",
                       "flexDirection": "row",
-                      "paddingLeft": {
-                        "token": "metrics.gap",
-                      },
-                      "paddingRight": {
-                        "token": "metrics.gap",
-                      },
                     },
                   },
                   "type": "div",
@@ -1803,12 +1740,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
             "id": "timeline:header",
             "style": {
               "alignItems": "stretch",
-              "borderBottom": {
-                "token": "metrics.border",
-              },
-              "borderColor": {
-                "token": "colors.separator",
-              },
               "display": "flex",
               "flexDirection": "row",
               "height": {
@@ -1852,7 +1783,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "label": "Play",
                             "metadata": {
                               "designTodo": "T1",
-                              "requiredSymbol": "play",
+                              "requiredSymbol": "play.fill",
                             },
                             "style": {
                               "color": {
@@ -1888,7 +1819,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             },
                             "style": {
                               "color": {
-                                "token": "colors.accent_text",
+                                "token": "colors.text",
                               },
                               "fontSize": {
                                 "token": "typography.timecode",
@@ -2462,9 +2393,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         "data-pm-component": "toolbar-item",
                         "id": "timeline:tab:launch",
                         "label": "Launch Film",
-                        "metadata": {
-                          "selectionMark": "rule",
-                        },
                         "role": "tab",
                         "style": {
                           "color": {
@@ -2495,20 +2423,8 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   "props": {
                     "style": {
                       "alignItems": "center",
-                      "borderBottom": {
-                        "token": "metrics.pill_inset",
-                      },
-                      "borderColor": {
-                        "token": "colors.accent",
-                      },
                       "display": "flex",
                       "flexDirection": "row",
-                      "paddingLeft": {
-                        "token": "metrics.gap",
-                      },
-                      "paddingRight": {
-                        "token": "metrics.gap",
-                      },
                     },
                   },
                   "type": "div",
@@ -2696,12 +2612,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
             "id": "timeline:header",
             "style": {
               "alignItems": "stretch",
-              "borderBottom": {
-                "token": "metrics.border",
-              },
-              "borderColor": {
-                "token": "colors.separator",
-              },
               "display": "flex",
               "flexDirection": "row",
               "height": {
@@ -2745,7 +2655,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "label": "Play",
                             "metadata": {
                               "designTodo": "T1",
-                              "requiredSymbol": "play",
+                              "requiredSymbol": "play.fill",
                             },
                             "style": {
                               "color": {
@@ -2781,7 +2691,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             },
                             "style": {
                               "color": {
-                                "token": "colors.accent_text",
+                                "token": "colors.text",
                               },
                               "fontSize": {
                                 "token": "typography.timecode",
@@ -3355,9 +3265,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         "data-pm-component": "toolbar-item",
                         "id": "timeline:tab:launch",
                         "label": "Launch Film",
-                        "metadata": {
-                          "selectionMark": "rule",
-                        },
                         "role": "tab",
                         "style": {
                           "color": {
@@ -3388,20 +3295,8 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   "props": {
                     "style": {
                       "alignItems": "center",
-                      "borderBottom": {
-                        "token": "metrics.pill_inset",
-                      },
-                      "borderColor": {
-                        "token": "colors.accent",
-                      },
                       "display": "flex",
                       "flexDirection": "row",
-                      "paddingLeft": {
-                        "token": "metrics.gap",
-                      },
-                      "paddingRight": {
-                        "token": "metrics.gap",
-                      },
                     },
                   },
                   "type": "div",
@@ -3589,12 +3484,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
             "id": "timeline:header",
             "style": {
               "alignItems": "stretch",
-              "borderBottom": {
-                "token": "metrics.border",
-              },
-              "borderColor": {
-                "token": "colors.separator",
-              },
               "display": "flex",
               "flexDirection": "row",
               "height": {
@@ -3638,7 +3527,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "label": "Play",
                             "metadata": {
                               "designTodo": "T1",
-                              "requiredSymbol": "play",
+                              "requiredSymbol": "play.fill",
                             },
                             "style": {
                               "color": {
@@ -3674,7 +3563,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             },
                             "style": {
                               "color": {
-                                "token": "colors.accent_text",
+                                "token": "colors.text",
                               },
                               "fontSize": {
                                 "token": "typography.timecode",
@@ -4245,9 +4134,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         "data-pm-component": "toolbar-item",
                         "id": "timeline:tab:launch",
                         "label": "Launch Film",
-                        "metadata": {
-                          "selectionMark": "rule",
-                        },
                         "role": "tab",
                         "style": {
                           "color": {
@@ -4278,20 +4164,8 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   "props": {
                     "style": {
                       "alignItems": "center",
-                      "borderBottom": {
-                        "token": "metrics.pill_inset",
-                      },
-                      "borderColor": {
-                        "token": "colors.accent",
-                      },
                       "display": "flex",
                       "flexDirection": "row",
-                      "paddingLeft": {
-                        "token": "metrics.gap",
-                      },
-                      "paddingRight": {
-                        "token": "metrics.gap",
-                      },
                     },
                   },
                   "type": "div",
@@ -4479,12 +4353,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
             "id": "timeline:header",
             "style": {
               "alignItems": "stretch",
-              "borderBottom": {
-                "token": "metrics.border",
-              },
-              "borderColor": {
-                "token": "colors.separator",
-              },
               "display": "flex",
               "flexDirection": "row",
               "height": {
@@ -4528,7 +4396,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "label": "Play",
                             "metadata": {
                               "designTodo": "T1",
-                              "requiredSymbol": "play",
+                              "requiredSymbol": "play.fill",
                             },
                             "style": {
                               "color": {
@@ -4564,7 +4432,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             },
                             "style": {
                               "color": {
-                                "token": "colors.accent_text",
+                                "token": "colors.text",
                               },
                               "fontSize": {
                                 "token": "typography.timecode",
@@ -5271,9 +5139,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         "data-pm-component": "toolbar-item",
                         "id": "timeline:tab:launch",
                         "label": "Launch Film",
-                        "metadata": {
-                          "selectionMark": "rule",
-                        },
                         "role": "tab",
                         "style": {
                           "color": {
@@ -5304,20 +5169,8 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   "props": {
                     "style": {
                       "alignItems": "center",
-                      "borderBottom": {
-                        "token": "metrics.pill_inset",
-                      },
-                      "borderColor": {
-                        "token": "colors.accent",
-                      },
                       "display": "flex",
                       "flexDirection": "row",
-                      "paddingLeft": {
-                        "token": "metrics.gap",
-                      },
-                      "paddingRight": {
-                        "token": "metrics.gap",
-                      },
                     },
                   },
                   "type": "div",
@@ -5505,12 +5358,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
             "id": "timeline:header",
             "style": {
               "alignItems": "stretch",
-              "borderBottom": {
-                "token": "metrics.border",
-              },
-              "borderColor": {
-                "token": "colors.separator",
-              },
               "display": "flex",
               "flexDirection": "row",
               "height": {
@@ -5554,7 +5401,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "label": "Play",
                             "metadata": {
                               "designTodo": "T1",
-                              "requiredSymbol": "play",
+                              "requiredSymbol": "play.fill",
                             },
                             "style": {
                               "color": {
@@ -5590,7 +5437,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             },
                             "style": {
                               "color": {
-                                "token": "colors.accent_text",
+                                "token": "colors.text",
                               },
                               "fontSize": {
                                 "token": "typography.timecode",
@@ -6069,9 +5916,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         "data-pm-component": "toolbar-item",
                         "id": "timeline:tab:launch",
                         "label": "Launch Film",
-                        "metadata": {
-                          "selectionMark": "rule",
-                        },
                         "role": "tab",
                         "style": {
                           "color": {
@@ -6102,20 +5946,8 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   "props": {
                     "style": {
                       "alignItems": "center",
-                      "borderBottom": {
-                        "token": "metrics.pill_inset",
-                      },
-                      "borderColor": {
-                        "token": "colors.accent",
-                      },
                       "display": "flex",
                       "flexDirection": "row",
-                      "paddingLeft": {
-                        "token": "metrics.gap",
-                      },
-                      "paddingRight": {
-                        "token": "metrics.gap",
-                      },
                     },
                   },
                   "type": "div",
@@ -6303,12 +6135,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
             "id": "timeline:header",
             "style": {
               "alignItems": "stretch",
-              "borderBottom": {
-                "token": "metrics.border",
-              },
-              "borderColor": {
-                "token": "colors.separator",
-              },
               "display": "flex",
               "flexDirection": "row",
               "height": {
@@ -6352,7 +6178,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "label": "Play",
                             "metadata": {
                               "designTodo": "T1",
-                              "requiredSymbol": "play",
+                              "requiredSymbol": "play.fill",
                             },
                             "style": {
                               "color": {
@@ -6388,7 +6214,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             },
                             "style": {
                               "color": {
-                                "token": "colors.accent_text",
+                                "token": "colors.text",
                               },
                               "fontSize": {
                                 "token": "typography.timecode",
@@ -6968,9 +6794,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         "data-pm-component": "toolbar-item",
                         "id": "timeline:tab:launch",
                         "label": "Launch Film",
-                        "metadata": {
-                          "selectionMark": "rule",
-                        },
                         "role": "tab",
                         "style": {
                           "color": {
@@ -7001,20 +6824,8 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   "props": {
                     "style": {
                       "alignItems": "center",
-                      "borderBottom": {
-                        "token": "metrics.pill_inset",
-                      },
-                      "borderColor": {
-                        "token": "colors.accent",
-                      },
                       "display": "flex",
                       "flexDirection": "row",
-                      "paddingLeft": {
-                        "token": "metrics.gap",
-                      },
-                      "paddingRight": {
-                        "token": "metrics.gap",
-                      },
                     },
                   },
                   "type": "div",
@@ -7202,12 +7013,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
             "id": "timeline:header",
             "style": {
               "alignItems": "stretch",
-              "borderBottom": {
-                "token": "metrics.border",
-              },
-              "borderColor": {
-                "token": "colors.separator",
-              },
               "display": "flex",
               "flexDirection": "row",
               "height": {
@@ -7251,7 +7056,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "label": "Play",
                             "metadata": {
                               "designTodo": "T1",
-                              "requiredSymbol": "play",
+                              "requiredSymbol": "play.fill",
                             },
                             "style": {
                               "color": {
@@ -7287,7 +7092,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             },
                             "style": {
                               "color": {
-                                "token": "colors.accent_text",
+                                "token": "colors.text",
                               },
                               "fontSize": {
                                 "token": "typography.timecode",
@@ -7928,9 +7733,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         "data-pm-component": "toolbar-item",
                         "id": "timeline:tab:launch",
                         "label": "Launch Film",
-                        "metadata": {
-                          "selectionMark": "rule",
-                        },
                         "role": "tab",
                         "style": {
                           "color": {
@@ -7961,20 +7763,8 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   "props": {
                     "style": {
                       "alignItems": "center",
-                      "borderBottom": {
-                        "token": "metrics.pill_inset",
-                      },
-                      "borderColor": {
-                        "token": "colors.accent",
-                      },
                       "display": "flex",
                       "flexDirection": "row",
-                      "paddingLeft": {
-                        "token": "metrics.gap",
-                      },
-                      "paddingRight": {
-                        "token": "metrics.gap",
-                      },
                     },
                   },
                   "type": "div",
@@ -8162,12 +7952,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
             "id": "timeline:header",
             "style": {
               "alignItems": "stretch",
-              "borderBottom": {
-                "token": "metrics.border",
-              },
-              "borderColor": {
-                "token": "colors.separator",
-              },
               "display": "flex",
               "flexDirection": "row",
               "height": {
@@ -8211,7 +7995,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "label": "Pause",
                             "metadata": {
                               "designTodo": "T1",
-                              "requiredSymbol": "pause",
+                              "requiredSymbol": "pause.fill",
                             },
                             "style": {
                               "color": {
@@ -8247,7 +8031,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             },
                             "style": {
                               "color": {
-                                "token": "colors.accent_text",
+                                "token": "colors.text",
                               },
                               "fontSize": {
                                 "token": "typography.timecode",
@@ -8674,9 +8458,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         "data-pm-component": "toolbar-item",
                         "id": "timeline:tab:launch",
                         "label": "Launch Film",
-                        "metadata": {
-                          "selectionMark": "rule",
-                        },
                         "role": "tab",
                         "style": {
                           "color": {
@@ -8707,20 +8488,8 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   "props": {
                     "style": {
                       "alignItems": "center",
-                      "borderBottom": {
-                        "token": "metrics.pill_inset",
-                      },
-                      "borderColor": {
-                        "token": "colors.accent",
-                      },
                       "display": "flex",
                       "flexDirection": "row",
-                      "paddingLeft": {
-                        "token": "metrics.gap",
-                      },
-                      "paddingRight": {
-                        "token": "metrics.gap",
-                      },
                     },
                   },
                   "type": "div",
@@ -8908,12 +8677,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
             "id": "timeline:header",
             "style": {
               "alignItems": "stretch",
-              "borderBottom": {
-                "token": "metrics.border",
-              },
-              "borderColor": {
-                "token": "colors.separator",
-              },
               "display": "flex",
               "flexDirection": "row",
               "height": {
@@ -8957,7 +8720,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "label": "Play",
                             "metadata": {
                               "designTodo": "T1",
-                              "requiredSymbol": "play",
+                              "requiredSymbol": "play.fill",
                             },
                             "style": {
                               "color": {
@@ -8993,7 +8756,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             },
                             "style": {
                               "color": {
-                                "token": "colors.accent_text",
+                                "token": "colors.text",
                               },
                               "fontSize": {
                                 "token": "typography.timecode",
@@ -15220,9 +14983,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         "data-pm-component": "toolbar-item",
                         "id": "timeline:tab:launch",
                         "label": "Launch Film",
-                        "metadata": {
-                          "selectionMark": "rule",
-                        },
                         "role": "tab",
                         "style": {
                           "color": {
@@ -15253,20 +15013,8 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   "props": {
                     "style": {
                       "alignItems": "center",
-                      "borderBottom": {
-                        "token": "metrics.pill_inset",
-                      },
-                      "borderColor": {
-                        "token": "colors.accent",
-                      },
                       "display": "flex",
                       "flexDirection": "row",
-                      "paddingLeft": {
-                        "token": "metrics.gap",
-                      },
-                      "paddingRight": {
-                        "token": "metrics.gap",
-                      },
                     },
                   },
                   "type": "div",
@@ -15454,12 +15202,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
             "id": "timeline:header",
             "style": {
               "alignItems": "stretch",
-              "borderBottom": {
-                "token": "metrics.border",
-              },
-              "borderColor": {
-                "token": "colors.separator",
-              },
               "display": "flex",
               "flexDirection": "row",
               "height": {
@@ -15503,7 +15245,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "label": "Play",
                             "metadata": {
                               "designTodo": "T1",
-                              "requiredSymbol": "play",
+                              "requiredSymbol": "play.fill",
                             },
                             "style": {
                               "color": {
@@ -15539,7 +15281,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             },
                             "style": {
                               "color": {
-                                "token": "colors.accent_text",
+                                "token": "colors.text",
                               },
                               "fontSize": {
                                 "token": "typography.timecode",
@@ -15616,8 +15358,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "requiredSymbol": "point.topleft.down.to.point.bottomright.curvepath",
                             },
                             "style": {
+                              "background": {
+                                "token": "colors.selected_fill",
+                              },
                               "color": {
-                                "token": "colors.accent_text",
+                                "token": "colors.text",
                               },
                               "minHeight": {
                                 "token": "metrics.hit",
@@ -15993,9 +15738,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         "data-pm-component": "toolbar-item",
                         "id": "timeline:tab:launch",
                         "label": "Launch Film",
-                        "metadata": {
-                          "selectionMark": "rule",
-                        },
                         "role": "tab",
                         "style": {
                           "color": {
@@ -16026,20 +15768,8 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   "props": {
                     "style": {
                       "alignItems": "center",
-                      "borderBottom": {
-                        "token": "metrics.pill_inset",
-                      },
-                      "borderColor": {
-                        "token": "colors.accent",
-                      },
                       "display": "flex",
                       "flexDirection": "row",
-                      "paddingLeft": {
-                        "token": "metrics.gap",
-                      },
-                      "paddingRight": {
-                        "token": "metrics.gap",
-                      },
                     },
                   },
                   "type": "div",
@@ -16227,12 +15957,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
             "id": "timeline:header",
             "style": {
               "alignItems": "stretch",
-              "borderBottom": {
-                "token": "metrics.border",
-              },
-              "borderColor": {
-                "token": "colors.separator",
-              },
               "display": "flex",
               "flexDirection": "row",
               "height": {
@@ -16276,7 +16000,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "label": "Play",
                             "metadata": {
                               "designTodo": "T1",
-                              "requiredSymbol": "play",
+                              "requiredSymbol": "play.fill",
                             },
                             "style": {
                               "color": {
@@ -16312,7 +16036,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             },
                             "style": {
                               "color": {
-                                "token": "colors.accent_text",
+                                "token": "colors.text",
                               },
                               "fontSize": {
                                 "token": "typography.timecode",
@@ -16389,8 +16113,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "requiredSymbol": "point.topleft.down.to.point.bottomright.curvepath",
                             },
                             "style": {
+                              "background": {
+                                "token": "colors.selected_fill",
+                              },
                               "color": {
-                                "token": "colors.accent_text",
+                                "token": "colors.text",
                               },
                               "minHeight": {
                                 "token": "metrics.hit",
@@ -16776,9 +16503,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         "data-pm-component": "toolbar-item",
                         "id": "timeline:tab:launch",
                         "label": "Launch Film",
-                        "metadata": {
-                          "selectionMark": "rule",
-                        },
                         "role": "tab",
                         "style": {
                           "color": {
@@ -16809,20 +16533,8 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   "props": {
                     "style": {
                       "alignItems": "center",
-                      "borderBottom": {
-                        "token": "metrics.pill_inset",
-                      },
-                      "borderColor": {
-                        "token": "colors.accent",
-                      },
                       "display": "flex",
                       "flexDirection": "row",
-                      "paddingLeft": {
-                        "token": "metrics.gap",
-                      },
-                      "paddingRight": {
-                        "token": "metrics.gap",
-                      },
                     },
                   },
                   "type": "div",
@@ -17010,12 +16722,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
             "id": "timeline:header",
             "style": {
               "alignItems": "stretch",
-              "borderBottom": {
-                "token": "metrics.border",
-              },
-              "borderColor": {
-                "token": "colors.separator",
-              },
               "display": "flex",
               "flexDirection": "row",
               "height": {
@@ -17059,7 +16765,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "label": "Play",
                             "metadata": {
                               "designTodo": "T1",
-                              "requiredSymbol": "play",
+                              "requiredSymbol": "play.fill",
                             },
                             "style": {
                               "color": {
@@ -17095,7 +16801,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             },
                             "style": {
                               "color": {
-                                "token": "colors.accent_text",
+                                "token": "colors.text",
                               },
                               "fontSize": {
                                 "token": "typography.timecode",
@@ -17173,8 +16879,11 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                               "requiredSymbol": "arrow.right.and.line.vertical.and.arrow.left",
                             },
                             "style": {
+                              "background": {
+                                "token": "colors.selected_fill",
+                              },
                               "color": {
-                                "token": "colors.accent_text",
+                                "token": "colors.text",
                               },
                               "minHeight": {
                                 "token": "metrics.hit",
@@ -17517,9 +17226,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         "data-pm-component": "toolbar-item",
                         "id": "timeline:tab:launch",
                         "label": "Launch Film",
-                        "metadata": {
-                          "selectionMark": "rule",
-                        },
                         "role": "tab",
                         "style": {
                           "color": {
@@ -17550,20 +17256,8 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   "props": {
                     "style": {
                       "alignItems": "center",
-                      "borderBottom": {
-                        "token": "metrics.pill_inset",
-                      },
-                      "borderColor": {
-                        "token": "colors.accent",
-                      },
                       "display": "flex",
                       "flexDirection": "row",
-                      "paddingLeft": {
-                        "token": "metrics.gap",
-                      },
-                      "paddingRight": {
-                        "token": "metrics.gap",
-                      },
                     },
                   },
                   "type": "div",
@@ -17751,12 +17445,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
             "id": "timeline:header",
             "style": {
               "alignItems": "stretch",
-              "borderBottom": {
-                "token": "metrics.border",
-              },
-              "borderColor": {
-                "token": "colors.separator",
-              },
               "display": "flex",
               "flexDirection": "row",
               "height": {
@@ -17800,7 +17488,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "label": "Play",
                             "metadata": {
                               "designTodo": "T1",
-                              "requiredSymbol": "play",
+                              "requiredSymbol": "play.fill",
                             },
                             "style": {
                               "color": {
@@ -17838,7 +17526,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 "token": "metrics.control_radius",
                               },
                               "color": {
-                                "token": "colors.accent_text",
+                                "token": "colors.text",
                               },
                               "fontSize": {
                                 "token": "typography.timecode",
@@ -18264,9 +17952,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         "data-pm-component": "toolbar-item",
                         "id": "timeline:tab:launch",
                         "label": "Launch Film",
-                        "metadata": {
-                          "selectionMark": "rule",
-                        },
                         "role": "tab",
                         "style": {
                           "color": {
@@ -18325,20 +18010,8 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   "props": {
                     "style": {
                       "alignItems": "center",
-                      "borderBottom": {
-                        "token": "metrics.pill_inset",
-                      },
-                      "borderColor": {
-                        "token": "colors.accent",
-                      },
                       "display": "flex",
                       "flexDirection": "row",
-                      "paddingLeft": {
-                        "token": "metrics.gap",
-                      },
-                      "paddingRight": {
-                        "token": "metrics.gap",
-                      },
                     },
                   },
                   "type": "div",
@@ -18358,9 +18031,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         "data-pm-component": "toolbar-item",
                         "id": "timeline:tab:end",
                         "label": "Endcard",
-                        "metadata": {
-                          "selectionMark": "rule",
-                        },
                         "role": "tab",
                         "style": {
                           "color": {
@@ -18390,15 +18060,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                       "alignItems": "center",
                       "display": "flex",
                       "flexDirection": "row",
-                      "paddingBottom": {
-                        "token": "metrics.pill_inset",
-                      },
-                      "paddingLeft": {
-                        "token": "metrics.gap",
-                      },
-                      "paddingRight": {
-                        "token": "metrics.gap",
-                      },
                     },
                   },
                   "type": "div",
@@ -18586,12 +18247,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
             "id": "timeline:header",
             "style": {
               "alignItems": "stretch",
-              "borderBottom": {
-                "token": "metrics.border",
-              },
-              "borderColor": {
-                "token": "colors.separator",
-              },
               "display": "flex",
               "flexDirection": "row",
               "height": {
@@ -18635,7 +18290,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "label": "Play",
                             "metadata": {
                               "designTodo": "T1",
-                              "requiredSymbol": "play",
+                              "requiredSymbol": "play.fill",
                             },
                             "style": {
                               "color": {
@@ -18671,7 +18326,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             },
                             "style": {
                               "color": {
-                                "token": "colors.accent_text",
+                                "token": "colors.text",
                               },
                               "fontSize": {
                                 "token": "typography.timecode",
@@ -19110,9 +18765,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                         "data-pm-component": "toolbar-item",
                         "id": "timeline:tab:launch",
                         "label": "Launch Film",
-                        "metadata": {
-                          "selectionMark": "rule",
-                        },
                         "role": "tab",
                         "style": {
                           "color": {
@@ -19143,20 +18795,8 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   "props": {
                     "style": {
                       "alignItems": "center",
-                      "borderBottom": {
-                        "token": "metrics.pill_inset",
-                      },
-                      "borderColor": {
-                        "token": "colors.accent",
-                      },
                       "display": "flex",
                       "flexDirection": "row",
-                      "paddingLeft": {
-                        "token": "metrics.gap",
-                      },
-                      "paddingRight": {
-                        "token": "metrics.gap",
-                      },
                     },
                   },
                   "type": "div",
@@ -19344,12 +18984,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
             "id": "timeline:header",
             "style": {
               "alignItems": "stretch",
-              "borderBottom": {
-                "token": "metrics.border",
-              },
-              "borderColor": {
-                "token": "colors.separator",
-              },
               "display": "flex",
               "flexDirection": "row",
               "height": {
@@ -19393,7 +19027,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "label": "Play",
                             "metadata": {
                               "designTodo": "T1",
-                              "requiredSymbol": "play",
+                              "requiredSymbol": "play.fill",
                             },
                             "style": {
                               "color": {
@@ -19429,7 +19063,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             },
                             "style": {
                               "color": {
-                                "token": "colors.accent_text",
+                                "token": "colors.text",
                               },
                               "fontSize": {
                                 "token": "typography.timecode",

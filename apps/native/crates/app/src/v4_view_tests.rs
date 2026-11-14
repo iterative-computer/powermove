@@ -367,7 +367,7 @@ fn every_kit_component_renders_a_real_element(cx: &mut TestAppContext) {
                 .to_owned()
         })
         .collect();
-    assert_eq!(names.len(), 30);
+    assert_eq!(names.len(), 32);
     for (i, name) in names.iter().enumerate() {
         let primitive = match name.as_str() {
             "sheet-anchor" | "popover-anchor" | "colour-popover" => "anchored",
@@ -386,6 +386,16 @@ fn every_kit_component_renders_a_real_element(cx: &mut TestAppContext) {
             "colour-well" => props["value"] = json!("#ff0000"),
             "viewer-gizmo" => {
                 props["metadata"] = json!({"pmKit":{"kind":"transform","position":{"x":4.,"y":5.}}})
+            }
+            "color-wheel" => {
+                props["value"] = json!([0.1, 0., -0.1]);
+                props["binding"] = json!("r+g+b");
+                props["metadata"] = json!({"pmKit":{"neutral":0.,"min":-1.,"max":1.}});
+            }
+            "curve-editor" => {
+                props["value"] = json!([2., 0., 0., 1., 1.]);
+                props["binding"] = json!("curve");
+                props["metadata"] = json!({"pmKit":{"channel":1}});
             }
             _ => {}
         }
@@ -1045,9 +1055,45 @@ fn a_tooltip_never_repeats_the_text_in_view(cx: &mut TestAppContext) {
         json!({"title":"Reset Effect","data-pm-component":"toolbar-item","label":"Reset Gaussian Blur","metadata":{"symbol":"arrow.counterclockwise"}}),
         &["click"],
     ));
+    // A row's value well that opens a menu: its row says "Font", it shows
+    // its value; an icon-only menu button beside it.
+    ops.extend(node_ops(
+        5,
+        1,
+        "div",
+        json!({"data-pm-component":"inspector-row","label":"Font"}),
+        &[],
+    ));
+    ops.extend(node_ops(
+        6,
+        5,
+        "button",
+        json!({"title":"Font","data-pm-component":"toolbar-item","label":"Font","aria-haspopup":"menu"}),
+        &["click"],
+    ));
+    ops.extend(node_ops(7, 6, "text", json!({}), &[]));
+    ops.push(Op::SetText {
+        id: 7,
+        text: "SF Pro Display".into(),
+    });
+    ops.extend(node_ops(
+        8,
+        1,
+        "button",
+        json!({"title":"More","data-pm-component":"toolbar-item","label":"More","aria-haspopup":"menu","metadata":{"symbol":"ellipsis"}}),
+        &["click"],
+    ));
     let (view, vcx) = window(cx, &rig, synthetic(&rig, ops), Default::default());
     vcx.run_until_parked();
     let shown = view.read_with(&vcx, |v, _| (v.shown_text(2, 3), v.shown_text(4, 3)));
     assert_eq!(shown.0, "Gaussian Blur", "the title is in view: no tooltip");
     assert_eq!(shown.1, "", "an icon says nothing: its title stays");
+    let tips = view.read_with(&vcx, |v, _| {
+        [2, 4, 6, 8].map(|id| v.tooltip_title(id).map(|t| t.to_string()))
+    });
+    assert_eq!(
+        tips,
+        [None, Some("Reset Effect".into()), None, Some("More".into())],
+        "no tooltip repeats the view or stands over a value's menu; icons keep theirs"
+    );
 }

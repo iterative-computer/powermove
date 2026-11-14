@@ -485,8 +485,9 @@ impl Render for WelcomeView {
         root.child(content)
     }
 }
-/// Three quarters of a ring, one turn a second. Still under Reduce Motion.
-fn spinner(time: f64, tokens: &Tokens) -> impl IntoElement + use<> {
+/// Three quarters of a ring, one turn a second (`time` in turns). Still
+/// under Reduce Motion. Also the kit's indeterminate progress row.
+pub fn spinner(time: f64, tokens: &Tokens) -> impl IntoElement + use<> {
     let colour = tokens.colors.secondary;
     let size = tokens.typography.reading;
     canvas(

@@ -53,6 +53,7 @@ pub mod sampling;
 pub mod scene3d;
 pub mod scopes;
 pub mod shader_layers;
+pub mod slices;
 pub mod space25d;
 pub mod stills;
 pub mod text;
@@ -66,7 +67,7 @@ pub use capability::{
     unsupported_with_fonts, unsupported_with_media,
 };
 pub use effects::{Effects, builtin_definitions};
-pub use error::{LayerFailure, RenderError, SvgFallback};
+pub use error::{DamagedFrame, LayerFailure, RenderError, SvgFallback};
 pub use renderer::{
     CommandBracket, Frame, FrameFootage, HOST_COMPILE_WAITS, LayerPixels, LayerQuad, LayerRaster,
     MediaPreparation, PassThrough, Rendered, Renderer, SnapshotRows, TextRaster,

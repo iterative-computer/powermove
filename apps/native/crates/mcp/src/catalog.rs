@@ -29,6 +29,20 @@ pub fn catalog() -> &'static Value {
                 .find(|t| t["name"] == replacement["name"]).expect("existing project tool");
             *tool = replacement.clone();
         }
+        // The media importer takes image sequences as File ▸ Import Image
+        // Sequence does (an additive `sequence` argument).
+        let media: Value =
+            serde_json::from_str(include_str!("../fixtures/media-native-catalog.json"))
+                .expect("native media catalog");
+        for replacement in media["tools"].as_array().unwrap() {
+            let tool = value["tools"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|t| t["name"] == replacement["name"])
+                .expect("existing media tool");
+            *tool = replacement.clone();
+        }
         value
     })
 }

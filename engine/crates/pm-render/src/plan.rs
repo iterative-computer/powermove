@@ -16,6 +16,7 @@
 //! same plan.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use pm_eval::groups::ActiveTransition;
 use pm_eval::node;
@@ -210,6 +211,18 @@ pub enum Source {
         path: PathBuf,
         /// The asset's Interpret Footage overrides (section 9).
         interpret: Option<pm_media::interpret::Interpretation>,
+        /// The files the next frames of a playing image sequence show, read
+        /// ahead on workers as a video's decoder runs ahead (empty for a
+        /// still, and for a sequence while paused or exporting).
+        ahead: Arc<[PathBuf]>,
+        /// A sequence's file in a frame that draws Media Offline cards: a
+        /// file found unreadable as it is drawn asks for the frame again,
+        /// which draws its card ([`crate::media::still_unreadable`]).
+        card_when_unreadable: bool,
+        /// A sequence's file: the pixel size of its sequence (its first
+        /// frame's). A file of another size is not drawn stretched: it is
+        /// that frame's card, or a failure naming it.
+        sequence_size: Option<(u32, u32)>,
     },
     Video {
         level2: bool,
@@ -307,6 +320,8 @@ pub struct Build<'r> {
     pub(crate) studio_shutters: u32,
     /// The resampler of level 2 raster content.
     pub(crate) sampling: crate::sampling::Sampling,
+    /// A playing viewer frame ([`BuildOptions::read_ahead`]).
+    read_ahead: bool,
     /// The output origin of the level being built (the request's at the
     /// top level, in its groups, mattes, and motion-blur samples; `(0, 0)`
     /// inside a precomp, which renders its own target).
@@ -429,6 +444,9 @@ pub struct BuildOptions {
     /// every level whose effects need the composition's pixel grid draws
     /// at the composition's density ([`comp_pass`]).
     pub final_output: bool,
+    /// A playing viewer frame ([`RenderRequest::read_ahead`](crate::RenderRequest::read_ahead)):
+    /// image sequences name the files their next frames show.
+    pub read_ahead: bool,
 }
 
 /// A bounded source-local material canvas, without its receiving model.
@@ -569,6 +587,7 @@ pub(crate) fn build_reusing<'r>(
                 view_override: options3d.view.is_some(),
                 origin: options.origin.map(|(x, y)| (x.to_bits(), y.to_bits())),
                 final_output: options.final_output,
+                read_ahead: options.read_ahead,
             },
         );
     }
@@ -598,6 +617,7 @@ pub(crate) fn build_reusing<'r>(
         origin: options.origin.unwrap_or((0.0, 0.0)),
         windowed: options.origin.is_some(),
         final_output: options.final_output,
+        read_ahead: options.read_ahead,
         passes: Vec::new(),
         compat,
         compat_missing: Vec::new(),
@@ -1753,43 +1773,17 @@ fn native_content_quad<'d>(
                         js::member_string(record, "name").unwrap_or_else(|| asset_id.clone());
                     let bw = js::or_number(js::get(&d, "w"), wf);
                     let bh = js::or_number(js::get(&d, "h"), hf);
-                    let target = pm_vector::render::scene::PixelRect::new(0, 0, width, height);
-                    let playback = b.sampling == crate::sampling::Sampling::Playback;
-                    let world = vector_world(scope, b, layer, time, scale)?;
-                    // The box's height on screen picks how much the card says.
-                    let device_h = bh * world[2].hypot(world[3]);
-                    let tier = crate::offline_card::Tier::for_height(device_h);
-                    if let Ok(card) = crate::offline_card::path(&file, bw, bh, tier) {
-                        let mut plan = |_: &mut Scope<'_, 'd>, world: &Mat2d, target| {
-                            Ok(crate::vector::svg::plan_svg(
-                                &card,
-                                bw,
-                                bh,
-                                [0.0, 0.0, 1.0, 1.0],
-                                world,
-                                target,
-                                playback,
-                            )
-                            .ok()
-                            .flatten()
-                            .map(|q| *q))
-                        };
-                        if scope.is_3d_layer(layer)? {
-                            return local_level2(
-                                scope, layer, time, scale, b.origin, target, &mut plan,
-                            );
-                        }
-                        if let Ok(quad) = crate::vector::svg::plan_svg(
-                            &card,
-                            bw,
-                            bh,
-                            [0.0, 0.0, 1.0, 1.0],
-                            &world,
-                            target,
-                            playback,
-                        ) {
-                            return Ok(quad.map(|q| device_quad(*q)));
-                        }
+                    if let Some(card) = offline_card(
+                        scope,
+                        b,
+                        layer,
+                        time,
+                        scale,
+                        (width, height),
+                        (bw, bh),
+                        &file,
+                    )? {
+                        return Ok(card);
                     }
                 }
                 b.failures.push(LayerFailure {
@@ -1870,6 +1864,23 @@ fn native_content_quad<'d>(
                     }
                 };
             }
+            if ty == "video"
+                && let Some(manifest) = crate::media::native_sequence(&path)
+            {
+                return sequence_frame(
+                    scope,
+                    b,
+                    layer,
+                    time,
+                    scale,
+                    (width, height),
+                    (wf, hf),
+                    &d,
+                    record,
+                    asset_id,
+                    &manifest,
+                );
+            }
             let sequence = crate::footage::is_sequence(record);
             if sequence {
                 match crate::media::sequence_rendition(&path) {
@@ -1902,10 +1913,9 @@ fn native_content_quad<'d>(
             let mut path = path;
             // Drawn from a proxy or optimized copy: the interpretation as
             // the copy carries it, or the original when it can't.
-            if let Some(original) = b.assets.original(&asset_id).filter(|o| *o != path)
-                && let Some(i) = interpret.take()
-            {
-                interpret = match crate::footage::for_copy(i, &original) {
+            if let Some(original) = b.assets.original(&asset_id).filter(|o| *o != path) {
+                let i = interpret.take().unwrap_or_default();
+                interpret = match crate::footage::for_copy(i, &original, sequence) {
                     crate::footage::CopyReading::Copy(i) => i,
                     crate::footage::CopyReading::Original(i) => {
                         path = original;
@@ -1922,8 +1932,11 @@ fn native_content_quad<'d>(
                 // Native selection uses the source's PTS (or conformed
                 // grid) and holds its last frame. Browser seek padding
                 // hid valid frames and made preview differ from export.
-                let time = (sequence && rate.is_none())
-                    .then(|| crate::media::sequence_playback_time(record, st))
+                // A sequence's rendition shows the slot its files show
+                // (`pm_media::image::sequence::sequence_slot`), at the
+                // conformed rate when there is one.
+                let time = sequence
+                    .then(|| crate::media::sequence_playback_time(record, st, rate))
                     .flatten()
                     .unwrap_or_else(|| js::max(0.0, st));
                 Source::Video {
@@ -1940,6 +1953,9 @@ fn native_content_quad<'d>(
                     asset: asset_id,
                     path,
                     interpret,
+                    ahead: Arc::from([]),
+                    card_when_unreadable: false,
+                    sequence_size: None,
                 }
             };
             Ok(Some(Quad::Texture {
@@ -2412,6 +2428,162 @@ fn shader_quad(
             None
         }
     }
+}
+
+/// Composition frames a playing image sequence reads ahead of the playhead.
+const SEQUENCE_AHEAD: usize = 6;
+
+/// An image sequence read in place: the frame its source time selects,
+/// drawn as a still (at the file's depth, with its alpha, tags and
+/// profile). A number with no file is that frame's Media Offline card
+/// where frames isolate failing layers, and a named failure elsewhere.
+#[allow(clippy::too_many_arguments)]
+fn sequence_frame<'d>(
+    scope: &mut Scope<'_, 'd>,
+    b: &mut Build<'_>,
+    layer: &'d Node,
+    time: f64,
+    scale: (f64, f64),
+    size: (u32, u32),
+    (wf, hf): (f64, f64),
+    d: &pm_eval::Content,
+    record: &Node,
+    asset: String,
+    manifest: &pm_media::image::sequence::Manifest,
+) -> JsResult<Option<Quad>> {
+    let interpret = crate::footage::interpretation(record);
+    // Interpret Footage's rate, else the rate it was imported at (exact:
+    // 24000/1001 for 23.976).
+    let fps = interpret
+        .as_ref()
+        .and_then(|i| i.frame_rate)
+        .or_else(|| manifest.rate())
+        .map_or(30.0, |r| r.to_f64());
+    // Inside motion-blur samples the center time's frame, as for video.
+    let at = b.video_center.unwrap_or(time);
+    let seconds = scope.source_time(layer, at, Some(&mut b.retime))?;
+    let number = manifest.number_at(seconds, fps);
+    let path = manifest.file(number);
+    // While playing, the files of the next frames are read ahead: each is a
+    // whole still to decode, and one frame's time is too short for that.
+    let mut ahead = Vec::new();
+    if b.read_ahead {
+        let step = 1.0 / scope.comp.rate().map_or(30.0, |r| r.rate.to_f64());
+        let mut last = number;
+        for i in 1..=SEQUENCE_AHEAD {
+            let s = scope.source_time(layer, at + i as f64 * step, Some(&mut b.retime))?;
+            let next = manifest.number_at(s, fps);
+            if next != last && next != number {
+                ahead.push(manifest.file(next));
+                last = next;
+            }
+        }
+    }
+    let bw = js::or_number(js::get(d, "w"), wf);
+    let bh = js::or_number(js::get(d, "h"), hf);
+    let rec = |k: &str| node::js_value_opt(node::member(Some(record), k));
+    let sw = js::or_number(&rec("w"), 1.0);
+    let sh = js::or_number(&rec("h"), 1.0);
+    // A missing file, one that exists but can't be read (truncated,
+    // corrupt, no permission) and one of another size than the sequence's
+    // is that frame's Media Offline card.
+    let missing = crate::media::stamp(&path).is_none();
+    let other_size =
+        crate::media::still_size(&path).filter(|&(w, h)| (w as f64, h as f64) != (sw, sh));
+    if missing
+        || other_size.is_some()
+        || crate::media::still_unreadable(&path)
+        || crate::media::decode_failed(&path)
+    {
+        let file = path
+            .file_name()
+            .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+        if b.offline_cards
+            && let Some(card) = offline_card(scope, b, layer, time, scale, size, (bw, bh), &file)?
+        {
+            return Ok(card);
+        }
+        let message = match other_size {
+            _ if missing => format!("frame {number} of the image sequence is missing: {file}"),
+            Some((w, h)) => other_size_message(Some(number), (w, h), (sw, sh), &file),
+            // There, but it does not read: a damaged file.
+            None => crate::DamagedFrame {
+                file: path.clone(),
+                seconds: None,
+                reason: format!("frame {number} of the image sequence can't be read"),
+            }
+            .message(),
+        };
+        b.failures.push(LayerFailure {
+            composition: scope.comp.id().to_string_lossy(),
+            layer: js::layer_id(layer),
+            message,
+        });
+        return Ok(None);
+    }
+    let uv = fit_uv(&js::string(js::get(d, "fit")), sw, sh, bw, bh);
+    Ok(Some(Quad::Texture {
+        source: Source::Image {
+            asset,
+            path,
+            interpret,
+            ahead: ahead.into(),
+            card_when_unreadable: b.offline_cards,
+            sequence_size: Some((sw as u32, sh as u32)),
+        },
+        w: bw,
+        h: bh,
+        ax: bw / 2.0,
+        ay: bh / 2.0,
+        uv,
+    }))
+}
+
+/// Why a sequence's file of another size is not drawn.
+pub(crate) fn other_size_message(
+    number: Option<i64>,
+    (w, h): (usize, usize),
+    (sw, sh): (f64, f64),
+    file: &str,
+) -> String {
+    let frame = number.map_or_else(|| "a frame".to_owned(), |n| format!("frame {n}"));
+    format!("{frame} of the image sequence is {w}×{h}, not {sw}×{sh} like the sequence: {file}")
+}
+
+/// The Media Offline card in a layer's `bw`×`bh` box naming `file`, as
+/// frames that isolate failing layers draw it; None when it cannot be drawn.
+#[allow(clippy::too_many_arguments)]
+fn offline_card<'d>(
+    scope: &mut Scope<'_, 'd>,
+    b: &Build<'_>,
+    layer: &'d Node,
+    time: f64,
+    scale: (f64, f64),
+    (width, height): (u32, u32),
+    (bw, bh): (f64, f64),
+    file: &str,
+) -> JsResult<Option<Option<Quad>>> {
+    let target = pm_vector::render::scene::PixelRect::new(0, 0, width, height);
+    let playback = b.sampling == crate::sampling::Sampling::Playback;
+    let world = vector_world(scope, b, layer, time, scale)?;
+    // The box's height on screen picks how much the card says.
+    let device_h = bh * world[2].hypot(world[3]);
+    let tier = crate::offline_card::Tier::for_height(device_h);
+    let Ok(card) = crate::offline_card::path(file, bw, bh, tier) else {
+        return Ok(None);
+    };
+    let svg = |world: &Mat2d, target| {
+        crate::vector::svg::plan_svg(&card, bw, bh, [0.0, 0.0, 1.0, 1.0], world, target, playback)
+    };
+    if scope.is_3d_layer(layer)? {
+        let mut plan = |_: &mut Scope<'_, 'd>, world: &Mat2d, target| {
+            Ok(svg(world, target).ok().flatten().map(|q| *q))
+        };
+        return local_level2(scope, layer, time, scale, b.origin, target, &mut plan).map(Some);
+    }
+    Ok(svg(&world, target)
+        .ok()
+        .map(|quad| quad.map(|q| device_quad(*q))))
 }
 
 /// The world matrix of a vector layer in target pixels, including the size

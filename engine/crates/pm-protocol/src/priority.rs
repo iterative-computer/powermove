@@ -320,6 +320,11 @@ pub struct JobStatus {
     /// phase, with its own progress.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checking: Option<f64>,
+    /// What the person is told with a finished export's file, one line
+    /// each: sound clipped (or kept over full scale in a float track), fine
+    /// detail the data rate did not keep.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
 }
 
 /// A preview of an export's latest encoded frame: a JPEG at most
@@ -538,6 +543,11 @@ pub struct DeliveryOptions {
     /// PNG sequences: the name frame files start with (`<name>_00000.png`),
     /// usually the destination folder's name. A bare name.
     pub sequence_name: Option<String>,
+    /// HLG HEVC: leave out the Dolby Vision Profile 8.4 metadata macOS's
+    /// encoder adds (on by default; players without Dolby Vision show the
+    /// HLG picture either way).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub without_dolby_vision: bool,
     /// Compatibility producers the exporting window has (a `raster`
     /// override): the job asks the host for those layers' pixels at each
     /// frame (`Request::CompatFrame`). Empty: every layer is the engine's.
@@ -1288,6 +1298,7 @@ mod tests {
             error: None,
             preview: None,
             checking: None,
+            notes: vec![],
         };
         let wait = AgentExportMode::Wait;
         assert_eq!(
