@@ -116,7 +116,14 @@ fn launch(
 /// Whether the left mouse button is down now, as the hardware (HID system)
 /// state has it: whatever events reached this app, or the session's view of
 /// the button after a release that went astray.
+/// Development builds: a review's `press:` holds the button until its
+/// `release:` (the real button is up while a background review drags).
+pub(crate) static REVIEW_HELD: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 pub fn left_button_held() -> bool {
+    if cfg!(debug_assertions) && REVIEW_HELD.load(std::sync::atomic::Ordering::Relaxed) {
+        return true;
+    }
     #[link(name = "CoreGraphics", kind = "framework")]
     unsafe extern "C" {
         fn CGEventSourceButtonState(state: i32, button: u32) -> bool;
@@ -281,8 +288,15 @@ fn open_editor_window(
                     .detach();
                 cx.observe_window_bounds(window, |v, _, cx| v.schedule_session(cx))
                     .detach();
-                cx.observe_window_activation(window, |v, _, cx| v.schedule_session(cx))
-                    .detach();
+                cx.observe_window_activation(window, |v, w, cx| {
+                    v.schedule_session(cx);
+                    // The original app cancels a drag when the window loses
+                    // focus (⌘-Tab mid-drag); a missed release still drops.
+                    if !w.is_window_active() {
+                        v.cancel_gesture(cx);
+                    }
+                })
+                .detach();
                 v.persist_session();
             });
             // Integrated apps own document close/save decisions. GPUI keeps
@@ -367,6 +381,7 @@ pub(crate) fn review_pointer(name: &str, window: &mut Window, cx: &mut App) -> b
     };
     match kind {
         "press" => {
+            REVIEW_HELD.store(true, std::sync::atomic::Ordering::Relaxed);
             window.dispatch_event(moved(position, false), cx);
             window.dispatch_event(down(position, 1), cx);
             return true;
@@ -376,6 +391,7 @@ pub(crate) fn review_pointer(name: &str, window: &mut Window, cx: &mut App) -> b
             return true;
         }
         "release" => {
+            REVIEW_HELD.store(false, std::sync::atomic::Ordering::Relaxed);
             window.dispatch_event(moved(position, true), cx);
             window.dispatch_event(up(position, 1), cx);
             return true;
