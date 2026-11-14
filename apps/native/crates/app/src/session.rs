@@ -2405,6 +2405,7 @@ impl Controller {
                     .as_ref()
                     .is_some_and(|s| matches!(s.destination, SessionDestination::File(_)))
             });
+        let started = crate::diag::enabled().then(std::time::Instant::now);
         cx.spawn(async move |this, cx| {
             let result = if file_save {
                 // The save panel already confirmed replacing an existing file.
@@ -2426,6 +2427,13 @@ impl Controller {
             } else {
                 kernel.shell(ShellCall::Save(session)).await
             };
+            if let Some(started) = started {
+                crate::diag::line(serde_json::json!({
+                    "save": (started.elapsed().as_secs_f64() * 1000.).round(),
+                    "file": file_save,
+                    "ok": matches!(&result, Some(Ok(ShellReply::Saved { .. }))),
+                }));
+            }
             let _ = this.update(cx, |v, cx| {
                 v.save_pending = false;
                 let close = v.close_after_save.take();
