@@ -2218,7 +2218,6 @@ impl Render for Editor {
                         .accessibility_id(format!("shell.tab.{tab}"))
                         .aria_selected(selected)
                         .tab_index(0)
-                        .focus_style(|s| s.ring(px(m.border * 2.)).ring_color(rgb(c.focus)))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.layout.docks[p.dock].groups[p.group].active = ti;
                             this.save();
@@ -2391,7 +2390,6 @@ impl Render for Editor {
                         .role(Role::Button)
                         .aria_label(options_title.clone())
                         .tab_index(tabs.len() as isize)
-                        .focus_style(|s| s.ring(px(m.border * 2.)).ring_color(rgb(c.focus)))
                         .on_click(cx.listener(move |this, e: &ClickEvent, _, cx| {
                             this.tab_menu(&options_id, e.position(), cx)
                         }))
@@ -2461,7 +2459,6 @@ impl Render for Editor {
                             .role(Role::Button)
                             .aria_label(label)
                             .tab_index(100)
-                            .focus_style(|s| s.ring(px(m.border * 2.)).ring_color(rgb(c.focus)))
                             .mt(px(m.gap))
                             .h(px(m.control))
                             .px(px(m.inset))
@@ -2842,7 +2839,6 @@ impl Render for Editor {
                     .id("status-workspace")
                     .track_focus(&self.workspace_focus)
                     .tab_index(2000)
-                    .focus_style(|s| s.ring(px(m.border * 2.)).ring_color(rgb(c.focus)))
                     .on_click(
                         cx.listener(|this, e: &ClickEvent, _, _| this.workspace_menu(e.position())),
                     )

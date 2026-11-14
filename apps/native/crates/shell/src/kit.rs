@@ -168,18 +168,11 @@ impl Kit {
         let hover = self.hover.clone();
         d.on_hover(move |hovered, _, cx| hover(key, *hovered, cx))
     }
-    /// The neutral keyboard focus ring, outside the control.
+    /// A control the keyboard can reach. It draws no focus ring: owner
+    /// decision (2026-11-14), a ring after a click read as a glitch, and
+    /// buttons and toggles show no ring at all; fields keep their caret.
     fn focusable(&self, d: Stateful<Div>) -> Stateful<Div> {
-        let (color, width, _) = self.t.focus_ring();
-        d.focus_visible_style(move |s| {
-            s.shadow(vec![BoxShadow {
-                color: ink(color, 1.).into(),
-                offset: point(px(0.), px(0.)),
-                blur_radius: px(0.),
-                spread_radius: px(width),
-                inset: false,
-            }])
-        })
+        d
     }
     /// A push button: 28 pt, label in the medium weight, an optional leading
     /// symbol and trailing chevron (a pop-up).
