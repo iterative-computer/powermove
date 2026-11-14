@@ -214,6 +214,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           "minWidth": {
                             "token": "metrics.hit",
                           },
+                          "paddingLeft": {
+                            "token": "metrics.gap",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.gap",
+                          },
                           "symbolSize": {
                             "token": "metrics.symbol_toolbar",
                           },
@@ -366,6 +372,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   ],
                   "props": {
                     "data-pm-component": "segmented-control",
+                    "data-pm-variant": "glass",
                     "id": "timeline:mode",
                     "label": "Timeline mode",
                     "role": "radiogroup",
@@ -813,6 +820,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           "minWidth": {
                             "token": "metrics.hit",
                           },
+                          "paddingLeft": {
+                            "token": "metrics.gap",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.gap",
+                          },
                           "symbolSize": {
                             "token": "metrics.symbol_toolbar",
                           },
@@ -965,6 +978,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   ],
                   "props": {
                     "data-pm-component": "segmented-control",
+                    "data-pm-variant": "glass",
                     "id": "timeline:mode",
                     "label": "Timeline mode",
                     "role": "radiogroup",
@@ -1538,6 +1552,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           "minWidth": {
                             "token": "metrics.hit",
                           },
+                          "paddingLeft": {
+                            "token": "metrics.gap",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.gap",
+                          },
                           "symbolSize": {
                             "token": "metrics.symbol_toolbar",
                           },
@@ -1690,6 +1710,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   ],
                   "props": {
                     "data-pm-component": "segmented-control",
+                    "data-pm-variant": "glass",
                     "id": "timeline:mode",
                     "label": "Timeline mode",
                     "role": "radiogroup",
@@ -2410,6 +2431,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           "minWidth": {
                             "token": "metrics.hit",
                           },
+                          "paddingLeft": {
+                            "token": "metrics.gap",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.gap",
+                          },
                           "symbolSize": {
                             "token": "metrics.symbol_toolbar",
                           },
@@ -2562,6 +2589,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   ],
                   "props": {
                     "data-pm-component": "segmented-control",
+                    "data-pm-variant": "glass",
                     "id": "timeline:mode",
                     "label": "Timeline mode",
                     "role": "radiogroup",
@@ -3282,6 +3310,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           "minWidth": {
                             "token": "metrics.hit",
                           },
+                          "paddingLeft": {
+                            "token": "metrics.gap",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.gap",
+                          },
                           "symbolSize": {
                             "token": "metrics.symbol_toolbar",
                           },
@@ -3434,6 +3468,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   ],
                   "props": {
                     "data-pm-component": "segmented-control",
+                    "data-pm-variant": "glass",
                     "id": "timeline:mode",
                     "label": "Timeline mode",
                     "role": "radiogroup",
@@ -4151,6 +4186,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           "minWidth": {
                             "token": "metrics.hit",
                           },
+                          "paddingLeft": {
+                            "token": "metrics.gap",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.gap",
+                          },
                           "symbolSize": {
                             "token": "metrics.symbol_toolbar",
                           },
@@ -4303,6 +4344,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   ],
                   "props": {
                     "data-pm-component": "segmented-control",
+                    "data-pm-variant": "glass",
                     "id": "timeline:mode",
                     "label": "Timeline mode",
                     "role": "radiogroup",
@@ -5156,6 +5198,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           "minWidth": {
                             "token": "metrics.hit",
                           },
+                          "paddingLeft": {
+                            "token": "metrics.gap",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.gap",
+                          },
                           "symbolSize": {
                             "token": "metrics.symbol_toolbar",
                           },
@@ -5308,6 +5356,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   ],
                   "props": {
                     "data-pm-component": "segmented-control",
+                    "data-pm-variant": "glass",
                     "id": "timeline:mode",
                     "label": "Timeline mode",
                     "role": "radiogroup",
@@ -5933,6 +5982,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           "minWidth": {
                             "token": "metrics.hit",
                           },
+                          "paddingLeft": {
+                            "token": "metrics.gap",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.gap",
+                          },
                           "symbolSize": {
                             "token": "metrics.symbol_toolbar",
                           },
@@ -6085,6 +6140,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   ],
                   "props": {
                     "data-pm-component": "segmented-control",
+                    "data-pm-variant": "glass",
                     "id": "timeline:mode",
                     "label": "Timeline mode",
                     "role": "radiogroup",
@@ -6811,6 +6867,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           "minWidth": {
                             "token": "metrics.hit",
                           },
+                          "paddingLeft": {
+                            "token": "metrics.gap",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.gap",
+                          },
                           "symbolSize": {
                             "token": "metrics.symbol_toolbar",
                           },
@@ -6963,6 +7025,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   ],
                   "props": {
                     "data-pm-component": "segmented-control",
+                    "data-pm-variant": "glass",
                     "id": "timeline:mode",
                     "label": "Timeline mode",
                     "role": "radiogroup",
@@ -7750,6 +7813,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           "minWidth": {
                             "token": "metrics.hit",
                           },
+                          "paddingLeft": {
+                            "token": "metrics.gap",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.gap",
+                          },
                           "symbolSize": {
                             "token": "metrics.symbol_toolbar",
                           },
@@ -7902,6 +7971,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   ],
                   "props": {
                     "data-pm-component": "segmented-control",
+                    "data-pm-variant": "glass",
                     "id": "timeline:mode",
                     "label": "Timeline mode",
                     "role": "radiogroup",
@@ -8475,6 +8545,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           "minWidth": {
                             "token": "metrics.hit",
                           },
+                          "paddingLeft": {
+                            "token": "metrics.gap",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.gap",
+                          },
                           "symbolSize": {
                             "token": "metrics.symbol_toolbar",
                           },
@@ -8627,6 +8703,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   ],
                   "props": {
                     "data-pm-component": "segmented-control",
+                    "data-pm-variant": "glass",
                     "id": "timeline:mode",
                     "label": "Timeline mode",
                     "role": "radiogroup",
@@ -15000,6 +15077,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           "minWidth": {
                             "token": "metrics.hit",
                           },
+                          "paddingLeft": {
+                            "token": "metrics.gap",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.gap",
+                          },
                           "symbolSize": {
                             "token": "metrics.symbol_toolbar",
                           },
@@ -15152,6 +15235,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   ],
                   "props": {
                     "data-pm-component": "segmented-control",
+                    "data-pm-variant": "glass",
                     "id": "timeline:mode",
                     "label": "Timeline mode",
                     "role": "radiogroup",
@@ -15755,6 +15839,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           "minWidth": {
                             "token": "metrics.hit",
                           },
+                          "paddingLeft": {
+                            "token": "metrics.gap",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.gap",
+                          },
                           "symbolSize": {
                             "token": "metrics.symbol_toolbar",
                           },
@@ -15907,6 +15997,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   ],
                   "props": {
                     "data-pm-component": "segmented-control",
+                    "data-pm-variant": "glass",
                     "id": "timeline:mode",
                     "label": "Timeline mode",
                     "role": "radiogroup",
@@ -16520,6 +16611,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           "minWidth": {
                             "token": "metrics.hit",
                           },
+                          "paddingLeft": {
+                            "token": "metrics.gap",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.gap",
+                          },
                           "symbolSize": {
                             "token": "metrics.symbol_toolbar",
                           },
@@ -16672,6 +16769,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   ],
                   "props": {
                     "data-pm-component": "segmented-control",
+                    "data-pm-variant": "glass",
                     "id": "timeline:mode",
                     "label": "Timeline mode",
                     "role": "radiogroup",
@@ -17243,6 +17341,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           "minWidth": {
                             "token": "metrics.hit",
                           },
+                          "paddingLeft": {
+                            "token": "metrics.gap",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.gap",
+                          },
                           "symbolSize": {
                             "token": "metrics.symbol_toolbar",
                           },
@@ -17395,6 +17499,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   ],
                   "props": {
                     "data-pm-component": "segmented-control",
+                    "data-pm-variant": "glass",
                     "id": "timeline:mode",
                     "label": "Timeline mode",
                     "role": "radiogroup",
@@ -17969,6 +18074,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           "minWidth": {
                             "token": "metrics.hit",
                           },
+                          "paddingLeft": {
+                            "token": "metrics.gap",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.gap",
+                          },
                           "symbolSize": {
                             "token": "metrics.symbol_toolbar",
                           },
@@ -18044,6 +18155,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           },
                           "minWidth": {
                             "token": "metrics.hit",
+                          },
+                          "paddingLeft": {
+                            "token": "metrics.gap",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.gap",
                           },
                           "symbolSize": {
                             "token": "metrics.symbol_toolbar",
@@ -18197,6 +18314,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   ],
                   "props": {
                     "data-pm-component": "segmented-control",
+                    "data-pm-variant": "glass",
                     "id": "timeline:mode",
                     "label": "Timeline mode",
                     "role": "radiogroup",
@@ -18782,6 +18900,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           "minWidth": {
                             "token": "metrics.hit",
                           },
+                          "paddingLeft": {
+                            "token": "metrics.gap",
+                          },
+                          "paddingRight": {
+                            "token": "metrics.gap",
+                          },
                           "symbolSize": {
                             "token": "metrics.symbol_toolbar",
                           },
@@ -18934,6 +19058,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                   ],
                   "props": {
                     "data-pm-component": "segmented-control",
+                    "data-pm-variant": "glass",
                     "id": "timeline:mode",
                     "label": "Timeline mode",
                     "role": "radiogroup",

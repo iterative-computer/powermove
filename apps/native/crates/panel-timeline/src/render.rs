@@ -773,12 +773,25 @@ impl Scene {
                     || op.id.starts_with("key-focus:")
                     || op.id.starts_with("trim:");
                 let x = if track { v.layer_column } else { 0. };
-                op.clip = Some(Rect::new(
+                let area = Rect::new(
                     x,
                     m.ruler as f64,
                     v.width - x,
                     (v.height - m.ruler as f64).max(0.),
-                ));
+                );
+                // An op clipped to its own box (a summary key to its strip)
+                // keeps that inside the tracks; wholly outside, it is not
+                // painted.
+                op.clip = match op.clip {
+                    None => Some(area),
+                    Some(own) => match intersection(own, area) {
+                        Some(both) => Some(both),
+                        None => {
+                            op.covered = true;
+                            Some(own)
+                        }
+                    },
+                };
             }
             ax.push(json!({"id":row.id,"role":"row","label":row.accessibility_label,"rowIndex":i,"rowCount":self.total(),"selected":row.selected,"depth":row.depth,"focusable":false}));
         }
@@ -919,26 +932,31 @@ impl Scene {
         }
         match &row.content {
             RowContent::Layer { clip, summary } => {
-                if let Some(clip) = clip {
-                    paint_clip(clip, y, h, v, self.label_step(v).0, t, ops);
-                }
-                // Summary marks only while the layer is collapsed: open, its
-                // property rows show the keys themselves.
+                let strip = clip
+                    .as_ref()
+                    .and_then(|clip| paint_clip(clip, y, h, v, self.label_step(v).0, t, ops));
+                // Summary marks only while the layer is collapsed (open, its
+                // property rows show the keys themselves), and only inside
+                // the strip they belong to: a layer with no strip on screen
+                // shows none.
                 let open = self
                     .rows
                     .get(i + 1)
                     .is_some_and(|next| matches!(next.content, RowContent::Property { .. }));
-                if !open {
-                    let ink = clip.as_ref().map_or(c.text, |clip| {
-                        t.strip(clip.label.color(t), strip_state(clip)).foreground
-                    });
+                if let (false, Some(clip), Some(strip)) = (open, clip, strip) {
+                    let ink = t.strip(clip.label.color(t), strip_state(clip)).foreground;
                     // In the strip's foot, under the name's descenders.
                     let size = (m.keyframe - SUMMARY_KEY_INSET) as f64;
+                    let within = Within {
+                        from: v.x(clip.from),
+                        to: v.x(clip.from + clip.duration),
+                        strip,
+                    };
                     paint_keys(
                         &row.id,
                         summary,
-                        Some(ink),
-                        y + h - t.strip_gap() as f64 - 1.5 * m.border as f64 - size / 2.,
+                        Some((ink, within)),
+                        strip.y + strip.height - 1.5 * m.border as f64 - size / 2.,
                         v,
                         t,
                         ops,
@@ -1281,20 +1299,28 @@ fn strip_state(c: &Clip) -> pm_design::StripState {
         StripState::Rest
     }
 }
-fn paint_clip(c: &Clip, y: f64, h: f64, v: Viewport, grid: f64, t: &Tokens, ops: &mut Vec<Op>) {
+/// Paints clip `c` and gives back its strip's box on screen (none when the
+/// clip is off screen).
+fn paint_clip(
+    c: &Clip,
+    y: f64,
+    h: f64,
+    v: Viewport,
+    grid: f64,
+    t: &Tokens,
+    ops: &mut Vec<Op>,
+) -> Option<Rect> {
     let m = t.metrics;
     let colors = &t.colors;
     // Each strip is its own object: an even gap all round (pm-design `strip_gap`).
     let gap = t.strip_gap() as f64;
-    let Some(r) = span(
+    let r = span(
         v.x(c.from) + gap / 2.,
         v.x(c.from + c.duration) - gap / 2.,
         y + gap,
         h - 2. * gap,
         v,
-    ) else {
-        return;
-    };
+    )?;
     let radius = t.strip_radius(r.height as f32) as f64;
     // Media Offline (docs/native/design/media-offline.md): the viewer's
     // ground with the danger hatch, as the engine's card.
@@ -1324,13 +1350,12 @@ fn paint_clip(c: &Clip, y: f64, h: f64, v: Viewport, grid: f64, t: &Tokens, ops:
         "sourceEdges":[v.x(c.from),v.x(c.from+c.duration)],
         "selected":c.selected,
         "top":material.top,"bottom":material.bottom,
-        "glow":material.glow.0,"glowAlpha":material.glow.1,
         // The ruler's grid reads through the body: its first line inside
         // the strip and the distance between lines, in points.
         "grid":material.grid.0,"gridAlpha":material.grid.1,
         "gridFrom":grid_from,"gridStep":grid * v.pps,
-        "rim":material.rim.0,"rimAlpha":material.rim.1,
-        "rimTop":material.rim_top.0,"rimTopAlpha":material.rim_top.1,"rimWidth":material.rim_width,"rimInset":material.rim_inset,
+        "ring":material.ring.0,"ringAlpha":material.ring.1,"ringWidth":material.ring_width,
+        "light":material.light.0,"lightAlpha":material.light.1,
         "shadow":material.shadow.0,"shadowAlpha":material.shadow.1,
         "shadowY":material.shadow.2,"shadowBlur":material.shadow.3,
     });
@@ -1514,12 +1539,25 @@ fn paint_clip(c: &Clip, y: f64, h: f64, v: Viewport, grid: f64, t: &Tokens, ops:
             ops.push(o);
         }
     }
+    Some(r)
+}
+/// The strip a collapsed layer's summary marks belong to: its source edges
+/// (`from`, `to`, unclamped panel x) and its box on screen.
+#[derive(Clone, Copy)]
+struct Within {
+    from: f64,
+    to: f64,
+    strip: Rect,
 }
 /// Keys on a property row (v1's marks): linear diamond, ease circle, hold
 /// square; the first and last keys of an animated span are half filled toward
 /// it, so a curve's ends read at a glance; selected keys are `accent` with a
 /// `panel` keyline. A collapsed layer's summary marks (`summary` = the clip's
-/// foreground) are small quiet diamonds inside the clip's foot.
+/// foreground, and the strip they sit in) are small quiet diamonds inside the
+/// strip's foot, as v1: keys outside the layer's in and out points are not
+/// drawn, the edge keys stand just inside its ends, marks closer than one
+/// glyph to the last one drawn are left out (a dense run reads as evenly
+/// spaced marks, not a bar), and every mark is clipped to the strip.
 /// A key glyph's look: shape, colour, selected (opacity and keyline), half.
 type Glyph<'a> = (&'a str, u32, bool, Option<&'a str>);
 /// A collapsed layer's summary marks are this much smaller than a key.
@@ -1527,7 +1565,7 @@ const SUMMARY_KEY_INSET: f32 = 5.;
 fn paint_keys(
     row: &str,
     keys: &[Key],
-    summary: Option<u32>,
+    summary: Option<(u32, Within)>,
     y: f64,
     v: Viewport,
     t: &Tokens,
@@ -1539,6 +1577,12 @@ fn paint_keys(
         } else {
             0.
         };
+    // A summary mark's centre stays this far inside its strip's ends.
+    let reach = size / 2. + 2. * t.metrics.border as f64;
+    let within = summary.map(|(_, w)| w);
+    if within.is_some_and(|w| w.strip.width < 2. * reach) {
+        return;
+    }
     let from = v.scroll_time - size / v.pps;
     let to = v.scroll_time + (v.width - v.layer_column + size) / v.pps;
     let start = keys.partition_point(|k| k.seconds < from);
@@ -1550,10 +1594,20 @@ fn paint_keys(
     // The glyph drawn last and its device half-pixel: keys are in time
     // order, so an identical glyph on the same half-pixel follows it directly.
     let mut on_top: Option<(i64, Glyph)> = None;
+    // The last summary mark drawn (thinning).
+    let mut drawn = f64::NEG_INFINITY;
     // `key:["row","key"]`, the row's part escaped once.
     let prefix = format!("key:[{},", serde_json::to_string(row).unwrap_or_default());
     for key in &keys[start..end] {
-        let x = v.x(key.seconds);
+        let mut x = v.x(key.seconds);
+        if let Some(w) = within {
+            // Outside the layer's in and out points: not drawn (v1).
+            if x < w.from - 0.5 || x > w.to + 0.5 {
+                continue;
+            }
+            x = x.clamp(w.strip.x + reach, w.strip.x + w.strip.width - reach);
+        }
+        let summary = summary.map(|(ink, _)| ink);
         let shape = if summary.is_some() {
             "diamond"
         } else {
@@ -1598,6 +1652,17 @@ fn paint_keys(
         let glyph = ((x * 2.).round() as i64, (shape, color, key.selected, half));
         o.covered = on_top == Some(glyph);
         on_top = Some(glyph);
+        if summary.is_some() {
+            // Clipped to the strip; a mark within one glyph of the last
+            // one drawn stays for hit-testing but is not painted (a
+            // selected mark always is).
+            o.clip = within.map(|w| w.strip);
+            if x - drawn < size && !key.selected {
+                o.covered = true;
+            } else {
+                drawn = x;
+            }
+        }
         ops.push(o);
         if key.focused {
             // The ring may cover keys under it: the next one draws again.

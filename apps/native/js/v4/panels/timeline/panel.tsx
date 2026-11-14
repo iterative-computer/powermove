@@ -133,6 +133,10 @@ function Header({ frame: f, send }: { frame: TimelineFrame; send: Send }) {
                   close: false,
                 })}
                 style={{
+                  // A name is text in a cell: the cell keeps the toolbar's
+                  // side margins round it.
+                  paddingLeft: t("metrics.gap"),
+                  paddingRight: t("metrics.gap"),
                   color: t(tab.active ? "colors.text" : "colors.muted"),
                   fontSize: t("typography.reading"),
                   ...(tab.active
@@ -162,6 +166,7 @@ function Header({ frame: f, send }: { frame: TimelineFrame; send: Send }) {
           <UI.SegmentedControl
             id="timeline:mode"
             label="Timeline mode"
+            data-pm-variant="glass"
             value={f.mode}
             options={[
               { id: "Layers", label: "Layers" },
