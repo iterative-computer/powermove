@@ -53,7 +53,7 @@ def main():
             app = subprocess.Popen(
                 [str(args.binary.resolve()), "--profile", str(output / f"profile-{index}")],
                 stdin=subprocess.PIPE, stdout=log, stderr=log, text=True,
-                env=dict(os.environ, PM_PERF_GATE="1", RUST_BACKTRACE="1"),
+                env=dict(os.environ, PM_NATIVE_NO_ORIGINAL="1", PM_PERF_GATE="1", RUST_BACKTRACE="1"),
             )
             try:
                 deadline = time.monotonic() + 15

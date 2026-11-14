@@ -570,6 +570,17 @@ pub struct Engine {
         Option<u64>,
         u64,
     )>,
+    /// The document, composition and contributed definitions the effects
+    /// were last registered for (`set_document_effects`): a drag frame of
+    /// the same keeps them (`drag_frame`).
+    effects_for: Option<(String, String, u64)>,
+    /// The frame being encoded is a drag's (scrubbed, not exact): a step of
+    /// an edit changes values, not which effects exist, so it does not
+    /// register the document's effects again (100 ms a step on a project
+    /// with many contributed effects); the exact frame after release does.
+    drag_frame: bool,
+    #[cfg(test)]
+    effects_registered: u64,
     pub(crate) studio_progress: Option<crate::studio::RefineObserver>,
     studio_preview: crate::studio::Preview,
     studio_view: crate::studio::ViewCamera,
@@ -1099,6 +1110,10 @@ impl Engine {
             capture_target: None,
             cache_enabled: true,
             studio_content: None,
+            effects_for: None,
+            drag_frame: false,
+            #[cfg(test)]
+            effects_registered: 0,
             studio_progress: None,
             studio_preview: crate::studio::Preview::debug_default().map_err(anyhow::Error::msg)?,
             studio_view: crate::studio::ViewCamera::Active,
@@ -1464,7 +1479,23 @@ impl Engine {
             // A model or environment file saved again is read again.
             self.observed_media(scene),
         );
-        if self.studio_content.as_ref() != Some(&key) {
+        let effects_for = (
+            scene
+                .doc
+                .root()
+                .and_then(|root| root.get("id"))
+                .and_then(|id| id.to_value().as_str().map(str::to_owned))
+                .unwrap_or_default(),
+            scene.comp.clone(),
+            self.resources.generation,
+        );
+        let keep_effects = self.drag_frame && self.effects_for.as_ref() == Some(&effects_for);
+        if self.studio_content.as_ref() != Some(&key) && !keep_effects {
+            self.effects_for = None;
+            #[cfg(test)]
+            {
+                self.effects_registered += 1;
+            }
             // A bad contribution draws nothing and is reported; frames carry on.
             // A compiler slot that was busy is retried, never reported as broken.
             let busy = |e: &str| e.contains("compiler-busy");
@@ -1498,6 +1529,9 @@ impl Engine {
                 }
             }
             self.definition_failure = failures.first().map(|failure| failure.message.clone());
+            self.effects_for = Some(effects_for);
+        }
+        if self.studio_content.as_ref() != Some(&key) {
             #[cfg(feature = "kernel")]
             crate::studio::attach_with_camera_fonts_progress(
                 &mut self.renderer,
@@ -1657,7 +1691,10 @@ impl Engine {
             let mut t = trace.lock().unwrap();
             t.enter_ms = (now() - t.worker_start) * 1e3;
         }
-        self.sync_studio(scene, spec.time)?;
+        self.drag_frame = spec.moment == Moment::Scrub && !spec.exact;
+        let synced = self.sync_studio(scene, spec.time);
+        self.drag_frame = false;
+        synced?;
         self.sync_fonts();
         self.gpu.device.poll(wgpu::PollType::Poll)?;
         let FrameSpec { time, output, .. } = spec;
@@ -2654,6 +2691,36 @@ mod lifetime_tests {
         assert!(engine.settled.is_none() && engine.cache.is_empty());
         assert!(engine.settle_now(&scene, spec, || false).unwrap());
         assert!(engine.settled.is_some());
+    }
+    /// A drag's frames (a new revision each step) keep the effects the
+    /// document registered (re-registering them cost 100 ms a step on a
+    /// project with many contributed effects); the frame after release, a
+    /// paused one, registers them again.
+    #[test]
+    fn drag_frames_keep_the_documents_registered_effects() {
+        let mut engine = Engine::new(Gpu::new("drag-effects-test").unwrap()).unwrap();
+        let at = |revision: u64| Scene {
+            doc: Arc::new(pm_model::Document::new(
+                Some(pm_model::canonical::canonical_project(
+                    pm_model::json::parse(include_str!("../tests/fixtures/shapes.json")).unwrap(),
+                )),
+                revision,
+            )),
+            comp: "Pshapes-primitives-root".into(),
+            media: Default::default(),
+            content: 1,
+        };
+        let t = Ticks::from_whole_seconds(1);
+        engine.sync_studio(&at(1), t).unwrap();
+        assert_eq!(engine.effects_registered, 1);
+        engine.drag_frame = true;
+        for revision in 2..5 {
+            engine.sync_studio(&at(revision), t).unwrap();
+        }
+        assert_eq!(engine.effects_registered, 1, "drag steps keep them");
+        engine.drag_frame = false;
+        engine.sync_studio(&at(5), t).unwrap();
+        assert_eq!(engine.effects_registered, 2, "the release registers again");
     }
     /// The settling renderer's caches are held to its part of the engine's
     /// grant and counted with the engine's (its own decode service too); a

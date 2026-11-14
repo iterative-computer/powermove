@@ -291,6 +291,8 @@ impl Render for WelcomeView {
             .gap(px(m.gap))
             .w_full()
             .max_w(px(m.sheet_width_wide))
+            .max_h(relative(1.))
+            .min_h(px(0.))
             .when(frame.centred, |d| d.items_center().text_center());
         if let Some(label) = &frame.eyebrow {
             content = content.child(
@@ -343,22 +345,45 @@ impl Render for WelcomeView {
             content = content.child(self.choices(cx));
         }
         if !frame.rows.is_empty() {
+            // A long list scrolls inside its card; the card takes the room
+            // the title, counts and buttons leave, never more.
             let mut card = div()
+                .id("welcome-rows")
+                .debug_selector(|| "welcome-rows".into())
+                .role(Role::List)
                 .flex()
                 .flex_col()
+                .flex_shrink_1()
+                .min_h(px(0.))
+                .overflow_y_scroll()
                 .rounded(px(m.group_radius))
                 .bg(rgb(c.panel));
-            for row in &frame.rows {
+            for (index, row) in frame.rows.iter().enumerate() {
                 let tone = match row.severity {
                     Severity::Warning => c.warning,
                     Severity::Danger => c.danger,
                     Severity::Note => c.secondary,
+                    Severity::Success => c.success,
                 };
+                if index > 0 {
+                    card = card.child(
+                        div()
+                            .flex_none()
+                            .ml(px(m.inset))
+                            .h(px(m.border))
+                            .bg(rgb(c.separator)),
+                    );
+                }
                 // Long lines wrap inside the card at any width: the text may
                 // shrink below its natural width, the symbol stays on line one.
                 card = card.child(
                     div()
+                        .id(SharedString::from(format!("welcome-row-{index}")))
+                        .debug_selector(move || format!("welcome-row-{index}"))
+                        .role(Role::ListItem)
+                        .aria_label(row.text.clone())
                         .flex()
+                        .flex_none()
                         .items_start()
                         .gap(px(m.gap))
                         .p(px(m.inset))
@@ -597,6 +622,18 @@ pub fn open_welcome(
     on_action: OnAction,
     cx: &mut App,
 ) -> anyhow::Result<WindowHandle<WelcomeView>> {
+    open_welcome_window(tokens, frame, on_action, "Welcome to Powermove", true, cx)
+}
+/// The Welcome frame in its own window, for a step opened later (Settings ›
+/// Storage › Bring In Extensions…): `quits` false closes just the window.
+pub fn open_welcome_window(
+    tokens: Tokens,
+    frame: Frame,
+    on_action: OnAction,
+    title: &'static str,
+    quits: bool,
+    cx: &mut App,
+) -> anyhow::Result<WindowHandle<WelcomeView>> {
     let bounds = Bounds::centered(
         None,
         size(
@@ -609,7 +646,7 @@ pub fn open_welcome(
         WindowOptions::new()
             .window_bounds(Some(WindowBounds::Windowed(bounds)))
             .titlebar(Some(TitlebarOptions {
-                title: Some("Welcome to Powermove".into()),
+                title: Some(title.into()),
                 appears_transparent: true,
                 ..Default::default()
             }))
@@ -618,8 +655,10 @@ pub fn open_welcome(
         |window, cx| {
             let view = cx.new(|cx| WelcomeView::new(tokens, frame, on_action, cx));
             window.focus(&view.read(cx).focus_handle(), cx);
-            window.on_window_should_close(cx, |_, cx| {
-                cx.quit();
+            window.on_window_should_close(cx, move |_, cx| {
+                if quits {
+                    cx.quit();
+                }
                 true
             });
             view.update(cx, |_, cx| {
