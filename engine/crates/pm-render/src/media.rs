@@ -2860,7 +2860,7 @@ mod still_share_tests {
 
         let still = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/stills2/png-chrm-srgb-gama-8.png");
-        media.prepare_image(&still, Some(64), false);
+        media.prepare_image(&still, Some(64), None);
         assert_eq!(media.service.usage().cache.budget, lease.frame_cache / 2);
         media.wait_for_stills();
         assert!(media.stills.held() > 0);
@@ -2900,7 +2900,7 @@ mod still_share_tests {
         assert_eq!(media.stills.limit(), 0);
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/stills2/png-chrm-srgb-gama-8.png");
-        media.prepare_image(&path, Some(64), false);
+        media.prepare_image(&path, Some(64), None);
         assert_eq!(media.service.usage().cache.budget, lease.frame_cache / 2);
         assert_eq!(media.stills.limit(), lease.frame_cache / 2);
         media.wait_for_stills();
