@@ -75,7 +75,8 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `metrics.composer_max_lines` | Agent composer grows to this many lines, then scrolls | 10 | 10 | 10 | 10 |
 | `metrics.control` | Standalone control height (buttons, popups) | 28 | 28 | 28 | 28 |
 | `metrics.control_radius` | Control radius inside a panel (panel radius − gap) | 8 | 8 | 8 | 8 |
-| `metrics.curve_editor` | The curve editor's graph height | 200 | 200 | 200 | 200 |
+| `metrics.curve_editor` | The curve editor's least graph height | 200 | 200 | 200 | 200 |
+| `metrics.curve_editor_max` | The curve editor's greatest graph height in a wide panel | 360 | 360 | 360 | 360 |
 | `metrics.dock_gap` | Space between docked panels and to the window edge | 8 | 8 | 8 | 8 |
 | `metrics.drag_opacity` | Opacity of a drag source left in place | 0.5 | 0.5 | 0.5 | 0.5 |
 | `metrics.drag_threshold` | Pointer travel before a drag starts | 3 | 3 | 3 | 3 |
@@ -88,7 +89,9 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `metrics.gap` | Gap between panels and to the window edge | 6 | 6 | 6 | 6 |
 | `metrics.gizmo_handle` | Transform handle and path vertex square | 7 | 7 | 7 | 7 |
 | `metrics.gizmo_keyline` | Gizmo stroke and keyline width over the image | 1 | 1 | 1 | 1 |
-| `metrics.grade_wheel` | A colour wheel's diameter | 112 | 112 | 112 | 112 |
+| `metrics.grade_pair` | Least width of two colour wheels side by side on their plates | 254 | 254 | 254 | 254 |
+| `metrics.grade_wheel` | A colour wheel's least diameter | 112 | 112 | 112 | 112 |
+| `metrics.grade_wheel_max` | A colour wheel's greatest diameter in a wide panel | 220 | 220 | 220 | 220 |
 | `metrics.group_radius` | Settings grouped-form card corner | 12 | 12 | 12 | 12 |
 | `metrics.header` | Panel header, viewer bar and timeline header height | 38 | 38 | 38 | 38 |
 | `metrics.hit` | Minimum pointer target | 24 | 24 | 24 | 24 |
