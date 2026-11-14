@@ -605,3 +605,87 @@ fn the_remaining_sound_classes_are_heard_as_measured() {
         }
     }
 }
+
+/// Matroska and WebM present a soundtrack from before zero as authored
+/// (MP4 and QuickTime turn it into a head-trimming edit, tested above).
+/// Read with `timing: 2`, a soundtrack starting a tenth of a second before
+/// the picture is the clip's origin and keeps its offset; one starting
+/// within a frame before it gives way to the picture, and its sound before
+/// the picture is not part of the clip. An older project hears the program
+/// sample its edits address, wherever the stream starts.
+#[test]
+fn a_soundtrack_presented_before_zero_is_placed_against_the_presentation() {
+    let dir = temp_dir("clip-origin-negative");
+    let wav = dir.join("click.wav");
+    let click = clicks(SR as usize, &[CLICK], 0.9);
+    write_wav(&wav, SR, &[click.clone(), click]);
+    let pcm_mkv: &[&str] = &[
+        "-c:v",
+        "mpeg4",
+        "-q:v",
+        "4",
+        "-c:a",
+        "pcm_s16le",
+        "-avoid_negative_ts",
+        "disabled",
+    ];
+    let opus_webm: &[&str] = &[
+        "-c:v",
+        "libvpx-vp9",
+        "-crf",
+        "30",
+        "-b:v",
+        "0",
+        "-c:a",
+        "libopus",
+        "-b:a",
+        "256k",
+        "-avoid_negative_ts",
+        "disabled",
+    ];
+    let start = |path: &std::path::Path| -> f64 {
+        let out = std::process::Command::new(ffmpeg().with_file_name("ffprobe"))
+            .args(["-v", "error", "-select_streams", "a:0", "-show_entries"])
+            .args(["stream=start_time", "-of", "csv=p=0"])
+            .arg(path)
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap()
+    };
+    // (file, sound start, codecs, tolerance in samples)
+    let cases: [(&str, f64, &[&str], i64); 3] = [
+        ("early-sound.mkv", -0.1, pcm_mkv, 1),
+        ("sound-a-frame-early.mkv", -0.02, pcm_mkv, 1),
+        ("early-sound.webm", -0.1, opus_webm, 2),
+    ];
+    for (name, sound_at, codecs, tolerance) in cases {
+        let path = dir.join(name);
+        clip(&path, &wav, 0.0, sound_at, codecs);
+        let sound_starts = start(&path);
+        assert!(
+            sound_starts < 0.0,
+            "{name}: the container must present the sound before zero ({sound_starts})"
+        );
+        // The click sits CLICK samples after the authored soundtrack's
+        // start, its first program sample (the stream's start counts
+        // Opus's pre-skip, which is not presented).
+        let origin = if -sound_at <= 0.04 { 0.0 } else { sound_at };
+        let versioned = CLICK as i64 + ((sound_at - origin) * SR as f64).round() as i64;
+        for (timing, expected) in [
+            (None, CLICK as i64),
+            (Some(pm_media::clip::ASSET_TIMING), versioned),
+        ] {
+            let (at, level) = click_with(&path, r#""trim":0,"speed":1"#, timing);
+            assert!(level.abs() > 0.2, "{name}: no click ({level})");
+            assert!(
+                (at as i64 - expected).abs() <= tolerance,
+                "{name}, timing {timing:?}: the click is at sample {at}, {expected} expected",
+            );
+        }
+    }
+}
+
