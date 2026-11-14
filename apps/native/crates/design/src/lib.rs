@@ -273,10 +273,17 @@ pub struct Metrics {
     pub ruler: f32,
     /// The viewer's rulers: a band along the top and the leading edge.
     pub viewer_ruler: f32,
-    /// A colour wheel's diameter (Lift, Gamma, Gain, Offset).
+    /// A colour wheel's least diameter (Lift, Gamma, Gain, Offset); wheels
+    /// grow with the panel's width up to `grade_wheel_max`.
     pub grade_wheel: f32,
-    /// The curve editor's graph height.
+    pub grade_wheel_max: f32,
+    /// The least width of two colour wheels side by side on their plates
+    /// (each wheel and its plate's padding, and the gap between them).
+    pub grade_pair: f32,
+    /// The curve editor's least graph height; it grows square with the
+    /// panel's width up to `curve_editor_max`.
     pub curve_editor: f32,
+    pub curve_editor_max: f32,
     pub layer_column: f32,
     /// Timeline clip bar corners (v1–3's `chrome.timeline.clipRadius`).
     pub clip_radius: f32,
@@ -750,7 +757,10 @@ impl Tokens {
                 ruler: 24.,
                 viewer_ruler: 16.,
                 grade_wheel: 112.,
+                grade_wheel_max: 220.,
+                grade_pair: 2. * (112. + 2. * space.sm) + space.sm,
                 curve_editor: 200.,
+                curve_editor_max: 360.,
                 layer_column: 320.,
                 clip_radius: radius.sm,
                 playhead: 1.,
