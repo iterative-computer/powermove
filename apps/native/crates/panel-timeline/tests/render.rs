@@ -58,8 +58,8 @@ fn selected_clips_keep_their_hue_with_a_white_rim_and_exact_authored_times() {
         let rest = t.strip(t.colors.labels.teal, pm_design::StripState::Rest);
         assert_eq!(clip.shape, "clip");
         assert_eq!(clip.detail["top"], material.top);
-        assert_eq!(clip.detail["rim"], material.rim.0);
-        assert!(material.rim.1 > rest.rim.1 * 2., "selection is the rim");
+        assert_eq!(clip.detail["ring"], material.ring.0);
+        assert!(material.ring.1 > rest.ring.1 * 2., "selection is the rim");
         // Accessibility reads selection from the strip, with no ring to find.
         let node = f.clip_nodes().into_iter().find(|n| n.id == "selected");
         assert!(node.is_some_and(|n| n.selected));
@@ -548,4 +548,81 @@ fn hidden_layers_draw_at_half_strength_and_keys_mark_their_span_ends() {
         f.ops.iter().any(|o| o.shape == "square"),
         "hold keys are squares"
     );
+}
+/// A collapsed layer's summary marks stay inside its strip (v1's closed
+/// clip): keys before its in point or after its out point are not drawn, the
+/// keys at its ends stand just inside them, a dense run is thinned to one
+/// mark per glyph width (the rest kept for hit-testing, not painted), and
+/// every mark is clipped to the strip so nothing hangs under or beside it.
+#[test]
+fn summary_marks_are_drawn_inside_their_strip_and_clipped_to_it() {
+    for scheme in [Scheme::Light, Scheme::Dark] {
+        let t = Tokens::new(scheme, Accessibility::default());
+        let mut short = clip("short");
+        short.from = 2.;
+        short.duration = 1.;
+        // Before the in point, on it, a dense run inside, on the out point,
+        // and after it.
+        let mut keys = vec![key("before", 1.2), key("in", 2.)];
+        keys.extend((0..40).map(|i| key(&format!("dense{i}"), 2.3 + i as f64 * 0.005)));
+        keys.extend([key("out", 3.), key("after", 4.5)]);
+        let s = Scene::new(
+            vec![row(
+                "short",
+                RowContent::Layer {
+                    clip: Some(short),
+                    summary: keys.into(),
+                },
+            )],
+            12.,
+            30.,
+            &t,
+        )
+        .unwrap();
+        let f = s.prepare(viewport(&t), &t).unwrap();
+        let strip = f.ops.iter().find(|o| o.id == "clip:short").unwrap().bounds;
+        let marks: Vec<_> = f.ops.iter().filter(|o| o.id.starts_with("key:")).collect();
+        let named = |name: &str| marks.iter().any(|o| o.id.contains(&format!("\"{name}\"")));
+        assert!(
+            !named("before") && !named("after"),
+            "outside the in and out points"
+        );
+        assert!(named("in") && named("out") && named("dense0"));
+        for o in &marks {
+            let b = o.bounds;
+            // Inside the strip, clear of its rounded ends.
+            assert!(
+                b.x >= strip.x && b.x + b.width <= strip.x + strip.width,
+                "{}",
+                o.id
+            );
+            assert!(
+                b.y >= strip.y && b.y + b.height <= strip.y + strip.height,
+                "{}",
+                o.id
+            );
+            let clip = o.clip.unwrap();
+            assert!(
+                clip.x >= strip.x
+                    && clip.y >= strip.y
+                    && clip.x + clip.width <= strip.x + strip.width
+                    && clip.y + clip.height <= strip.y + strip.height,
+                "{} is clipped to its strip",
+                o.id
+            );
+        }
+        // The dense run (0.2 s at 100 pt/s = 20 pt) paints a mark at most
+        // every glyph width.
+        let painted: Vec<f64> = marks
+            .iter()
+            .filter(|o| !o.covered && o.id.contains("dense"))
+            .map(|o| o.bounds.x)
+            .collect();
+        assert!(painted.len() >= 2 && painted.len() < 6, "{painted:?}");
+        assert!(
+            painted
+                .windows(2)
+                .all(|w| w[1] - w[0] >= marks[0].bounds.width - 1e-9)
+        );
+    }
 }

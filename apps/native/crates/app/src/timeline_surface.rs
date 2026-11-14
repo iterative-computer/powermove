@@ -23,8 +23,28 @@ use std::{
 };
 
 /// Host services a gesture needs. Implemented by the Controller; tests record.
+/// Media dropped on the timeline: placed at `at`, joining the stack at
+/// `index` (0 the top; `None` the bottom).
+#[derive(Clone, Debug, PartialEq)]
+pub struct MediaDrop {
+    pub at: f64,
+    pub index: Option<usize>,
+    pub what: Dropped,
+}
+#[derive(Clone, Debug, PartialEq)]
+pub enum Dropped {
+    /// From Finder; Option held keeps a folder's files apart.
+    Files {
+        paths: Vec<std::path::PathBuf>,
+        alt: bool,
+    },
+    /// What the Project panel is dragging.
+    ProjectItems,
+}
 pub trait Delegate: 'static {
     fn time(&self, cx: &App) -> f64;
+    /// Media dropped on the timeline (Finder files, Project items).
+    fn drop_media(&self, _drop: MediaDrop, _cx: &mut App) {}
     fn seek(&self, seconds: f64, cx: &mut App);
     fn effect(&self, effect: HostEffect, cx: &mut App);
     fn report(&self, message: String, cx: &mut App);
@@ -263,6 +283,9 @@ pub struct TimelineSurface {
     /// Clears the skimmer when the window stops being active (Cmd-Tab, key
     /// loss, hide): the pointer may never move out of the timeline.
     activation: Option<Subscription>,
+    /// Where media being dragged over the timeline would land (window
+    /// position), for the insertion line.
+    media_over: Option<Point<Pixels>>,
 }
 const WHEEL_ZOOM: f64 = 0.01;
 /// The fewest letters of a clip's name worth showing before its ellipsis.
@@ -323,6 +346,7 @@ impl TimelineSurface {
             skimmer: None,
             hover_clip: None,
             activation: None,
+            media_over: None,
             late: None,
         };
         this.restore_view();
@@ -1073,6 +1097,47 @@ impl TimelineSurface {
     fn local(&self, position: Point<Pixels>) -> (f64, f64) {
         let at = position - self.bounds.origin;
         (f32::from(at.x) as f64, f32::from(at.y) as f64)
+    }
+    /// Where media dropped at `position` lands: the frame under the pointer
+    /// (the layer column counts as the first time shown), and its place in
+    /// the stack ([`Scene::drop_before`], v1.2.0's rule).
+    fn media_slot(&self, position: Point<Pixels>) -> (f64, Option<usize>, f64) {
+        let (x, y) = self.local(position);
+        let at = frame_time(
+            &self.model,
+            self.time_at(x.max(self.view.layer_column)).max(0.),
+        );
+        let ruler = self.tokens.metrics.ruler as f64;
+        let content = y.max(ruler) - ruler + self.view.scroll_y;
+        let layers = self.model.index.layers.len();
+        let (index, top) = match self.scene.as_ref().map(|s| (s.drop_before(content), s)) {
+            Some((pm_panel_timeline::render::DropSlot::Top, _)) | None => (Some(0), 0.),
+            Some((pm_panel_timeline::render::DropSlot::Before(Some(id)), scene)) => (
+                self.model.index.layer_ordinal(&id),
+                scene
+                    .scroll_for(&pm_panel_timeline::v4::row_id(
+                        &pm_panel_timeline::RowId::Layer(id),
+                    ))
+                    .unwrap_or(0.),
+            ),
+            Some((pm_panel_timeline::render::DropSlot::Before(None), scene)) => {
+                (Some(layers), scene.content_height())
+            }
+        };
+        (at, index, ruler + top - self.view.scroll_y)
+    }
+    fn media_moved(&mut self, bounds: Bounds<Pixels>, at: Point<Pixels>, cx: &mut Context<Self>) {
+        let over = bounds.contains(&at).then_some(at);
+        if over != self.media_over {
+            self.media_over = over;
+            cx.notify();
+        }
+    }
+    fn drop_media(&mut self, what: Dropped, position: Point<Pixels>, cx: &mut Context<Self>) {
+        self.media_over = None;
+        let (at, index, _) = self.media_slot(position);
+        self.delegate.drop_media(MediaDrop { at, index, what }, cx);
+        cx.notify();
     }
     fn time_at(&self, x: f64) -> f64 {
         self.view.scroll_time + (x - self.view.layer_column) / self.view.pps
@@ -2481,6 +2546,33 @@ impl Render for TimelineSurface {
         };
         let weak = this.clone();
         let t = &self.tokens;
+        // Media dragged over the timeline: where it would land, an
+        // insertion line between layers and the frame under the pointer.
+        if !cx.has_active_drag() {
+            self.media_over = None;
+        }
+        let landing = self.media_over.map(|position| {
+            let (at, _, y) = self.media_slot(position);
+            let x = self.view.layer_column + (at - self.view.scroll_time) * self.view.pps;
+            let (width, height) = (self.bounds.size.width, self.bounds.size.height);
+            let accent = rgb(self.tokens.colors.accent);
+            [
+                div()
+                    .absolute()
+                    .left(px(self.view.layer_column as f32))
+                    .top(px(y as f32 - 1.))
+                    .w(width - px(self.view.layer_column as f32))
+                    .h(px(2.))
+                    .bg(accent),
+                div()
+                    .absolute()
+                    .left(px(x as f32))
+                    .top(px(self.tokens.metrics.ruler))
+                    .w(px(1.))
+                    .h(height - px(self.tokens.metrics.ruler))
+                    .bg(accent),
+            ]
+        });
         let tip = self.tip.clone().map(|(text, (x, y))| {
             // The shell's tooltip look: floating fill, separator edge, minimum type.
             div()
@@ -2540,6 +2632,34 @@ impl Render for TimelineSurface {
                 MouseButton::Left,
                 cx.listener(|s, event: &MouseDownEvent, _, cx| s.on_down(event, cx)),
             )
+            // Finder files and Project items dropped here land at the time
+            // and place in the stack under the pointer (v1.2.0's timeline).
+            // GPUI tells every listener of a drag's moves: the line shows
+            // only while the pointer is over the timeline.
+            .on_drag_move(cx.listener(|s, event: &DragMoveEvent<ExternalPaths>, _, cx| {
+                s.media_moved(event.bounds, event.event.position, cx);
+            }))
+            .on_drag_move(cx.listener(
+                |s, event: &DragMoveEvent<crate::v4_view::PanelDrag>, _, cx| {
+                    if event.drag(cx).panel == pm_builtins::PROJECT_PANEL {
+                        s.media_moved(event.bounds, event.event.position, cx);
+                    }
+                },
+            ))
+            .on_drop(cx.listener(|s, paths: &ExternalPaths, window, cx| {
+                cx.stop_propagation();
+                let what = Dropped::Files {
+                    paths: paths.paths().to_vec(),
+                    alt: window.modifiers().alt,
+                };
+                s.drop_media(what, window.mouse_position(), cx);
+            }))
+            .on_drop(cx.listener(|s, drag: &crate::v4_view::PanelDrag, window, cx| {
+                if drag.panel == pm_builtins::PROJECT_PANEL {
+                    cx.stop_propagation();
+                    s.drop_media(Dropped::ProjectItems, window.mouse_position(), cx);
+                }
+            }))
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(|s, event: &MouseDownEvent, window, cx| {
@@ -2712,6 +2832,7 @@ impl Render for TimelineSurface {
                 .size_full(),
             )
             // Over the canvas.
+            .children(landing.into_iter().flatten())
             .children(tip)
             .children(self.skimmer_marks())
     }
@@ -2792,52 +2913,44 @@ impl Cull {
             || b.y + b.height <= -MARGIN
     }
 }
-/// A strip's rim, each part as (colour, alpha). In one colour (the dark
-/// canvas's light): a ring inside the edge, then the same ring again over
-/// the top edge and its corners, so the light is brightest there. In two
-/// (the light canvas's deeper rim under a light top edge): the top's ring
-/// over the top edge and its corners, the side's below them.
+/// A strip's rim (pm-design `Strip`): a ring of light inside the edge,
+/// `width` wide and even all round, and light on the top edge: the strip's
+/// own shape lowered by a point, shading what it leaves uncovered inside the
+/// edge, so the line is full along the top, thins round the top corners and
+/// is gone by the straight sides. Both are inset shadows: nothing outside the
+/// edge, nothing over the body's middle, no band that starts or stops.
 fn strip_rim(
     area: Bounds<Pixels>,
     radius: Pixels,
-    width: Pixels,
     smoothing: f32,
-    side: (u32, f32),
-    top: (u32, f32),
+    ring: (u32, f32),
+    width: Pixels,
+    light: (u32, f32),
     window: &mut Window,
 ) {
-    let ring = |(rgb, alpha): (u32, f32)| {
-        PaintQuad::new(area)
-            .border_color(rgba(
-                (rgb << 8) | (alpha.clamp(0., 1.) * 255.).round() as u32,
-            ))
-            .border_widths(width)
-            .corner_radii(radius)
-            .corner_smoothing(smoothing)
+    let ink = |(rgb, alpha): (u32, f32)| -> Background {
+        rgba((rgb << 8) | (alpha.clamp(0., 1.) * 255.).round() as u32).into()
     };
-    let band = Bounds::new(area.origin, size(area.size.width, radius + width));
-    let masked = |bounds: Bounds<Pixels>, quad: PaintQuad, window: &mut Window| {
-        // A band wholly outside what may be painted (a strip cut by the
-        // graph's top) paints nothing: an empty mask left a speck.
-        let seen = window.content_mask().bounds.intersect(&bounds);
-        if seen.size.width <= px(0.) || seen.size.height <= px(0.) {
-            return;
-        }
-        window.with_content_mask(
-            Some(ContentMask {
-                bounds,
-                fade_out: Default::default(),
-            }),
-            |window| window.paint_quad(quad),
-        )
-    };
-    if side.0 == top.0 {
-        window.paint_quad(ring(side));
-        masked(band, ring((top.0, top.1 - side.1)), window);
-    } else {
-        let below = Bounds::from_corners(point(area.origin.x, band.bottom()), area.bottom_right());
-        masked(below, ring(side), window);
-        masked(band, ring(top), window);
+    let corners = Corners::all(radius);
+    if ring.1 > 0. {
+        let shadow = BoxShadow {
+            color: ink(ring),
+            offset: point(px(0.), px(0.)),
+            blur_radius: px(0.),
+            spread_radius: width,
+            inset: true,
+        };
+        window.paint_inset_shadows(area, corners, smoothing, &[shadow]);
+    }
+    if light.1 > 0. {
+        let shadow = BoxShadow {
+            color: ink(light),
+            offset: point(px(0.), px(1.)),
+            blur_radius: px(0.5),
+            spread_radius: px(0.),
+            inset: true,
+        };
+        window.paint_inset_shadows(area, corners, smoothing, &[shadow]);
     }
 }
 /// The strip under the pointer: its rim in the hover state (lighter on the
@@ -2853,10 +2966,10 @@ fn strip_hover(op: &Op, pointer_x: f64, origin: Point<Pixels>, t: &Tokens, windo
     strip_rim(
         area,
         radius,
-        px(t.metrics.border),
         t.radius.smoothing,
-        hover.rim,
-        hover.rim_top,
+        hover.ring,
+        px(hover.ring_width),
+        hover.light,
         window,
     );
     let grip = t.trim_grip();
@@ -2925,7 +3038,7 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
                 |rgb: u32, a: f64| rgba((rgb << 8) | (a.clamp(0., 1.) * 255.).round() as u32);
             let radius = px(op.radius as f32).min(area.size.height / 2.);
             let smoothing = t.radius.smoothing;
-            let rim = px(number("rimWidth").max(1.) as f32);
+            let ring = px(number("ringWidth").max(1.) as f32);
             if number("shadowAlpha") > 0. {
                 window.paint_drop_shadows(
                     area,
@@ -2940,6 +3053,7 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
                     }],
                 );
             }
+            // The body: one ramp from the deep top to the luminous foot.
             window.paint_quad(
                 PaintQuad::new(area)
                     .background(linear_gradient(
@@ -2950,18 +3064,6 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
                     .corner_radii(radius)
                     .corner_smoothing(smoothing),
             );
-            if number("glowAlpha") > 0. {
-                window.paint_quad(
-                    PaintQuad::new(area)
-                        .background(linear_gradient(
-                            180.,
-                            linear_color_stop(tint(hex("glow"), 0.), pm_design::GLOW_FROM),
-                            linear_color_stop(tint(hex("glow"), number("glowAlpha")), 1.),
-                        ))
-                        .corner_radii(radius)
-                        .corner_smoothing(smoothing),
-                );
-            }
             let (step, grid) = (number("gridStep") as f32, number("gridAlpha"));
             if step >= 8. && grid > 0. {
                 let mut x = origin.x + px(number("gridFrom") as f32);
@@ -2972,8 +3074,11 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
                         // by the middle of its height.
                         window.paint_quad(
                             PaintQuad::new(Bounds::new(
-                                point(x, area.origin.y + rim),
-                                size(px(1.), (area.size.height - rim * 2.) * pm_design::GRID_FADE),
+                                point(x, area.origin.y + ring),
+                                size(
+                                    px(1.),
+                                    (area.size.height - ring * 2.) * pm_design::GRID_FADE,
+                                ),
                             ))
                             .background(linear_gradient(
                                 180.,
@@ -2985,17 +3090,13 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
                     x += px(step);
                 }
             }
-            let inset = px(number("rimInset") as f32);
             strip_rim(
-                Bounds::new(
-                    area.origin + point(inset, inset),
-                    size(area.size.width - inset * 2., area.size.height - inset * 2.),
-                ),
-                (radius - inset).max(px(0.)),
-                rim,
+                area,
+                radius,
                 smoothing,
-                (hex("rim"), number("rimAlpha") as f32),
-                (hex("rimTop"), number("rimTopAlpha") as f32),
+                (hex("ring"), number("ringAlpha") as f32),
+                ring,
+                (hex("light"), number("lightAlpha") as f32),
                 window,
             );
         }

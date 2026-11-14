@@ -18,7 +18,7 @@ pub use color::mix;
 use color::oklch;
 pub use recipe::{Elevation, Shadow, Text, TextStyle};
 use serde::{Deserialize, Serialize};
-pub use strip::{GLOW_FROM, GRID_FADE, Playhead, Strip, StripState, TrimGrip};
+pub use strip::{GRID_FADE, Playhead, Strip, StripState, TrimGrip};
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Scheme {
     Light,
