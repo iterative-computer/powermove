@@ -687,6 +687,13 @@ impl Target {
         }
     }
 }
+/// One project per window (owner decision, 2026-11-14): an editor window is
+/// never a tab of another, whatever the system's tab preference, so a window
+/// showing Home never stands in a tab bar as a "Home" tab (H3).
+pub fn one_project_per_window(window: &NSWindow) {
+    window.setTabbingIdentifier(&NSString::from_str("com.powermove.native.editor"));
+    window.setTabbingMode(NSWindowTabbingMode::Disallowed);
+}
 fn join_tab_group(leader: u64, window: &NSWindow) -> bool {
     let mtm = MainThreadMarker::new().unwrap();
     let number = WINDOW_IDS.with(|m| {
@@ -2132,10 +2139,7 @@ impl Host {
         window.makeFirstResponder(Some(&gpui));
         window.setTitle(&NSString::from_str("Untitled"));
         window.setSubtitle(&NSString::from_str(""));
-        window.setTabbingIdentifier(&NSString::from_str("com.powermove.native.editor"));
-        // One project per window (owner decision, 2026-11-14): never a tab
-        // of another window, whatever the system's tab preference.
-        window.setTabbingMode(NSWindowTabbingMode::Disallowed);
+        one_project_per_window(&window);
         // Frames, tabs and workspaces restore from the shell session (multiple
         // windows); AppKit's autosave name is one-per-window and would collide.
         window.setRestorable(false);

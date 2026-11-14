@@ -40,3 +40,6 @@ harness = false
 [[test]]
 name = "hosted_present"
 harness = false
+[[test]]
+name = "one_window_per_project"
+harness = false
