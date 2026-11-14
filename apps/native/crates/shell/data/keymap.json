@@ -2588,5 +2588,18 @@
     "in_fields": false,
     "repeat": false,
     "loose": false
+  },
+  {
+    "id": "native.dimension",
+    "chord": "3",
+    "command": "studio.view",
+    "args": [
+      "look",
+      "toggle"
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
   }
 ]

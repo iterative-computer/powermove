@@ -3,6 +3,7 @@ import {
   EmptyState,
   PopUpButton,
   PushButton,
+  SegmentedControl,
   ToolbarItem,
   token,
 } from "../../src/components";
@@ -326,7 +327,39 @@ export function ViewerPanel({
       </text>
     </div>
   ) : null;
-  const viewCamera = free ? (
+  // 2D | 3D, the bar's leading control: the composition as shot, or the 3D
+  // scene's editor view (the same switch as View camera and looking around).
+  // A composition without 3D layers keeps 3D visible but dimmed.
+  const dimension = source ? null : (
+    <SegmentedControl
+      id="viewer.dimension"
+      label="View"
+      value={free ? "3d" : "2d"}
+      options={[
+        {
+          id: "2d",
+          label: "2D",
+          help: "The composition, as its camera sees it.",
+        },
+        {
+          id: "3d",
+          label: "3D",
+          ...(m.studio
+            ? {
+                help: "The 3D scene: look around and frame it without moving the camera.",
+              }
+            : { title: "Add a 3D layer to view the scene" }),
+          disabled: !m.studio,
+        },
+      ]}
+      onChange={(id) =>
+        actions.drive("viewer.studio.look", id === "3d" ? "free" : "camera")
+      }
+      style={{ fontSize: token("typography.body"), flexShrink: 0 }}
+    />
+  );
+  // Focus and full screen have no bar: there, one control returns.
+  const viewCamera = free && state.host.presentation !== "Docked" ? (
     <div
       id="viewer.studio.return"
       role="group"
@@ -395,6 +428,7 @@ export function ViewerPanel({
               gap: token("metrics.gap"),
             }}
           >
+            {dimension}
             {source ? (
               <>
                 <text

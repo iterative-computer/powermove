@@ -165,6 +165,9 @@ pub struct State {
     /// an older publication must not snap the view back meanwhile.
     pub look_pending: Option<bool>,
     pub free: Option<View>,
+    /// The composition the scene belongs to: switching compositions brings
+    /// back that composition's own 2D/3D choice (`studioLookByComp`).
+    pub comp: Option<String>,
     /// Handles follow the object's own axes (UI state `studioAxes`).
     pub object_axes: bool,
     /// The Light panel's kind to add and whether Add is armed (UI state
@@ -310,12 +313,36 @@ impl GizmoSurface {
                 let Some(p) = kernel.published(&project) else {
                     return;
                 };
-                if p.ui_state.viewer.get(key).and_then(pm_model::Value::as_str) == Some(value) {
+                // 2D/3D (the look) is also remembered per composition.
+                let comp = (key == "studioLook").then(|| p.snapshot.render_comp());
+                let kept = |ui: &pm_kernel::state::UiState| {
+                    comp.as_ref().is_none_or(|c| {
+                        ui.viewer
+                            .get("studioLookByComp")
+                            .and_then(|m| m.get(c))
+                            .and_then(pm_model::Value::as_str)
+                            == Some(value)
+                    })
+                };
+                if p.ui_state.viewer.get(key).and_then(pm_model::Value::as_str) == Some(value)
+                    && kept(&p.ui_state)
+                {
                     return;
                 }
                 let mut ui = p.ui_state.clone();
                 if let Some(v) = ui.viewer.as_object_mut() {
                     v.insert(key, pm_model::Value::from(value));
+                    if let Some(c) = &comp {
+                        let mut by = v
+                            .get("studioLookByComp")
+                            .filter(|m| m.as_object().is_some())
+                            .cloned()
+                            .unwrap_or_else(|| pm_model::Value::Object(Default::default()));
+                        if let Some(m) = by.as_object_mut() {
+                            m.insert(c.as_str(), pm_model::Value::from(value));
+                        }
+                        v.insert("studioLookByComp", by);
+                    }
                 }
                 let state = kernel.state();
                 let _ = kernel
@@ -346,6 +373,13 @@ impl GizmoSurface {
         const AXES_: &[&str] = &["scene", "object"];
         const VIEWS: &[&str] = &["1", "2", "4"];
         const TIERS: &[&str] = &["fast", "live", "refine"];
+        // View ▸ 2D / 3D (3): the other of the composition and its scene.
+        let value = match (group, value) {
+            ("look", "toggle") if !self.studio.active() => return,
+            ("look", "toggle") if self.studio.free_look => "camera",
+            ("look", "toggle") => "free",
+            _ => value,
+        };
         let (key, allowed) = match group {
             "frame" => return self.studio_frame(cx),
             "look" => ("studioLook", LOOKS),

@@ -457,6 +457,7 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
                 k("Fit Selected Curves", "graph.fit", ""),
                 sep(),
                 Item::command("Tools", "tools", ""),
+                r_args("2D / 3D", "studio.view", json!(["look", "toggle"])),
                 Item::command("3D", "view3d", ""),
                 sep(),
                 Item::command("Show/Hide Sidebar", "toggleSidebar", ""),
