@@ -407,6 +407,20 @@ fn transcode(
         "disabled",
         "-noautorotate",
     ]);
+    // FFmpeg's native VP8/VP9 decoders do not expose Matroska's
+    // BlockAdditional alpha. Select the wrapper that pairs both streams
+    // before the input is opened, or a 4444 output silently becomes opaque.
+    if recipe.source_has_alpha {
+        match string(source_video, "codec_name") {
+            Some("vp8") => {
+                cmd.args(["-c:v", "libvpx"]);
+            }
+            Some("vp9") => {
+                cmd.args(["-c:v", "libvpx-vp9"]);
+            }
+            _ => {}
+        }
+    }
     cmd.arg("-i").arg(request.source);
     cmd.args([
         "-map",

@@ -585,7 +585,9 @@ fn load(profile: &Path, objects: &Path) -> Index {
 /// not know were R′G′B′), often left untagged by VideoToolbox, while the copy
 /// keeps its own matrix: retired. Attached files and sequences (retired at
 /// load) are never touched. Checked once per content per run; runs on the
-/// file worker.
+/// file worker. Version 5 also retires VP8/VP9 alpha renditions whose
+/// generator discarded the Matroska alpha stream, and portrait renditions
+/// fitted into the former landscape HD box.
 fn earlier_recipe(inner: &Inner, content: &str, original: &Path) -> Vec<Rendition> {
     let stale = |state: &State| -> Vec<Rendition> {
         let Some(record) = state.index.contents.get(content) else {
@@ -609,11 +611,15 @@ fn earlier_recipe(inner: &Inner, content: &str, original: &Path) -> Vec<Renditio
             return vec![];
         }
     }
-    let rgb = pm_media::probe::probe(original)
+    let affected = pm_media::probe::probe(original)
         .ok()
-        .and_then(|p| p.probe.video.map(|v| v.codec.is_rgb()))
-        == Some(true);
-    if !rgb {
+        .and_then(|p| p.probe.video)
+        .is_some_and(|v| {
+            v.codec.is_rgb()
+                || (v.alpha.is_some() && matches!(v.codec.codec.as_str(), "vp8" | "vp9"))
+                || (v.height > v.width && v.height > 1080)
+        });
+    if !affected {
         return vec![];
     }
     let mut state = inner.state.lock().unwrap();
