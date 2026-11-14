@@ -52,6 +52,7 @@ pub mod sampling;
 pub mod scene3d;
 pub mod scopes;
 pub mod shader_layers;
+pub mod slices;
 pub mod space25d;
 pub mod stills;
 pub mod text;
