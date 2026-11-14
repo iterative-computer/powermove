@@ -311,6 +311,9 @@ struct Answers {
     per_need: Option<Duration>,
     /// Override layers in the last look-ahead frame, and the last frame it asked.
     layers: usize,
+    /// Override layers in the last frame the look-ahead looked at (zero when
+    /// it had none).
+    ahead_layers: usize,
     /// The last frame the look-ahead asked for, and the scale it asked at:
     /// answers at another scale cover nothing (a windowed raster stands in
     /// only at its own scale).
@@ -678,6 +681,7 @@ impl CompatStore {
         let mut answers = self.answers.lock().unwrap();
         let scale = needs.first().map_or(0, |need| need.scale.to_bits());
         answers.horizon = Some((at + (frames - 1) * step, scale));
+        answers.ahead_layers = needs.len();
         if !needs.is_empty() {
             answers.layers = needs.len();
         }
@@ -718,6 +722,11 @@ impl CompatStore {
     /// The realm's measured time per need, the batch in flight (its age and
     /// size), the needs waiting behind it and the override layers of the
     /// last look-ahead frame: a traced viewer's after-frame row.
+    /// Whether the frames ahead of the playhead draw layers only an
+    /// extension draws (as the look-ahead last found them).
+    pub(crate) fn overrides_ahead(&self) -> bool {
+        self.answers.lock().unwrap().ahead_layers > 0
+    }
     pub(crate) fn trace(&self) -> serde_json::Value {
         let answers = self.answers.lock().unwrap();
         serde_json::json!({
