@@ -1093,6 +1093,17 @@ impl SurfaceView {
             });
             self.subscriptions.entry(id).or_default().push(subscription);
         }
+        // A field the panel opens on demand (a layer's rename, a typed time)
+        // takes the keyboard as it appears, its text selected: typing
+        // replaces it, and no shortcut fires on the way.
+        if view.cancel_change {
+            field.update(cx, |f, cx| {
+                // Escape closes it unchanged (an AppKit field commits on
+                // Escape unless told otherwise).
+                f.set_escape_cancels(true);
+                f.begin_editing_selecting_all(cx);
+            });
+        }
         self.fields.insert(id, field);
     }
     /// Ask JS for the row window that covers native scroll, when it left the
