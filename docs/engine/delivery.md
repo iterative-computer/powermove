@@ -230,7 +230,9 @@ whole path (decode, render of an untouched clip, encode); neither is in place.
 ### HAP
 
 HAP clips import through the bundled FFmpeg's own HAP decoder (no encoder is built, and
-none is needed to read). HAP export is not offered. Writing the MOV is simple
+none is needed to read): HAP, HAP Alpha and HAP Q decode to FFmpeg's own pixels, alpha
+included (`pm-media` `tests/hap.rs`). HAP Q Alpha, two textures per frame, has no test
+file yet. HAP export is not offered. Writing the MOV is simple
 (AVAssetWriter passes `Hap1` samples through, and FFmpeg reads them back exactly), but each
 flavour needs its own texture encoder at UHD speed (BC1, BC3, and scaled YCoCg in BC3 for
 HAP Q), plus Snappy and chunked sections, and an export branch that bypasses VideoToolbox,
