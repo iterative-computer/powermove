@@ -33,6 +33,10 @@ pub fn apply(window: &NSWindow) {
 /// A shared window (the colour panel) moves to whichever window asked last.
 /// Attaching resets the child's hiding and Spaces behaviour, so the policy is
 /// applied again after.
+/// AppKit orders a hidden child in at once when its parent is on screen, so
+/// an inactive app's child would show before [`show`] lets it, and hiding it
+/// on deactivation took its parent (the editor window) off screen with it.
+/// Such a child waits unattached and joins its parent when it shows.
 pub fn attach(window: &NSWindow, parent: &NSWindow) {
     if let Some(old) = window.parentWindow() {
         if std::ptr::eq(&*old, parent) {
@@ -41,8 +45,46 @@ pub fn attach(window: &NSWindow, parent: &NSWindow) {
         }
         old.removeChildWindow(window);
     }
+    let inactive = MainThreadMarker::new()
+        .is_some_and(|mtm| !NSApplication::sharedApplication(mtm).isActive());
+    if inactive && parent.isVisible() && !window.isVisible() {
+        JOINS.with(|j| {
+            let mut joins = j.borrow_mut();
+            joins.retain(|(w, _)| w.load().is_some_and(|w| !std::ptr::eq(&*w, window)));
+            joins.push((Weak::from(window), Weak::from(parent)));
+        });
+        apply(window);
+        return;
+    }
     unsafe { parent.addChildWindow_ordered(window, NSWindowOrderingMode::Above) };
     apply(window);
+}
+
+/// The parent a child waiting unattached ([`attach`]) joins when it shows.
+fn waiting_parent(window: &NSWindow) -> Option<objc2::rc::Retained<NSWindow>> {
+    JOINS.with(|j| {
+        j.borrow()
+            .iter()
+            .find(|(w, _)| w.load().is_some_and(|w| std::ptr::eq(&*w, window)))
+            .and_then(|(_, p)| p.load())
+    })
+}
+
+/// A child that waited unattached joins its parent, now that it shows.
+fn join(window: &NSWindow) {
+    let parent = JOINS.with(|j| {
+        let mut joins = j.borrow_mut();
+        let at = joins
+            .iter()
+            .position(|(w, _)| w.load().is_some_and(|w| std::ptr::eq(&*w, window)))?;
+        joins.remove(at).1.load()
+    });
+    if let Some(parent) = parent
+        && window.parentWindow().is_none()
+    {
+        unsafe { parent.addChildWindow_ordered(window, NSWindowOrderingMode::Above) };
+        apply(window);
+    }
 }
 
 /// A child window waiting for its app to become active, and the window it
@@ -57,6 +99,8 @@ thread_local! {
     /// Child windows asked to show while the app was inactive (`key`: make it
     /// key too), and the observer that shows them once the app is active.
     static PENDING: RefCell<Vec<Pending>> = const { RefCell::new(Vec::new()) };
+    /// Child windows asked to attach while the app was inactive, and their parents.
+    static JOINS: RefCell<Vec<(Weak<NSWindow>, Weak<NSWindow>)>> = const { RefCell::new(Vec::new()) };
     static OBSERVER: RefCell<Option<objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2_foundation::NSObjectProtocol>>>> =
         const { RefCell::new(None) };
 }
@@ -75,14 +119,19 @@ pub fn show(window: &NSWindow, key: bool) {
         return;
     }
     forget(window);
+    let parent = window.parentWindow().or_else(|| waiting_parent(window));
     PENDING.with(|p| {
         p.borrow_mut().push(Pending {
             window: Weak::from(window),
-            parent: window.parentWindow().map(|parent| Weak::from(&*parent)),
+            parent: parent.as_ref().map(|parent| Weak::from(&**parent)),
             key,
         })
     });
     observe_activation();
+    #[cfg(debug_assertions)]
+    if let Some(parent) = parent {
+        review_show(window, &parent);
+    }
 }
 
 /// Calls [`show_pending`] whenever the app becomes active.
@@ -185,6 +234,7 @@ pub fn raise_if_active(window: &NSWindow) {
 }
 
 fn order_front(window: &NSWindow, key: bool) {
+    join(window);
     if key {
         window.makeKeyAndOrderFront(None);
     } else {

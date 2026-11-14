@@ -719,6 +719,53 @@ fn missing_runtime_reports_no_connection_and_keeps_the_draft() {
     panel.panels.close();
 }
 #[test]
+fn a_quiet_run_still_republishes_its_working_time() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, environment(root.path(), "hold"));
+    panel.connected(Provider::Chatgpt);
+    panel.send("Make the headline");
+    panel.wait(|s| !s.runs.is_empty());
+    assert!(panel.text().contains("Working · 0:0"));
+    // The held run sends nothing; only the clock moves.
+    let before = panel.revision();
+    thread::sleep(Duration::from_millis(2300));
+    assert!(
+        panel.revision() >= before + 2,
+        "{} -> {}",
+        before,
+        panel.revision()
+    );
+    panel.click("agent-stop");
+    panel.wait(idle);
+    panel.panels.close();
+}
+#[test]
+fn the_panel_republishes_as_a_popover_when_its_window_opens() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, environment(root.path(), "reply"));
+    panel.text();
+    let has_pin = |panel: &mut Agent| {
+        panel
+            .surface()
+            .surface
+            .nodes()
+            .values()
+            .any(|n| n.props.get("id").and_then(Value::as_str) == Some("agent-presentation"))
+    };
+    assert!(!has_pin(&mut panel), "docked: no Pin to Workspace");
+    // The app's facts once the popover window opens: nothing else changed,
+    // so only the presentation fact can republish the panel.
+    panel.panels.update_facts(json!({"agentPopover": true}));
+    panel.text();
+    assert!(has_pin(&mut panel), "the popover shows Pin to Workspace");
+    panel.panels.update_facts(json!({"agentPopover": false}));
+    panel.text();
+    assert!(!has_pin(&mut panel), "docked again");
+    panel.panels.close();
+}
+#[test]
 fn an_agent_tool_launches_sends_to_and_cancels_a_background_thread() {
     let root = tempfile::tempdir().unwrap();
     let actor = actor();
