@@ -524,3 +524,15 @@ test("HDR delivery carries its own label: no color tag row", async () => {
   expect(has("export.colorTag")).toBe(false);
   await f.root.dispose();
 });
+test("the dynamic range opens on what the host chose: the project's Output", async () => {
+  // The host opens the sheet with the project's Output as the dynamic range
+  // (builtins models.rs export_snapshot); the row shows it chosen.
+  const seed = initial();
+  seed.project!.hdr = true;
+  seed.options.format = "mp4";
+  seed.options.dynamicRange = "hlg";
+  const f = await mounted(seed);
+  expect(f.model.options.dynamicRange).toBe("hlg");
+  expect(named(f.root, "export.dynamicRange").props.value).toBe("hlg");
+  await f.root.dispose();
+});

@@ -30,6 +30,10 @@ ffmpeg -f lavfi -i 'color=c=red@0.5:s=64x64:r=30:d=1,format=yuva420p' -an -c:v l
 
 A 2.0 s, 48 kHz, stereo, 16-bit PCM WAV is 384,000 bytes before its header and cannot satisfy the 300 KiB fixture limit. `tone.wav` is therefore 1.5 s (288,000 bytes of samples); all compressed audio fixtures remain 2.0 s. The manifest records the duration.
 
+## HAP
+
+`hap/hap1.mov`, `hap/hap5.mov` and `hap/hapy.mov` are HAP, HAP Alpha and HAP Q: 64×32, two frames of uncompressed texture sections with a different colour (and, for HAP Alpha, alpha) in every 4×4 block column, written by AVAssetWriter in pass-through. No FFmpeg build encodes HAP without Snappy, so `gen.sh` does not make them; `hap/make.swift` does (`swiftc -O make.swift -o /tmp/make-hap && /tmp/make-hap hap1 hap1.mov`). `pm-media`'s `tests/hap.rs` compares their decode with FFmpeg's.
+
 ## Regeneration
 
 ```bash

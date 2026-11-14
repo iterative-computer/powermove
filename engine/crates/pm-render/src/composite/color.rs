@@ -2,9 +2,11 @@
 //! "Project color settings"; contract 4 `ProjectColor`).
 //!
 //! The document stores them at the root as `colorDepth: 8 | 16 | 32` plus
-//! `color: { mode, linearBlending, blendDomain, masteringPeak }`. Mode `hdr`
-//! keeps BT.2100 light in the working space; it needs float storage, so depth
-//! 8 reads as 16 there.
+//! `color: { mode, linearBlending, blendDomain, masteringPeak, hdrTransfer }`.
+//! Mode `hdr` keeps BT.2100 light in the working space; it needs float
+//! storage, so depth 8 reads as 16 there. `hdrTransfer` (`pq`, the default,
+//! or `hlg`) is what an HDR project delivers; together with the mode it is
+//! the project's Output.
 //! The old `color.precision` is read only when depth is absent. An absent or
 //! `null` field, and any absent key, is decision 1's default (Standard,
 //! linear blending off, 16-bit float, HDR-safe blend formulas), which is
@@ -13,7 +15,9 @@
 
 use pm_eval::node;
 use pm_model::{Node, NodeKind};
-use pm_protocol::color::{BlendDomain, ColorMode, Precision, ProjectColor, WorkingEncoding};
+use pm_protocol::color::{
+    BlendDomain, ColorMode, HdrTransfer, Precision, ProjectColor, WorkingEncoding,
+};
 
 /// The color settings a frame renders with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,6 +66,8 @@ pub fn project_color(root: &Node) -> Result<ProjectColor, String> {
             ("masteringPeak", _, NodeKind::Number(n)) if (203.0..=10000.0).contains(n) => {
                 out.mastering_peak = *n as u16
             }
+            ("hdrTransfer", Some("pq"), _) => out.hdr_transfer = HdrTransfer::Pq,
+            ("hdrTransfer", Some("hlg"), _) => out.hdr_transfer = HdrTransfer::Hlg,
             ("linearBlending", _, NodeKind::Bool(b)) => out.linear_blending = *b,
             ("precision", Some("float16"), _) => out.precision = Precision::Float16,
             ("precision", Some("float32"), _) => out.precision = Precision::Float32,
@@ -120,6 +126,31 @@ mod tests {
         .unwrap();
         assert_eq!(all.precision, Precision::Float32);
         assert_eq!(all.blend_domain, BlendDomain::DisplayEncoded);
+    }
+
+    #[test]
+    fn the_output_is_sdr_unless_the_project_is_hdr_and_pq_unless_it_says_hlg() {
+        use pm_protocol::color::ProjectOutput;
+        for (json, output) in [
+            (r#"{}"#, ProjectOutput::Sdr),
+            (r#"{"color":{"hdrTransfer":"hlg"}}"#, ProjectOutput::Sdr),
+            (r#"{"color":{"mode":"hdr"}}"#, ProjectOutput::Pq),
+            (
+                r#"{"color":{"mode":"hdr","hdrTransfer":"pq"}}"#,
+                ProjectOutput::Pq,
+            ),
+            (
+                r#"{"color":{"mode":"hdr","hdrTransfer":"hlg"}}"#,
+                ProjectOutput::Hlg,
+            ),
+        ] {
+            assert_eq!(
+                project_color(&root(json)).unwrap().output(),
+                output,
+                "{json}"
+            );
+        }
+        assert!(project_color(&root(r#"{"color":{"hdrTransfer":"slog3"}}"#)).is_err());
     }
 
     #[test]

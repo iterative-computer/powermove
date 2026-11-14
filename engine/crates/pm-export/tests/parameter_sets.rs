@@ -113,6 +113,11 @@ fn check(name: &str, codec: Codec, container: Container, tags: ColorTags) {
             continue;
         }
         let path = dir.join(format!("{encoder}.{}", container.extension()));
+        let tags = if encoder == "software" {
+            plain(tags)
+        } else {
+            tags
+        };
         let s = spec(path.clone(), codec, container, tags);
         if encoder == "software" {
             let sink = pm_export::software::SoftwareSink::new(&s).unwrap();
@@ -212,6 +217,23 @@ fn hevc_states_pq() {
     );
 }
 
+/// The tags without Dolby Vision, which only the VideoToolbox sink writes.
+fn plain(tags: ColorTags) -> ColorTags {
+    match tags {
+        ColorTags::Rec2100Hlg {
+            white_nits,
+            peak_nits,
+            metadata,
+            ..
+        } => ColorTags::Rec2100Hlg {
+            white_nits,
+            peak_nits,
+            metadata,
+            dolby_vision: false,
+        },
+        tags => tags,
+    }
+}
 #[test]
 fn hevc_states_hlg() {
     check(

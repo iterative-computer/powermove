@@ -9,6 +9,7 @@ name = "powermove-native"
 path = "src/main.rs"
 [dependencies]
 pm-mcp = { path = "../mcp" }
+pm-export = { path = "../../../../engine/crates/pm-export" }
 url = "2.5"
 pm-shell = { path = "../shell" }
 anyhow = "1"
@@ -110,8 +111,6 @@ path = "../store-host"
 
 [dev-dependencies.fs2]
 version = "0.4"
-[dev-dependencies.pm-export]
-path = "../../../../engine/crates/pm-export"
 [dev-dependencies.pm-media]
 path = "../../../../engine/crates/pm-media"
 [dev-dependencies.pm-render]

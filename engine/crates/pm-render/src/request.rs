@@ -96,9 +96,10 @@ pub struct RenderRequest {
     pub output_tone: Option<OutputTone>,
 }
 
-/// BT.2390 on the finished frame, for a target that holds less light than
-/// the frame ([`crate::composite::ColorSettings::hdr`]): SDR delivery of an
-/// HDR project, or HDR delivery below the content's peak.
+/// BT.2390 on the finished frame ([`crate::composite::ColorSettings::hdr`]):
+/// SDR delivery of an HDR project, and every HDR target, which holds the
+/// mastering display's light: content stated brighter rolls off to it, and
+/// light a grade lifts past it is held at it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct OutputTone {
     pub source_peak: f32,
@@ -106,18 +107,23 @@ pub struct OutputTone {
 }
 
 impl OutputTone {
-    /// The one rule for an HDR project's output, shared by delivery and the
-    /// viewer: `hdr` targets hold `mastering_peak`, SDR targets SDR white.
-    /// `None` when the target holds the frame's `content_peak`.
+    /// The one rule for an HDR project's output, shared by delivery, the
+    /// viewer and the Output scopes: `hdr` targets hold `mastering_peak`,
+    /// always (the curve clamps at `source_peak`, so a graded highlight
+    /// never passes the master), SDR targets SDR white. `content_peak` is
+    /// the light the sources state (`pm_render::media::hdr_content`).
+    /// `None` only for an SDR target the frame fits.
     pub fn for_target(content_peak: f32, mastering_peak: f32, hdr: bool) -> Option<Self> {
-        let (source_peak, target_peak) = if hdr {
-            (content_peak, mastering_peak)
-        } else {
-            (content_peak.max(mastering_peak), 203.0)
-        };
-        (source_peak > target_peak).then_some(Self {
+        let source_peak = content_peak.max(mastering_peak);
+        if hdr {
+            return Some(Self {
+                source_peak,
+                target_peak: mastering_peak,
+            });
+        }
+        (source_peak > 203.0).then_some(Self {
             source_peak,
-            target_peak,
+            target_peak: 203.0,
         })
     }
 }

@@ -59,8 +59,17 @@ impl Window {
         }
         let mut items = vec![];
         for i in range.clone() {
+            // An archived step names the run it came from (its trace
+            // message), so the view can fold a finished turn's work.
+            let mut trace = Value::Null;
             let (id, value) = if i < self.index.len() {
                 let row = &self.index.page(i..i + 1)[0];
+                if row.step_index.is_some()
+                    && let Some(message) = self.archived.get(&row.message)
+                {
+                    trace = json!({"id":row.message,"durationMs":message.value["durationMs"],
+                        "steering":message.value["steering"] == true});
+                }
                 (
                     format!("history:{}", row.id),
                     self.index
@@ -80,8 +89,12 @@ impl Window {
                 .questions
                 .get(command_id)
                 .map_or_else(Default::default, |draft| draft.chosen().clone());
-            items.push(json!({"id":id,"commandId":id,"value":value,"chosen":chosen,
-                "open":session.disclosures.get(&id).copied().unwrap_or_else(||session.disclosure_open(command_id, false))}));
+            let mut item = json!({"id":id,"commandId":id,"value":value,"chosen":chosen,
+                "open":session.disclosures.get(&id).copied().unwrap_or_else(||session.disclosure_open(command_id, false))});
+            if !trace.is_null() {
+                item["trace"] = trace;
+            }
+            items.push(item);
         }
         let mut value = panel.inspect(&self.thread)?;
         let text = session.draft.text();
@@ -105,6 +118,8 @@ impl Window {
                 .collect::<Vec<_>>()
         );
         value["elapsedMs"] = json!(session.elapsed_ms(now));
+        // What the run is doing before its first step lands.
+        value["activity"] = json!(session.activity);
         value["stopping"] = json!(session.run.as_ref().is_some_and(|r| r.stopping));
         value["showJump"] = json!(session.follow.show_jump);
         let access = match session.settings.access {
@@ -223,6 +238,43 @@ fn control_id(panel: &Panel, thread: &str, id: &str) -> Result<String> {
         return Err(Error::Invalid("ambiguous archived control"));
     }
     Ok(raw.into())
+}
+fn retry_turn(
+    panel: &mut Panel,
+    thread: &str,
+    message: Option<&str>,
+    run: &str,
+    request: &str,
+    now: u64,
+) -> Result<Effect> {
+    let s = panel.session(thread)?;
+    if s.run.is_some() {
+        return Err(Error::Busy);
+    }
+    let rows = s.conversation.page(0..s.conversation.len());
+    let end = match message {
+        Some(id) => rows
+            .iter()
+            .position(|r| r.id == id)
+            .ok_or_else(|| Error::UnknownId(id.into()))?,
+        None => rows.len(),
+    };
+    let user = rows[..end]
+        .iter()
+        .rev()
+        .find(|r| r.value["role"] == "user")
+        .ok_or(Error::Invalid("retry has no user turn"))?;
+    let text = user.value["text"].as_str().unwrap_or_default().to_owned();
+    let files = user.value["attachments"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let request_draft = crate::composer::Draft::from_legacy(&text, &files)
+        .or_else(|_| crate::composer::Draft::from_legacy(&text, &[]))?;
+    let saved = std::mem::replace(panel.draft_mut(thread)?, request_draft);
+    let effect = panel.submit(thread, run, request, now);
+    *panel.draft_mut(thread)? = saved;
+    effect
 }
 fn optional_boolean(value: &Value, name: &str) -> Result<bool> {
     match value.get(name) {
@@ -396,6 +448,22 @@ pub fn dispatch(
             None
         }
         "undoResult" => Some(panel.undo_result(thread)?),
+        // Try Again on a failed turn: the request before it, sent again
+        // (with the files it carried); the composer's own draft stays.
+        "retry" => {
+            let message = action["id"].as_str().map(|id| {
+                let id = id.strip_prefix("history:").unwrap_or(id);
+                id.split('/').next().unwrap_or(id).to_owned()
+            });
+            Some(retry_turn(
+                panel,
+                thread,
+                message.as_deref(),
+                context.run,
+                context.request,
+                now,
+            )?)
+        }
         "artifact" => {
             Some(panel.artifact(thread, string(action, "path")?, boolean(action, "import")?)?)
         }
@@ -588,6 +656,165 @@ mod tests {
             assert_eq!(e.target.project, "synthetic-project");
         }
         assert!(act(&mut p, json!({"type":"shell","action":"invented"})).is_err());
+    }
+    #[test]
+    fn escape_in_the_popover_composer_closes_it_unless_the_shortcuts_menu_takes_it() {
+        // The reported bug: Escape in the composer never closed the popover.
+        let mut p = panel();
+        let e = act(&mut p, json!({"type":"key","key":{"key":"Escape"}}))
+            .unwrap()
+            .unwrap();
+        assert!(matches!(e.kind, EffectKind::Shell(ShellAction::Close)));
+        // An open shortcuts menu takes the first Escape and stays put.
+        act(&mut p, json!({"type":"focus","focused":true})).unwrap();
+        act(&mut p, json!({"type":"draft","text":"/","selection":[1,1]})).unwrap();
+        assert_eq!(snapshot(&p)["slash"]["visible"], true);
+        assert!(
+            act(&mut p, json!({"type":"key","key":{"key":"Escape"}}))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(snapshot(&p)["slash"]["visible"], false);
+        let e = act(&mut p, json!({"type":"key","key":{"key":"Escape"}}))
+            .unwrap()
+            .unwrap();
+        assert!(matches!(e.kind, EffectKind::Shell(ShellAction::Close)));
+    }
+    #[test]
+    fn a_reply_returned_only_at_the_end_is_shown_once_after_earlier_notes() {
+        // Codex exec (Auto) streams notes, then returns its answer at the end.
+        let mut p = panel();
+        draft(&mut p);
+        act(&mut p, json!({"type":"submit"})).unwrap();
+        p.receive("thread","run",1,Update::Trace(json!({"kind":"answer","text":"I'll check the project."})),11).unwrap();
+        p.receive("thread","run",2,Update::Complete { text: "Added the title layer.".into(), error: false, cancelled: false },20).unwrap();
+        let texts = |p: &Panel| -> Vec<String> {
+            snapshot(p)["rows"]["items"].as_array().unwrap().iter()
+                .filter_map(|r| r["value"]["text"].as_str().map(str::to_owned)).collect()
+        };
+        assert!(texts(&p).iter().any(|t| t == "Added the title layer."));
+        // A streamed reply (the app server) is not repeated.
+        draft(&mut p);
+        let ctx = Context {
+            run: "run-2",
+            request: "request-2",
+            new_thread: "new",
+            now: 30,
+            popover_open: true,
+            catalogs: &|_| Default::default(),
+        };
+        dispatch(&mut p, "thread", &json!({"type":"submit"}), ctx).unwrap();
+        p.receive("thread","run-2",1,Update::Trace(json!({"kind":"answer","text":"Done: the title is in."})),31).unwrap();
+        p.receive("thread","run-2",2,Update::Complete { text: "Done: the title is in.".into(), error: false, cancelled: false },40).unwrap();
+        assert_eq!(texts(&p).iter().filter(|t| t.as_str() == "Done: the title is in.").count(), 1);
+    }
+    #[test]
+    fn a_question_still_open_after_its_run_is_answered_through_its_archived_row() {
+        // A message-transport question outlives its run (the agent asked and
+        // finished); the card's choices act on its archived row.
+        let mut p = panel();
+        draft(&mut p);
+        act(&mut p, json!({"type":"submit"})).unwrap();
+        p.receive("thread","run",1,Update::Trace(json!({"kind":"question","itemId":"q","transport":"message",
+            "questions":[{"id":"title","question":"Which title?","allowOther":true,"options":[{"label":"A"},{"label":"B"}]}]})),11).unwrap();
+        p.receive("thread","run",2,Update::Complete { text: "Waiting for your choice.".into(), error: false, cancelled: false },20).unwrap();
+        let v = snapshot(&p);
+        let row = v["rows"]["items"].as_array().unwrap().iter()
+            .find(|r| r["value"]["kind"] == "question").unwrap().clone();
+        assert_eq!(row["value"]["status"], "open");
+        let step = row["commandId"].as_str().unwrap();
+        act(&mut p, json!({"type":"chooseAnswer","step":step,"question":"title","option":"B"})).unwrap();
+        let v = snapshot(&p);
+        let row = v["rows"]["items"].as_array().unwrap().iter()
+            .find(|r| r["value"]["kind"] == "question").unwrap().clone();
+        assert_eq!(row["chosen"]["title"], json!(["B"]));
+        assert!(act(&mut p, json!({"type":"answer","step":step,"skip":false})).unwrap().is_some());
+    }
+    #[test]
+    fn try_again_sends_the_failed_turns_request_and_keeps_the_composer_draft() {
+        let mut p = panel();
+        draft(&mut p);
+        act(&mut p, json!({"type":"submit"})).unwrap();
+        p.receive(
+            "thread",
+            "run",
+            1,
+            Update::Complete {
+                text: r#"{"type":"error","error":{"message":"Overloaded"}}"#.into(),
+                error: true,
+                cancelled: false,
+            },
+            20,
+        )
+        .unwrap();
+        let v = snapshot(&p);
+        let failed = v["rows"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["value"]["error"] == true)
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        p.draft_mut("thread")
+            .unwrap()
+            .insert_text("next idea", 30, false);
+        let ctx = Context {
+            run: "run-2",
+            request: "request-2",
+            new_thread: "new",
+            now: 40,
+            popover_open: true,
+            catalogs: &|_| Default::default(),
+        };
+        let e = dispatch(&mut p, "thread", &json!({"type":"retry","id":failed}), ctx)
+            .unwrap()
+            .unwrap();
+        match e.kind {
+            EffectKind::Send { text, .. } => assert_eq!(text, "Authored 日本🙂\n"),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(snapshot(&p)["draft"]["text"], "next idea");
+        // A running turn has nothing to try again.
+        assert!(act(&mut p, json!({"type":"retry"})).is_err());
+    }
+    #[test]
+    fn the_snapshot_names_threads_and_each_archived_steps_run() {
+        let mut p = panel();
+        draft(&mut p);
+        act(&mut p, json!({"type":"submit"})).unwrap();
+        p.receive(
+            "thread",
+            "run",
+            1,
+            Update::Trace(json!({"kind":"tool-start","itemId":"call","toolName":"get_project_state","label":"Get project state"})),
+            12,
+        )
+        .unwrap();
+        p.receive(
+            "thread",
+            "run",
+            2,
+            Update::Complete {
+                text: "Done.".into(),
+                error: false,
+                cancelled: false,
+            },
+            5_012,
+        )
+        .unwrap();
+        let v = snapshot(&p);
+        assert_eq!(v["threads"][0]["id"], "thread");
+        let step = v["rows"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["value"]["kind"] == "tool")
+            .unwrap();
+        assert!(step["trace"]["id"].is_string());
+        assert_eq!(step["trace"]["steering"], false);
+        assert!(step["trace"]["durationMs"].as_u64().is_some());
     }
     #[test]
     fn switched_thread_refuses_old_actions_and_old_windows() {

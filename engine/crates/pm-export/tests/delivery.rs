@@ -425,6 +425,11 @@ fn every_format_at_cutover_exports_and_verifies() {
             r.max_pixel_error_cv(),
             started.elapsed().as_secs_f64() * 1e3
         );
+        eprintln!(
+            "MEASURE {name} picture: worst frame {:.2}x typical, nearest neighbour {:?}x its own",
+            r.picture.frame_distance_cv / r.picture.typical_cv.max(1e-12),
+            r.picture.identity
+        );
         assert_eq!(delivered.path, destination, "{name}");
         assert_eq!(
             (r.codec.as_str(), r.depth, r.pixel_format.as_str()),

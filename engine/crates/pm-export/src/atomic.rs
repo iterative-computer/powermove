@@ -330,7 +330,9 @@ fn remove_stale_frames(folder: &Path, written: &[String]) -> Result<(), Error> {
 }
 
 /// Retain replaced and stale user outputs. Scratch cleanup never calls this.
-fn archive_existing(path: &Path) -> Result<(), Error> {
+/// A copy of the file at `path` goes into `.powermove-export-archive` beside
+/// it; nothing there is fine.
+pub fn archive_existing(path: &Path) -> Result<(), Error> {
     match fs::symlink_metadata(path) {
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(Error::Io(e.to_string())),

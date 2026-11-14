@@ -1131,3 +1131,105 @@ fn an_image_sequence_read_in_place_exports_its_frames_at_their_times() {
         assert!(!dir.path().join(&name).exists(), "{name}");
     }
 }
+/// A short ProRes export of the shapes fixture to `destination`.
+fn prores_request(destination: std::path::PathBuf) -> ExportRequest {
+    let mut request = request(destination, 1);
+    as_prores(&mut request);
+    request
+}
+/// A fifth of a second of ProRes 422 HQ.
+fn as_prores(request: &mut ExportRequest) {
+    let JobSpec::Export { settings, .. } = &mut request.spec else {
+        unreachable!()
+    };
+    settings.format = ExportFormat::ProRes {
+        profile: pm_protocol::priority::ProResProfile::Hq,
+    };
+    settings.color = OutputColor::Rec709QuickTime {
+        candidate: pm_protocol::color::QuickTimeTag::Cicp1_13_1,
+    };
+    settings.alpha = AlphaOutput::None;
+    settings.range.end = Ticks::new(Ticks::from_whole_seconds(2).get() / 5).unwrap();
+}
+/// The files the export archive holds for `name` beside it.
+fn archived(folder: &Path, name: &str) -> Vec<Vec<u8>> {
+    let Ok(entries) = std::fs::read_dir(folder.join(".powermove-export-archive")) else {
+        return vec![];
+    };
+    entries
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.file_name().unwrap().to_string_lossy().ends_with(name))
+        .map(|p| std::fs::read(p).unwrap())
+        .collect()
+}
+/// An existing file is replaced only when the export was told to (the
+/// person said Replace): then only once the whole export and its check
+/// succeeded, the old file kept in the export archive. Untold, it is never
+/// replaced and the failure names it; a failed export leaves it in place.
+#[test]
+fn an_existing_file_is_replaced_only_when_told_and_the_old_one_is_kept() {
+    let dir = tempfile::tempdir().unwrap();
+    let film = dir.path().join("film.mov");
+    let old = b"the last export".to_vec();
+    std::fs::write(&film, &old).unwrap();
+    let untold = finish(prores_request(film.clone()));
+    assert_eq!(untold.state, JobState::Failed, "{untold:?}");
+    assert!(untold.error.unwrap().message.contains("film.mov"));
+    assert_eq!(std::fs::read(&film).unwrap(), old);
+    assert!(archived(dir.path(), "film.mov").is_empty());
+    // A replace that fails part way (a damaged file of a sequence) leaves
+    // the existing file as it was.
+    let frames = dir.path().join("frames");
+    std::fs::create_dir(&frames).unwrap();
+    let (project, media) = with_sequence(&frames);
+    std::fs::write(frames.join("shot.0004.png"), vec![0x5a; 4096]).unwrap();
+    let mut failing = request_for(&project, film.clone(), 1);
+    failing.originals = media.originals.clone();
+    as_prores(&mut failing);
+    failing.replace = true;
+    let failed = finish(failing);
+    assert_eq!(failed.state, JobState::Failed, "{failed:?}");
+    assert_eq!(std::fs::read(&film).unwrap(), old);
+    assert!(archived(dir.path(), "film.mov").is_empty());
+    let mut told = prores_request(film.clone());
+    told.replace = true;
+    let done = finish(told);
+    assert_eq!(done.state, JobState::Done, "{done:?}");
+    let now = std::fs::read(&film).unwrap();
+    assert_ne!(now, old);
+    assert_eq!(&now[4..8], b"ftyp", "a movie replaced the old file");
+    assert_eq!(archived(dir.path(), "film.mov"), vec![old]);
+    let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.contains(".partial"))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+}
+/// A file Powermove may not read is not called damaged: the export says
+/// what happened and what to do, and publishes nothing.
+#[test]
+fn an_unreadable_file_of_an_image_sequence_says_why_it_could_not_be_read() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let frames = dir.path().join("frames");
+    std::fs::create_dir(&frames).unwrap();
+    let (project, media) = with_sequence(&frames);
+    let locked = frames.join("shot.0004.png");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let destination = dir.path().join("locked.mov");
+    let mut request = request_for(&project, destination.clone(), 1);
+    request.originals = media.originals.clone();
+    as_prores(&mut request);
+    let status = finish(request);
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(status.state, JobState::Failed, "{status:?}");
+    let message = status.error.unwrap().message;
+    for part in ["couldn't be exported", "shot.0004.png", "permission"] {
+        assert!(message.contains(part), "{part} in: {message}");
+    }
+    for wrong in ["damaged", "Replace or trim"] {
+        assert!(!message.contains(wrong), "{wrong} in: {message}");
+    }
+    assert!(!destination.exists());
+}

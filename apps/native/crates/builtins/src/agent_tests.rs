@@ -302,7 +302,7 @@ fn typed_message_runs_a_bundled_provider_and_its_reply_survives_reopen() {
     let actor = actor();
     let mut panel = Agent::mount(&actor, environment(root.path(), "reply"));
     panel.connected(Provider::Chatgpt);
-    assert!(!panel.text().contains("Connect Your Agent"));
+    assert!(!panel.text().contains("Connect ChatGPT"));
     panel.send("Hi");
     panel.wait(idle);
     let agent = panel.agent();
@@ -494,14 +494,14 @@ fn signing_out_during_a_run_keeps_its_conversation_and_stop() {
         assert!(Instant::now() < deadline);
         thread::sleep(Duration::from_millis(5));
     }
-    assert!(!panel.text().contains("Connect Your Agent"));
+    assert!(!panel.text().contains("Connect ChatGPT"));
     panel.click("agent-stop");
     panel.wait(idle);
     assert_eq!(
         agent.lock().unwrap().panel.raw_archive()["threads"][0]["lastRunStatus"],
         "cancelled"
     );
-    assert!(panel.text().contains("Connect Your Agent"));
+    assert!(panel.text().contains("Connect ChatGPT"));
     panel.panels.close();
 }
 #[test]
@@ -682,7 +682,7 @@ fn signing_in_from_settings_opens_the_browser_and_connects_the_panel() {
         thread::sleep(Duration::from_millis(5));
     }
     assert_eq!(read(&accounts).1, "Sign in to ChatGPT in Settings.");
-    assert!(panel.text().contains("Connect Your Agent"));
+    assert!(panel.text().contains("Connect ChatGPT"));
     let backend = |panel: &Agent| {
         panel
             .panels
@@ -735,7 +735,7 @@ fn signing_in_from_settings_opens_the_browser_and_connects_the_panel() {
     let chatgpt = row(&after, "account.chatgpt");
     assert_eq!(chatgpt["actionLabel"], "Sign Out");
     assert_eq!(chatgpt["detail"], "user@example.invalid · plus");
-    assert!(!panel.text().contains("Connect Your Agent"));
+    assert!(!panel.text().contains("Connect ChatGPT"));
     panel.choose("agent-model", "model:fixture-5");
     panel.send("Hi");
     panel.wait(idle);
@@ -745,7 +745,7 @@ fn signing_in_from_settings_opens_the_browser_and_connects_the_panel() {
         assert!(Instant::now() < deadline);
         thread::sleep(Duration::from_millis(5));
     }
-    assert!(panel.text().contains("Connect Your Agent"));
+    assert!(panel.text().contains("Connect ChatGPT"));
     panel.panels.close();
 }
 #[test]
@@ -897,7 +897,10 @@ fn the_model_access_and_slash_menus_change_the_run_settings() {
     let menu = panel.request("agentMenu");
     let labels = Agent::labels(&menu);
     assert!(
-        labels.contains(&"/new".to_owned()) && labels.contains(&"/model".to_owned()),
+        // Each row names its command, then what it does (the original's
+        // copy): "/new — Start a new conversation".
+        labels.iter().any(|l| l.starts_with("/new"))
+            && labels.iter().any(|l| l.starts_with("/model")),
         "{labels:?}"
     );
     let a = agent.clone();
@@ -920,7 +923,20 @@ fn an_auto_run_reaches_the_provider_and_shows_what_it_did() {
         "{text}\n{}",
         panel.agent().lock().unwrap().panel.raw_archive()
     );
-    // Its step says what was run, not only that something ran.
+    // A finished turn folds its work behind "Worked for …" (the original
+    // panel); opened, its step says what was run, not only that something ran.
+    let worked = panel
+        .surface()
+        .surface
+        .nodes()
+        .values()
+        .filter_map(|n| n.props.get("id").and_then(Value::as_str))
+        .find(|id| id.starts_with("work-"))
+        .map(str::to_owned);
+    if let Some(worked) = worked {
+        panel.click(&worked);
+    }
+    let text = panel.text();
     assert!(text.contains("1 tool call"), "{text}");
     let work = panel
         .surface()
@@ -948,7 +964,8 @@ fn a_quiet_run_still_republishes_its_working_time() {
     panel.connected(Provider::Chatgpt);
     panel.send("Make the headline");
     panel.wait(|s| !s.runs.is_empty());
-    assert!(panel.text().contains("Working · 0:0"));
+    // The original's timer copy: "Working for 0s".
+    assert!(panel.text().contains("Working for 0s"));
     // The held run sends nothing; only the clock moves.
     let before = panel.revision();
     thread::sleep(Duration::from_millis(2300));
@@ -1966,7 +1983,7 @@ fn a_connected_model_runs_with_the_powermove_tools_and_streams_its_reply() {
     let mut panel = Agent::mount(&actor, compatible_environment(root.path(), &model));
     panel.choose("agent-model", "provider:compatible");
     panel.connected(Provider::Compatible);
-    assert!(!panel.text().contains("Connect Your Agent"));
+    assert!(!panel.text().contains("Connect ChatGPT"));
     panel.send("Use a tool please");
     panel.wait(idle);
     let text = panel.text();

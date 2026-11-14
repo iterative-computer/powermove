@@ -66,9 +66,9 @@ pub enum JobError {
     #[error("audio failed: {0}")]
     Audio(String),
     /// A source frame could not be read: the person's sentence, naming the
-    /// export frame, the clip, the file and where in it.
+    /// export frame, the clip, the file, where in it and why.
     #[error("{0}")]
-    Damaged(String),
+    Unread(String),
     #[error(transparent)]
     Export(Error),
 }
@@ -637,42 +637,64 @@ pub fn start_timecode(timeline: &Timeline) -> crate::settings::TimecodeSpec {
 
 /// "Frame 00:00:00:19 couldn't be exported: “Interview” reads a damaged
 /// frame of interview.mov at 00:00:00.292. Replace or trim the clip, then
-/// export again."
-fn damaged_sentence(
+/// export again." A frame that could not be read for another reason says
+/// that reason and what to do: "… “Interview” couldn't read interview.mov
+/// at 00:00:00.292: its volume is not available. Reconnect it, then export
+/// again."
+fn unread_sentence(
     document: &Document,
     failure: &pm_render::LayerFailure,
-    damaged: &pm_render::DamagedFrame,
+    unread: &pm_render::UnreadFrame,
     rate: Rate,
     tick: i64,
 ) -> String {
+    use pm_render::ReadCause;
     let (num, den) = (i128::from(rate.num()), i128::from(rate.den()));
     let unit = den * i128::from(TICKS_PER_SECOND);
     let frame = (2 * i128::from(tick) * num + unit).div_euclid(2 * unit);
     let at = pm_time::TimecodeFormat::for_rate(rate).timecode_of(frame as i64);
     let layer = layer_name(document, &failure.composition, &failure.layer)
         .unwrap_or_else(|| failure.layer.clone());
-    let file = damaged.file.file_name().map_or_else(
-        || damaged.file.display().to_string(),
+    let file = unread.file.file_name().map_or_else(
+        || unread.file.display().to_string(),
         |n| n.to_string_lossy().into_owned(),
     );
-    match damaged.seconds {
-        Some(seconds) => {
-            let ms = (seconds.max(0.) * 1000.).round() as u64;
-            let source = format!(
-                "{:02}:{:02}:{:02}.{:03}",
-                ms / 3_600_000,
-                ms / 60_000 % 60,
-                ms / 1000 % 60,
-                ms % 1000
-            );
-            format!(
-                "Frame {at} couldn't be exported: “{layer}” reads a damaged frame of {file} at {source}. Replace or trim the clip, then export again."
-            )
-        }
-        // A file that is one frame (an image sequence's).
-        None => format!(
-            "Frame {at} couldn't be exported: “{layer}” reads a damaged file, {file}. Replace the file or trim the clip, then export again."
+    let source = unread.seconds.map(|seconds| {
+        let ms = (seconds.max(0.) * 1000.).round() as u64;
+        format!(
+            "{:02}:{:02}:{:02}.{:03}",
+            ms / 3_600_000,
+            ms / 60_000 % 60,
+            ms / 1000 % 60,
+            ms % 1000
+        )
+    });
+    let start = format!("Frame {at} couldn't be exported: “{layer}”");
+    let read = match &source {
+        Some(source) => format!("{start} couldn't read {file} at {source}"),
+        None => format!("{start} couldn't read {file}"),
+    };
+    match (unread.cause, source) {
+        (ReadCause::Damaged, Some(source)) => format!(
+            "{start} reads a damaged frame of {file} at {source}. Replace or trim the clip, then export again."
         ),
+        // A file that is one frame (an image sequence's).
+        (ReadCause::Damaged, None) => format!(
+            "{start} reads a damaged file, {file}. Replace the file or trim the clip, then export again."
+        ),
+        (ReadCause::Unavailable, _) => {
+            format!("{read}: its volume is not available. Reconnect it, then export again.")
+        }
+        (ReadCause::NoPermission, _) => format!(
+            "{read}: Powermove doesn't have permission to read it. Allow reading in the file's Get Info, then export again."
+        ),
+        (ReadCause::Missing, _) => format!(
+            "{read}: the file is no longer there. Put it back or relink the clip, then export again."
+        ),
+        (ReadCause::OutOfMemory, _) => {
+            format!("{read}: there wasn't enough memory. Quit other apps, then export again.")
+        }
+        (ReadCause::Failed, _) => format!("{read} ({}). Export again.", unread.reason),
     }
 }
 
@@ -771,38 +793,19 @@ fn tags_of(color: OutputColor, peak_nits: u16) -> Result<ColorTags, JobError> {
 
 /// The mastering display and light levels an HDR delivery states: the
 /// sources' where they carry them, within the project's mastering peak.
-fn hdr_metadata(
-    project: &pm_protocol::color::ProjectColor,
-    content: &pm_render::media::HdrContent,
-) -> HdrMetadata {
-    use pm_media::probe::color::MasteringDisplay;
-    let peak = f64::from(project.mastering_peak);
-    let display: Option<&MasteringDisplay> = content.mastering.as_ref();
-    // Display P3 primaries and D65 when no source states a display: the
-    // common grading monitor (BT.2408).
-    let xy = |value: Option<(f64, f64)>, default: (f64, f64)| {
-        let (x, y) = value.unwrap_or(default);
-        [(x / 0.00002).round() as u16, (y / 0.00002).round() as u16]
-    };
-    let luminance = |nits: f64| (nits / 0.0001).round() as u32;
-    let max = display
-        .and_then(|d| d.max_luminance)
-        .map_or(peak, |l| l.min(peak));
+/// An HDR delivery's mastering display: the project's stated master, its
+/// peak with Display P3 primaries and D65 (the common grading monitor,
+/// BT.2408), whatever the sources say. The light levels are measured from
+/// the frames as they are encoded, not stated here.
+fn hdr_metadata(project: &pm_protocol::color::ProjectColor) -> HdrMetadata {
+    let xy = |(x, y): (f64, f64)| [(x / 0.00002).round() as u16, (y / 0.00002).round() as u16];
     HdrMetadata {
-        primaries: [
-            xy(display.and_then(|d| d.green), (0.265, 0.690)),
-            xy(display.and_then(|d| d.blue), (0.150, 0.060)),
-            xy(display.and_then(|d| d.red), (0.680, 0.320)),
-        ],
-        white: xy(display.and_then(|d| d.white), (0.3127, 0.3290)),
-        max_luminance: luminance(max),
-        min_luminance: luminance(display.and_then(|d| d.min_luminance).unwrap_or(0.0)),
-        max_cll: content.content_light.map_or(0, |c| {
-            u16::try_from(c.max_cll.min(project.mastering_peak.into())).unwrap_or(u16::MAX)
-        }),
-        max_fall: content.content_light.map_or(0, |c| {
-            u16::try_from(c.max_fall.min(project.mastering_peak.into())).unwrap_or(u16::MAX)
-        }),
+        primaries: [xy((0.265, 0.690)), xy((0.150, 0.060)), xy((0.680, 0.320))],
+        white: xy((0.3127, 0.3290)),
+        max_luminance: (f64::from(project.mastering_peak) / 0.0001).round() as u32,
+        min_luminance: 0,
+        max_cll: 0,
+        max_fall: 0,
     }
 }
 
@@ -1366,7 +1369,7 @@ fn plan_export_checked(
             )
         })
         .flatten();
-    set_hdr_metadata(&mut tags, hdr_metadata(&project, &content));
+    set_hdr_metadata(&mut tags, hdr_metadata(&project));
     let mut problems: Vec<String> = check(doc, &job.composition, &job.media)
         .iter()
         .map(ToString::to_string)
@@ -1842,17 +1845,17 @@ where
                     .iter()
                     .any(|clip| asset == Some(clip.asset.as_str()))
             });
-            // A damaged source frame stops the export, said where; nothing
-            // stands in for it.
-            if let Some((failure, damaged)) = f
+            // A source frame that does not read stops the export, said
+            // where and why; nothing stands in for it.
+            if let Some((failure, unread)) = f
                 .failures
                 .iter()
-                .find_map(|l| pm_render::DamagedFrame::parse(&l.message).map(|d| (l, d)))
+                .find_map(|l| pm_render::UnreadFrame::parse(&l.message).map(|d| (l, d)))
             {
-                return Err(JobError::Damaged(damaged_sentence(
+                return Err(JobError::Unread(unread_sentence(
                     &document,
                     failure,
-                    &damaged,
+                    &unread,
                     timeline.rate,
                     timeline.tick(n).get(),
                 )));

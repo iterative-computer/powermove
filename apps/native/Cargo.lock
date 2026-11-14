@@ -5082,6 +5082,7 @@ dependencies = [
  "pm-expr",
  "pm-fx-defs",
  "pm-model",
+ "pm-protocol",
  "pm-scene3d",
  "pm-text",
  "pm-wasm",

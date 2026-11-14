@@ -33,6 +33,12 @@ pub struct ExportRequest {
     #[serde(default)]
     pub copies_of: std::collections::BTreeMap<String, PathBuf>,
     pub destination: PathBuf,
+    /// The person said Replace (or an agent asked to): an existing file at
+    /// the destination is replaced only once the whole export and its file
+    /// check have succeeded, the old one kept in the export archive. Without
+    /// it an existing file is never replaced and the export names it.
+    #[serde(default)]
+    pub replace: bool,
     #[serde(default)]
     pub saving_app_version: Option<String>,
     #[serde(default)]
@@ -552,6 +558,7 @@ impl ExportRequest {
             proxies: media.proxies,
             copies_of: Default::default(),
             destination,
+            replace: false,
             saving_app_version: snapshot.document.saving_app_version().map(str::to_owned),
             resources: Default::default(),
             disk_reserve: DISK_RESERVE,
@@ -1278,7 +1285,11 @@ pub fn run_child() -> Result<()> {
             settings,
             media: Arc::new(media),
             destination: request.destination,
-            overwrite: pm_export::settings::Overwrite::Fail,
+            overwrite: if request.replace {
+                pm_export::settings::Overwrite::Replace
+            } else {
+                pm_export::settings::Overwrite::Fail
+            },
             mode: Some(0o600),
             seed: 1,
         };

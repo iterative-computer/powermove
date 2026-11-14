@@ -108,9 +108,18 @@ export const states: Record<string, () => Publication> = {
           chosen: {},
           open: false,
           value: {
+            id: "q",
             kind: "question",
-            title: "Apply the same entrance to Kicker?",
-            questions: [{ id: "q", question: "It would start 0.2 s after…" }],
+            status: "open",
+            transport: "reply",
+            questions: [
+              {
+                id: "q",
+                question:
+                  "Apply the same entrance to Kicker? It would start 0.2 s after…",
+                options: [{ label: "Yes" }, { label: "No" }],
+              },
+            ],
           },
         },
       ],
@@ -125,8 +134,11 @@ export const states: Record<string, () => Publication> = {
           chosen: {},
           open: true,
           value: {
+            id: "tool",
             kind: "tool",
+            toolName: "apply_commands",
             label: "Make the headline",
+            detail: "apply_commands",
             status: "running",
             output: "Done.",
           },
@@ -144,7 +156,11 @@ export const states: Record<string, () => Publication> = {
         commandId: "",
         chosen: {},
         open: false,
-        value: { kind: "error", text: "ChatGPT couldn’t be reached." },
+        value: {
+          role: "assistant",
+          error: true,
+          text: "ChatGPT couldn’t be reached.",
+        },
       },
     ]);
     p.snapshot.saveError = "synthetic";

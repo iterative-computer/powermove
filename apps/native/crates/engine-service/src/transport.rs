@@ -50,7 +50,8 @@ pub fn shuttle(key: ShuttleKey, rate: PlaybackRate, from_pause: bool) -> Option<
 pub struct Transport {
     pub clock: TransportClock,
     pub audio: Option<AudioLink>,
-    awaiting: Option<(i64, Option<u32>, PlaybackRate)>,
+    // Deadline, previous device epoch, requested rate, requested media start.
+    awaiting: Option<(i64, Option<u32>, PlaybackRate, i64)>,
     /// The last wait for the audio clock that ended: how long it took (µs)
     /// and whether it ended on the host clock instead. Taken by the trace.
     pub started: Option<(i64, bool)>,
@@ -154,7 +155,7 @@ impl Transport {
                 if running && rate == self.clock.rate() {
                     return;
                 }
-                let mut from = self.clock.media_at(now);
+                let mut from = self.clock.picture_at(now);
                 if !running {
                     let range = self.clock.loop_range();
                     let start = range.map_or(0, |r| r.start.get());
@@ -176,15 +177,19 @@ impl Transport {
                         at: start,
                     });
                     self.clock.hold(from, now);
-                    self.awaiting =
-                        Some((now + crate::clock::AUDIO_START_TIMEOUT_US, before, rate));
+                    self.awaiting = Some((
+                        now + crate::clock::AUDIO_START_TIMEOUT_US,
+                        before,
+                        rate,
+                        from,
+                    ));
                 }
             }
             TransportCommand::PlayAround {
                 pre_roll,
                 post_roll,
             } => {
-                let here = self.clock.media_at(now);
+                let here = self.clock.picture_at(now);
                 if let Some(a) = self.audio.as_ref().filter(|_| self.audible) {
                     a.send(AudioCtl::PlayAround {
                         at: here,
@@ -196,6 +201,7 @@ impl Transport {
                         now + crate::clock::AUDIO_START_TIMEOUT_US,
                         before,
                         PlaybackRate::NORMAL,
+                        (here - pre_roll.get().max(0)).max(0),
                     ));
                 } else {
                     self.clock
@@ -208,8 +214,12 @@ impl Transport {
                     if running && (self.audible || self.clock.following()) {
                         a.send(AudioCtl::Seek(time.get()));
                         self.clock.hold(time.get(), now);
-                        self.awaiting =
-                            Some((now + crate::clock::AUDIO_START_TIMEOUT_US, before, rate));
+                        self.awaiting = Some((
+                            now + crate::clock::AUDIO_START_TIMEOUT_US,
+                            before,
+                            rate,
+                            time.get(),
+                        ));
                     } else {
                         a.send(if mode == pm_protocol::clock::SeekMode::Scrub {
                             AudioCtl::Scrub(time.get())
@@ -239,13 +249,17 @@ impl Transport {
         if let Some(a) = &self.audio {
             if let Some(s) = a.clock().and_then(|c| c.latest()) {
                 let accept = match self.awaiting {
-                    Some((_, epoch, _)) => {
+                    Some((_, epoch, ..)) => {
                         s.state != TransportState::Stopped && Some(s.epoch) != epoch
                     }
                     None => self.clock.following(),
                 };
                 if accept {
-                    self.clock.follow(&s);
+                    if let Some((_, _, _, from)) = self.awaiting {
+                        self.clock.follow_start(&s, from);
+                    } else {
+                        self.clock.follow(&s);
+                    }
                     if let Some((deadline, ..)) = self.awaiting.take() {
                         self.started = Some((
                             now - (deadline - crate::clock::AUDIO_START_TIMEOUT_US),
@@ -254,7 +268,7 @@ impl Transport {
                     }
                 }
             }
-            if let Some((deadline, _, rate)) = self.awaiting
+            if let Some((deadline, _, rate, _)) = self.awaiting
                 && (a.failed() || now >= deadline)
             {
                 self.awaiting = None;
@@ -352,6 +366,7 @@ mod start_wait_tests {
             asked + crate::clock::AUDIO_START_TIMEOUT_US,
             None,
             PlaybackRate::NORMAL,
+            0,
         ));
         transport.poll(asked + 400_000);
         assert_eq!(transport.started, None, "still waiting");
