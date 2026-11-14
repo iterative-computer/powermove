@@ -293,7 +293,8 @@ fn graph_draws_v1s_ground_legend_axis_colours_key_shapes_and_playhead_values() {
         ops.iter()
             .filter(|o| o.id.starts_with("graph-transform-handle"))
             .count(),
-        4
+        // Electron's graphTransformHandles includes corners and edge midpoints.
+        8
     );
     assert!(ops.iter().all(|o| o.clip.is_some()));
     let wire =

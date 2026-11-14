@@ -167,6 +167,8 @@ pub struct Graph {
     pub selection: Option<Rect>,
     /// Merge Selected Curves: one curve, in the accent.
     pub merged: bool,
+    /// The Speed Graph: values are rates, so the box only marks the group.
+    pub speed: bool,
     /// What this graph shows (mode, merge, layer and property): a range kept
     /// steady across rebuilds is kept only for the same view.
     pub view: String,
@@ -441,6 +443,7 @@ pub fn sample(
     let merged = model.graph_merge && curves.len() == 1 && curves[0].points.is_empty();
     let mut graph = Graph::new(curves, range.0 - margin, range.1 + margin).ok()?;
     graph.merged = merged;
+    graph.speed = speed;
     graph.view = format!(
         "{}:{}:{layer_id}:{path}",
         if speed { "speed" } else { "value" },
@@ -502,6 +505,7 @@ impl Graph {
             max,
             selection: None,
             merged: false,
+            speed: false,
             view: String::new(),
         })
     }
@@ -512,6 +516,73 @@ impl Graph {
             (self.min, self.max) = (min, max);
         }
         self
+    }
+    /// The box around two or more selected keys (v1's
+    /// `graphSelectionBounds(points, 16, 8)`), in surface points.
+    pub fn selection_box(&self, v: Viewport, region: Rect) -> Option<Rect> {
+        if let Some(rect) = self.selection {
+            return Some(rect);
+        }
+        if self.merged {
+            return None;
+        }
+        let plot = plot(region);
+        let y_of = |value: f64| {
+            plot.y + plot.height - (value - self.min) / (self.max - self.min) * plot.height
+        };
+        let points: Vec<(f64, f64)> = self
+            .curves
+            .iter()
+            .flat_map(|c| c.points.iter())
+            .filter(|p| p.selected)
+            .map(|p| (v.x(p.point.seconds), y_of(p.point.value)))
+            .collect();
+        if points.len() < 2 {
+            return None;
+        }
+        let pad = 8.;
+        let (mut x0, mut x1, mut y0, mut y1) = points.iter().fold(
+            (
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+            ),
+            |(a, b, c, d), (x, y)| (a.min(*x), b.max(*x), c.min(*y), d.max(*y)),
+        );
+        (x0, x1, y0, y1) = (x0 - pad, x1 + pad, y0 - pad, y1 + pad);
+        if x1 - x0 < 16. {
+            let m = (x0 + x1) / 2.;
+            (x0, x1) = (m - 8., m + 8.);
+        }
+        if y1 - y0 < 16. {
+            let m = (y0 + y1) / 2.;
+            (y0, y1) = (m - 8., m + 8.);
+        }
+        Some(Rect::new(x0, y0, x1 - x0, y1 - y0))
+    }
+    /// Whether the box scales: v1 reads values off the curve, which the
+    /// Speed Graph and merged curves don't plot.
+    pub fn transformable(&self) -> bool {
+        !self.speed && !self.merged
+    }
+    /// The selected keys' span: first and last composition time, least and
+    /// greatest value.
+    pub fn selected_span(&self) -> Option<(f64, f64, f64, f64)> {
+        let mut span: Option<(f64, f64, f64, f64)> = None;
+        for p in self
+            .curves
+            .iter()
+            .flat_map(|c| c.points.iter())
+            .filter(|p| p.selected)
+        {
+            let (t, v) = (p.point.seconds, p.point.value);
+            span = Some(match span {
+                None => (t, t, v, v),
+                Some((a, b, c, d)) => (a.min(t), b.max(t), c.min(v), d.max(v)),
+            });
+        }
+        span
     }
     /// The value a curve has at `seconds` (its plotted samples).
     pub fn value_of(curve: &Curve, seconds: f64) -> Option<f64> {
@@ -752,7 +823,7 @@ impl Graph {
                 }
             }
         }
-        if let Some(rect) = self.selection {
+        if let Some(rect) = self.selection_box(v, region) {
             if ![rect.x, rect.y, rect.width, rect.height]
                 .iter()
                 .all(|v| v.is_finite())
@@ -770,15 +841,12 @@ impl Graph {
             op.detail = json!({"dash":[3.,3.]});
             op.clip = Some(body);
             ops.push(op);
-            for (i, (x, y)) in [
-                (rect.x, rect.y),
-                (rect.x + rect.width, rect.y),
-                (rect.x, rect.y + rect.height),
-                (rect.x + rect.width, rect.y + rect.height),
-            ]
-            .into_iter()
-            .enumerate()
-            {
+            let shown = if self.transformable() {
+                grips(rect).to_vec()
+            } else {
+                vec![]
+            };
+            for (i, (x, y)) in shown.into_iter().enumerate() {
                 let mut op = Op::new(
                     format!("graph-transform-handle:{i}"),
                     "rect",
@@ -850,6 +918,62 @@ impl Graph {
         }
         Ok(ops)
     }
+}
+/// A transform box's grips (v1's `graphTransformHandles`), in `GRIPS` order.
+pub const GRIPS: [&str; 8] = ["nw", "n", "ne", "e", "se", "s", "sw", "w"];
+pub fn grips(b: Rect) -> [(f64, f64); 8] {
+    let (x0, y0, x1, y1) = (b.x, b.y, b.x + b.width, b.y + b.height);
+    let (mx, my) = ((x0 + x1) / 2., (y0 + y1) / 2.);
+    [
+        (x0, y0),
+        (mx, y0),
+        (x1, y0),
+        (x1, my),
+        (x1, y1),
+        (mx, y1),
+        (x0, y1),
+        (x0, my),
+    ]
+}
+/// The grip within 6 points of `(x, y)`, the nearest.
+pub fn grip_at(b: Rect, x: f64, y: f64) -> Option<usize> {
+    let mut best = None;
+    let mut reach = 6.;
+    for (i, (gx, gy)) in grips(b).into_iter().enumerate() {
+        let d = (x - gx).hypot(y - gy);
+        if d <= reach {
+            (best, reach) = (Some(i), d);
+        }
+    }
+    best
+}
+/// v1's drag readout (`drawGraphReadout`): the numbers under the pointer in
+/// a small accent bubble.
+pub fn readout(text: &str, x: f64, y: f64, region: Rect, t: &Tokens) -> Vec<Op> {
+    let small = t.typography.minimum as f64;
+    let width = text.chars().count() as f64 * small * 0.62 + 12.;
+    let height = 18.;
+    let right = region.x + region.width;
+    let bottom = region.y + region.height;
+    let bx = (x + 14.).clamp(region.x + 4., (right - width - 4.).max(region.x + 4.));
+    let by = (y - height - 8.).clamp(region.y + 32., (bottom - height - 4.).max(region.y + 32.));
+    let mut bubble = Op::new(
+        "graph-readout",
+        "rounded-rect",
+        Rect::new(bx, by, width, height),
+        t.colors.accent,
+    );
+    bubble.radius = 3.;
+    let mut label = Op::new(
+        "graph-readout-text",
+        "text",
+        Rect::new(bx + 6., by, width - 6., height),
+        0xffffff,
+    );
+    label.text = Some(text.to_owned());
+    label.font_size = small;
+    label.detail = json!({"tabular":true});
+    vec![bubble, label]
 }
 /// The handle side as it appears in op ids: `graph-handle:<key>:<in|out>`.
 pub fn side_name(side: EaseSide) -> &'static str {

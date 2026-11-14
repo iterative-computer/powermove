@@ -1023,6 +1023,9 @@ pub struct Drag {
     /// the press. A vertical drag there changes speeds (as v1 does), never
     /// the keys' values.
     speed_eases: Option<Vec<(String, EaseSide, TemporalEase)>>,
+    /// A handle drag: its key's layer-local time and value, and the other
+    /// side's ease, which follows the dragged side unless ⌥ splits them (v1).
+    handle_key: Option<(f64, f64, Option<TemporalEase>)>,
 }
 /// Each side's ease of the keys `ids` as the graph shows it: the speed (value
 /// units per second) and influence (percent) of its direction handle, so a
@@ -1238,7 +1241,24 @@ impl Drag {
             }
             _ => None,
         };
+        let handle_key = match &kind {
+            DragKind::Handle { id, side } => index.key(id).and_then(|(_, _, key)| {
+                let value = key.value.as_f64()?;
+                let other = if *side == EaseSide::In {
+                    EaseSide::Out
+                } else {
+                    EaseSide::In
+                };
+                let opposite = key_eases(index, std::slice::from_ref(id))
+                    .into_iter()
+                    .find(|(_, s, _)| *s == other)
+                    .map(|(_, _, e)| e);
+                Some((key.time, value, opposite))
+            }),
+            _ => None,
+        };
         Ok(Self {
+            handle_key,
             speed_eases,
             kind,
             start: index.clone(),
@@ -1572,18 +1592,46 @@ impl Drag {
             DragKind::Handle { id, side } => {
                 finite(sample.handle_time)?;
                 finite(sample.handle_value)?;
+                let (t, mut v) = (sample.handle_time, sample.handle_value);
+                // ⇧ lays the handle flat (v1's `moveBezierHandle` flat side).
+                if let Some((_, key_value, _)) = self.handle_key
+                    && sample.modifiers.shift
+                {
+                    v = key_value;
+                }
                 out.push(
                     KeyframeCommand::SetHandle {
                         key_id: id.clone(),
                         side: *side,
-                        value: HandleValue::Point {
-                            t: sample.handle_time,
-                            v: sample.handle_value,
-                        },
+                        value: HandleValue::Point { t, v },
                         split: sample.modifiers.alt,
                     }
                     .into(),
                 );
+                // Unless ⌥ splits them, the other handle stays on the same
+                // tangent through the key, keeping its own length (v1's
+                // `mirroredBezierHandlePoint`).
+                if let Some((key_time, key_value, Some(opposite))) = self.handle_key
+                    && !sample.modifiers.alt
+                    && (t - key_time).abs() > 1e-9
+                {
+                    out.push(
+                        KeyframeCommand::SetHandle {
+                            key_id: id.clone(),
+                            side: if *side == EaseSide::In {
+                                EaseSide::Out
+                            } else {
+                                EaseSide::In
+                            },
+                            value: HandleValue::Ease(TemporalEase {
+                                speed: (v - key_value) / (t - key_time),
+                                influence: opposite.influence,
+                            }),
+                            split: false,
+                        }
+                        .into(),
+                    );
+                }
             }
             DragKind::Property { targets, time } => {
                 for (l, c) in targets {
@@ -2075,11 +2123,11 @@ pub fn menu_label(id: &str) -> &'static str {
         "ease.linear" => "Linear",
         "ease.easeIn" => "Ease In",
         "ease.easeOut" => "Ease Out",
-        "ease.easeInOut" => "Ease In and Out",
+        "ease.easeInOut" => "Easy Ease",
         "ease.swish" => "Swish",
         "ease.power" => "Power",
-        "ease.expoOut" => "Expo Out",
-        "ease.backOut" => "Back Out",
+        "ease.expoOut" => "Exponential Out",
+        "ease.backOut" => "Overshoot",
         "ease.snap" => "Snap",
         "ease.glide" => "Glide",
         "track.add" => "Add Keyframe",

@@ -631,6 +631,236 @@ fn a_speed_graph_drag_changes_speed_not_value(cx: &mut TestAppContext) {
     s.undo(cx);
     assert!((speed(&s) - before).abs() < 1e-6);
 }
+/// Window position of graph op `id`'s centre, as painted now.
+fn graph_op_at(s: &mut Stage, id: &str) -> Point<Pixels> {
+    let origin = s.origin();
+    let ops = s.surface.read_with(&s.vcx, |t, _| t.graph_ops_for_test());
+    let b = ops
+        .iter()
+        .find(|o| o.id == id)
+        .unwrap_or_else(|| panic!("{id} painted"))
+        .bounds;
+    origin
+        + point(
+            px((b.x + b.width / 2.) as f32),
+            px((b.y + b.height / 2.) as f32),
+        )
+}
+/// A stored key side's ease speed (`inEase` or `outEase`).
+fn ease_speed(s: &Stage, id: &str, side: &str) -> f64 {
+    s.surface.read_with(&s.vcx, |t, _| {
+        t.model()
+            .index
+            .key(id)
+            .unwrap()
+            .2
+            .stored
+            .to_value()
+            .get(side)
+            .and_then(|e| e.get("speed"))
+            .and_then(|v| v.as_f64())
+            .unwrap_or(f64::NAN)
+    })
+}
+/// v1's transform box: two selected keys get a dashed box with eight grips;
+/// dragging the east grip scales their times about the west edge, from where
+/// the grip was (nothing jumps), as one Undo step.
+#[gpui::test]
+fn the_transform_box_scales_selected_keys_about_the_far_edge(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    let ids = graph_on_first_key(&mut s, cx);
+    let second = graph_key_at(&mut s, &ids[1]);
+    s.vcx.simulate_click(second, Modifiers::shift());
+    s.idle(cx);
+    let ops = s.surface.read_with(&s.vcx, |t, _| t.graph_ops_for_test());
+    assert_eq!(
+        ops.iter()
+            .filter(|o| o.id.starts_with("graph-transform-handle:"))
+            .count(),
+        8
+    );
+    let east = graph_op_at(&mut s, "graph-transform-handle:3");
+    let pps = s
+        .surface
+        .read_with(&s.vcx, |t, _| t.frame().unwrap().viewport.pps) as f32;
+    s.drag(
+        cx,
+        east,
+        east + point(px(pps * 0.5), px(0.)),
+        Modifiers::none(),
+    );
+    assert!(
+        s.recorder.reports.borrow().is_empty(),
+        "{:?}",
+        s.recorder.reports.borrow()
+    );
+    assert_eq!(key_time(&s, &ids[0]), 0.5, "the west edge stays");
+    assert!(
+        (key_time(&s, &ids[1]) - 2.).abs() < 0.05,
+        "{}",
+        key_time(&s, &ids[1])
+    );
+    s.undo(cx);
+    assert_eq!(key_time(&s, &ids[1]), 1.5);
+}
+/// v1: the wheel over the graph pans its values (the keys don't change);
+/// Fit Selected Curves frames them again.
+#[gpui::test]
+fn the_wheel_over_the_graph_pans_its_values(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    let ids = graph_on_first_key(&mut s, cx);
+    let range = |s: &Stage| {
+        let g = s.surface.read_with(&s.vcx, |t, _| t.graph()).unwrap();
+        (g.min, g.max)
+    };
+    let before = range(&s);
+    let at = graph_key_at(&mut s, &ids[0]) + point(px(40.), px(20.));
+    s.vcx.simulate_event(ScrollWheelEvent {
+        position: at,
+        delta: ScrollDelta::Pixels(point(px(0.), px(30.))),
+        ..Default::default()
+    });
+    s.idle(cx);
+    let panned = range(&s);
+    assert!(
+        (panned.0 - before.0).abs() > 1e-6,
+        "{before:?} -> {panned:?}"
+    );
+    assert!(
+        ((panned.1 - panned.0) - (before.1 - before.0)).abs() < 1e-9,
+        "a pan, not a zoom"
+    );
+    let value = s.surface.read_with(&s.vcx, |t, _| {
+        t.model()
+            .index
+            .key(&ids[0])
+            .unwrap()
+            .2
+            .value
+            .as_f64()
+            .unwrap()
+    });
+    assert_eq!(value, 50.);
+    // A rebuild keeps the panned range for this view.
+    s.surface.update(&mut s.vcx, |t, cx| t.published(cx));
+    s.idle(cx);
+    assert_eq!(range(&s), panned);
+    s.surface.update(&mut s.vcx, |t, cx| {
+        t.command("graph.fit", 0., None, false, cx)
+    });
+    s.idle(cx);
+    assert_eq!(range(&s), before);
+}
+/// v1: ⇧ on a graph key drag keeps it on its main axis (and snaps).
+#[gpui::test]
+fn shift_keeps_a_graph_key_drag_on_its_main_axis(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    let ids = graph_on_first_key(&mut s, cx);
+    let at = graph_key_at(&mut s, &ids[0]);
+    s.drag(cx, at, at + point(px(30.), px(8.)), Modifiers::shift());
+    assert!(
+        s.recorder.reports.borrow().is_empty(),
+        "{:?}",
+        s.recorder.reports.borrow()
+    );
+    let value = s.surface.read_with(&s.vcx, |t, _| {
+        t.model()
+            .index
+            .key(&ids[0])
+            .unwrap()
+            .2
+            .value
+            .as_f64()
+            .unwrap()
+    });
+    assert_eq!(value, 50., "sideways: the value stays");
+    assert!(key_time(&s, &ids[0]) > 0.5);
+}
+/// v1's handles: ⇧ lays a handle flat; without ⌥ the other handle stays on
+/// the same tangent through the key.
+#[gpui::test]
+fn handles_flatten_with_shift_and_mirror_without_option(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    let ids = keyed(&mut s, cx, &[0.5, 1., 1.5]);
+    let first = op_center(&mut s, "key:");
+    s.vcx.simulate_click(first, Modifiers::none());
+    s.idle(cx);
+    s.surface
+        .update(&mut s.vcx, |t, cx| t.command("graph", 0., None, false, cx));
+    s.idle(cx);
+    let middle = graph_key_at(&mut s, &ids[1]);
+    s.vcx.simulate_click(middle, Modifiers::none());
+    s.idle(cx);
+    let speed = |s: &Stage, side: &str| ease_speed(s, &ids[1], side);
+    let out = graph_op_at(&mut s, &format!("graph-handle:{}:out", ids[1]));
+    s.drag(cx, out, out - point(px(0.), px(25.)), Modifiers::none());
+    assert!(
+        s.recorder.reports.borrow().is_empty(),
+        "{:?}",
+        s.recorder.reports.borrow()
+    );
+    let (o, i) = (speed(&s, "outEase"), speed(&s, "inEase"));
+    assert!(
+        o.is_finite() && (o - i).abs() < 1e-3,
+        "mirrored: out {o} in {i}"
+    );
+    let out = graph_op_at(&mut s, &format!("graph-handle:{}:out", ids[1]));
+    s.drag(cx, out, out - point(px(0.), px(20.)), Modifiers::shift());
+    assert!(
+        speed(&s, "outEase").abs() < 1e-6,
+        "flat: {}",
+        speed(&s, "outEase")
+    );
+}
+/// v1: a double-click on a graph key edits its value; a right-click opens
+/// the keyframe menu with v1's easing names.
+#[gpui::test]
+fn graph_keys_edit_on_double_click_and_ease_from_their_menu(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    let ids = graph_on_first_key(&mut s, cx);
+    let at = graph_key_at(&mut s, &ids[1]);
+    s.vcx.simulate_event(MouseDownEvent {
+        button: MouseButton::Left,
+        position: at,
+        modifiers: Modifiers::none(),
+        click_count: 2,
+        first_mouse: false,
+    });
+    s.vcx.simulate_event(MouseUpEvent {
+        button: MouseButton::Left,
+        position: at,
+        modifiers: Modifiers::none(),
+        click_count: 2,
+    });
+    s.idle(cx);
+    assert!(
+        s.recorder
+            .effects
+            .borrow()
+            .iter()
+            .any(|e| matches!(e, HostEffect::EditKeyValues(_))),
+        "{:?}",
+        s.recorder.effects.borrow()
+    );
+    s.vcx.simulate_event(MouseDownEvent {
+        button: MouseButton::Right,
+        position: at,
+        modifiers: Modifiers::none(),
+        click_count: 1,
+        first_mouse: false,
+    });
+    s.idle(cx);
+    let menus = s.recorder.menus.borrow();
+    let labels: Vec<String> = menus
+        .last()
+        .unwrap()
+        .iter()
+        .filter_map(|i| i["label"].as_str().map(str::to_owned))
+        .collect();
+    for label in ["Edit Value…", "Easy Ease", "Exponential Out", "Overshoot"] {
+        assert!(labels.iter().any(|l| l == label), "{label}: {labels:?}");
+    }
+}
 #[gpui::test]
 fn the_speed_graph_plots_the_rate_of_change(cx: &mut TestAppContext) {
     let mut s = stage(cx, 1);
