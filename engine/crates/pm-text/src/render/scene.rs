@@ -702,6 +702,9 @@ pub struct CoveragePathCache {
     bytes: usize,
     limit: usize,
     tick: u64,
+    /// Lookups answered from the cache / made (diagnostics, taken by
+    /// [`CoveragePathCache::take_counts`]).
+    counts: (u64, u64),
 }
 
 impl Default for CoveragePathCache {
@@ -744,7 +747,13 @@ impl CoveragePathCache {
             bytes: 0,
             limit,
             tick: 0,
+            counts: (0, 0),
         }
+    }
+
+    /// Hits and misses since the last call.
+    pub fn take_counts(&mut self) -> (u64, u64) {
+        std::mem::take(&mut self.counts)
     }
 
     pub fn bytes(&self) -> usize {
@@ -853,8 +862,12 @@ impl CoveragePathCache {
             Geometry::Device(_) => Affine::IDENTITY,
         };
         let lines = match self.hit(&key, placed) {
-            Some(lines) => lines,
+            Some(lines) => {
+                self.counts.0 += 1;
+                lines
+            }
             None => {
+                self.counts.1 += 1;
                 let elements = self.take_prepared(&key, placed).unwrap_or_else(|| {
                     let (elements, input_elements) = source_geometry(placed, &mut self.resolver);
                     self.resolver.trim_after(

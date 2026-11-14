@@ -138,6 +138,7 @@ pub struct TargetPool {
     free_bytes: u64,
     frame: u64,
     free_budget: u64,
+    max_free: usize,
     /// Bytes held by targets in the pool and taken from it.
     live_bytes: u64,
     created: u64,
@@ -150,6 +151,7 @@ impl Default for TargetPool {
             free_bytes: 0,
             frame: 0,
             free_budget: Self::FREE_BUDGET,
+            max_free: 128,
             live_bytes: 0,
             created: 0,
         }
@@ -158,7 +160,12 @@ impl Default for TargetPool {
 
 impl TargetPool {
     pub fn set_free_budget(&mut self, bytes: u64) {
-        self.free_budget = bytes.min(Self::FREE_BUDGET);
+        self.set_free_budget_up_to(bytes, Self::FREE_BUDGET);
+    }
+    /// [`Self::set_free_budget`] with another ceiling than [`Self::FREE_BUDGET`].
+    pub fn set_free_budget_up_to(&mut self, bytes: u64, cap: u64) {
+        self.free_budget = bytes.min(cap);
+        self.max_free = if cap > Self::FREE_BUDGET { 512 } else { 128 };
         self.trim(self.live_bytes.saturating_sub(self.free_bytes) + self.free_budget);
     }
     pub const FREE_BUDGET: u64 = 48 << 20;
@@ -243,7 +250,7 @@ impl TargetPool {
         };
         self.free_bytes += target.bytes();
         self.free.push((key, target, self.frame));
-        while self.free_bytes > self.free_budget || self.free.len() > 128 {
+        while self.free_bytes > self.free_budget || self.free.len() > self.max_free {
             let oldest = self
                 .free
                 .iter()

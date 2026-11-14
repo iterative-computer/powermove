@@ -187,6 +187,8 @@ struct Events {
     /// timer, a fetch) and registers or decides from has finished, as for a
     /// window's realm. Until then no frame is asked of it.
     settled: AtomicBool,
+    /// The extensions still loading when it last said (names).
+    loading: Mutex<Vec<String>>,
     /// Extensions that did not start here, by id.
     failed: Mutex<BTreeSet<String>>,
     /// A raster answer's layout read the page did not answer: the export
@@ -223,6 +225,15 @@ impl RealmEvents for Arc<Events> {
     }
     fn contributions(&self, value: Value) {
         let settled = value["settled"] != false;
+        *self.loading.lock().unwrap() = value["loading"]
+            .as_array()
+            .map(|l| {
+                l.iter()
+                    .filter_map(|e| e["name"].as_str().or(e["id"].as_str()))
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
         if self.settled.swap(settled, Ordering::AcqRel) != settled {
             let _ = self.inbox.send(RunInput::Settled);
         }
@@ -316,6 +327,7 @@ pub(super) fn run(start: Start, inbox: Sender<RunInput>, input: Receiver<RunInpu
         page_missed: AtomicBool::new(start.pageless),
         dom_pending: AtomicBool::new(false),
         settled: AtomicBool::new(false),
+        loading: Mutex::default(),
         failed: Mutex::default(),
         layout_failed: AtomicBool::new(false),
         started: Mutex::default(),
@@ -518,7 +530,16 @@ impl Run {
                 ),
             }
         } else if !self.events.settled.load(Ordering::Acquire) {
-            "waiting for the export's extensions to finish starting".to_owned()
+            let loading = self.events.loading.lock().unwrap();
+            match loading.len() {
+                0 => "waiting for the export's extensions to finish starting".to_owned(),
+                1..=3 => format!("waiting for {} to finish starting", loading.join(", ")),
+                n => format!(
+                    "waiting for {} and {} more to finish starting",
+                    loading[..3].join(", "),
+                    n - 3
+                ),
+            }
         } else if !self.ready() {
             "waiting for the export's page to open".to_owned()
         } else {

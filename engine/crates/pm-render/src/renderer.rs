@@ -1453,7 +1453,12 @@ impl Renderer {
         } else {
             0
         };
-        self.pool.set_free_budget(bytes.max(floor));
+        // PM_ABL_POOL_MIB (measurement): keep this many MiB of free targets
+        // between frames whatever the grant.
+        match pm_media::decode::diag::knob("PM_ABL_POOL_MIB") {
+            Some(mib) => self.pool.set_free_budget_up_to(mib << 20, mib << 20),
+            None => self.pool.set_free_budget(bytes.max(floor)),
+        }
         self.pyramids.set_budget(bytes);
         self.binds.set_budget(bytes);
     }
