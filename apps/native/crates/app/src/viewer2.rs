@@ -175,7 +175,7 @@ pub enum Action {
 }
 /// View › Channels, in the order of the menu, with their palette commands
 /// and After Effects' keys (⌥1 to ⌥4; the overlay ⌥5).
-pub const CHANNELS: [(Channels, &str, &str); 6] = [
+pub const CHANNELS: [(Channels, &str, &str); 7] = [
     (Channels::Rgb, "RGB", "viewer.showRGB"),
     (Channels::Red, "Red", "viewer.showRed"),
     (Channels::Green, "Green", "viewer.showGreen"),
@@ -186,6 +186,11 @@ pub const CHANNELS: [(Channels, &str, &str); 6] = [
         "Alpha Overlay",
         "viewer.showAlphaOverlay",
     ),
+    (
+        Channels::RangeOverlay,
+        "Over-Range and Out-of-Gamut",
+        "viewer.showRangeOverlay",
+    ),
 ];
 /// View › Viewer Media, in the order of the menu.
 const MEDIA_MODES: [(MediaMode, &str); 4] = [
@@ -195,7 +200,7 @@ const MEDIA_MODES: [(MediaMode, &str); 4] = [
     (MediaMode::ProxyOnly, "Proxy Only"),
 ];
 impl Action {
-    const ALL: [Action; 36] = [
+    const ALL: [Action; 37] = [
         Action::Output(OutputMode::Sdr),
         Action::Output(OutputMode::Pq),
         Action::Output(OutputMode::Hlg),
@@ -229,6 +234,7 @@ impl Action {
         Action::Channels(Channels::Blue),
         Action::Channels(Channels::Alpha),
         Action::Channels(Channels::AlphaOverlay),
+        Action::Channels(Channels::RangeOverlay),
         Action::Rulers,
         Action::Grid,
         Action::ClearGuides,

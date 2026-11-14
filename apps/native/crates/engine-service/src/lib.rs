@@ -94,6 +94,10 @@ pub enum Channels {
     Alpha = 4,
     /// The picture, with what is transparent tinted.
     AlphaOverlay = 5,
+    /// The picture, with what its delivery cannot hold tinted: light over
+    /// the peak (SDR white, or an HDR project's master) magenta, colour
+    /// outside the delivery's gamut (Rec. 709, or Rec. 2020 for HDR) cyan.
+    RangeOverlay = 6,
 }
 #[repr(C)]
 pub(crate) struct OverlayParams {
@@ -106,7 +110,9 @@ pub(crate) struct OverlayParams {
     output: [f32; 4],
     canvas: [f32; 4],
     drawable: [f32; 2],
-    pad2: [f32; 2],
+    /// [`Channels::RangeOverlay`]: the peak in relative light (1.0 is SDR
+    /// white), and 1 when the delivery's gamut is Rec. 2020.
+    range: [f32; 2],
     lines: [OverlayLine; OverlayGeometry::MAX_LINES],
 }
 impl OverlayGeometry {
@@ -162,7 +168,7 @@ impl OverlayGeometry {
             output: [0.; 4],
             canvas: [0.; 4],
             drawable: [0.; 2],
-            pad2: [0.; 2],
+            range: [1., 0.],
             lines: [OverlayLine::default(); Self::MAX_LINES],
         };
         p.lines[..self.lines.len()].copy_from_slice(&self.lines);
