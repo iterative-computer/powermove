@@ -1652,6 +1652,24 @@ impl SurfaceView {
             ..modified(modifiers)
         }
     }
+    /// The nearest focusable node holding `id` (itself first) takes the
+    /// keyboard, as a click focuses it on the web and in AppKit. Text fields
+    /// and native controls keep their own focus handling.
+    fn focus_pressed(&self, id: Id, window: &mut Window, cx: &mut App) {
+        let mut at = Some(id);
+        while let Some(node) = at {
+            if self.fields.contains_key(&node) || self.controls.contains_key(&node) {
+                return;
+            }
+            if let Some(focus) = self.focus.get(&node) {
+                if !focus.is_focused(window) {
+                    focus.focus(window, cx);
+                }
+                return;
+            }
+            at = self.prepared.node(node).and_then(|n| n.parent);
+        }
+    }
     fn press(&mut self, id: Id, event: &MouseDownEvent, cx: &mut Context<Self>) {
         let button = button_code(event.button);
         self.capture = Some(Capture {
@@ -2677,7 +2695,12 @@ impl SurfaceView {
         if events.pointer() {
             element = element.on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |v, event: &MouseDownEvent, _, cx| {
+                cx.listener(move |v, event: &MouseDownEvent, window, cx| {
+                    // Stopping here also stops GPUI's own focus transfer:
+                    // the press gives the keyboard to the item it lands in.
+                    if !window.default_prevented() {
+                        v.focus_pressed(id, window, cx);
+                    }
                     v.press(id, event, cx);
                     cx.stop_propagation();
                 }),
