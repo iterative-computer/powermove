@@ -2447,9 +2447,12 @@ fn agent_dismisses(open: bool, editor_took_key: bool) -> bool {
     open && editor_took_key
 }
 #[cfg(test)]
-mod agent_close_tests {
-    use super::*;
-    use std::time::Duration;
+mod popover_keys_tests {
+    use super::PopoverKeys;
+    use gpui::{
+        Context, FocusHandle, InteractiveElement, IntoElement, KeyDownEvent, ParentElement,
+        Render, Styled, TestAppContext, Window, div,
+    };
     /// A popover's root as SurfaceWindow draws it: its keys, a control inside.
     struct Popover {
         keys: PopoverKeys,
@@ -2491,6 +2494,11 @@ mod agent_close_tests {
         vcx.simulate_keystrokes("shift-escape");
         assert_eq!(view.read_with(&vcx, |p, _| p.dismissed), 2);
     }
+}
+#[cfg(test)]
+mod agent_close_tests {
+    use super::*;
+    use std::time::Duration;
     #[::core::prelude::v1::test]
     fn the_toolbar_item_toggles_the_agent_popover_closed_and_open() {
         // The reported bug: the item only ever opened (activated) it.
