@@ -6,8 +6,8 @@ use crate::v4_view_tests::{
     PROJECT, Rig, bounds, publication, rig, rig_project, settle, tokens, window,
 };
 use gpui::{
-    App, AppContext, Bounds, Entity, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, Pixels,
-    Point, TestAppContext, VisualTestContext, point, px,
+    App, AppContext, Bounds, CursorStyle, Entity, Modifiers, MouseButton, MouseDownEvent,
+    MouseUpEvent, Pixels, Point, TestAppContext, VisualTestContext, point, px,
 };
 use gpui_macos::native_text::TextEvent;
 use pm_engine_service::OverlayLine;
@@ -605,6 +605,41 @@ fn the_hand_tool_drags_the_view_without_editing(cx: &mut TestAppContext) {
         });
     assert_eq!(total, point(px(30.), px(-12.)));
     assert_eq!(s.pose().position, before.position);
+}
+/// The cursor says what a press does (viewer.ts updateStageCursor): move
+/// inside the selection, rotate on its rotate handle and with the Rotate
+/// tool, zoom in with the Zoom tool and zoom out while ⌥ is held.
+#[gpui::test]
+fn the_viewer_cursor_says_what_a_press_does(cx: &mut TestAppContext) {
+    let mut s = stage(cx);
+    let (center, _, rotate) = s.points();
+    let mut at = |s: &mut Stage, comp: [f64; 2], m: Modifiers| {
+        let p = s.point_of(comp);
+        s.vcx.simulate_mouse_move(p, None, m);
+        cx.run_until_parked();
+        s.surface.read_with(&s.vcx, |g, _| g.cursor_style())
+    };
+    assert_eq!(at(&mut s, center, Modifiers::none()), CursorStyle::Move);
+    assert_eq!(at(&mut s, rotate, Modifiers::none()), CursorStyle::Rotate);
+    assert_eq!(
+        at(&mut s, [-15., -15.], Modifiers::none()),
+        CursorStyle::Arrow
+    );
+    s.recorder.tool.set(Some(Tool::Rotate));
+    assert_eq!(
+        at(&mut s, [-15., -15.], Modifiers::none()),
+        CursorStyle::Rotate
+    );
+    s.recorder.tool.set(Some(Tool::Zoom));
+    assert_eq!(at(&mut s, center, Modifiers::none()), CursorStyle::ZoomIn);
+    assert_eq!(at(&mut s, center, Modifiers::alt()), CursorStyle::ZoomOut);
+    // Letting go of ⌥ without moving flips it back.
+    s.vcx.simulate_modifiers_change(Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(
+        s.surface.read_with(&s.vcx, |g, _| g.cursor_style()),
+        CursorStyle::ZoomIn
+    );
 }
 #[gpui::test]
 fn the_zoom_tool_keeps_the_point_under_the_pointer(cx: &mut TestAppContext) {

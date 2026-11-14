@@ -327,6 +327,10 @@ pub struct GizmoSurface {
     hover_next: Option<Press>,
     /// ⌘/Ctrl held at the last pointer move: the hover reaches the leaf.
     hover_deep: bool,
+    /// ⌥ held: the Zoom tool zooms out (its cursor says so).
+    hover_alt: bool,
+    /// Where the pointer last hovered, to re-read the cursor when ⌥ changes.
+    hover_at: Option<Point<Pixels>>,
     studio: studio3d::State,
     kernel: KernelHandle,
     project: String,
@@ -594,6 +598,8 @@ impl GizmoSurface {
             hover_out: false,
             hover_next: None,
             hover_deep: false,
+            hover_alt: false,
+            hover_at: None,
             studio: Default::default(),
             kernel,
             project,
@@ -936,6 +942,7 @@ impl GizmoSurface {
     }
     /// The cursor promises what a press here does.
     fn hover(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        self.hover_at = Some(position);
         if self.rulers.shown && self.rulers.pointer != Some(position) {
             self.rulers.pointer = Some(position);
             cx.notify();
@@ -985,25 +992,56 @@ impl GizmoSurface {
         } else {
             self.unhover(cx);
         }
+        // viewer.ts updateStageCursor: each tool's own cursor; with Select,
+        // a handle's resize or rotate cursor, and move inside the selection.
         let cursor = match tool {
             _ if ruler.is_some() => ruler.unwrap_or(CursorStyle::Arrow),
             _ if in_text => CursorStyle::IBeam,
             Tool::Hand => CursorStyle::OpenHand,
             Tool::Text => CursorStyle::IBeam,
-            Tool::Anchor | Tool::Zoom | Tool::Shape | Tool::Pen => CursorStyle::Crosshair,
+            Tool::Zoom if self.hover_alt => CursorStyle::ZoomOut,
+            Tool::Zoom => CursorStyle::ZoomIn,
+            Tool::Rotate => CursorStyle::Rotate,
+            Tool::Anchor | Tool::Shape | Tool::Pen => CursorStyle::Crosshair,
             Tool::Select if self.studio_cursor(at, frame).is_some() => {
                 self.studio_cursor(at, frame).unwrap()
             }
-            _ => match self.handle_at(at, frame.scale) {
-                Some(Hit::Handle(index)) => self
-                    .handle_pose()
-                    .map_or(CursorStyle::Arrow, |p| p.cursor(index)),
-                _ => CursorStyle::Arrow,
-            },
+            _ => self.select_cursor(at, frame.scale),
         };
         if cursor != self.cursor {
             self.cursor = cursor;
             cx.notify();
+        }
+    }
+    /// The Select tool's cursor at `at` (composition pixels).
+    fn select_cursor(&self, at: [f64; 2], scale: f64) -> CursorStyle {
+        match self.handle_at(at, scale) {
+            Some(Hit::Handle(index)) => self
+                .handle_pose()
+                .map_or(CursorStyle::Arrow, |p| p.cursor(index)),
+            Some(Hit::Rotate) => CursorStyle::Rotate,
+            Some(_) => CursorStyle::Arrow,
+            // Inside a layer's box or the selection's common box, a drag moves.
+            None if self.transformable()
+                && (self.poses.iter().any(|p| inside(&p.corners, at))
+                    || self.handle_pose().is_some_and(|p| inside(&p.corners, at))) =>
+            {
+                CursorStyle::Move
+            }
+            None => CursorStyle::Arrow,
+        }
+    }
+    /// ⌥ pressed or released over the viewer: the Zoom tool's cursor flips.
+    fn on_modifiers(&mut self, alt: bool, cx: &mut Context<Self>) {
+        if alt == self.hover_alt {
+            return;
+        }
+        self.hover_alt = alt;
+        if self.drag.is_none()
+            && self.host.tool(cx) == Tool::Zoom
+            && let Some(at) = self.hover_at
+        {
+            self.hover(at, cx);
         }
     }
     fn unhover(&mut self, cx: &mut Context<Self>) {
@@ -1464,6 +1502,7 @@ impl GizmoSurface {
         }
         if self.drag.is_none() {
             self.hover_deep = event.modifiers.platform || event.modifiers.control;
+            self.hover_alt = event.modifiers.alt;
             if self.bounds.contains(&event.position) {
                 self.hover(event.position, cx);
             } else {
@@ -1746,6 +1785,10 @@ impl GizmoSurface {
     }
     pub fn controls(&self) -> bool {
         self.controls
+    }
+    #[cfg(test)]
+    pub fn cursor_style(&self) -> CursorStyle {
+        self.cursor
     }
     #[cfg(test)]
     pub fn gesture_active(&self) -> bool {
@@ -2700,6 +2743,11 @@ impl Render for GizmoSurface {
             .on_scroll_wheel(cx.listener(|s, event: &ScrollWheelEvent, window, cx| {
                 s.on_wheel(event, window.line_height(), cx);
             }))
+            .on_modifiers_changed(
+                cx.listener(|s, event: &gpui::ModifiersChangedEvent, _, cx| {
+                    s.on_modifiers(event.modifiers.alt, cx);
+                }),
+            )
             .on_pinch(cx.listener(|s, event: &PinchEvent, _, cx| {
                 if s.studio_pinch(event.delta as f64, cx) {
                     return;
