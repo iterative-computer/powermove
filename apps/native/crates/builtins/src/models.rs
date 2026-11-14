@@ -995,7 +995,10 @@ impl Backend {
         self.native.ensure_timeline()?;
         let client = self.native.timeline.as_ref().ok_or("Timeline closed")?;
         if args["type"] == "graphOptions" {
-            let context = pm_panel_timeline::Context::Graph { series: 0 };
+            // The curves the graph shows decide Fit and Merge, as on the
+            // graph's own menu (v1's options menu has both).
+            let series = client.model.graph_series().0.len();
+            let context = pm_panel_timeline::Context::Graph { series };
             let rows: Vec<Value> = client
                 .model
                 .menu(&context)

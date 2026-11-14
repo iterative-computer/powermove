@@ -1786,8 +1786,9 @@ impl TimelineModel {
             Context::Graph { series } => {
                 add("graph.value", true, self.graph_mode == GraphMode::Value);
                 add("graph.speed", true, self.graph_mode == GraphMode::Speed);
-                add("graph.fit", *series > 0, false);
+                // v1's order: Merge, then Fit.
                 add("graph.merge", *series >= 2, self.graph_merge);
+                add("graph.fit", *series > 0, false);
                 add(
                     "graph.combined",
                     true,

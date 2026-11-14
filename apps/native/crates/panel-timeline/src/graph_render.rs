@@ -18,17 +18,43 @@ pub struct Segment {
 #[derive(Clone, Debug)]
 pub struct Curve {
     pub id: String,
+    /// The channel the curve plots (`position.x`), its legend name and its
+    /// place among the curves shown: they choose its ink (pm-design
+    /// `graph_curve`).
+    pub path: String,
     pub name: String,
-    pub focused: bool,
+    pub index: usize,
+    /// How many layers' curves of this channel are shown as this one (the
+    /// same property on several layers draws once, v1).
+    pub layers: usize,
     pub segments: Vec<Segment>,
     pub points: Vec<GraphPoint>,
+}
+/// A key's mark in the graph, as v1 draws it: a square for a hold, an
+/// hourglass for an eased key, a diamond for a linear one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyShape {
+    Linear,
+    Bezier,
+    Hold,
+}
+impl KeyShape {
+    fn name(self) -> &'static str {
+        match self {
+            KeyShape::Linear => "linear",
+            KeyShape::Bezier => "bezier",
+            KeyShape::Hold => "hold",
+        }
+    }
 }
 #[derive(Clone, Debug)]
 pub struct GraphPoint {
     pub id: String,
     pub point: Point,
     pub selected: bool,
-    /// Direction handles of a selected key in the Value Graph.
+    pub shape: KeyShape,
+    /// Direction handles shown in the Value Graph: a selected key's, and an
+    /// eased side of any key (v1).
     pub handles: Vec<(EaseSide, Point)>,
     pub active_handle: Option<EaseSide>,
 }
@@ -37,8 +63,13 @@ pub struct Graph {
     curves: Vec<Curve>,
     pub min: f64,
     pub max: f64,
-    pub grid: Vec<(f64, String)>,
     pub selection: Option<Rect>,
+    /// The channels plotted, as `(layer, channel)`, and whether the key
+    /// selection chose them (`TimelineModel::graph_series`).
+    pub series: Vec<(String, String)>,
+    pub picked: bool,
+    /// The values the graph plots in Speed mode are rates.
+    pub speed: bool,
 }
 /// What a graph with no curve in it says.
 pub const EMPTY: &str = "Select an animated property to see its curve.";
@@ -53,6 +84,14 @@ pub fn empty_note(region: Rect, t: &Tokens) -> Op {
 fn valid(p: Point) -> bool {
     p.seconds.is_finite() && p.value.is_finite()
 }
+/// A value as the graph prints it: at most two decimals, none it does not
+/// need (v1's `graphValueText`).
+pub fn value_text(value: f64) -> String {
+    let rounded = (value * 100.).round() / 100.;
+    let text = format!("{rounded:.2}");
+    let text = text.trim_end_matches('0').trim_end_matches('.');
+    if text == "-0" { "0".into() } else { text.into() }
+}
 /// Build evaluated curves for the channels in view. Sampling is the evaluator's:
 /// `value` answers one composition time, so holds, eases and expressions plot exactly.
 /// The Speed Graph plots the evaluated rate of change, one-sided at keys so a
@@ -63,31 +102,51 @@ pub fn sample(
 ) -> Option<Graph> {
     const SAMPLES: usize = 24;
     let index = &model.index;
-    let (layer_id, path) = model.graph_property()?;
-    let layer = index.layer(&layer_id)?;
     let speed = model.graph_mode == crate::GraphMode::Speed;
+    let (series, picked) = model.graph_series();
+    if series.is_empty() {
+        return None;
+    }
+    // The same channel on several layers draws once, as the target layer's
+    // (else the first), and the legend counts the layers (v1).
+    let target = model.graph_property().map(|(layer, _)| layer);
+    let mut chosen: Vec<(String, String, usize)> = vec![];
+    for (layer, path) in &series {
+        match chosen.iter_mut().find(|c| c.1 == *path) {
+            Some(c) => {
+                c.2 += 1;
+                if target.as_deref() == Some(layer.as_str()) {
+                    c.0 = layer.clone();
+                }
+            }
+            None => chosen.push((layer.clone(), path.clone(), 1)),
+        }
+    }
+    // `side` picks the difference: -1 before `seconds`, 1 after, 0 across.
+    let mut plot = |layer: &str, path: &str, seconds: f64, side: i8, reach: f64| -> Option<f64> {
+        if !speed {
+            return value(layer, path, seconds);
+        }
+        let h = reach.clamp(1e-6, 1e-3);
+        let (a, b) = match side {
+            -1 => (seconds - h, seconds),
+            1 => (seconds, seconds + h),
+            _ => (seconds - h / 2., seconds + h / 2.),
+        };
+        let rate = (value(layer, path, b)? - value(layer, path, a)?) / (b - a);
+        rate.is_finite().then_some(rate)
+    };
     let mut curves = vec![];
     let mut range = (f64::INFINITY, f64::NEG_INFINITY);
-    for channel in model.track_channels(&layer_id, &path) {
+    for (number, (layer_id, path, layers)) in chosen.iter().enumerate() {
+        let (Some(layer), Some(channel)) = (index.layer(layer_id), index.channel(layer_id, path))
+        else {
+            continue;
+        };
         if channel.keys.is_empty() {
             continue;
         }
         let at = |key: &crate::Key| layer.from + key.time;
-        // `side` picks the difference: -1 before `seconds`, 1 after, 0 across.
-        let mut plot = |seconds: f64, side: i8, reach: f64| -> Option<f64> {
-            if !speed {
-                return value(&layer_id, &channel.path, seconds);
-            }
-            let h = reach.clamp(1e-6, 1e-3);
-            let (a, b) = match side {
-                -1 => (seconds - h, seconds),
-                1 => (seconds, seconds + h),
-                _ => (seconds - h / 2., seconds + h / 2.),
-            };
-            let rate = (value(&layer_id, &channel.path, b)? - value(&layer_id, &channel.path, a)?)
-                / (b - a);
-            rate.is_finite().then_some(rate)
-        };
         let mut segments = vec![];
         for pair in channel.keys.windows(2) {
             let (from, to) = (at(&pair[0]), at(&pair[1]));
@@ -100,10 +159,11 @@ pub fn sample(
                     SAMPLES => -1,
                     _ => 0,
                 };
-                let point = Point {
-                    seconds,
-                    value: plot(seconds, side, reach)?,
+                let Some(value) = plot(layer_id, path, seconds, side, reach) else {
+                    previous = None;
+                    continue;
                 };
+                let point = Point { seconds, value };
                 range = (range.0.min(point.value), range.1.max(point.value));
                 if let Some(previous) = previous {
                     segments.push(Segment {
@@ -121,21 +181,38 @@ pub fn sample(
         } else {
             pm_kernel::commands::keyframes::handle_points(&stored)
         };
+        let interp = |key: &pm_model::Value, field: &str| {
+            key.get(field).and_then(pm_model::Value::as_str).map(str::to_owned)
+        };
         let mut points = vec![];
         for (i, key) in channel.keys.iter().enumerate() {
             let seconds = at(key);
             let last = i + 1 == channel.keys.len();
-            let point = Point {
-                seconds,
-                value: plot(seconds, if last { -1 } else { 1 }, 1e-3)?,
+            let Some(value) = plot(layer_id, path, seconds, if last { -1 } else { 1 }, 1e-3) else {
+                continue;
             };
+            let point = Point { seconds, value };
             range = (range.0.min(point.value), range.1.max(point.value));
-            let selected = model.selection.key_selected(&layer_id, &key.id);
+            let selected = model.selection.key_selected(layer_id, &key.id);
+            let (inp, out) = (interp(&stored[i], "inInterp"), interp(&stored[i], "outInterp"));
+            let hold = stored[i].get("hold").and_then(pm_model::Value::as_bool) == Some(true)
+                || out.as_deref() == Some("hold");
+            let shape = if hold {
+                KeyShape::Hold
+            } else if inp.as_deref() == Some("bezier") || out.as_deref() == Some("bezier") {
+                KeyShape::Bezier
+            } else {
+                KeyShape::Linear
+            };
+            let eased = |side: EaseSide| match side {
+                EaseSide::In => inp.as_deref() == Some("bezier"),
+                _ => out.as_deref() == Some("bezier"),
+            };
             let handles: Vec<_> = handles
                 .get(i)
-                .filter(|_| selected)
                 .into_iter()
                 .flat_map(|[before, after]| [(EaseSide::In, *before), (EaseSide::Out, *after)])
+                .filter(|(side, _)| selected || eased(*side))
                 .filter_map(|(side, p)| {
                     let (t, v) = p?;
                     Some((
@@ -147,21 +224,21 @@ pub fn sample(
                     ))
                 })
                 .collect();
-            for (_, p) in &handles {
-                range = (range.0.min(p.value), range.1.max(p.value));
-            }
             points.push(GraphPoint {
                 id: key.id.clone(),
                 point,
                 selected,
+                shape,
                 handles,
                 active_handle: None,
             });
         }
         curves.push(Curve {
-            id: format!("{layer_id}:{}", channel.path),
-            name: crate::property_label(&channel.path),
-            focused: true,
+            id: format!("{layer_id}:{path}"),
+            path: path.clone(),
+            name: crate::property_label(path),
+            index: number,
+            layers: *layers,
             segments,
             points,
         });
@@ -169,46 +246,27 @@ pub fn sample(
     if curves.is_empty() {
         return None;
     }
-    // Merge Selected Curves: two axes of one motion read as one curve, the
-    // length of the vector they make together (their combined speed in the
-    // Speed Graph). It is a view of the same keys, so it shows no key
-    // points or handles of its own.
+    // Merge Selected Curves: the curves shown fold into the one motion they
+    // describe together, the length of the vector they make (their combined
+    // speed in the Speed Graph). It is a view of the same keys, so it shows
+    // no key points or handles of its own.
     if model.graph_merge && curves.len() > 1 {
-        let length = |points: &[Point]| Point {
-            seconds: points[0].seconds,
-            value: points.iter().map(|p| p.value * p.value).sum::<f64>().sqrt(),
-        };
-        // Every curve was sampled between the same key times only when its
-        // keys agree; sample each span of the union of key times instead.
         let mut times: Vec<f64> = curves
             .iter()
             .flat_map(|c| c.points.iter().map(|p| p.point.seconds))
             .collect();
         times.sort_by(f64::total_cmp);
         times.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
-        let channels: Vec<String> = model
-            .track_channels(&layer_id, &path)
-            .into_iter()
-            .filter(|c| !c.keys.is_empty())
-            .map(|c| c.path.clone())
-            .collect();
         let mut at = |seconds: f64, side: i8, reach: f64| -> Option<Point> {
-            let mut points = vec![];
-            for channel in &channels {
-                let value = if speed {
-                    let h = reach.clamp(1e-6, 1e-3);
-                    let (a, b) = match side {
-                        -1 => (seconds - h, seconds),
-                        1 => (seconds, seconds + h),
-                        _ => (seconds - h / 2., seconds + h / 2.),
-                    };
-                    (value(&layer_id, channel, b)? - value(&layer_id, channel, a)?) / (b - a)
-                } else {
-                    value(&layer_id, channel, seconds)?
-                };
-                points.push(Point { seconds, value });
+            let mut total = 0.;
+            for (layer, path, _) in &chosen {
+                total += plot(layer, path, seconds, side, reach)?.powi(2);
             }
-            Some(length(&points)).filter(|p| p.value.is_finite())
+            Some(Point {
+                seconds,
+                value: total.sqrt(),
+            })
+            .filter(|p| p.value.is_finite())
         };
         let mut segments = vec![];
         range = (f64::INFINITY, f64::NEG_INFINITY);
@@ -236,17 +294,33 @@ pub fn sample(
             }
         }
         if !segments.is_empty() {
+            let count = curves.len();
             curves = vec![Curve {
-                id: format!("{layer_id}:{path}"),
-                name: crate::property_label(&path),
-                focused: true,
+                id: "merged".into(),
+                path: String::new(),
+                name: format!("Merged · {count} curves"),
+                index: 0,
+                layers: 1,
                 segments,
                 points: vec![],
             }];
         }
     }
-    let margin = ((range.1 - range.0) * 0.1).max(1.);
-    Graph::new(curves, range.0 - margin, range.1 + margin).ok()
+    // v1's value range: the curves' extent, a span of at least one, and
+    // 22% of it either side.
+    let (mut min, mut max) = range;
+    if !min.is_finite() {
+        (min, max) = (0., 1.);
+    }
+    if max - min < 1e-6 {
+        max = min + 1.;
+    }
+    let pad = (max - min) * 0.22;
+    let mut graph = Graph::new(curves, min - pad, max + pad).ok()?;
+    graph.series = series;
+    graph.picked = picked;
+    graph.speed = speed;
+    Some(graph)
 }
 impl Graph {
     pub fn curves(&self) -> &[Curve] {
@@ -300,18 +374,28 @@ impl Graph {
             curves,
             min,
             max,
-            grid: grid(min, max),
             selection: None,
+            series: vec![],
+            picked: false,
+            speed: false,
         })
     }
-    pub fn prepare(&self, v: Viewport, bounds: Rect, t: &Tokens) -> Result<Vec<Op>, Error> {
+    /// The graph's paint plan: value lines, curves, their handles and keys
+    /// in `bounds` (the plot), and the legend in `legend` (v1's strip above
+    /// the plot: a swatch and the channel's name per curve).
+    pub fn prepare(
+        &self,
+        v: Viewport,
+        bounds: Rect,
+        legend: Rect,
+        t: &Tokens,
+    ) -> Result<Vec<Op>, Error> {
         if !v.valid()
             || ![bounds.x, bounds.y, bounds.width, bounds.height]
                 .iter()
                 .all(|x| x.is_finite())
             || bounds.width <= 0.
             || bounds.height <= 0.
-            || self.grid.iter().any(|(value, _)| !value.is_finite())
         {
             return Err(Error::InvalidGeometry);
         }
@@ -323,122 +407,128 @@ impl Graph {
         };
         let mut ops = vec![];
         let c = &t.colors;
-        for (value, label) in &self.grid {
-            let y = point(Point {
-                seconds: 0.,
-                value: *value,
-            })[1];
-            // Hairlines in the panel's line ink; the value just above, on the inset.
+        // Everything a curve draws stays inside the plot and the strip above
+        // it, never over the legend.
+        let text = (t.typography.minimum * t.typography.dense_leading) as f64;
+        let below = legend.y + legend.height;
+        let plot = Rect::new(
+            bounds.x,
+            below,
+            bounds.width,
+            (bounds.y + bounds.height + t.metrics.inset as f64 - below).max(0.),
+        );
+        for value in ticks(self.min, self.max, bounds.height) {
+            let y = point(Point { seconds: 0., value })[1];
+            // Hairlines in the panel's line ink, the zero line a step
+            // stronger; the value just above each, on the inset.
             let (ink, alpha) = t.line();
             let mut line = Op::new(
-                format!("graph-grid:{label}"),
+                format!("graph-grid:{value}"),
                 "rect",
                 Rect::new(bounds.x, y, bounds.width, t.metrics.border as f64),
-                ink,
+                if value == 0. { c.muted } else { ink },
             );
-            line.opacity = alpha as f64;
-            let text = (t.typography.minimum * t.typography.dense_leading) as f64;
-            // The plot plus room above it for the top line's label.
-            let labelled = Rect::new(
-                bounds.x,
-                bounds.y - text,
-                bounds.width,
-                bounds.height + text,
-            );
-            line.clip = Some(labelled);
+            line.opacity = if value == 0. { 0.5 } else { alpha as f64 };
+            line.clip = Some(plot);
             ops.push(line);
-            let mut label_op = Op::new(
-                format!("graph-value:{label}"),
+            let mut label = Op::new(
+                format!("graph-value:{value}"),
                 "text",
-                Rect::new(
-                    bounds.x + t.metrics.gap as f64,
-                    y - text,
-                    bounds.width,
-                    text,
-                ),
+                Rect::new(bounds.x + t.metrics.gap as f64, y - text, bounds.width, text),
                 c.muted,
             );
-            label_op.detail = json!({"tabular":true});
-            label_op.text = Some(label.clone());
-            label_op.font_size = t.typography.minimum as f64;
-            label_op.clip = Some(labelled);
-            ops.push(label_op);
+            label.detail = json!({"tabular":true});
+            label.text = Some(tick_text(value));
+            label.font_size = t.typography.minimum as f64;
+            label.clip = Some(plot);
+            ops.push(label);
         }
         let from = v.scroll_time;
         let to = from + (v.width - v.layer_column) / v.pps;
+        let right = v.width;
         for curve in &self.curves {
+            let ink = if curve.path.is_empty() {
+                c.accent
+            } else {
+                t.graph_curve(&curve.path, curve.index)
+            };
             let first = curve.segments.partition_point(|s| s.to.seconds < from);
             let end = curve.segments.partition_point(|s| s.from.seconds <= to);
-            let mut path = Op::new(
-                format!("curve:{}", curve.id),
-                "curve",
-                bounds,
-                if curve.focused { c.text } else { c.secondary },
-            );
+            let mut path = Op::new(format!("curve:{}", curve.id), "curve", bounds, ink);
             path.stroke = 1.5;
-            path.clip = Some(bounds);
+            path.clip = Some(plot);
             path.detail = json!({"segments":curve.segments[first..end].iter().map(|s|json!({"from":point(s.from),"to":point(s.to),"controls":s.controls.map(|points|points.map(point))})).collect::<Vec<_>>()});
             ops.push(path);
-            if let Some(segment) = curve.segments.last() {
-                let p = point(segment.to);
-                // The name sits just above its curve's end, inside the plot.
-                let line = (t.typography.minimum * t.typography.dense_leading) as f64;
-                let y = (p[1] - line - t.metrics.border as f64)
-                    .clamp(bounds.y, (bounds.y + bounds.height - line).max(bounds.y));
-                let mut name = Op::new(
-                    format!("curve-name:{}", curve.id),
-                    "text",
-                    Rect::new(p[0] + t.metrics.gap as f64, y, bounds.width, line),
-                    if curve.focused { c.text } else { c.secondary },
-                );
-                name.text = Some(curve.name.clone());
-                name.font_size = t.typography.minimum as f64;
-                name.clip = Some(bounds);
-                ops.push(name);
+            // Past its last key a curve holds that value: it is printed at
+            // the right edge, over the curve (v1).
+            if let Some(last) = curve.points.last().map(|k| k.point).or(curve.segments.last().map(|s| s.to))
+                && point(last)[0] < right - 55.
+            {
+                let y = point(last)[1];
+                if y >= bounds.y && y <= bounds.y + bounds.height {
+                    let mut o = Op::new(
+                        format!("curve-end:{}", curve.id),
+                        "text",
+                        Rect::new(bounds.x, y - text - t.metrics.border as f64, right - 16. - bounds.x, text),
+                        ink,
+                    );
+                    o.text = Some(value_text(last.value));
+                    o.font_size = t.typography.minimum as f64;
+                    o.detail = json!({"align":"right","tabular":true});
+                    o.clip = Some(plot);
+                    ops.push(o);
+                }
             }
             let start = curve.points.partition_point(|key| key.point.seconds < from);
             let end = curve.points.partition_point(|key| key.point.seconds <= to);
             for key in &curve.points[start..end] {
-                if key.point.seconds < from || key.point.seconds > to {
-                    continue;
-                }
                 let p = point(key.point);
-                let size = t.metrics.keyframe as f64 - 2.;
-                let mut op = Op::new(
-                    format!("graph-key:{}", key.id),
-                    "square",
-                    Rect::new(p[0] - size / 2., p[1] - size / 2., size, size),
-                    if key.selected { c.accent } else { c.text },
-                );
-                op.detail = json!({"keyline":key.selected.then_some(c.panel),"keylineWidth":1.});
-                op.clip = Some(bounds);
-                ops.push(op);
                 for (side, handle) in &key.handles {
                     let h = point(*handle);
                     let side_name = side_name(*side);
+                    let handle_ink = if key.selected {
+                        t.graph_handle_selected()
+                    } else {
+                        ink
+                    };
                     let mut line = Op::new(
                         format!("graph-tangent:{}:{side_name}", key.id),
                         "line",
                         bounds,
-                        c.secondary,
+                        handle_ink,
                     );
                     line.stroke = 1.;
-                    line.detail = json!({"from":p,"to":h});
-                    line.clip = Some(bounds);
+                    line.detail = json!({"from":p,"to":h,"dash":2.});
+                    line.clip = Some(plot);
                     ops.push(line);
+                    // A handle dot: filled when its key is selected, hollow
+                    // (the canvas inside, the curve's ink round it) else.
                     let mut dot = Op::new(
                         format!("graph-handle:{}:{side_name}", key.id),
                         "circle",
                         Rect::new(h[0] - 3., h[1] - 3., 6., 6.),
                         if key.active_handle == Some(*side) {
                             c.accent
+                        } else if key.selected {
+                            handle_ink
                         } else {
-                            c.text
+                            c.panel
                         },
                     );
-                    dot.clip = Some(bounds);
+                    dot.detail = json!({"keyline":handle_ink,"keylineWidth":1.});
+                    dot.clip = Some(plot);
                     ops.push(dot);
                 }
+                let size = GRAPH_VERTEX;
+                let mut op = Op::new(
+                    format!("graph-key:{}", key.id),
+                    "graph-key",
+                    Rect::new(p[0] - size / 2., p[1] - size / 2., size, size),
+                    ink,
+                );
+                op.detail = json!({"shape":key.shape.name(),"selected":key.selected,"ring":c.accent});
+                op.clip = Some(plot);
+                ops.push(op);
             }
         }
         if let Some(rect) = self.selection {
@@ -452,58 +542,70 @@ impl Graph {
             }
             let mut op = Op::new("graph-selection", "ring", rect, c.secondary);
             op.stroke = 1.;
-            op.clip = Some(bounds);
+            op.clip = Some(plot);
             ops.push(op);
-            for (i, (x, y)) in [
-                (rect.x, rect.y),
-                (rect.x + rect.width, rect.y),
-                (rect.x, rect.y + rect.height),
-                (rect.x + rect.width, rect.y + rect.height),
-            ]
-            .into_iter()
-            .enumerate()
-            {
-                let mut op = Op::new(
-                    format!("graph-transform-handle:{i}"),
-                    "square",
-                    Rect::new(x - 3., y - 3., 6., 6.),
-                    c.text,
-                );
-                op.clip = Some(bounds);
-                ops.push(op);
-            }
         }
+        // The legend: the canvas under it, a swatch and the channel's name
+        // per curve, in the curves' order; the surface lays the names out.
+        let mut ground = Op::new("graph-legend-ground", "rect", legend, c.panel);
+        ground.opacity = 1.;
+        ops.push(ground);
+        let rate = if self.speed { "/s" } else { "" };
+        let items: Vec<_> = self
+            .curves
+            .iter()
+            .map(|curve| {
+                let ink = if curve.path.is_empty() {
+                    c.accent
+                } else {
+                    t.graph_curve(&curve.path, curve.index)
+                };
+                let mut name = curve.name.clone();
+                if !rate.is_empty() {
+                    name.push_str(" /s");
+                }
+                if curve.layers > 1 {
+                    name.push_str(&format!(" · {} layers", curve.layers));
+                }
+                json!({"color":ink,"text":name})
+            })
+            .collect();
+        let mut o = Op::new("graph-legend", "legend", legend, c.secondary);
+        o.font_size = t.typography.minimum as f64;
+        o.detail = json!({"items":items,"inset":t.metrics.inset});
+        ops.push(o);
         Ok(ops)
     }
 }
-/// Value lines at a round step giving four or five lines across the range,
-/// labelled with only the decimals the step needs.
-fn grid(min: f64, max: f64) -> Vec<(f64, String)> {
-    let raw = (max - min) / 4.;
-    if !(raw.is_finite() && raw > 0.) {
+/// A key mark's size in the graph (v1's `GRAPH_VERTEX`).
+pub const GRAPH_VERTEX: f64 = 8.;
+/// v1's value ticks: about one every 44 points of plot, on a 1, 2 or 5 step.
+fn ticks(min: f64, max: f64, height: f64) -> Vec<f64> {
+    if !(min.is_finite() && max.is_finite() && max > min) {
         return vec![];
     }
-    let magnitude = 10f64.powf(raw.log10().floor());
-    let step = [1., 2., 2.5, 5., 10.]
+    let rough = (max - min) / (height / 44.).floor().max(2.);
+    let magnitude = 10f64.powf(rough.log10().floor());
+    let step = [1., 2., 5., 10.]
         .into_iter()
-        .map(|f| f * magnitude)
-        .find(|s| *s >= raw)
-        .unwrap_or(10. * magnitude);
-    let decimals = (-(step.log10().floor())
-        + if (step / magnitude).fract() != 0. {
-            1.
-        } else {
-            0.
-        })
-    .max(0.) as usize;
-    let mut value = (min / step).ceil() * step;
-    let mut lines = vec![];
-    while value <= max + step * 1e-9 && lines.len() < 12 {
-        let shown = if value.abs() < step * 1e-9 { 0. } else { value };
-        lines.push((value, format!("{shown:.decimals$}")));
-        value += step;
+        .find(|n| n * magnitude >= rough)
+        .unwrap_or(10.)
+        * magnitude;
+    let mut ticks = vec![];
+    let mut i = (min / step).ceil();
+    while i <= (max / step).floor() && ticks.len() < 100 {
+        let value = format!("{:.12}", i * step).parse::<f64>().unwrap_or(i * step);
+        ticks.push(if value == 0. { 0. } else { value });
+        i += 1.;
     }
-    lines
+    ticks
+}
+/// A tick's label: one decimal at most (v1).
+fn tick_text(value: f64) -> String {
+    let rounded = (value * 10.).round() / 10.;
+    let text = format!("{rounded:.1}");
+    let text = text.strip_suffix(".0").unwrap_or(&text);
+    if text == "-0" { "0".into() } else { text.into() }
 }
 /// The handle side as it appears in op ids: `graph-handle:<key>:<in|out>`.
 pub fn side_name(side: EaseSide) -> &'static str {
@@ -515,22 +617,13 @@ pub fn side_name(side: EaseSide) -> &'static str {
 #[cfg(test)]
 mod grid_tests {
     #[test]
-    fn value_lines_land_on_round_steps_with_only_the_decimals_they_need() {
-        let lines = super::grid(0., 100.);
-        assert_eq!(
-            lines.iter().map(|(_, l)| l.as_str()).collect::<Vec<_>>(),
-            ["0", "25", "50", "75", "100"]
-        );
-        let small = super::grid(-0.3, 0.9);
-        assert_eq!(
-            small.iter().map(|(_, l)| l.as_str()).collect::<Vec<_>>(),
-            ["0.0", "0.5"]
-        );
-        assert!(
-            small
-                .iter()
-                .all(|(v, _)| (-0.3 - 1e-9..=0.9 + 1e-9).contains(v))
-        );
-        assert!(super::grid(1., 1.).is_empty());
+    fn value_ticks_follow_v1_one_per_44_points_on_round_steps() {
+        assert_eq!(super::ticks(0., 100., 220.), [0., 20., 40., 60., 80., 100.]);
+        assert_eq!(super::ticks(-0.3, 0.9, 88.), [0.]);
+        assert!(super::ticks(1., 1., 100.).is_empty());
+        assert_eq!(super::tick_text(0.25), "0.3");
+        assert_eq!(super::tick_text(50.), "50");
+        assert_eq!(super::value_text(79.6149), "79.61");
+        assert_eq!(super::value_text(-0.001), "0");
     }
 }

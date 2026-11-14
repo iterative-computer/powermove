@@ -2306,19 +2306,36 @@ impl Host {
                     return event.as_ptr();
                 }
                 if let Some(host) = weak.upgrade() {
-                    let (palette, fields, window, splitter_focus) = {
+                    let (palette, fields, window, splitter_focus, gpui) = {
                         let h = host.borrow();
                         (
                             h.palette.clone(),
                             h.fields.clone(),
                             h.window.clone(),
                             h.splitter_focus,
+                            h.gpui.clone(),
                         )
                     };
                     if matches!(
                         e.r#type(),
                         NSEventType::LeftMouseDown | NSEventType::RightMouseDown
                     ) {
+                        // A press on the window's own content (a timeline, a
+                        // canvas, a list), not on a hosted control, ends the
+                        // editing of a hosted text field: the keyboard comes
+                        // back with it, so ⌘Z and the other shortcuts reach
+                        // the project, not the field a person left.
+                        if e.windowNumber() == window.windowNumber() {
+                            let editing = window.firstResponder().is_some_and(|r| unsafe {
+                                msg_send![&*r, isKindOfClass: NSTextView::class()]
+                            });
+                            let content = window.contentView().and_then(|v| {
+                                v.hitTest(e.locationInWindow())
+                            });
+                            if editing && content.is_some_and(|hit| std::ptr::eq(&*hit, &*gpui)) {
+                                window.makeFirstResponder(Some(&gpui));
+                            }
+                        }
                         for popup in [&palette, &fields] {
                             let mut p = popup.borrow_mut();
                             if p.model.open && e.windowNumber() != p.window.windowNumber() {

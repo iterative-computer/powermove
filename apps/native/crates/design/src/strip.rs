@@ -316,6 +316,41 @@ impl Tokens {
             primary: oklch(l.mark, (chroma * 1.4).min(0.15), hue),
         }
     }
+    /// A graph curve's ink for channel `path`, the `index`th curve shown:
+    /// X red, Y green and Z blue, any other channel in turn the ink, yellow,
+    /// violet and teal (v1's graph). Each is its layer colour's hue at one
+    /// lightness and chroma per appearance, so curves read alike on the
+    /// timeline canvas and differ by hue alone.
+    pub fn graph_curve(&self, path: &str, index: usize) -> u32 {
+        let l = &self.colors.labels;
+        let hue = if path.ends_with(".x") {
+            Some(l.red)
+        } else if path.ends_with(".y") {
+            Some(l.green)
+        } else if path.ends_with(".z") {
+            Some(l.blue)
+        } else {
+            [None, Some(l.yellow), Some(l.violet), Some(l.teal)][index % 4]
+        };
+        let Some(fill) = hue else {
+            return self.colors.text;
+        };
+        let (_, _, hue) = to_oklch(fill);
+        if self.scheme == Scheme::Dark {
+            oklch(0.74, 0.13, hue)
+        } else {
+            oklch(0.56, 0.14, hue)
+        }
+    }
+    /// The graph's selected direction handles: v1's yellow, in this appearance.
+    pub fn graph_handle_selected(&self) -> u32 {
+        let (_, _, hue) = to_oklch(self.colors.labels.yellow);
+        if self.scheme == Scheme::Dark {
+            oklch(0.83, 0.13, hue)
+        } else {
+            oklch(0.62, 0.14, hue)
+        }
+    }
     pub fn playhead(&self) -> Playhead {
         Playhead {
             // Powermove orange, as v1: the ruler's one bright mark.
