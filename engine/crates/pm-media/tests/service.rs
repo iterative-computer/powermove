@@ -430,3 +430,110 @@ fn session_windows_count_and_shrink_under_the_lease() {
     assert_eq!(u.sessions, 1, "{u:?}");
     assert!(u.frame_cache > 0 && u.pool.external_bytes > 0, "{u:?}");
 }
+
+/// A decoder reference and a cached frame are both pool storage. Keeping a
+/// live decoder may borrow unused frame-cache capacity, within the same
+/// combined lease; a zero decoder request still closes every session.
+#[test]
+fn warm_decoder_borrows_only_unused_frame_capacity() {
+    let src = MediaSource::open(&fixtures_dir().join("vp9-opus.webm")).unwrap();
+    let svc = DecodeService::new(ServiceConfig {
+        pool_free_bytes: 0,
+        ..Default::default()
+    });
+    let mut session = svc
+        .session_with(&src, 7, DecodePurpose::Display, Some(Backend::Ffmpeg))
+        .unwrap();
+    let one = session.frame(0).unwrap().bytes();
+    // A pinned pool slot models reference storage outside the frame cache.
+    let pinned = svc.pool().acquire(8 * pm_media::pool::PAGE).unwrap();
+    let used = svc.usage();
+    let total = used.frame_cache + used.decoders + 16 * one;
+    let usage = svc.apply_lease(MediaLease {
+        frame_cache: total - 1,
+        decoders: 1,
+    });
+    assert!(usage.decoders > 1, "{usage:?}");
+    drop(session);
+    assert_eq!(
+        svc.usage().sessions,
+        1,
+        "unused frame capacity should retain the warm decoder"
+    );
+    for n in 1..12 {
+        let mut session = svc
+            .session_with(&src, 7, DecodePurpose::Display, Some(Backend::Ffmpeg))
+            .unwrap();
+        assert_eq!(
+            session.stats().requests,
+            n,
+            "a decoder was reopened at frame {n}"
+        );
+        session.frame(n).unwrap();
+        drop(session);
+        let u = svc.usage();
+        assert!(u.frame_cache + u.decoders <= total, "{u:?}");
+        assert!(u.frame_cache <= total - 1, "{u:?}");
+    }
+    drop(pinned);
+    let u = svc.apply_lease(MediaLease {
+        frame_cache: total,
+        decoders: 0,
+    });
+    assert_eq!(
+        u.sessions, 0,
+        "zero is a close request even with unused frame capacity"
+    );
+    let u = svc.apply_lease(MediaLease {
+        frame_cache: 0,
+        decoders: 0,
+    });
+    assert_eq!(
+        u.frame_cache + u.decoders,
+        0,
+        "all cache and pool storage returns on a zero lease"
+    );
+}
+
+#[test]
+fn a_displayed_decoder_displaces_cold_idle_state_before_reopening() {
+    let src = MediaSource::open(&fixtures_dir().join("vp9-opus.webm")).unwrap();
+    let svc = DecodeService::new(ServiceConfig {
+        cache_bytes: 0,
+        pool_free_bytes: 0,
+        ..Default::default()
+    });
+    {
+        let mut cold = svc
+            .session_with(&src, 7, DecodePurpose::Display, Some(Backend::Ffmpeg))
+            .unwrap();
+        cold.frame(10).unwrap();
+    }
+    let budget = svc.usage().decoders;
+    assert!(budget > 0);
+    svc.apply_lease(MediaLease {
+        frame_cache: 0,
+        decoders: budget,
+    });
+    svc.note_display(src.id, 8);
+    {
+        let mut current = svc
+            .session_with(&src, 8, DecodePurpose::Display, Some(Backend::Ffmpeg))
+            .unwrap();
+        current.frame(10).unwrap();
+    }
+    assert_eq!(svc.usage().sessions, 1);
+    assert!(svc.usage().decoders <= budget);
+    let mut current = svc
+        .session_with(&src, 8, DecodePurpose::Display, Some(Backend::Ffmpeg))
+        .unwrap();
+    assert_eq!(
+        current.stats().requests,
+        1,
+        "the cold idle decoder evicted the displayed one"
+    );
+    current.frame(11).unwrap();
+    assert_eq!(current.stats().seeks, 1, "the displayed run should continue");
+    drop(current);
+    assert!(svc.usage().decoders <= budget);
+}

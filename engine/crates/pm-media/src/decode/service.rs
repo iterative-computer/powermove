@@ -20,9 +20,9 @@ use pm_protocol::color::ColorDescription;
 use pm_protocol::common::ByteSize;
 use pm_protocol::lease::LeaseCategories;
 use pm_time::{Rate, Tick};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 static NEXT_SOURCE: AtomicU64 = AtomicU64::new(1);
@@ -259,8 +259,10 @@ impl Default for ServiceConfig {
 pub struct MediaLease {
     /// The frame cache budget.
     pub frame_cache: usize,
-    /// Decoded memory outside the frame cache: session windows, decoder
-    /// references, frames renderers still hold, and free pool slots.
+    /// Base allowance outside the frame cache: session windows, decoder
+    /// references, frames renderers still hold, and free pool slots. Warm
+    /// references may borrow unused frame-cache capacity within the same
+    /// combined allowance; zero still requests that every session close.
     pub decoders: usize,
 }
 
@@ -332,8 +334,12 @@ pub struct DecodeService {
     open_sessions: AtomicU64,
     /// Decoders a failed session's recovery tried to open, in all.
     recovery_opens: AtomicU64,
-    /// The lease's decoder share ([`MediaLease::decoders`]).
-    decoder_budget: AtomicUsize,
+    /// The two media shares are one bounded pool: warm decoder references
+    /// can borrow only the frame-cache capacity that is not being kept.
+    lease: Mutex<MediaLease>,
+    /// Most recently displayed streams, not background preparation. Bounded
+    /// metadata lets a clip being shown displace older idle decoders first.
+    displayed: Mutex<VecDeque<SessionKey>>,
 }
 
 /// A session checked out of the pool; it returns on drop.
@@ -408,10 +414,13 @@ impl SessionGuard<'_> {
                 self.service.cache.insert(key, fr.clone());
             }
         }
-        // Over the decoder share (a shrunken lease), the window gives back
-        // the frames the cache could not keep.
+        // Over the combined allowance, older idle state gives way before
+        // the current window returns frames the cache could not keep.
         if self.service.decoders_over() {
-            s.clear_window();
+            self.service.fit_older_than(self.key);
+            if self.service.decoders_over() {
+                s.clear_window();
+            }
         }
         f
     }
@@ -544,10 +553,9 @@ impl Drop for SessionGuard<'_> {
     fn drop(&mut self) {
         if let Some(mut s) = self.session.take() {
             let svc = self.service;
-            // Over the decoder share, the session returns without its window,
-            // and closes when that is still not enough (always for a zero
-            // share, as in `fit_decoders`).
-            let zero = svc.decoder_budget.load(Ordering::Relaxed) == 0;
+            // Over the combined media allowance, return the window first,
+            // then close if needed. A zero decoder share always closes it.
+            let zero = svc.lease.lock().unwrap().decoders == 0;
             // PM_FIX_KEEP_SESSION: over the share, a session gives back its
             // window but stays open as its key's one idle session; cold
             // sources and idle release close it.
@@ -560,6 +568,9 @@ impl Drop for SessionGuard<'_> {
                     .unwrap()
                     .get(&self.key)
                     .is_none_or(|l| l.is_empty());
+            if !zero && svc.decoders_over() {
+                svc.fit_older_than(self.key);
+            }
             if zero || svc.decoders_over() {
                 s.clear_window();
                 // Returned window buffers are free pool storage now. Release
@@ -628,8 +639,29 @@ impl DecodeService {
             scrubbed_ms: AtomicU64::new(0),
             open_sessions: AtomicU64::new(0),
             recovery_opens: AtomicU64::new(0),
-            decoder_budget: AtomicUsize::new(usize::MAX),
+            lease: Mutex::new(MediaLease::UNLIMITED),
+            displayed: Mutex::new(VecDeque::new()),
         }
+    }
+
+    /// The display is asking for this source now. Preparation does not
+    /// call this: a future clip must not displace the one being displayed.
+    pub fn note_display(&self, source: u64, instance: InstanceId) {
+        let key = SessionKey {
+            source,
+            instance,
+            purpose: DecodePurpose::Display,
+        };
+        let mut displayed = self.displayed.lock().unwrap();
+        if let Some(at) = displayed.iter().position(|k| *k == key) {
+            displayed.remove(at);
+        }
+        displayed.push_front(key);
+        displayed.truncate(32);
+    }
+
+    fn fit_older_than(&self, key: SessionKey) {
+        self.fit_decoders_before(Some(key));
     }
 
     /// How many decoders failed sessions' recoveries tried to open. For tests.
@@ -747,44 +779,79 @@ impl DecodeService {
         }
     }
 
-    /// Applies a lease change and enforces it: the frame cache evicts down
-    /// to its share; over the decoder share, idle sessions drop their
-    /// windows, free pool memory is released, and idle sessions close until
-    /// usage fits (all of them for a zero share). Sessions in use give their windows back at their next
-    /// request and close on return while usage is still over. Returns the
-    /// usage afterwards (the acknowledgement; frames renderers still hold
-    /// count until they let go).
+    /// Applies a lease change and enforces it. The frame cache stays within
+    /// its maximum and yields unused capacity to warm decoder references.
+    /// Over their combined allowance, windows and free buffers go first,
+    /// then idle sessions. A zero decoder share closes every idle session.
+    /// Checked-out sessions return their windows at their next request and
+    /// close on return while still over. Live frames remain counted until
+    /// their renderer lets them go.
     pub fn apply_lease(&self, lease: MediaLease) -> MediaUsage {
+        *self.lease.lock().unwrap() = lease;
         self.cache.set_budget(lease.frame_cache);
-        self.decoder_budget.store(lease.decoders, Ordering::Relaxed);
         self.fit_decoders();
         self.usage()
     }
 
-    /// Whether decoder memory exceeds the lease's decoder share.
+    /// A decoder may use the unused part of the frame-cache share, but
+    /// their combined retained bytes must still fit the unchanged lease.
+    /// Zero decoder leases remain a request to close every idle session.
     fn decoders_over(&self) -> bool {
-        let budget = self.decoder_budget.load(Ordering::Relaxed);
-        budget != usize::MAX && self.usage().decoders > budget
+        let lease = *self.lease.lock().unwrap();
+        if lease.decoders == usize::MAX {
+            return false;
+        }
+        if lease.decoders == 0 || lease.frame_cache == 0 {
+            return self.usage().decoders > lease.decoders;
+        }
+        let total = lease.decoders.saturating_add(lease.frame_cache);
+        let usage = self.usage();
+        if usage.decoders.saturating_add(usage.frame_cache) > total && usage.pool.free_bytes > 0 {
+            // Reusable free storage gives way before cached answers do.
+            self.pool.trim(0);
+        }
+        let usage = self.usage();
+        self.cache
+            .set_budget(lease.frame_cache.min(total.saturating_sub(usage.decoders)));
+        let usage = self.usage();
+        usage.decoders.saturating_add(usage.frame_cache) > total
     }
 
-    /// Brings decoder memory within the decoder share, cheapest first.
+    /// Brings combined media memory within its allowance, cheapest first.
     fn fit_decoders(&self) {
+        self.fit_decoders_before(None);
+    }
+
+    fn fit_decoders_before(&self, before: Option<SessionKey>) {
         let mut idle = self.idle.lock().unwrap();
+        let displayed = self.displayed.lock().unwrap().clone();
+        let rank = |key: &SessionKey| displayed.iter().position(|k| k == key).unwrap_or(usize::MAX);
+        let before = before.map(|key| rank(&key));
+        let eligible = |key: &SessionKey| before.is_none_or(|current| rank(key) > current);
         if self.decoders_over() {
-            for s in idle.values_mut().flatten() {
-                s.clear_window();
+            for (key, sessions) in idle.iter_mut() {
+                if eligible(key) {
+                    for s in sessions {
+                        s.clear_window();
+                    }
+                }
             }
         }
         self.trim_free();
         // A zero share closes every idle session: the state VideoToolbox
         // keeps per session is not measurable, so nothing else frees it.
-        let zero = self.decoder_budget.load(Ordering::Relaxed) == 0;
+        let zero = self.lease.lock().unwrap().decoders == 0;
         // PM_FIX_KEEP_SESSION=2: over the share, idle sessions keep only
         // their decoder (windows and free pool memory go above); only a zero
         // share (idle release, project close) closes them.
         let keep = super::diag::knob("PM_FIX_KEEP_SESSION") == Some(2) || self.scrubbing();
         while zero || (!keep && self.decoders_over()) {
-            let Some(s) = idle.values_mut().find_map(|l| l.pop()) else {
+            let key = idle
+                .iter()
+                .filter(|(key, list)| !list.is_empty() && eligible(key))
+                .max_by_key(|(key, _)| rank(key))
+                .map(|(key, _)| *key);
+            let Some(s) = key.and_then(|key| idle.get_mut(&key).and_then(|list| list.pop())) else {
                 break;
             };
             drop(s);
@@ -795,14 +862,22 @@ impl DecodeService {
         idle.retain(|_, l| !l.is_empty());
     }
 
-    /// Keeps free pool memory within the configured amount and what the
-    /// decoder share leaves after live memory.
+    /// Free buffers use only what the combined allowance leaves after
+    /// cached frames and live decoder storage, within the configured cap.
     fn trim_free(&self) {
-        let budget = self.decoder_budget.load(Ordering::Relaxed);
+        let lease = *self.lease.lock().unwrap();
         let u = self.usage();
         let live = u.decoders - u.pool.free_bytes.min(u.decoders);
-        self.pool
-            .trim(self.config.pool_free_bytes.min(budget.saturating_sub(live)));
+        let free = if lease.decoders == 0 {
+            0
+        } else {
+            lease
+                .decoders
+                .saturating_add(lease.frame_cache)
+                .saturating_sub(u.frame_cache)
+                .saturating_sub(live)
+        };
+        self.pool.trim(self.config.pool_free_bytes.min(free));
     }
 
     pub fn usage(&self) -> MediaUsage {

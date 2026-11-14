@@ -1779,7 +1779,7 @@ impl Engine {
             found
         } else {
             let uploading = std::time::Instant::now();
-            let surface = self.cache_surface(size)?;
+            let surface = self.cache_surface_for(size, spec.moment == Moment::Playing && !spec.exact)?;
             if let Some((_, pixels)) = disk {
                 self.upload(&surface, size, &pixels);
                 if let Some(error) = self.failed.lock().unwrap().take() {
@@ -2105,6 +2105,9 @@ impl Engine {
     /// A pooled surface of `size` for a frame the cache will hold, making
     /// room in the cache first.
     fn cache_surface(&mut self, size: Size) -> Result<Arc<ExportedSurface>> {
+        self.cache_surface_for(size, false)
+    }
+    fn cache_surface_for(&mut self, size: Size, playing: bool) -> Result<Arc<ExportedSurface>> {
         let bytes = u64::from(size.width) * u64::from(size.height) * 8;
         // PM_FIX_OUT_HALF: the output frame cache keeps within half the
         // engine's grant, leaving the rest to decode and conversion.
@@ -2117,12 +2120,27 @@ impl Engine {
         } else {
             FRAME_CACHE_BYTES
         };
-        let capacity = ((limit / bytes).clamp(1, 8)) as usize;
+        // A linear playback run needs its current and upcoming surfaces,
+        // not a long cache of frames it has already passed. Returning those
+        // bytes lets the same grant retain the live video working set.
+        let capacity = ((limit / bytes).clamp(1, if playing { 3 } else { 8 })) as usize;
         while self.cache.len() >= capacity {
             self.cache.pop_front();
         }
         self.pool
             .retain(|s| s.size == size || Arc::strong_count(s) > 1);
+        // Reclaim free surplus when a paused cache becomes a playing pool.
+        // In-flight references are kept and return on subsequent frames.
+        while self.pool.iter().filter(|s| s.size == size).count() > capacity {
+            let Some(free) = self
+                .pool
+                .iter()
+                .position(|s| s.size == size && Arc::strong_count(s) == 1)
+            else {
+                break;
+            };
+            self.pool.remove(free);
+        }
         // The half-grant bound covers the output surfaces in flight too,
         // including frames with stand-ins (which never enter `self.cache`).
         // Keeping a full cache beside those surfaces starved video decode
@@ -3229,6 +3247,39 @@ mod lifetime_tests {
 #[cfg(test)]
 mod playback_pool_tests {
     use super::*;
+
+    #[test]
+    fn a_playing_pool_returns_surplus_without_increasing_its_grant() {
+        let mut engine = Engine::without_definitions(
+            Gpu::new("playing-pool-returns-surplus").unwrap(),
+            None,
+        )
+        .unwrap();
+        let size = Size::new(1612, 850);
+        let grant = engine.memory_client.grant();
+        let held: Vec<_> = (0..6)
+            .map(|_| engine.cache_surface(size).unwrap())
+            .collect();
+        assert_eq!(engine.pool.len(), 6);
+        drop(held);
+        let mut flights = VecDeque::new();
+        for _ in 0..32 {
+            if flights.len() == 3 {
+                flights.pop_front();
+            }
+            flights.push_back(engine.cache_surface_for(size, true).unwrap());
+            assert_eq!(engine.pool.len(), 3, "free surfaces of past frames must return");
+            assert_eq!(
+                engine.memory_client.grant(),
+                grant,
+                "the playback allowance stays fixed"
+            );
+        }
+        assert!(
+            engine.memory_usage().surface_bytes
+                <= 3 * u64::from(size.width) * u64::from(size.height) * 8
+        );
+    }
 
     #[test]
     fn in_flight_stand_ins_share_the_output_cache_allowance() {
