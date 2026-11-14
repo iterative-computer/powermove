@@ -101,7 +101,20 @@ impl ResourceFeed {
             viewers: vec![],
         })))
     }
-    /// The viewer draws this feed's resources from now on.
+    /// A viewer placed by `make` with this feed's latest snapshot, attached
+    /// before any publication can pass it by (`EngineService::viewer_fed`).
+    pub(crate) fn place(
+        &self,
+        make: impl FnOnce(std::sync::Arc<ResourceSnapshot>) -> anyhow::Result<crate::Viewer>,
+    ) -> anyhow::Result<crate::Viewer> {
+        let mut feed = self.0.lock().unwrap();
+        feed.viewers.retain(crate::Viewer::live);
+        let viewer = make(feed.current.clone())?;
+        feed.viewers.push(viewer.clone());
+        Ok(viewer)
+    }
+    /// The viewer draws this feed's resources from now on (one already
+    /// drawing; a new one is placed with [`crate::EngineService::viewer_fed`]).
     pub fn attach(&self, viewer: &crate::Viewer) -> anyhow::Result<()> {
         let mut feed = self.0.lock().unwrap();
         feed.viewers.retain(crate::Viewer::live);
