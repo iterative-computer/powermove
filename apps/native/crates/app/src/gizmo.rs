@@ -151,7 +151,14 @@ pub trait Host: 'static {
     fn frame(&self, bounds: Bounds<Pixels>, cx: &App) -> Option<ViewFrame>;
     fn tool(&self, cx: &App) -> Tool;
     /// Publish engine-drawn lines, normalized to the composition frame.
-    fn overlay(&self, lines: Vec<OverlayLine>, cx: &mut App);
+    /// The outline and handles, normalized to the composition, and where the
+    /// composition sits in the viewer view (`None`: nothing to place them by).
+    fn overlay(
+        &self,
+        lines: Vec<OverlayLine>,
+        at: Option<crate::gizmo_layer::Placement>,
+        cx: &mut App,
+    );
     fn navigate(&self, change: Navigate, cx: &mut App);
     /// The shared layer menu, on the selection the press made.
     /// The right-click menu over `layer`, or over empty canvas.
@@ -272,6 +279,18 @@ enum Job {
     Select(Option<String>),
     /// Select these layers (the copies an Option-drag made).
     SelectLayers(Vec<String>),
+}
+impl Job {
+    /// For the main-thread trace.
+    fn kind(&self) -> &'static str {
+        match self {
+            Job::Begin(_) => "begin",
+            Job::Step(..) => "step",
+            Job::Finish(_) => "finish",
+            Job::Transact(..) => "transact",
+            Job::Select(_) | Job::SelectLayers(_) => "select",
+        }
+    }
 }
 pub struct GizmoSurface {
     /// The layer a click would select under the pointer, outlined
@@ -613,7 +632,7 @@ impl GizmoSurface {
     fn reread(&mut self, cx: &mut Context<Self>) {
         if self.host.playing(cx) {
             self.poses = Default::default();
-            self.host.overlay(vec![], cx);
+            self.host.overlay(vec![], None, cx);
             return;
         }
         self.latest += 1;
@@ -763,7 +782,19 @@ impl GizmoSurface {
             lines.extend(self.studio_lines(frame));
         }
         lines.truncate(pm_engine_service::OverlayGeometry::MAX_LINES);
-        self.host.overlay(lines, cx);
+        // The composition's rectangle in the viewer view (the gizmo covers it).
+        let at = crate::gizmo_layer::Placement {
+            origin: [
+                f64::from(f32::from(frame.origin.x - self.bounds.origin.x)),
+                f64::from(f32::from(frame.origin.y - self.bounds.origin.y)),
+            ],
+            size: [frame.size[0] * frame.scale, frame.size[1] * frame.scale],
+            view: [
+                f64::from(f32::from(self.bounds.size.width)),
+                f64::from(f32::from(self.bounds.size.height)),
+            ],
+        };
+        self.host.overlay(lines, Some(at), cx);
     }
     fn to_comp(&self, position: Point<Pixels>, frame: ViewFrame) -> [f64; 2] {
         let at = position - frame.origin;
@@ -1649,6 +1680,7 @@ impl GizmoSurface {
             self.host.input(at, cx);
         }
         let (kernel, project, gesture) = (self.kernel.clone(), self.project.clone(), self.gesture);
+        let (started, kind) = (std::time::Instant::now(), job.kind());
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
@@ -1716,6 +1748,9 @@ impl GizmoSurface {
                         .map_err(|e| format!("{e:?}"))
                 })
                 .await;
+            crate::diag::line(
+                serde_json::json!({"gizmo": kind, "ms": started.elapsed().as_secs_f64() * 1000.}),
+            );
             let _ = this.update(cx, |s, cx| {
                 s.busy = false;
                 match result {

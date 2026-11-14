@@ -129,7 +129,12 @@ impl Host for Recording {
     fn tool(&self, _: &App) -> Tool {
         self.0.tool.get().unwrap_or(Tool::Select)
     }
-    fn overlay(&self, lines: Vec<OverlayLine>, _: &mut App) {
+    fn overlay(
+        &self,
+        lines: Vec<OverlayLine>,
+        _: Option<crate::gizmo_layer::Placement>,
+        _: &mut App,
+    ) {
         *self.0.lines.borrow_mut() = lines;
     }
     fn navigate(&self, change: Navigate, _: &mut App) {
@@ -613,7 +618,7 @@ impl Host for OwnerHost {
     fn tool(&self, _: &App) -> Tool {
         Tool::Select
     }
-    fn overlay(&self, _: Vec<OverlayLine>, cx: &mut App) {
+    fn overlay(&self, _: Vec<OverlayLine>, _: Option<crate::gizmo_layer::Placement>, cx: &mut App) {
         let _ = self.0.update(cx, |o, _| o.overlays += 1);
     }
     fn navigate(&self, _: Navigate, _: &mut App) {}

@@ -174,7 +174,7 @@ pub struct Controller {
     pub closing_note: Option<String>,
     pub close_window: Option<gpui::AnyWindowHandle>,
     pub close_operation: Option<crate::mcp::Operation>,
-    pub gizmo_lines: Vec<pm_engine_service::OverlayLine>,
+    pub gizmo_layer: Option<crate::gizmo_layer::GizmoLayer>,
     /// The toolbar tool, mirrored from shell commands for native surfaces.
     pub tool: String,
     /// The Shape tool's variant (`rect`, `rounded`, `ellipse`, `polygon`, `star`).
@@ -794,7 +794,7 @@ impl Controller {
             closing_note: None,
             close_window: None,
             close_operation: None,
-            gizmo_lines: vec![],
+            gizmo_layer: None,
             tool: "toolSelect".into(),
             shape_variant: "rect".into(),
             view: Default::default(),

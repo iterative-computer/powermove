@@ -2129,8 +2129,13 @@ impl crate::gizmo::Host for ControllerDelegate {
             _ => Tool::Other,
         }
     }
-    fn overlay(&self, lines: Vec<pm_engine_service::OverlayLine>, cx: &mut App) {
-        let _ = self.0.update(cx, |v, _| v.set_gizmos(lines));
+    fn overlay(
+        &self,
+        lines: Vec<pm_engine_service::OverlayLine>,
+        at: Option<crate::gizmo_layer::Placement>,
+        cx: &mut App,
+    ) {
+        let _ = self.0.update(cx, |v, _| v.set_gizmos(lines, at));
     }
     fn pick_surface(
         &self,
