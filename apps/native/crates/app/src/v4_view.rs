@@ -92,6 +92,29 @@ const POINTER: u64 = 1;
 #[path = "v4_grade.rs"]
 mod grade;
 
+/// A number field's value after an arrow key: the typed text (else the
+/// field's value) one step up or down, ten with Shift, within its limits.
+fn arrow_step(typed: &str, facts: crate::v4_compile::NumberFacts, key: &str) -> f64 {
+    let current = typed
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|n| n.is_finite())
+        .unwrap_or(facts.value);
+    let step = if facts.step > 0. { facts.step } else { 1. };
+    let delta = match key {
+        "up" => step,
+        "down" => -step,
+        "shiftUp" => step * 10.,
+        _ => -step * 10.,
+    };
+    let next = current + delta;
+    // A step keeps to the step's own grid: 0.1 + 0.2 shows 0.3.
+    let places = (-step.log10().floor()).max(0.) as i32 + 1;
+    let scale = 10f64.powi(places);
+    ((next * scale).round() / scale).clamp(facts.min, facts.max)
+}
+
 /// A press on a number field: a click edits, a drag scrubs (language.md §9).
 /// A press on a grading control (`grade`) drags it through the same gesture.
 struct ScrubDrag {
@@ -1031,6 +1054,21 @@ impl SurfaceView {
                             };
                             this.send(id, "keydown", detail, cx);
                         }
+                    }
+                    // Up and Down in a number field step its value (Shift:
+                    // ten steps) and write it, as a spin field does.
+                    TextEvent::Key(key @ ("up" | "down" | "shiftUp" | "shiftDown")) if number => {
+                        let Some(facts) = this.prepared.node(id).and_then(|n| n.number) else {
+                            return;
+                        };
+                        let Some(field) = this.fields.get(&id).cloned() else {
+                            return;
+                        };
+                        let typed = field.read(cx).editing_text();
+                        let next = arrow_step(&typed, facts, key);
+                        let shown = facts.text(next);
+                        field.update(cx, |f, cx| f.replace_text(&shown, cx));
+                        this.change(id, json!(next), cx);
                     }
                     // Canvas editors only.
                     TextEvent::Selection { .. } | TextEvent::Key(_) | TextEvent::Blurred => {}
@@ -3359,6 +3397,30 @@ fn host_rows_source(node: &pm_surface::Node) -> Option<Value> {
 mod tests {
     use super::file_drop;
     use serde_json::json;
+
+    /// Up and Down step a number field from what is typed (else its value),
+    /// ten steps with Shift, on the step's grid, within the field's limits.
+    #[test]
+    fn arrow_keys_step_a_number_field() {
+        let facts = crate::v4_compile::NumberFacts {
+            value: 0.,
+            step: 0.1,
+            speed: 1.,
+            min: -10.,
+            max: 10.,
+            precision: None,
+        };
+        assert_eq!(super::arrow_step("0.5", facts, "up"), 0.6);
+        assert_eq!(super::arrow_step("0.2", facts, "up"), 0.3);
+        assert_eq!(super::arrow_step("0.5", facts, "down"), 0.4);
+        assert_eq!(super::arrow_step("0.5", facts, "shiftUp"), 1.5);
+        assert_eq!(super::arrow_step("", facts, "down"), -0.1);
+        assert_eq!(super::arrow_step("9.95", facts, "shiftUp"), 10.);
+        let whole = crate::v4_compile::NumberFacts { step: 1., ..facts };
+        assert_eq!(super::arrow_step("3", whole, "down"), 2.);
+        let unstepped = crate::v4_compile::NumberFacts { step: 0., ..facts };
+        assert_eq!(super::arrow_step("3", unstepped, "up"), 4.);
+    }
 
     #[test]
     fn a_file_drop_carries_paths_under_the_key_the_project_panel_reads() {
