@@ -1986,3 +1986,382 @@ fn a_double_click_on_an_imported_model_focuses_the_part_under_the_pointer(cx: &m
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+/// The stage with a camera, a softbox and a box added as Studio 3D layers.
+fn studio_stage(cx: &mut TestAppContext) -> Stage {
+    let mut s = stage(cx);
+    for args in [
+        serde_json::json!({"operation":"add_camera","id":"cam","patch":{"p":{"x":0,"y":1,"z":6,"targetX":0,"targetY":0,"targetZ":0}}}),
+        serde_json::json!({"operation":"add_object","id":"box","object":{"source":{"primitive":"box"}}}),
+        serde_json::json!({"operation":"add_light","id":"key","light":{"type":"area","p":{"x":1.2,"y":1,"z":1.5,"targetX":0.2,"targetY":0.5,"targetZ":0,"width":1,"height":0.6}}}),
+    ] {
+        let ack = s
+            .rig
+            .kernel
+            .call(
+                PROJECT,
+                Request::new(
+                    Caller::native(),
+                    Call::Transact {
+                        label: None,
+                        expected_revision: None,
+                        body: pm_kernel::WriteBody::Commands(vec![
+                            pm_kernel::Scene3dCommand::Apply {
+                                comp: None,
+                                args: pm_scene3d::to_model(&args),
+                                selection: vec![],
+                                time: 0.,
+                                autokey: false,
+                            }
+                            .into(),
+                        ]),
+                    },
+                ),
+            )
+            .wait()
+            .unwrap()
+            .unwrap();
+        assert!(
+            !matches!(ack.reply, pm_kernel::Reply::Throw(_)),
+            "{:?}",
+            ack.reply
+        );
+    }
+    s.refresh(cx);
+    let surface = s.surface.clone();
+    settle(cx, move |cx| {
+        surface.read_with(cx, |g, _| g.studio_active())
+    });
+    s
+}
+/// Refresh for a 3D selection: it has no 2D poses to wait for.
+fn refresh_3d(s: &mut Stage, cx: &mut TestAppContext) {
+    s.surface.update(&mut s.vcx, |g, cx| g.refresh(cx));
+    let surface = s.surface.clone();
+    settle(cx, move |cx| surface.read_with(cx, |g, _| g.idle()));
+}
+/// A pointer drag on 3D handles, as `Stage::drag` without its 2D refresh.
+fn drag_3d(s: &mut Stage, cx: &mut TestAppContext, from: Point<Pixels>, by: Point<Pixels>) {
+    let m = Modifiers::none();
+    s.vcx.simulate_mouse_down(from, MouseButton::Left, m);
+    for step in 1..=3 {
+        let at = from + point(by.x * (step as f32 / 3.), by.y * (step as f32 / 3.));
+        s.vcx.simulate_mouse_move(at, MouseButton::Left, m);
+        let g = s.surface.clone();
+        settle(cx, move |cx| g.read_with(cx, |g, _| g.idle()));
+    }
+    s.vcx.simulate_mouse_up(from + by, MouseButton::Left, m);
+    let g = s.surface.clone();
+    settle(cx, move |cx| g.read_with(cx, |g, _| g.idle()));
+    assert!(
+        s.recorder.reports.borrow().is_empty(),
+        "{:?}",
+        s.recorder.reports.borrow()
+    );
+    refresh_3d(s, cx);
+}
+fn undo_3d(s: &mut Stage, cx: &mut TestAppContext) {
+    s.rig
+        .kernel
+        .call(
+            PROJECT,
+            Request::new(Caller::native(), Call::History(HistoryCall::Undo)),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    refresh_3d(s, cx);
+}
+/// The document's layer `id`, as stored.
+fn stored(s: &Stage, id: &str) -> serde_json::Value {
+    let p = s.rig.kernel.published(PROJECT).unwrap();
+    let root = pm_scene3d::from_model(&p.snapshot.root().unwrap().to_value()).unwrap();
+    fn find(v: &serde_json::Value, id: &str) -> Option<serde_json::Value> {
+        match v {
+            serde_json::Value::Object(o) => {
+                if o.get("id").and_then(|i| i.as_str()) == Some(id) && o.contains_key("p") {
+                    return Some(v.clone());
+                }
+                o.values().find_map(|c| find(c, id))
+            }
+            serde_json::Value::Array(a) => a.iter().find_map(|c| find(c, id)),
+            _ => None,
+        }
+    }
+    find(&root, id).unwrap_or_else(|| panic!("no layer {id} in {root}"))
+}
+/// Looking around a 3D composition (scroll, the Hand tool) moves only the
+/// editor view: the document — the shot camera's position, aim and keys —
+/// is untouched, nothing pans the 2D viewer, and View camera returns.
+#[gpui::test]
+fn navigating_3d_moves_only_the_editor_view_and_view_camera_returns(cx: &mut TestAppContext) {
+    let mut s = studio_stage(cx);
+    let document = |s: &Stage| {
+        pm_scene3d::from_model(
+            &s.rig
+                .kernel
+                .published(PROJECT)
+                .unwrap()
+                .snapshot
+                .root()
+                .unwrap()
+                .to_value(),
+        )
+        .unwrap()
+    };
+    let before = document(&s);
+    assert!(!s.surface.read_with(&s.vcx, |g, _| g.studio_free()));
+    // A trackpad's two-finger scroll orbits.
+    let at = s.point_of([320., 180.]);
+    s.vcx.simulate_event(gpui::ScrollWheelEvent {
+        position: at,
+        delta: gpui::ScrollDelta::Pixels(point(px(60.), px(-20.))),
+        modifiers: Modifiers::none(),
+        touch_phase: gpui::TouchPhase::Moved,
+    });
+    cx.run_until_parked();
+    let orbited = s.surface.read_with(&s.vcx, |g, _| g.studio_free_pose());
+    assert!(orbited.is_some(), "the first navigation leaves the shot");
+    assert!(s.surface.read_with(&s.vcx, |g, _| g.studio_free()));
+    // ⇧ pans and a wheel dollies; the Hand tool's drag orbits too.
+    for (delta, m) in [
+        (
+            gpui::ScrollDelta::Pixels(point(px(30.), px(10.))),
+            Modifiers::shift(),
+        ),
+        (gpui::ScrollDelta::Lines(point(0., 3.)), Modifiers::none()),
+    ] {
+        s.vcx.simulate_event(gpui::ScrollWheelEvent {
+            position: at,
+            delta,
+            modifiers: m,
+            touch_phase: gpui::TouchPhase::Moved,
+        });
+        cx.run_until_parked();
+    }
+    s.recorder.tool.set(Some(Tool::Hand));
+    let from = s.point_of([100., 100.]);
+    s.vcx
+        .simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+    s.vcx.simulate_mouse_move(
+        from + point(px(80.), px(30.)),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    s.vcx.simulate_mouse_up(
+        from + point(px(80.), px(30.)),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    cx.run_until_parked();
+    s.recorder.tool.set(Some(Tool::Select));
+    let moved = s
+        .surface
+        .read_with(&s.vcx, |g, _| g.studio_free_pose())
+        .unwrap();
+    assert_ne!(Some(moved), orbited, "the Hand tool moved the editor view");
+    // Nothing reached the document or the 2D view.
+    assert_eq!(document(&s), before, "navigation never edits the shot");
+    assert!(s.recorder.navigation.borrow().is_empty());
+    // View camera returns to the shot.
+    s.surface
+        .update(&mut s.vcx, |g, cx| g.studio_setting("look", "camera", cx));
+    let surface = s.surface.clone();
+    settle(cx, move |cx| {
+        surface.update(cx, |g, cx| {
+            g.refresh(cx);
+            !g.studio_free()
+        })
+    });
+    assert_eq!(document(&s), before);
+}
+/// A light's marker selects it and drags it in the view plane (Electron's
+/// light markers); its target stays, and Undo restores the position.
+#[gpui::test]
+fn a_light_marker_selects_and_moves_the_light_and_undo_restores_it(cx: &mut TestAppContext) {
+    let mut s = studio_stage(cx);
+    let (marker, _) = s
+        .surface
+        .read_with(&s.vcx, |g, _| g.studio_light_points("key"))
+        .expect("the light has a marker in view");
+    let before = stored(&s, "key");
+    let from = s.point_of(marker);
+    drag_3d(&mut s, cx, from, point(px(40.), px(-20.)));
+    let kernel = s.rig.kernel.clone();
+    settle(cx, move |_| {
+        kernel.published(PROJECT).unwrap().selection.layers() == ["key".to_string()]
+    });
+    let after = stored(&s, "key");
+    assert_ne!(
+        after["p"]["position.x"], before["p"]["position.x"],
+        "{after}"
+    );
+    assert_eq!(
+        after["d"]["data"]["light"]["p"]["targetX"], before["d"]["data"]["light"]["p"]["targetX"],
+        "a plain move keeps the light's aim point"
+    );
+    undo_3d(&mut s, cx);
+    assert_eq!(
+        stored(&s, "key")["p"]["position.x"],
+        before["p"]["position.x"]
+    );
+}
+/// The selected light's ◆ drags its target: the light stays where it is and
+/// now aims elsewhere. Undo restores the aim.
+#[gpui::test]
+fn dragging_a_lights_target_aims_it_and_undo_restores_it(cx: &mut TestAppContext) {
+    let mut s = studio_stage(cx);
+    let (marker, _) = s
+        .surface
+        .read_with(&s.vcx, |g, _| g.studio_light_points("key"))
+        .unwrap();
+    click(&mut s, cx, marker, Modifiers::none(), 1);
+    let kernel = s.rig.kernel.clone();
+    settle(cx, move |_| {
+        kernel.published(PROJECT).unwrap().selection.layers() == ["key".to_string()]
+    });
+    refresh_3d(&mut s, cx);
+    let (_, target) = s
+        .surface
+        .read_with(&s.vcx, |g, _| g.studio_light_points("key"))
+        .unwrap();
+    let before = stored(&s, "key");
+    let from = s.point_of(target.expect("an aimed light has a target in view"));
+    drag_3d(&mut s, cx, from, point(px(0.), px(-30.)));
+    let after = stored(&s, "key");
+    assert_eq!(after["p"]["position.x"], before["p"]["position.x"]);
+    assert_ne!(
+        after["d"]["data"]["light"]["p"]["targetY"], before["d"]["data"]["light"]["p"]["targetY"],
+        "{after}"
+    );
+    // The drag nudges the target from where it was, never from the origin.
+    let y = |l: &serde_json::Value| {
+        let v = &l["d"]["data"]["light"]["p"]["targetY"];
+        v.as_f64().or(v["v"].as_f64()).unwrap()
+    };
+    assert!(
+        (y(&after) - y(&before)).abs() < 1.0,
+        "{} -> {}",
+        y(&before),
+        y(&after)
+    );
+    assert!(y(&before) > 0.4, "the fixture's target is off the origin");
+    undo_3d(&mut s, cx);
+    assert_eq!(
+        stored(&s, "key")["d"]["data"]["light"]["p"]["targetY"],
+        before["d"]["data"]["light"]["p"]["targetY"]
+    );
+}
+/// Writes the overlay strokes the viewer would draw for a selected light, at
+/// the shot and while looking around, for offscreen review (no screen needed).
+/// `PM_PANEL_CAPTURE=… cargo test … dump_light_overlays -- --ignored`
+#[gpui::test]
+#[ignore = "writes JSON; set PM_PANEL_CAPTURE"]
+fn dump_light_overlays(cx: &mut TestAppContext) {
+    let dir = std::env::var("PM_PANEL_CAPTURE").unwrap_or_else(|_| "/tmp/pm-shots/panels".into());
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut s = studio_stage(cx);
+    let dump = |s: &mut Stage, cx: &mut TestAppContext, name: &str| {
+        s.surface.update(&mut s.vcx, |g, cx| g.redraw(cx));
+        cx.run_until_parked();
+        let lines: Vec<_> = s
+            .recorder
+            .lines
+            .borrow()
+            .iter()
+            .map(|l| serde_json::json!({"ends": l.ends, "color": l.color}))
+            .collect();
+        std::fs::write(
+            format!("{dir}/{name}.json"),
+            serde_json::to_string(&serde_json::json!({"size":[640,360],"lines":lines})).unwrap(),
+        )
+        .unwrap();
+    };
+    let (marker, _) = s
+        .surface
+        .read_with(&s.vcx, |g, _| g.studio_light_points("key"))
+        .unwrap();
+    click(&mut s, cx, marker, Modifiers::none(), 1);
+    let kernel = s.rig.kernel.clone();
+    settle(cx, move |_| {
+        kernel.published(PROJECT).unwrap().selection.layers() == ["key".to_string()]
+    });
+    refresh_3d(&mut s, cx);
+    dump(&mut s, cx, "overlay-shot-light-selected");
+    let at = s.point_of([320., 180.]);
+    s.vcx.simulate_event(gpui::ScrollWheelEvent {
+        position: at,
+        delta: gpui::ScrollDelta::Pixels(point(px(140.), px(-40.))),
+        modifiers: Modifiers::none(),
+        touch_phase: gpui::TouchPhase::Moved,
+    });
+    s.vcx.simulate_event(gpui::ScrollWheelEvent {
+        position: at,
+        delta: gpui::ScrollDelta::Lines(point(0., 4.)),
+        modifiers: Modifiers::none(),
+        touch_phase: gpui::TouchPhase::Moved,
+    });
+    cx.run_until_parked();
+    refresh_3d(&mut s, cx);
+    dump(&mut s, cx, "overlay-editor-view-light-selected");
+}
+/// The overlay has a fixed budget (`OverlayGeometry::MAX_LINES`): with three
+/// lights, one selected, while looking around, everything still fits, so no
+/// marker or handle is cut off.
+#[gpui::test]
+fn lights_handles_and_the_camera_fit_the_overlay_budget(cx: &mut TestAppContext) {
+    let mut s = studio_stage(cx);
+    for (id, x) in [("fill", -1.5), ("rim", 0.4)] {
+        s.rig
+            .kernel
+            .call(
+                PROJECT,
+                Request::new(
+                    Caller::native(),
+                    Call::Transact {
+                        label: None,
+                        expected_revision: None,
+                        body: pm_kernel::WriteBody::Commands(vec![
+                            pm_kernel::Scene3dCommand::Apply {
+                                comp: None,
+                                args: pm_scene3d::to_model(&serde_json::json!({"operation":"add_light","id":id,
+                                    "light":{"type":"spot","p":{"x":x,"y":1.4,"z":1.,"targetX":0,"targetY":0,"targetZ":0}}})),
+                                selection: vec![],
+                                time: 0.,
+                                autokey: false,
+                            }
+                            .into(),
+                        ]),
+                    },
+                ),
+            )
+            .wait()
+            .unwrap()
+            .unwrap();
+    }
+    refresh_3d(&mut s, cx);
+    let (marker, _) = s
+        .surface
+        .read_with(&s.vcx, |g, _| g.studio_light_points("key"))
+        .unwrap();
+    click(&mut s, cx, marker, Modifiers::none(), 1);
+    let kernel = s.rig.kernel.clone();
+    settle(cx, move |_| {
+        kernel.published(PROJECT).unwrap().selection.layers() == ["key".to_string()]
+    });
+    let at = s.point_of([320., 180.]);
+    s.vcx.simulate_event(gpui::ScrollWheelEvent {
+        position: at,
+        delta: gpui::ScrollDelta::Pixels(point(px(40.), px(-10.))),
+        modifiers: Modifiers::none(),
+        touch_phase: gpui::TouchPhase::Moved,
+    });
+    cx.run_until_parked();
+    refresh_3d(&mut s, cx);
+    s.surface.update(&mut s.vcx, |g, cx| g.redraw(cx));
+    cx.run_until_parked();
+    let n = s.recorder.lines.borrow().len();
+    assert!(
+        n > 40 && n < pm_engine_service::OverlayGeometry::MAX_LINES,
+        "{n} lines"
+    );
+}

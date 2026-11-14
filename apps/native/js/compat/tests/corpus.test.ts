@@ -451,3 +451,54 @@ test("control binding factories preserve work-area limits and linked-scale autho
   });
   expect(scale.origin).toBe("synthetic");
 });
+
+test("extensions can prepare media commands without editing the project", () => {
+  const host = new FakeHost();
+  const realm = new CompatRealm({
+    id: "media-command",
+    generation: 1,
+    initial: host.publication(),
+    host,
+  });
+  realm.PM.proj.assets = {
+    clip: {
+      id: "clip",
+      kind: "video",
+      name: "Clip",
+      w: 640,
+      h: 360,
+      dur: 20,
+      hasAudio: true,
+    },
+    sound: { id: "sound", kind: "audio", name: "Sound", dur: 10 },
+    image: { id: "image", kind: "image", name: "Image", w: 200, h: 100 },
+    lut: { id: "lut", kind: "lut" },
+  };
+  const ext = realm.extension("media-command", 3, {});
+  const before = JSON.stringify(realm.PM.proj);
+  const command = ext.api.media.commandForAsset("clip", 1.01);
+  expect(command).toMatchObject({
+    type: "add_layer",
+    layerType: "video",
+    duration: 20,
+    content: { asset: "clip", embeddedAudio: true, w: 640, h: 360 },
+  });
+  expect(ext.api.media.commandForAsset("sound", 0).content).toEqual({
+    asset: "sound",
+    trim: 0,
+    gain: 1,
+    fadeIn: 0,
+    fadeOut: 0,
+  });
+  expect(ext.api.media.commandForAsset("image", 0).layerType).toBe("image");
+  expect(ext.api.media.commandForAsset("missing")).toBeUndefined();
+  expect(ext.api.media.commandForAsset("lut")).toBeNull();
+  ext.api.media.registerImportDefaults({ anchor: { x: 0.5, y: 0.5 } });
+  expect(ext.api.media.commandForAsset("image", 0).properties).toMatchObject({
+    "anchor.x": 100,
+    "anchor.y": 50,
+  });
+  expect(ext.api.media.commandForAsset("sound", 0).properties).toBeUndefined();
+  expect(JSON.stringify(realm.PM.proj)).toBe(before);
+  ext.dispose();
+});

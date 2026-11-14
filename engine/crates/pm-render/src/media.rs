@@ -1018,6 +1018,7 @@ fn video_color(
             reading.tone_map.unwrap_or(ToneMap {
                 transfer: desc.transfer,
                 peak_nits: 1000.0,
+                method: interp.tone_mapping.unwrap_or(1),
             })
         }),
         chromaticities: None,
@@ -1140,6 +1141,9 @@ fn source_uniform(
             color.power.unwrap_or(1.0),
             if tone.is_none() { 1.0 } else { 0.0 },
         ],
+        // The tone mapping chosen for an HDR source in an SDR project, and
+        // its Highlight Desaturation (the Color Space Transform's default).
+        tone: [tone.map_or(1.0, |t| t.method as f32), 15.0, 0.0, 0.0],
         ..Default::default()
     };
     // Primaries columns (the matrix is row-major).

@@ -1830,3 +1830,58 @@ fn extension_pixels_and_bilinear_taps_match_electron_at_each_output_size() {
         }
     }
 }
+
+/// An identity effect with undeclared reach deliberately selects the uncropped
+/// reference path. The optimized path must retain the original owner UVs and
+/// shadow reach, including on a partly offscreen resting legacy shape.
+#[test]
+fn raster_crop_preserves_owner_gradient_and_shadow() {
+    let _gpu = gpu();
+    let identity = raw_effect(
+        "test.uncropped",
+        "#version 300 es\nprecision highp float;\nin vec2 v_st;\nuniform sampler2D u_tex;\nout vec4 o;\nvoid main(){o=texture(u_tex,v_st);}",
+        json!([]),
+        false,
+    );
+    let mut defs = builtin_definitions();
+    defs.definitions.push(identity);
+    let mut r = Renderer::headless().unwrap();
+    assert!(r.set_definitions(&defs).unwrap().is_empty());
+    let req = RenderRequest::at_scale(Size::new(W, H), 1., Precision::Float32);
+    for shadow in [false, true] {
+        let mut shape = layer(
+            "paper",
+            "shape",
+            json!({"shape":"rect","w":1000,"h":800,"radius":17,"stroke":0,"color":"#FFFFFF"}),
+            -350.25,
+            -250.75,
+            2.,
+        );
+        set(&mut shape, "scale.x", json!(100));
+        set(&mut shape, "scale.y", json!(100));
+        let mut effects = vec![fx(
+            "gradient",
+            "gradient",
+            json!({"amount":ch(json!(100)),"angle":ch(json!(37)),"dither":ch(json!(0))}),
+        )];
+        if shadow {
+            effects.push(fx(
+                "shadow",
+                "shadow",
+                json!({"distance":ch(json!(23)),"softness":ch(json!(11))}),
+            ));
+        }
+        shape["fx"] = json!(effects);
+        let cropped = load(&project(W, H, 2., no_fill(), vec![shape.clone()]));
+        effects.push(fx("uncropped", "test.uncropped", json!({})));
+        shape["fx"] = json!(effects);
+        let reference = load(&project(W, H, 2., no_fill(), vec![shape]));
+        let a = render(&mut r, &cropped, &MapResolver::default(), 0., &req).unwrap();
+        let b = render(&mut r, &reference, &MapResolver::default(), 0., &req).unwrap();
+        assert!(
+            max_diff(&a, &b) < 0.0001,
+            "shadow={shadow}, max difference {}",
+            max_diff(&a, &b)
+        );
+    }
+}

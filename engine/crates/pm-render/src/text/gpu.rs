@@ -1323,16 +1323,32 @@ impl TextGpu {
         }
         pm_perf::bump(pm_perf::Counter::TextCacheMisses);
         let scene = &plan.scene;
+        let region = Rect::new(plan.crop[0] as f64, plan.crop[1] as f64,
+            plan.crop[2] as f64, plan.crop[3] as f64);
+        let needed = |item: &pm_text::render::scene::Item| {
+            let reach = f64::from(blur_radius(item.blur)) + 1.;
+            let r = item.bounds.inflate(reach,reach).intersect(region);
+            r.width()>0. && r.height()>0.
+        };
         // Glyphs, sizes, or transforms the cache has not met (a layer first
         // drawn, or animated) get their geometry on several threads at once.
         self.cpu.coverage_cache().prepare(
-            scene.items.iter().flat_map(|item| match &item.content {
+            scene.items.iter().filter(|item| needed(item)).flat_map(|item| match &item.content {
                 ItemContent::Coverage { paths } => paths.as_slice(),
                 _ => &[],
             }),
             |n, make| crate::parallel::map(n, make),
         );
-        let atlas = atlas::pack(scene, MAX_PAGE);
+        let atlas = atlas::pack_region(
+            scene,
+            MAX_PAGE,
+            Rect::new(
+                plan.crop[0] as f64,
+                plan.crop[1] as f64,
+                plan.crop[2] as f64,
+                plan.crop[3] as f64,
+            ),
+        );
         // A scene uses one coverage source throughout, including when any
         // contour is too large or otherwise unsuitable for direct integration.
         let mut direct = matches!(self.coverage, Coverage::Auto | Coverage::Direct);
@@ -1345,6 +1361,7 @@ impl TextGpu {
             let mut planned_at: HashMap<(usize, [u64; 4]), usize> = HashMap::new();
             let mut staged_items = Vec::new();
             for (i, item) in scene.items.iter().enumerate() {
+                if !needed(item) { continue; }
                 let ItemContent::Coverage { paths } = &item.content else {
                     continue;
                 };
@@ -1418,6 +1435,7 @@ impl TextGpu {
         // Color glyph textures (uploaded before the passes are recorded).
         let mut images: HashMap<usize, wgpu::TextureView> = HashMap::new();
         for (i, item) in scene.items.iter().enumerate() {
+            if !needed(item) { continue; }
             if let ItemContent::Image { image, .. } = &item.content {
                 images.insert(i, self.image(device, queue, image, working));
             }
@@ -1603,6 +1621,7 @@ impl TextGpu {
         let mut out = Vec::new();
         for i in range {
             let item = &scene.items[i];
+            if matches!(item.content, ItemContent::Image { .. }) && !sources.images.contains_key(&i) { continue; }
             match &item.content {
                 ItemContent::Coverage { .. } => {
                     let a = item.color[3] * item.opacity;

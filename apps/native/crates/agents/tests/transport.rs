@@ -279,3 +279,35 @@ fn typed_process_drain_preserves_lifecycle_separately_from_provider_callbacks() 
     assert_eq!(completed, 1);
     assert!(traces > 0);
 }
+
+#[test]
+fn codex_exec_receives_eof_before_starting_work() {
+    let t = Temp::new();
+    let h = transport::spawn(
+        ProcessSpec {
+            executable: "/usr/bin/python3".into(),
+            args: vec!["-c".into(), "import sys,pathlib,time; assert sys.stdin.read() == ''; time.sleep(2.2); pathlib.Path('stdin-closed').write_text('yes')".into()],
+            cwd: t.0.clone(),
+            env: BTreeMap::new(),
+        },
+        Machine::CodexExec {
+            client: pm_agents::codex_exec::Client::new(
+                "r".into(),
+                Authority::new(Access::Project, ApprovalMode::Auto, false).unwrap(),
+                0,
+            ),
+            output: t.0.join("reply.json"),
+        },
+        vec![],
+    );
+    let end = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < end && !t.0.join("stdin-closed").exists() {
+        thread::sleep(Duration::from_millis(5));
+    }
+    let closed = t.0.join("stdin-closed").exists();
+    drop(h);
+    assert!(
+        closed,
+        "codex exec waits for EOF before resolving its prompt"
+    );
+}

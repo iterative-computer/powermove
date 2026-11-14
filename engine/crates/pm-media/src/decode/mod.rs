@@ -285,11 +285,18 @@ pub fn open(
     for b in order {
         let r = match b {
             Backend::VideoToolbox => open_vt(spec, purpose, arbiter, pool),
-            Backend::Ffmpeg => FfDecoder::new(spec.input, spec.stream, None, pool.clone(), threads)
-                .map(Decoder::Ff),
+            Backend::Ffmpeg => FfDecoder::new_for_purpose(
+                spec.input,
+                spec.stream,
+                None,
+                pool.clone(),
+                threads,
+                purpose,
+            )
+            .map(Decoder::Ff),
             Backend::Dav1d => Dav1dDecoder::new(pool.clone(), threads).map(Decoder::Dav1d),
             Backend::FfmpegAlphaPair => {
-                AlphaPairDecoder::new(spec.input, spec.stream, pool.clone(), threads)
+                AlphaPairDecoder::new(spec.input, spec.stream, pool.clone(), threads, purpose)
                     .map(Decoder::Alpha)
             }
         };

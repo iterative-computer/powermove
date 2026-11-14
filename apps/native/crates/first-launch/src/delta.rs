@@ -18,7 +18,7 @@ use pm_kernel::{
     profile::{LocalStorageEntry, ProfileStorage},
     state::{StateOp, is_setting},
 };
-use pm_model::json::{Value as KernelValue, parse, to_canonical_string};
+use pm_model::json::{Value as KernelValue, parse};
 use pm_native_migrate::{local_storage, migration::ClosureInput, snapshot::Snapshot};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -61,18 +61,40 @@ pub(crate) struct ProjectCopy {
     copy: String,
 }
 fn fingerprint(project: &KernelValue, history: Option<&KernelValue>) -> String {
+    struct HashSink<'a>(&'a mut blake3::Hasher);
+    impl pm_model::json::write::Sink for HashSink<'_> {
+        fn push_str(&mut self, text: &str) {
+            self.0.update(text.as_bytes());
+        }
+    }
     let mut hasher = blake3::Hasher::new();
-    hasher.update(to_canonical_string(project).as_bytes());
+    pm_model::json::write_canonical(project, &mut HashSink(&mut hasher));
     hasher.update(b"\0");
     if let Some(history) = history {
-        hasher.update(to_canonical_string(history).as_bytes());
+        pm_model::json::write_canonical(history, &mut HashSink(&mut hasher));
     }
     hasher.finalize().to_hex().to_string()
 }
+fn canonical_bytes(value: &KernelValue) -> u64 {
+    struct Count(u64);
+    impl pm_model::json::write::Sink for Count {
+        fn push_str(&mut self, text: &str) {
+            self.0 += text.len() as u64;
+        }
+    }
+    let mut count = Count(0);
+    pm_model::json::write_canonical(value, &mut count);
+    count.0
+}
 /// The native form of a source project. Its authored name stays exactly as it was.
 pub(crate) fn project_copy(p: &LibraryProject, id: &str) -> Result<ProjectCopy> {
-    let mut project = as_json(&p.project)?;
-    project["id"] = id.into();
+    // Keep the existing model tree: a JSON round trip duplicates large layer
+    // and history data and can force gigabytes of swap during first launch.
+    let mut project = p.project.clone();
+    project
+        .as_object_mut()
+        .context("source project is not an object")?
+        .insert("id", KernelValue::String(id.into()));
     let history = p.history.clone().unwrap_or_else(|| {
         parse(r#"{"version":1,"paths":"composition","index":-1,"entries":[]}"#).unwrap()
     });
@@ -83,18 +105,15 @@ pub(crate) fn project_copy(p: &LibraryProject, id: &str) -> Result<ProjectCopy> 
     .is_err();
     let mut meta = p
         .session
-        .as_ref()
-        .map(as_json)
-        .transpose()?
-        .unwrap_or(serde_json::json!({}));
+        .clone()
+        .unwrap_or_else(|| KernelValue::Object(Default::default()));
     // A read-only media association is not an in-place save destination.
     // The kernel can resolve it when this named copy is explicitly opened.
     if let Some(m) = meta.as_object_mut()
         && let Some(file) = m.remove("file")
     {
-        m.insert("embeddedMedia".into(), file);
+        m.insert("embeddedMedia", file);
     }
-    let project = to_kernel(&project)?;
     let workspace = p
         .workspace
         .as_ref()
@@ -107,16 +126,16 @@ pub(crate) fn project_copy(p: &LibraryProject, id: &str) -> Result<ProjectCopy> 
         project,
         history,
         workspace,
-        meta: to_kernel(&meta)?,
+        meta,
         refused,
     })
 }
 impl ProjectCopy {
     pub(crate) fn bytes(&self) -> u64 {
-        (to_canonical_string(&self.project).len()
-            + to_canonical_string(&self.history).len()
-            + to_canonical_string(&self.meta).len()
-            + to_canonical_string(&self.workspace).len()) as u64
+        [&self.project, &self.history, &self.meta, &self.workspace]
+            .into_iter()
+            .map(canonical_bytes)
+            .sum()
     }
     pub(crate) fn save(&self, writer: &LibraryWriter, id: &str) -> Result<()> {
         writer.save_project(
@@ -788,4 +807,29 @@ pub fn allow_folders(
     publish(&native, &state)?;
     hook(Event::Complete)?;
     Ok(summary(&native, &state, &pass))
+}
+
+#[cfg(test)]
+mod streaming_tests {
+    use super::*;
+    use pm_model::json::to_canonical_string;
+    #[test]
+    fn streamed_fingerprints_and_sizes_keep_the_existing_canonical_bytes() {
+        let project = parse(r#"{"name":"é 🚀 \ud800","numbers":[-0,1e21,1e-8],"assets":{"a":{"id":"a","storageKey":"media:a"}}}"#).unwrap();
+        let history = parse(r#"{"entries":[],"version":1}"#).unwrap();
+        let text = to_canonical_string(&project);
+        assert_eq!(canonical_bytes(&project), text.len() as u64);
+        assert_eq!(
+            fingerprint(&project, None),
+            blake3::hash(format!("{text}\0").as_bytes())
+                .to_hex()
+                .to_string()
+        );
+        assert_eq!(
+            fingerprint(&project, Some(&history)),
+            blake3::hash(format!("{text}\0{}", to_canonical_string(&history)).as_bytes())
+                .to_hex()
+                .to_string()
+        );
+    }
 }

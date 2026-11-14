@@ -161,6 +161,15 @@ fn matte_hex(matte: [f64; 3]) -> String {
     format!("#{:02X}{:02X}{:02X}", c(matte[0]), c(matte[1]), c(matte[2]))
 }
 
+/// Tone Mapping's choices (an HDR source in an SDR project): the Color
+/// Space Transform's labels, stored by pm-media's names.
+fn tones() -> Vec<(&'static str, &'static str)> {
+    pm_color::cst::TONE_MAPPING
+        .into_iter()
+        .zip(pm_media::interpret::TONE_MAPPING)
+        .collect()
+}
+
 /// The automatic value of a read field and where it came from.
 fn read<T>(field: &Read<T>) -> (&T, &Origin) {
     (&field.automatic, &field.origin)
@@ -196,6 +205,23 @@ pub fn surface(
     );
     matrix.enabled = video;
     range.enabled = video;
+    // An HDR source drawn in an SDR project: BT.2390 per channel unless
+    // chosen here.
+    let choices = tones();
+    let automatic = Origin::Default {
+        rule: "BT.2390 per channel, to SDR white".into(),
+    };
+    let names = pm_media::interpret::TONE_MAPPING;
+    let mut tone = popup(
+        "toneMapping",
+        "Tone Mapping",
+        &choices,
+        chosen.tone_mapping.and_then(|i| names.get(i as usize)),
+        reading
+            .and_then(|r| r.tone_map)
+            .map(|_| (&names[1], &automatic)),
+    );
+    tone.enabled = video && reading.is_some_and(|r| r.tone_map.is_some());
     let fields = vec![
         popup(
             "primaries",
@@ -213,6 +239,7 @@ pub fn surface(
         ),
         matrix,
         range,
+        tone,
         popup(
             "alpha",
             "Alpha",
@@ -250,7 +277,7 @@ pub fn surface(
     surface.groups = vec![
         FieldGroup {
             title: "Color",
-            fields: vec!["primaries", "transfer", "matrix", "range"],
+            fields: vec!["primaries", "transfer", "matrix", "range", "toneMapping"],
         },
         FieldGroup {
             title: "Alpha",
@@ -271,6 +298,7 @@ pub struct Chosen {
     pub transfer: usize,
     pub matrix: usize,
     pub range: usize,
+    pub tone_mapping: usize,
     pub alpha: usize,
     pub gain_map: usize,
     /// The matte well's colour, once the person has changed it.
@@ -285,6 +313,7 @@ impl Chosen {
             transfer: at("transfer"),
             matrix: at("matrix"),
             range: at("range"),
+            tone_mapping: at("toneMapping"),
             alpha: at("alpha"),
             gain_map: at("gainMap"),
             matte,
@@ -355,6 +384,12 @@ impl Chosen {
             "gainMap",
             &GAIN_MAPS,
             (self.gain_map, opened.gain_map),
+        );
+        changed |= set(
+            interpret,
+            "toneMapping",
+            &tones(),
+            (self.tone_mapping, opened.tone_mapping),
         );
         let alpha = set(interpret, "alpha", &ALPHAS, (self.alpha, opened.alpha));
         changed |= alpha;
@@ -546,6 +581,7 @@ mod tests {
                 transfer: at(TRANSFERS.len()),
                 matrix: at(MATRICES.len()),
                 range: at(RANGES.len()),
+                tone_mapping: at(tones().len()),
                 alpha: at(ALPHAS.len()),
                 gain_map: at(GAIN_MAPS.len()),
                 matte: None,
@@ -553,6 +589,7 @@ mod tests {
             let mut interpret = Map::new();
             assert!(chosen.write(&Chosen::default(), &mut interpret));
             let parsed = parsed(&interpret);
+            assert_eq!(parsed.tone_mapping, Some(chosen.tone_mapping as u32 - 1));
             assert_eq!(parsed.primaries, Some(PRIMARIES[chosen.primaries - 1].1));
             assert_eq!(parsed.transfer, Some(TRANSFERS[chosen.transfer - 1].1));
             assert_eq!(parsed.matrix, Some(MATRICES[chosen.matrix - 1].1));
@@ -790,6 +827,30 @@ mod tests {
         assert!(interpret.get("range").is_none(), "Automatic removes it");
         assert_eq!(interpret.get("matrix"), Some(&Value::from("bt601")));
         assert_eq!(interpret.get("cleanAperture"), Some(&Value::from(true)));
+    }
+
+    /// Tone Mapping is written as pm-media reads it, and Automatic (BT.2390
+    /// per channel) removes it; it shows disabled with no HDR reading.
+    #[test]
+    fn tone_mapping_is_chosen_per_clip() {
+        let opened = Chosen::default();
+        let mut interpret = Map::new();
+        let chosen = Chosen {
+            tone_mapping: 1 + 5,
+            ..Default::default()
+        };
+        assert!(chosen.write(&opened, &mut interpret));
+        assert_eq!(parsed(&interpret).tone_mapping, Some(5));
+        assert!(Chosen::default().write(&chosen, &mut interpret));
+        assert_eq!(parsed(&interpret).tone_mapping, None);
+        let field = sheet(&Interpretation::default())
+            .fields
+            .into_iter()
+            .find(|f| f.id == "toneMapping")
+            .unwrap();
+        assert!(!field.enabled);
+        assert_eq!(field.values[1], "None");
+        assert_eq!(field.values[6], "BT.2446 Method C");
     }
 
     #[test]

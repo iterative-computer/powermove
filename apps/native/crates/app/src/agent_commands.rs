@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 
 /// Commands only the agent runs (a person has the same through a key, a
 /// toggle or a sheet): id, label, menu, and its arguments.
-pub const AGENT: [(&str, &str, &str, &str); 9] = [
+pub const AGENT: [(&str, &str, &str, &str); 10] = [
     ("transport.play", "Play", "Playback", ""),
     ("transport.pause", "Pause", "Playback", ""),
     (
@@ -42,6 +42,12 @@ pub const AGENT: [(&str, &str, &str, &str); 9] = [
         "New Composition",
         "Composition",
         "[{name?, w?, h?, fps?, dur?, background?}]",
+    ),
+    (
+        "footage.interpret",
+        "Interpret Footage",
+        "Clip",
+        "[assetId, {primaries?, transfer?, matrix?, range?, siting?, alpha?, alphaMatte?, toneMapping?, gainMap?, frameRate?, fieldOrder?, pixelAspect?, cleanAperture?} (a member null: Automatic; the object null: every member Automatic)]",
     ),
     (
         "color.importCdlFile",
@@ -80,6 +86,7 @@ pub fn refused(command: &str) -> Option<Option<&'static str>> {
         "keyframeValue" | "scaleKeyframes" => Some("replace_keyframes (apply_commands)"),
         "keyframeVelocity" => Some("set_easing (apply_commands)"),
         "viewer.applyLut" => Some("manage_media"),
+        "interpretFootage" => Some("run_command footage.interpret"),
         "color.importCdl" => Some("run_command color.importCdlFile"),
         "color.exportCdl" => Some("run_command color.exportCdlFile"),
         "store" => Some("store_search"),
@@ -158,6 +165,69 @@ pub fn check(command: &str, disabled: &std::collections::BTreeSet<String>) -> Re
     Ok(())
 }
 
+/// Interpret Footage for an agent: `args` [assetId, members], each member
+/// set as the sheet sets it (null: Automatic), the whole object null: every
+/// member Automatic. Refused in a sentence when the asset is not a video or
+/// image or a member is not one pm-media reads.
+pub fn interpret(args: &[Value], published: &Published) -> Result<Plan, String> {
+    let asset = args
+        .first()
+        .and_then(Value::as_str)
+        .ok_or("Give the asset's id and the members to set.")?;
+    let record = published
+        .snapshot
+        .root()
+        .and_then(|root| root.get("assets"))
+        .and_then(|assets| assets.get(asset))
+        .ok_or_else(|| format!("No asset {asset}."))?;
+    let kind = record
+        .get("kind")
+        .and_then(|k| k.to_value().as_str().map(str::to_owned));
+    if !matches!(kind.as_deref(), Some("video" | "image")) {
+        return Err(format!("{asset} is not a video or image to interpret."));
+    }
+    let members = args.get(1).cloned().unwrap_or(Value::Null);
+    let mut merged: serde_json::Map<String, Value> = if members.is_null() {
+        Default::default()
+    } else {
+        let stored = record
+            .get("interpret")
+            .map(|i| pm_model::json::to_canonical_string(&i.to_value()))
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+            .and_then(|v| v.as_object().cloned())
+            .unwrap_or_default();
+        let mut merged = stored;
+        for (key, value) in members.as_object().ok_or("Members must be an object.")? {
+            if value.is_null() {
+                merged.remove(key);
+            } else {
+                merged.insert(key.clone(), value.clone());
+            }
+        }
+        merged
+    };
+    let (_, issues) =
+        pm_media::interpret::Interpretation::from_json(&Value::Object(merged.clone()));
+    if let Some(issue) = issues.first() {
+        return Err(format!("{}: {}.", issue.member, issue.message));
+    }
+    merged.retain(|_, v| !v.is_null());
+    let interpret = (!merged.is_empty())
+        .then(|| pm_model::json::parse(&Value::Object(merged).to_string()).expect("JSON"));
+    Ok(Plan {
+        label: "Interpret Footage".into(),
+        commands: vec![
+            pm_kernel::MediaCommand::SetInterpretation {
+                asset_id: asset.to_owned(),
+                interpret,
+            }
+            .into(),
+        ],
+        select: None,
+        count_keys: None,
+    })
+}
+
 /// The agent's edits that a person makes through a sheet.
 pub fn plan(name: &str, args: &[Value], published: &Published, time: f64) -> Option<Plan> {
     let options = args.first().cloned().unwrap_or(Value::Null);
@@ -226,6 +296,46 @@ pub fn plan(name: &str, args: &[Value], published: &Published, time: f64) -> Opt
 mod tests {
     use super::*;
     use crate::parity_tests::{Desk, project};
+
+    /// The agent interprets footage as the sheet does: members set, one set
+    /// back to Automatic, all set back; a member pm-media does not read and
+    /// an asset that is not footage are refused in a sentence.
+    #[test]
+    fn an_agent_interprets_footage_as_the_sheet_does() {
+        let mut p = project(vec![]);
+        p["assets"] = serde_json::json!({
+            "clip": {"id": "clip", "kind": "video", "name": "Clip.mov"},
+            "tune": {"id": "tune", "kind": "audio", "name": "Tune.wav"},
+        });
+        let desk = Desk::new(p);
+        let run = |args: Value| {
+            let plan = interpret(&[serde_json::json!("clip"), args], &desk.published())?;
+            let published = desk.published();
+            desk.call(
+                crate::layer_commands::transaction(&plan, Some(published.revision())).unwrap(),
+            );
+            Ok::<_, String>(())
+        };
+        let stored = || {
+            let doc: Value =
+                serde_json::from_str(&pm_model::json::to_canonical_string(&desk.document()))
+                    .unwrap();
+            doc["assets"]["clip"]["interpret"].clone()
+        };
+        run(serde_json::json!({"toneMapping": "bt2446a", "range": "full"})).unwrap();
+        assert_eq!(
+            stored(),
+            serde_json::json!({"toneMapping": "bt2446a", "range": "full"})
+        );
+        run(serde_json::json!({"range": null})).unwrap();
+        assert_eq!(stored(), serde_json::json!({"toneMapping": "bt2446a"}));
+        run(Value::Null).unwrap();
+        assert!(stored().is_null());
+        let refused = run(serde_json::json!({"toneMapping": "magic"})).unwrap_err();
+        assert!(refused.starts_with("toneMapping:"), "{refused}");
+        let audio = interpret(&[serde_json::json!("tune"), Value::Null], &desk.published());
+        assert!(audio.is_err());
+    }
 
     /// Every command a person can reach (menus, the palette, keys) has an
     /// agent route: run_command, or a named tool that does the same job;

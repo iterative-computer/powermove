@@ -218,6 +218,14 @@ impl Backend {
         rows.extend(protected_folders_row(&media["folders"]));
         Ok(rows)
     }
+    /// Settings › Storage, from the host's `storageSettings` fact (this Mac's
+    /// folders, so shown with or without a project).
+    pub(crate) fn storage_rows(&self) -> Vec<Value> {
+        self.native.facts["storageSettings"]["rows"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+    }
     pub(crate) fn settings_rows(&mut self) -> Result<Vec<Value>, String> {
         let media = self.media_rows()?;
         let Some(p) = self.published() else {
@@ -591,6 +599,16 @@ impl Backend {
                 Ok(NativeCommand::Value(self.settings_snapshot()?))
             }
             Some("row")
+                if action["action"]
+                    .as_str()
+                    .is_some_and(|a| a.starts_with("storage.")) =>
+            {
+                self.native
+                    .platform
+                    .push(("storage.settings".into(), json!({"action":action["action"]})));
+                Ok(NativeCommand::Value(self.settings_snapshot()?))
+            }
+            Some("row")
                 if matches!(
                     action["action"].as_str(),
                     Some("media.location" | "media.clear" | "media.reveal" | "media.folders")
@@ -936,6 +954,10 @@ impl pm_services::surface_backing::projects::ModsHost for PushMod<'_> {
 /// Settings › Accounts › Powermove Account, from the app's `cloud` fact
 /// Row actions that sign out, disconnect or delete: from an older Settings
 /// publication they land only on the target that publication showed.
+#[cfg(test)]
+pub(crate) fn destructive_for_test(action: &str) -> bool {
+    destructive(action)
+}
 fn destructive(action: &str) -> bool {
     matches!(
         action,
@@ -944,7 +966,7 @@ fn destructive(action: &str) -> bool {
             | "account.delete"
             | "provider.disconnect"
             | "agents.remove"
-    )
+    ) || action.starts_with("storage.delete.")
 }
 /// (v1.2.0 SettingsScreen): Sign In… while signed out; the identity with Sign
 /// Out, Remember Installs and Delete Account… while signed in.

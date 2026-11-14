@@ -499,7 +499,7 @@ pub(crate) fn studio_plan(
             };
             let at = placement.at;
             edit(
-                json!({"operation":"add_light","name":args["name"].as_str().unwrap_or(placement.name),"light":{"type":"area","p":{"x":at[0],"y":at[1],"z":at[2],"targetX":c[0],"targetY":c[1],"targetZ":c[2],"width":placement.width,"height":placement.height,"intensity":scalar(args,"intensity",placement.intensity)?,"color":color}}}),
+                json!({"operation":"add_light","id":args["id"],"name":args["name"].as_str().unwrap_or(placement.name),"light":{"type":"area","p":{"x":at[0],"y":at[1],"z":at[2],"targetX":c[0],"targetY":c[1],"targetZ":c[2],"width":placement.width,"height":placement.height,"intensity":scalar(args,"intensity",placement.intensity)?,"color":color}}}),
             )
         }
         "aim_light" => {

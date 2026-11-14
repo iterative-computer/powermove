@@ -684,19 +684,33 @@ export interface ColorWheelProps extends SurfaceProps {
   neutral: number;
   min: number;
   max: number;
+  /** The wheel's master and its limits: shown on the wheel's bezel, so the
+   * wheel and its master read as one instrument (set in its own field). */
+  master?: { value: number; min: number; max: number };
 }
 /** A colour wheel (drawn by the host): dragging the puck pushes red, green
  * and blue together, keeping their brightness, in one Undo step; Option
  * drags finely; a double-click returns the wheel to neutral. */
 export function ColorWheel(props: ColorWheelProps) {
-  const { neutral, min, max, ...rest } = props;
+  const { neutral, min, max, master, ...rest } = props;
   return kit(
     "color-wheel",
     "div",
     {
       ...rest,
       control: "color-wheel",
-      metadata: kitMetadata(props, { neutral, min, max }),
+      metadata: kitMetadata(props, {
+        neutral,
+        min,
+        max,
+        ...(master
+          ? {
+              master: master.value,
+              masterMin: master.min,
+              masterMax: master.max,
+            }
+          : {}),
+      }),
     },
     {
       width: token("metrics.grade_wheel"),

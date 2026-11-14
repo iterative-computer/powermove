@@ -79,6 +79,9 @@ pub struct SourceUniform {
     pub matte: [f32; 4],
     /// HDR input tone mapping: x is the content peak in cd/m² (L_HDR).
     pub hdr: [f32; 4],
+    /// An HDR source's tone mapping into an SDR project: x the
+    /// `pm_color::cst::TONE_MAPPING` index, y Highlight Desaturation.
+    pub tone: [f32; 4],
 }
 
 /// The bytes of a plain `repr(C)` value.
@@ -507,9 +510,10 @@ impl Pipelines {
         ]
         .map(|(_, name, layout)| {
             let code = format!(
-                "{}\n{}\n{}\n{}",
+                "{}\n{}\n{}\n{}\n{}",
                 pm_color::wgsl::COLOR,
                 pm_color::tonemap::wgsl(),
+                pm_color::cst::tone_wgsl(),
                 pm_color::camera_log::wgsl(),
                 include_str!("shaders/source.wgsl").replace("OUT_FORMAT", name)
             );

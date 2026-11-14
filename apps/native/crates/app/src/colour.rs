@@ -469,6 +469,13 @@ pub(crate) fn scope_summary(frame: &ScopeFrame) -> serde_json::Value {
     let share = |n: u64| (n as f64 / pixels * 1000.).round() / 10.;
     let levels = frame.config.levels.max(2) as usize;
     let level = |bin: usize| (bin as f64 / (levels - 1) as f64 * 1000.).round() / 10.;
+    // On PQ a level is absolute light: its cd/m² (ST 2084) beside it.
+    let pq = frame.config.signal == ScopeSignal::Pq;
+    let nits = |bin: usize| {
+        pq.then(|| {
+            (pm_color::tonemap::pq_eotf(bin as f64 / (levels - 1) as f64) * 10.).round() / 10.
+        })
+    };
     let histogram = |bins: &[u32]| {
         let band = bins.len().div_ceil(32).max(1);
         let lit = |i: &usize| bins[*i] > 0;
@@ -478,6 +485,8 @@ pub(crate) fn scope_summary(frame: &ScopeFrame) -> serde_json::Value {
                 .collect::<Vec<_>>(),
             "lowest": (0..bins.len()).find(lit).map(level),
             "highest": (0..bins.len()).rev().find(lit).map(level),
+            "lowestNits": (0..bins.len()).find(lit).and_then(nits),
+            "highestNits": (0..bins.len()).rev().find(lit).and_then(nits),
         })
     };
     // Waveform rows are levels (bottom first), columns the frame's width.
@@ -497,7 +506,8 @@ pub(crate) fn scope_summary(frame: &ScopeFrame) -> serde_json::Value {
             });
             let low = lit.next();
             let high = lit.last().or(low);
-            json!({"low": low.map(level), "high": high.map(level)})
+            json!({"low": low.map(level), "high": high.map(level),
+                "lowNits": low.and_then(nits), "highNits": high.and_then(nits)})
         })
         .collect();
     // Vectorscope: rows of Cr, columns of Cb, each -0.5..0.5 across the bins.
@@ -544,7 +554,7 @@ pub(crate) fn scope_summary(frame: &ScopeFrame) -> serde_json::Value {
             "meanHueDegrees": (chroma > 1e-4).then(|| (cr.atan2(cb).to_degrees().rem_euclid(360.) * 10.).round() / 10.),
             "maxChroma": round(far),
         },
-        "note": "Levels are percent of the signal range, shares percent of pixels; bands run dark to light (histograms) and left to right (waveform).",
+        "note": "Levels are percent of the signal range (on PQ also in cd/m², the *Nits members), shares percent of pixels; bands run dark to light (histograms) and left to right (waveform).",
     })
 }
 

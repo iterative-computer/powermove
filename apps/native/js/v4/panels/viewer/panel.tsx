@@ -1,9 +1,7 @@
-import { useEffect, useRef, useState } from "preact/hooks";
+import { useEffect, useState } from "preact/hooks";
 import {
   EmptyState,
   PopUpButton,
-  Slider,
-  SegmentedControl,
   PushButton,
   ToolbarItem,
   token,
@@ -117,12 +115,6 @@ function Transport({
  * neutral placeholders; metadata is inspection data, never a rendering recipe.
  * All output is provisional until Opus review. See README for exact section gates.
  */
-/** A light value as the panel reads it: three significant digits. */
-function reading(v: number): string {
-  if (!Number.isFinite(v)) return "";
-  const digits = Math.min(6, Math.max(0, 2 - Math.floor(Math.log10(Math.max(Math.abs(v), 1e-9)))));
-  return String(Number(v.toFixed(digits)));
-}
 export function ViewerPanel({
   state,
   actions,
@@ -147,6 +139,10 @@ export function ViewerPanel({
         />
       </div>
     );
+  // 3D compositions add no toolbar (3d-studio.md §2): looking around is the
+  // viewer's own gesture. While away from the shot the stage is the editor
+  // view: the zoom slot names it, and one control, top-left, returns.
+  const free = !source && m.studio?.look === "free";
   const zoomValue = m.fit ? "fit" : m.shownZoom;
   // The native pop-up shows its selected row, so Fit names its zoom.
   const zoomOptions = [
@@ -186,35 +182,49 @@ export function ViewerPanel({
       >
         {channelViews.find((c) => c.v === channels)?.label ?? "RGB"}
       </PopUpButton>
-      <PopUpButton
-        id="viewer.zoom"
-        data-pm-variant="inline"
-        binding="viewer.zoom"
-        label={`Zoom, ${m.fit ? "Fit, " : ""}${percent(m.shownZoom)} percent`}
-        title="Zoom"
-        value={zoomValue}
-        display={zoomTitle(m)}
-        widthSample="Fit (100 %)"
-        options={zoomOptions}
-        style={popupStyle}
-        onChange={(event) => {
-          if (event.value === "fit") actions.drive("viewer.fit");
-          else if (event.value === "actual") actions.drive("viewer.zoom", 1);
-          else if (
-            typeof event.value === "number" &&
-            zoomPresets.includes(event.value as (typeof zoomPresets)[number])
-          )
-            actions.drive("viewer.zoom", event.value);
-          else if (
-            ["viewer.zoom.in", "viewer.zoom.out", "viewer.fit"].includes(
-              String(event.value),
+      {free ? (
+        <text
+          id="viewer.zoom"
+          label="Editor View"
+          style={{
+            color: token("colors.text"),
+            fontSize: token("typography.body"),
+            whiteSpace: "nowrap",
+          }}
+        >
+          Editor View
+        </text>
+      ) : (
+        <PopUpButton
+          id="viewer.zoom"
+          data-pm-variant="inline"
+          binding="viewer.zoom"
+          label={`Zoom, ${m.fit ? "Fit, " : ""}${percent(m.shownZoom)} percent`}
+          title="Zoom"
+          value={zoomValue}
+          display={zoomTitle(m)}
+          widthSample="Fit (100 %)"
+          options={zoomOptions}
+          style={popupStyle}
+          onChange={(event) => {
+            if (event.value === "fit") actions.drive("viewer.fit");
+            else if (event.value === "actual") actions.drive("viewer.zoom", 1);
+            else if (
+              typeof event.value === "number" &&
+              zoomPresets.includes(event.value as (typeof zoomPresets)[number])
             )
-          )
-            actions.drive(String(event.value));
-        }}
-      >
-        {zoomTitle(m)}
-      </PopUpButton>
+              actions.drive("viewer.zoom", event.value);
+            else if (
+              ["viewer.zoom.in", "viewer.zoom.out", "viewer.fit"].includes(
+                String(event.value),
+              )
+            )
+              actions.drive(String(event.value));
+          }}
+        >
+          {zoomTitle(m)}
+        </PopUpButton>
+      )}
       <PopUpButton
         id="viewer.quality"
         data-pm-variant="inline"
@@ -233,32 +243,6 @@ export function ViewerPanel({
       </PopUpButton>
     </>
   );
-  // 3d-studio.md §2: Look Through, Tool, Axes, Frame, Views and Preview,
-  // leading the bar, only while the composition has 3D layers. Tooltips are
-  // two lines: the name (with its shortcut), then what it does.
-  const looks = [
-    { id: "camera", label: "Camera", help: "See exactly what the shot renders." },
-    { id: "free", label: "Free View", help: "Look around without changing the shot." },
-  ];
-  const tools = [
-    { id: "move", label: "Move", symbol: "move.3d", help: "Drag the selection, or one arrow for one axis." },
-    { id: "rotate", label: "Rotate", symbol: "rotate.3d", help: "Turn the selection by its rings." },
-    { id: "scale", label: "Scale", symbol: "scale.3d", help: "Resize the selection." },
-    { id: "orbit", label: "Orbit", symbol: "view.3d", help: "Drag to circle the view. Anytime: ⌥-drag." },
-    { id: "pan", label: "Pan", symbol: "hand.raised", help: "Drag to slide the view. Anytime: ⇧⌥-drag." },
-    { id: "zoom", label: "Zoom", symbol: "plus.magnifyingglass", help: "Drag to move closer. Anytime: ⌥-scroll." },
-    { id: "light", label: "Light", symbol: "lightbulb", help: "Click a model to put light there." },
-  ];
-  const views = [
-    { id: "1", label: "One View", short: "1 View", help: "One view of the scene." },
-    { id: "2", label: "Two Views", short: "2 Views", help: "Side by side, each with its own camera." },
-    { id: "4", label: "Four Views", short: "4 Views", help: "The shot, top, front and side." },
-  ];
-  const tiers = [
-    { id: "live", label: "Fast", help: "Real-time preview. Exports stay full quality." },
-    { id: "refine", label: "Quality", help: "Path-traced, as it will export." },
-  ];
-  const object = m.studio?.axes === "object";
   // 3d-studio.md §3 status capsule: Quality's progress, bottom-trailing over
   // the image. Hidden in Fast and while Live; "Clean" shows briefly, then goes.
   const refine = m.studio?.tier === "refine" ? m.studio?.refine : undefined;
@@ -319,266 +303,40 @@ export function ViewerPanel({
       </text>
     </div>
   ) : null;
-  // 3d-studio.md §6: the Light panel, top-leading over the stage while Light
-  // is the tool. Values are the model's; a pull is one Undo ("Light Size").
-  // 3d-studio.md §6 motion: the panel springs in when Light is chosen and
-  // out when it isn't. The host animates any node marked `pmKit.presence`;
-  // the panel stays, marked closing, for the exit (motion.exit, 0.12 s) and a
-  // frame's grace, then goes.
-  const liveLight = m.studio?.tool === "light" ? m.studio.light : undefined;
-  const lastLight = useRef<typeof liveLight>(undefined);
-  if (liveLight) lastLight.current = liveLight;
-  const [, rerender] = useState(0);
-  useEffect(() => {
-    if (liveLight || !lastLight.current) return;
-    const timer = setTimeout(() => {
-      lastLight.current = undefined;
-      rerender((n) => n + 1);
-    }, 160);
-    return () => clearTimeout(timer);
-  }, [!!liveLight]);
-  const light = liveLight ?? lastLight.current;
-  const lightClosing = !liveLight;
-  const kinds = [
-    { v: "area", label: "Softbox" },
-    { v: "spot", label: "Spotlight" },
-    { v: "point", label: "Bulb" },
-    { v: "sun", label: "Sun" },
-  ];
-  const lightPresets = [
-    { v: "rim_left", label: "Rim Strip Left" },
-    { v: "rim_right", label: "Rim Strip Right" },
-    { v: "top", label: "Top Softbox" },
-    { v: "edge_card", label: "Edge Highlight Card" },
-    { v: "strip", label: "Strip Light" },
-  ];
-  const lightPanel = light ? (
+  const viewCamera = free ? (
     <div
-      id="viewer.studio.lightPanel"
+      id="viewer.studio.return"
       role="group"
-      label="Light Tool"
-      metadata={{ pmKit: { presence: true, closing: lightClosing } }}
+      label="Editor View"
       style={{
         position: "absolute",
-        left: token("metrics.gap"),
-        top: token("metrics.gap"),
-        width: token("metrics.popover_width"),
-        display: "flex",
-        flexDirection: "column",
-        alignItems: "stretch",
-        gap: token("metrics.gap"),
-        padding: token("metrics.inset"),
-        background: token("colors.floating"),
-        borderRadius: token("metrics.control_radius"),
-      }}
-    >
-      <SegmentedControl
-        id="viewer.studio.lightAim"
-        label="Aim"
-        value={m.studio?.lightAim ?? "reflect"}
-        options={[
-          { id: "reflect", label: "Reflect", help: "The highlight lands where you click." },
-          { id: "direct", label: "Direct", help: "The light faces where you click." },
-          { id: "orbit", label: "Orbit", help: "Drag to circle the light around its target." },
-        ]}
-        onChange={(value) => actions.drive("viewer.studio.lightAim", value)}
-      />
-      <div style={{ display: "flex", flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: token("metrics.gap") }}>
-        <ToolbarItem
-          id="viewer.studio.lightAdd"
-          label="Add"
-          title={"Add\nThen click a model to put it there."}
-          active={light.settings.add}
-          onClick={() => actions.drive("viewer.studio.lightAdd", light.settings.add ? "off" : "on")}
-        >
-          Add
-        </ToolbarItem>
-        <PopUpButton
-          id="viewer.studio.lightKind"
-          data-pm-variant="inline"
-          binding="viewer.studio.lightKind"
-          label="Light to Add"
-          value={m.studio?.lightKind ?? "area"}
-          style={popupStyle}
-          options={kinds}
-          onChange={(event) => actions.drive("viewer.studio.lightKind", event.value)}
-        />
-      </div>
-      {/* Round 7: one-click looks for product edges, placed for the model as
-          the camera sees it; Aim At turns the chosen light onto a model. */}
-      <div style={{ display: "flex", flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: token("metrics.gap") }}>
-        <PopUpButton
-          id="viewer.studio.light.preset"
-          data-pm-variant="inline"
-          binding="viewer.studio.light.preset"
-          title={"Presets\nAdd a light placed for the selected model and camera."}
-          label="Light Presets"
-          display="Presets"
-          value={null}
-          style={popupStyle}
-          options={lightPresets}
-          onChange={(event) => actions.drive("viewer.studio.light.preset", event.value)}
-        />
-        {!light.hint && (light.models?.length ?? 0) > 0 ? (
-          <PopUpButton
-            id="viewer.studio.light.aimAt"
-            data-pm-variant="inline"
-            binding="viewer.studio.light.aimAt"
-            title={"Aim At\nTurn this light to face a model."}
-            label="Aim At"
-            display="Aim At"
-            value={null}
-            disabled={light.locked}
-            style={popupStyle}
-            options={light.models ?? []}
-            onChange={(event) => actions.drive("viewer.studio.light.aimAt", event.value)}
-          />
-        ) : null}
-      </div>
-      {light.hint ? (
-        <text style={{ color: token("colors.muted"), fontSize: token("typography.body") }}>
-          {light.hint}
-        </text>
-      ) : (
-        <>
-          <div style={{ display: "flex", flexDirection: "row", alignItems: "baseline", justifyContent: "space-between", gap: token("metrics.gap") }}>
-            <text style={{ color: token("colors.text"), fontSize: token("typography.title"), fontWeight: token("typography.semibold_weight") }}>
-              {light.name ?? ""}
-            </text>
-            <text style={{ color: token("colors.muted"), fontSize: token("typography.minimum") }}>
-              {light.kind ?? ""}
-            </text>
-          </div>
-          {light.rows.map((row) => (
-            <div
-              key={row.id}
-              style={{ display: "flex", flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: token("metrics.gap"), height: token("metrics.row") }}
-            >
-              <text
-                title={`${row.label}\n${row.tooltip}`}
-                style={{ color: token("colors.secondary"), fontSize: token("typography.body"), whiteSpace: "nowrap" }}
-              >
-                {row.label}
-              </text>
-              {/* 3d-studio.md §6: a slider per value (logarithmic where the
-                  value spans orders of magnitude), with its reading beside. */}
-              <div style={{ display: "flex", flexDirection: "row", alignItems: "center", gap: token("metrics.gap") }}>
-                <Slider
-                  id={`viewer.studio.light.${row.id}`}
-                  label={row.label}
-                  title={`${row.label}\n${row.tooltip}`}
-                  binding={`viewer.studio.light.${row.id}`}
-                  value={row.value}
-                  min={row.min}
-                  max={row.max}
-                  log={row.log}
-                  unit={row.unit ?? (row.id === "spread" ? "°" : "")}
-                  disabled={light.locked}
-                  onChange={(e) => actions.drive(`viewer.studio.light.${row.id}`, Number(e.value))}
-                />
-                <text
-                  style={{ color: token("colors.text"), fontSize: token("typography.body"), fontVariantNumeric: "tabular-nums", textAlign: "right", width: token("metrics.toolbar") }}
-                >
-                  {reading(row.value)}
-                  {row.unit ?? (row.id === "spread" ? "°" : "")}
-                </text>
-              </div>
-            </div>
-          ))}
-        </>
-      )}
-    </div>
-  ) : null;
-  const studio = !m.studio ? null : m.studio.compact ? (
-    // Narrower than the group: one 3D pull-down, same items and order.
-    <PopUpButton
-      id="viewer.studio.menu"
-      data-pm-variant="inline"
-      binding="viewer.studio.menu"
-      title={"3D\nCamera, tools, axes, views and preview."}
-      label="3D"
-      display="3D"
-      value={null}
-      style={popupStyle}
-      options={[
-        ...looks.map((o) => ({ v: `look:${o.id}`, label: o.label, checked: (m.studio?.look ?? "camera") === o.id })),
-        { separator: true },
-        ...tools.map((o) => ({ v: `tool:${o.id}`, label: o.label, checked: (m.studio?.tool ?? "move") === o.id })),
-        { separator: true },
-        { v: "axes:scene", label: "Scene Axes", checked: !object },
-        { v: "axes:object", label: "Object Axes", checked: object },
-        { v: "frame", label: "Frame" },
-        { separator: true },
-        ...views.map((o) => ({ v: `views:${o.id}`, label: o.label, checked: (m.studio?.views ?? "1") === o.id })),
-        { separator: true },
-        ...tiers.map((o) => ({ v: `tier:${o.id}`, label: o.label, checked: m.studio?.tier === o.id })),
-      ]}
-      onChange={(event) => actions.drive("viewer.studio.menu", event.value)}
-    />
-  ) : (
-    <div
-      id="viewer.studio"
-      role="group"
-      label="3D"
-      style={{
+        left: token("metrics.inset"),
+        top: token("metrics.inset"),
+        height: token("metrics.field"),
         display: "flex",
         flexDirection: "row",
         alignItems: "center",
-        gap: token("metrics.gap"),
+        paddingLeft: token("metrics.inner_radius"),
+        paddingRight: token("metrics.inner_radius"),
+        background: token("colors.floating"),
+        borderRadius: token("metrics.pill_radius"),
       }}
     >
-      <SegmentedControl
-        id="viewer.studio.look"
-        label="Look Through"
-        value={m.studio.look ?? "camera"}
-        options={looks}
-        onChange={(value) => actions.drive("viewer.studio.look", value)}
-      />
-      <SegmentedControl
-        id="viewer.studio.tool"
-        label="Tool"
-        value={m.studio.tool ?? "move"}
-        options={tools}
-        onChange={(value) => actions.drive("viewer.studio.tool", value)}
-      />
       <ToolbarItem
-        id="viewer.studio.axes"
-        label={object ? "Object Axes" : "Scene Axes"}
-        title={
-          object
-            ? "Object Axes\nHandles line up with the object. Click for the scene’s."
-            : "Scene Axes\nHandles line up with the scene. Click for the object’s."
-        }
-        metadata={{ symbol: object ? "cube" : "globe" }}
-        onClick={() => actions.drive("viewer.studio.axes", object ? "scene" : "object")}
-      />
-      <ToolbarItem
-        id="viewer.studio.frame"
-        label="Frame"
-        title={"Frame (F)\nFit the selection, or everything."}
-        metadata={{ symbol: "viewfinder" }}
-        onClick={() => actions.drive("viewer.studio.frame")}
-      />
-      <PopUpButton
-        id="viewer.studio.views"
-        data-pm-variant="inline"
-        binding="viewer.studio.views"
-        title={"Views\nOne view, two side by side, or four."}
-        label="Views"
-        value={m.studio.views ?? "1"}
-        style={popupStyle}
-        options={views.map((o) => ({ v: o.id, label: o.short, detail: o.help }))}
-        onChange={(event) => actions.drive("viewer.studio.views", event.value)}
-      />
-      <SegmentedControl
-        id="viewer.studio.tier"
-        label="Preview"
-        value={m.studio.tier}
-        options={tiers}
-        onChange={(value) => actions.drive("viewer.studio.tier", value)}
-      />
+        id="viewer.studio.viewCamera"
+        label="View camera"
+        title={"View camera\nBack to the shot. Looking around never moves it."}
+        metadata={{ symbol: "camera" }}
+        style={{
+          color: token("colors.text"),
+          fontSize: token("typography.body"),
+        }}
+        onClick={() => actions.drive("viewer.studio.look", "camera")}
+      >
+        View camera
+      </ToolbarItem>
     </div>
-  );
+  ) : null;
   return (
     <div
       id="viewer"
@@ -648,8 +406,6 @@ export function ViewerPanel({
                   Back to Composition
                 </ToolbarItem>
               </>
-            ) : studio ? (
-              studio
             ) : (
               transport && (
                 <>
@@ -705,7 +461,6 @@ export function ViewerPanel({
               gap: token("metrics.gap"),
             }}
           >
-            {!source && studio}
             {popups}
           </div>
         </div>
@@ -747,7 +502,7 @@ export function ViewerPanel({
           label="Transform gizmos"
           style={{ position: "absolute", inset: "fill" }}
         />
-        {lightPanel}
+        {viewCamera}
         {capsule}
       </div>
       {!source && m.canvasLost && (

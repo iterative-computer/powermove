@@ -18,3 +18,6 @@ mod wire;
 pub mod workspace;
 
 pub use anyhow::Result;
+
+pub mod linked;
+pub use linked::{AdoptReport, LinkedFolder, LinkedSummary, adopt_linked, linked_summary};

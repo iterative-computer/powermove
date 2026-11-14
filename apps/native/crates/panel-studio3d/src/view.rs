@@ -1043,6 +1043,28 @@ pub fn add_layer(
         }
         return Ok((format!("Add {label}"), commands, id.into()));
     }
+    // A light preset placed for the selected model (else the first) and the
+    // shot: the same `light_preset` operation agents use headless.
+    if let Some(preset) = kind.strip_prefix("preset:") {
+        let name = pm_scene3d::light_tool::preset_placement(preset, [0.; 3], 1., [0., 0., 5.])
+            .map_err(|e| invalid(e.0))?
+            .name;
+        let chosen = p
+            .selection
+            .layers()
+            .first()
+            .filter(|s| {
+                layers
+                    .iter()
+                    .any(|l| l["id"] == s.as_str() && schema::role(l) == Some(Role::Object))
+            })
+            .cloned();
+        let mut args = json!({"operation":"light_preset","preset":preset,"id":id});
+        if let Some(target) = chosen {
+            args["target"] = json!(target);
+        }
+        return Ok((format!("Add {name}"), vec![scene(p, time, args)], id.into()));
+    }
     let label = new_menu()
         .into_iter()
         .find(|(k, _)| *k == kind && !k.is_empty())

@@ -12,6 +12,16 @@ Tiny, deterministic media files shared by the engine crates' tests, the native e
 
 `expectedColorAt` records the source-color contract. Lossy YUV codecs and matrix/range round trips can decode one or two integer levels away from the nominal RGB triplet; verification should use a small tolerance.
 
+## Interactive VP9 regression
+
+`vp9-alpha-threading.webm` is a separate 64×64, 30 fps, one-second
+half-transparent red clip for the interactive VP9 threading regression.
+It contains generated pixels only. Regenerate it with:
+
+```sh
+ffmpeg -f lavfi -i 'color=c=red@0.5:s=64x64:r=30:d=1,format=yuva420p' -an -c:v libvpx-vp9 -lossless 1 -threads 1 -y vp9-alpha-threading.webm
+```
+
 ## Animation contract
 
 `animated.gif`, `animated-apng.png` (APNG) and `animated.webp` are the same animation in three containers: 160×90, three 100 ms frames of solid red, green, then blue, each with an opaque left half and a fully transparent right half. Importing one produces a 0.3 s clip, so frame *n* is on screen at `t = n / 10`. Chromium decodes all three through `ImageDecoder`, which is how Powermove reads them; FFmpeg cannot demux animated WebP at all.

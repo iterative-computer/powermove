@@ -151,12 +151,7 @@ fn generated_profile_migrates_copies_history_agents_gzip_local_storage_and_media
         0
     );
     assert!(config.native_profile.join("extensions-overlay").is_dir());
-    assert!(
-        config
-            .native_profile
-            .join("Agent Workspaces/synthetic/artifacts/result.txt")
-            .is_file()
-    );
+    assert!(!config.native_profile.join("Agent Workspaces").exists());
     assert_eq!(events.last(), Some(&Event::Complete));
 }
 #[test]
@@ -306,9 +301,13 @@ fn rejects_overlap_symlink_destination_tampered_checkpoint_and_low_space() {
     assert!(run(&config, |_| Ok(())).is_err());
     let t = tempdir().unwrap();
     let config = profile(t.path());
-    let f = fs::File::create(config.electron_profile.join("Agent State/huge")).unwrap();
-    f.set_len(1_000_000_000_000).unwrap();
-    assert!(format!("{:#}", run(&config, |_| Ok(())).unwrap_err()).contains("6 GiB"));
+    // Up-front space is only demanded for bytes that must be written: on one
+    // APFS volume the copy is a clone, so this check applies off APFS only.
+    if !pm_native_migrate::snapshot::clone_volume(&config.electron_profile, t.path()) {
+        let f = fs::File::create(config.electron_profile.join("Agent State/huge")).unwrap();
+        f.set_len(1_000_000_000_000).unwrap();
+        assert!(format!("{:#}", run(&config, |_| Ok(())).unwrap_err()).contains("6 GiB"));
+    }
 }
 const VECTOR: &str = "djEw521BZIsrMJSAMb+RQ1RKlWAueRfLNPqKVz3YbvlR1wyDW+SU+AhcTt32biud/p0d";
 struct SyntheticSecrets {
@@ -683,7 +682,7 @@ fn linked_native_file_parent_cannot_create_folders_in_electron() {
     .unwrap_err();
     symlink(
         &config.electron_profile,
-        config.native_profile.join("Agent Workspaces"),
+        config.native_profile.join("Agent State"),
     )
     .unwrap();
     let before = files(&config.electron_profile);
@@ -1118,9 +1117,10 @@ fn main_file_media_and_upgrade_receipt_are_preserved_and_never_reported_as_migra
         read::<Value>(&base.join(format!("Media Store/Index/{}.json", "b".repeat(64)))),
         record
     );
-    assert_eq!(
-        fs::read(base.join(format!("Media Store/{}.mp4", "a".repeat(64)))).unwrap(),
-        b"synthetic"
+    assert!(
+        !base
+            .join(format!("Media Store/{}.mp4", "a".repeat(64)))
+            .exists()
     );
     assert_eq!(
         read::<Value>(&base.join("storage-upgrade-v1.json"))["future"],
@@ -1259,88 +1259,46 @@ fn guard(downloads: &std::path::Path) -> pm_first_launch::source_access::Scope {
     )
 }
 #[test]
-fn protected_originals_are_explained_first_and_skipped_ones_are_reported_and_kept() {
-    use pm_first_launch::{run_with_folder_access, source_access::Choice};
+fn protected_originals_are_linked_without_opening_the_guarded_folder() {
     let t = tempdir().unwrap();
     let (config, downloads) = protected_original(t.path());
     let _guard = guard(&downloads);
     let mut events = Vec::new();
-    let result = run(&config, |e| {
-        events.push(e);
+    let result = run(&config, |event| {
+        events.push(event);
         Ok(())
     })
     .unwrap();
-    let Outcome::NeedsFolderAccess { folders } = result else {
-        panic!("{result:?}");
-    };
-    assert_eq!(folders, vec![("Downloads".to_owned(), 1)]);
-    assert!(events.contains(&Event::FolderAccessRequired));
-    assert!(events.contains(&Event::Progress {
-        step: Step::Inventory,
-        done: 0,
-        total: 1
-    }));
-    let availability = config
-        .native_profile
-        .join("first-launch-checkpoint/availability.json");
-    assert!(
-        !availability.exists(),
-        "nothing is decided before the person is"
-    );
-    // A relaunch before answering asks again; it never opens the folder.
-    assert!(matches!(
-        run(&config, |_| Ok(())).unwrap(),
-        Outcome::NeedsFolderAccess { .. }
-    ));
-    let result = run_with_folder_access(&config, Choice::Skip, |_| Ok(())).unwrap();
     assert!(
         matches!(
             result,
             Outcome::Complete {
                 projects: 1,
                 blocked_owners: 0,
-                not_reached: 1,
+                not_reached: 0,
                 ..
             }
         ),
         "{result:?}"
     );
+    assert!(!events.contains(&Event::FolderAccessRequired));
     let state: State = read(&config.native_profile.join("migration.json"));
-    assert_eq!(state.folder_access, Some(Choice::Skip));
-    let closure: Value = read(&availability);
-    let clip = closure["references"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|r| {
-            r["sourcePath"]
-                .as_str()
-                .is_some_and(|p| p.ends_with("original.mov"))
-        })
-        .unwrap();
-    assert_eq!(clip["unreached"], true);
-    let report = pm_first_launch::report::load(&config.native_profile).unwrap();
-    assert!(report.rows.iter().any(|r| r.kind
-        == pm_first_launch::surfaces::migration::ReportKind::NotReached
-        && r.display_name == "original.mov"));
+    assert!(state.folder_outcomes.is_empty());
+    let summary =
+        pm_native_migrate::linked_summary(&config.native_profile.join("Media Store")).unwrap();
+    assert_eq!(summary.folders[&downloads].items, 1);
+    assert_eq!(
+        fs::read(downloads.join("original.mov")).unwrap(),
+        b"synthetic original"
+    );
 }
 #[test]
-fn allowed_protected_originals_are_copied() {
+fn skipping_guarded_reads_still_publishes_metadata_only_links() {
     use pm_first_launch::{run_with_folder_access, source_access::Choice};
     let t = tempdir().unwrap();
     let (config, downloads) = protected_original(t.path());
     let _guard = guard(&downloads);
-    assert!(matches!(
-        run(&config, |_| Ok(())).unwrap(),
-        Outcome::NeedsFolderAccess { .. }
-    ));
-    let result = run_with_folder_access(&config, Choice::Allow, |_| Ok(())).unwrap();
-    // macOS's answer is kept for that folder; later runs open it directly.
-    let state: State = read(&config.native_profile.join("migration.json"));
-    assert_eq!(
-        state.folder_outcomes.values().collect::<Vec<_>>(),
-        [&pm_first_launch::source_access::Outcome::Granted]
-    );
+    let result = run_with_folder_access(&config, Choice::Skip, |_| Ok(())).unwrap();
     assert!(
         matches!(
             result,
@@ -1352,20 +1310,11 @@ fn allowed_protected_originals_are_copied() {
         ),
         "{result:?}"
     );
-    let state: Value = read(&config.native_profile.join("Media Store/migration.json"));
-    let pass = state["passes"]
-        .as_object()
-        .unwrap()
-        .values()
-        .next()
-        .unwrap();
-    assert!(
-        pass["closure"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|e| e["status"] == "verified-original")
-    );
+    let state: State = read(&config.native_profile.join("migration.json"));
+    assert!(state.folder_outcomes.is_empty());
+    let summary =
+        pm_native_migrate::linked_summary(&config.native_profile.join("Media Store")).unwrap();
+    assert_eq!(summary.folders[&downloads].items, 1);
 }
 #[test]
 fn a_captured_payload_means_its_protected_original_is_never_opened() {
@@ -1386,5 +1335,76 @@ fn a_captured_payload_means_its_protected_original_is_never_opened() {
     assert!(
         matches!(result, Outcome::Complete { not_reached: 0, .. }),
         "{result:?}"
+    );
+}
+
+#[test]
+fn agent_work_links_and_special_files_are_left_behind_not_refused() {
+    let t = tempdir().unwrap();
+    let config = profile(t.path());
+    let work = config
+        .electron_profile
+        .join("Agent Workspaces/synthetic/artifacts/run/work");
+    fs::create_dir_all(work.join("venv/bin")).unwrap();
+    fs::write(work.join("notes.txt"), "kept").unwrap();
+    // What a Python venv and a package cache leave behind: relative, absolute,
+    // dangling and profile-internal links, plus a named pipe.
+    symlink("/usr/bin/python3", work.join("venv/bin/python")).unwrap();
+    symlink("python", work.join("venv/bin/python3")).unwrap();
+    symlink(work.join("missing"), work.join("dangling")).unwrap();
+    symlink(
+        config.electron_profile.join("store"),
+        work.join("store-link"),
+    )
+    .unwrap();
+    let fifo = std::ffi::CString::new(work.join("pipe").to_str().unwrap()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+    let result = run(&config, |_| Ok(())).unwrap();
+    assert!(matches!(result, Outcome::Complete { .. }), "{result:?}");
+    let copied = config
+        .native_profile
+        .join("Agent Workspaces/synthetic/artifacts/run/work");
+    assert!(!copied.exists());
+    for name in [
+        "venv/bin/python",
+        "venv/bin/python3",
+        "dangling",
+        "store-link",
+        "pipe",
+    ] {
+        assert!(
+            fs::symlink_metadata(copied.join(name)).is_err(),
+            "{name} was carried over"
+        );
+    }
+    // Links inside the source are untouched.
+    assert!(
+        fs::symlink_metadata(work.join("venv/bin/python"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+}
+
+#[test]
+fn a_family_moved_behind_a_link_is_read_through_it() {
+    let t = tempdir().unwrap();
+    let config = profile(t.path());
+    let moved = t.path().join("Elsewhere/Agent Tasks");
+    fs::create_dir_all(&moved).unwrap();
+    fs::write(moved.join("task.json"), "{}").unwrap();
+    symlink(&moved, config.electron_profile.join("Agent Tasks")).unwrap();
+    let result = run(&config, |_| Ok(())).unwrap();
+    assert!(matches!(result, Outcome::Complete { .. }), "{result:?}");
+    assert!(
+        config
+            .native_profile
+            .join("Agent Tasks/task.json")
+            .is_file()
+    );
+    assert!(
+        fs::symlink_metadata(config.native_profile.join("Agent Tasks"))
+            .unwrap()
+            .is_dir()
     );
 }

@@ -65,12 +65,14 @@ export function ColorPanel({ controller: c, command }: ColorProps) {
   // Balance and Tone as rows, then the four wheels (Lift, Gamma, Gain,
   // Offset) side by side as the panel's width allows.
   const wheelControls = (g: GradeEffect) => [
-    ...WHEEL_SECTIONS.slice(0, 2).map((s) => (
-      <div key={`${g.header.id}:${s.title}`} role="group" label={s.title}>
-        <Subheading title={s.title} />
-        {rows(s.keys.map((k) => parameter(g, k)))}
-      </div>
-    )),
+    <Plate key={`${g.header.id}:balance`} label="Balance and Tone" wide>
+      {WHEEL_SECTIONS.slice(0, 2).map((s) => (
+        <div key={`${g.header.id}:${s.title}`} role="group" label={s.title}>
+          <Subheading title={s.title} />
+          {rows(s.keys.map((k) => parameter(g, k)))}
+        </div>
+      ))}
+    </Plate>,
     <Wheels key={`${g.header.id}:wheels`} g={g} locked={p.locked} />,
   ];
   const add = (definition: string, label: string) => (
@@ -129,6 +131,7 @@ export function ColorPanel({ controller: c, command }: ColorProps) {
                   <SectionAction
                     id={`${PANEL_ID}:import-cdl`}
                     label="Import CDL…"
+                    short="Import"
                     symbol="square.and.arrow.down"
                     disabled={!editable}
                     onActivate={() => command(IMPORT_CDL)}
@@ -137,6 +140,7 @@ export function ColorPanel({ controller: c, command }: ColorProps) {
                     <SectionAction
                       id={`${PANEL_ID}:export-cdl`}
                       label="Export CDL…"
+                      short="Export"
                       symbol="square.and.arrow.up"
                       disabled={p.target !== "Layer"}
                       onActivate={() => command(EXPORT_CDL)}
@@ -285,11 +289,11 @@ function Wheels({
         flexDirection: "row",
         flexWrap: "wrap",
         justifyContent: "center",
-        columnGap: t("metrics.inset"),
-        rowGap: t("metrics.inset"),
-        paddingTop: t("metrics.inset"),
-        paddingLeft: t("metrics.inset"),
-        paddingRight: t("metrics.inset"),
+        columnGap: t("metrics.gap"),
+        rowGap: t("metrics.gap"),
+        paddingTop: t("metrics.gap"),
+        paddingLeft: t("metrics.gap"),
+        paddingRight: t("metrics.gap"),
       }}
     >
       {WHEELS_OF.map((w) => {
@@ -302,16 +306,19 @@ function Wheels({
         ];
         const disabled = locked || !g.header.enabled || !group;
         return (
+          // One instrument: its name, the wheel (its master on the bezel),
+          // the master's field and the channels, on one plate.
           <div
             key={w.key}
             role="group"
             label={w.title}
+            data-pm-variant="plate"
             style={{
               display: "flex",
               flexDirection: "column",
               alignItems: "center",
               gap: t("metrics.gap"),
-              width: t("metrics.grade_wheel"),
+              padding: t("metrics.gap"),
             }}
           >
             <text
@@ -332,6 +339,15 @@ function Wheels({
                 neutral={w.neutral}
                 min={w.range[0]}
                 max={w.range[1]}
+                {...(master
+                  ? {
+                      master: {
+                        value: master.parameter.value as number,
+                        min: master.parameter.min ?? w.range[0],
+                        max: master.parameter.max ?? w.range[1],
+                      },
+                    }
+                  : {})}
                 disabled={disabled}
                 onKeyDown={stop}
               />
@@ -386,6 +402,45 @@ function Wheels({
   );
 }
 
+/** A group of grading controls on the grading material (the host draws it:
+ * the kit's one switch between the materials under review). */
+function Plate({
+  label,
+  children,
+  wide,
+}: {
+  key?: string;
+  label: string;
+  children: any;
+  /** Spans the panel, inset from its edges (else it hugs its content). */
+  wide?: boolean;
+}) {
+  return (
+    <div
+      role="group"
+      label={label}
+      data-pm-variant="plate"
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        paddingTop: t("metrics.gap"),
+        paddingBottom: t("metrics.gap"),
+        paddingLeft: t("metrics.gap"),
+        paddingRight: t("metrics.gap"),
+        ...(wide
+          ? {
+              marginLeft: t("metrics.inset"),
+              marginRight: t("metrics.inset"),
+              marginTop: t("metrics.gap"),
+            }
+          : {}),
+      }}
+    >
+      {children}
+    </div>
+  );
+}
+
 /** A channel value as a colourist reads it: two places, a true minus. */
 function signed(v: number) {
   return v.toFixed(2).replace("-", "\u2212");
@@ -397,15 +452,7 @@ function CurveControl({ g, locked }: { g: GradeEffect; locked: boolean }) {
   if (!group) return null;
   const channel = Number(parameter(g, "channel")?.parameter.value ?? 0);
   return (
-    <div
-      role="group"
-      label="Curve"
-      style={{
-        paddingTop: t("metrics.gap"),
-        paddingLeft: t("metrics.inset"),
-        paddingRight: t("metrics.inset"),
-      }}
-    >
+    <div role="group" label="Curve" style={{ paddingTop: t("metrics.gap") }}>
       <UI.CurveEditor
         id={`${PANEL_ID}:curve:${g.header.id}`}
         label="Curve"
@@ -540,7 +587,9 @@ function Tool({
         editable={editable}
         removable
       />
-      {children}
+      <Plate label={label} wide>
+        {children}
+      </Plate>
     </div>
   );
 }

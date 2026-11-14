@@ -451,9 +451,8 @@ impl Flow {
                 .into_iter()
                 .map(|(id, text)| {
                     let (symbol, severity) = match id {
-                        "history_refusals" | "missing_projects" => {
-                            ("exclamationmark.triangle.fill", Severity::Warning)
-                        }
+                        // An empty list entry lost nothing: a note, not a warning.
+                        "history_refusals" => ("exclamationmark.triangle.fill", Severity::Warning),
                         "blocked_owners" => ("xmark.octagon.fill", Severity::Danger),
                         _ => ("info.circle", Severity::Note),
                     };

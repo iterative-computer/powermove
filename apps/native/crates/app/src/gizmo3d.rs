@@ -9,7 +9,7 @@ use pm_engine_service::{OverlayLine, studio::FreeView};
 use pm_kernel::{Caller, Command, Request, Scene3dCommand, SelectionCall};
 use pm_panel_studio3d::viewport::{Eye, Item, Scene};
 use pm_scene3d::navigation::{
-    Pose as View, Vec3, add, dolly, dot, length, mul, normalize, orbit, pan, sub,
+    Lens, Pose as View, Vec3, add, cross, dolly, dot, length, mul, normalize, orbit, pan, sub,
 };
 use pm_scene3d::schema::Role;
 use std::sync::Arc;
@@ -48,7 +48,77 @@ pub(super) enum Handle {
     Pair(usize),
     Ring(usize),
     Uniform,
+    /// A light's marker (index into the scene's items): pressing selects the
+    /// light and dragging moves it in the view plane, as Electron's markers.
+    /// `true` while pinned to the visible edge, where it only selects.
+    Marker(usize, bool),
+    /// A selected light's aim point (◆): dragging moves its target.
+    Target(usize),
 }
+/// A light marker's radius, in points.
+const MARKER: f64 = 9.5;
+/// Where a light's marker sits in composition pixels, and the outward
+/// direction when it is pinned to the edge of the visible area `vis`
+/// (`[x0, y0, x1, y1]`) because the light is outside it or behind the eye.
+fn marker_place(
+    eye: &Eye,
+    p: Vec3,
+    vis: [f64; 4],
+    margin: f64,
+) -> Option<([f64; 2], Option<[f64; 2]>)> {
+    let inner = [
+        vis[0] + margin,
+        vis[1] + margin,
+        vis[2] - margin,
+        vis[3] - margin,
+    ];
+    if inner[2] <= inner[0] || inner[3] <= inner[1] {
+        return None;
+    }
+    let c = [(inner[0] + inner[2]) / 2., (inner[1] + inner[3]) / 2.];
+    let dir = match eye.project(p) {
+        Some((q, _))
+            if q[0] >= inner[0] && q[0] <= inner[2] && q[1] >= inner[1] && q[1] <= inner[3] =>
+        {
+            return Some((q, None));
+        }
+        Some((q, _)) => [q[0] - c[0], q[1] - c[1]],
+        None => {
+            let (r, u) = eye.right_up();
+            let v = sub(p, eye.pose.position);
+            [dot(v, r), -dot(v, u)]
+        }
+    };
+    let l = dir[0].hypot(dir[1]);
+    let d = if l < 1e-9 {
+        [0., 1.]
+    } else {
+        [dir[0] / l, dir[1] / l]
+    };
+    let (hw, hh) = ((inner[2] - inner[0]) / 2., (inner[3] - inner[1]) / 2.);
+    let t = (hw / d[0].abs().max(1e-9)).min(hh / d[1].abs().max(1e-9));
+    Some(([c[0] + d[0] * t, c[1] + d[1] * t], Some(d)))
+}
+/// A light's emitter frame, as the renderer builds it: `dir` toward the
+/// target, `side` level with the floor, `up` across both.
+fn emitter_basis(pivot: Vec3, target: Vec3) -> (Vec3, Vec3, Vec3) {
+    let dir = normalize(sub(target, pivot));
+    let mut side = cross(dir, [0., 1., 0.]);
+    if length(side) < 1e-3 {
+        side = [1., 0., 0.];
+    }
+    let side = normalize(side);
+    (dir, side, cross(dir, side))
+}
+/// `v` turned `deg` degrees about the unit axis `k` (Rodrigues).
+fn turn(v: Vec3, k: Vec3, deg: f64) -> Vec3 {
+    let (s, c) = deg.to_radians().sin_cos();
+    add(
+        add(mul(v, c), mul(cross(k, v), s)),
+        mul(k, dot(k, v) * (1. - c)),
+    )
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Nav {
     Orbit,
@@ -91,6 +161,9 @@ pub struct State {
     pub tool: Tool,
     /// Looking through Free View rather than the shot (UI state `studioLook`).
     pub free_look: bool,
+    /// A look this viewer chose and wrote, until a publication carries it:
+    /// an older publication must not snap the view back meanwhile.
+    pub look_pending: Option<bool>,
     pub free: Option<View>,
     /// Handles follow the object's own axes (UI state `studioAxes`).
     pub object_axes: bool,
@@ -258,6 +331,7 @@ impl GizmoSurface {
     fn studio_go_free(&mut self, cx: &mut Context<Self>) {
         if !self.studio.free_look {
             self.studio.free_look = true;
+            self.studio.look_pending = Some(true);
             if self.studio.free.is_none() {
                 self.studio.free = self.studio.scene.as_ref().map(|s| s.shot);
             }
@@ -287,8 +361,40 @@ impl GizmoSurface {
                 self.studio_push_view(cx);
                 return;
             }
+            if key == "studioLook" && *v == "camera" && self.studio.free_look {
+                // View camera: back to the shot at once, not when the write lands.
+                self.studio.free_look = false;
+                self.studio.look_pending = Some(false);
+                self.studio_push_view(cx);
+                self.draw(cx);
+            }
             self.studio_ui(key, v, cx);
         }
+    }
+    /// Looking through Free View in a 3D composition: the viewer fills its
+    /// whole body with the editor view.
+    pub fn studio_free(&self) -> bool {
+        self.studio.active() && self.studio.free_look
+    }
+    /// Where a light's marker and its ◆ target sit, in composition pixels,
+    /// with the whole composition in view (tests drive them as a person would).
+    #[cfg(test)]
+    pub(crate) fn studio_light_points(&self, id: &str) -> Option<([f64; 2], Option<[f64; 2]>)> {
+        let scene = self.studio.scene.as_ref()?;
+        let eye = self.studio.eye()?;
+        let item = scene.items.iter().find(|i| i.id == id)?;
+        let (m, _) = marker_place(
+            &eye,
+            item.pivot,
+            [0., 0., scene.width, scene.height],
+            MARKER + 6.,
+        )?;
+        Some((m, item.target.and_then(|t| eye.project(t)).map(|p| p.0)))
+    }
+    /// The editor view's pose while looking around (tests).
+    #[cfg(test)]
+    pub(crate) fn studio_free_pose(&self) -> Option<View> {
+        self.studio.free_look.then_some(self.studio.free).flatten()
     }
     /// Whether the composition shows Studio 3D layers (F frames them).
     pub fn studio_active(&self) -> bool {
@@ -309,7 +415,218 @@ impl GizmoSurface {
         }
     }
     /// Lines for the 3D selection and its handles, in normalized frame space.
+    /// Lines for the 3D layers, in normalized frame space, within the
+    /// overlay's fixed budget (`OverlayGeometry::MAX_LINES`, truncated from the
+    /// end): handles first, then the selected lights' emitter and aim, the
+    /// light markers, and last the shot camera's frustum.
     pub(super) fn studio_lines(&self, frame: ViewFrame) -> Vec<OverlayLine> {
+        let mut lines = self.studio_handle_lines(frame);
+        let (selected, markers, camera) = self.studio_light_lines(frame);
+        lines.extend(selected);
+        lines.extend(markers);
+        lines.extend(camera);
+        lines
+    }
+    /// The shot camera while looking around, and every light: the selected
+    /// lights' emitter, aim line and ◆ target; markers for all of them.
+    fn studio_light_lines(
+        &self,
+        frame: ViewFrame,
+    ) -> (Vec<OverlayLine>, Vec<OverlayLine>, Vec<OverlayLine>) {
+        let (mut selected, mut markers, mut camera) = (vec![], vec![], vec![]);
+        let (Some(scene), Some(eye)) = (&self.studio.scene, self.studio.eye()) else {
+            return (selected, markers, camera);
+        };
+        let [w, h] = frame.size;
+        let line = |a: [f64; 2], b: [f64; 2], color: [f32; 4]| OverlayLine {
+            ends: [a[0] / w, a[1] / h, b[0] / w, b[1] / h].map(|v| v as f32),
+            color,
+        };
+        let t = &self.tokens;
+        let accent = rgb(t.colors.accent);
+        let ink = rgb(t.colors.secondary);
+        let pt = 1. / frame.scale;
+        if self.studio.free_look
+            && let Lens::Perspective { fov, aspect, .. } = scene.lens
+        {
+            let shot = scene.shot;
+            let mut c = ink;
+            c[3] = 0.8;
+            let (_, r, down) = emitter_basis(shot.position, shot.target);
+            let d = length(sub(shot.target, shot.position)).max(0.5);
+            let hh = d * (fov.to_radians() / 2.).tan() / shot.zoom.max(1e-6);
+            let hw = hh * aspect;
+            let corner = |x: f64, y: f64| add(shot.target, add(mul(r, x * hw), mul(down, y * hh)));
+            let shown: Vec<_> = [
+                corner(-1., -1.),
+                corner(1., -1.),
+                corner(1., 1.),
+                corner(-1., 1.),
+            ]
+            .iter()
+            .map(|q| eye.project(*q).map(|p| p.0))
+            .collect();
+            let at = eye.project(shot.position).map(|p| p.0);
+            for k in 0..4 {
+                if let (Some(a), Some(b)) = (shown[k], shown[(k + 1) % 4]) {
+                    camera.push(line(a, b, c));
+                }
+                if let (Some(a), Some(b)) = (at, shown[k]) {
+                    camera.push(line(a, b, c));
+                }
+            }
+            if let Some(a) = at {
+                let s = 6. * pt;
+                for (p, q) in [
+                    ([-s, -s], [s, -s]),
+                    ([s, -s], [s, s]),
+                    ([s, s], [-s, s]),
+                    ([-s, s], [-s, -s]),
+                ] {
+                    camera.push(line(
+                        [a[0] + p[0], a[1] + p[1]],
+                        [a[0] + q[0], a[1] + q[1]],
+                        c,
+                    ));
+                }
+            }
+        }
+        let ring = |c: [f64; 2], r: f64, n: usize, color: [f32; 4], out: &mut Vec<OverlayLine>| {
+            let at = |k: usize| {
+                let a = k as f64 / n as f64 * std::f64::consts::TAU;
+                [c[0] + r * a.cos(), c[1] + r * a.sin()]
+            };
+            for k in 0..n {
+                out.push(line(at(k), at(k + 1), color));
+            }
+        };
+        let vis = self.studio_visible(frame);
+        for (index, item) in scene.items.iter().enumerate() {
+            if item.role != Role::Light {
+                continue;
+            }
+            let sel = self.studio.selected.contains(&item.id);
+            let kind = item.light.as_deref().unwrap_or("area");
+            if sel
+                && kind != "point"
+                && let Some(target) = item.target
+            {
+                let (_, side, up) = emitter_basis(item.pivot, target);
+                if kind == "area" && item.shape[0] > 0. {
+                    let (hw, hh) = (item.shape[0] / 2., item.shape[1] / 2.);
+                    let q: Vec<_> = [(-1., -1.), (1., -1.), (1., 1.), (-1., 1.)]
+                        .iter()
+                        .map(|(x, y)| {
+                            eye.project(add(item.pivot, add(mul(side, x * hw), mul(up, y * hh))))
+                                .map(|p| p.0)
+                        })
+                        .collect();
+                    for k in 0..4 {
+                        if let (Some(a), Some(b)) = (q[k], q[(k + 1) % 4]) {
+                            selected.push(line(a, b, accent));
+                        }
+                    }
+                }
+                if kind == "spot" && item.shape[2] > 0. {
+                    let d = length(sub(target, item.pivot));
+                    let rad = d * item.shape[2].clamp(1., 89.).to_radians().tan();
+                    let rim = |k: usize| {
+                        let a = k as f64 / 12. * std::f64::consts::TAU;
+                        add(
+                            target,
+                            add(mul(side, rad * a.cos()), mul(up, rad * a.sin())),
+                        )
+                    };
+                    for k in 0..12 {
+                        if let (Some((a, _)), Some((b, _))) =
+                            (eye.project(rim(k)), eye.project(rim(k + 1)))
+                        {
+                            selected.push(line(a, b, accent));
+                        }
+                    }
+                    for k in [0, 6] {
+                        if let (Some((a, _)), Some((b, _))) =
+                            (eye.project(item.pivot), eye.project(rim(k)))
+                        {
+                            selected.push(line(a, b, accent));
+                        }
+                    }
+                }
+                if let (Some((a, _)), Some((b, _))) = (eye.project(item.pivot), eye.project(target))
+                {
+                    // Three dashes along the aim, then the ◆.
+                    for k in [1., 3., 5.] {
+                        let p = |f: f64| [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f];
+                        selected.push(line(p(k / 7.), p((k + 1.) / 7.), accent));
+                    }
+                    let color = if self.studio.hover == Some(Handle::Target(index)) {
+                        rgb(t.colors.text)
+                    } else {
+                        accent
+                    };
+                    let s = 6. * pt;
+                    let dm = [
+                        [b[0], b[1] - s],
+                        [b[0] + s, b[1]],
+                        [b[0], b[1] + s],
+                        [b[0] - s, b[1]],
+                    ];
+                    for k in 0..4 {
+                        selected.push(line(dm[k], dm[(k + 1) % 4], color));
+                    }
+                }
+            }
+            let Some((m, edge)) = marker_place(&eye, item.pivot, vis, (MARKER + 6.) * pt) else {
+                continue;
+            };
+            let r = MARKER * pt;
+            let out = if sel { &mut selected } else { &mut markers };
+            ring(m, r, 8, ink, out);
+            if sel {
+                ring(m, r + 3.5 * pt, 10, accent, out);
+            }
+            let g = |x: f64, y: f64| [m[0] + x * pt, m[1] + y * pt];
+            let strokes: &[((f64, f64), (f64, f64))] = match kind {
+                "spot" => &[
+                    ((-2., -5.), (2., -5.)),
+                    ((2., -5.), (5., 4.)),
+                    ((5., 4.), (-5., 4.)),
+                    ((-5., 4.), (-2., -5.)),
+                ],
+                "point" => &[
+                    ((-3., 0.), (0., -3.)),
+                    ((0., -3.), (3., 0.)),
+                    ((3., 0.), (0., 3.)),
+                    ((0., 3.), (-3., 0.)),
+                ],
+                "sun" => &[
+                    ((-6., 0.), (6., 0.)),
+                    ((0., -6.), (0., 6.)),
+                    ((-4., -4.), (4., 4.)),
+                    ((-4., 4.), (4., -4.)),
+                ],
+                _ => &[
+                    ((-5., -3.5), (5., -3.5)),
+                    ((5., -3.5), (5., 3.5)),
+                    ((5., 3.5), (-5., 3.5)),
+                    ((-5., 3.5), (-5., -3.5)),
+                ],
+            };
+            for (a, b) in strokes {
+                out.push(line(g(a.0, a.1), g(b.0, b.1), ink));
+            }
+            if let Some(d) = edge {
+                // Pinned: a chevron points the way to the light.
+                let tip = [m[0] + d[0] * (r + 6. * pt), m[1] + d[1] * (r + 6. * pt)];
+                let back = [tip[0] - d[0] * 4. * pt, tip[1] - d[1] * 4. * pt];
+                let n = [-d[1] * 4. * pt, d[0] * 4. * pt];
+                out.push(line(tip, [back[0] + n[0], back[1] + n[1]], ink));
+                out.push(line(tip, [back[0] - n[0], back[1] - n[1]], ink));
+            }
+        }
+        (selected, markers, camera)
+    }
+    fn studio_handle_lines(&self, frame: ViewFrame) -> Vec<OverlayLine> {
         let mut lines = vec![];
         let (Some(scene), Some(eye)) = (&self.studio.scene, self.studio.eye()) else {
             return lines;
@@ -328,7 +645,7 @@ impl GizmoSurface {
         for item in scene
             .items
             .iter()
-            .filter(|i| self.studio.selected.contains(&i.id))
+            .filter(|i| self.studio.selected.contains(&i.id) && i.role != Role::Light)
         {
             if drag.is_some() {
                 break;
@@ -533,8 +850,74 @@ impl GizmoSurface {
         }
         lines
     }
+    /// The part of the composition the viewer shows, in composition pixels
+    /// (`[x0, y0, x1, y1]`): all of it at Fit, less when the editor view
+    /// covers the panel or the image is zoomed past it.
+    pub(super) fn studio_visible(&self, frame: ViewFrame) -> [f64; 4] {
+        let b = self.bounds;
+        if f32::from(b.size.width) <= 0. || f32::from(b.size.height) <= 0. {
+            return [0., 0., frame.size[0], frame.size[1]];
+        }
+        let x0 = f32::from(b.origin.x - frame.origin.x) as f64 / frame.scale;
+        let y0 = f32::from(b.origin.y - frame.origin.y) as f64 / frame.scale;
+        let x1 = x0 + f32::from(b.size.width) as f64 / frame.scale;
+        let y1 = y0 + f32::from(b.size.height) as f64 / frame.scale;
+        [
+            x0.max(0.),
+            y0.max(0.),
+            x1.min(frame.size[0]),
+            y1.min(frame.size[1]),
+        ]
+    }
+    /// A light's ◆ target or marker under the point. They come before the
+    /// transform handles, as Electron's markers do.
+    fn studio_light_handle(&self, at: [f64; 2], frame: ViewFrame) -> Option<Handle> {
+        if !matches!(self.studio.tool, Tool::Move | Tool::Rotate | Tool::Scale) {
+            return None;
+        }
+        let scene = self.studio.scene.as_ref()?;
+        let eye = self.studio.eye()?;
+        let pt = 1. / frame.scale;
+        let lights = || {
+            scene
+                .items
+                .iter()
+                .enumerate()
+                .filter(|(_, i)| i.role == Role::Light && !i.locked)
+        };
+        for (index, item) in lights() {
+            if self.studio.selected.contains(&item.id)
+                && item.light.as_deref() != Some("point")
+                && let Some((p, _)) = item.target.and_then(|t| eye.project(t))
+                && (at[0] - p[0]).hypot(at[1] - p[1]) <= 8. * pt
+            {
+                return Some(Handle::Target(index));
+            }
+        }
+        let vis = self.studio_visible(frame);
+        let mut best: Option<(f64, Handle)> = None;
+        for (index, item) in lights() {
+            let Some((m, edge)) = marker_place(&eye, item.pivot, vis, (MARKER + 6.) * pt) else {
+                continue;
+            };
+            let d = (at[0] - m[0]).hypot(at[1] - m[1]);
+            // Selected markers win a tie, then the nearest.
+            let rank = d - if self.studio.selected.contains(&item.id) {
+                4. * pt
+            } else {
+                0.
+            };
+            if d <= (MARKER + 3.) * pt && best.is_none_or(|(b, _)| rank < b) {
+                best = Some((rank, Handle::Marker(index, edge.is_some())));
+            }
+        }
+        best.map(|(_, h)| h)
+    }
     /// Which handle is under a composition point.
     fn studio_handle(&self, at: [f64; 2], frame: ViewFrame) -> Option<Handle> {
+        if let Some(h) = self.studio_light_handle(at, frame) {
+            return Some(h);
+        }
         let eye = self.studio.eye()?;
         let items = self.studio.movable();
         let pivot = State::pivot(&items)?;
@@ -601,11 +984,14 @@ impl GizmoSurface {
     }
     /// A press in the viewer while the composition has 3D layers. `true`
     /// when the 3D layer took it.
+    /// `view_tool` is the window's Hand (`Some(false)`) or Zoom (`Some(true)`)
+    /// tool: in a 3D composition they move the editor view, never the shot.
     pub(super) fn studio_down(
         &mut self,
         event: &MouseDownEvent,
         at: [f64; 2],
         frame: ViewFrame,
+        view_tool: Option<bool>,
         cx: &mut Context<Self>,
     ) -> bool {
         if !self.studio.active() {
@@ -613,12 +999,14 @@ impl GizmoSurface {
         }
         let middle = event.button == MouseButton::Middle;
         let alt = event.modifiers.alt;
-        let nav = if middle || alt {
+        let nav = if middle || alt || view_tool == Some(false) {
             Some(if event.modifiers.shift {
                 Nav::Pan
             } else {
                 Nav::Orbit
             })
+        } else if view_tool == Some(true) {
+            Some(Nav::Dolly)
         } else {
             match self.studio.tool {
                 Tool::Orbit => Some(Nav::Orbit),
@@ -710,7 +1098,34 @@ impl GizmoSurface {
             return true;
         }
         if let Some(handle) = self.studio_handle(at, frame) {
-            let items = self.studio.movable();
+            let (handle, items) = match handle {
+                Handle::Marker(index, _) | Handle::Target(index) => {
+                    let Some(item) = self
+                        .studio
+                        .scene
+                        .as_ref()
+                        .and_then(|s| s.items.get(index).cloned())
+                    else {
+                        return true;
+                    };
+                    let shift = event.modifiers.shift;
+                    if shift || !self.studio.selected.contains(&item.id) {
+                        self.studio_select(item.id.clone(), shift, cx);
+                    }
+                    // ⇧ only toggles the light; a marker pinned to the edge
+                    // only selects (its light is out of view).
+                    if shift || matches!(handle, Handle::Marker(_, true)) {
+                        return true;
+                    }
+                    let handle = if matches!(handle, Handle::Marker(..)) {
+                        Handle::Plane
+                    } else {
+                        handle
+                    };
+                    (handle, vec![item])
+                }
+                h => (h, self.studio.movable()),
+            };
             let pivot = State::pivot(&items).unwrap_or([0.; 3]);
             let axis_px = self.tokens.metrics.rotation_stem as f64 * 4. / frame.scale;
             self.studio.drag = Some(Drag {
@@ -1064,8 +1479,22 @@ impl GizmoSurface {
             }
             drag.active = true;
             let plural = drag.items.len() > 1;
+            let lights = drag.items.iter().all(|i| i.role == Role::Light);
+            let scale = self.studio.tool == Tool::Scale;
             self.queue
                 .push_back(Job::Begin(match (drag.handle, plural) {
+                    (Handle::Target(_), _) => "Aim Light",
+                    (Handle::Ring(_), _) if lights => "Aim Light",
+                    (Handle::Plane | Handle::Axis(_) | Handle::Pair(_), false)
+                        if lights && !scale =>
+                    {
+                        "Move Light"
+                    }
+                    (Handle::Plane | Handle::Axis(_) | Handle::Pair(_), true)
+                        if lights && !scale =>
+                    {
+                        "Move Lights"
+                    }
                     (Handle::Ring(_), false) => "Rotate 3D Layer",
                     (Handle::Ring(_), true) => "Rotate 3D Layers",
                     (Handle::Uniform, false) | (Handle::Axis(_), false)
@@ -1108,9 +1537,60 @@ impl GizmoSurface {
                 (d[0] * s[0] + d[1] * s[1]) / l2
             })
         };
+        // ⌥ while moving a light carries its target along (Electron), so it
+        // keeps aiming the same way.
+        let carry = event.modifiers.alt;
+        let aim_by = |item: &Item, w: Vec3, commands: &mut Vec<Command>| {
+            if let Some(aim) = item.aim {
+                for (a, key) in ["light.targetX", "light.targetY", "light.targetZ"]
+                    .iter()
+                    .enumerate()
+                {
+                    commands.push(set(&item.id, key, aim[a] + w[a], drag.time));
+                }
+            }
+        };
         for item in &drag.items {
             let id = item.id.as_str();
+            let light = item.role == Role::Light;
             match (drag.handle, tool) {
+                (Handle::Target(_), _) => {
+                    // The aim point slides in the view plane through it.
+                    let Some(target) = item.target else {
+                        continue;
+                    };
+                    let upp = eye.units_per_pixel(target);
+                    let (r, u) = eye.right_up();
+                    let mut w = add(mul(r, d[0] * upp), mul(u, -d[1] * upp));
+                    if snap {
+                        w = w.map(f64::round);
+                    }
+                    aim_by(item, w, &mut commands);
+                }
+                (Handle::Ring(i), _) if light => {
+                    // Rotating a light swings its aim about its position: the
+                    // renderer aims lights by their target, not their rotation.
+                    let (Some(target), Some((c, _))) = (item.target, eye.project(drag.pivot))
+                    else {
+                        continue;
+                    };
+                    let a = [drag.origin[0] - c[0], drag.origin[1] - c[1]];
+                    let b = [at[0] - c[0], at[1] - c[1]];
+                    let mut deg = (a[0] * b[1] - a[1] * b[0])
+                        .atan2(a[0] * b[0] + a[1] * b[1])
+                        .to_degrees()
+                        * fine;
+                    let f = normalize(sub(eye.pose.target, eye.pose.position));
+                    if dot(basis[i], f) < 0. {
+                        deg = -deg;
+                    }
+                    if snap {
+                        deg = (deg / 15.).round() * 15.;
+                    }
+                    let v = sub(target, item.pivot);
+                    let w = sub(add(item.pivot, turn(v, basis[i], -deg)), target);
+                    aim_by(item, w, &mut commands);
+                }
                 (Handle::Axis(i), Tool::Move) => {
                     let mut t = along(i) * drag.length;
                     if snap {
@@ -1126,6 +1606,9 @@ impl GizmoSurface {
                         if w[a].abs() > 1e-9 || a == i {
                             commands.push(set(id, key, item.position[a] + c[a], drag.time));
                         }
+                    }
+                    if light && carry {
+                        aim_by(item, w, &mut commands);
                     }
                     offset = w;
                 }
@@ -1157,6 +1640,9 @@ impl GizmoSurface {
                     {
                         commands.push(set(id, key, item.position[a] + c[a], drag.time));
                     }
+                    if light && carry {
+                        aim_by(item, w, &mut commands);
+                    }
                     offset = w;
                 }
                 (Handle::Plane, _) => {
@@ -1172,6 +1658,9 @@ impl GizmoSurface {
                         .enumerate()
                     {
                         commands.push(set(id, key, item.position[i] + c[i], drag.time));
+                    }
+                    if light && carry {
+                        aim_by(item, w, &mut commands);
                     }
                     offset = w;
                 }
@@ -1261,7 +1750,9 @@ impl GizmoSurface {
         self.draw(cx);
         true
     }
-    /// ⌥-scroll dollies anywhere; plain scroll dollies with the Zoom tool.
+    /// Scrolling in a 3D composition moves the editor view, never the shot:
+    /// a trackpad's two-finger scroll orbits, ⇧ pans, and ⌥, ⌘ or a mouse
+    /// wheel dollies. The first one leaves the camera for Free View.
     pub(super) fn studio_wheel(
         &mut self,
         event: &ScrollWheelEvent,
@@ -1271,14 +1762,48 @@ impl GizmoSurface {
         let Some(scene) = self.studio.scene.clone() else {
             return false;
         };
-        if !(event.modifiers.alt || self.studio.tool == Tool::Zoom) {
-            return false;
-        }
-        let dy = f32::from(event.delta.pixel_delta(line).y) as f64;
+        let d = event.delta.pixel_delta(line);
+        let (dx, dy) = (f32::from(d.x) as f64, f32::from(d.y) as f64);
+        let m = event.modifiers;
+        let wheel = matches!(event.delta, ScrollDelta::Lines(_));
+        let frame = self.host.frame(self.bounds, cx);
         self.studio_go_free(cx);
         let start = self.studio.view().unwrap_or(scene.shot);
-        let fine = if event.modifiers.shift { 0.1 } else { 1. };
-        self.studio.free = Some(dolly(start, -dy * fine, scene.lens));
+        self.studio.free = Some(
+            if wheel || m.alt || m.platform || m.control || self.studio.tool == Tool::Zoom {
+                let fine = if m.shift && !wheel { 0.1 } else { 1. };
+                dolly(start, -dy * fine, scene.lens)
+            } else if m.shift {
+                let Some(frame) = frame else {
+                    return true;
+                };
+                let (right, up) = scene.eye(Some(start)).right_up();
+                pan(
+                    start,
+                    dx,
+                    dy,
+                    scene.lens,
+                    frame.size[1] * frame.scale,
+                    right,
+                    up,
+                )
+            } else {
+                orbit(start, dx, dy)
+            },
+        );
+        self.studio_push_view(cx);
+        self.draw(cx);
+        true
+    }
+    /// Pinching in a 3D composition dollies the editor view.
+    pub(super) fn studio_pinch(&mut self, delta: f64, cx: &mut Context<Self>) -> bool {
+        let Some(scene) = self.studio.scene.clone() else {
+            return false;
+        };
+        self.studio_go_free(cx);
+        let start = self.studio.view().unwrap_or(scene.shot);
+        // Pinching out moves closer; a positive dolly moves away.
+        self.studio.free = Some(dolly(start, -delta * 400., scene.lens));
         self.studio_push_view(cx);
         self.draw(cx);
         true
@@ -1319,7 +1844,8 @@ impl GizmoSurface {
                 }
             }
             _ => match self.studio_handle(at, frame) {
-                Some(Handle::Plane) => CursorStyle::OpenHand,
+                Some(Handle::Plane | Handle::Marker(_, false)) => CursorStyle::OpenHand,
+                Some(Handle::Target(_)) => CursorStyle::Crosshair,
                 Some(_) => CursorStyle::PointingHand,
                 None => return None,
             },
@@ -1329,4 +1855,54 @@ impl GizmoSurface {
 /// A 3D item the viewer must not pick: locked, or not in the scene.
 fn locked(scene: &Scene, id: &str) -> bool {
     scene.items.iter().any(|i| i.id == id && i.locked)
+}
+#[cfg(test)]
+mod light_marker_tests {
+    use super::{Eye, View, length, marker_place, turn};
+    use pm_scene3d::navigation::Lens;
+    fn eye() -> Eye {
+        Eye {
+            pose: View {
+                position: [0., 0., 5.],
+                target: [0., 0., 0.],
+                zoom: 1.,
+            },
+            lens: Lens::Perspective {
+                fov: 40.,
+                aspect: 16. / 9.,
+                near: 0.01,
+                far: 100.,
+            },
+            width: 640.,
+            height: 360.,
+        }
+    }
+    #[test]
+    fn a_light_in_view_sits_where_it_projects() {
+        let (m, edge) = marker_place(&eye(), [0., 0., 0.], [0., 0., 640., 360.], 10.).unwrap();
+        assert!((m[0] - 320.).abs() < 1e-6 && (m[1] - 180.).abs() < 1e-6);
+        assert!(edge.is_none());
+    }
+    #[test]
+    fn a_light_outside_or_behind_is_pinned_to_the_visible_edge_pointing_at_it() {
+        let vis = [0., 0., 640., 360.];
+        // Far to the right: pinned at the right edge, pointing right.
+        let (m, edge) = marker_place(&eye(), [50., 0., 0.], vis, 10.).unwrap();
+        assert!((m[0] - 630.).abs() < 1e-6, "{m:?}");
+        assert!(edge.unwrap()[0] > 0.9);
+        // Behind the eye and up: still pinned, pointing up.
+        let (m, edge) = marker_place(&eye(), [0., 5., 9.], vis, 10.).unwrap();
+        assert!((m[1] - 10.).abs() < 1e-6, "{m:?}");
+        assert!(edge.unwrap()[1] < -0.9);
+        // A narrower visible area (the editor view covering the panel) pins inside it.
+        let (m, _) = marker_place(&eye(), [50., 0., 0.], [100., 0., 500., 360.], 10.).unwrap();
+        assert!((m[0] - 490.).abs() < 1e-6, "{m:?}");
+    }
+    #[test]
+    fn rotating_a_lights_aim_keeps_its_distance() {
+        let v = [0., 0., -3.];
+        let w = turn(v, [0., 1., 0.], 90.);
+        assert!((length(w) - 3.).abs() < 1e-9);
+        assert!((w[0] + 3.).abs() < 1e-9 && w[2].abs() < 1e-9, "{w:?}");
+    }
 }
