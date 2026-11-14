@@ -2129,6 +2129,12 @@ impl SurfaceView {
             );
         if !disabled && (clickable || events.double_click) {
             element = element.on_click(cx.listener(move |v, event: &ClickEvent, window, cx| {
+                // A node that only takes double-clicks (a layer's name) leaves
+                // a single click to what it sits in (its row selects).
+                let double = events.double_click && event.click_count() == 2;
+                if !clickable && !double {
+                    return;
+                }
                 cx.stop_propagation();
                 let position = event.position();
                 let detail = v.detail(position, Some(0), 0, event.click_count(), event.modifiers());
