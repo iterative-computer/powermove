@@ -62,10 +62,10 @@ impl DocumentSource {
             .material_images
             .lock()
             .map_err(|_| "Material image cache poisoned")?;
-        if let Some(index) = cache.iter().position(|(key, _)| key == id) {
-            let entry = cache.remove(index);
-            let pixels = entry.1.clone();
-            cache.push(entry);
+        // The uploaded map array owns these pixels. Weak entries reuse all
+        // its images without another cache of pixels or a 16-image LRU that
+        // reloads every image on every frame of a larger scene.
+        if let Some(pixels) = cache.get(id).and_then(std::sync::Weak::upgrade) {
             return Ok(pixels);
         }
         use std::io::Read;
@@ -79,10 +79,8 @@ impl DocumentSource {
             return Err("Material image exceeds the import byte budget".into());
         }
         let pixels = pm_scene3d::render::texture_rgba(&bytes).map_err(|e| e.to_string())?;
-        cache.push((id.into(), pixels.clone()));
-        if cache.len() > 16 {
-            cache.remove(0);
-        }
+        cache.retain(|_, pixels| pixels.strong_count() > 0);
+        cache.insert(id.into(), Arc::downgrade(&pixels));
         Ok(pixels)
     }
     pub(super) fn bind_material_maps(
@@ -91,7 +89,7 @@ impl DocumentSource {
         owner: &str,
         material: &Value,
         gpu: &mut GpuMaterial,
-        layers: &mut Vec<Vec<u8>>,
+        layers: &mut Vec<Arc<Vec<u8>>>,
         indices: &mut HashMap<(String, usize), usize>,
     ) -> Result<(), String> {
         for (slot, source) in material["maps"]
@@ -125,7 +123,7 @@ impl DocumentSource {
                     self.captured_material(request, owner, source)?.1
                 };
                 let index = layers.len();
-                layers.push((*pixels).clone());
+                layers.push(pixels);
                 indices.insert(key, index);
                 index
             } as f32;

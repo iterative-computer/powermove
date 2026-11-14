@@ -187,8 +187,8 @@ struct Voice {
 enum Today {
     /// Not yet looked at (the composition is needed).
     Unbuilt,
-    /// Not covered (a time map that is not linear, a negative start, a
-    /// source without a known length): the engine's readers play it.
+    /// Not covered (a time map that is not linear, a source without a
+    /// known length): the engine's readers play it.
     Off,
     On(Box<TodayVoice>),
 }
