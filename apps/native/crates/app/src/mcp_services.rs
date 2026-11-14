@@ -307,6 +307,7 @@ impl EngineJobs {
                         text: Some(crate::extensions::canvas_text(fonts)),
                         frames: None,
                         rasters: Some(overrides.hooks()),
+                        clipboard: None,
                         vars: Some(crate::extensions::vars_source(&self.profile)),
                         wake: Arc::new(|| {}),
                     },

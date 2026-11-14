@@ -160,6 +160,8 @@ pub struct HostConfig {
     pub rasters: Option<crate::RasterHooks>,
     /// Values for extensions' declared `vars`.
     pub vars: Option<crate::VarsSource>,
+    /// The app's pasteboard for `navigator.clipboard` (none: refused).
+    pub clipboard: Option<crate::TextClipboard>,
 }
 
 enum Input {
@@ -2298,6 +2300,7 @@ impl Owner {
         host.set_frames(self.config.frames.clone());
         host.set_rasters(self.config.rasters.clone());
         host.set_effects(Some(self.shared.effects.clone()));
+        host.set_clipboard(self.config.clipboard.clone());
         let pool = crate::pool(&format!("window:{}", self.config.project), host.clone())?;
         let realm = pool.realm(RealmKind::Compat)?;
         trace(json!({"realm": "pool"}));
@@ -2631,6 +2634,7 @@ mod tests {
                 text: None,
                 frames,
                 rasters,
+                clipboard: None,
                 vars: None,
                 wake: Arc::new(|| ()),
             });
@@ -2813,6 +2817,7 @@ mod tests {
             wake: Arc::new(|| ()),
             frames: None,
             rasters: None,
+            clipboard: None,
             vars: None,
         });
         let deadline = Instant::now() + Duration::from_secs(20);
@@ -3509,6 +3514,7 @@ mod tests {
             text: None,
             frames: None,
             rasters: None,
+            clipboard: None,
             vars: Some(Arc::new(move |id: &str, keys: &[String]| {
                 seen.lock().unwrap().push((id.to_owned(), keys.to_vec()));
                 [
@@ -3641,6 +3647,7 @@ mod tests {
             text: None,
             frames: None,
             rasters: None,
+            clipboard: None,
             vars: Some(every_value(SECRET)),
             wake: Arc::new(|| ()),
         });
@@ -3702,6 +3709,7 @@ mod tests {
             text: None,
             frames: None,
             rasters: None,
+            clipboard: None,
             vars: Some(Arc::new(move |_: &str, keys: &[String]| {
                 keys.iter()
                     .filter(|_| source.load(Ordering::Acquire))
@@ -3782,6 +3790,7 @@ mod tests {
             text: None,
             frames: None,
             rasters: None,
+            clipboard: None,
             vars: Some(every_value(SECRET)),
             wake: Arc::new(|| ()),
         });
@@ -3890,6 +3899,7 @@ mod tests {
             text: None,
             frames: None,
             rasters: None,
+            clipboard: None,
             vars: Some(every_value(SECRET)),
             wake: Arc::new(|| ()),
         });

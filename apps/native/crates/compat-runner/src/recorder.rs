@@ -95,6 +95,8 @@ pub struct NativeHost {
     frames: Mutex<Option<crate::FrameRenderer>>,
     rasters: Mutex<Option<crate::RasterHooks>>,
     effects: Mutex<Option<crate::EffectsSlot>>,
+    /// The app's pasteboard (`navigator.clipboard`): a window's realm only.
+    clipboard: Mutex<Option<crate::TextClipboard>>,
     /// [`crate::code_identity`] of the records this realm runs (0: unknown).
     code: std::sync::atomic::AtomicU64,
     /// Values for extensions' declared `vars`, staged by the owner for a
@@ -217,6 +219,7 @@ impl NativeHost {
             frames: Mutex::new(None),
             rasters: Mutex::new(None),
             effects: Mutex::new(None),
+            clipboard: Mutex::new(None),
             code: std::sync::atomic::AtomicU64::new(0),
             vars: Mutex::default(),
             capture: Mutex::new(None),
@@ -510,6 +513,9 @@ impl NativeHost {
         self.kernel.lock().unwrap().size().unwrap()
     }
     /// A window realm's effect clipboard (an export realm has none).
+    pub fn set_clipboard(&self, clipboard: Option<crate::TextClipboard>) {
+        *self.clipboard.lock().unwrap() = clipboard;
+    }
     pub fn set_effects(&self, effects: Option<crate::EffectsSlot>) {
         *self.effects.lock().unwrap() = effects;
     }
@@ -1675,6 +1681,16 @@ impl EngineProxy for NativeHost {
             }
             "compat.answers" => return self.raster_answers(input),
             "fonts.families" => return Ok(json!(crate::font_families())),
+            "clipboard.text" => {
+                let clipboard = self.clipboard.lock().unwrap().clone().ok_or_else(|| {
+                    Error::Host("The clipboard is not available to this extension here".into())
+                })?;
+                let text = clipboard(input["write"].as_str()).map_err(Error::Host)?;
+                return Ok(match input.get("write") {
+                    Some(_) => Value::Null,
+                    None => Value::String(text),
+                });
+            }
             "effects.clipboard" => {
                 let slot = self.effects.lock().unwrap().clone();
                 let hook = slot.and_then(|slot| slot.lock().unwrap().clone());

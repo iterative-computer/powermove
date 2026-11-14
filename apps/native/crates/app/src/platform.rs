@@ -243,6 +243,38 @@ fn paste_board() -> Retained<NSPasteboard> {
     NSPasteboard::generalPasteboard()
 }
 
+/// `navigator.clipboard`'s text for extensions, on the pasteboard Paste reads
+/// (chosen now, on the main thread); called from the realm's thread.
+pub fn text_clipboard() -> pm_compat_runner::TextClipboard {
+    #[cfg(debug_assertions)]
+    let name = REVIEW_BOARD.with(|b| b.borrow().clone());
+    #[cfg(not(debug_assertions))]
+    let name = None;
+    text_clipboard_on(name)
+}
+fn text_clipboard_on(name: Option<String>) -> pm_compat_runner::TextClipboard {
+    std::sync::Arc::new(move |write: Option<&str>| {
+        let board = match &name {
+            Some(name) => NSPasteboard::pasteboardWithName(&NSString::from_str(name)),
+            None => NSPasteboard::generalPasteboard(),
+        };
+        // SAFETY: AppKit's own pasteboard type constants.
+        let kind = unsafe { NSPasteboardTypeString };
+        match write {
+            Some(text) => {
+                board.clearContents();
+                if !board.setString_forType(&NSString::from_str(text), kind) {
+                    return Err("The text could not be put on the clipboard".into());
+                }
+                Ok(String::new())
+            }
+            None => Ok(board
+                .stringForType(kind)
+                .map(|text| text.to_string())
+                .unwrap_or_default()),
+        }
+    })
+}
 /// What Paste finds for the importer on the pasteboard.
 #[derive(Debug, PartialEq)]
 pub enum PastedMedia {
@@ -712,7 +744,29 @@ mod signal_tests {
 
 #[cfg(test)]
 mod paste_tests {
-    use super::{PastedMedia, read_media, tiff_to_png};
+    use super::{PastedMedia, read_media, text_clipboard_on, tiff_to_png};
+    /// An extension's `navigator.clipboard` text reaches the pasteboard and
+    /// comes back, from a thread of its own as the realm calls it.
+    #[test]
+    fn an_extensions_clipboard_text_goes_through_the_pasteboard() {
+        let name = "com.powermove.tests.paste.extension-text".to_owned();
+        let clipboard = text_clipboard_on(Some(name.clone()));
+        std::thread::spawn(move || {
+            clipboard(Some("cubic-bezier(0.25, 0.1, 0.25, 1)")).unwrap();
+            assert_eq!(clipboard(None).unwrap(), "cubic-bezier(0.25, 0.1, 0.25, 1)");
+        })
+        .join()
+        .unwrap();
+        let board = board("extension-text");
+        assert_eq!(
+            board
+                .stringForType(unsafe { NSPasteboardTypeString })
+                .map(|s| s.to_string()),
+            None,
+            "board() clears it"
+        );
+        assert_eq!(text_clipboard_on(Some(name))(None).unwrap(), "");
+    }
     use objc2_app_kit::*;
     use objc2_foundation::{NSData, NSString, NSURL};
     /// A pasteboard of the tests' own: the person's clipboard is never touched.

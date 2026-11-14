@@ -259,6 +259,10 @@ pub fn code_identity(records: &Value) -> u64 {
 pub type VarsSource =
     Arc<dyn Fn(&str, &[String]) -> std::collections::BTreeMap<String, String> + Send + Sync>;
 pub type EffectsHook = Arc<dyn Fn(&str) -> std::result::Result<Value, String> + Send + Sync>;
+/// The app's pasteboard as `navigator.clipboard` has it: `Some(text)` writes
+/// that text, `None` reads the text there (empty when there is none).
+pub type TextClipboard =
+    Arc<dyn Fn(Option<&str>) -> std::result::Result<String, String> + Send + Sync>;
 /// Where a window's realm finds its [`EffectsHook`], set once the window's
 /// panels run (they start after its extensions).
 pub type EffectsSlot = Arc<std::sync::Mutex<Option<EffectsHook>>>;
@@ -693,6 +697,71 @@ mod tests {
         assert_eq!(
             runner.json("atob('YQ'.repeat(200000)).length").unwrap(),
             json!(300000)
+        );
+    }
+    /// `navigator.clipboard` writes and reads the app's pasteboard; a realm
+    /// without one (an export's, an agent's) is refused, as a browser refuses
+    /// a page without the permission, and the extension's catch runs.
+    #[test]
+    fn navigator_clipboard_reads_and_writes_the_apps_pasteboard() {
+        let runner = runner();
+        let refused = runner
+            .json("navigator.clipboard.writeText('x').then(()=>'written',e=>String(e?.message??e))")
+            .unwrap();
+        assert!(
+            refused.as_str().unwrap().contains("not available"),
+            "{refused}"
+        );
+        let board = Arc::new(std::sync::Mutex::new(String::new()));
+        let held = board.clone();
+        runner
+            .host
+            .set_clipboard(Some(Arc::new(move |write: Option<&str>| {
+                let mut text = held.lock().unwrap();
+                Ok(match write {
+                    Some(write) => {
+                        *text = write.to_owned();
+                        String::new()
+                    }
+                    None => text.clone(),
+                })
+            })));
+        assert_eq!(
+            runner
+                .json("navigator.clipboard.writeText('cubic-bezier(0, 0, 1, 1)').then(()=>navigator.clipboard.readText())")
+                .unwrap(),
+            json!("cubic-bezier(0, 0, 1, 1)")
+        );
+        assert_eq!(*board.lock().unwrap(), "cubic-bezier(0, 0, 1, 1)");
+    }
+    /// `document.fonts` as extensions use it: `ready` waits for the faces
+    /// asked for (`load`, the project's text) and `status` says whether any
+    /// is still loading.
+    #[test]
+    fn document_fonts_ready_waits_for_the_faces_asked_for() {
+        let runner = runner();
+        assert_eq!(
+            runner
+                .json(
+                    "document.fonts.ready.then(set=>[set===document.fonts,document.fonts.status])"
+                )
+                .unwrap(),
+            json!([true, "loaded"])
+        );
+        assert_eq!(
+            runner
+                .json("(()=>{globalThis.done=false;document.fonts.load('italic 700 16px \"Probe Serif\"');document.fonts.ready.then(()=>globalThis.done=true);return [document.fonts.status,document.fonts.check('700 16px Probe Serif'),document.fonts.check('italic 700 16px Probe Serif')]})()")
+                .unwrap(),
+            json!(["loading", true, false])
+        );
+        runner
+            .json("(__compat.fontsLoaded(['Probe Serif|700|1']),true)")
+            .unwrap();
+        assert_eq!(
+            runner
+                .json("document.fonts.ready.then(()=>[done,document.fonts.status])")
+                .unwrap(),
+            json!([true, "loaded"])
         );
     }
     /// TypeScript is transformed natively and a cached graph is read back: the

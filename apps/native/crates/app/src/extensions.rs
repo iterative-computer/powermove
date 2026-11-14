@@ -537,6 +537,7 @@ impl Controller {
                 let _ = wake_tx.try_send(());
             }),
             vars: Some(vars_source(&self.profile)),
+            clipboard: Some(crate::platform::text_clipboard()),
         });
         rasters.connect(host.raster_inbox());
         self.extensions.doc_id = doc_id;
@@ -2172,6 +2173,7 @@ mod tests {
             contributions: Some(Arc::new(json!({"definitions": [effect("fast.tint")]}))),
             settled: false,
             loading: vec![("b-slow".into(), "Slow".into())],
+            unavailable: vec![],
         };
         // The host settles (with the late effect) before the window pins.
         let late = Publication {
@@ -2181,6 +2183,7 @@ mod tests {
             )),
             settled: true,
             loading: vec![],
+            unavailable: vec![],
         };
         let start = ResourceSnapshot {
             pending: true,
