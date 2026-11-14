@@ -319,19 +319,21 @@ impl Controller {
                         {
                             v.message = error.clone();
                         }
-                        Ok(path) => {
+                        Ok(finished) => {
                             v.close_export_sheet(cx);
-                            let name = std::path::Path::new(path)
-                                .file_name()
-                                .map_or_else(|| path.clone(), |n| n.to_string_lossy().into_owned());
+                            let line = finished.line();
                             // A long export ends while the user is
-                            // elsewhere: the line stays until something
-                            // replaces it, and the Dock icon asks once.
+                            // elsewhere, and a file with something to say
+                            // (its sound clipped) is worth reading: the line
+                            // stays until something replaces it, and the
+                            // Dock icon asks once.
                             if began.elapsed() > std::time::Duration::from_secs(30) {
-                                v.message = format!("Exported {name}");
+                                v.message = line;
                                 crate::platform::request_attention();
+                            } else if !finished.notes.is_empty() {
+                                v.message = line;
                             } else {
-                                v.note(format!("Exported {name}"), cx);
+                                v.note(line, cx);
                             }
                         }
                         Err(_) => v.close_export_sheet(cx),
@@ -355,14 +357,14 @@ async fn execute(
     runtime: Arc<pm_builtins::Builtins>,
     executor: gpui::BackgroundExecutor,
     tasks: Arc<Mutex<BackgroundTasks>>,
-) -> Result<String, String> {
+) -> Result<Finished, String> {
     let planned = pm_builtins::delivery::plan(
         &frozen.publication.snapshot,
         &frozen.options,
         frozen.playhead,
     );
     let mut ticket = None;
-    let mut result: Result<String, Failure> = match planned {
+    let mut result: Result<Finished, Failure> = match planned {
         Err(error) => Err(error.into()),
         Ok(planned) => {
             let title = frozen
@@ -461,9 +463,36 @@ async fn execute(
             )
             .await
         }
-        Ok(path) => observe(&runtime, json!({"phase":"done","path":path})).await,
+        Ok(finished) => {
+            observe(
+                &runtime,
+                json!({"phase":"done","path":finished.path,"notes":finished.notes}),
+            )
+            .await
+        }
     }
     result.map_err(|f| f.message)
+}
+/// A finished export: its file, and what the person is told with it (the
+/// sound clipped; fine detail the data rate did not keep).
+struct Finished {
+    path: String,
+    notes: Vec<String>,
+}
+impl Finished {
+    /// "Exported Film.mov", or "Exported Film.mov." with each note after it.
+    fn line(&self) -> String {
+        let name = std::path::Path::new(&self.path)
+            .file_name()
+            .map_or_else(|| self.path.clone(), |n| n.to_string_lossy().into_owned());
+        if self.notes.is_empty() {
+            return format!("Exported {name}");
+        }
+        std::iter::once(format!("Exported {name}."))
+            .chain(self.notes.iter().cloned())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
 }
 /// Why an export ended without a file: what the sheet says, and the offline
 /// media it refused to export without (the sheet then offers Export Without
@@ -556,7 +585,7 @@ async fn execute_inner(
     executor: &gpui::BackgroundExecutor,
     task: TaskAdmission<'_>,
     planned: &pm_builtins::delivery::Plan,
-) -> Result<String, Failure> {
+) -> Result<Finished, Failure> {
     let TaskAdmission { tasks, ticket } = task;
     if job.cancel.load(Ordering::Acquire) {
         return Err("cancelled".into());
@@ -575,7 +604,10 @@ async fn execute_inner(
             &frozen.destination,
             &job.cancel,
         )?;
-        return Ok(path.to_string_lossy().into());
+        return Ok(Finished {
+            path: path.to_string_lossy().into(),
+            notes: vec![],
+        });
     }
     let document = frozen.publication.snapshot.doc_id;
     let mut request = pm_engine_service::jobs::ExportRequest::new(
@@ -661,7 +693,10 @@ async fn execute_inner(
                             std::path::Path::new(&path),
                         )?;
                     }
-                    Ok(path)
+                    Ok(Finished {
+                        path,
+                        notes: final_status.notes,
+                    })
                 }
                 JobState::Cancelled => Err("cancelled".into()),
                 _ => Err(final_status.error.map_or_else(
@@ -704,6 +739,23 @@ async fn execute_inner(
 #[cfg(test)]
 mod agent_tests {
     use super::*;
+
+    #[test]
+    fn a_finished_export_line_carries_what_the_person_is_told() {
+        let plain = Finished {
+            path: "/out/Film.mov".into(),
+            notes: vec![],
+        };
+        assert_eq!(plain.line(), "Exported Film.mov");
+        let clipped = Finished {
+            path: "/out/Film.mov".into(),
+            notes: vec!["Audio clipped: 1,204 samples over full scale, peak +2.1 dB.".into()],
+        };
+        assert_eq!(
+            clipped.line(),
+            "Exported Film.mov. Audio clipped: 1,204 samples over full scale, peak +2.1 dB."
+        );
+    }
     use pm_promedia::tasks::TaskState;
 
     fn row(project: &str) -> pm_promedia::tasks::Task {

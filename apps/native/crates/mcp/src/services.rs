@@ -212,8 +212,29 @@ pub trait Speech: Send + Sync {
 pub trait ThreadArchive: Send + Sync {
     fn read(&self, tool: &str, project: Option<&str>, args: &Value) -> Result<Value>;
 }
+/// What an engine export delivered.
+#[derive(Clone, Debug)]
+pub struct VideoDelivered {
+    pub path: PathBuf,
+    /// The file's size and frame rate (`None`: the project's).
+    pub size: Option<(u32, u32)>,
+    pub fps: Option<f64>,
+    /// What the person would be told with the file: sound clipped, fine
+    /// detail the data rate did not keep.
+    pub notes: Vec<String>,
+}
+impl From<PathBuf> for VideoDelivered {
+    fn from(path: PathBuf) -> Self {
+        Self {
+            path,
+            size: None,
+            fps: None,
+            notes: vec![],
+        }
+    }
+}
 pub trait ExportChild: Send + Sync {
-    fn video(&self, request: &VideoExportRequest) -> Result<PathBuf>;
+    fn video(&self, request: &VideoExportRequest) -> Result<VideoDelivered>;
     fn video_progress(&self, _: &FrozenProject) -> Option<crate::export_jobs::Progress> {
         None
     }
@@ -223,7 +244,7 @@ pub trait ExportChild: Send + Sync {
 }
 pub struct NativeExportChild;
 impl ExportChild for NativeExportChild {
-    fn video(&self, _: &VideoExportRequest) -> Result<PathBuf> {
+    fn video(&self, _: &VideoExportRequest) -> Result<VideoDelivered> {
         Err(Error::unavailable(
             "pm-engine-service export child, original media resolver, fonts and extension definitions",
         ))
@@ -577,7 +598,8 @@ pub fn captions(layer: &Value, format: &str) -> Result<String> {
 }
 
 pub(crate) fn run_video(child: &dyn ExportChild, request: &VideoExportRequest) -> Result<Value> {
-    let path = child.video(request)?;
+    let delivered = child.video(request)?;
+    let path = &delivered.path;
     let canonical = std::fs::canonicalize(&path)?;
     let directory = std::fs::canonicalize(&request.directory)?;
     if !canonical.starts_with(directory)
@@ -588,7 +610,17 @@ pub(crate) fn run_video(child: &dyn ExportChild, request: &VideoExportRequest) -
             "Export produced no saved file in the explicit export directory.",
         ));
     }
-    Ok(
-        json!({"path":path,"projectId":request.snapshot.project_id,"width":request.snapshot.project["w"],"height":request.snapshot.project["h"],"fps":request.snapshot.project["fps"]}),
-    )
+    let project = &request.snapshot.project;
+    let (width, height) = delivered
+        .size
+        .map_or((project["w"].clone(), project["h"].clone()), |(w, h)| {
+            (json!(w), json!(h))
+        });
+    let fps = delivered.fps.map_or(project["fps"].clone(), |f| json!(f));
+    let mut result = json!({"path":path,"projectId":request.snapshot.project_id,"width":width,"height":height,"fps":fps});
+    // v1's result, with what the person would be told when there is any.
+    if !delivered.notes.is_empty() {
+        result["notes"] = json!(delivered.notes);
+    }
+    Ok(result)
 }

@@ -320,6 +320,11 @@ pub struct JobStatus {
     /// phase, with its own progress.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checking: Option<f64>,
+    /// What the person is told with a finished export's file, one line
+    /// each: sound clipped (or kept over full scale in a float track), fine
+    /// detail the data rate did not keep.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
 }
 
 /// A preview of an export's latest encoded frame: a JPEG at most
@@ -1288,6 +1293,7 @@ mod tests {
             error: None,
             preview: None,
             checking: None,
+            notes: vec![],
         };
         let wait = AgentExportMode::Wait;
         assert_eq!(

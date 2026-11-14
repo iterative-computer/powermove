@@ -437,11 +437,16 @@ fn failed(error: impl std::fmt::Display) -> Error {
     }
 }
 fn finish(handle: ExportHandle) -> Result<PathBuf> {
+    finished(handle).map(|(path, _)| path)
+}
+/// A finished export's file and what the person is told with it.
+fn finished(handle: ExportHandle) -> Result<(PathBuf, Vec<String>)> {
     let status = handle.wait().map_err(failed)?;
+    let notes = status.notes;
     match status.state {
         JobState::Done => status
             .path
-            .map(PathBuf::from)
+            .map(|path| (PathBuf::from(path), notes))
             .ok_or_else(|| failed("Export completed without an output path")),
         _ => Err(failed(status.error.map(|e| e.message).unwrap_or_else(
             || "Powermove lost contact with the export engine. Try again.".into(),
@@ -464,7 +469,7 @@ fn file_name(name: &str, extension: &str) -> String {
     format!("{stem}-{}.{extension}", pm_kernel::new_id("export"))
 }
 impl ExportChild for EngineJobs {
-    fn video(&self, request: &VideoExportRequest) -> Result<PathBuf> {
+    fn video(&self, request: &VideoExportRequest) -> Result<pm_mcp::services::VideoDelivered> {
         let frozen = &request.snapshot;
         let published = self.published(frozen)?;
         let project = &frozen.project;
@@ -476,6 +481,8 @@ impl ExportChild for EngineJobs {
             .settings
             .clone()
             .ok_or_else(|| Error::invalid("Missing render settings"))?;
+        // What the file is: the agent may have chosen its size and rate.
+        let (settings_size, settings_rate) = (settings.size, settings.frame_rate);
         std::fs::create_dir_all(&request.directory)?;
         let name = request
             .options
@@ -548,7 +555,9 @@ impl ExportChild for EngineJobs {
             task.finish(Err("cancelled".into()));
             return Err(cancelled());
         }
-        let result = finish(handle).and_then(|path| {
+        let size = (settings_size.width, settings_size.height);
+        let fps = settings_rate.num as f64 / settings_rate.den as f64;
+        let result = finished(handle).and_then(|(path, notes)| {
             // Caption files beside the video, as a person's export writes them.
             let sidecar = match options.captions_sidecar.as_str() {
                 "srt" => Some(pm_captions::CaptionFormat::Srt),
@@ -564,7 +573,12 @@ impl ExportChild for EngineJobs {
                 )
                 .map_err(failed)?;
             }
-            Ok(path)
+            Ok(pm_mcp::services::VideoDelivered {
+                path,
+                size: Some(size),
+                fps: Some(fps),
+                notes,
+            })
         });
         task.finish(result.as_ref().map(|_| ()).map_err(|e| e.message.clone()));
         result

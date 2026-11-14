@@ -594,6 +594,7 @@ fn status(
         }),
         preview: None,
         checking: None,
+        notes: vec![],
     }
 }
 /// An export refused because clips it draws are offline (audio it would
@@ -1068,7 +1069,7 @@ pub fn run_child() -> Result<()> {
     }
     let worker_cancel = cancel.clone();
     let done = Finished(finished.clone(), wake);
-    let worker = std::thread::spawn(move || -> Result<PathBuf> {
+    let worker = std::thread::spawn(move || -> Result<(PathBuf, Vec<String>)> {
         let _done = done;
         let cancel = worker_cancel;
         let gate = ChildGate::new(permits);
@@ -1236,7 +1237,8 @@ pub fn run_child() -> Result<()> {
                     pm_export::settings::AlphaOutput::None,
                     None,
                 ),
-            );
+            )
+            .map(|path| (path, vec![]));
         }
         let job = pm_export::render::ExportJob {
             document: Arc::new(doc),
@@ -1269,7 +1271,16 @@ pub fn run_child() -> Result<()> {
                 });
             },
         )?;
-        Ok(delivered.path)
+        // What the person is told with the file: sound over full scale,
+        // then what the file check noted.
+        let report = delivered.report;
+        let notes = report
+            .mix
+            .and_then(|mix| mix.warning())
+            .into_iter()
+            .chain(report.notes)
+            .collect();
+        Ok((delivered.path, notes))
     });
     while !finished.load(Ordering::Acquire) {
         // A turn at least every 50 ms: CoreText posts its font change
@@ -1303,13 +1314,16 @@ pub fn run_child() -> Result<()> {
             None,
             Some(LOW_DISK.into()),
         ))?,
-        Ok(path) => emit(status(
-            &job_id,
-            JobState::Done,
-            1.,
-            Some(path.to_string_lossy().into()),
-            None,
-        ))?,
+        Ok((path, notes)) => emit(JobStatus {
+            notes,
+            ..status(
+                &job_id,
+                JobState::Done,
+                1.,
+                Some(path.to_string_lossy().into()),
+                None,
+            )
+        })?,
         Err(_) if let Some(error) = broken.lock().unwrap().take() => emit(status(
             &job_id,
             JobState::Failed,
@@ -1690,6 +1704,12 @@ impl<S: pm_export::Sink> pm_export::Sink for FencedSink<S> {
     }
     fn idle(&mut self) -> std::result::Result<(), pm_export::Error> {
         self.inner.idle()
+    }
+    fn count_checked(&mut self, checked: Arc<std::sync::atomic::AtomicU64>) {
+        self.inner.count_checked(checked);
+    }
+    fn with_mix(output: S::Output, mix: Option<pm_export::verify::MixLevels>) -> S::Output {
+        S::with_mix(output, mix)
     }
     fn finish(self) -> std::result::Result<Self::Output, pm_export::Error> {
         self.hold()?;

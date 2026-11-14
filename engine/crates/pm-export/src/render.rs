@@ -1499,11 +1499,17 @@ pub fn run_export_into<S: Sink + Send>(
 where
     S::Output: Send,
 {
-    let result = export_frames(renderer, job, plan, sink, gate, cancel, progress);
+    // The mix's levels arrive with the progress; the last is the whole mix,
+    // which the finished export reports (the person is told what clipped).
+    let mut mix = None;
+    let result = export_frames(renderer, job, plan, sink, gate, cancel, &mut |p| {
+        mix = p.mix;
+        progress(p)
+    });
     // The frames' staging buffer, target and pixels are kept only while
     // exporting (one-off frames release them in `render_frame`).
     renderer.release_frame_reuse();
-    result
+    result.map(|output| S::with_mix(output, mix))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2073,14 +2079,7 @@ pub fn run_export(
 ) -> Result<crate::Delivered, JobError> {
     let plan = plan_export(job)?;
     let sink = sink_for(&plan)?;
-    // The mix's levels arrive with the progress; the last is the whole mix.
-    let mut mix = None;
-    let mut delivered = run_export_into(renderer, job, plan, sink, gate, cancel, &mut |p| {
-        mix = p.mix;
-        progress(p)
-    })?;
-    delivered.report.mix = mix;
-    Ok(delivered)
+    run_export_into(renderer, job, plan, sink, gate, cancel, progress)
 }
 
 // ---------------------------------------------------------------------------

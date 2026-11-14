@@ -34,6 +34,14 @@ pub trait Sink {
     /// `checked` (sinks that check their file frame by frame).
     fn count_checked(&mut self, _checked: std::sync::Arc<std::sync::atomic::AtomicU64>) {}
     fn finish(self) -> Result<Self::Output, Error>;
+    /// A finished output given the levels of the mix it carries (a delivered
+    /// file reports them, so the person is told what clipped).
+    fn with_mix(output: Self::Output, _mix: Option<crate::verify::MixLevels>) -> Self::Output
+    where
+        Self: Sized,
+    {
+        output
+    }
     /// A job may be cancelled while a sink is finishing a long encoder or mux step.
     fn finish_with_cancel(self, _cancel: &AtomicBool) -> Result<Self::Output, Error>
     where
@@ -133,6 +141,10 @@ impl<S: Sink + Send + 'static> Sink for Overlapped<S> {
 
     fn finish(mut self) -> Result<S::Output, Error> {
         self.join()?.finish()
+    }
+
+    fn with_mix(output: S::Output, mix: Option<crate::verify::MixLevels>) -> S::Output {
+        S::with_mix(output, mix)
     }
 
     fn finish_with_cancel(mut self, cancel: &AtomicBool) -> Result<S::Output, Error> {
