@@ -231,7 +231,7 @@
     },
     {
       "name": "export_video",
-      "description": "Render the current project to MP4 (default), ProRes or WebM with its audio, with every option of the Export sheet (profile, codec, quality, size, frame rate, range, dynamic range, colour tag, timecode, audio coding, proxies, captions). Uses the production renderer and the system's encoders; returns the actual file path and stage timings after encoding finishes. Exports without a save dialog to the host export folder (desktop: ~/Powermove), using a unique filename. A long export keeps running and this call returns {status:\"running\", jobId, progress} after about 20 minutes; call export_video again with only that jobId to keep waiting. Never start a second export meanwhile. Native Studio accepts studioQuality (draft/preview/production/final or a quality patch) for this export only. Saved composition quality is unchanged. Stills and deliveries converge toward the noise threshold up to the sample ceiling; timeLimitSeconds is a preview hint, not a delivery deadline. The preset motionBlurSamples field is saved but its shutter integration is pending.",
+      "description": "Render the current project to MP4 (default) or ProRes with its audio. Uses the production renderer and FFmpeg encoder; returns the actual file path and stage timings after encoding finishes. Exports without a save dialog to the host export folder (desktop: ~/Powermove), using a unique filename. A long export keeps running and this call returns {status:\"running\", jobId, progress} after about 20 minutes; call export_video again with only that jobId to keep waiting. Never start a second export meanwhile. Native Studio accepts studioQuality (draft/preview/production/final or a quality patch) for this export only. Saved composition quality is unchanged. Stills and deliveries converge toward the noise threshold up to the sample ceiling; timeLimitSeconds is a preview hint, not a delivery deadline. The preset motionBlurSamples field is saved but its shutter integration is pending. Every option of the Export sheet is available under the sheet's own names (format webm too): profile, codec, quality, scale with width and height, fps, dynamicRange, colorTag, timecode, audioCoding, useProxies, captionsBurn and captionsSidecar; absent ones keep the output above. The result carries notes when the person would be told something with the file (sound clipped).",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -247,8 +247,7 @@
               "mp4",
               "prores",
               "webm"
-            ],
-            "description": "MP4 (H.264 or HEVC, the default), QuickTime ProRes, or WebM (VP9)."
+            ]
           },
           "range": {
             "type": "string",

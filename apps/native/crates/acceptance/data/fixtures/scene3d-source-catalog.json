@@ -231,7 +231,7 @@
     },
     {
       "name": "export_video",
-      "description": "Render the current project to MP4 (default) or ProRes with its audio. Uses the production renderer and FFmpeg encoder; returns the actual file path and stage timings after encoding finishes. Exports without a save dialog to the host export folder (desktop: ~/Powermove), using a unique filename. A long export keeps running and this call returns {status:\"running\", jobId, progress} after about 20 minutes; call export_video again with only that jobId to keep waiting. Never start a second export meanwhile. Native Studio accepts studioQuality (draft/preview/production/final or a quality patch) for this export only. Saved composition quality is unchanged. Stills and deliveries converge toward the noise threshold up to the sample ceiling; timeLimitSeconds is a preview hint, not a delivery deadline. The preset motionBlurSamples field is saved but its shutter integration is pending.",
+      "description": "Render the current project to MP4 (default) or ProRes with its audio. Uses the production renderer and FFmpeg encoder; returns the actual file path and stage timings after encoding finishes. Exports without a save dialog to the host export folder (desktop: ~/Powermove), using a unique filename. A long export keeps running and this call returns {status:\"running\", jobId, progress} after about 20 minutes; call export_video again with only that jobId to keep waiting. Never start a second export meanwhile. Native Studio accepts studioQuality (draft/preview/production/final or a quality patch) for this export only. Saved composition quality is unchanged. Stills and deliveries converge toward the noise threshold up to the sample ceiling; timeLimitSeconds is a preview hint, not a delivery deadline. The preset motionBlurSamples field is saved but its shutter integration is pending. Every option of the Export sheet is available under the sheet's own names (format webm too): profile, codec, quality, scale with width and height, fps, dynamicRange, colorTag, timecode, audioCoding, useProxies, captionsBurn and captionsSidecar; absent ones keep the output above. The result carries notes when the person would be told something with the file (sound clipped).",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -245,7 +245,8 @@
             "type": "string",
             "enum": [
               "mp4",
-              "prores"
+              "prores",
+              "webm"
             ]
           },
           "range": {
@@ -263,6 +264,120 @@
           },
           "alpha": {
             "type": "boolean"
+          },
+          "profile": {
+            "type": "string",
+            "enum": [
+              "422proxy",
+              "422lt",
+              "422",
+              "422hq",
+              "4444",
+              "4444xq"
+            ],
+            "description": "ProRes flavour (format prores). Default 4444."
+          },
+          "codec": {
+            "type": "string",
+            "enum": [
+              "h264",
+              "hevc"
+            ],
+            "description": "MP4 codec: H.264, or 10-bit HEVC. Default h264."
+          },
+          "quality": {
+            "type": "string",
+            "enum": [
+              "draft",
+              "high",
+              "max"
+            ],
+            "description": "MP4 and WebM data rate: draft 4, high 16, max 40 Mbps. Default high."
+          },
+          "scale": {
+            "oneOf": [
+              {
+                "type": "number",
+                "enum": [
+                  0.5,
+                  1,
+                  2
+                ]
+              },
+              {
+                "type": "string",
+                "enum": [
+                  "custom"
+                ]
+              }
+            ],
+            "description": "Output size as a fraction of the composition's, or custom with width and height. Default 1."
+          },
+          "width": {
+            "type": "integer",
+            "minimum": 16,
+            "maximum": 8192,
+            "description": "Output width in pixels with scale custom."
+          },
+          "height": {
+            "type": "integer",
+            "minimum": 16,
+            "maximum": 8192,
+            "description": "Output height in pixels with scale custom."
+          },
+          "fps": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "maximum": 240,
+            "description": "Frame rate of the file, such as 23.976, 25 or 29.97. Default the composition's."
+          },
+          "dynamicRange": {
+            "type": "string",
+            "enum": [
+              "sdr",
+              "pq",
+              "hlg"
+            ],
+            "description": "SDR, or HDR as PQ or HLG (projects that keep HDR light; HEVC or ProRes). Default sdr."
+          },
+          "colorTag": {
+            "type": "string",
+            "enum": [
+              "rec709QuickTime",
+              "rec709"
+            ],
+            "description": "The label of an SDR ProRes or MP4: Rec.709 as QuickTime and Safari read it (1-13-1, the default), or broadcast Rec.709 (1-1-1). The picture's codes are the same."
+          },
+          "timecode": {
+            "type": "string",
+            "pattern": "^$|^[0-9]{2}:[0-5][0-9]:[0-5][0-9][:;][0-9]{2}$",
+            "description": "Start timecode of a ProRes file, HH:MM:SS:FF (;FF for drop-frame). Default the composition's own time."
+          },
+          "audioCoding": {
+            "type": "string",
+            "enum": [
+              "pcm24",
+              "pcm16",
+              "pcmFloat"
+            ],
+            "description": "Sound of a ProRes file: 24-bit, 16-bit or 32-bit float PCM. Default pcm24."
+          },
+          "useProxies": {
+            "type": "boolean",
+            "description": "Read proxy media where it exists, for a quick draft. Default false: originals."
+          },
+          "captionsBurn": {
+            "type": "boolean",
+            "description": "Draw the composition's captions into the picture. Default false."
+          },
+          "captionsSidecar": {
+            "type": "string",
+            "enum": [
+              "none",
+              "srt",
+              "vtt"
+            ],
+            "description": "Caption files beside the video (Film.srt, or Film.en.srt with several captions layers). Default none."
           },
           "jobId": {
             "type": "string",
