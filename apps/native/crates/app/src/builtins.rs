@@ -21,6 +21,13 @@ pub struct Host {
     /// The font picker's open request: the panel's runtime and the request
     /// it answers when a face is chosen (or nothing).
     pub font_pick: Option<(Arc<Builtins>, u64)>,
+    /// The Agent panel's open menu: its runtime, the request it answers,
+    /// and the values of its rows.
+    pub agent_pick: Option<(Arc<Builtins>, u64, Vec<Value>)>,
+    /// The Agent panel is in the workspace's docks (pinned), and whether its
+    /// toolbar item has parked it (hidden, its place kept).
+    pub agent_docked: bool,
+    pub agent_parked: bool,
     project: Option<String>,
     document: Option<u64>,
     application: bool,
@@ -514,12 +521,97 @@ impl Controller {
         self.builtins.font_pick = Some((runtime.clone(), request.id));
         let _ = window;
         self.host.borrow_mut().open_menu(
+            None,
             choices,
             anchor,
             Some(FONT_PAGE),
             Some("fontPick:".into()),
             "Search fonts",
         );
+    }
+    /// The Agent panel's pop-up menus (threads, model, access, slash): the
+    /// field menu under the control that asked, standing above the popover
+    /// when the panel is shown there.
+    fn agent_menu(
+        &mut self,
+        runtime: &Arc<Builtins>,
+        request: &pm_builtins::PlatformRequest,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some((previous, id, _)) = self.builtins.agent_pick.take() {
+            previous.platform_reply(id, Ok(Value::Null));
+        }
+        let options = request.input["options"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let anchor = request.input["anchor"].as_u64().and_then(|id| {
+            let view = self.builtins.views.get(&request.panel)?;
+            let b = view.read(cx).anchor_bounds(id)?;
+            Some(pm_shell::layout::Rect {
+                x: f32::from(b.origin.x),
+                y: f32::from(b.origin.y),
+                w: f32::from(b.size.width),
+                h: f32::from(b.size.height),
+            })
+        });
+        let owner = (!self.builtins.agent_docked)
+            .then(|| self.builtins.windows.get("agent").copied())
+            .flatten()
+            .and_then(|w| w.update(cx, |_, w, _| crate::platform::ns_window(w)).ok())
+            .flatten();
+        let choices = options
+            .iter()
+            .enumerate()
+            .map(|(i, o)| {
+                let mut c = pm_shell::transient::Choice::new(
+                    o["label"].as_str().unwrap_or_default(),
+                    format!("agentPick:{i}"),
+                );
+                if let Some(category) = o["category"].as_str() {
+                    c = c.within(category);
+                }
+                if let Some(on) = o["checked"].as_bool() {
+                    c = c.checked(on);
+                }
+                c
+            })
+            .collect();
+        let values = options.iter().map(|o| o["value"].clone()).collect();
+        self.builtins.agent_pick = Some((runtime.clone(), request.id, values));
+        self.host.borrow_mut().open_menu(
+            owner,
+            choices,
+            anchor,
+            None,
+            Some("agentPick:".into()),
+            request.input["placeholder"].as_str().unwrap_or("Search"),
+        );
+    }
+    /// The Agent menu's answer: a row's value, or none when it closed unchosen.
+    pub fn agent_picked(&mut self, index: &str) {
+        if let Some((runtime, id, values)) = self.builtins.agent_pick.take() {
+            let value = index
+                .parse::<usize>()
+                .ok()
+                .and_then(|i| values.get(i).cloned())
+                .unwrap_or(Value::Null);
+            runtime.platform_reply(id, Ok(value));
+        }
+    }
+    /// The toolbar's Agent item: the popover, or, while the panel is pinned,
+    /// its docked panel shown or hidden in place (agent-panel.md §1).
+    pub fn toggle_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let host = self.host.borrow();
+        if self.builtins.agent_docked {
+            self.builtins.agent_parked = true;
+            host.send_command("panel:park:agent", vec![]);
+        } else if std::mem::take(&mut self.builtins.agent_parked) {
+            host.send_command("panel:show:agent", vec![]);
+        } else {
+            drop(host);
+            self.show_builtin("agent", window, cx);
+        }
     }
     /// The font picker's answer: a family, or none when it closed unchosen.
     pub fn font_picked(&mut self, family: &str) {
@@ -690,6 +782,15 @@ impl Controller {
         for error in runtime.take_errors() {
             eprintln!("v4: {error}");
         }
+        let (working, attention, elapsed, background) = runtime.agent_status();
+        self.host
+            .borrow_mut()
+            .set_agent_status(pm_shell::AgentStatus {
+                working,
+                attention,
+                elapsed: elapsed.map(|ms| format!("{}:{:02}", ms / 60_000, ms / 1000 % 60)),
+                background,
+            });
         self.sync_v4_commands(&runtime);
         let painters = runtime.painters_revision();
         if painters != self.builtins.painters
@@ -1399,11 +1500,93 @@ impl Controller {
                     Ok(Value::Null)
                 }
                 "agent.close" => {
+                    // Docked, Close takes it out of the workspace: the Agent
+                    // item opens the popover again (agent-panel.md §1).
+                    if self.builtins.agent_docked {
+                        self.host.borrow().send_command("panel:close:agent", vec![]);
+                    }
                     if let Some(handle) = self.builtins.windows.remove("agent") {
                         let _ = handle.update(cx, |_, w, _| w.remove_window());
                     }
                     self.update_builtins(cx);
                     gpui_macos::child_window::raise_if_active(&self.host.borrow().window);
+                    Ok(Value::Null)
+                }
+                // Pin to Workspace: the popover closes and the panel docks
+                // beside Properties, saved with the workspace's layout.
+                "agent.pin" => {
+                    if let Some(handle) = self.builtins.windows.remove("agent") {
+                        let _ = handle.update(cx, |_, w, _| w.remove_window());
+                    }
+                    self.builtins.agent_parked = false;
+                    self.host.borrow().send_command("panel:show:agent", vec![]);
+                    self.update_builtins(cx);
+                    Ok(Value::Null)
+                }
+                // Delete Thread asks first, as v1's PM.confirm.
+                "agent.delete" => {
+                    let thread = request.input["thread"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned();
+                    let title = request.input["title"].as_str().unwrap_or("this thread");
+                    let detail = if request.input["busy"] == true {
+                        "This stops its run and removes the thread’s history. This cannot be undone."
+                    } else {
+                        "This removes the thread’s history. This cannot be undone."
+                    };
+                    use crate::alert::{Alert, Button};
+                    let rx = Alert::new(
+                        format!("Delete “{title}”?"),
+                        detail,
+                        vec![
+                            Button::new("Delete Thread", true).default().destructive(),
+                            Button::new("Cancel", false).cancel(),
+                        ],
+                    )
+                    .sheet(&self.host.borrow().window);
+                    let runtime = runtime.clone();
+                    cx.spawn(async move |this, cx| {
+                        if rx.recv().await != Ok(Some(true)) {
+                            return;
+                        }
+                        let outcome = cx
+                            .background_executor()
+                            .spawn(async move { runtime.agent_delete_thread(&thread) })
+                            .await;
+                        if let Err(message) = outcome {
+                            let _ = this.update(cx, |v, cx| {
+                                v.errors.borrow_mut().tell("Agent", &message);
+                                cx.notify();
+                            });
+                        }
+                    })
+                    .detach();
+                    Ok(Value::Null)
+                }
+                // Full access asks first (language §9), as v1's consent.
+                "agent.consent" => {
+                    let effect = request.input["effect"].as_u64().unwrap_or_default();
+                    use crate::alert::{Alert, Button};
+                    let rx = Alert::new(
+                        "Give the agent full access?",
+                        "It can run commands and edit files anywhere on this Mac without asking. Choose this only for work you trust.",
+                        vec![
+                            Button::new("Allow Full Access", true).default(),
+                            Button::new("Cancel", false).cancel(),
+                        ],
+                    )
+                    .critical()
+                    .sheet(&self.host.borrow().window);
+                    let runtime = runtime.clone();
+                    cx.spawn(async move |_, cx| {
+                        let accepted = rx.recv().await == Ok(Some(true));
+                        let _ = cx
+                            .background_executor()
+                            .spawn(async move { runtime.agent_consent(effect, accepted) })
+                            .await;
+                    })
+                    .detach();
                     Ok(Value::Null)
                 }
                 "settings.present" => {
@@ -1474,6 +1657,10 @@ impl Controller {
                 }
                 "fontMenu" => {
                     self.font_menu(&runtime, &request, window, cx);
+                    continue;
+                }
+                "agentMenu" => {
+                    self.agent_menu(&runtime, &request, cx);
                     continue;
                 }
                 "project.menu" => {
