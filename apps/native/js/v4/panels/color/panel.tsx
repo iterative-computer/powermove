@@ -108,7 +108,7 @@ export function ColorPanel({ controller: c, command }: ColorProps) {
       <SectionAction
         id={`${PANEL_ID}:import-cdl`}
         label="Import CDL…"
-        short="Import"
+        short="Import CDL"
         symbol="square.and.arrow.down"
         disabled={!editable}
         onActivate={() => command(IMPORT_CDL)}
@@ -117,7 +117,7 @@ export function ColorPanel({ controller: c, command }: ColorProps) {
         <SectionAction
           id={`${PANEL_ID}:export-cdl`}
           label="Export CDL…"
-          short="Export"
+          short="Export CDL"
           symbol="square.and.arrow.up"
           disabled={p.target !== "Layer"}
           onActivate={() => command(EXPORT_CDL)}
@@ -172,7 +172,7 @@ export function ColorPanel({ controller: c, command }: ColorProps) {
                 onActivate={() => command(LOAD_LUT)}
               />
               {add(CST, "Add Color Space Transform", "Transform")}
-              {!firstWheels && cdl}
+              {cdl}
             </AddRow>
             {tools.map((g, i) => (
               <Tool
@@ -183,7 +183,6 @@ export function ColorPanel({ controller: c, command }: ColorProps) {
                 editable={editable}
                 up={move(tools, i, -1)}
                 down={move(tools, i, 1)}
-                action={g === firstWheels ? cdl : null}
               >
                 {body(g)}
               </Tool>
@@ -623,6 +622,8 @@ function ToolHeader({
         label={title}
         style={{
           flexGrow: 1,
+          flexShrink: 1,
+          minWidth: 0,
           display: "flex",
           alignSelf: "stretch",
           alignItems: "center",
@@ -632,7 +633,16 @@ function ToolHeader({
           if (editable) send({ type: "toggle", id });
         }}
       >
-        <text>{title}</text>
+        {/* One line: a long name ends in an ellipsis, never wraps. */}
+        <text
+          style={{
+            whiteSpace: "nowrap",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+          }}
+        >
+          {title}
+        </text>
       </div>
       {action}
       {order(up, `Move ${title} Up`, "chevron.up")}
