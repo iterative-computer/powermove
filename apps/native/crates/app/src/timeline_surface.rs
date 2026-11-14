@@ -268,6 +268,8 @@ const WHEEL_ZOOM: f64 = 0.01;
 /// The fewest letters of a clip's name worth showing before its ellipsis.
 const NAME_LEAST: usize = 3;
 const PPS: (f64, f64) = (4., 4000.);
+/// How far past the timeline's end the view may run, in points.
+const END_ROOM: f64 = 48.;
 impl TimelineSurface {
     pub fn new(
         kernel: KernelHandle,
@@ -536,11 +538,36 @@ impl TimelineSurface {
     }
     fn zoom_at(&mut self, x: f64, factor: f64, cx: &mut Context<Self>) {
         let anchor = self.view.scroll_time + (x - self.view.layer_column) / self.view.pps;
-        self.view.pps = (self.view.pps * factor).clamp(PPS.0, PPS.1);
-        self.view.scroll_time = (anchor - (x - self.view.layer_column) / self.view.pps)
-            .max(self.model.index.minimum_time());
+        self.view.pps = (self.view.pps * factor).clamp(self.least_pps(), PPS.1);
+        self.view.scroll_time = anchor - (x - self.view.layer_column) / self.view.pps;
+        self.clamp_time();
         self.fitted = true;
         self.changed_while_hot(cx);
+    }
+    /// The time area's width in points (none before the first layout).
+    fn time_width(&self) -> Option<f64> {
+        let width = f32::from(self.bounds.size.width) as f64 - self.view.layer_column;
+        (width > END_ROOM).then_some(width)
+    }
+    /// The farthest a person can zoom out: the whole of the timeline's time
+    /// (`minimum_time` to `maximum_time`) fits the time area with a little
+    /// room at its end, never more.
+    fn least_pps(&self) -> f64 {
+        let index = &self.model.index;
+        let span = (index.maximum_time() - index.minimum_time()).max(1. / index.fps.max(1.));
+        self.time_width()
+            .map_or(PPS.0, |w| ((w - END_ROOM) / span).clamp(PPS.0, PPS.1))
+    }
+    /// Keeps the view on the timeline's time: from its earliest time to a
+    /// little past its end, so scrolling or zooming never leaves it on empty
+    /// time past the composition.
+    fn clamp_time(&mut self) {
+        let index = &self.model.index;
+        let least = index.minimum_time();
+        let most = self.time_width().map_or(f64::INFINITY, |w| {
+            index.maximum_time() + END_ROOM / self.view.pps - w / self.view.pps
+        });
+        self.view.scroll_time = self.view.scroll_time.min(most).max(least);
     }
     /// The ruler and the rows: the body less the bottom bar, which a body
     /// too short for both gives up.
@@ -681,7 +708,8 @@ impl TimelineSurface {
             }
             Part::Time => {
                 if let Some(time) = bar.scroll_time_at(x - grab, &self.tokens) {
-                    self.view.scroll_time = time.max(self.model.index.minimum_time());
+                    self.view.scroll_time = time;
+                    self.clamp_time();
                     self.fitted = true;
                     self.changed_while_hot(cx);
                 }
@@ -875,6 +903,9 @@ impl TimelineSurface {
                 self.fit_time(cx);
             }
             self.clamp_scroll();
+            // A view restored or resized past the timeline's end comes back
+            // onto its time.
+            self.clamp_time();
         }
         if self.frame.is_none() {
             let shown = (self.view.pps, self.view.scroll_time, self.view.layer_column);
@@ -1551,9 +1582,8 @@ impl TimelineSurface {
             Gesture::Pan { at } => {
                 let delta = event.position - *at;
                 *at = event.position;
-                self.view.scroll_time = (self.view.scroll_time
-                    - f32::from(delta.x) as f64 / self.view.pps)
-                    .max(self.model.index.minimum_time());
+                self.view.scroll_time -= f32::from(delta.x) as f64 / self.view.pps;
+                self.clamp_time();
                 self.changed(false, cx);
             }
             Gesture::Column => {
@@ -1673,8 +1703,8 @@ impl TimelineSurface {
         let horizontal = dx.abs() > dy.abs() || event.modifiers.shift;
         if horizontal {
             let travel = if dx.abs() > dy.abs() { dx } else { dy };
-            self.view.scroll_time = (self.view.scroll_time - travel / self.view.pps)
-                .max(self.model.index.minimum_time());
+            self.view.scroll_time -= travel / self.view.pps;
+            self.clamp_time();
         } else {
             self.view.scroll_y = (self.view.scroll_y - dy).max(0.);
             self.clamp_scroll();
