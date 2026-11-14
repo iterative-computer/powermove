@@ -9,21 +9,29 @@
 use pm_first_launch::{
     Config,
     extension_transfer::{self as transfer, Progress, Scan, TransferResult},
-    surfaces::extensions::{Model, Place, Tone},
+    surfaces::extensions::{Model, PREVIEW, Place, Tone},
 };
-use pm_shell::welcome::{Button, Frame, Progress as Bar, Row, Severity, StepRow};
-use std::{cell::RefCell, path::PathBuf, rc::Rc};
+use pm_shell::welcome::{Button, Frame, Names, Progress as Bar, Row, Severity, Stat, StepRow};
+use std::{cell::RefCell, collections::BTreeMap, path::PathBuf, rc::Rc};
 
-/// The Welcome frame for the step, as the gate and Settings show it.
+/// The Welcome frame for the step, as the gate and Settings show it: the
+/// outcome and its counts first, the exceptions in full, the rest by name.
 pub fn frame(model: &Model) -> Frame {
     let view = model.view();
     Frame {
         surface: view.surface.into(),
+        top: true,
         eyebrow: Some("Extensions From the Original App".into()),
         title: view.title,
         line: view.line,
-        status: view.status,
-        spinner: false,
+        stats: model
+            .stats()
+            .into_iter()
+            .map(|(n, label)| Stat {
+                value: n.to_string(),
+                label: label.into(),
+            })
+            .collect(),
         steps: model
             .rows()
             .into_iter()
@@ -36,6 +44,7 @@ pub fn frame(model: &Model) -> Frame {
                 }),
             })
             .collect(),
+        rows_title: model.items_title().map(str::to_owned),
         rows: model
             .items()
             .into_iter()
@@ -43,15 +52,20 @@ pub fn frame(model: &Model) -> Frame {
                 let (symbol, severity) = match item.tone {
                     Tone::Warning => ("exclamationmark.triangle.fill", Severity::Warning),
                     Tone::Note => ("info.circle", Severity::Note),
-                    Tone::Done => ("checkmark.circle.fill", Severity::Success),
                 };
                 Row {
                     symbol,
                     severity,
-                    text: item.text,
+                    text: item.name,
+                    detail: Some(item.reason).filter(|r| !r.is_empty()),
                 }
             })
             .collect(),
+        names: model.listed().map(|(title, names)| Names {
+            title: title.into(),
+            names,
+            preview: PREVIEW,
+        }),
         note: model.note().map(str::to_owned),
         details: model.details().map(str::to_owned),
         buttons: view
@@ -75,9 +89,42 @@ pub fn eligible(config: Option<&Config>) -> Option<Config> {
         .filter(|c| c.electron_profile.is_dir() && c.native_profile.is_dir())
         .cloned()
 }
-/// Read-only: hashes extension folders, compiles nothing.
-pub fn scan(config: &Config) -> Result<Scan, String> {
-    transfer::scan(config).map_err(|e| format!("{e:#}"))
+/// What the scan found, with each extension's display name.
+#[derive(Clone, Debug, Default)]
+pub struct Found {
+    pub scan: Scan,
+    pub names: BTreeMap<String, String>,
+}
+impl Found {
+    pub fn model(self, place: Place) -> Model {
+        Model::offer(self.scan, place).named(self.names)
+    }
+}
+/// The manifest's display name for `id`, from the original app or here.
+fn display_name(config: &Config, id: &str) -> Option<String> {
+    [&config.electron_profile, &config.native_profile]
+        .into_iter()
+        .find_map(|root| {
+            let path = root.join("extensions").join(id).join("manifest.json");
+            let manifest: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+            manifest["name"]
+                .as_str()
+                .map(str::trim)
+                .filter(|n| !n.is_empty())
+                .map(str::to_owned)
+        })
+}
+/// Read-only: hashes extension folders and reads their manifests' names;
+/// compiles nothing.
+pub fn scan(config: &Config) -> Result<Found, String> {
+    let scan = transfer::scan(config).map_err(|e| format!("{e:#}"))?;
+    let names = scan
+        .entries
+        .iter()
+        .filter_map(|e| Some((e.id.clone(), display_name(config, &e.id)?)))
+        .collect();
+    Ok(Found { scan, names })
 }
 /// Not Now: the startup offer stays quiet until the person asks from Settings.
 pub fn decline(profile: &std::path::Path) {
@@ -106,7 +153,7 @@ pub fn run(config: &Config, progress: impl FnMut(Progress)) -> Result<TransferRe
 
 #[derive(Debug)]
 pub enum Update {
-    Scanned(Result<Scan, String>),
+    Scanned(Result<Found, String>),
     Progress(Progress),
     Finished(Result<TransferResult, String>),
 }
@@ -162,9 +209,7 @@ pub fn open_from_settings(
                 {
                     let mut slot = model.borrow_mut();
                     match update {
-                        Update::Scanned(Ok(scan)) => {
-                            *slot = Some(Model::offer(scan, Place::Settings))
-                        }
+                        Update::Scanned(Ok(found)) => *slot = Some(found.model(Place::Settings)),
                         Update::Scanned(Err(error)) => {
                             let mut m = Model::offer(Scan::default(), Place::Settings);
                             m.finished(Err(error));

@@ -820,15 +820,19 @@ fn existing_library_with_original_extensions(home: &Path) -> (Plan, PathBuf) {
     let support = home.join(APPLICATION_SUPPORT);
     let original = support.join("Powermove");
     write(&original.join("store/projects.json"), &json!([]));
-    let extension = |id: &str, source: &str| {
+    let extension = |id: &str, name: &str, source: &str| {
         write(
             &original.join(format!("extensions/{id}/manifest.json")),
-            &json!({"id":id,"name":id,"version":"1.0.0","apiVersion":3,"entry":"index.ts"}),
+            &json!({"id":id,"name":name,"version":"1.0.0","apiVersion":3,"entry":"index.ts"}),
         );
         fs::write(original.join(format!("extensions/{id}/index.ts")), source).unwrap();
     };
-    extension("pong", "export default function activate() {}");
-    extension("broken", "export default function activate( {");
+    extension("pong", "Pong", "export default function activate() {}");
+    extension(
+        "broken",
+        "Broken Glow",
+        "export default function activate( {",
+    );
     fs::create_dir_all(original.join("extensions/figma-layer-import")).unwrap();
     let native = pm_first_launch::default_paths(&support).native_profile;
     write(
@@ -863,14 +867,13 @@ fn not_now_opens_the_library_and_later_launches_do_not_ask_again() {
     assert_eq!(frame.surface, "N004");
     titled(&frame, "Bring In Your Extensions");
     assert!(frame.line.contains("2 extensions"), "{}", frame.line);
-    assert!(
-        frame
-            .rows
-            .iter()
-            .any(|r| r.text.starts_with("figma-layer-import: ")),
-        "{:?}",
-        frame.rows
-    );
+    // The skip, in full; the rest by display name.
+    assert_eq!(frame.rows.len(), 1, "{:?}", frame.rows);
+    assert_eq!(frame.rows[0].text, "figma-layer-import");
+    assert!(frame.rows[0].detail.as_deref().unwrap().contains("empty"));
+    let names = frame.names.as_ref().unwrap();
+    assert_eq!(names.names, ["Broken Glow", "Pong"]);
+    assert!(frame.top, "the step's title stays put");
     let labels: Vec<_> = frame.buttons.iter().map(|b| b.label.as_str()).collect();
     assert_eq!(labels, ["Not Now", "Bring In Extensions"]);
     // Not Now: remembered, and the library opens at once.
@@ -928,25 +931,36 @@ fn bring_in_copies_only_extensions_and_summarises_each_with_its_reason() {
     assert_eq!(frame.surface, "N006");
     titled(&frame, "Your Extensions Are In");
     assert!(
-        frame.line.starts_with("1 brought in and 1 couldn’t load."),
+        frame
+            .line
+            .starts_with("One couldn’t load. The reason is below."),
         "{}",
         frame.line
     );
-    let texts: Vec<_> = frame.rows.iter().map(|r| r.text.as_str()).collect();
-    assert!(
-        texts[0].starts_with("broken: It was copied but couldn’t load"),
-        "{texts:?}"
+    let stats: Vec<_> = frame
+        .stats
+        .iter()
+        .map(|s| (s.value.as_str(), s.label.as_str()))
+        .collect();
+    assert_eq!(
+        stats,
+        [
+            ("1", "Brought in"),
+            ("1", "Couldn’t load"),
+            ("1", "Skipped")
+        ]
     );
+    // Exceptions first and in full, by display name, with their reasons.
+    assert_eq!(frame.rows_title.as_deref(), Some("Needs a Look"));
+    assert_eq!(frame.rows[0].text, "Broken Glow");
+    let reason = frame.rows[0].detail.as_deref().unwrap();
     assert!(
-        texts.iter().any(|t| t.starts_with("figma-layer-import: ")),
-        "{texts:?}"
+        reason.starts_with("It was copied but couldn’t load"),
+        "{reason}"
     );
-    assert!(
-        texts
-            .iter()
-            .any(|t| *t == "pong: New in the original app. It loads."),
-        "{texts:?}"
-    );
+    assert_eq!(frame.rows[1].text, "figma-layer-import");
+    // Successes by name only, no repeated reason.
+    assert_eq!(frame.names.as_ref().unwrap().names, ["Pong"]);
     assert!(native.join("extensions/pong/manifest.json").is_file());
     // Projects and settings are exactly as they were.
     assert_eq!(
