@@ -829,8 +829,10 @@ fn bootstrap(
             place_file(&root.join("profile").join(relative), &target, entry, native)?;
         }
         state.imported_files.insert(relative.clone());
-        publish(native, state)?;
     }
+    // Files have been fsynced. This receipt supplies one full storage barrier
+    // for the batch before any callback can observe it as complete.
+    publish(native, state)?;
     disk::private_dir(&native.join("extensions-overlay"))?;
     seal_shared(&native.join("extensions-shared"))
 }
@@ -865,14 +867,20 @@ fn place_file(from: &Path, target: &Path, entry: &disk::FileEntry, native: &Path
         target.parent().unwrap().canonicalize()?.starts_with(native),
         "native file destination escaped profile"
     );
-    let temp = target.with_extension("first-launch-copy");
+    let temp = target.with_file_name(format!(
+        "{}.first-launch-copy",
+        target
+            .file_name()
+            .context("missing filename")?
+            .to_string_lossy()
+    ));
     if temp.exists() {
         disk::archive(&temp)?;
     }
-    let copied = disk::copy(from, &temp)?;
+    let copied = disk::copy_staged(from, &temp)?;
     ensure!(copied.hash == entry.hash, "checkpoint copy differs");
     fs::rename(temp, target)?;
-    File::open(target.parent().unwrap())?.sync_all()?;
+    disk::sync_staged(&File::open(target.parent().unwrap())?)?;
     Ok(())
 }
 const PROJECT_FAMILIES: [&str; 9] = [

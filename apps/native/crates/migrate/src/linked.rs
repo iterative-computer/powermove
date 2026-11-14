@@ -29,7 +29,7 @@ pub struct LinkedSummary {
     pub total_items: u64,
     pub total_bytes: u64,
     pub missing: u64,
-    /// Totals for each ancestor directory; look up the original app's profile.
+    /// Available linked files under each ancestor; look up the original app's profile.
     pub folders: BTreeMap<PathBuf, LinkedFolder>,
 }
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -86,6 +86,7 @@ pub fn linked_summary(media_root: &Path) -> Result<LinkedSummary> {
         summary.total_bytes += key.size;
         if !valid_file(path, key.size) {
             summary.missing += 1;
+            continue;
         }
         for folder in path.ancestors().skip(1) {
             let count = summary.folders.entry(folder.into()).or_default();
@@ -176,6 +177,15 @@ pub fn adopt_linked(
     }
     Ok(report)
 }
+fn owned_valid(root: &Path, key: &KeyRecord) -> bool {
+    key.path.is_none()
+        && key.hash.len() == 64
+        && key.hash.bytes().all(|b| b.is_ascii_hexdigit())
+        && valid_file(
+            &root.join("objects").join(&key.hash[..2]).join(&key.hash),
+            key.size,
+        )
+}
 fn make_key(
     key: &str,
     path: PathBuf,
@@ -215,6 +225,12 @@ pub fn link_many_with_disk(
 ) -> Result<Pass> {
     use fs2::FileExt;
     use std::os::unix::fs::OpenOptionsExt;
+    ensure!(
+        batches
+            .iter()
+            .all(|(_, records)| records.iter().all(|r| r.payload_index < r.external.len())),
+        "invalid media payload index"
+    );
     for (snapshot, _) in batches {
         snapshot.ensure_destination(root)?;
     }
@@ -260,7 +276,6 @@ pub fn link_many_with_disk(
             .cloned()
     };
     for record in disk {
-        hook(Checkpoint::RecordPublished)?;
         let path = reference_path(&record.key, record.size)
             .or_else(|| {
                 record
@@ -283,11 +298,13 @@ pub fn link_many_with_disk(
                 Some(&record.revision),
                 (!record.sha256.is_empty()).then(|| record.sha256.clone()),
             );
-            key.expected_blake3 = record
-                .raw
-                .get("hash")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned);
+            if record.sha256.is_empty() {
+                key.expected_blake3 = record
+                    .raw
+                    .get("hash")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned);
+            }
             available.insert(record.key.clone(), key);
         }
     }
@@ -323,7 +340,6 @@ pub fn link_many_with_disk(
                 source_record: record.clone(),
                 stored: available.get(&record.key).cloned(),
             });
-            hook(Checkpoint::RecordPublished)?;
         }
     }
     for r in &closure.references {
@@ -355,28 +371,68 @@ pub fn link_many_with_disk(
             }
         }
     }
+    // Adoption remains available after the old profile's payload disappears.
+    let mut expected = BTreeMap::new();
+    for r in disk {
+        expected.insert(r.key.clone(), Some(r.revision.clone()));
+    }
+    for (_, records) in batches {
+        for r in *records {
+            expected
+                .entry(r.key.clone())
+                .or_insert_with(|| r.revision().map(str::to_owned));
+        }
+    }
+    for r in &closure.references {
+        expected.entry(r.key.clone()).or_insert(r.revision.clone());
+        if let Some(id) = &r.legacy_id {
+            expected.entry(id.clone()).or_insert(r.revision.clone());
+        }
+    }
+    for (_, key) in keys(root)? {
+        if !available.contains_key(&key.key)
+            && owned_valid(root, &key)
+            && expected
+                .get(&key.key)
+                .is_some_and(|rev| rev.as_ref().is_none_or(|rev| rev == &key.revision))
+        {
+            available.insert(key.key.clone(), key);
+        }
+    }
+    let mut writes = Vec::new();
     for (key, record) in &mut available {
         let target = root
             .join("keys")
             .join(format!("{:x}.json", Sha256::digest(key.as_bytes())));
-        let existing = fs::read(&target)
-            .ok()
-            .and_then(|b| serde_json::from_slice::<KeyRecord>(&b).ok());
+        let existing: Option<KeyRecord> = if target.exists() {
+            Some(serde_json::from_reader(open_regular(&target)?)?)
+        } else {
+            None
+        };
+        if let Some(old) = &existing {
+            ensure!(old.key == *key, "key filename mismatch");
+            if old.revision != record.revision || old.size != record.size || old.mime != record.mime
+            {
+                pass.mapping_conflicts.insert(key.clone());
+                continue;
+            }
+        }
+        if existing.as_ref() == Some(&*record) {
+            continue;
+        }
         if let Some(old) = existing.filter(|k| {
-            k.path.is_none()
+            owned_valid(root, k)
                 && k.revision == record.revision
                 && k.size == record.size
                 && k.mime == record.mime
-                && k.hash.len() == 64
-                && valid_file(
-                    &root.join("objects").join(&k.hash[..2]).join(&k.hash),
-                    k.size,
-                )
         }) {
             *record = old;
         } else {
-            atomic_json(&target, record)?;
+            writes.push((target, record.clone()));
         }
+    }
+    for (target, record) in writes {
+        crate::snapshot::atomic_json_staged(&target, &record)?;
     }
     for record in pass.records.values_mut() {
         record.stored = available.get(&record.source_record.key).cloned();
@@ -421,7 +477,8 @@ pub fn link_many_with_disk(
             export_warning: r.is_proxy() && !original_available,
         });
     }
-    pass.cutover_ready = closure.complete() && pass.blocked_owners.is_empty();
+    pass.cutover_ready =
+        closure.complete() && pass.blocked_owners.is_empty() && pass.mapping_conflicts.is_empty();
     let state_path = root.join("migration.json");
     let mut state = if state_path.exists() {
         serde_json::from_reader(open_regular(&state_path)?)?
@@ -430,6 +487,14 @@ pub fn link_many_with_disk(
     };
     state["passes"][format!("{}:{}", pass.snapshot, pass.base_hash)] = serde_json::to_value(&pass)?;
     atomic_json(&state_path, &state)?;
+    for _ in 0..batches
+        .iter()
+        .map(|(_, records)| records.len())
+        .sum::<usize>()
+        + disk.len()
+    {
+        hook(Checkpoint::RecordPublished)?;
+    }
     hook(Checkpoint::ClosurePublished)?;
     Ok(pass)
 }
@@ -440,19 +505,23 @@ mod tests {
     #[test]
     fn metadata_publish_and_resumable_adoption() {
         let temp = tempfile::tempdir().unwrap();
-        let source = temp.path().join("original.bin");
+        let base = temp.path().canonicalize().unwrap();
+        let source = base.join("original.bin");
         fs::write(&source, b"synthetic payload").unwrap();
-        let root = temp.path().join("media");
+        let root = base.join("media");
         fs::create_dir_all(root.join("keys")).unwrap();
         let key = make_key("item", source.clone(), 17, "video/mp4", Some("v1"), None);
         // A sparse multi-GB input proves publication itself does not hash bytes.
-        let sparse = temp.path().join("sparse");
+        let sparse = base.join("sparse");
         fs::File::create(&sparse)
             .unwrap()
             .set_len(50 * 1024 * 1024 * 1024)
             .unwrap();
+        let activity = std::sync::Arc::new(crate::source_access::Activity::default());
+        let _scope =
+            crate::source_access::install(crate::source_access::Choice::Allow, activity.clone());
         let started = std::time::Instant::now();
-        let large_root = temp.path().join("large-media");
+        let large_root = base.join("large-media");
         let record = crate::library_media::DiskMediaRecord {
             key: "large".into(),
             revision: "v1".into(),
@@ -475,6 +544,11 @@ mod tests {
         )
         .unwrap();
         assert!(started.elapsed().as_secs() < 5);
+        assert_eq!(
+            activity.bytes().0,
+            0,
+            "publishing links reads no payload bytes"
+        );
         assert_eq!(
             linked_summary(&large_root).unwrap().total_bytes,
             50 * 1024 * 1024 * 1024
@@ -501,7 +575,31 @@ mod tests {
                     .join(&stored.hash)
             )
             .unwrap(),
-            fs::read(source).unwrap()
+            fs::read(&source).unwrap()
         );
+        fs::remove_file(&source).unwrap();
+        let record = crate::library_media::DiskMediaRecord {
+            key: "item".into(),
+            revision: "v1".into(),
+            mime: "video/mp4".into(),
+            size: 17,
+            sha256: String::new(),
+            owned_path: Some(source),
+            source_path: None,
+            raw: serde_json::json!({}),
+        };
+        let pass = link_many_with_disk(
+            &[],
+            &[record],
+            &ClosureInput {
+                inventoried: BTreeSet::new(),
+                references: vec![],
+            },
+            &root,
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert!(pass.disk_records["item"].path.is_none());
+        assert_eq!(linked_summary(&root).unwrap().total_items, 0);
     }
 }

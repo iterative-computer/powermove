@@ -267,17 +267,16 @@ fn stored(
             return None;
         }
         let valid = |p: &Path| {
-            p.is_absolute()
-                && std::fs::symlink_metadata(p)
-                    .ok()
-                    .is_some_and(|m| m.is_file() && m.len() == size as u64)
+            std::fs::symlink_metadata(p)
+                .ok()
+                .is_some_and(|m| m.is_file() && m.len() == size as u64)
         };
         let object = store.join("objects").join(&hash[..2]).join(hash);
         let path: PathBuf = record
             .get("path")
             .and_then(Value::as_str)
             .map(PathBuf::from)
-            .filter(|p| valid(p))
+            .filter(|p| p.is_absolute() && valid(p))
             .unwrap_or(object);
         valid(&path).then_some(())?;
         let entry = MediaEntry {

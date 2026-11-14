@@ -18,16 +18,25 @@ fn real_linked_launch() {
         native_profile: native.clone(),
     };
     let start = std::time::Instant::now();
-    let mut outcome = pm_first_launch::run(&config, |_| Ok(())).unwrap();
+    let mut progress = |event| {
+        if matches!(
+            event,
+            pm_first_launch::Event::Started(_) | pm_first_launch::Event::Published(_)
+        ) {
+            println!("{event:?} at {:.3}s", start.elapsed().as_secs_f64());
+        }
+        Ok(())
+    };
+    let mut outcome = pm_first_launch::run(&config, &mut progress).unwrap();
     loop {
         outcome = match outcome {
             Outcome::NeedsSecretConsent { .. } => {
-                pm_first_launch::skip_secret_consent(&config, |_| Ok(())).unwrap()
+                pm_first_launch::skip_secret_consent(&config, &mut progress).unwrap()
             }
             Outcome::NeedsFolderAccess { .. } => pm_first_launch::run_with_folder_access(
                 &config,
                 pm_first_launch::source_access::Choice::Skip,
-                |_| Ok(()),
+                &mut progress,
             )
             .unwrap(),
             _ => break,
@@ -51,10 +60,11 @@ fn real_linked_launch() {
         .unwrap();
     let mut hydrated = 0;
     let mut resolved = 0;
-    for row in store.projects().unwrap() {
+    for (index, row) in store.projects().unwrap().into_iter().enumerate() {
+        let session = format!("check-{index}");
         kernel
             .shell(ShellCall::Open {
-                id: "check".into(),
+                id: session.clone(),
                 source: SessionSource::Library {
                     profile: native.clone(),
                     project: row.id,
@@ -62,7 +72,7 @@ fn real_linked_launch() {
                 electron_profile: None,
             })
             .unwrap();
-        let media = kernel.project("check").unwrap().store().media();
+        let media = kernel.project(&session).unwrap().store().media();
         let mut count = 0;
         for entry in media.iter() {
             if let MediaSource::File { path, .. } = &entry.source {
@@ -81,6 +91,16 @@ fn real_linked_launch() {
     println!("hydrated_projects={hydrated} resolved_files={resolved}");
     assert!(hydrated >= 3);
     drop(kernel);
+    fn unseal(path: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt;
+        if std::fs::symlink_metadata(path).unwrap().is_dir() {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            for entry in std::fs::read_dir(path).unwrap() {
+                unseal(&entry.unwrap().path());
+            }
+        }
+    }
+    unseal(&native);
     std::fs::remove_dir_all(native).unwrap();
 }
 
@@ -96,6 +116,11 @@ fn first_launch_links_live_blobs_and_kernel_resolves_them() {
             b"synthetic excluded payload",
         )
         .unwrap();
+    }
+    for i in 0..40 {
+        let path = config.electron_profile.join("Agent State/metadata");
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(path.join(format!("{i}.json")), b"{}").unwrap();
     }
     let before = support::files(&config.electron_profile);
     assert!(matches!(
@@ -120,6 +145,12 @@ fn first_launch_links_live_blobs_and_kernel_resolves_them() {
         pm_native_migrate::linked_summary(&config.native_profile.join("Media Store")).unwrap();
     assert!(summary.total_items > 0);
     assert_eq!(summary.missing, 0);
+    assert_eq!(
+        std::fs::read_dir(config.native_profile.join("Media Store/objects"))
+            .unwrap()
+            .count(),
+        0
+    );
     let mut kernel = Kernel::new(KernelConfig::default());
     kernel
         .shell(ShellCall::AttachLibrary {

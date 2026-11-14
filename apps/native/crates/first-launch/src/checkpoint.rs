@@ -108,7 +108,7 @@ impl Checkpoint {
             for p in before.keys() {
                 let target = profile.join(p);
                 disk::private_dir(target.parent().unwrap())?;
-                files.insert(p.clone(), disk::copy(&source.join(p), &target)?);
+                files.insert(p.clone(), disk::copy_staged(&source.join(p), &target)?);
             }
             let dbroot = stage.join("chromium");
             disk::private_dir(&dbroot)?;
@@ -350,10 +350,11 @@ pub(crate) fn file_target(path: &Path) -> Result<PathBuf> {
         .to_string_lossy()
         .starts_with("project-files.json.pending-")
         || [
-            "Media Store/Index",
-            "Media Store/keys",
+            "Media Store",
             "storage-upgrade-v1.json",
             "project-files.json",
+            "backups",
+            "recovery",
         ]
         .iter()
         .any(|name| first == *name)

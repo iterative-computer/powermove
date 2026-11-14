@@ -223,6 +223,30 @@ pub fn tree_bytes(root: &Path) -> Result<u64> {
     Ok(walk(root)?.values().map(|s| s.size).sum())
 }
 pub fn copy(source: &Path, target: &Path) -> Result<FileEntry> {
+    copy_with_sync(source, target, true)
+}
+/// Flush each staged file to the filesystem. The caller must issue a full
+/// storage barrier before publishing the enclosing checkpoint/receipt.
+pub(crate) fn copy_staged(source: &Path, target: &Path) -> Result<FileEntry> {
+    copy_with_sync(source, target, false)
+}
+pub(crate) fn sync_staged(file: &File) -> Result<()> {
+    use std::os::fd::AsRawFd;
+    // SAFETY: the descriptor is live and borrowed for this filesystem flush.
+    if unsafe { libc::fsync(file.as_raw_fd()) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(())
+}
+fn copy_with_sync(source: &Path, target: &Path, full: bool) -> Result<FileEntry> {
+    let sync = |file: &File| -> Result<()> {
+        if full {
+            file.sync_all()?;
+            Ok(())
+        } else {
+            sync_staged(file)
+        }
+    };
     let (expected, size) = hash_counted(source)?;
     // A clone shares the source's blocks, so free space is checked only
     // before bytes are actually streamed.
@@ -253,16 +277,16 @@ pub fn copy(source: &Path, target: &Path) -> Result<FileEntry> {
             std::io::copy(&mut input, &mut output)? == size,
             "checkpoint source changed"
         );
-        output.sync_all()?;
+        sync(&output)?;
     }
     let mode = fs::metadata(source)?.permissions().mode() & 0o777;
     fs::set_permissions(target, fs::Permissions::from_mode(mode & 0o700))?;
-    File::open(target)?.sync_all()?;
+    sync(&File::open(target)?)?;
     ensure!(
         hash(target)? == (expected.clone(), size),
         "checkpoint content mismatch"
     );
-    File::open(target.parent().unwrap())?.sync_all()?;
+    sync(&File::open(target.parent().unwrap())?)?;
     Ok(FileEntry {
         hash: expected,
         bytes: size,

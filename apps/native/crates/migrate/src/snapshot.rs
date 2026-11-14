@@ -333,7 +333,17 @@ impl Snapshot {
             return Ok(None);
         };
         let path = root.join(relative);
-        Ok(crate::linked::valid_file(&path, stamp.size).then_some(path))
+        let unchanged = fs::symlink_metadata(&path).is_ok_and(|m| {
+            m.is_file()
+                && m.len() == stamp.size
+                && m.ino() == stamp.inode
+                && m.dev() == stamp.device
+                && m.modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .is_some_and(|t| t.as_nanos() == stamp.modified)
+        });
+        Ok((unchanged && crate::linked::valid_file(&path, stamp.size)).then_some(path))
     }
     /// Materialize one captured identity into a caller-owned batch. A changed,
     /// replaced or missing source is refused; never read it as the old snapshot.
@@ -684,6 +694,26 @@ fn try_clone(_: &Path, _: &Path) -> Result<bool> {
 }
 
 pub(crate) fn atomic_json(path: &Path, value: &impl Serialize) -> Result<()> {
+    atomic_json_sync(path, value, true)
+}
+/// Filesystem flush only. The batch owner must finish with `atomic_json` to
+/// supply the full storage barrier before reporting durable completion.
+pub(crate) fn atomic_json_staged(path: &Path, value: &impl Serialize) -> Result<()> {
+    atomic_json_sync(path, value, false)
+}
+fn atomic_json_sync(path: &Path, value: &impl Serialize, full: bool) -> Result<()> {
+    let sync = |file: &File| -> Result<()> {
+        if full {
+            file.sync_all()?;
+        } else {
+            use std::os::fd::AsRawFd;
+            // SAFETY: live borrowed descriptor, flushed before the final barrier.
+            if unsafe { libc::fsync(file.as_raw_fd()) } != 0 {
+                return Err(std::io::Error::last_os_error().into());
+            }
+        }
+        Ok(())
+    };
     let tmp = path.with_extension("json.part");
     if fs::symlink_metadata(&tmp).is_ok() {
         archive_attempt(&tmp)?;
@@ -696,10 +726,10 @@ pub(crate) fn atomic_json(path: &Path, value: &impl Serialize) -> Result<()> {
         .open(&tmp)?;
     serde_json::to_writer(&mut file, value)?;
     file.write_all(b"\n")?;
-    file.sync_all()?;
+    sync(&file)?;
     drop(file);
     fs::rename(&tmp, path)?;
-    File::open(path.parent().unwrap())?.sync_all()?;
+    sync(&File::open(path.parent().unwrap())?)?;
     Ok(())
 }
 

@@ -239,13 +239,14 @@ fn native_work_stays_and_a_change_on_both_sides_keeps_both() {
             .iter()
             .any(|c| c.kind == ConflictKind::Setting && c.id == "theme")
     );
-    assert!(conflicts.iter().any(|c| c.kind == ConflictKind::File));
+    assert!(!conflicts.iter().any(|c| c.kind == ConflictKind::File));
+    assert_eq!(
+        fs::read(config.native_profile.join(artifact)).unwrap(),
+        b"native artifact"
+    );
     let base = state(&config).delta_base.unwrap();
     let delta_dir = config.native_profile.join("first-launch-deltas").join(base);
-    assert_eq!(
-        fs::read(delta_dir.join("profile").join(artifact)).unwrap(),
-        b"original artifact"
-    );
+    assert!(!delta_dir.join("profile").join(artifact).exists());
     let rows = report::load(&config.native_profile).unwrap();
     assert_eq!(
         rows.sections()[&ReportKind::Conflicts].len(),
