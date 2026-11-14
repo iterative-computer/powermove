@@ -367,6 +367,7 @@ pub(crate) fn transient(error: &anyhow::Error) -> bool {
                 RenderError::WatchdogPending
                     | RenderError::CompatPending(_)
                     | RenderError::ShaderFallbackPending(_)
+                    | RenderError::MediaPending
             )
         )
 }
@@ -560,6 +561,22 @@ fn lose(lost: &AtomicBool, waker: &Waker) {
         wake.try_send(()).ok();
     }
 }
+/// What a frame reads back besides presenting it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Readback {
+    None,
+    /// The engine's frame (`capture_next`): in an SDR view, drawn again
+    /// without the presentation's SDR clip.
+    Capture,
+    /// The picture presented, as presented (the trace's picture hash).
+    Presented,
+}
+impl From<bool> for Readback {
+    fn from(capture: bool) -> Self {
+        if capture { Self::Capture } else { Self::None }
+    }
+}
+
 pub struct Submission {
     pub drawable: Option<metal::MetalDrawable>,
     pub trace: Arc<std::sync::Mutex<Trace>>,
@@ -710,6 +727,8 @@ impl Engine {
         if let Some(disk) = &self.disk {
             disk.memory_pressure(crate::memory::pressure());
         }
+        self.renderer
+            .set_memory_pressure(crate::memory::pressure() == crate::memory::Pressure::Critical);
         let request = self.memory_request.swap(u64::MAX, Ordering::AcqRel);
         let surfaces = self.memory_usage().surface_bytes;
         let share = self.memory_client.grant();
@@ -1204,6 +1223,11 @@ impl Engine {
         observed
     }
     /// Changes when a frame a scrub or playback render missed has decoded.
+    /// The frame about to be drawn stops waiting for a still being read
+    /// once `interrupt` moves (`pm_render::media::Interrupt`).
+    pub fn set_interrupt(&mut self, interrupt: Option<pm_render::media::Interrupt>) {
+        self.renderer.set_interrupt(interrupt);
+    }
     pub fn media_landed(&self) -> u64 {
         self.renderer.media_landed()
     }
@@ -1510,15 +1534,14 @@ impl Engine {
         spec: FrameSpec,
         layer: Option<&metal::MetalLayer>,
         overlays: &crate::OverlayGeometry,
-        capture: bool,
+        read: impl Into<Readback>,
         trace: Arc<std::sync::Mutex<Trace>>,
     ) -> Result<Option<Submission>> {
+        let read = read.into();
         self.govern_memory();
         self.last_frame = Instant::now();
         self.idle_released = false;
-        objc2::rc::autoreleasepool(|_| {
-            self.encode_inner(scene, spec, layer, overlays, capture, trace)
-        })
+        objc2::rc::autoreleasepool(|_| self.encode_inner(scene, spec, layer, overlays, read, trace))
     }
     fn encode_inner(
         &mut self,
@@ -1526,9 +1549,10 @@ impl Engine {
         spec: FrameSpec,
         layer: Option<&metal::MetalLayer>,
         overlays: &crate::OverlayGeometry,
-        capture: bool,
+        read: Readback,
         trace: Arc<std::sync::Mutex<Trace>>,
     ) -> Result<Option<Submission>> {
+        let capture = read == Readback::Capture;
         {
             let mut t = trace.lock().unwrap();
             t.enter_ms = (now() - t.worker_start) * 1e3;
@@ -1745,6 +1769,7 @@ impl Engine {
                     if let Some(work) = work {
                         t.work = pm_perf::snapshot().since(&work);
                     }
+                    t.images_over = self.renderer.image_over_budget();
                 }
                 self.renderer.set_scrub(false);
                 self.renderer.set_playback(None);
@@ -1907,7 +1932,7 @@ impl Engine {
             pass.end_encoding();
         };
         present(destination, &params);
-        let read = |texture: &metal::TextureRef| {
+        let read_texture = |texture: &metal::TextureRef| {
             let b = self.metal.new_buffer(
                 output.width as u64 * output.height as u64 * 8,
                 metal::MTLResourceOptions::StorageModeShared,
@@ -1950,11 +1975,12 @@ impl Engine {
             );
             #[cfg(test)]
             {
-                presented = Some(read(destination));
+                presented = Some(read_texture(destination));
             }
-            Some(read(target))
-        } else if capture {
-            Some(read(destination))
+            Some(read_texture(target))
+        } else if read != Readback::None {
+            // What was presented, exactly: the drawable itself.
+            Some(read_texture(destination))
         } else {
             None
         };
@@ -2235,6 +2261,20 @@ pub(crate) static MEDIA_SAMPLED: std::sync::Mutex<
 pub(crate) static LATE_COMPLETION_MS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
+/// FNV-1a over a picture's size and its stored bytes (RGBA half floats).
+pub fn picture_hash(width: u32, height: u32, bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for b in width
+        .to_le_bytes()
+        .iter()
+        .chain(&height.to_le_bytes())
+        .chain(bytes)
+    {
+        hash = (hash ^ u64::from(*b)).wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
 impl Submission {
     pub fn pixels(&self) -> Vec<[f64; 3]> {
         let b = self.readback.as_ref().unwrap();
@@ -2248,6 +2288,18 @@ impl Submission {
             .chunks_exact(4)
             .map(|p| [p[0], p[1], p[2]].map(|v| half::f16::from_bits(v).to_f64()))
             .collect()
+    }
+    /// A hash of the picture read back, as stored (half floats, alpha
+    /// included) with its size: equal hashes are equal pictures.
+    pub fn picture_hash(&self) -> u64 {
+        let b = self.readback.as_ref().unwrap();
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                b.contents().cast::<u8>(),
+                self.width as usize * self.height as usize * 8,
+            )
+        };
+        picture_hash(self.width, self.height, bytes)
     }
     pub fn commit(&self) {
         self.submit(None);
@@ -3280,6 +3332,61 @@ mod viewer_output_tests {
         assert!(
             captured.iter().zip(edr).all(|(c, e)| (*c - e).abs() < 0.01),
             "a capture is the engine's frame: {captured:?} vs {edr:?}"
+        );
+    }
+    /// The trace's picture hash reads the picture presented, as stored: in
+    /// an SDR view that is the clipped picture on screen, not the engine's
+    /// frame a capture reads; the hash covers the size, alpha and every
+    /// half-float bit.
+    #[test]
+    fn the_traced_picture_is_the_presented_picture_as_stored() {
+        let mut engine = Engine::new(Gpu::new("picture-hash-test").unwrap()).unwrap();
+        let scene = columns(1, 64.);
+        let spec = FrameSpec::exact(Ticks::ZERO, output(64, 36));
+        engine.mastering = Mastering::LinearP3;
+        let raw = |b: &metal::Buffer, pixels: usize| unsafe {
+            std::slice::from_raw_parts(b.contents().cast::<u8>(), pixels * 8).to_vec()
+        };
+        let mut frame = |read: Readback| {
+            let sub = engine
+                .frame(
+                    &scene,
+                    spec,
+                    None,
+                    &Default::default(),
+                    read,
+                    Arc::default(),
+                )
+                .unwrap()
+                .unwrap();
+            sub.commit();
+            sub.complete().unwrap();
+            sub
+        };
+        let captured = frame(Readback::Capture);
+        let pixels = (captured.width * captured.height) as usize;
+        let shown = raw(captured.presented.as_ref().unwrap(), pixels);
+        let engines_frame = raw(captured.readback.as_ref().unwrap(), pixels);
+        assert_ne!(
+            shown, engines_frame,
+            "the SDR view clips what a capture keeps"
+        );
+        let traced = frame(Readback::Presented);
+        assert!(
+            raw(traced.readback.as_ref().unwrap(), pixels) == shown,
+            "the traced picture is the one presented"
+        );
+        let hash = |bytes: &[u8]| picture_hash(64, 36, bytes);
+        assert_eq!(traced.picture_hash(), hash(&shown));
+        let (mut alpha, mut low) = (shown.clone(), shown.clone());
+        alpha[6] ^= 1;
+        low[0] ^= 1;
+        assert_ne!(hash(&alpha), hash(&shown), "alpha counts");
+        assert_ne!(hash(&low), hash(&shown), "the last bit of a half counts");
+        assert_ne!(
+            picture_hash(36, 64, &shown),
+            hash(&shown),
+            "the size counts"
         );
     }
     /// The channel view is the viewer's alone: the presented picture shows a

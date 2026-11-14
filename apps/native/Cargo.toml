@@ -21,3 +21,10 @@ incremental = false
 [profile.soak]
 inherits = "release"
 debug-assertions = true
+
+# The engine's work counters (texture, buffer, pipeline and bind-group
+# creations, passes, draws, uploads, readbacks) reach a traced viewer's rows
+# through the same wgpu front crate the engine workspace builds with:
+# engine/third_party/wgpu/POWERMOVE.md.
+[patch.crates-io]
+wgpu = { path = "../../engine/third_party/wgpu" }

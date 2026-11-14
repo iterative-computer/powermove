@@ -374,6 +374,9 @@ pub struct ViewerStatus {
     pub missing_effects: Vec<pm_render::effects::versions::MissingEffect>,
     /// Playing frames with a stand-in for a decode that missed its allowance.
     pub stand_in_frames: u64,
+    /// Frames whose own stills exceeded the engine's image grant: drawn, and
+    /// kept while drawn, over budget (the trace row says by how much).
+    pub over_budget_frames: u64,
     /// Auto's current playing resolution, for the viewer chrome.
     pub effective_quality: f64,
     /// Playing or waiting for the audio epoch: the host should keep its
@@ -634,6 +637,10 @@ struct Shared {
     /// Times a closed document's caches were released (`CacheUsage`).
     project_releases: std::sync::atomic::AtomicU64,
     wake: std::sync::mpsc::SyncSender<()>,
+    /// Moves when a frame being drawn is superseded (a transport command, a
+    /// new revision, other media or quality, a viewer closing): a frame
+    /// waiting for a still being read stops waiting.
+    superseded: Arc<std::sync::atomic::AtomicU64>,
     interactive: jobs::Activity,
     /// The worker engine's current Metal device; a GPU loss replaces it.
     device: Mutex<metal::Device>,
@@ -673,6 +680,10 @@ struct Shared {
     slow_frames: std::sync::atomic::AtomicBool,
 }
 impl Shared {
+    fn supersede(&self) {
+        self.superseded
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }
     /// The fonts changed: every viewer draws again, under a new stamp.
     fn fonts_changed(&self) {
         let mut state = self.state.lock().unwrap();
@@ -771,6 +782,7 @@ impl Viewer {
                     publication_ms,
                 };
                 v.config.snapshot = snapshot;
+                self.shared.supersede();
                 v.stamp.revision = v.config.snapshot.revision;
                 v.stamp.sequence += 1;
                 bump_site(line!(), "");
@@ -799,6 +811,7 @@ impl Viewer {
             .get_mut(&self.id)
             .ok_or_else(|| anyhow::anyhow!("viewer retired"))?;
         (v.paths, v.paused_paths) = viewer_media(&media, v.media_mode);
+        self.shared.supersede();
         v.status.proxied = media.proxied(v.media_mode);
         v.config.media = media;
         v.content = content;
@@ -821,6 +834,7 @@ impl Viewer {
             return Ok(());
         }
         v.media_mode = mode;
+        self.shared.supersede();
         (v.paths, v.paused_paths) = viewer_media(&v.config.media, mode);
         v.status.proxied = v.config.media.proxied(mode);
         v.content = content;
@@ -1091,7 +1105,9 @@ impl Viewer {
                 };
             }
             Ok(())
-        })
+        })?;
+        self.shared.supersede();
+        Ok(())
     }
     /// The Mixer's monitor solo: only these top-level layers are heard
     /// (empty: every strip). Meters still read every strip.
@@ -1267,6 +1283,7 @@ impl Viewer {
     }
     /// This view left `State::views`: its scope tap goes, the worker wakes.
     fn retired(&self) {
+        self.shared.supersede();
         let mut scopes = self.shared.scopes.lock().unwrap();
         if scopes.as_ref().is_some_and(|(id, _)| *id == self.id) {
             *scopes = None;
@@ -1340,6 +1357,7 @@ impl EngineService {
             memory: Mutex::default(),
             project_releases: Default::default(),
             wake,
+            superseded: Default::default(),
             interactive: jobs::Activity::default(),
             device: Mutex::new(device),
             scopes: Mutex::new(None),
@@ -1416,19 +1434,14 @@ impl EngineService {
         let thread = std::thread::Builder::new()
             .name("pm-engine-service".into())
             .spawn(move || {
-                // PM_FIX_RENDER_QOS=1: the viewer's render thread runs at the
-                // UI's class, as the frames it draws are interactive; at the
-                // default class the app's scheduler can place it on slower
-                // cores (same work cost ~1.6x more CPU time in the app).
-                if pm_media::decode::diag::knob("PM_FIX_RENDER_QOS") == Some(1) {
-                    // SAFETY: affects only the calling thread.
-                    unsafe {
-                        libc::pthread_set_qos_class_self_np(
-                            libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE,
-                            0,
-                        );
-                    }
-                }
+                // The frames this thread draws are what the person is looking
+                // at: it runs at the UI's class. At the default class a busy
+                // machine left it waiting for a core half the time (a heavy
+                // range played at 4 fps instead of 9), and the scheduler can
+                // place it on slower cores. Set on the thread itself, through
+                // pthread: `NSThread.qualityOfService` set after a thread
+                // has started does not change its class.
+                qos::set_interactive_qos();
                 supervise(engine, worker, wakes)
             })?;
         Ok(Self {
@@ -1748,6 +1761,10 @@ struct Flight {
     /// A playing frame's index and key in the disk render cache: gaps
     /// between played frames are dropped frames (`DiskFrames::dropped`).
     played: Option<(i64, [u8; 32])>,
+    /// Override layers this frame drew from an earlier answer.
+    late_layers: usize,
+    /// Read back only for the trace's picture hash, not asked as a capture.
+    picture_only: bool,
 }
 /// A settled picture asked of the engine and not handed over yet.
 struct Settling {
@@ -2133,12 +2150,6 @@ impl Drop for LoopPool {
 }
 
 fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc::Receiver<()>) {
-    // Same interactive class as pm-node/present; export remains separately
-    // governed. A default-class worker can miss display deadlines under load.
-    objc2::rc::autoreleasepool(|_| {
-        objc2_foundation::NSThread::currentThread()
-            .setQualityOfService(objc2_foundation::NSQualityOfService::UserInteractive);
-    });
     if std::mem::take(&mut engine.builtins_pending)
         && let Err(error) = engine.load_builtin_definitions()
     {
@@ -2180,10 +2191,18 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             None
         }
     });
+    // Diagnostic (traced viewers, `PM_ENGINE_TRACE_PICTURES=1`): every
+    // playing frame's presented picture is read back as presented and its
+    // row carries a hash of its stored bytes (`Submission::picture_hash`),
+    // so two builds can be compared playing frame by playing frame. The readback costs time: never on in a timing run.
+    let trace_pictures =
+        recorder.is_some() && std::env::var_os("PM_ENGINE_TRACE_PICTURES").is_some();
     // Diagnostic A/B only: the pre-latency-pass schedule (re-present every
     // tick, picture for the target vsync, unaligned audio start).
     let legacy = std::env::var("PM_ENGINE_PRESENT").as_deref() == Ok("legacy");
     let mut cursor = 0;
+    // Traced viewers: when the last retired frame's present pass left the GPU.
+    let mut gpu_free = 0f64;
     let mut last_was_surface_query = false;
     let (mut rebuilt_at, mut backoff) = (None::<std::time::Instant>, Duration::ZERO);
     // The settled picture being drawn off this thread, if one is.
@@ -2380,26 +2399,47 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             }
             if let Some(v) = state.views.get_mut(&f.id) {
                 let t = f.submission.trace.lock().unwrap();
-                if let Some(recorder) = &recorder && !recorder.record(serde_json::json!({"display":t.display,"worker":t.worker_start,"completed":t.completed,"commit":t.commit,
+                // A playing frame read back for the trace alone: not a capture.
+                let traced_picture = f.picture_only && f.submission.readback.is_some();
+                let captured = f.submission.readback.is_some() && !f.picture_only;
+                v.status.over_budget_frames += u64::from(t.images_over.is_some());
+                if let Some(recorder) = &recorder {
+                    let mut row = serde_json::json!({"display":t.display,"worker":t.worker_start,"completed":t.completed,"commit":t.commit,
                         "input":f.input,"audio_host":f.audio_host,"time":f.spec.time.get(),"scale":f.spec.scale,"moment":format!("{:?}",f.spec.moment),"disk":t.disk,"disk_wait_ms":t.disk_wait_ms,"enter_ms":t.enter_ms,"disk_upload_ms":t.disk_upload_ms,"cache_hit":t.cache_hit,
                         "stale":v.stamp != f.stamp,"viewer_id":f.id,"generation":f.stamp.generation,"revision":f.stamp.revision,"sequence":f.stamp.sequence,"gpu_ok":t.gpu_ok,
                         "request":f.pipeline.request,"actor_ms":f.pipeline.actor_ms,"publication_ms":f.pipeline.publication_ms,
                         "bumps":bumps_snapshot(),"present_requested":t.present_requested,"render_start":t.render_start,"render_submitted":t.render_submitted,"render_cpu_ms":t.render_cpu_ms,"work":serde_json::from_str::<serde_json::Value>(&t.work.to_json()).unwrap_or_default(),"drawable_asked":t.drawable_asked,"drawable_acquired":t.drawable_acquired,
-                        "encode_end":t.encode_end,"scheduled":t.scheduled,"gpu_start":t.gpu_start,"gpu_done":t.gpu_done,"callback":t.display_callback,"target":t.target,"requested":t.requested,"predicted":t.predicted})) {
-                    v.status.error = Some("viewer diagnostic trace overflow/disconnected".into());
+                        "encode_end":t.encode_end,"scheduled":t.scheduled,"gpu_start":t.gpu_start,"gpu_done":t.gpu_done,"callback":t.display_callback,"target":t.target,"requested":t.requested,"predicted":t.predicted,
+                        "images_over":t.images_over});
+                    // The render's own GPU time: from when the GPU was free
+                    // for it (its submission, or the frame before leaving
+                    // the GPU: one queue, in order) to the present pass.
+                    let render_gpu_ms = (t.render_submitted > 0. && t.gpu_start > 0.)
+                        .then(|| (t.gpu_start - t.render_submitted.max(gpu_free)) * 1e3);
+                    gpu_free = gpu_free.max(t.gpu_done);
+                    let r = runtime.get(&f.id);
+                    if let (Some(row), serde_json::Value::Object(more)) = (
+                        row.as_object_mut(),
+                        serde_json::json!({
+                            "interval": r.map(|r| r.interval), "ahead": r.map(|r| r.ahead),
+                            "stand_ins": f.submission.stand_ins, "late_layers": f.late_layers,
+                            "skipped_targets": v.status.skipped_targets, "held_frames": v.status.held_frames,
+                            "render_gpu_ms": render_gpu_ms,
+                            "picture": traced_picture
+                                .then(|| format!("{:016x}", f.submission.picture_hash())),
+                        }),
+                    ) {
+                        row.extend(more);
+                    }
+                    if !recorder.record(row) {
+                        v.status.error =
+                            Some("viewer diagnostic trace overflow/disconnected".into());
+                    }
                 }
-                if v.stamp != f.stamp
-                    && !only_moved(
-                        v,
-                        f.stamp,
-                        f.moves,
-                        f.spec.moment,
-                        f.submission.readback.is_some(),
-                    )
-                {
+                if v.stamp != f.stamp && !only_moved(v, f.stamp, f.moves, f.spec.moment, captured) {
                     v.status.stale_rejections += 1;
                     // Its readback is for a stamp no one shows: ask again.
-                    v.capture |= f.submission.readback.is_some();
+                    v.capture |= captured;
                     continue;
                 }
                 if represent && v.commands.is_empty() {
@@ -2420,18 +2460,23 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 // Captured pixels are delivered only from an exact frame: a
                 // paused, full-resolution picture with no stand-in and no
                 // disk frame. Anything else is asked again.
-                let readback = f.submission.readback.as_ref().filter(|_| {
-                    let exact = f.spec.exact
-                        && f.spec.moment == Moment::Paused
-                        && f.spec.scale >= 1.
-                        && !f.submission.stand_ins
-                        && t.disk != 2;
-                    if !exact {
-                        v.capture = true;
-                        v.dirty = true;
-                    }
-                    exact
-                });
+                let readback = f
+                    .submission
+                    .readback
+                    .as_ref()
+                    .filter(|_| captured)
+                    .filter(|_| {
+                        let exact = f.spec.exact
+                            && f.spec.moment == Moment::Paused
+                            && f.spec.scale >= 1.
+                            && !f.submission.stand_ins
+                            && t.disk != 2;
+                        if !exact {
+                            v.capture = true;
+                            v.dirty = true;
+                        }
+                        exact
+                    });
                 v.status.frame = Some(FrameReport {
                     stamp: f.stamp,
                     time: f.spec.time,
@@ -2800,6 +2845,14 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 a.send(audio::AudioCtl::SkimAudio(on));
             }
             let sample = r.transport.poll((now * 1e6) as i64);
+            if let Some((waited, fallback)) = r.transport.started.take()
+                && let Some(recorder) = &recorder
+            {
+                recorder.record(serde_json::json!({
+                    "audio_start": true, "at": now, "viewer_id": id,
+                    "wait_ms": waited as f64 / 1e3, "fallback": fallback,
+                }));
+            }
             changed |= v
                 .status
                 .clock
@@ -2857,6 +2910,8 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             if r.stand_in.is_some_and(|at| at != landed) {
                 r.stand_in = None;
                 v.dirty = !playing || v.dirty;
+                // A frame held for a still being read draws at once.
+                r.not_before = r.not_before.min(now);
             }
             // The playhead stopped on a frame dragged at reduced resolution.
             // A new picture of the same time: its own `frame:rendered`.
@@ -3265,12 +3320,25 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             {
                 panic!("injected frame failure");
             }
+            let picture_only = trace_pictures && spec.moment == Moment::Playing && !capture;
             // Whose frame a 3D refinement's progress belongs to.
             *progress_work.lock().unwrap() = Some((id, stamp));
             let result = provider
                 .map_or_else(|| Ok(overlays), |p| p(&scene.doc, &scene.comp, spec.time))
                 .and_then(|overlays| {
-                    engine.frame(&scene, spec, layer.as_ref(), &overlays, capture, trace)
+                    let read = if capture {
+                        render::Readback::Capture
+                    } else if picture_only {
+                        render::Readback::Presented
+                    } else {
+                        render::Readback::None
+                    };
+                    let superseded = &shared.superseded;
+                    let armed = superseded.load(std::sync::atomic::Ordering::Acquire);
+                    engine.set_interrupt(Some((superseded.clone(), armed)));
+                    let frame = engine.frame(&scene, spec, layer.as_ref(), &overlays, read, trace);
+                    engine.set_interrupt(None);
+                    frame
                 });
             *progress_work.lock().unwrap() = None;
             pass.mark("frame");
@@ -3408,6 +3476,8 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                             audio_host,
                             pipeline,
                             played,
+                            late_layers,
+                            picture_only,
                         });
                     }
                     Ok(None) => {
@@ -3483,6 +3553,17 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                                 } else {
                                     drawable_retry(r.refusals - 1)
                                 };
+                            // A still being read: drawn again when it lands
+                            // (`media_landed`), not by polling a stalled read.
+                            if matches!(
+                                e.downcast_ref::<pm_render::RenderError>(),
+                                Some(pm_render::RenderError::MediaPending)
+                            ) {
+                                r.stand_in = Some(landed);
+                                if spec.moment != policy::Moment::Playing {
+                                    r.not_before = now + 1.;
+                                }
+                            }
                             // Retried for good, but never silently: past a few
                             // seconds the viewer says what it waits for.
                             let since = *r.waiting_since.get_or_insert(now);
@@ -3522,26 +3603,49 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             state.notify();
             drop(state);
             pass.mark("submit");
+            // Traced viewers: what this thread does after a playing frame
+            // before it can take the next one.
+            let after = (recorder.is_some() && spec.moment == Moment::Playing).then(trace::now);
+            let (mut asked, mut uploaded) = (0., 0.);
             if spec.moment == Moment::Playing {
                 let rate = runtime.get(&id).map(|r| r.transport.rate());
                 ask_ahead(&mut engine, &shared.disk, &scene, spec, rate);
+                if after.is_some() {
+                    asked = trace::now();
+                }
                 // The next frame, if it is rendered, is uploaded in this
                 // frame's slack instead of at its own turn.
                 let step = frame_ticks * i64::from(rate.map_or(1, |r| r.num.signum()));
                 if let Ok(next) = Ticks::new(spec.time.get() + step) {
                     engine.upload_ahead(&scene, next);
                 }
+                if after.is_some() {
+                    uploaded = trace::now();
+                }
             }
             // A frame rendered on disk is read, not drawn: planning it and
             // opening its media ahead would only hold this thread (a quarter
             // of a second on a heavy project) while frames are due.
+            let mut prepared = None;
             if let Some(at) = prepare_at.filter(|at| !shared.disk.rendered(&scene, *at)) {
                 let videos = engine.prepare(&scene, at, spec);
                 if let Some(r) = runtime.get_mut(&id) {
                     r.lookahead.planned(at, videos, frame_ticks);
                 }
+                prepared = Some("ahead");
             } else if let Some(at) = refine_at.filter(|at| !shared.disk.rendered(&scene, *at)) {
                 engine.prepare(&scene, at, spec);
+                prepared = Some("entry");
+            }
+            if let (Some(recorder), Some(start)) = (&recorder, after) {
+                recorder.record(serde_json::json!({
+                    "after_frame": true, "at": start, "time": spec.time.get(), "viewer_id": id,
+                    "ask_ahead_ms": (asked - start) * 1e3,
+                    "upload_ahead_ms": (uploaded - asked) * 1e3,
+                    "prepare_ms": (trace::now() - uploaded) * 1e3,
+                    "prepared": prepared,
+                    "realm": engine.compat().map(|store| store.trace()),
+                }));
             }
             pass.mark("ahead");
         } else {
@@ -5933,6 +6037,7 @@ fn refusal_kind(error: &anyhow::Error) -> &'static str {
         Some(pm_render::RenderError::CompatPending(_)) => "raster-override",
         Some(pm_render::RenderError::WatchdogPending) => "watchdog",
         Some(pm_render::RenderError::ShaderFallbackPending(_)) => "shader-fallback",
+        Some(pm_render::RenderError::MediaPending) => "still",
         _ if error.is::<render::CompilerBusy>() => "shader-compiler",
         _ if error.is::<render::DiskFramePending>() => "disk-frame",
         _ if error.is::<render::DefinitionsPending>() => "definitions",
