@@ -2792,52 +2792,44 @@ impl Cull {
             || b.y + b.height <= -MARGIN
     }
 }
-/// A strip's rim, each part as (colour, alpha). In one colour (the dark
-/// canvas's light): a ring inside the edge, then the same ring again over
-/// the top edge and its corners, so the light is brightest there. In two
-/// (the light canvas's deeper rim under a light top edge): the top's ring
-/// over the top edge and its corners, the side's below them.
+/// A strip's rim (pm-design `Strip`): a ring of light inside the edge,
+/// `width` wide and even all round, and light on the top edge: the strip's
+/// own shape lowered by a point, shading what it leaves uncovered inside the
+/// edge, so the line is full along the top, thins round the top corners and
+/// is gone by the straight sides. Both are inset shadows: nothing outside the
+/// edge, nothing over the body's middle, no band that starts or stops.
 fn strip_rim(
     area: Bounds<Pixels>,
     radius: Pixels,
-    width: Pixels,
     smoothing: f32,
-    side: (u32, f32),
-    top: (u32, f32),
+    ring: (u32, f32),
+    width: Pixels,
+    light: (u32, f32),
     window: &mut Window,
 ) {
-    let ring = |(rgb, alpha): (u32, f32)| {
-        PaintQuad::new(area)
-            .border_color(rgba(
-                (rgb << 8) | (alpha.clamp(0., 1.) * 255.).round() as u32,
-            ))
-            .border_widths(width)
-            .corner_radii(radius)
-            .corner_smoothing(smoothing)
+    let ink = |(rgb, alpha): (u32, f32)| -> Background {
+        rgba((rgb << 8) | (alpha.clamp(0., 1.) * 255.).round() as u32).into()
     };
-    let band = Bounds::new(area.origin, size(area.size.width, radius + width));
-    let masked = |bounds: Bounds<Pixels>, quad: PaintQuad, window: &mut Window| {
-        // A band wholly outside what may be painted (a strip cut by the
-        // graph's top) paints nothing: an empty mask left a speck.
-        let seen = window.content_mask().bounds.intersect(&bounds);
-        if seen.size.width <= px(0.) || seen.size.height <= px(0.) {
-            return;
-        }
-        window.with_content_mask(
-            Some(ContentMask {
-                bounds,
-                fade_out: Default::default(),
-            }),
-            |window| window.paint_quad(quad),
-        )
-    };
-    if side.0 == top.0 {
-        window.paint_quad(ring(side));
-        masked(band, ring((top.0, top.1 - side.1)), window);
-    } else {
-        let below = Bounds::from_corners(point(area.origin.x, band.bottom()), area.bottom_right());
-        masked(below, ring(side), window);
-        masked(band, ring(top), window);
+    let corners = Corners::all(radius);
+    if ring.1 > 0. {
+        let shadow = BoxShadow {
+            color: ink(ring),
+            offset: point(px(0.), px(0.)),
+            blur_radius: px(0.),
+            spread_radius: width,
+            inset: true,
+        };
+        window.paint_inset_shadows(area, corners, smoothing, &[shadow]);
+    }
+    if light.1 > 0. {
+        let shadow = BoxShadow {
+            color: ink(light),
+            offset: point(px(0.), px(1.)),
+            blur_radius: px(0.5),
+            spread_radius: px(0.),
+            inset: true,
+        };
+        window.paint_inset_shadows(area, corners, smoothing, &[shadow]);
     }
 }
 /// The strip under the pointer: its rim in the hover state (lighter on the
@@ -2853,10 +2845,10 @@ fn strip_hover(op: &Op, pointer_x: f64, origin: Point<Pixels>, t: &Tokens, windo
     strip_rim(
         area,
         radius,
-        px(t.metrics.border),
         t.radius.smoothing,
-        hover.rim,
-        hover.rim_top,
+        hover.ring,
+        px(hover.ring_width),
+        hover.light,
         window,
     );
     let grip = t.trim_grip();
@@ -2925,7 +2917,7 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
                 |rgb: u32, a: f64| rgba((rgb << 8) | (a.clamp(0., 1.) * 255.).round() as u32);
             let radius = px(op.radius as f32).min(area.size.height / 2.);
             let smoothing = t.radius.smoothing;
-            let rim = px(number("rimWidth").max(1.) as f32);
+            let ring = px(number("ringWidth").max(1.) as f32);
             if number("shadowAlpha") > 0. {
                 window.paint_drop_shadows(
                     area,
@@ -2940,6 +2932,7 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
                     }],
                 );
             }
+            // The body: one ramp from the deep top to the luminous foot.
             window.paint_quad(
                 PaintQuad::new(area)
                     .background(linear_gradient(
@@ -2950,18 +2943,6 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
                     .corner_radii(radius)
                     .corner_smoothing(smoothing),
             );
-            if number("glowAlpha") > 0. {
-                window.paint_quad(
-                    PaintQuad::new(area)
-                        .background(linear_gradient(
-                            180.,
-                            linear_color_stop(tint(hex("glow"), 0.), pm_design::GLOW_FROM),
-                            linear_color_stop(tint(hex("glow"), number("glowAlpha")), 1.),
-                        ))
-                        .corner_radii(radius)
-                        .corner_smoothing(smoothing),
-                );
-            }
             let (step, grid) = (number("gridStep") as f32, number("gridAlpha"));
             if step >= 8. && grid > 0. {
                 let mut x = origin.x + px(number("gridFrom") as f32);
@@ -2972,8 +2953,11 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
                         // by the middle of its height.
                         window.paint_quad(
                             PaintQuad::new(Bounds::new(
-                                point(x, area.origin.y + rim),
-                                size(px(1.), (area.size.height - rim * 2.) * pm_design::GRID_FADE),
+                                point(x, area.origin.y + ring),
+                                size(
+                                    px(1.),
+                                    (area.size.height - ring * 2.) * pm_design::GRID_FADE,
+                                ),
                             ))
                             .background(linear_gradient(
                                 180.,
@@ -2985,17 +2969,13 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
                     x += px(step);
                 }
             }
-            let inset = px(number("rimInset") as f32);
             strip_rim(
-                Bounds::new(
-                    area.origin + point(inset, inset),
-                    size(area.size.width - inset * 2., area.size.height - inset * 2.),
-                ),
-                (radius - inset).max(px(0.)),
-                rim,
+                area,
+                radius,
                 smoothing,
-                (hex("rim"), number("rimAlpha") as f32),
-                (hex("rimTop"), number("rimTopAlpha") as f32),
+                (hex("ring"), number("ringAlpha") as f32),
+                ring,
+                (hex("light"), number("lightAlpha") as f32),
                 window,
             );
         }
