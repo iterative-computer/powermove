@@ -15,7 +15,10 @@ fn main() {
     let mut fonts = pm_text::host::FontService::new().unwrap();
     let scenario = std::thread::spawn({
         let broker = broker.clone();
-        move || first_pictures_keep_the_text(broker)
+        move || {
+            first_pictures_keep_the_text(broker.clone());
+            static_text_matches_across_stop(broker);
+        }
     });
     while !scenario.is_finished() {
         let until = objc2_foundation::NSDate::dateWithTimeIntervalSinceNow(0.005);
@@ -116,4 +119,59 @@ fn first_pictures_keep_the_text(broker: pm_text::host::FontBroker) {
             );
         }
     }
+}
+
+// Fractional Fit sizes change CoreText hinting when playback and pause
+// choose different raster grids. Compare the actual shown RGB pixels,
+// including the immediate paused picture, its settled picture and capture.
+fn static_text_matches_across_stop(broker: pm_text::host::FontBroker) {
+    let scene = scene();
+    let mut host = Headless::with_fonts(pm_render::text::host::RenderFonts::new(broker)).unwrap();
+    for (width, height) in [(470, 264), (471, 265), (640, 360)] {
+        let output = Output {
+            width,
+            height,
+            display: 0,
+            headroom: 1.,
+            crop: None,
+        };
+        let scale = FrameSpec::text_grid_scale(&scene, &output, 160 << 20).unwrap();
+        let spec = FrameSpec {
+            moment: Moment::Playing,
+            scale,
+            exact: false,
+            ..FrameSpec::exact(Ticks::ZERO, output)
+        };
+        let playing = host
+            .frame_spec_settled(&scene, spec, &Default::default())
+            .unwrap();
+        for (exact, settled) in [(false, false), (false, true), (true, false)] {
+            let paused = host
+                .frame_spec_settled(
+                    &scene,
+                    FrameSpec {
+                        moment: Moment::Paused,
+                        exact,
+                        settled,
+                        ..spec
+                    },
+                    &Default::default(),
+                )
+                .unwrap();
+            let error = playing
+                .iter()
+                .zip(&paused)
+                .flat_map(|(a, b)| (0..3).map(move |c| (a[c] - b[c]).abs()))
+                .fold(0., f64::max);
+            assert!(
+                error <= 1e-6,
+                "{width}x{height}: Stop changed text, exact={exact}, settled={settled}, max RGB error={error}"
+            );
+        }
+        assert!(
+            FrameSpec::text_grid_scale(&scene, &output, 1 << 20).is_none(),
+            "a native grid must fit its existing memory grant"
+        );
+    }
+    println!("test static_text_matches_across_stop ... ok");
 }

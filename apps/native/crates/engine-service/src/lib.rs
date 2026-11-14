@@ -3128,8 +3128,16 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             // frames keep their policy. (A play waiting for its audio start
             // draws as it is.)
             let resting = quality == 1. && moment == Moment::Paused && !r.transport.running();
+            let text_grid = (quality == 1. && moment != Moment::Scrub)
+                .then(|| engine.text_grid_scale(&scene, &v.config.output))
+                .flatten();
             let (scale, settled) = if capture {
                 (full, false)
+            } else if let Some(scale) = text_grid {
+                // Keep the native glyph grid at Play and at Stop; the
+                // paused worker can settle directly without flashing a
+                // drawable-sized version of the title in between.
+                (scale, resting)
             } else if resting && settling {
                 (full, true)
             } else if resting && FrameSpec::exact(time, v.config.output).settles(&scene) {
