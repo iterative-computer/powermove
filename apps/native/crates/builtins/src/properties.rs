@@ -2526,12 +2526,23 @@ impl Properties {
 }
 
 /// A family's variation facts from the installed fonts (`inspectFont`).
+/// Apple's system families (new text's font is SF Pro Display), which no
+/// installed family carries by name on a Mac without Apple's font
+/// download. v1 lists them among the Mac's own fonts (`legacy/core/fonts.ts`
+/// NATIVE) and never calls them missing; its canvas draws such text in its
+/// fallback, as the engine does, so Properties does not either.
+fn apple_system_family(family: &str) -> bool {
+    matches!(
+        family.trim().to_ascii_lowercase().as_str(),
+        "sf pro" | "sf pro display" | "sf pro text"
+    )
+}
 fn font_facts(family: &str) -> pm_panel_inspector::content::FontFacts {
     let installed = (!family.is_empty())
         .then(|| pm_text::registry::installed_family_axes(family))
         .flatten();
     pm_panel_inspector::content::FontFacts {
-        readable: installed.is_some(),
+        readable: installed.is_some() || apple_system_family(family),
         axes: installed
             .unwrap_or_default()
             .into_iter()

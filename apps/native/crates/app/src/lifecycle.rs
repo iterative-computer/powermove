@@ -8,6 +8,9 @@ use std::sync::atomic::Ordering;
 pub enum Intent {
     Window,
     Quit,
+    /// Close the project only: the window stays, on Home, or on the project
+    /// that replaces it (one project per window, opened in place).
+    Project,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CloseState {
@@ -590,10 +593,31 @@ pub(crate) fn reason(reply: Option<Result<ShellReply, pm_kernel::KernelFailure>>
     }
 }
 /// The status line while a close or quit waits for `work`.
+/// What opening a project in a window does (one project per window).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OpenPlan {
+    /// The window shows no project: it opens here at once.
+    Here,
+    /// The window's project closes first (asking about unsaved work as any
+    /// close does), then the other opens in its place.
+    AfterClose,
+    /// A close is already under way here: the open waits for nothing and
+    /// says so.
+    Refuse,
+}
+pub fn open_plan(has_project: bool, opening: bool, closing: bool) -> OpenPlan {
+    if closing {
+        OpenPlan::Refuse
+    } else if has_project || opening {
+        OpenPlan::AfterClose
+    } else {
+        OpenPlan::Here
+    }
+}
 fn closing(intent: Intent, work: &str) -> String {
     match intent {
         Intent::Quit => format!("Quitting: {work}…"),
-        Intent::Window => format!("Closing: {work}…"),
+        Intent::Window | Intent::Project => format!("Closing: {work}…"),
     }
 }
 impl Controller {
@@ -604,6 +628,10 @@ impl Controller {
             .is_some_and(|p| p.dirty)
     }
     pub fn cancel_close(&mut self, cx: &mut Context<Self>) {
+        // Cancelled: the project that was to replace this one does not open.
+        if let Some(next) = self.replace_with.take() {
+            self.dispose_pending(next, cx);
+        }
         self.close_pending = false;
         self.closing_note = None;
         self.close_operation.take();
@@ -765,7 +793,7 @@ impl Controller {
             .detach();
             return;
         }
-        if intent == Intent::Window && cx.global::<QuitCoordinator>().quitting {
+        if intent != Intent::Quit && cx.global::<QuitCoordinator>().quitting {
             self.message = "Finish the quit decision first.".into();
             cx.notify();
             return;
@@ -928,7 +956,7 @@ impl Controller {
                 if let Some(session) = session {
                     expect_closed(kernel.shell(ShellCall::Close(session)).await)?;
                 }
-                if intent == Intent::Window {
+                if intent != Intent::Quit {
                     match kernel.shell(ShellCall::DurabilityBarrier).await {
                         Some(Ok(ShellReply::Durable)) => {}
                         other => {
@@ -990,7 +1018,9 @@ impl Controller {
                     if intent == Intent::Quit {
                         v.closing_note = Some(closing(Intent::Quit, "finishing up"));
                         cx.defer(next_quit);
-                    } else if had_project && crate::entry::editors(cx).len() <= 1 {
+                    } else if intent == Intent::Project
+                        || (had_project && crate::entry::editors(cx).len() <= 1)
+                    {
                         // v1: closing the last project shows Home; the
                         // window stays, its session forgets the project.
                         v.mcp.closing.store(false, Ordering::Release);
@@ -1012,6 +1042,10 @@ impl Controller {
                         v.message = "No project".into();
                         if let Some(shell) = v.shell.as_ref().and_then(gpui::WeakEntity::upgrade) {
                             shell.update(cx, |s, _| s.bind_project("shell-untitled".into()));
+                        }
+                        // The project this one gave way to opens here.
+                        if let Some(next) = v.replace_with.take() {
+                            v.apply_pending(next, cx);
                         }
                         cx.notify();
                     } else if let Some(handle) = v.close_window {
@@ -1041,6 +1075,24 @@ impl Controller {
 mod tests {
     use super::*;
     use pm_kernel::*;
+
+    /// One project per window: an open in a window that shows one closes
+    /// it first; a project with unsaved changes is asked about (Save, Don't
+    /// Save, Cancel) as any close is; a clean one closes without a question.
+    #[test]
+    fn an_open_replaces_the_project_shown_after_its_own_close() {
+        assert_eq!(open_plan(false, false, false), OpenPlan::Here);
+        assert_eq!(open_plan(true, false, false), OpenPlan::AfterClose);
+        assert_eq!(open_plan(false, true, false), OpenPlan::AfterClose);
+        assert_eq!(open_plan(true, false, true), OpenPlan::Refuse);
+        // The close that runs first is the ordinary one: Dirty asks, Clean
+        // closes at once, a save or an open in flight holds it.
+        assert_eq!(close_state(None, false, false), CloseState::Clean);
+        assert_eq!(close_state(None, false, true), CloseState::Saving);
+        assert_eq!(close_state(None, true, false), CloseState::Busy);
+        // A project close keeps the window: its note says closing, not quitting.
+        assert_eq!(closing(Intent::Project, "saving"), "Closing: saving…");
+    }
 
     /// A second Quit while the first waits on work names that work and
     /// offers to quit now; while a question is on screen it is the answer.

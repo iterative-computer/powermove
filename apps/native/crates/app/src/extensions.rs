@@ -1939,6 +1939,14 @@ impl Controller {
         let bodies = shell.native_panels.clone();
         let stage = self.extensions.stage.clone();
         let sent = self.extensions.sent.clone();
+        // The panels' ground under the page (`translucency.panel` over the
+        // window's material, as the shell paints a panel).
+        let fill = {
+            let t = &shell.tokens;
+            let c = t.colors.panel;
+            let channel = |shift: u32| f64::from((c >> shift) & 0xff) / 255.;
+            [channel(16), channel(8), channel(0), f64::from(t.translucency.panel)]
+        };
         shell.native_present = Some(Rc::new(move |width, height| {
             let viewport = Rect::new(0., 0., width, height);
             let bodies = bodies.borrow();
@@ -1950,26 +1958,33 @@ impl Controller {
                 let mut host = page.borrow_mut();
                 let stage = stage.get().filter(|_| key.is_empty());
                 let to_rect = |r: &layout::Rect| Rect::new(r.x as f64, r.y as f64, r.w as f64, r.h as f64);
-                // Each panel only within its own body: a page that has not
-                // yet moved a panel's content (a splitter drag) never shows
-                // it through a neighbour's body.
-                let regions = bodies
+                let mine: Vec<(&String, Rect)> = bodies
                     .iter()
                     .filter(|(id, _)| owners.get(id).map_or("", String::as_str) == key)
-                    .map(|(id, r)| {
-                        // Development builds: `PM_NATIVE_NO_PANEL_MASK` shows the
-                        // page through every body as before, for comparison.
-                        if cfg!(debug_assertions)
-                            && std::env::var_os("PM_NATIVE_NO_PANEL_MASK").is_some()
-                        {
-                            to_rect(r)
-                        } else {
-                            sent.mask(id, to_rect(r))
-                        }
-                    })
+                    .map(|(id, r)| (id, to_rect(r)))
+                    .collect();
+                // The page shows through each panel's whole body, on the
+                // panels' ground ...
+                let regions = mine
+                    .iter()
+                    .map(|(_, r)| *r)
                     .chain(stage.as_ref().map(to_rect))
                     .collect();
+                // ... and its content only within that panel's body and every
+                // place recently sent to the page: a page that has not yet
+                // moved a panel's content (a splitter drag) never shows it
+                // through a neighbour's body; the panel's ground shows there.
+                let content = (!(cfg!(debug_assertions)
+                    && std::env::var_os("PM_NATIVE_NO_PANEL_MASK").is_some()))
+                .then(|| {
+                    mine.iter()
+                        .map(|(id, r)| sent.mask(id, *r))
+                        .chain(stage.as_ref().map(to_rect))
+                        .collect()
+                });
                 let _ = host.set_regions(regions);
+                let _ = host.set_content_regions(content);
+                host.set_fill(Some(fill));
                 dirty |= host.composition_dirty();
                 let _ = host.attach(
                     PAGE_PANEL,

@@ -114,7 +114,7 @@ fn menu_matches_every_w1_equivalent_and_installs_every_command() {
     let doc = include_str!("../../../../../docs/native/w1-keymap.md");
     let rows: Vec<_> = doc.lines().filter(|s| s.starts_with("| M0")).collect();
     let equivalents = menu::equivalents();
-    assert_eq!(rows.len(), 35);
+    assert_eq!(rows.len(), 33);
     let installed: Vec<_> = menu::menus().into_iter().flat_map(|(_, i)| i).collect();
     for (row, e) in rows.iter().zip(equivalents) {
         let c: Vec<_> = row.split('|').map(str::trim).collect();

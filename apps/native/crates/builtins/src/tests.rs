@@ -3433,6 +3433,197 @@ fn export_defaults_rows_write_the_project_and_open_the_export_sheet() {
     assert_eq!(stored(&kernel), None, "one undo restores the project");
 }
 
+/// An old file: its export frame rate is the one it was created at (30),
+/// its composition has been 24 fps since. The sheet opens on 24, and an
+/// export at 24 writes nothing. A rate the person picks is kept by the
+/// project (and its sheet then says the composition's), and Settings ▸
+/// Project's Export frame rate is a choice too.
+#[test]
+fn the_export_sheet_opens_on_the_compositions_rate_unless_one_was_chosen() {
+    let actor = KernelActor::spawn(KernelConfig::default());
+    let kernel = actor.handle();
+    let project = pm_model::json::parse(r##"{"id":"synthetic","name":"Old Film","compId":"c","w":640,"h":360,"fps":24,"dur":10,"bg":"#000000","assets":{},"comps":{},"exportDefaults":{"format":"mp4","scale":1,"fps":30,"range":"work","quality":"high","mblur":true,"audio":true,"alpha":false},"layers":[{"id":"a","type":"shape","name":"Headline","from":0,"dur":10,"on":true,"lock":false,"p":{"opacity":{"v":100,"kf":[]},"position.x":{"v":320,"kf":[]},"position.y":{"v":180,"kf":[]}},"d":{"w":100,"h":100},"fx":[]}]}"##).unwrap();
+    kernel
+        .open("synthetic", OpenSource::Untitled(project))
+        .wait()
+        .unwrap()
+        .unwrap();
+    let sheet = |realm: &str| {
+        data::Backend::new(
+            kernel.clone(),
+            pm_surface::host_api::Identity {
+                realm: realm.into(),
+                generation: 1,
+                project: "synthetic".into(),
+            },
+            "export",
+            false,
+        )
+        .unwrap()
+    };
+    let revision = || kernel.published("synthetic").unwrap().revision();
+    let stored = || {
+        kernel
+            .published("synthetic")
+            .unwrap()
+            .snapshot
+            .root()
+            .unwrap()
+            .get("exportDefaults")
+            .map(|n| data::wire(&n.to_value()))
+            .unwrap()
+    };
+    let mut first = sheet("export-old");
+    let opened = first.export_snapshot().unwrap();
+    assert_eq!(
+        opened["options"]["fps"].as_f64(),
+        Some(24.0),
+        "the composition's rate"
+    );
+    assert!(
+        !opened["project"]["summary"]
+            .as_str()
+            .unwrap()
+            .contains("composition is"),
+        "{}",
+        opened["project"]["summary"]
+    );
+    // Exported as it opened: the project is untouched.
+    let before = revision();
+    let models::NativeCommand::State(_) = first
+        .native_command("export.begin", &json!({"options": opened["options"]}))
+        .unwrap()
+    else {
+        panic!("a state write")
+    };
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert_eq!(revision(), before, "nothing written");
+    assert_eq!(
+        stored()["fps"].as_f64(),
+        Some(30.0),
+        "the stored rate as it was"
+    );
+    // Exported at 30 on purpose: kept.
+    let mut options = opened["options"].clone();
+    options["fps"] = json!(30.0);
+    first
+        .native_command("export.begin", &json!({ "options": options }))
+        .unwrap();
+    let start = std::time::Instant::now();
+    while revision() == before && start.elapsed() < std::time::Duration::from_secs(5) {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert_eq!(stored()["fps"].as_f64(), Some(30.0));
+    assert_eq!(stored()["fpsChosen"], json!(true));
+    let reopened = sheet("export-chosen").export_snapshot().unwrap();
+    assert_eq!(
+        reopened["options"]["fps"].as_f64(),
+        Some(30.0),
+        "the chosen rate"
+    );
+    assert!(
+        reopened["project"]["summary"]
+            .as_str()
+            .unwrap()
+            .ends_with(" · 30 fps · composition is 24 fps"),
+        "{}",
+        reopened["project"]["summary"]
+    );
+    // Undo forgets the choice: the composition's rate again.
+    kernel
+        .call(
+            "synthetic",
+            Request::new(Caller::native(), pm_kernel::HistoryCall::Undo),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        sheet("export-undone").export_snapshot().unwrap()["options"]["fps"].as_f64(),
+        Some(24.0)
+    );
+    // Settings ▸ Project: setting the Export frame rate is choosing it, and
+    // another export row keeps the choice.
+    let mut settings = data::Backend::new(
+        kernel.clone(),
+        pm_surface::host_api::Identity {
+            realm: "settings-rate".into(),
+            generation: 1,
+            project: "synthetic".into(),
+        },
+        "settings",
+        false,
+    )
+    .unwrap();
+    for (id, value) in [
+        ("project.export-fps", json!(25.0)),
+        ("project.quality", json!("max")),
+    ] {
+        let publication = settings.settings_snapshot().unwrap();
+        let models::NativeCommand::Kernel(request) = settings.native_command("panel.settings", &json!({"revision":publication["revision"],"action":{"type":"write","id":id,"value":value}})).unwrap() else { panic!("actor request") };
+        kernel.call("synthetic", request).wait().unwrap().unwrap();
+    }
+    assert_eq!(stored()["fps"].as_f64(), Some(25.0));
+    assert_eq!(stored()["quality"], json!("max"));
+    assert_eq!(stored()["fpsChosen"], json!(true));
+    assert_eq!(
+        sheet("export-settings").export_snapshot().unwrap()["options"]["fps"].as_f64(),
+        Some(25.0)
+    );
+}
+
+/// Range and size do not go stale as the frame rate did: a composition made
+/// larger and longer after the sheet first opened exports at its new size and
+/// length (Full is the composition's size; the work area or the whole length).
+#[test]
+fn the_export_sheet_follows_a_resized_and_lengthened_composition() {
+    let actor = actor();
+    let kernel = actor.handle();
+    let mut sheet = data::Backend::new(
+        kernel.clone(),
+        pm_surface::host_api::Identity {
+            realm: "export-resized".into(),
+            generation: 1,
+            project: "synthetic".into(),
+        },
+        "export",
+        false,
+    )
+    .unwrap();
+    let before = sheet.export_snapshot().unwrap();
+    assert_eq!(before["project"]["summary"], "300 frames · 10 s · 640×360");
+    let p = kernel.published("synthetic").unwrap();
+    kernel
+        .call(
+            "synthetic",
+            Request::new(
+                Caller::native(),
+                pm_kernel::Call::Transact {
+                    label: Some("Composition Settings".into()),
+                    expected_revision: Some(p.revision()),
+                    body: pm_kernel::WriteBody::Commands(vec![
+                        pm_kernel::CompCommand::Set {
+                            patch: Box::new(pm_kernel::commands::comps::CompPatch {
+                                width: Some(1280.0),
+                                height: Some(720.0),
+                                duration: Some(12.0),
+                                ..Default::default()
+                            }),
+                        }
+                        .into(),
+                    ]),
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    let after = sheet.export_snapshot().unwrap();
+    assert_eq!(after["project"]["summary"], "360 frames · 12 s · 1280×720");
+    assert_eq!(after["options"]["range"], before["options"]["range"]);
+    assert_eq!(after["options"]["scale"], before["options"]["scale"]);
+}
+
 #[test]
 fn a_contributed_layer_types_parameters_are_properties_rows() {
     let actor = KernelActor::spawn(KernelConfig::default());
@@ -3578,7 +3769,8 @@ fn type_settings_list_a_variable_fonts_axes_and_saved_axes_of_a_missing_font() {
     let project = pm_model::json::parse(r##"{"id":"synthetic","name":"Synthetic Film","compId":"c","w":640,"h":360,"fps":30,"dur":10,"bg":"#000000","assets":{},"comps":{},"layers":[
       {"id":"skia","type":"text","name":"Variable","from":0,"dur":10,"on":true,"lock":false,"p":{"opacity":{"v":100,"kf":[]}},"d":{"text":"A","font":"Skia","color":"#112233"},"fx":[]},
       {"id":"plain","type":"text","name":"Static","from":0,"dur":10,"on":true,"lock":false,"p":{"opacity":{"v":100,"kf":[]}},"d":{"text":"B","font":"Helvetica","color":"#112233"},"fx":[]},
-      {"id":"gone","type":"text","name":"Missing","from":0,"dur":10,"on":true,"lock":false,"p":{"opacity":{"v":100,"kf":[]}},"d":{"text":"C","font":"No Such Family 7f3a","color":"#112233","fontAxis.wdth":{"v":88.62,"kf":[],"expr":null}},"fx":[]}]}"##).unwrap();
+      {"id":"gone","type":"text","name":"Missing","from":0,"dur":10,"on":true,"lock":false,"p":{"opacity":{"v":100,"kf":[]}},"d":{"text":"C","font":"No Such Family 7f3a","color":"#112233","fontAxis.wdth":{"v":88.62,"kf":[],"expr":null}},"fx":[]},
+      {"id":"system","type":"text","name":"Default","from":0,"dur":10,"on":true,"lock":false,"p":{"opacity":{"v":100,"kf":[]}},"d":{"text":"D","font":"SF Pro Display","color":"#112233"},"fx":[]}]}"##).unwrap();
     kernel
         .open("synthetic", OpenSource::Untitled(project))
         .wait()
@@ -3655,6 +3847,9 @@ fn type_settings_list_a_variable_fonts_axes_and_saved_axes_of_a_missing_font() {
             .any(|r| r["control"]["kind"] == "status" && r["control"]["value"] == "Not installed")
     );
     assert_eq!(gone["action"], "refresh-fonts");
+    // New text's font, SF Pro Display, is one of the Mac's own fonts, as in
+    // v1, also where Apple's download is not installed: not "missing".
+    assert!(section("system", &mut presenter).0.is_none());
 }
 
 /// 3d-studio.md §8 through the Properties presenter: each role's sections,

@@ -304,6 +304,26 @@ impl Controller {
                 }
                 Outbound::HideHome => v.hide_home(cx),
                 Outbound::Command(name) => v.host.borrow().send_command(name, vec![]),
+                // Ghost loading from Home: a window with no project shows the
+                // editor's ghost at once (one with a project keeps it until
+                // the replacing open, `replace_project`).
+                Outbound::Opening { name, aspect } => {
+                    if v.session.is_none() && !v.opening {
+                        v.begin_ghost(&name, aspect, cx);
+                    }
+                }
+                // Checked after this update: an open that succeeded hands
+                // its project over (`Opened`) in the same update.
+                Outbound::OpenEnded => {
+                    let this = cx.entity().downgrade();
+                    cx.defer(move |cx| {
+                        let _ = this.update(cx, |v, cx| {
+                            if v.session.is_none() && !v.opening && v.opening_name.is_some() {
+                                v.end_ghost(cx);
+                            }
+                        });
+                    });
+                }
             });
         });
         let tokens = self.host.borrow().tokens.clone();

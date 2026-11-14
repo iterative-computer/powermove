@@ -185,6 +185,9 @@ pub struct NodeView {
     pub text: Option<SharedString>,
     pub symbol: Option<SharedString>,
     pub symbol_size: f32,
+    /// An `img`'s resource: an opaque key the host resolves (a Project
+    /// panel thumbnail, `media_thumbs`), never a path.
+    pub resource: Option<SharedString>,
     pub disabled: bool,
     pub events: Events,
     pub ax: Option<Ax>,
@@ -197,6 +200,9 @@ pub struct NodeView {
     /// What a dragged item is, for its drop targets (`metadata.item` as
     /// text: an Effects row's effect id).
     pub drag_item: Option<SharedString>,
+    /// A virtual list whose items are each exactly its `itemSize` tall
+    /// (`metadata.fixedItems`), so an item may fill its height.
+    pub fixed_items: bool,
     pub is_plain_text: bool,
     pub binding: Option<SharedString>,
     pub number: Option<NumberFacts>,
@@ -204,6 +210,8 @@ pub struct NodeView {
     /// Escape reports an empty change, so a transient editor can close.
     pub cancel_change: bool,
     pub timeline_scrub: Option<(SharedString, SharedString)>,
+    /// The timeline's layer name: a press there can lift into a reorder.
+    pub timeline_layer_drag: Option<SharedString>,
     pub outline_column: bool,
     pub outline_first: Option<SharedString>,
     pub outline_window: Option<(usize, usize)>,
@@ -798,8 +806,11 @@ fn compile(
         .and_then(|m| m.get("item"))
         .and_then(Value::as_str)
         .map(|s| SharedString::from(s.to_owned()));
+    let fixed_items = virtual_window.is_some()
+        && meta.and_then(|m| m.get("fixedItems")) == Some(&Value::Bool(true));
     NodeView {
         drag_item,
+        fixed_items,
         well: slot_control
             && matches!(
                 component,
@@ -823,6 +834,11 @@ fn compile(
                 SharedString::from(t.get("path")?.as_str()?.to_owned()),
             ))
         }),
+        timeline_layer_drag: meta
+            .and_then(|m| m.get("timelineLayerDrag"))
+            .and_then(|t| t.get("layer"))
+            .and_then(Value::as_str)
+            .map(|layer| SharedString::from(layer.to_owned())),
         outline_column: meta.and_then(|m| m.get("nativeColumn")).is_some(),
         outline_first: meta
             .and_then(|m| m.get("nativeFirstRow"))
@@ -849,6 +865,10 @@ fn compile(
         rich: Rich::of(node),
         symbol,
         symbol_size: compiled.symbol_size.unwrap_or(t.metrics.symbol_panel),
+        resource: (node.r#type == "img")
+            .then(|| node.props.get("resource").and_then(Value::as_str))
+            .flatten()
+            .map(|r| SharedString::from(r.to_owned())),
         disabled,
         events: Events::of(node),
         ax,

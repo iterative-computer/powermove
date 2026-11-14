@@ -1044,6 +1044,54 @@ impl Backend {
         );
         Ok(json!(rows))
     }
+    /// An export at another frame rate than the sheet opened with: the
+    /// person chose it, and the project keeps it (Export settings, an
+    /// ordinary edit, as v1's export wrote its defaults). An export at the
+    /// rate it opened with writes nothing: the file is the same.
+    fn keep_chosen_export_rate(&mut self, fps: f64) {
+        let Some(p) = self.published() else {
+            return;
+        };
+        let Some(root) = p.snapshot.root() else {
+            return;
+        };
+        let comp_fps = pm_kernel::model::comp_node(root, p.snapshot.open_comp().as_deref())
+            .and_then(|c| c.get("fps"))
+            .and_then(|n| n.to_value().as_f64())
+            .unwrap_or(30.);
+        let mut defaults = self.export_defaults(root, comp_fps);
+        if defaults["fps"]
+            .as_f64()
+            .is_some_and(|f| (f - fps).abs() < 1e-9)
+        {
+            return;
+        }
+        defaults["fps"] = json!(fps);
+        defaults[pm_kernel::commands::comps::EXPORT_RATE_CHOSEN] = json!(true);
+        let Ok(defaults) = pm_model::json::parse(&defaults.to_string()) else {
+            return;
+        };
+        let request = Request::new(
+            self.caller,
+            Call::Transact {
+                label: Some("Export settings".into()),
+                expected_revision: Some(p.revision()),
+                body: WriteBody::Commands(vec![
+                    pm_kernel::CompCommand::Set {
+                        patch: Box::new(pm_kernel::commands::comps::CompPatch {
+                            export_defaults: Some(defaults),
+                            ..Default::default()
+                        }),
+                    }
+                    .into(),
+                ]),
+            },
+        )
+        .with_document(p.snapshot.doc_id);
+        // The export goes ahead whatever this edit's fate (a newer revision
+        // refuses it: the person changed the project meanwhile).
+        drop(self.kernel.call(&self.identity.project, request));
+    }
     pub(crate) fn export_snapshot(&mut self) -> Result<Value, String> {
         self.sync()?;
         let p = self.published().ok_or("closed")?;
@@ -1750,6 +1798,7 @@ impl Backend {
                 let typed: pm_promedia::export_panel::Options = crate::delivery::options(&options)?;
                 typed.validate()?;
                 self.native.export["options"] = options.clone();
+                self.keep_chosen_export_rate(typed.fps);
                 return Ok(NativeCommand::State(state::StateTransaction {
                     expected_revision: Some(self.kernel.state().revision),
                     ops: vec![state::StateOp::Setting {
