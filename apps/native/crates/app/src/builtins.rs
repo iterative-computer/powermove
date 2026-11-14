@@ -1478,11 +1478,23 @@ impl Controller {
                                         .as_ref()
                                         .map(|r| r.project_selection())
                                         .unwrap_or_default();
-                                    crate::quick_look::toggle(quick_look_files(
+                                    let names = self.asset_names();
+                                    let files = quick_look_files(
                                         &selection,
                                         &id,
                                         &self.media_base.originals,
-                                    ));
+                                    )
+                                    .into_iter()
+                                    .map(|(id, path)| {
+                                        let name = names.get(&id).cloned().unwrap_or_else(|| {
+                                            path.file_name()
+                                                .map(|n| n.to_string_lossy().into_owned())
+                                                .unwrap_or_default()
+                                        });
+                                        (path, name)
+                                    })
+                                    .collect();
+                                    crate::quick_look::toggle(files);
                                 }
                                 pm_panel_media::Effect::Focus(_)
                                 | pm_panel_media::Effect::ClearPreview => {}
@@ -2888,6 +2900,30 @@ mod project_view_tests {
     }
 }
 
+impl Controller {
+    /// The open project's asset names, by id (what the Project shows).
+    fn asset_names(&self) -> std::collections::HashMap<String, String> {
+        let Some(published) = &self.published else {
+            return Default::default();
+        };
+        let Some(pm_model::doc::NodeKind::Object(assets)) = published
+            .snapshot
+            .root()
+            .and_then(|r| r.get("assets"))
+            .map(|a| a.kind())
+        else {
+            return Default::default();
+        };
+        assets
+            .iter()
+            .filter_map(|(id, record)| {
+                let name = record.get("name")?.to_value().as_str()?.to_owned();
+                Some((id.as_str()?.to_owned(), name))
+            })
+            .collect()
+    }
+}
+
 /// The files Quick Look shows for Space on `pressed`: the whole selection
 /// when it holds that item (the arrow keys then move through it), else that
 /// item; each asset's original, an image sequence as its first frame.
@@ -2895,23 +2931,24 @@ fn quick_look_files(
     selection: &[String],
     pressed: &str,
     originals: &std::collections::BTreeMap<String, std::path::PathBuf>,
-) -> Vec<std::path::PathBuf> {
+) -> Vec<(String, std::path::PathBuf)> {
     let ids: Vec<&str> = if selection.iter().any(|s| s == pressed) {
         selection.iter().map(String::as_str).collect()
     } else {
         vec![pressed]
     };
     ids.into_iter()
-        .filter_map(|id| originals.get(id))
-        .map(
-            |path| match pm_media::image::sequence::Manifest::read(path) {
+        .filter_map(|id| Some((id, originals.get(id)?)))
+        .map(|(id, path)| {
+            let file = match pm_media::image::sequence::Manifest::read(path) {
                 Ok(Some(sequence)) => (sequence.first..=sequence.last)
                     .map(|n| sequence.file(n))
                     .find(|f| f.is_file())
                     .unwrap_or_else(|| path.clone()),
                 _ => path.clone(),
-            },
-        )
+            };
+            (id.to_owned(), file)
+        })
         .collect()
 }
 
@@ -2930,11 +2967,14 @@ mod quick_look_tests {
         let selection = ["b".to_owned(), "c".to_owned(), "a".to_owned()];
         assert_eq!(
             super::quick_look_files(&selection, "a", &originals),
-            [std::path::PathBuf::from("/m/b.png"), "/m/a.mov".into()]
+            [
+                ("b".to_owned(), std::path::PathBuf::from("/m/b.png")),
+                ("a".to_owned(), "/m/a.mov".into())
+            ]
         );
         assert_eq!(
             super::quick_look_files(&["b".to_owned()], "a", &originals),
-            [std::path::PathBuf::from("/m/a.mov")]
+            [("a".to_owned(), std::path::PathBuf::from("/m/a.mov"))]
         );
     }
 }

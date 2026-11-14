@@ -17,7 +17,32 @@ unsafe extern "C" {}
 
 /// What Quick Look shows: the files, in the selection's order.
 #[derive(Default)]
-pub struct Items(RefCell<Vec<Retained<NSURL>>>);
+pub struct Items(RefCell<Vec<Retained<Item>>>);
+
+/// One preview: the original file under the name the Project shows (an
+/// original in the library's store is named by its bytes, not by the file).
+pub struct ItemData {
+    url: Retained<NSURL>,
+    title: Retained<NSString>,
+}
+
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "PMQuickLookItem"]
+    #[ivars = ItemData]
+    struct Item;
+    impl Item {
+        #[unsafe(method(previewItemURL))]
+        fn url(&self) -> *mut NSURL {
+            Retained::as_ptr(&self.ivars().url) as *mut NSURL
+        }
+        #[unsafe(method(previewItemTitle))]
+        fn title(&self) -> *mut NSString {
+            Retained::as_ptr(&self.ivars().title) as *mut NSString
+        }
+    }
+);
 
 define_class!(
     #[unsafe(super(NSObject))]
@@ -36,8 +61,8 @@ define_class!(
                 .0
                 .borrow()
                 .get(index.max(0) as usize)
-                .map_or(std::ptr::null_mut(), |url| {
-                    Retained::as_ptr(url) as *mut AnyObject
+                .map_or(std::ptr::null_mut(), |item| {
+                    Retained::as_ptr(item) as *mut AnyObject
                 })
         }
         /// Space closes the preview, as in Finder (Escape closes it already).
@@ -94,9 +119,10 @@ pub fn showing() -> bool {
     }
 }
 
-/// Space on the selection: Quick Look of `files` (closed again if it is
-/// showing). Files that are gone are left out; none left, nothing opens.
-pub fn toggle(files: Vec<PathBuf>) {
+/// Space on the selection: Quick Look of `files` (path and the name the
+/// Project shows; closed again if it is showing). Files that are gone are
+/// left out; none left, nothing opens.
+pub fn toggle(files: Vec<(PathBuf, String)>) {
     let Some(mtm) = MainThreadMarker::new() else {
         return;
     };
@@ -105,10 +131,16 @@ pub fn toggle(files: Vec<PathBuf>) {
         let _: () = unsafe { msg_send![panel(), orderOut: std::ptr::null::<AnyObject>()] };
         return;
     }
-    let urls: Vec<Retained<NSURL>> = files
+    let urls: Vec<Retained<Item>> = files
         .iter()
-        .filter(|p| p.exists())
-        .map(|p| NSURL::fileURLWithPath(&NSString::from_str(&p.to_string_lossy())))
+        .filter(|(p, _)| p.exists())
+        .map(|(p, name)| {
+            let data = ItemData {
+                url: NSURL::fileURLWithPath(&NSString::from_str(&p.to_string_lossy())),
+                title: NSString::from_str(name),
+            };
+            unsafe { msg_send![super(Item::alloc(mtm).set_ivars(data)), init] }
+        })
         .collect();
     if urls.is_empty() {
         return;
