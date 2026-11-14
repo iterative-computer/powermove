@@ -252,6 +252,66 @@ impl Controller {
     }
     /// The Project panel's dragged items placed at `at` from stack `index`
     /// (the timeline, the viewer): one Undo step, the new layers selected.
+    /// An effect dragged from the Effects panel and dropped on a layer (or,
+    /// with none under the pointer, the selected layer, as v1.2.0): added at
+    /// the playhead in one Undo step, as the panel's Add adds it. Audio
+    /// layers take no effects; nothing to take it says so.
+    pub(crate) fn drop_effect(
+        &mut self,
+        drop: crate::timeline_surface::EffectDrop,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(view) = self.builtins.views.get(&drop.panel).cloned() {
+            view.update(cx, |v, cx| v.end_drag(cx));
+        }
+        let layer = drop.layer.clone().or_else(|| {
+            self.published
+                .as_ref()
+                .and_then(|p| p.selection.primary().map(str::to_owned))
+        });
+        let Some(layer) = layer else {
+            self.message = format!("Drop {} on a layer, or select one first", drop.label);
+            return cx.notify();
+        };
+        let kind = self.published.as_ref().and_then(|p| {
+            let root = p.snapshot.root()?;
+            let at = pm_kernel::model::find_layer(root, &layer)?;
+            let node = pm_kernel::model::layer_at(root, &at)?;
+            Some((
+                node.get("type")?.to_value().as_str()?.to_owned(),
+                node.get("name")
+                    .and_then(|n| n.to_value().as_str().map(str::to_owned)),
+            ))
+        });
+        if let Some((kind, name)) = &kind
+            && kind == "audio"
+        {
+            let name = name.as_deref().unwrap_or("This layer");
+            self.message = format!("{name} is audio: audio layers don't take effects");
+            return cx.notify();
+        }
+        let commands = self
+            .builtins
+            .runtime
+            .as_ref()
+            .ok_or_else(|| "The Effects panel closed.".to_owned())
+            .and_then(|r| r.effect_commands(&drop.panel, &layer, &drop.definition, self.time()));
+        match commands {
+            Ok(commands) => self.run_layer_plan(
+                crate::layer_commands::Plan {
+                    label: format!("Add {}", drop.label),
+                    commands,
+                    select: Some(vec![layer]),
+                    count_keys: None,
+                },
+                cx,
+            ),
+            Err(why) => {
+                self.message = why;
+                cx.notify();
+            }
+        }
+    }
     pub(crate) fn place_project_items(
         &mut self,
         at: f64,

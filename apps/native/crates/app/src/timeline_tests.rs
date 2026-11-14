@@ -26,6 +26,8 @@ pub(crate) struct Recorder {
     pub skimming: std::cell::Cell<bool>,
     /// How often the panel said the time under it moved (scroll, zoom, size).
     pub moved: std::cell::Cell<usize>,
+    /// Effects dropped from the Effects panel.
+    pub effect_drops: RefCell<Vec<crate::timeline_surface::EffectDrop>>,
 }
 pub(crate) struct Recording(pub Rc<Recorder>);
 impl Delegate for Recording {
@@ -47,6 +49,9 @@ impl Delegate for Recording {
     }
     fn view_moved(&self, _: &mut App) {
         self.0.moved.set(self.0.moved.get() + 1);
+    }
+    fn drop_effect(&self, drop: crate::timeline_surface::EffectDrop, _: &mut App) {
+        self.0.effect_drops.borrow_mut().push(drop);
     }
     fn skimming(&self, _: &App) -> bool {
         self.0.skimming.get()
@@ -1612,4 +1617,41 @@ fn option_dragging_a_clip_leaves_it_and_places_a_copy(cx: &mut TestAppContext) {
     s.drag(cx, from, to, Modifiers::none());
     assert_eq!(layers(&s).len(), 2);
     assert!(s.start_of("l1") > before);
+}
+
+/// An effect dragged from the Effects panel and released over a layer's bar
+/// goes to that layer (v1.2.0's timeline drop), whichever layer is selected.
+#[gpui::test]
+fn an_effect_dropped_on_a_layers_bar_goes_to_that_layer(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    let at = s.at(1, 0.5);
+    let row = s
+        .surface
+        .read_with(&s.vcx, |t, _| t.scene().unwrap())
+        .navigate_first(1)
+        .unwrap();
+    let pm_panel_timeline::RowId::Layer(layer) = pm_panel_timeline::v4::parse_row(&row).unwrap()
+    else {
+        panic!("row 1 is a layer: {row}");
+    };
+    s.vcx.update(|_, cx| {
+        let drag = crate::v4_view::PanelDrag::of("effects", "Gaussian Blur", Some("gaussianBlur"));
+        let view = cx.new(|_| drag.clone());
+        cx.start_drag(gpui::AnyDrag::new(drag, view));
+    });
+    s.vcx
+        .simulate_mouse_move(at, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    s.vcx
+        .simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    assert_eq!(
+        *s.recorder.effect_drops.borrow(),
+        [crate::timeline_surface::EffectDrop {
+            panel: "effects".into(),
+            definition: "gaussianBlur".into(),
+            label: "Gaussian Blur".into(),
+            layer: Some(layer),
+        }]
+    );
 }

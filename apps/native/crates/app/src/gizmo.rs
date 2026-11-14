@@ -153,6 +153,9 @@ pub trait Host: 'static {
     /// Files from Finder dropped on the viewer: imported, and placed at the
     /// playhead on top of the stack (`alt`: a folder keeps its files apart).
     fn drop_files(&self, _paths: Vec<std::path::PathBuf>, _alt: bool, _cx: &mut App) {}
+    /// An effect from the Effects panel dropped on the viewer: the selected
+    /// layer takes it.
+    fn drop_effect(&self, _drop: crate::timeline_surface::EffectDrop, _cx: &mut App) {}
     fn playing(&self, cx: &App) -> bool;
     fn frame(&self, bounds: Bounds<Pixels>, cx: &App) -> Option<ViewFrame>;
     fn tool(&self, cx: &App) -> Tool;
@@ -2527,7 +2530,9 @@ impl Render for GizmoSurface {
                     .drop_files(paths.paths().to_vec(), window.modifiers().alt, cx);
             }))
             .on_drag_over::<crate::v4_view::PanelDrag>(move |style, drag, _, _| {
-                if drag.panel == pm_builtins::PROJECT_PANEL {
+                if drag.panel == pm_builtins::PROJECT_PANEL
+                    || drag.panel == crate::timeline_surface::EFFECTS_PANEL
+                {
                     style.border(ring).border_color(accent)
                 } else {
                     style
@@ -2537,6 +2542,19 @@ impl Render for GizmoSurface {
                 if drag.panel == pm_builtins::PROJECT_PANEL {
                     cx.stop_propagation();
                     s.host.drop_project_items(cx);
+                } else if drag.panel == crate::timeline_surface::EFFECTS_PANEL
+                    && let Some(definition) = &drag.item
+                {
+                    cx.stop_propagation();
+                    s.host.drop_effect(
+                        crate::timeline_surface::EffectDrop {
+                            panel: drag.panel.clone(),
+                            definition: definition.to_string(),
+                            label: drag.label.to_string(),
+                            layer: None,
+                        },
+                        cx,
+                    );
                 }
             }))
             .on_mouse_down(
