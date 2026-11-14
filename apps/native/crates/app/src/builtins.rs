@@ -518,6 +518,7 @@ impl Controller {
             anchor,
             Some(FONT_PAGE),
             Some("fontPick:".into()),
+            "Search fonts",
         );
     }
     /// The font picker's answer: a family, or none when it closed unchosen.

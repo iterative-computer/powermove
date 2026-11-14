@@ -3799,6 +3799,8 @@ impl Host {
             let mut p = self.fields.borrow_mut();
             p.model.choices = field_choices();
             (p.anchor, p.model.page, p.dismiss) = (None, None, None);
+            p.search
+                .setPlaceholderString(Some(&NSString::from_str(FIELD_PLACEHOLDER)));
         }
         let p = if field { &self.fields } else { &self.palette };
         p.borrow_mut().toggle();
@@ -3813,6 +3815,7 @@ impl Host {
         anchor: Option<crate::layout::Rect>,
         page: Option<usize>,
         dismiss: Option<String>,
+        placeholder: &str,
     ) {
         if self.palette.borrow().model.open {
             self.palette.borrow_mut().hide();
@@ -3825,6 +3828,8 @@ impl Host {
         let mut p = self.fields.borrow_mut();
         p.model.choices = choices;
         (p.anchor, p.model.page, p.dismiss) = (anchor, page, dismiss);
+        p.search
+            .setPlaceholderString(Some(&NSString::from_str(placeholder)));
         p.toggle();
     }
     pub fn system(&self, name: &str) -> bool {
@@ -4524,6 +4529,8 @@ fn popup_material(
 fn popup_highlight(t: &Tokens) -> Retained<NSColor> {
     native_color(t.colors.text).colorWithAlphaComponent(t.translucency.selected as f64)
 }
+/// The field menu's search placeholder (`fieldMenu`).
+const FIELD_PLACEHOLDER: &str = "Search fields";
 /// The field menu's own rows (`fieldMenu`).
 fn field_choices() -> Vec<Choice> {
     ["Position", "Scale", "Rotation", "Opacity"]
@@ -4652,7 +4659,7 @@ impl Popup {
         search.setPlaceholderString(Some(&NSString::from_str(if surface == Surface::Palette {
             "Search commands"
         } else {
-            "Search fields"
+            FIELD_PLACEHOLDER
         })));
         search.setControlSize(NSControlSize::Large);
         search.setFont(Some(&NSFont::systemFontOfSize(t.typography.title as f64)));
