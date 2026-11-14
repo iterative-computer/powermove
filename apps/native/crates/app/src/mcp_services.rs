@@ -353,6 +353,7 @@ impl EngineJobs {
         published: &Arc<Published>,
         settings: ExportSettings,
         destination: PathBuf,
+        replace: bool,
         look: bool,
         preview: bool,
         studio_quality: Option<serde_json::Value>,
@@ -378,6 +379,7 @@ impl EngineJobs {
             destination,
         )?;
         request.preview = preview;
+        request.replace = replace;
         request.studio_quality = studio_quality;
         request.studio_render_scale = studio_render_scale;
         // The definitions its caller pinned (`Self::resources`): the
@@ -452,8 +454,9 @@ fn finished(handle: ExportHandle) -> Result<(PathBuf, Vec<String>)> {
         ))),
     }
 }
-/// The published name made safe for a file, with a unique suffix.
-fn file_name(name: &str, extension: &str) -> String {
+/// The published name made safe for a file: with a unique suffix, or as
+/// given to replace the last export of it (`replace`).
+fn file_name(name: &str, extension: &str, replace: bool) -> String {
     let stem = name
         .chars()
         .map(|c| {
@@ -465,6 +468,9 @@ fn file_name(name: &str, extension: &str) -> String {
         })
         .take(100)
         .collect::<String>();
+    if replace {
+        return format!("{stem}.{extension}");
+    }
     format!("{stem}-{}.{extension}", pm_kernel::new_id("export"))
 }
 impl ExportChild for EngineJobs {
@@ -489,9 +495,37 @@ impl ExportChild for EngineJobs {
             .clone()
             .or_else(|| project["name"].as_str().map(str::to_owned))
             .unwrap_or_else(|| "Untitled".into());
-        let destination = request
-            .directory
-            .join(file_name(&name, options.format.extension()));
+        let replace = request.options.replace;
+        let destination =
+            request
+                .directory
+                .join(file_name(&name, options.format.extension(), replace));
+        // Caption files beside the video, as a person's export writes them.
+        let sidecar = match options.captions_sidecar.as_str() {
+            "srt" => Some(pm_captions::CaptionFormat::Srt),
+            "vtt" => Some(pm_captions::CaptionFormat::Vtt),
+            _ => None,
+        };
+        let sidecars = sidecar
+            .filter(|_| plan.captions > 0)
+            .map(|format| {
+                crate::export_coordinator::sidecar_files(
+                    &published,
+                    &options.range,
+                    format,
+                    &destination,
+                )
+            })
+            .unwrap_or_default();
+        // Told before the encode: nothing already there is replaced unless
+        // the agent asked to.
+        let existing = crate::export_coordinator::existing_outputs(&destination, &sidecars);
+        if !replace && let Some(first) = existing.first() {
+            return Err(Error::invalid(format!(
+                "“{}” is already in the export folder, and nothing there is replaced without replace true.",
+                crate::export_coordinator::shown_name(first)
+            )));
+        }
         // Listed in Background Tasks beside the person's exports, where it can
         // be watched and cancelled.
         let task =
@@ -514,6 +548,7 @@ impl ExportChild for EngineJobs {
             &published,
             settings,
             destination,
+            replace,
             false,
             false,
             request.options.studio_quality.clone(),
@@ -557,21 +592,7 @@ impl ExportChild for EngineJobs {
         let size = (settings_size.width, settings_size.height);
         let fps = settings_rate.num as f64 / settings_rate.den as f64;
         let result = finished(handle).and_then(|(path, notes)| {
-            // Caption files beside the video, as a person's export writes them.
-            let sidecar = match options.captions_sidecar.as_str() {
-                "srt" => Some(pm_captions::CaptionFormat::Srt),
-                "vtt" => Some(pm_captions::CaptionFormat::Vtt),
-                _ => None,
-            };
-            if let Some(format) = sidecar.filter(|_| plan.captions > 0) {
-                crate::export_coordinator::write_sidecars(
-                    &published,
-                    &options.range,
-                    format,
-                    &path,
-                )
-                .map_err(failed)?;
-            }
+            crate::export_coordinator::write_sidecars(&sidecars, replace).map_err(failed)?;
             Ok(pm_mcp::services::VideoDelivered {
                 path,
                 size: Some(size),
@@ -833,6 +854,7 @@ fn frame_with(
         published,
         settings,
         destination,
+        false,
         true,
         capture.draws_offline_cards(),
         studio_quality,
@@ -1852,6 +1874,24 @@ mod tests {
         )
         .unwrap_err();
         assert!(refused.message.contains("4444"), "{}", refused.message);
+    }
+    /// An agent export takes a fresh name unless it asked to replace the
+    /// last export of its name.
+    #[test]
+    fn an_agent_replaces_only_when_it_asks_to() {
+        assert_eq!(file_name("Film", "mp4", true), "Film.mp4");
+        let fresh = file_name("Film", "mp4", false);
+        assert!(
+            fresh.starts_with("Film-") && fresh.ends_with(".mp4"),
+            "{fresh}"
+        );
+        let parse = |args| {
+            pm_mcp::services::VideoOptions::parse(&args)
+                .unwrap()
+                .replace
+        };
+        assert!(parse(json!({"replace": true})));
+        assert!(!parse(json!({})));
     }
     /// A capture's pin from its window alone (production adds the pageless
     /// host for a project with no window).

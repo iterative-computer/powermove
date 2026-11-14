@@ -146,6 +146,26 @@ pub fn render_comp_id(root: &Node) -> Option<String> {
     })
 }
 
+/// The project's Output (`color.mode` and `color.hdrTransfer`): SDR unless
+/// the mode is `hdr`, then PQ unless the transfer is `hlg`. The engine reads
+/// the same members (`pm_render::composite::project_color`).
+pub fn project_output(root: &Node) -> pm_protocol::color::ProjectOutput {
+    use pm_protocol::color::ProjectOutput;
+    let text = |key: &str| {
+        root.get("color")
+            .and_then(|c| c.get(key))
+            .and_then(|v| match v.kind() {
+                NodeKind::String(s) => Some(s.to_string_lossy()),
+                _ => None,
+            })
+    };
+    match (text("mode").as_deref(), text("hdrTransfer").as_deref()) {
+        (Some("hdr"), Some("hlg")) => ProjectOutput::Hlg,
+        (Some("hdr"), _) => ProjectOutput::Pq,
+        _ => ProjectOutput::Sdr,
+    }
+}
+
 /// The composition node: `comps/<id>`, or the root itself when `comp_id` is
 /// `None`.
 pub fn comp_node<'a>(root: &'a Node, comp_id: Option<&str>) -> Option<&'a Node> {

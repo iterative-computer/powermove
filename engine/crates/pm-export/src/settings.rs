@@ -350,6 +350,19 @@ impl HdrMetadata {
 
 impl ColorTags {
     /// The HDR metadata an output carries.
+    /// These tags with the light levels `light` (MaxCLL, MaxFALL) in their
+    /// HDR metadata.
+    pub fn with_content_light(self, light: crate::convert::FrameLight) -> Self {
+        let mut tags = self;
+        if let Self::Rec2100Pq { metadata, .. } | Self::Rec2100Hlg { metadata, .. } = &mut tags
+            && let Some(m) = metadata
+        {
+            m.max_cll = light.peak;
+            m.max_fall = light.average;
+        }
+        tags
+    }
+
     pub fn hdr_metadata(self) -> Option<HdrMetadata> {
         match self {
             Self::Rec2100Pq { metadata, .. } | Self::Rec2100Hlg { metadata, .. } => metadata,

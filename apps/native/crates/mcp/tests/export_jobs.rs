@@ -259,3 +259,32 @@ fn deadline_error_keeps_pending_worker_visible_to_drain_without_claiming_cancell
     f.drain();
     assert!(jobs.drain(Duration::ZERO).is_ok());
 }
+/// A size is custom only with scale "custom" and both dimensions, as the
+/// catalogue says; anything else is refused, never exported at the
+/// composition's size.
+#[test]
+fn an_output_size_takes_scale_custom_with_both_dimensions() {
+    use pm_mcp::services::VideoOptions;
+    for args in [
+        json!({"width": 1280, "height": 720}),
+        json!({"width": 1280}),
+        json!({"height": 720}),
+        json!({"scale": "custom", "width": 1280}),
+        json!({"scale": "custom"}),
+        json!({"scale": 1, "width": 1280, "height": 720}),
+    ] {
+        let refused = VideoOptions::parse(&args).map(|_| ()).unwrap_err();
+        assert!(
+            refused.message.contains("custom"),
+            "{args}: {}",
+            refused.message
+        );
+    }
+    for args in [
+        json!({"scale": "custom", "width": 1280, "height": 720}),
+        json!({"scale": 0.5}),
+        json!({}),
+    ] {
+        assert!(VideoOptions::parse(&args).is_ok(), "{args}");
+    }
+}

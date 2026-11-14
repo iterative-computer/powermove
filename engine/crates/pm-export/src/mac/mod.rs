@@ -32,6 +32,9 @@ pub struct VideoToolboxSink {
     alpha: Option<alpha::AlphaDescriptions>,
     /// Frames of the written file checked so far.
     checked: Arc<AtomicU64>,
+    /// An HDR export's MaxCLL and MaxFALL so far: the most of its frames'
+    /// peaks and of their averages.
+    light: Option<crate::convert::FrameLight>,
 }
 
 impl VideoToolboxSink {
@@ -71,6 +74,7 @@ impl VideoToolboxSink {
                 && matches!(spec.codec, crate::settings::Codec::ProRes(_)))
             .then(alpha::AlphaDescriptions::default),
             checked: Arc::default(),
+            light: None,
         })
     }
 
@@ -105,22 +109,48 @@ impl VideoToolboxSink {
         {
             crate::mp4box::add_channel_layout(&temp, audio.channels)?;
         }
+        // The light levels of what was graded, measured from the frames: the
+        // file says them and its check holds it to them.
+        let mut spec = self.spec.clone();
+        let light = self.light.filter(|_| spec.tags.hdr_metadata().is_some());
+        if let Some(light) = light {
+            crate::mp4box::set_content_light(&temp, light.peak, light.average)?;
+            spec.tags = spec.tags.with_content_light(light);
+        }
         let (report, problems) = examine(
             &temp,
-            &self.spec,
+            &spec,
             std::mem::take(&mut self.evidence),
             audio_frames,
             cancel,
             &self.checked,
         )?;
         if !problems.is_empty() {
+            keep_failed(&temp, &problems);
             return Err(Error::Verify(problems.join("; ")));
         }
         let mut report = report;
         report.hardware_encoder = self.encoder.hardware;
+        report.content_light = light;
         report.bytes = std::fs::metadata(&temp).map(|m| m.len()).unwrap_or(0);
         let path = self.output.commit()?;
         Ok(Delivered { path, report })
+    }
+}
+
+/// A development aid: with `PM_EXPORT_KEEP_FAILED` set to a folder, a file
+/// that failed its check is copied there (with what was found) before it is
+/// removed, so a failure that does not repeat can still be looked at.
+fn keep_failed(temp: &std::path::Path, problems: &[String]) {
+    let Some(folder) = std::env::var_os("PM_EXPORT_KEEP_FAILED") else {
+        return;
+    };
+    let folder = std::path::PathBuf::from(folder);
+    let name = temp.file_name().unwrap_or_default().to_string_lossy();
+    let kept = folder.join(name.trim_start_matches('.'));
+    if std::fs::create_dir_all(&folder).is_ok() && std::fs::copy(temp, &kept).is_ok() {
+        let _ = std::fs::write(kept.with_extension("txt"), problems.join("\n"));
+        eprintln!("kept the failed file at {}", kept.display());
     }
 }
 
@@ -215,6 +245,11 @@ impl Sink for VideoToolboxSink {
 
     fn video(&mut self, index: u64, input: &EncoderInput) -> Result<(), Error> {
         self.evidence.add(index, self.spec.frames, input);
+        if let Some(frame) = input.light {
+            let all = self.light.get_or_insert_default();
+            all.peak = all.peak.max(frame.peak);
+            all.average = all.average.max(frame.average);
+        }
         let buffer = self.pool.buffer()?;
         buffer.write(input)?;
         buffer.tag(
