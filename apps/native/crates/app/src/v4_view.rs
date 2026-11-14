@@ -2212,10 +2212,7 @@ impl SurfaceView {
         // A tooltip says what is not already in view: one that repeats the
         // text the element shows (an effect's name, a row's label) only
         // covers its neighbours.
-        if let Some(title) = node
-            .title
-            .clone()
-            .filter(|title| title.trim() != self.shown_text(node.id, 3).trim())
+        if let Some(title) = self.tooltip_title(node.id)
         {
             let tokens = self.table.tokens.clone();
             element = element.tooltip(move |_, cx| {
@@ -2788,6 +2785,43 @@ impl HeaderView {
     }
 }
 impl SurfaceView {
+    /// The tooltip a node shows, if any: never one that repeats what is in
+    /// view (its own words, the label of the row it sits in), and none on a
+    /// control that opens a menu and shows its value (its menu says the rest,
+    /// and a tooltip would stand over the open menu).
+    pub(crate) fn tooltip_title(&self, id: Id) -> Option<SharedString> {
+        let node = self.prepared.node(id)?;
+        let shown = self.shown_text(id, 3);
+        let props = self.publication.surface.node(id).map(|n| &n.props);
+        let menu_value = props.is_some_and(|p| p.contains_key("aria-haspopup"))
+            && (!shown.trim().is_empty()
+                || props.is_some_and(|p| p.get("value").is_some_and(|v| !v.is_null())));
+        node.title
+            .clone()
+            .filter(|title| title.trim() != shown.trim())
+            .filter(|title| self.row_label(id).as_deref() != Some(title.trim()))
+            .filter(|_| !menu_value)
+    }
+    /// The label of the row (kit `InspectorRow`) a node sits in, which the
+    /// row shows beside it.
+    fn row_label(&self, id: Id) -> Option<String> {
+        let mut at = self.prepared.node(id)?.parent;
+        while let Some(parent) = at {
+            let node = self.prepared.node(parent)?;
+            if node.component == Some(Component::InspectorRow) {
+                return self
+                    .publication
+                    .surface
+                    .node(parent)?
+                    .props
+                    .get("label")
+                    .and_then(Value::as_str)
+                    .map(|l| l.trim().to_owned());
+            }
+            at = node.parent;
+        }
+        None
+    }
     /// The words a node shows: its own text and its descendants' (to
     /// `depth` levels), in order, without controls' values.
     pub(crate) fn shown_text(&self, id: Id, depth: usize) -> String {
