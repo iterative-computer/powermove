@@ -539,9 +539,31 @@ define_class!(
             let y=self.bounds().size.height-local.y;
             if self.ivars().borrow().iter().any(|r|r.contains(local.x,y)){unsafe{msg_send![super(self),hitTest:point]}}else{None}
         }
+        /// S5: a key the page leaves (WebKit hands it on up the responder
+        /// chain: no field took it, no page script stopped it) goes back to
+        /// the editor, as Electron's window listener runs it: the editor's
+        /// view takes the keyboard and the key is delivered again, so Space
+        /// plays and the timeline's keys run after a click in a DOM panel.
+        #[unsafe(method(keyDown:))]
+        fn key_down(&self,event:&NSEvent){
+            let Some(editor)=self.editor_view() else{return};
+            let Some(window)=self.window() else{return};
+            if window.makeFirstResponder(Some(&editor)){
+                NSApplication::sharedApplication(MainThreadMarker::from(self)).postEvent_atStart(event,true);
+            }
+        }
     }
 );
 impl SlotView {
+    /// The editor's GPUI view beside this slot (the content's key handler).
+    fn editor_view(&self) -> Option<Retained<NSView>> {
+        let parent = unsafe { self.superview() }?;
+        parent
+            .subviews()
+            .to_vec()
+            .into_iter()
+            .find(|v| v.class().name().to_bytes() == b"GPUIView")
+    }
     fn new(mtm: MainThreadMarker, frame: NSRect) -> Retained<Self> {
         unsafe {
             msg_send![super(Self::alloc(mtm).set_ivars(RefCell::new(vec![]))),initWithFrame:frame]

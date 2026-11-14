@@ -2147,6 +2147,12 @@ impl Host {
         let window = gpui.window().unwrap();
         let content = window.contentView().unwrap();
         appearance(&window, &t);
+        // The editor keeps the keyboard from the start (Electron's window
+        // has it): AppKit otherwise gives a window that becomes key to the
+        // first field or control it finds, and Space and the timeline's
+        // keys go there until a click on the editor takes the keyboard back.
+        window.setInitialFirstResponder(Some(&gpui));
+        window.makeFirstResponder(Some(&gpui));
         window.setTitle(&NSString::from_str("Untitled"));
         window.setSubtitle(&NSString::from_str(""));
         window.setTabbingIdentifier(&NSString::from_str("com.powermove.native.editor"));
@@ -2408,12 +2414,21 @@ impl Host {
                     if e.windowNumber() != window.windowNumber() {
                         return event.as_ptr();
                     }
-                    let responder = window.firstResponder();
+                    let mut responder = window.firstResponder();
+                    // A responder no longer on screen (a hidden page's field, a
+                    // closed panel's control, either one's field editor) never
+                    // keeps the keyboard: the editor takes it back.
+                    if responder.as_deref().is_some_and(stray_responder) {
+                        let gpui = host.borrow().gpui.clone();
+                        window.makeFirstResponder(Some(&gpui));
+                        responder = window.firstResponder();
+                    }
                     let name = responder
                         .as_ref()
                         .map(|r| r.class().name().to_string_lossy().to_string())
                         .unwrap_or_default();
-                    // WebKit keeps its DOM-first key order. S5 forwards unhandled keys explicitly.
+                    // WebKit keeps its DOM-first key order; a key the page
+                    // leaves comes back through the compat slot (S5).
                     if menu::owns_text_edit(false, &name) {
                         return event.as_ptr();
                     }
@@ -2478,12 +2493,14 @@ impl Host {
                     {
                         return event.as_ptr();
                     }
-                    if matches!(
-                        chord.as_str(),
-                        "enter" | "space" | "up" | "down" | "left" | "right"
-                    ) && responder.as_ref().is_some_and(|r| unsafe {
-                        msg_send![&**r,isKindOfClass:NSControl::class()]
-                    }) {
+                    // A control a click left the keyboard with keeps Return and
+                    // the arrows; Space plays, as in Electron (only a field
+                    // types it; keyboard navigation, above, presses with it).
+                    if control_keeps(&chord)
+                        && responder.as_ref().is_some_and(|r| unsafe {
+                            msg_send![&**r,isKindOfClass:NSControl::class()]
+                        })
+                    {
                         return event.as_ptr();
                     }
                     let field = responder.as_ref().is_some_and(|r| unsafe {
@@ -6330,5 +6347,48 @@ mod agent_status_tests {
             ..working
         };
         assert_eq!(asking.tooltip(), "Agent needs your answer");
+    }
+}
+
+/// The keys a control the pointer left the keyboard with keeps: Return and
+/// the arrows. Space is the editor's (play), as in Electron, where only a
+/// field types it.
+fn control_keeps(chord: &str) -> bool {
+    matches!(chord, "enter" | "up" | "down" | "left" | "right")
+}
+#[cfg(test)]
+mod key_owner_tests {
+    #[test]
+    fn a_clicked_control_keeps_return_and_arrows_and_space_plays() {
+        for chord in ["enter", "up", "down", "left", "right"] {
+            assert!(super::control_keeps(chord), "{chord}");
+        }
+        for chord in ["space", "shift+space", "j", "k", "l", "home", "b"] {
+            assert!(!super::control_keeps(chord), "{chord}");
+        }
+    }
+}
+/// A first responder that is no longer on screen: a view out of its window
+/// or hidden (with a hidden ancestor), or the field editor of one.
+fn stray_responder(responder: &NSResponder) -> bool {
+    unsafe {
+        let mut view: *mut AnyObject = responder as *const NSResponder as *mut AnyObject;
+        let text: bool = msg_send![&*view, isKindOfClass: NSTextView::class()];
+        if text {
+            let editor: bool = msg_send![&*view, isFieldEditor];
+            if editor {
+                let delegate: *mut AnyObject = msg_send![&*view, delegate];
+                if !delegate.is_null() {
+                    view = delegate;
+                }
+            }
+        }
+        let is_view: bool = msg_send![&*view, isKindOfClass: NSView::class()];
+        if !is_view {
+            return false;
+        }
+        let window: *mut AnyObject = msg_send![&*view, window];
+        let hidden: bool = msg_send![&*view, isHiddenOrHasHiddenAncestor];
+        window.is_null() || hidden
     }
 }
