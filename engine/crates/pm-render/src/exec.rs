@@ -567,7 +567,7 @@ impl Exec<'_> {
                         // The next files of a playing sequence start decoding
                         // on workers before this one is read.
                         for next in ahead.iter() {
-                            self.media.prepare_image(next, edge, interpret.is_some());
+                            self.media.prepare_image(next, edge, interpret.as_ref());
                         }
                         // A sequence's file is read between two fresh looks
                         // at it: a file that changed while it was read (a

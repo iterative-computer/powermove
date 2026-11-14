@@ -1171,7 +1171,7 @@ fn the_still_prefetch_hold_goes_at_budget_zero_and_at_rest() {
     let mut media = MediaCache::new(&gpu.device);
     let hold = |media: &mut MediaCache| {
         for path in &s {
-            media.prepare_image(path, None, false);
+            media.prepare_image(path, None, None);
         }
         media.wait_for_stills();
         assert!(media.still_prefetch_bytes() > 0, "the hold is counted");

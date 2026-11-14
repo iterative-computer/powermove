@@ -1571,10 +1571,7 @@ impl MediaCache {
                 path.display()
             )));
         }
-        let ask = stills::StillAsk {
-            edge,
-            interpreted: interpret.is_some(),
-        };
+        let ask = stills::StillAsk::of(edge, interpret);
         let issue = |i: ProbeIssue| match i {
             ProbeIssue::Unsupported(f) => MediaFailure::Unsupported(f),
             ProbeIssue::Unreadable(m) => MediaFailure::Failed(m),
@@ -1621,6 +1618,9 @@ impl MediaCache {
             pm_perf::bump(pm_perf::Counter::StillDecodes);
             whole = pm_media::image::read(path, &self.pool).ok();
             let _ = still_facts_from(path, whole.as_ref());
+            // The facts are the default reading's; a still read for its
+            // SDR base is decoded as such below.
+            whole = whole.filter(|_| ask.rendition == pm_media::image::Rendition::default());
         }
         probe_interpreted_image(path, interp).map_err(issue)?;
         let facts = still_facts(path).map_err(issue)?;
@@ -1632,15 +1632,15 @@ impl MediaCache {
                 (None, Some(whole)) => whole,
                 (Some(edge), whole) => {
                     pm_media::image::imageio::read_preview(path, &self.pool, edge).or_else(|e| {
-                        whole
-                            .ok_or(e)
-                            .or_else(|_| pm_media::image::read(path, &self.pool))
+                        whole.ok_or(e).or_else(|_| {
+                            pm_media::image::read_with(path, &self.pool, ask.rendition)
+                        })
                     })
                 }
                 .map_err(failed)?,
                 (None, None) => {
                     pm_perf::bump(pm_perf::Counter::StillDecodes);
-                    pm_media::image::read(path, &self.pool).map_err(failed)?
+                    pm_media::image::read_with(path, &self.pool, ask.rendition).map_err(failed)?
                 }
             },
         };
@@ -1795,7 +1795,12 @@ impl MediaCache {
     /// `media/stills.rs`). `edge` is the edge its draw reads it at
     /// (`exec::source_edge`): a viewer frame's still is decoded as a preview
     /// of that size, never whole (the decode a preview exists to avoid).
-    pub(crate) fn prepare_image(&mut self, path: &Path, edge: Option<u32>, interpreted: bool) {
+    pub(crate) fn prepare_image(
+        &mut self,
+        path: &Path,
+        edge: Option<u32>,
+        interpret: Option<&Interpretation>,
+    ) {
         let edge = edge.filter(|_| self.preview_media);
         let Some((len, modified)) = stamp(path) else {
             return;
@@ -1807,7 +1812,7 @@ impl MediaCache {
         {
             return;
         }
-        let ask = stills::StillAsk { edge, interpreted };
+        let ask = stills::StillAsk::of(edge, interpret);
         self.stills.request(path, (len, modified), ask, &self.pool);
     }
 
