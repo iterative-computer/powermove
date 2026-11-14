@@ -65,6 +65,10 @@ pub enum JobError {
     Render(String),
     #[error("audio failed: {0}")]
     Audio(String),
+    /// A source frame could not be read: the person's sentence, naming the
+    /// export frame, the clip, the file and where in it.
+    #[error("{0}")]
+    Damaged(String),
     #[error(transparent)]
     Export(Error),
 }
@@ -631,6 +635,67 @@ pub fn start_timecode(timeline: &Timeline) -> crate::settings::TimecodeSpec {
     }
 }
 
+/// "Frame 00:00:00:19 couldn't be exported: “Interview” reads a damaged
+/// frame of interview.mov at 00:00:00.292. Replace or trim the clip, then
+/// export again."
+fn damaged_sentence(
+    document: &Document,
+    failure: &pm_render::LayerFailure,
+    damaged: &pm_render::DamagedFrame,
+    rate: Rate,
+    tick: i64,
+) -> String {
+    let (num, den) = (i128::from(rate.num()), i128::from(rate.den()));
+    let unit = den * i128::from(TICKS_PER_SECOND);
+    let frame = (2 * i128::from(tick) * num + unit).div_euclid(2 * unit);
+    let at = pm_time::TimecodeFormat::for_rate(rate).timecode_of(frame as i64);
+    let layer = layer_name(document, &failure.composition, &failure.layer)
+        .unwrap_or_else(|| failure.layer.clone());
+    let file = damaged.file.file_name().map_or_else(
+        || damaged.file.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    );
+    match damaged.seconds {
+        Some(seconds) => {
+            let ms = (seconds.max(0.) * 1000.).round() as u64;
+            let source = format!(
+                "{:02}:{:02}:{:02}.{:03}",
+                ms / 3_600_000,
+                ms / 60_000 % 60,
+                ms / 1000 % 60,
+                ms % 1000
+            );
+            format!(
+                "Frame {at} couldn't be exported: “{layer}” reads a damaged frame of {file} at {source}. Replace or trim the clip, then export again."
+            )
+        }
+        // A file that is one frame (an image sequence's).
+        None => format!(
+            "Frame {at} couldn't be exported: “{layer}” reads a damaged file, {file}. Replace the file or trim the clip, then export again."
+        ),
+    }
+}
+
+/// The name of layer `layer` of composition `composition`.
+fn layer_name(document: &Document, composition: &str, layer: &str) -> Option<String> {
+    use pm_eval::node;
+    let root = document.root()?;
+    let string = |n: Option<&Node>| node::js_value_opt(n).to_js_string().to_string_lossy();
+    let open = node::string(node::member(Some(root), "compId"))
+        .or_else(|| node::string(node::member(Some(root), "id")))
+        .map(|s| s.to_string_lossy());
+    let comp = if open.as_deref() == Some(composition) {
+        root
+    } else {
+        node::member(node::member(Some(root), "comps"), composition)?
+    };
+    node::array(node::member(Some(comp), "layers"))?
+        .iter()
+        .find(|l| string(node::member(Some(l), "id")) == layer)
+        .map(|l| string(node::member(Some(l), "name")))
+        .filter(|name| !name.is_empty())
+}
+
 fn rate_of(settings: &ExportSettings) -> Result<Rate, JobError> {
     let fr = settings.frame_rate;
     Rate::new(i64::from(fr.num), i64::from(fr.den))
@@ -690,6 +755,7 @@ fn tags_of(color: OutputColor, peak_nits: u16) -> Result<ColorTags, JobError> {
             white_nits: HDR_WHITE_NITS,
             peak_nits: peak_nits.clamp(400, 4000),
             metadata: None,
+            dolby_vision: true,
         }),
         OutputColor::Rec709Broadcast => Ok(ColorTags::Rec709Broadcast),
         OutputColor::Rec709QuickTime {
@@ -1278,6 +1344,9 @@ fn plan_export_checked(
         .unwrap_or(pm_protocol::color::ProjectColor::DEFAULT);
     let hdr_project = project.mode == pm_protocol::color::ColorMode::Hdr;
     let mut tags = tags_of(s.color, project.mastering_peak)?;
+    if let ColorTags::Rec2100Hlg { dolby_vision, .. } = &mut tags {
+        *dolby_vision = !s.delivery.without_dolby_vision;
+    }
     if tags.is_hdr() && !hdr_project {
         return Err(JobError::Invalid(
             "HDR delivery needs an HDR project".into(),
@@ -1500,11 +1569,17 @@ pub fn run_export_into<S: Sink + Send>(
 where
     S::Output: Send,
 {
-    let result = export_frames(renderer, job, plan, sink, gate, cancel, progress);
+    // The mix's levels arrive with the progress; the last is the whole mix,
+    // which the finished export reports (the person is told what clipped).
+    let mut mix = None;
+    let result = export_frames(renderer, job, plan, sink, gate, cancel, &mut |p| {
+        mix = p.mix;
+        progress(p)
+    });
     // The frames' staging buffer, target and pixels are kept only while
     // exporting (one-off frames release them in `render_frame`).
     renderer.release_frame_reuse();
-    result
+    result.map(|output| S::with_mix(output, mix))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1767,6 +1842,21 @@ where
                     .iter()
                     .any(|clip| asset == Some(clip.asset.as_str()))
             });
+            // A damaged source frame stops the export, said where; nothing
+            // stands in for it.
+            if let Some((failure, damaged)) = f
+                .failures
+                .iter()
+                .find_map(|l| pm_render::DamagedFrame::parse(&l.message).map(|d| (l, d)))
+            {
+                return Err(JobError::Damaged(damaged_sentence(
+                    &document,
+                    failure,
+                    &damaged,
+                    timeline.rate,
+                    timeline.tick(n).get(),
+                )));
+            }
             if !f.failures.is_empty() {
                 return Err(JobError::Unsupported(
                     f.failures
@@ -2074,14 +2164,7 @@ pub fn run_export(
 ) -> Result<crate::Delivered, JobError> {
     let plan = plan_export(job)?;
     let sink = sink_for(&plan)?;
-    // The mix's levels arrive with the progress; the last is the whole mix.
-    let mut mix = None;
-    let mut delivered = run_export_into(renderer, job, plan, sink, gate, cancel, &mut |p| {
-        mix = p.mix;
-        progress(p)
-    })?;
-    delivered.report.mix = mix;
-    Ok(delivered)
+    run_export_into(renderer, job, plan, sink, gate, cancel, progress)
 }
 
 // ---------------------------------------------------------------------------

@@ -195,7 +195,8 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
       | "alpha"
       | "captionsBurn"
       | "useProxies"
-      | "studioReducedSize",
+      | "studioReducedSize"
+      | "dolbyVision",
   ) => (
     <FormRow name={key} help={help(key)}>
       <UI.Switch
@@ -203,7 +204,7 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
         label={rows[key][0]}
         title={help(key)}
         binding={s.bindings[key]}
-        value={o[key] ?? false}
+        value={o[key] ?? key === "dolbyVision"}
         disabled={busy || (key === "audio" && !p.hasAudio)}
         onChange={(e) => edit(key, e.value as boolean)}
       />
@@ -516,6 +517,12 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
                   {shows(o, "quality") ? select("quality", qualities) : null}
                   {p.hdr && (o.format === "prores" || o.format === "mp4")
                     ? select("dynamicRange", dynamicRanges)
+                    : null}
+                  {/* An MP4 in HDR is HEVC; HLG HEVC carries the metadata. */}
+                  {p.hdr &&
+                  o.format === "mp4" &&
+                  (o.dynamicRange ?? "sdr") === "hlg"
+                    ? toggle("dolbyVision")
                     : null}
                   {/* HDR delivery carries its own label. */}
                   {shows(o, "colorTag") &&

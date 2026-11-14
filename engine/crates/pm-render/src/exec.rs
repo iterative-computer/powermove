@@ -355,6 +355,9 @@ impl Exec<'_> {
                 layer: draw.layer.clone(),
                 message,
             }),
+            // The media cache marked the frame: it is held, not drawn
+            // without the layer.
+            MediaFailure::Pending => {}
         }
     }
 
@@ -662,6 +665,20 @@ impl Exec<'_> {
                                 crate::media::note_decode_failed(path);
                                 self.media.unreadable_found();
                             }
+                            // A sequence's file that is there but does not
+                            // read is damaged: named by its file.
+                            Some(Err(MediaFailure::Failed(reason))) if member => self.fail(
+                                plan,
+                                draw,
+                                MediaFailure::Failed(
+                                    crate::DamagedFrame {
+                                        file: path.to_path_buf(),
+                                        seconds: None,
+                                        reason,
+                                    }
+                                    .message(),
+                                ),
+                            ),
                             Some(Err(e)) => self.fail(plan, draw, e),
                         }
                     }

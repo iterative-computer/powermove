@@ -333,17 +333,62 @@ pub fn order_sequence(paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
     }
 }
 /// The type a sequence's retained manifest is kept as.
-const SEQUENCE_MIME: &str = "application/x-powermove-image-sequence";
+pub const SEQUENCE_MIME: &str = "application/x-powermove-image-sequence";
 /// Chosen frames as a sequence read in place: a manifest in scratch
 /// (removed when dropped) that the asset retains as its original, and the
 /// asset record. Frames are never transcoded: each is read as a still at
 /// its own depth when it is drawn.
-struct ChosenSequence {
+pub struct ChosenSequence {
     _dir: tempfile::TempDir,
-    path: PathBuf,
-    asset: serde_json::Value,
+    /// The manifest to retain as the asset's original ([`SEQUENCE_MIME`]).
+    pub path: PathBuf,
+    /// The asset record.
+    pub asset: serde_json::Value,
     /// Numbers in the range with no file, as the status line says them.
-    missing: Option<String>,
+    pub missing: Option<String>,
+}
+
+/// An image sequence chosen as File ▸ Import Image Sequence chooses it, for
+/// a host that imports it another way (the agent's `import_media`): `path`
+/// is the sequence's folder or one of its files (its numbering is read
+/// there), `fps` the sheet's Frame Rate (1 to 240). The same checks and
+/// refusals as the sheet. `None`: cancelled.
+pub fn choose_image_sequence(
+    path: &Path,
+    fps: f64,
+    cancel: &AtomicBool,
+) -> Result<Option<ChosenSequence>, String> {
+    if !fps.is_finite() || !(1.0..=240.0).contains(&fps) {
+        return Err("Choose a frame rate from 1 to 240".into());
+    }
+    let frame = if path.is_dir() {
+        // The folder's first numbered still names the sequence.
+        let mut stills: Vec<PathBuf> = std::fs::read_dir(path)
+            .map_err(|e| e.to_string())?
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|p| kind(p) == Some("image"))
+            .collect();
+        stills.sort();
+        stills
+            .into_iter()
+            .find(|p| matches!(pm_media::image::sequence::detect(p), Ok(Some(_))))
+            .ok_or("This folder has no numbered image frames")?
+    } else {
+        path.to_path_buf()
+    };
+    let frames: Vec<PathBuf> = pm_media::image::sequence::detect(&frame)
+        .map_err(|e| e.to_string())?
+        .ok_or("Choose at least 2 numbered image frames")?
+        .frames
+        .into_iter()
+        .map(|(_, p)| p)
+        .collect();
+    let sequence = SequenceImport {
+        fps,
+        progress: Default::default(),
+    };
+    choose_sequence(&frames, &sequence, cancel)
 }
 fn choose_sequence(
     paths: &[PathBuf],

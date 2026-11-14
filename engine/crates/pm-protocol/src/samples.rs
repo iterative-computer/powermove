@@ -548,6 +548,7 @@ pub fn export_settings() -> ExportSettings {
             preview: true,
             sequence_name: None,
             compat: vec![crate::snapshot::CompatSource::RasterOverride],
+            without_dolby_vision: false,
         },
     }
 }
@@ -1574,6 +1575,7 @@ pub fn events() -> Vec<Envelope> {
                 jpeg: Bytes(vec![0xFF, 0xD8, 0xFF, 0xD9]),
             }),
             checking: None,
+            notes: vec![],
         })),
         event(Event::BlenderProgress(BlenderProgress {
             job: "blender-1".into(),

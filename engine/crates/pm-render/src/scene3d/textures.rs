@@ -683,6 +683,8 @@ pub fn still_map(
         .map_err(|e| match e {
             crate::media::MediaFailure::Unsupported(f) => MapError::Unsupported(f),
             crate::media::MediaFailure::Failed(m) => MapError::Failed(m),
+            // The frame itself is held (`MediaCache::still_pending`).
+            crate::media::MediaFailure::Pending => MapError::Failed("still being read".into()),
         })?;
     media.release_image(path, Precision::Float32, working);
     Ok((target.texture, crate::media::deep_still(path)))

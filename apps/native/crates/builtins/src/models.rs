@@ -1094,6 +1094,7 @@ impl Backend {
                 "colorTag",
                 "timecode",
                 "audioCoding",
+                "dolbyVision",
                 "preset",
                 "presetName"
             ]))?;
