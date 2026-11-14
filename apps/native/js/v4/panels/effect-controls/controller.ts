@@ -56,7 +56,8 @@ export class EffectsController {
               ? r.parameters
               : [];
         for (const parameter of list)
-          if (!parameter.readonly) editable.set(parameter.binding, parameter.id);
+          if (!parameter.readonly)
+            editable.set(parameter.binding, parameter.id);
       }
     const wanted = new Set(editable.keys());
     for (const [handle, id] of editable)

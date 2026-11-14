@@ -913,6 +913,22 @@ fn effect_controls_folds_a_grades_wheels_and_curve_points_into_summary_rows() {
     assert!(!key(rows, "liftRed") && !key(rows, "x3"));
     // Balance, Tone and the curve's Channel stay rows of their own.
     assert!(key(rows, "temperature") && key(rows, "channel"));
+    // A summary row's wheel master is a field: its binding is the panel's.
+    let lift = rows.iter().find(|r| r["group"] == "lift").unwrap();
+    let master = lift["parameters"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["key"] == "liftMaster")
+        .unwrap();
+    assert!(
+        data::effect_binding_rows(
+            &projection,
+            master["binding"].as_str().unwrap(),
+            &[master["id"].as_str().unwrap().to_owned()],
+        )
+        .is_some()
+    );
     // The Color panel draws the instruments: every row reaches it.
     let mut color = data::Backend::new(
         kernel.clone(),

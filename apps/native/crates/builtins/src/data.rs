@@ -32,23 +32,30 @@ pub(crate) fn effect_binding_rows<'a>(
     handle: &str,
     channels: &[String],
 ) -> Option<Vec<&'a Value>> {
-    let rows = projection["rows"].as_array()?;
-    let row = |id: &str| {
-        rows.iter().find(|r| {
-            r["kind"] == "parameter"
-                && r["parameter"]["id"] == id
-                && r["parameter"]["readonly"] == false
+    // Every editable parameter the panel shows: its own rows, and those a
+    // summary row edits (Effect Controls' wheel master).
+    let parameters: Vec<&Value> = projection["rows"]
+        .as_array()?
+        .iter()
+        .flat_map(|r| match r["kind"].as_str() {
+            Some("parameter") => vec![&r["parameter"]],
+            Some("summary") => r["parameters"]
+                .as_array()
+                .map(|list| list.iter().collect())
+                .unwrap_or_default(),
+            _ => vec![],
         })
-    };
+        .filter(|p| p["readonly"] == false)
+        .collect();
     let found = channels
         .iter()
-        .map(|id| row(id))
+        .map(|id| parameters.iter().copied().find(|p| p["id"] == id.as_str()))
         .collect::<Option<Vec<_>>>()?;
     let handles = found
         .iter()
-        .map(|r| r["parameter"]["binding"].as_str())
+        .map(|p| p["binding"].as_str())
         .collect::<Option<Vec<_>>>()?;
-    let effect = &found.first()?["parameter"]["effect"];
+    let effect = &found.first()?["effect"];
     let distinct = channels
         .iter()
         .collect::<std::collections::BTreeSet<_>>()
@@ -56,7 +63,7 @@ pub(crate) fn effect_binding_rows<'a>(
         == channels.len();
     (distinct
         && handles.join("+") == handle
-        && found.iter().all(|r| r["parameter"]["effect"] == *effect))
+        && found.iter().all(|p| p["effect"] == *effect))
     .then_some(found)
 }
 pub(crate) fn model(value: &Value) -> Result<pm_model::Value, String> {
@@ -466,7 +473,7 @@ impl Backend {
         let bindings = rows
             .iter()
             .map(|row| {
-                let address = model(&row["parameter"]["id"])?;
+                let address = model(&row["id"])?;
                 pm_panel_inspector::PropertyId::from_value(
                     &pm_model::json::parse(address.as_str().ok_or("Effect property id")?)
                         .map_err(|e| e.to_string())?,

@@ -614,6 +614,8 @@ function SummaryView({
             attr={{ symbol: "camera.filters" }}
             onClick={(e) => {
               stop(e);
+              // A maximised Effect Controls gives way first.
+              c.platform.command("restorePanel");
               c.platform.command("panel:activate:color");
             }}
             style={{

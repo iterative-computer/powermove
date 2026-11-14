@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { EffectControls } from "../panel";
-import { states, selected } from "./fixtures";
+import { states, selected, radius } from "./fixtures";
 import { fixture, event, find, nodes, wire } from "./helpers";
 import { projection } from "../contract";
 import type { Json } from "../../../src";
@@ -191,6 +191,59 @@ test("§6 native AccessKit exposes selected rows, checkbox state, and numeric sp
     numericValue: 24,
     value: "24 pixels",
   });
+  await f.root.dispose();
+  await f.controller.dispose();
+});
+
+// U2: a grade's wheel is one summary row: its master a field (its binding
+// registered), red, green and blue in their inks, and Open in Color, which
+// restores a maximised Effect Controls and shows the Color panel.
+test("a colour wheel sums up on one row and opens in the Color panel", async () => {
+  const channel = (key: string, value: number) => ({
+    ...radius,
+    id: `{"layer":"a","path":"w.${key}"}`,
+    effect: "w",
+    key,
+    label: key,
+    binding: `w.${key}`,
+    value,
+  });
+  const p = {
+    ...selected(),
+    count: 2,
+    effectCount: 1,
+    range: [0, 2] as [number, number],
+    rows: [
+      { ...selected().rows[0], id: "w", label: "Color Wheels", effectCount: 1 },
+      {
+        kind: "summary" as const,
+        id: "summary:w:lift",
+        effect: "w",
+        group: "lift",
+        label: "Lift",
+        parameters: [
+          channel("liftMaster", -0.03),
+          channel("liftRed", -0.02),
+          channel("liftGreen", 0),
+          channel("liftBlue", 0.06),
+        ],
+        effectLabel: "Color Wheels",
+        enabled: true,
+      },
+    ],
+  } as unknown as Parameters<typeof fixture>[0];
+  const f = await fixture(p);
+  await f.root.render(
+    <EffectControls controller={f.controller} rowHeight={24} />,
+  );
+  const master = find(f.root, (q) => q.binding === "w.liftMaster");
+  expect(master.props.value).toBe(-0.03);
+  expect(nodes(f.root).some((n) => n.textContent === "−0.02")).toBe(true);
+  const open = nodes(f.root).find(
+    (n) => n.props.id === "layer-effects:open-color:summary:w:lift",
+  )!;
+  await event(f.root, open.id, "click");
+  expect(f.kit.commands).toEqual(["restorePanel", "panel:activate:color"]);
   await f.root.dispose();
   await f.controller.dispose();
 });
