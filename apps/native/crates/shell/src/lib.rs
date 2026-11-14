@@ -38,8 +38,8 @@ pub use macos::open_editor_tab;
 pub(crate) use macos::open_settings;
 #[cfg(target_os = "macos")]
 pub use macos::{
-    Finish, Gate, OpenUrls, open_editor, run, run_gated, run_integrated, run_with_device, smoke,
-    tokens,
+    Finish, Gate, OpenUrls, left_button_held, open_editor, run, run_gated, run_integrated,
+    run_with_device, smoke, tokens,
 };
 #[cfg(target_os = "macos")]
 pub use native::{

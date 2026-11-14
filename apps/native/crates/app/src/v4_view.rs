@@ -1064,6 +1064,11 @@ impl SurfaceView {
             .find(|n| n.cancel_change)
             .map(|n| n.id)
     }
+    /// A scrub or grading drag is in progress (tests).
+    #[cfg(test)]
+    pub fn scrubbing(&self) -> bool {
+        self.scrub.is_some()
+    }
     #[cfg(test)]
     pub fn first_number(&self) -> Option<String> {
         let mut numbers: Vec<_> = self
@@ -1578,6 +1583,15 @@ impl SurfaceView {
                         return;
                     }
                     let _ = moved.update(cx, |v, cx| {
+                        // The button is up: a release that never reached this
+                        // window ends the gesture here, and the window's other
+                        // listeners see this move (owner feedback W4, W5).
+                        if (event.pressed_button.is_none() || !button_held())
+                            && (v.scrub.is_some() || v.capture.is_some())
+                        {
+                            v.release_pointer(event.position, 1, event.modifiers, cx);
+                            return;
+                        }
                         if v.scrub.is_some() {
                             cx.stop_propagation();
                             v.scrub_move(event, cx);
@@ -1602,35 +1616,55 @@ impl SurfaceView {
                         }
                     });
                 });
+                // A new press while a gesture is still held (its release
+                // never came) ends that gesture first, so the press does its
+                // own work and the window's moves are no longer held.
+                let pressed = weak.clone();
+                window.on_mouse_event(move |event: &MouseDownEvent, phase, _, cx| {
+                    if phase != DispatchPhase::Capture {
+                        return;
+                    }
+                    let _ = pressed.update(cx, |v, cx| {
+                        if v.scrub.is_some() || v.capture.is_some() {
+                            v.release_pointer(event.position, 1, event.modifiers, cx);
+                        }
+                    });
+                });
                 let released = weak.clone();
                 window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
                     if phase != DispatchPhase::Capture {
                         return;
                     }
                     let _ = released.update(cx, |v, cx| {
-                        v.scrub_release(true, cx);
-                        let Some(capture) = v.capture.take() else {
-                            return;
-                        };
-                        if v.prepared
-                            .node(capture.target)
-                            .is_some_and(|n| n.events.pointer_up)
-                        {
-                            let detail = v.detail(
-                                event.position,
-                                Some(capture.button),
-                                0,
-                                event.click_count,
-                                event.modifiers,
-                            );
-                            v.pointer(capture.target, "pointerup", detail, cx);
-                        }
+                        v.release_pointer(event.position, event.click_count, event.modifiers, cx)
                     });
                 });
             },
         )
         .absolute()
         .inset_0()
+    }
+    /// The pressed pointer comes up: a scrub or a grading drag ends (one
+    /// Undo step), a captured node hears `pointerup`.
+    fn release_pointer(
+        &mut self,
+        position: Point<Pixels>,
+        click_count: usize,
+        modifiers: Modifiers,
+        cx: &mut Context<Self>,
+    ) {
+        self.scrub_release(true, cx);
+        let Some(capture) = self.capture.take() else {
+            return;
+        };
+        if self
+            .prepared
+            .node(capture.target)
+            .is_some_and(|n| n.events.pointer_up)
+        {
+            let detail = self.detail(position, Some(capture.button), 0, click_count, modifiers);
+            self.pointer(capture.target, "pointerup", detail, cx);
+        }
     }
     fn element(
         &self,
@@ -3120,5 +3154,15 @@ mod tests {
             drag.data["public.file-url"],
             json!(["/a b/clip.mov", "/c.png"])
         );
+    }
+}
+
+/// Whether the left button is down as the hardware has it (macOS); tests
+/// have no hardware button and follow their events alone.
+fn button_held() -> bool {
+    if cfg!(test) {
+        true
+    } else {
+        pm_shell::left_button_held()
     }
 }
