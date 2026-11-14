@@ -34,6 +34,8 @@ struct State {
     image_bytes: u64,
     /// An SVG raster pin's bytes and its raster-to-intrinsic scale per axis.
     rasters: BTreeMap<(String, u64), (u64, f64, f64)>,
+    /// Videos `<video>` elements opened (`video-N`), for their frames.
+    videos: BTreeMap<String, crate::video::Video>,
 }
 /// Decoded image memory one realm may hold at once.
 const IMAGE_BUDGET: u64 = 1 << 30;
@@ -1620,6 +1622,49 @@ impl EngineProxy for NativeHost {
     ) -> Result<Value> {
         budget.check()?;
         match operation {
+            // `<video>`: a held or staged file opened for its frames.
+            "video.open" => {
+                let token = input["token"]
+                    .as_str()
+                    .and_then(|t| t.parse().ok())
+                    .ok_or(Error::Invalid("file token"))?;
+                let path = crate::files::path(token)
+                    .ok_or_else(|| Error::Host("The video's file is gone.".into()))?;
+                let video = crate::video::Video::open(&path)?;
+                let mut state = self.state.lock().unwrap();
+                state.next += 1;
+                let id = format!("video-{}", state.next);
+                let reply = json!({"video": id, "duration": video.duration,
+                    "width": video.width, "height": video.height});
+                state.videos.insert(id, video);
+                return Ok(reply);
+            }
+            // Its frame at a time, as an image the realm draws like any other.
+            "video.frame" => {
+                let id = input["video"].as_str().unwrap_or_default();
+                let mut state = self.state.lock().unwrap();
+                let video = state
+                    .videos
+                    .get(id)
+                    .ok_or(Error::Invalid("unknown video"))?;
+                let pixels = video.frame(input["time"].as_f64().unwrap_or(0.))?;
+                let image = crate::image::Encoded::frame(pixels);
+                state.image_bytes = state
+                    .image_bytes
+                    .checked_add(image.cost)
+                    .filter(|total| *total <= IMAGE_BUDGET)
+                    .ok_or(Error::Quota("image memory"))?;
+                state.next += 1;
+                let id = format!("image-{}", state.next);
+                let reply = json!({"surface": id, "width": image.width, "height": image.height});
+                state.images.insert(id, image);
+                return Ok(reply);
+            }
+            "video.close" => {
+                let id = input["video"].as_str().unwrap_or_default();
+                self.state.lock().unwrap().videos.remove(id);
+                return Ok(Value::Null);
+            }
             "file.release" => {
                 // The realm collected the last File for this picked token.
                 if let Some(token) = input["token"].as_str().and_then(|t| t.parse().ok()) {

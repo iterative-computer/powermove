@@ -24,6 +24,7 @@ pub mod store_host;
 pub mod store_install;
 mod store_kernel;
 mod store_runtime;
+mod video;
 pub use store_dispatch::KernelStoreDispatch;
 pub mod transport;
 pub use recorder::{CanvasText, NativeHost, NoEvents, RealmEvents};
@@ -698,6 +699,66 @@ mod tests {
             runner.json("atob('YQ'.repeat(200000)).length").unwrap(),
             json!(300000)
         );
+    }
+    /// `<video>` as extensions read clips (rotoscoping): an asset's file (as
+    /// `PM.MediaStore.get` holds it) or downloaded bytes open natively; its
+    /// duration and size are known, a seek lands on that time's frame, and
+    /// `drawImage` draws it.
+    #[test]
+    fn a_video_element_reads_a_clips_frames_at_the_times_asked() {
+        let runner = runner();
+        let clip = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../../../engine/fixtures/h264-aac.mp4"),
+        )
+        .unwrap();
+        let token = crate::files::stage(&clip, "clip.mp4").unwrap();
+        let script = format!(
+            "(async()=>{{
+               const held=runtime.hostFile({{token:'{token}',name:'clip.mp4',type:'video/mp4',size:{size}}});
+               const read=async(blob)=>{{
+                 const v=document.createElement('video');
+                 const wait=type=>new Promise((ok,no)=>{{v.addEventListener(type,ok,{{once:true}});
+                   v.addEventListener('error',()=>no(new Error(v.error?.message)),{{once:true}})}});
+                 const loaded=wait('loadeddata');
+                 v.muted=true;v.src=URL.createObjectURL(blob);await loaded;
+                 const c=document.createElement('canvas');c.width=16;c.height=9;
+                 const x=c.getContext('2d',{{willReadFrequently:true}});
+                 const at=async t=>{{const seeked=wait('seeked');v.currentTime=t;await seeked;
+                   x.drawImage(v,0,0,16,9);return Array.from(x.getImageData(8,4,1,1).data)}};
+                 return [v.duration,v.videoWidth,v.videoHeight,v.readyState,await at(0.5),await at(1.5)];
+               }};
+               const own=Object.getPrototypeOf(document.createElement('video'))!==Object.getPrototypeOf(document.createElement('div'));
+               return [own,await read(held),await read(new Blob([await held.arrayBuffer()],{{type:'video/mp4'}}))];
+             }})()",
+            size = clip.len()
+        );
+        let value = runner.json(&script).unwrap();
+        assert_eq!(value[0], true, "a video has a prototype of its own");
+        for read in [&value[1], &value[2]] {
+            assert!((read[0].as_f64().unwrap() - 2.).abs() < 0.05, "{read}");
+            assert_eq!(
+                (&read[1], &read[2], &read[3]),
+                (&json!(160), &json!(90), &json!(4))
+            );
+            let pixel = |i: usize| -> Vec<u64> {
+                read[i]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|c| c.as_u64().unwrap())
+                    .collect()
+            };
+            let (red, green) = (pixel(4), pixel(5));
+            assert!(
+                red[0] > 200 && red[1] < 80 && red[3] == 255,
+                "0.5 s is red: {red:?}"
+            );
+            assert!(
+                green[1] > 200 && green[0] < 100 && green[3] == 255,
+                "1.5 s is green: {green:?}"
+            );
+        }
     }
     /// `navigator.clipboard` writes and reads the app's pasteboard; a realm
     /// without one (an export's, an agent's) is refused, as a browser refuses

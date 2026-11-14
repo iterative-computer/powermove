@@ -342,6 +342,8 @@
     hostFile({token, name, type, size, lastModified}) { const file = new File([], name, {type, lastModified}); hostFiles.set(file, {token, size: Number(size)}); heldFiles.register(file, token); blobData.set(file, () => new Uint8Array(__read('file.read', JSON.stringify({token})))); return file; },
     /** The host's token for a File it holds, else undefined. */
     fileToken: file => hostFiles.get(file)?.token,
+    /** The host's token for the File behind a realm blob: URL, else undefined. */
+    urlFileToken: url => { const blob = objectURLs.get(String(url).split('#')[0]); return blob ? hostFiles.get(blob)?.token : undefined; },
     stage(op) { const text=JSON.stringify(op), copy=JSON.parse(text); const bytes=new TextEncoder().encode(text).byteLength+(ops.length?1:0); if(ops.length>=__limits.max_ops || opBytes+bytes>__limits.max_op_bytes) throw new RangeError('Operation quota'); ops.push(copy); opBytes+=bytes; }
   });
   globalThis.__pm = Object.freeze({
