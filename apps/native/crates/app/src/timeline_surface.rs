@@ -144,6 +144,11 @@ enum Spec {
     Slide,
     Keys,
     GraphKeys,
+    /// A transform-box grip: scales the boxed keys about `anchor`.
+    Transform {
+        keys: Vec<String>,
+        anchor: (f64, f64),
+    },
     /// A key's direction handle in the Value Graph.
     Handle {
         key: String,
@@ -271,6 +276,18 @@ pub struct TimelineSurface {
     /// The clip under the pointer and the pointer's x in the panel: its strip
     /// draws hovered, with the trim grip inside the nearer edge.
     hover_clip: Option<(String, f64)>,
+    /// The graph's value range a person scrolled to, for the curves it was
+    /// set on (v1's `graphViewBounds`): the wheel pans values; another set of
+    /// curves fits again.
+    graph_view: Option<(Vec<(String, String)>, f64, f64)>,
+    /// The key a graph drag took hold of, as (id, seconds, value) when it was
+    /// pressed: the readout reads a group move against it.
+    graph_grab: Option<(String, f64, f64)>,
+    /// Where the pointer is while graph keys are dragged (the readout's place).
+    graph_at: Option<Point<Pixels>>,
+    /// The transform-box grip held, the box as it was pressed and the
+    /// latest (time, value) scale it asked for (the readout's text).
+    graph_box: Option<(graph_render::Grip, graph_render::TransformBox, (f64, f64))>,
     bounds: Bounds<Pixels>,
     /// The panel's whole body: `bounds` (the ruler and the rows) and the
     /// bottom bar under them.
@@ -373,6 +390,10 @@ impl TimelineSurface {
             told: None,
             skimmer: None,
             hover_clip: None,
+            graph_view: None,
+            graph_grab: None,
+            graph_at: None,
+            graph_box: None,
             activation: None,
             media_over: None,
             effect_over: None,
@@ -841,6 +862,7 @@ impl TimelineSurface {
                 .spawn(async move {
                     let effects = run(&mut client, job).await;
                     let built = build(&client, &tokens, offline, sources);
+                    remember_shown(&mut client, &built);
                     (client, effects, built)
                 })
                 .await;
@@ -897,7 +919,19 @@ impl TimelineSurface {
                 (next.min, next.max) = (held.min, held.max);
                 Some(Arc::new(next))
             }
-            (_, _, next) => next,
+            (_, _, Some(next)) => match &self.graph_view {
+                // A range the wheel chose holds while the same curves show.
+                Some((series, min, max)) if *series == next.series => {
+                    let mut next = Arc::unwrap_or_clone(next);
+                    (next.min, next.max) = (*min, *max);
+                    Some(Arc::new(next))
+                }
+                _ => {
+                    self.graph_view = None;
+                    Some(next)
+                }
+            },
+            (_, _, None) => None,
         };
         self.outline.set_scene(Some(built.scene));
         self.frame = None;
@@ -1228,12 +1262,26 @@ impl TimelineSurface {
     fn time_at(&self, x: f64) -> f64 {
         self.view.scroll_time + (x - self.view.layer_column) / self.view.pps
     }
-    /// The plot: the graph region less `inset` top and bottom, so keys at the
-    /// value range's ends never sit on its edges. Values map into this rect.
+    /// The plot: the graph region less the legend strip and `inset` under
+    /// it and at the foot, so keys at the value range's ends never sit on its
+    /// edges (v1). Values map into this rect.
     fn graph_area(&self) -> Option<Rect> {
-        let inset = self.tokens.metrics.inset as f64;
+        let m = self.tokens.metrics;
+        let (inset, legend) = (m.inset as f64, m.row as f64);
+        self.graph_region().map(|r| {
+            Rect::new(
+                r.x,
+                r.y + legend + inset,
+                r.width,
+                (r.height - legend - 2. * inset).max(1.),
+            )
+        })
+    }
+    /// The legend strip at the top of the graph region (v1).
+    fn graph_legend(&self) -> Option<Rect> {
+        let legend = self.tokens.metrics.row as f64;
         self.graph_region()
-            .map(|r| Rect::new(r.x, r.y + inset, r.width, (r.height - 2. * inset).max(1.)))
+            .map(|r| Rect::new(r.x, r.y + self.tokens.metrics.border as f64, r.width, legend))
     }
     /// The graph's whole region under the ruler (lower half in Dope Sheet and Graph).
     fn graph_region(&self) -> Option<Rect> {
@@ -1499,6 +1547,25 @@ impl TimelineSurface {
         area: Rect,
         cx: &mut Context<Self>,
     ) {
+        // The box stands off the keys it frames, so its grips are taken
+        // before any key or handle (v1 graphDown).
+        if let Some((grip, b)) = self
+            .viewport()
+            .and_then(|v| self.graph.as_ref()?.transform_box(v, area))
+            .and_then(|b| Some((b.grip_at(x, y)?, b)))
+        {
+            let (anchor_time, anchor_value, _, _) = b.scale(grip, 0., 0., false);
+            self.gesture = Gesture::Pressed(Press {
+                origin: event.position,
+                spec: Some(Spec::Transform {
+                    keys: b.keys.clone(),
+                    anchor: (anchor_time, anchor_value),
+                }),
+                release: None,
+            });
+            self.graph_box = Some((grip, b, (1., 1.)));
+            return;
+        }
         let ops = self.graph_ops(area).unwrap_or_default();
         let hit = |prefix: &str| {
             ops.iter()
@@ -1528,6 +1595,17 @@ impl TimelineSurface {
             });
             return;
         }
+        self.graph_grab = hit("graph-key:").and_then(|key| {
+            let p = self
+                .graph
+                .as_ref()?
+                .curves()
+                .iter()
+                .flat_map(|c| c.points.iter())
+                .find(|p| p.id == key)?
+                .point;
+            Some((key, p.seconds, p.value))
+        });
         if let Some(key) = hit("graph-key:")
             && let Some((layer, channel, _)) = self
                 .graph
@@ -1556,10 +1634,23 @@ impl TimelineSurface {
             };
         }
     }
+    /// The graph key nearest `(x, y)` within v1's 8 point reach.
+    fn graph_key_at(&self, x: f64, y: f64) -> Option<String> {
+        let ops = self.graph_area().and_then(|area| self.graph_ops(area))?;
+        ops.iter()
+            .filter_map(|o| {
+                let id = o.id.strip_prefix("graph-key:")?;
+                let (cx, cy) = (o.bounds.x + o.bounds.width / 2., o.bounds.y + o.bounds.height / 2.);
+                let d = (x - cx).hypot(y - cy);
+                (d < 8.).then(|| (d, id.to_owned()))
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(_, id)| id)
+    }
     fn graph_ops(&self, area: Rect) -> Option<Vec<Op>> {
         self.graph
             .as_ref()?
-            .prepare(self.viewport()?, area, &self.tokens)
+            .prepare(self.viewport()?, area, self.graph_legend()?, &self.tokens)
             .ok()
     }
     fn sample(
@@ -1580,6 +1671,7 @@ impl TimelineSurface {
             value_delta: -(f32::from(delta.y) as f64) * value_scale,
             time_scale: 1.,
             value_scale: 1.,
+            anchor: None,
             handle_time: 0.,
             handle_value: 0.,
             modifiers: Self::mods(modifiers),
@@ -1593,6 +1685,9 @@ impl TimelineSurface {
         self.tokens.metrics.keyframe as f64 / self.view.pps
     }
     fn on_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) -> bool {
+        if self.graph_grab.is_some() && matches!(self.gesture, Gesture::Dragging { .. }) {
+            self.graph_at = Some(event.position);
+        }
         let held = match self.gesture {
             Gesture::Zoom => Some((Part::Zoom, 0.)),
             Gesture::Navigate { grab } => Some((Part::Time, grab)),
@@ -1657,6 +1752,21 @@ impl TimelineSurface {
                     let (x, y) = self.local(event.position);
                     sample.handle_time = self.time_at(x) - layer_from;
                     sample.handle_value = graph.value_at(area, y);
+                }
+                if let (Some((grip, b, _)), Some(area), Some(graph)) =
+                    (self.graph_box.as_ref(), self.graph_area(), self.graph.as_ref())
+                {
+                    let (x, y) = self.local(event.position);
+                    // Cmd (Ctrl) scales about the box's centre.
+                    let centred = event.modifiers.platform || event.modifiers.control;
+                    let (at, av, ts, vs) =
+                        b.scale(*grip, self.time_at(x), graph.value_at(area, y), centred);
+                    (sample.anchor, sample.time_scale, sample.value_scale) =
+                        (Some((at, av)), ts, vs);
+                    if let Some(held) = self.graph_box.as_mut() {
+                        held.2 = (ts, vs);
+                    }
+                    self.graph_at = Some(event.position);
                 }
                 if readout {
                     let delta = event.position - origin;
@@ -1773,6 +1883,7 @@ impl TimelineSurface {
         self.pump(cx);
     }
     fn on_up(&mut self, cx: &mut Context<Self>) -> bool {
+        (self.graph_grab, self.graph_at, self.graph_box) = (None, None, None);
         match std::mem::replace(&mut self.gesture, Gesture::Idle) {
             Gesture::Idle => return false,
             Gesture::Pressed(press) => {
@@ -1822,7 +1933,26 @@ impl TimelineSurface {
             }
             return;
         }
-        let _ = y;
+        // In the graph the wheel pans values, and sideways time (v1).
+        if !event.modifiers.shift
+            && let (Some(region), Some(area), Some(graph)) =
+                (self.graph_region(), self.graph_area(), self.graph.clone())
+            && y >= region.y
+        {
+            let delta = dy * graph.value_per_point(area.height);
+            let (min, max) = (graph.min + delta, graph.max + delta);
+            let mut next = Arc::unwrap_or_clone(graph);
+            (next.min, next.max) = (min, max);
+            self.graph_view = Some((next.series.clone(), min, max));
+            self.graph = Some(Arc::new(next));
+            if dx != 0. {
+                self.view.scroll_time -= dx / self.view.pps;
+                self.clamp_time();
+            }
+            self.changed_while_hot(cx);
+            cx.notify();
+            return;
+        }
         let horizontal = dx.abs() > dy.abs() || event.modifiers.shift;
         if horizontal {
             let travel = if dx.abs() > dy.abs() { dx } else { dy };
@@ -1868,8 +1998,13 @@ impl TimelineSurface {
                 },
             }
         } else if self.graph_region().is_some_and(|a| y >= a.y) {
-            MenuContext::Graph {
-                series: self.graph.as_ref().map_or(0, |_| 1),
+            // A key under the pointer has the keyframe menu, as in the dope
+            // sheet (v1); the rest of the graph its own.
+            match self.graph_key_at(x, y) {
+                Some(key) => MenuContext::Keys { ids: vec![key] },
+                None => MenuContext::Graph {
+                    series: self.graph.as_ref().map_or(0, |g| g.series.len()),
+                },
             }
         } else if let Some((_, key)) = frame.hit_key(x, y, 3.) {
             MenuContext::Keys { ids: vec![key] }
@@ -2051,8 +2186,20 @@ impl TimelineSurface {
         }
         self.hover_clip = hovered;
         let m = self.tokens.metrics;
+        let grip = self
+            .graph_area()
+            .zip(self.viewport())
+            .and_then(|(area, v)| self.graph.as_ref()?.transform_box(v, area)?.grip_at(x, y));
         let cursor =
-            if (x - self.view.layer_column).abs() <= m.hit as f64 / 4. && y >= m.ruler as f64 {
+            if let Some(grip) = grip {
+                use graph_render::Grip;
+                match grip {
+                    Grip::N | Grip::S => CursorStyle::ResizeUpDown,
+                    Grip::E | Grip::W => CursorStyle::ResizeLeftRight,
+                    Grip::NW | Grip::SE => CursorStyle::ResizeUpLeftDownRight,
+                    Grip::NE | Grip::SW => CursorStyle::ResizeUpRightDownLeft,
+                }
+            } else if (x - self.view.layer_column).abs() <= m.hit as f64 / 4. && y >= m.ruler as f64 {
                 CursorStyle::ResizeColumn
             } else if let Some((id, Some(_))) = self.frame.as_ref().and_then(|f| f.hit_clip(x, y))
                 // A locked layer's ends offer no trim.
@@ -2418,6 +2565,11 @@ fn drag_kind(model: &TimelineModel, spec: Spec, time: f64) -> Result<DragKind, S
         Spec::Offset => DragKind::QuickOffsetLayers { ids },
         Spec::Keys => DragKind::Keys { ids: keys },
         Spec::GraphKeys => DragKind::GraphKeys { ids: keys },
+        Spec::Transform { keys, anchor } => DragKind::TransformKeys {
+            ids: keys,
+            anchor_time: anchor.0,
+            anchor_value: anchor.1,
+        },
         Spec::Handle { key, side } => DragKind::Handle { id: key, side },
         Spec::Property { layer, path } => {
             let paths: Vec<_> = model
@@ -2577,6 +2729,17 @@ impl ModelPresenter for Presenter {
         lane: usize,
     ) -> Option<String> {
         Some(format!("{area:?} {}", lane + 1))
+    }
+}
+/// The curves a key selection put in the graph stay there once every key is
+/// deselected (v1's `graphShown`).
+fn remember_shown(client: &mut TimelineClient, built: &Option<Built>) {
+    if let Some(graph) = built
+        .as_ref()
+        .and_then(|b| b.graph.as_ref())
+        .filter(|g| g.picked)
+    {
+        client.model.graph_shown = graph.series.clone();
     }
 }
 fn build(
@@ -2965,9 +3128,89 @@ impl Render for TimelineSurface {
             .children(effect_row)
             .children(tip)
             .children(self.skimmer_marks())
+            .children(self.graph_readout())
     }
 }
 impl TimelineSurface {
+    /// The graph's readout while keys are dragged (v1): one key reads where
+    /// it is, value and time; several read the offset the whole group moved
+    /// by. The Speed Graph's axis is a rate, so it reads the time alone.
+    fn graph_readout(&self) -> Option<AnyElement> {
+        if !matches!(self.gesture, Gesture::Dragging { .. }) {
+            return None;
+        }
+        let at = self.graph_at?;
+        let text = match &self.graph_box {
+            Some((grip, _, scale)) => Self::scale_text(*grip, *scale),
+            None => self.move_text()?,
+        };
+        let t = &self.tokens;
+        let local = at - self.bounds.origin;
+        Some(
+            div()
+                .absolute()
+                .left(local.x + px(14.))
+                .top(local.y - px(26.))
+                .px(px(t.metrics.gap))
+                .py(px(t.metrics.border * 2.))
+                .rounded(px(t.metrics.inner_radius))
+                .bg(rgb(t.colors.accent))
+                .text_size(px(t.typography.minimum))
+                .text_color(rgb(0xffffff))
+                .whitespace_nowrap()
+                .child(text)
+                .into_any_element(),
+        )
+    }
+    /// A transform drag reads the scale of each axis it changes, as v1:
+    /// "T 120%  ·  V 80%".
+    fn scale_text(grip: graph_render::Grip, (time, value): (f64, f64)) -> String {
+        let percent = |s: f64| {
+            let p = (s * 1000.).round() / 10.;
+            format!("{}%", if p.fract() == 0. { format!("{p:.0}") } else { format!("{p:.1}") })
+        };
+        let (times, values) = grip.axes();
+        let mut parts = vec![];
+        if times {
+            parts.push(format!("T {}", percent(time)));
+        }
+        if values {
+            parts.push(format!("V {}", percent(value)));
+        }
+        parts.join("  \u{b7}  ")
+    }
+    /// A key move's readout text.
+    fn move_text(&self) -> Option<String> {
+        let (key, seconds, value) = self.graph_grab.clone()?;
+        let graph = self.graph.as_ref()?;
+        let points: Vec<_> = graph.curves().iter().flat_map(|c| c.points.iter()).collect();
+        let now = points.iter().find(|p| p.id == key)?.point;
+        let fps = self.model.index.fps.max(1.);
+        let code = |t: f64| {
+            let frames = (t.abs() * fps).round() as u64;
+            let nominal = fps.round().max(1.) as u64;
+            let sec = frames / nominal;
+            format!("{:02}:{:02}:{:02}:{:02}", sec / 3600, sec / 60 % 60, sec % 60, frames % nominal)
+        };
+        let plots_value = !graph.speed;
+        let text = if points.iter().filter(|p| p.selected).count() <= 1 {
+            let time = code(now.seconds);
+            if plots_value {
+                format!("{}  ·  {time}", graph_render::value_text(now.value))
+            } else {
+                time
+            }
+        } else {
+            let dt = now.seconds - seconds;
+            let time = format!("{}{}", if dt >= 0. { "+" } else { "\u{2212}" }, code(dt));
+            if plots_value {
+                format!("\u{394} {}  ·  {time}", graph_render::value_text(now.value - value))
+            } else {
+                time
+            }
+        };
+        Some(text)
+    }
     /// The skimmer: a hairline of text ink across the ruler and tracks
     /// (the playhead is the accent), with its timecode on the ruler.
     fn skimmer_marks(&self) -> Vec<AnyElement> {
@@ -3322,11 +3565,116 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
                 (point_of(&op.detail["from"]), point_of(&op.detail["to"]))
             {
                 let mut path = PathBuilder::stroke(px(op.stroke as f32));
-                path.move_to(at(from.0, from.1));
-                path.line_to(at(to.0, to.1));
+                match op.detail["dash"].as_f64().filter(|d| *d > 0.) {
+                    // Dashes `dash` long with gaps as long (a direction
+                    // handle's tangent, v1).
+                    Some(dash) => {
+                        let (dx, dy) = (to.0 - from.0, to.1 - from.1);
+                        let length = dx.hypot(dy);
+                        let mut d = 0.;
+                        while d < length {
+                            let e = (d + dash).min(length);
+                            path.move_to(at(from.0 + dx * d / length, from.1 + dy * d / length));
+                            path.line_to(at(from.0 + dx * e / length, from.1 + dy * e / length));
+                            d += 2. * dash;
+                        }
+                    }
+                    None => {
+                        path.move_to(at(from.0, from.1));
+                        path.line_to(at(to.0, to.1));
+                    }
+                }
                 if let Ok(path) = path.build() {
                     window.paint_path(path, color);
                 }
+            }
+        }
+        // A key in the graph (v1's vertex): a square for a hold, an
+        // hourglass for an eased key, a diamond for a linear one, in its
+        // curve's ink; selected, a ring of the same shape round it.
+        "graph-key" => {
+            let c = area.center();
+            let r = area.size.width / 2.;
+            let shape = op.detail["shape"].as_str().unwrap_or("linear");
+            let mark = |radius: Pixels, window: &mut Window, ink: Rgba, ring: bool| {
+                let corners: Vec<Point<Pixels>> = match shape {
+                    "hold" => vec![
+                        point(c.x - radius, c.y - radius),
+                        point(c.x + radius, c.y - radius),
+                        point(c.x + radius, c.y + radius),
+                        point(c.x - radius, c.y + radius),
+                    ],
+                    "bezier" => vec![
+                        point(c.x - radius, c.y - radius),
+                        point(c.x + radius, c.y - radius),
+                        point(c.x - radius, c.y + radius),
+                        point(c.x + radius, c.y + radius),
+                    ],
+                    _ => vec![
+                        point(c.x, c.y - radius - px(1.)),
+                        point(c.x + radius + px(1.), c.y),
+                        point(c.x, c.y + radius + px(1.)),
+                        point(c.x - radius - px(1.), c.y),
+                    ],
+                };
+                let mut path = if ring {
+                    PathBuilder::stroke(px(1.3))
+                } else {
+                    PathBuilder::fill()
+                };
+                path.move_to(corners[0]);
+                for p in &corners[1..] {
+                    path.line_to(*p);
+                }
+                path.close();
+                if let Ok(path) = path.build() {
+                    window.paint_path(path, ink);
+                }
+            };
+            if op.detail["selected"] == true {
+                let ring = op.detail["ring"].as_u64().unwrap_or(op.color as u64) as u32;
+                mark(r + px(2.), window, rgb(ring), true);
+            }
+            mark(r, window, color, false);
+        }
+        // The graph's legend: per curve a swatch and its name, left to
+        // right; what does not fit ends in an ellipsis (v1).
+        "legend" => {
+            let inset = op.detail["inset"].as_f64().unwrap_or(12.) as f32;
+            let font_size = px(op.font_size as f32);
+            let height = font_size * t.typography.dense_leading;
+            let mut x = area.origin.x + px(inset);
+            let right = area.right() - px(8.);
+            let middle = area.center().y;
+            for item in op.detail["items"].as_array().into_iter().flatten() {
+                let ink = item["color"].as_u64().unwrap_or(op.color as u64) as u32;
+                let text: SharedString = item["text"].as_str().unwrap_or("").to_owned().into();
+                let run = TextRun {
+                    len: text.len(),
+                    font: Font {
+                        family: pm_design::TEXT_FONT.into(),
+                        weight: FontWeight::MEDIUM,
+                        ..window.text_style().font()
+                    },
+                    color: rgb_to_hsla(color),
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                    letter_spacing: None,
+                };
+                let line = window.text_system().shape_line(text, font_size, &[run.clone()]);
+                let width = px(15.) + line.width + px(10.);
+                if x + width > right {
+                    let more = window.text_system().shape_line("…".into(), font_size, &[TextRun { len: "…".len(), ..run }]);
+                    let _ = more.paint(point(x, middle - height / 2.), height, TextAlign::Left, None, window, cx);
+                    break;
+                }
+                window.paint_quad(
+                    PaintQuad::new(Bounds::new(point(x, middle - px(1.)), size(px(10.), px(2.))))
+                        .background(rgb(ink)),
+                );
+                let _ = line.paint(point(x + px(15.), middle - height / 2.), height, TextAlign::Left, None, window, cx);
+                x += width;
             }
         }
         "curve" => {

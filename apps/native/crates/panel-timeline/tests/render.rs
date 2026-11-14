@@ -200,9 +200,50 @@ fn malformed_geometry_and_nan_never_reach_native_painter() {
 
 #[test]
 fn graph_curves_handles_selection_and_names_use_neutral_spec_marks() {
-    use pm_panel_timeline::graph_render::*;
     let t = tokens();
     let v = viewport(&t);
+    let g = graph(true, false);
+    let area = Rect::new(v.layer_column, 220., v.width - v.layer_column, 220.);
+    let legend = Rect::new(v.layer_column, 220., v.width - v.layer_column, 28.);
+    let ops = g.prepare(v, area, legend, &t).unwrap();
+    assert_eq!(
+        ops.iter().find(|o| o.id == "curve:a:position.x").unwrap().color,
+        t.graph_curve("position.x", 0)
+    );
+    let legend = ops.iter().find(|o| o.id == "graph-legend").unwrap();
+    assert_eq!(legend.detail["items"][0]["text"], "X Position");
+    // Two selected keys: v1's transform box with its eight grips.
+    assert!(ops.iter().any(|o| o.id == "graph-box"));
+    assert_eq!(
+        ops.iter()
+            .filter(|o| o.id.starts_with("graph-transform-handle"))
+            .count(),
+        8
+    );
+    assert!(
+        ops.iter()
+            .filter(|o| o.id != "graph-legend" && o.id != "graph-legend-ground")
+            .all(|o| o.clip.is_some())
+    );
+    let wire =
+        serde_json::to_string_pretty(&ops.iter().map(Op::wire).collect::<Vec<_>>()).unwrap() + "\n";
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/graph-render.json");
+    if std::env::var_os("PM_UPDATE_TIMELINE_RENDER").is_some() {
+        std::fs::write(&path, &wire).unwrap();
+    }
+    // Workspace feature unification can enable serde_json preserve_order.
+    // JSON object order is immaterial; ordered paint arrays remain exact.
+    let expected: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let actual: serde_json::Value = serde_json::from_str(&wire).unwrap();
+    assert_eq!(actual, expected);
+}
+
+/// One X Position curve from 1 s (0) to 3 s (1), eased out of its first key,
+/// both keys selected or not; in the Speed Graph or the Value Graph.
+fn graph(selected: bool, speed: bool) -> pm_panel_timeline::graph_render::Graph {
+    use pm_panel_timeline::graph_render::*;
     let a = Point {
         seconds: 1.,
         value: 0.,
@@ -211,11 +252,21 @@ fn graph_curves_handles_selection_and_names_use_neutral_spec_marks() {
         seconds: 3.,
         value: 1.,
     };
+    let key = |id: &str, point: Point, handles| GraphPoint {
+        id: id.into(),
+        point,
+        selected,
+        shape: KeyShape::Bezier,
+        handles,
+        active_handle: None,
+    };
     let mut g = Graph::new(
         vec![Curve {
-            id: "x".into(),
-            name: "X".into(),
-            focused: true,
+            id: "a:position.x".into(),
+            path: "position.x".into(),
+            name: "X Position".into(),
+            index: 0,
+            layers: 1,
             segments: vec![Segment {
                 from: a,
                 to: b,
@@ -230,65 +281,60 @@ fn graph_curves_handles_selection_and_names_use_neutral_spec_marks() {
                     },
                 ]),
             }],
-            points: vec![GraphPoint {
-                id: "key".into(),
-                point: a,
-                selected: true,
-                handles: vec![(
-                    EaseSide::Out,
-                    Point {
-                        seconds: 1.5,
-                        value: 0.,
-                    },
-                )],
-                active_handle: Some(EaseSide::Out),
-            }],
+            points: vec![
+                key(
+                    "k1",
+                    a,
+                    vec![(
+                        EaseSide::Out,
+                        Point {
+                            seconds: 1.5,
+                            value: 0.,
+                        },
+                    )],
+                ),
+                key("k2", b, vec![]),
+            ],
         }],
-        0.,
-        1.,
+        -0.22,
+        1.22,
     )
     .unwrap();
-    g.grid = vec![(0., "0".into()), (1., "1".into())];
-    g.selection = Some(Rect::new(300., 250., 100., 80.));
-    let ops = g
-        .prepare(
-            v,
-            Rect::new(v.layer_column, 220., v.width - v.layer_column, 220.),
-            &t,
-        )
-        .unwrap();
-    assert_eq!(
-        ops.iter().find(|o| o.id == "curve:x").unwrap().color,
-        t.colors.text
-    );
-    assert_eq!(
-        ops.iter()
-            .find(|o| o.id == "curve-name:x")
-            .unwrap()
-            .text
-            .as_deref(),
-        Some("X")
-    );
-    assert_eq!(
-        ops.iter()
-            .filter(|o| o.id.starts_with("graph-transform-handle"))
-            .count(),
-        4
-    );
-    assert!(ops.iter().all(|o| o.clip.is_some()));
-    let wire =
-        serde_json::to_string_pretty(&ops.iter().map(Op::wire).collect::<Vec<_>>()).unwrap() + "\n";
-    let path =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/graph-render.json");
-    if std::env::var_os("PM_UPDATE_TIMELINE_RENDER").is_some() {
-        std::fs::write(&path, &wire).unwrap();
+    g.speed = speed;
+    g
+}
+
+#[test]
+fn the_transform_box_frames_two_selected_keys_and_scales_as_v1() {
+    use pm_panel_timeline::graph_render::*;
+    let t = tokens();
+    let v = viewport(&t);
+    let area = Rect::new(v.layer_column, 220., v.width - v.layer_column, 220.);
+    assert!(graph(false, false).transform_box(v, area).is_none());
+    let b = graph(true, false).transform_box(v, area).unwrap();
+    // It stands 8 points off the keys.
+    let left = v.layer_column + (1. - v.scroll_time) * v.pps;
+    assert!((b.rect.x - (left - BOX_INSET)).abs() < 1e-9);
+    assert_eq!(b.keys, ["k1", "k2"]);
+    assert_eq!((b.time, b.value), ((1., 3.), (0., 1.)));
+    // Each grip is taken within its reach, the nearest; nothing else is.
+    for grip in Grip::ALL {
+        let [x, y] = grip.at(b.rect);
+        assert_eq!(b.grip_at(x + 4., y), Some(grip));
     }
-    // Workspace feature unification can enable serde_json preserve_order.
-    // JSON object order is immaterial; ordered paint arrays remain exact.
-    let expected: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
-    let actual: serde_json::Value = serde_json::from_str(&wire).unwrap();
-    assert_eq!(actual, expected);
+    let [x, y] = Grip::E.at(b.rect);
+    assert_eq!(b.grip_at(x + GRIP_REACH + 1., y), None);
+    // The east edge scales time about the west edge; values stay.
+    assert_eq!(b.scale(Grip::E, 5., 9., false), (1., 0.5, 2., 1.));
+    // The north-west corner scales both about the south-east corner (the
+    // north grips carry the highest value).
+    assert_eq!(b.scale(Grip::NW, 2., 0.5, false), (3., 0., 0.5, 0.5));
+    // Cmd: about the centre.
+    assert_eq!(b.scale(Grip::E, 4., 0., true), (2., 0.5, 2., 1.));
+    // The Speed Graph frames the keys but offers no grips.
+    let speed = graph(true, true).transform_box(v, area).unwrap();
+    let [x, y] = Grip::E.at(speed.rect);
+    assert_eq!(speed.grip_at(x, y), None);
 }
 
 #[test]
