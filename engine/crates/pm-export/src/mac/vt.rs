@@ -245,6 +245,12 @@ impl Encoder {
                     false,
                 )?;
             }
+            // The mastering display is the project's, known now. The light
+            // levels are measured from the frames: the session states the
+            // master's light so the container holds a `clli` box (macOS
+            // writes both only there, no SEI in the stream), which the
+            // measured levels overwrite once every frame is encoded
+            // (`mp4box::set_content_light`).
             if let Some(hdr) = spec.tags.hdr_metadata() {
                 set(
                     &session,
@@ -252,14 +258,26 @@ impl Encoder {
                     &any_data(&hdr.mdcv()),
                     false,
                 )?;
-                if hdr.max_cll != 0 {
-                    set(
-                        &session,
-                        kVTCompressionPropertyKey_ContentLightLevelInfo,
-                        &any_data(&hdr.clli()),
-                        false,
-                    )?;
-                }
+                let master = u16::try_from(hdr.max_luminance / 10_000).unwrap_or(u16::MAX);
+                let stated = crate::settings::HdrMetadata {
+                    max_cll: if hdr.max_cll == 0 {
+                        master
+                    } else {
+                        hdr.max_cll
+                    },
+                    max_fall: if hdr.max_cll == 0 {
+                        master
+                    } else {
+                        hdr.max_fall
+                    },
+                    ..hdr
+                };
+                set(
+                    &session,
+                    kVTCompressionPropertyKey_ContentLightLevelInfo,
+                    &any_data(&stated.clli()),
+                    false,
+                )?;
             }
             set(
                 &session,

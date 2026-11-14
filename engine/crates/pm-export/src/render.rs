@@ -793,38 +793,19 @@ fn tags_of(color: OutputColor, peak_nits: u16) -> Result<ColorTags, JobError> {
 
 /// The mastering display and light levels an HDR delivery states: the
 /// sources' where they carry them, within the project's mastering peak.
-fn hdr_metadata(
-    project: &pm_protocol::color::ProjectColor,
-    content: &pm_render::media::HdrContent,
-) -> HdrMetadata {
-    use pm_media::probe::color::MasteringDisplay;
-    let peak = f64::from(project.mastering_peak);
-    let display: Option<&MasteringDisplay> = content.mastering.as_ref();
-    // Display P3 primaries and D65 when no source states a display: the
-    // common grading monitor (BT.2408).
-    let xy = |value: Option<(f64, f64)>, default: (f64, f64)| {
-        let (x, y) = value.unwrap_or(default);
-        [(x / 0.00002).round() as u16, (y / 0.00002).round() as u16]
-    };
-    let luminance = |nits: f64| (nits / 0.0001).round() as u32;
-    let max = display
-        .and_then(|d| d.max_luminance)
-        .map_or(peak, |l| l.min(peak));
+/// An HDR delivery's mastering display: the project's stated master, its
+/// peak with Display P3 primaries and D65 (the common grading monitor,
+/// BT.2408), whatever the sources say. The light levels are measured from
+/// the frames as they are encoded, not stated here.
+fn hdr_metadata(project: &pm_protocol::color::ProjectColor) -> HdrMetadata {
+    let xy = |(x, y): (f64, f64)| [(x / 0.00002).round() as u16, (y / 0.00002).round() as u16];
     HdrMetadata {
-        primaries: [
-            xy(display.and_then(|d| d.green), (0.265, 0.690)),
-            xy(display.and_then(|d| d.blue), (0.150, 0.060)),
-            xy(display.and_then(|d| d.red), (0.680, 0.320)),
-        ],
-        white: xy(display.and_then(|d| d.white), (0.3127, 0.3290)),
-        max_luminance: luminance(max),
-        min_luminance: luminance(display.and_then(|d| d.min_luminance).unwrap_or(0.0)),
-        max_cll: content.content_light.map_or(0, |c| {
-            u16::try_from(c.max_cll.min(project.mastering_peak.into())).unwrap_or(u16::MAX)
-        }),
-        max_fall: content.content_light.map_or(0, |c| {
-            u16::try_from(c.max_fall.min(project.mastering_peak.into())).unwrap_or(u16::MAX)
-        }),
+        primaries: [xy((0.265, 0.690)), xy((0.150, 0.060)), xy((0.680, 0.320))],
+        white: xy((0.3127, 0.3290)),
+        max_luminance: (f64::from(project.mastering_peak) / 0.0001).round() as u32,
+        min_luminance: 0,
+        max_cll: 0,
+        max_fall: 0,
     }
 }
 
@@ -1388,7 +1369,7 @@ fn plan_export_checked(
             )
         })
         .flatten();
-    set_hdr_metadata(&mut tags, hdr_metadata(&project, &content));
+    set_hdr_metadata(&mut tags, hdr_metadata(&project));
     let mut problems: Vec<String> = check(doc, &job.composition, &job.media)
         .iter()
         .map(ToString::to_string)

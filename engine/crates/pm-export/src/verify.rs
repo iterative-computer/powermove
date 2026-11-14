@@ -207,6 +207,9 @@ pub struct VerifyReport {
     pub notes: Vec<String>,
     /// The Dolby Vision configuration the file carries.
     pub dolby_vision: Option<crate::mp4box::Dovi>,
+    /// An HDR file's MaxCLL and MaxFALL, measured from the frames it was
+    /// given (what its `clli` says).
+    pub content_light: Option<crate::convert::FrameLight>,
     /// Whether VideoToolbox reported a hardware encoder.
     pub hardware_encoder: Option<bool>,
     /// Bytes delivered (every file of a PNG sequence).
@@ -682,6 +685,7 @@ pub fn examine(
         picture,
         notes,
         dolby_vision: visual.dolby_vision,
+        content_light: None,
         hardware_encoder: None,
         bytes: 0,
         mix: None,

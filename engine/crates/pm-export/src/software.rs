@@ -677,6 +677,7 @@ fn unpack(bytes: &[u8], spec: &ExportSpec) -> EncoderInput {
         width: spec.width,
         height: spec.height,
         planes,
+        light: None,
     }
 }
 
@@ -1009,6 +1010,7 @@ fn probe_and_verify(
         picture,
         notes,
         dolby_vision,
+        content_light: None,
         hardware_encoder: Some(false),
         bytes: fs::metadata(path).map_err(io)?.len(),
         mix: None,
