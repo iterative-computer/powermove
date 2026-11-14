@@ -67,6 +67,13 @@ pub fn receive(urls: Vec<String>, cx: &mut App) {
             }
             continue;
         }
+        // `review/key/<keystroke>`: one key pressed and let go in the
+        // editor window (`space`, `escape`, `right`), where it has focus.
+        #[cfg(debug_assertions)]
+        if let Some(key) = raw.strip_prefix("powermove://review/key/") {
+            review_key(key, cx);
+            continue;
+        }
         #[cfg(debug_assertions)]
         if let Some(points) = raw.strip_prefix("powermove://review/pointer/") {
             review_input(review_points(points), None, cx);
@@ -487,6 +494,27 @@ fn review_steps(points: &[Point<Pixels>], paths: Option<Vec<PathBuf>>) -> Vec<Pl
 
 /// Sends a review pointer path into the first editor window, one step a
 /// frame, so each event meets the hitboxes the last frame drew.
+#[cfg(debug_assertions)]
+fn review_key(key: &str, cx: &mut App) {
+    let Some(&(_, handle)) = cx.default_global::<Entries>().editors.first() else {
+        return;
+    };
+    let Ok(keystroke) = gpui::Keystroke::parse(key) else {
+        return;
+    };
+    let _ = cx.update_window(handle, |_, window, cx| {
+        window.dispatch_event(
+            PlatformInput::KeyDown(gpui::KeyDownEvent {
+                keystroke: keystroke.clone(),
+                is_held: false,
+                prefer_character_input: false,
+            }),
+            cx,
+        );
+        window.dispatch_event(PlatformInput::KeyUp(gpui::KeyUpEvent { keystroke }), cx);
+    });
+}
+
 #[cfg(debug_assertions)]
 fn review_input(points: Vec<Point<Pixels>>, paths: Option<Vec<PathBuf>>, cx: &mut App) {
     let Some(&(_, handle)) = cx.default_global::<Entries>().editors.first() else {
