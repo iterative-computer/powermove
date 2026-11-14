@@ -607,6 +607,10 @@ fn a_still_capture_bypasses_an_uninstalled_effect_and_a_delivery_names_it() {
     assert_eq!(refused.state, JobState::Failed, "{refused:?}");
     let message = refused.error.unwrap().message;
     assert!(message.contains("acme.glow isn't installed"), "{message}");
+    assert!(
+        message.contains("Install the extension “acme”"),
+        "the extension its id names: {message}"
+    );
     // Switched off, it never draws, so a delivery doesn't need it.
     let off = finish(request_for(
         &with_uninstalled_effect(false),
@@ -614,6 +618,27 @@ fn a_still_capture_bypasses_an_uninstalled_effect_and_a_delivery_names_it() {
         1,
     ));
     assert_eq!(off.state, JobState::Done, "{off:?}");
+}
+/// An effect whose extension is installed but provides nothing now (turned
+/// off, stopped, failed to start) is refused naming that extension and why,
+/// never as "not installed".
+#[test]
+fn a_delivery_names_the_installed_extension_that_provides_nothing_now() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut off = request_for(&with_uninstalled_effect(true), dir.path().join("off"), 1);
+    off.resources.unavailable = vec![pm_engine_service::resources::Unavailable {
+        id: "acme".into(),
+        name: "Acme Effects".into(),
+        why: "is turned off".into(),
+    }];
+    let refused = finish(off);
+    assert_eq!(refused.state, JobState::Failed, "{refused:?}");
+    let message = refused.error.unwrap().message;
+    assert!(
+        message.contains("Acme Effects is turned off, so acme.glow can't be drawn")
+            && !message.contains("installed"),
+        "{message}"
+    );
 }
 /// A delivery sent while extensions still load (the app waits, so only a
 /// stray one) never says the effect isn't installed.

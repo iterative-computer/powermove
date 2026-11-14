@@ -283,13 +283,15 @@ impl Render for WelcomeView {
         {
             window.request_animation_frame();
         }
+        let spoken = frame.title.replace('\n', " ");
         let mut content = div()
             .relative()
             .flex()
             .flex_col()
             .gap(px(m.gap))
             .w_full()
-            .max_w(px(m.sheet_width_wide));
+            .max_w(px(m.sheet_width_wide))
+            .when(frame.centred, |d| d.items_center().text_center());
         if let Some(label) = &frame.eyebrow {
             content = content.child(
                 div()
@@ -304,7 +306,7 @@ impl Render for WelcomeView {
                     .id("welcome-title")
                     .debug_selector(|| "welcome-title".into())
                     .role(Role::Heading)
-                    .aria_label(frame.title.clone())
+                    .aria_label(spoken.clone())
                     .text_size(px(t.typography.display))
                     .text_color(rgb(c.text))
                     .child(frame.title.clone()),
@@ -429,7 +431,11 @@ impl Render for WelcomeView {
         for button in frame.buttons.iter().filter(|b| b.leading) {
             footer = footer.child(self.button(button, cx));
         }
-        footer = footer.child(div().flex_1());
+        footer = if frame.centred {
+            footer.justify_center()
+        } else {
+            footer.child(div().flex_1())
+        };
         for button in frame.buttons.iter().filter(|b| !b.leading) {
             footer = footer.child(self.button(button, cx));
         }
@@ -440,7 +446,7 @@ impl Render for WelcomeView {
             .id("welcome")
             .role(Role::Group)
             .accessibility_id("shell.welcome")
-            .aria_label(frame.title.clone())
+            .aria_label(spoken)
             .relative()
             .size_full()
             .flex()

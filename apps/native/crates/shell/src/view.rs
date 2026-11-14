@@ -542,7 +542,7 @@ impl Editor {
                 };
                 self.layout.move_panel_to(id, DropTarget::Edge(edge))
             }
-            ("panel", "group" | "above" | "below") => {
+            ("panel", "group" | "above" | "below" | "left" | "right") => {
                 let (id, target) = rest.split_once(':').unwrap_or((rest, ""));
                 self.layout.place_relative(id, target, verb)
             }
@@ -1570,6 +1570,12 @@ impl Render for Editor {
         // time, after this frame's layout has recorded them.
         let native_bodies = self.host.as_ref().map(|h| h.borrow().native_panels.clone());
         let dragging = matches!(&self.gesture, Some(Gesture::Panel(d)) if d.moved);
+        // A resize keeps its cursor wherever the pointer goes until release.
+        let resizing = match &self.gesture {
+            Some(Gesture::Resize(d, ..)) if d.horizontal => Some(CursorStyle::ResizeUpDown),
+            Some(Gesture::Resize(..)) => Some(CursorStyle::ResizeLeftRight),
+            _ => None,
+        };
         let mut root = div()
             .id("editor")
             .role(Role::Group)
@@ -1581,6 +1587,7 @@ impl Render for Editor {
             .text_color(rgb(c.text))
             .track_focus(&self.focus)
             .when(dragging, |d| d.cursor(CursorStyle::ClosedHand))
+            .when_some(resizing, |d, cursor| d.cursor(cursor))
             .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
                 if let Some(i) = &this.integration {
                     i.drop_paths(paths.paths().to_vec(), cx);
@@ -1632,7 +1639,7 @@ impl Render for Editor {
                             } else {
                                 f32::from(e.position.x - start.x)
                             };
-                            this.layout.resize(d, delta, &this.tokens);
+                            this.layout.resize(d, delta, this.dock_bounds, &this.tokens);
                             cx.notify();
                         }
                         Some(Gesture::Panel(drag)) => {
@@ -1717,7 +1724,7 @@ impl Render for Editor {
                         }
                         _ => return,
                     };
-                    this.layout.resize(&d, delta, &this.tokens);
+                    this.layout.resize(&d, delta, this.dock_bounds, &this.tokens);
                     this.save();
                     cx.notify();
                 }
@@ -2173,32 +2180,31 @@ impl Render for Editor {
         for (i, d) in self.geometry.dividers.clone().into_iter().enumerate() {
             let divd = d.clone();
             let key_divider = d.clone();
-            // The whole gap takes the pointer; what shows is a thin grip
-            // centred in it, on hover and while it has keyboard focus.
-            let group: SharedString = format!("splitter-{i}").into();
-            let dragged = matches!(&self.gesture, Some(Gesture::Resize(g, ..))
-                if (g.dock, g.group, g.horizontal) == (d.dock, d.group, d.horizontal));
-            let (grip_ink, grip_alpha) = (c.text, if dragged { 0.4 } else { 0.22 });
-            let grip = div()
-                .rounded_full()
-                .when(d.horizontal, |g| g.h(px(m.border * 2.)).w_full())
-                .when(!d.horizontal, |g| g.w(px(m.border * 2.)).h_full())
-                .when(dragged, |g| g.bg(tint(grip_ink, grip_alpha)))
-                .group_hover_style(group.clone(), move |s| s.bg(tint(grip_ink, grip_alpha)));
+            // As in Final Cut and After Effects, the splitter is the gap
+            // itself: nothing is drawn on it, the resize cursor says it can
+            // be dragged, along its whole length and a little past each side.
+            let reach = m.border * 2.;
+            let hit = if d.horizontal {
+                Rect {
+                    y: d.rect.y - reach,
+                    h: d.rect.h + 2. * reach,
+                    ..d.rect
+                }
+            } else {
+                Rect {
+                    x: d.rect.x - reach,
+                    w: d.rect.w + 2. * reach,
+                    ..d.rect
+                }
+            };
             root = root.child(
-                positioned(d.rect)
+                positioned(hit)
                     .id(format!("splitter-{i}"))
-                    .group(group)
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .when(d.horizontal, |s| s.px(px(m.panel_radius)))
-                    .when(!d.horizontal, |s| s.py(px(m.panel_radius)))
-                    .child(grip)
                     .role(Role::Splitter)
                     .aria_label("Resize dock")
                     .tab_index(1000 + i as isize)
-                    .focus_style(|s| s.bg(tint(c.focus, 0.5)))
+                    // Only a keyboard focus shows (a press focuses it too).
+                    .focus_visible_style(|s| s.bg(tint(c.focus, 0.5)))
                     .on_key_down(cx.listener(move |this, e: &KeyDownEvent, _, cx| {
                         let delta = match e.keystroke.key.as_str() {
                             "left" | "up" => -this.tokens.metrics.keyboard_step,
@@ -2210,7 +2216,7 @@ impl Render for Editor {
                             }
                             _ => return,
                         };
-                        this.layout.resize(&key_divider, delta, &this.tokens);
+                        this.layout.resize(&key_divider, delta, this.dock_bounds, &this.tokens);
                         this.save();
                         cx.stop_propagation();
                         cx.notify();

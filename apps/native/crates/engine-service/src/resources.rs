@@ -19,8 +19,40 @@ pub struct ResourceSnapshot {
     /// frame that waits for one says which.
     #[serde(default)]
     pub loading: Vec<(String, String)>,
+    /// Installed extensions that provide nothing now, with why: they are
+    /// named beside the effects they would provide. Names; pins nothing.
+    #[serde(default)]
+    pub unavailable: Vec<Unavailable>,
+}
+/// An installed extension that provides nothing now (turned off, stopped,
+/// failed to start), named beside an effect it would provide. `why` reads
+/// after its name: "is turned off".
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Unavailable {
+    pub id: String,
+    pub name: String,
+    pub why: String,
+}
+/// Whether an effect's id is its extension's: `<extension>` or
+/// `<extension>.<name>`.
+pub fn provides(extension: &str, effect: &str) -> bool {
+    effect
+        .strip_prefix(extension)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
+}
+/// The extension an effect's id names (`<extension>.<name>`), when it names one.
+pub fn named_extension(effect: &str) -> Option<&str> {
+    effect
+        .split_once('.')
+        .map(|(id, _)| id)
+        .filter(|id| !id.is_empty())
 }
 impl ResourceSnapshot {
+    /// The installed extension that would provide `effect`, if it is one that
+    /// provides nothing now.
+    pub fn unavailable_owner(&self, effect: &str) -> Option<&Unavailable> {
+        self.unavailable.iter().find(|u| provides(&u.id, effect))
+    }
     pub fn validate(&self) -> anyhow::Result<()> {
         // Definitions arrive whole in `definitions`; a pinned extension
         // generation names content nothing here can load.
