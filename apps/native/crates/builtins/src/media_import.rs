@@ -17,16 +17,28 @@ use std::{
 };
 
 /// `shared/media-formats.ts`. Formats the engine decodes natively need no proxy.
+/// The stills the still path draws (`pm_media::image::read`), EXR at its
+/// depth. DPX (planar samples not drawn at depth yet), TGA and PSD (outside
+/// the renderer's still classes) are not offered.
 const IMAGES: &[&str] = &[
-    "png", "jpg", "jpeg", "gif", "webp", "avif", "bmp", "ico", "svg", "tif", "tiff", "heic", "heif",
+    "png", "jpg", "jpeg", "gif", "webp", "avif", "bmp", "ico", "svg", "tif", "tiff", "heic",
+    "heif", "exr",
 ];
 const AUDIO: &[&str] = &[
-    "wav", "mp3", "m4a", "aac", "ogg", "oga", "opus", "weba", "flac", "aif", "aiff",
+    "wav", "mp3", "m4a", "aac", "ogg", "oga", "opus", "weba", "flac", "aif", "aiff", "aifc", "caf",
+];
+/// Camera raw: named when refused (no raw development in the engine).
+const RAW_EXTENSIONS: &[&str] = &[
+    "dng", "cr2", "cr3", "crw", "nef", "nrw", "arw", "srf", "sr2", "raf", "orf", "rw2", "pef",
+    "srw", "x3f", "3fr", "iiq", "erf", "mos", "braw", "r3d", "ari",
 ];
 const VIDEO: &[&str] = &[
     "mp4", "mov", "m4v", "webm", "mkv", "avi", "wmv", "asf", "flv", "mpg", "mpeg", "m2v", "mts",
     "m2ts", "ts", "3gp", "3g2", "mxf", "ogv", "dv", "vob",
 ];
+/// What Import Media says of a camera raw file.
+const RAW: &str =
+    "Camera raw files can't be imported yet · export TIFF or EXR from your raw developer";
 /// Every extension Import Media accepts, for the open panel's filter.
 pub fn extensions() -> Vec<&'static str> {
     [IMAGES, AUDIO, VIDEO].concat()
@@ -86,6 +98,9 @@ fn mime(path: &Path, kind: &str) -> String {
         ("image", "jpg" | "jpeg") => "image/jpeg".into(),
         ("image", "svg") => "image/svg+xml".into(),
         ("image", "tif") => "image/tiff".into(),
+        ("image", "exr") => "image/x-exr".into(),
+        ("audio", "aif" | "aifc") => "audio/aiff".into(),
+        ("audio", "caf") => "audio/x-caf".into(),
         ("video", "mov") => "video/quicktime".into(),
         ("video", "mkv") => "video/x-matroska".into(),
         ("audio", "mp3") => "audio/mpeg".into(),
@@ -270,7 +285,7 @@ pub struct ImportRequest {
     pub models: bool,
     /// The layer definition an extension asked its asset to place as.
     pub layer_definition: Option<String>,
-    /// Import Image Sequence: `paths` are the frames, encoded into one clip.
+    /// Import Image Sequence: `paths` are the frames of one clip.
     pub sequence: Option<SequenceImport>,
     /// The placed layer's name and fitted size, instead of the file's.
     pub placed_as: Option<PlacedAs>,
@@ -298,7 +313,7 @@ pub struct SequenceImport {
     pub progress: Arc<Mutex<String>>,
 }
 /// `chooseSequence`'s ordering, in today's words: frame-number order, gaps
-/// skipped (the available images play consecutively).
+/// reported (a missing number shows as Media Offline, never another frame).
 pub fn order_sequence(paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
     use pm_media::image::sequence::ImageSequence;
     if paths.len() < 2 {
@@ -317,66 +332,178 @@ pub fn order_sequence(paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
         }
     }
 }
-/// `<prefix> sequence.webm`, the clip's name in the Project panel.
-pub fn sequence_name(first: &Path) -> String {
-    let name = first
-        .file_name()
-        .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
-    let stem = name
-        .rsplit_once('.')
-        .map_or(name.as_str(), |(stem, _)| stem);
-    let prefix = stem.trim_end_matches(|c: char| c.is_ascii_digit());
-    let prefix = prefix.trim_end_matches(['-', '_', '.', ' ']);
-    format!(
-        "{} sequence.webm",
-        if prefix.is_empty() { "Image" } else { prefix }
-    )
-}
-/// The frames encoded into a scratch WebM (removed when dropped), and the
-/// asset facts today's importer adds to it.
-struct EncodedSequence {
+/// The type a sequence's retained manifest is kept as.
+const SEQUENCE_MIME: &str = "application/x-powermove-image-sequence";
+/// Chosen frames as a sequence read in place: a manifest in scratch
+/// (removed when dropped) that the asset retains as its original, and the
+/// asset record. Frames are never transcoded: each is read as a still at
+/// its own depth when it is drawn.
+struct ChosenSequence {
     _dir: tempfile::TempDir,
     path: PathBuf,
-    fps: f64,
-    frames: u64,
+    asset: serde_json::Value,
+    /// Numbers in the range with no file, as the status line says them.
+    missing: Option<String>,
 }
-fn encode_sequence(
+fn choose_sequence(
     paths: &[PathBuf],
     sequence: &SequenceImport,
     cancel: &AtomicBool,
-) -> Result<EncodedSequence, String> {
-    use pm_export::stills::{Stage, encode_still_sequence};
-    let frames = order_sequence(paths)?;
+) -> Result<Option<ChosenSequence>, String> {
+    use pm_media::image::sequence::{ImageSequence, MAX_FRAMES, Manifest};
+    order_sequence(paths)?;
+    let chosen = ImageSequence::from_paths(paths).map_err(|e| e.to_string())?;
+    if chosen.last().saturating_sub(chosen.first()) >= MAX_FRAMES as i64 {
+        return Err(format!(
+            "These frames are numbered {} to {}, too far apart to be one sequence. Choose frames numbered closer together.",
+            chosen.first(),
+            chosen.last()
+        ));
+    }
+    // 23.976 is 24000/1001: the clip's length and frames stay on the grid.
+    let rate = pm_time::SUPPORTED_RATES
+        .into_iter()
+        .find(|r| (r.to_f64() - sequence.fps).abs() < 1e-3)
+        .or_else(|| pm_time::Rate::new((sequence.fps * 1000.0).round() as i64, 1000).ok())
+        .ok_or("Choose a frame rate above 0")?;
+    let fps = rate.to_f64();
+    let manifest = Manifest::of(&chosen, rate).map_err(|_| {
+        "Choose frames numbered the same way (for example frame_0001.png)".to_owned()
+    })?;
+    if let Ok(mut progress) = sequence.progress.lock() {
+        *progress = "Importing image sequence…".into();
+    }
+    // The first frame proves the format reads; it gives the clip its size.
+    let first = &chosen.frames[0].1;
+    decodes(first, "image")?;
+    // Every frame is drawn at that size: one of another size is refused now
+    // (read from each file's header, not decoded).
+    let size_of = |path: &Path| pm_media::image::imageio::pixel_size(path).ok();
+    if let Some(expected) = size_of(first) {
+        for (_, path) in &chosen.frames[1..] {
+            if cancel.load(Ordering::Acquire) {
+                return Ok(None);
+            }
+            if let Some((w, h)) = size_of(path).filter(|size| *size != expected) {
+                let name = path.file_name().unwrap_or_default().to_string_lossy();
+                return Err(format!(
+                    "{name} is {w}×{h}, but the sequence’s first frame is {}×{}. Render every frame at one size.",
+                    expected.0, expected.1
+                ));
+            }
+        }
+    }
+    let facts =
+        pm_media::facts::media_facts_as(first, None, pm_media::clip::ClipTiming::Presentation)
+            .map_err(|e| e.to_string())?;
+    let [w, h] = facts.display_size.unwrap_or([0, 0]);
+    let size: u64 = chosen
+        .frames
+        .iter()
+        .filter_map(|(_, p)| std::fs::metadata(p).ok())
+        .map(|m| m.len())
+        .sum();
+    let frames = manifest.frames();
+    let asset = json!({
+        "name": manifest.name(),
+        "kind": "video",
+        "size": size,
+        "dur": frames as f64 / fps,
+        "w": w,
+        "h": h,
+        "channels": 0,
+        "sampleRate": 0,
+        "playbackProxy": false,
+        "playbackProxyVersion": 0,
+        "persisted": true,
+        "hasAudio": false,
+        "audioDur": 0,
+        "format": extension(first),
+        "fps": fps,
+        "imageSequence": {"fps": fps, "frames": frames, "first": manifest.first, "last": manifest.last},
+    });
+    let Some(missing) = manifest.missing_until(cancel) else {
+        return Ok(None);
+    };
+    let missing = (!missing.is_empty()).then(|| {
+        let ranges: Vec<String> = missing
+            .iter()
+            .map(|(a, b)| {
+                if a == b {
+                    a.to_string()
+                } else {
+                    format!("{a}–{b}")
+                }
+            })
+            .collect();
+        let single = missing.len() == 1 && missing[0].0 == missing[0].1;
+        format!(
+            "{} {} missing",
+            if single { "frame" } else { "frames" },
+            ranges.join(", ")
+        )
+    });
     let dir = tempfile::Builder::new()
         .prefix("powermove-image-sequence-")
         .tempdir()
         .map_err(|e| e.to_string())?;
-    let path = dir.path().join(sequence_name(&frames[0]));
-    let say = |line: String| {
-        if let Ok(mut progress) = sequence.progress.lock() {
-            *progress = line;
-        }
-    };
-    let encoded = encode_still_sequence(&frames, sequence.fps, &path, cancel, &mut |stage| {
-        say(match stage {
-            Stage::Checking { done, total } => format!("Checking frames · {done} of {total}"),
-            Stage::Creating { done, total } => {
-                format!("Creating sequence · {done} of {total} frames")
-            }
-        })
-    })
-    .map_err(|error| match error {
-        pm_export::Error::InvalidFrame(why) | pm_export::Error::InvalidSpec(why) => why,
-        pm_export::Error::Io(why) => why,
-        pm_export::Error::Cancelled => "Import cancelled".into(),
-        other => format!("Could not create the image sequence: {other}"),
-    })?;
-    say("Importing image sequence…".into());
-    Ok(EncodedSequence {
+    let path = dir.path().join("sequence.json");
+    std::fs::write(&path, manifest.to_bytes()).map_err(|e| e.to_string())?;
+    Ok(Some(ChosenSequence {
         _dir: dir,
         path,
-        fps: sequence.fps,
-        frames: encoded.frames,
+        asset,
+        missing,
+    }))
+}
+/// A sequence asset relinked by choosing one of its files in their new
+/// folder: every file numbered as that one is the sequence again, at the
+/// rate it was imported at.
+struct RelinkedSequence {
+    frames: Vec<PathBuf>,
+    sequence: SequenceImport,
+    /// The first and last number the asset had, when it says.
+    was: Option<(i64, i64)>,
+}
+impl RelinkedSequence {
+    /// The status line's word on a range that changed.
+    fn range_note(&self, asset: &serde_json::Value) -> Option<String> {
+        let number = |key: &str| asset["imageSequence"][key].as_i64();
+        let now = (number("first")?, number("last")?);
+        let was = self.was.filter(|was| *was != now)?;
+        Some(format!(
+            "frames {}–{}, were {}–{}",
+            now.0, now.1, was.0, was.1
+        ))
+    }
+}
+/// `paths` (one numbered still) as the new place of the sequence `record`
+/// is, or None when the asset is not a sequence or the file is not one of a
+/// numbered set (it then replaces the asset as any file does).
+fn relinked_sequence(
+    record: Option<&serde_json::Value>,
+    paths: &[PathBuf],
+) -> Option<RelinkedSequence> {
+    let numbers = record?.get("imageSequence")?;
+    let [frame] = paths else {
+        return None;
+    };
+    if kind(frame) != Some("image") {
+        return None;
+    }
+    let found = pm_media::image::sequence::detect(frame).ok()??;
+    let fps = numbers["fps"]
+        .as_f64()
+        .or_else(|| record?["fps"].as_f64())
+        .filter(|fps| fps.is_finite() && *fps > 0.0)
+        .unwrap_or(30.0);
+    Some(RelinkedSequence {
+        frames: found.frames.into_iter().map(|(_, path)| path).collect(),
+        sequence: SequenceImport {
+            fps,
+            progress: Default::default(),
+        },
+        was: numbers["first"].as_i64().zip(numbers["last"].as_i64()),
     })
 }
 /// A 3D model's type, for imports that take models.
@@ -396,6 +523,8 @@ pub struct Outcome {
     pub assets: Vec<String>,
     /// File name and reason, in the panel's words.
     pub failed: Vec<(String, String)>,
+    /// What else a person should know (frames missing from a sequence).
+    pub notes: Vec<String>,
     pub cancelled: bool,
 }
 impl Outcome {
@@ -406,6 +535,7 @@ impl Outcome {
             1 => parts.push(format!("Imported {}", self.imported[0])),
             n => parts.push(format!("Imported {n} files")),
         }
+        parts.extend(self.notes.iter().cloned());
         parts.extend(
             self.failed
                 .iter()
@@ -441,20 +571,52 @@ impl Builtins {
         let archive = Archive::open(profile).map_err(|e| e.to_string())?;
         let mut outcome = Outcome::default();
         let mut items = vec![];
-        let encoded = match &request.sequence {
-            Some(sequence) => match encode_sequence(&request.paths, sequence, cancel) {
-                Ok(encoded) => Some(encoded),
-                Err(_) if cancel.load(Ordering::Acquire) => {
-                    outcome.cancelled = true;
-                    return Ok(outcome);
+        // A relink retains the old bytes and reads which of the old file's
+        // audio streams were heard and how the asset reads its file's times.
+        let mut timing = pm_media::clip::ClipTiming::Presentation;
+        let mut relinked = None;
+        let (previous, old_streams) = match &request.replace {
+            Some(id) => {
+                let published = self.broker.kernel.published(&project).ok_or(SWITCHED)?;
+                let entry = published.media.get(id).cloned();
+                let previous = entry
+                    .map(|entry| archive.retain_entry(&entry))
+                    .transpose()
+                    .map_err(|e| e.to_string())?;
+                let record = published
+                    .snapshot
+                    .root()
+                    .and_then(|root| root.get("assets")?.get(id))
+                    .map(|record| crate::data::wire(&record.to_value()));
+                timing = asset_timing(record.as_ref());
+                if request.sequence.is_none() {
+                    relinked = relinked_sequence(record.as_ref(), &request.paths);
                 }
-                Err(error) => return Err(error),
-            },
+                let streams = record.and_then(|record| record.get("audioStreams").cloned());
+                (previous, streams)
+            }
+            None => (None, None),
+        };
+        let chosen = match (&request.sequence, &relinked) {
+            (Some(sequence), _) => Some(choose_sequence(&request.paths, sequence, cancel)?),
+            (None, Some(relinked)) => Some(choose_sequence(
+                &relinked.frames,
+                &relinked.sequence,
+                cancel,
+            )?),
+            (None, None) => None,
+        };
+        let sequence = match chosen {
+            Some(None) => {
+                outcome.cancelled = true;
+                return Ok(outcome);
+            }
+            Some(Some(sequence)) => Some(sequence),
             None => None,
         };
         let (mut folders, mut folder_of) = (vec![], std::collections::HashMap::new());
-        let paths = match &encoded {
-            Some(encoded) => vec![encoded.path.clone()],
+        let paths = match &sequence {
+            Some(sequence) => vec![sequence.path.clone()],
             None if request.keep_folders && request.replace.is_none() => {
                 let (made, files) = folder_tree(request.paths);
                 folders = made;
@@ -470,28 +632,6 @@ impl Builtins {
             }
             None => expand(request.paths),
         };
-        // A relink retains the old bytes and reads which of the old file's
-        // audio streams were heard and how the asset reads its file's times.
-        let mut timing = pm_media::clip::ClipTiming::Presentation;
-        let (previous, old_streams) = match &request.replace {
-            Some(id) => {
-                let published = self.broker.kernel.published(&project).ok_or(SWITCHED)?;
-                let entry = published.media.get(id).cloned();
-                let previous = entry
-                    .map(|entry| archive.retain_entry(&entry))
-                    .transpose()
-                    .map_err(|e| e.to_string())?;
-                let record = published
-                    .snapshot
-                    .root()
-                    .and_then(|root| root.get("assets")?.get(id))
-                    .map(|record| crate::data::wire(&record.to_value()));
-                timing = asset_timing(record.as_ref());
-                let streams = record.and_then(|record| record.get("audioStreams").cloned());
-                (previous, streams)
-            }
-            None => (None, None),
-        };
         for path in paths {
             if cancel.load(Ordering::Acquire) {
                 outcome.cancelled = true;
@@ -501,34 +641,53 @@ impl Builtins {
                 .file_name()
                 .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
             let model = request.models.then(|| model_mime(&path)).flatten();
-            let Some(kind) = kind(&path).or(model.map(|_| "model")) else {
-                outcome.failed.push((name, "Unsupported file".into()));
+            let kind = match &sequence {
+                Some(_) => Some("video"),
+                None => kind(&path).or(model.map(|_| "model")),
+            };
+            let Some(kind) = kind else {
+                let raw = RAW_EXTENSIONS.contains(&extension(&path).as_str());
+                outcome
+                    .failed
+                    .push((name, if raw { RAW } else { "Unsupported file" }.into()));
                 continue;
             };
-            let type_ = model.map_or_else(|| mime(&path, kind), str::to_owned);
-            let retained = (if model.is_some() {
+            let type_ = match (&sequence, model) {
+                (Some(_), _) => SEQUENCE_MIME.to_owned(),
+                (None, Some(model)) => model.to_owned(),
+                (None, None) => mime(&path, kind),
+            };
+            // A sequence's first frame was read when it was chosen.
+            let retained = (if model.is_some() || sequence.is_some() {
                 Ok(())
             } else {
                 decodes(&path, kind)
             })
             .and_then(|()| {
                 let size = std::fs::metadata(&path).map_err(|e| e.to_string())?.len();
-                let (mut asset, streams) = match model {
-                    // A model has no media facts; the scene system reads its bytes.
-                    Some(_) => (
-                        json!({"name":name,"kind":"model","size":size,"persisted":true,
+                let (mut asset, streams) = if let Some(sequence) = &sequence {
+                    (sequence.asset.clone(), vec![])
+                } else {
+                    match model {
+                        // A model has no media facts; the scene system reads its bytes.
+                        Some(_) => (
+                            json!({"name":name,"kind":"model","size":size,"persisted":true,
                             "sourcePath":path.to_string_lossy()}),
-                        vec![],
-                    ),
-                    None => {
-                        let (asset, streams) = metadata(&path, kind, size, timing)?;
-                        (crate::data::wire(&asset), streams)
+                            vec![],
+                        ),
+                        None => {
+                            let (asset, streams) = metadata(&path, kind, size, timing)?;
+                            (crate::data::wire(&asset), streams)
+                        }
                     }
                 };
                 // A new clip's times address the file's presentation. A
                 // relinked asset keeps the reading its edits were made with:
                 // the merge leaves its `timing` member (or its absence) alone.
-                if request.replace.is_none() && matches!(kind, "video" | "audio") {
+                if request.replace.is_none()
+                    && sequence.is_none()
+                    && matches!(kind, "video" | "audio")
+                {
                     asset["timing"] = json!(pm_media::clip::ClipTiming::imported());
                 }
                 if let Some(definition) = &request.layer_definition {
@@ -538,14 +697,10 @@ impl Builtins {
                     asset["folder"] = json!(folder);
                 }
                 // Generated in scratch: no source file to relink to.
-                if (encoded.is_some() || request.staged.is_some())
+                if request.staged.is_some()
                     && let Some(asset) = asset.as_object_mut()
                 {
                     asset.remove("sourcePath");
-                }
-                if let Some(encoded) = &encoded {
-                    asset["fps"] = json!(encoded.fps);
-                    asset["imageSequence"] = json!({"fps": encoded.fps, "frames": encoded.frames});
                 }
                 Ok((asset, streams))
             })
@@ -665,6 +820,12 @@ impl Builtins {
         }
         outcome.imported = names;
         outcome.assets = assets;
+        if let (Some(relinked), Some(sequence)) = (&relinked, &sequence)
+            && let Some(note) = relinked.range_note(&sequence.asset)
+        {
+            outcome.notes.push(note);
+        }
+        outcome.notes.extend(sequence.and_then(|s| s.missing));
         Ok(outcome)
     }
 }
@@ -908,68 +1069,610 @@ mod tests {
         );
     }
 
+    /// A 16-bit RGBA PNG of `w`×`h` samples `pixel(x, y)`.
+    fn png16(w: u32, h: u32, pixel: impl Fn(u32, u32) -> [u16; 4]) -> Vec<u8> {
+        fn crc(bytes: &[u8]) -> u32 {
+            let mut c = !0u32;
+            for b in bytes {
+                c ^= u32::from(*b);
+                for _ in 0..8 {
+                    c = if c & 1 == 1 {
+                        0xedb8_8320 ^ (c >> 1)
+                    } else {
+                        c >> 1
+                    };
+                }
+            }
+            !c
+        }
+        fn chunk(out: &mut Vec<u8>, kind: &[u8], data: &[u8]) {
+            out.extend((data.len() as u32).to_be_bytes());
+            let start = out.len();
+            out.extend(kind);
+            out.extend(data);
+            let sum = crc(&out[start..]);
+            out.extend(sum.to_be_bytes());
+        }
+        let mut raw = vec![];
+        for y in 0..h {
+            raw.push(0);
+            for x in 0..w {
+                for v in pixel(x, y) {
+                    raw.extend(v.to_be_bytes());
+                }
+            }
+        }
+        let mut z = flate2::write::ZlibEncoder::new(vec![], flate2::Compression::fast());
+        std::io::Write::write_all(&mut z, &raw).unwrap();
+        let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
+        let mut ihdr = vec![];
+        ihdr.extend(w.to_be_bytes());
+        ihdr.extend(h.to_be_bytes());
+        ihdr.extend([16, 6, 0, 0, 0]);
+        chunk(&mut out, b"IHDR", &ihdr);
+        chunk(&mut out, b"IDAT", &z.finish().unwrap());
+        chunk(&mut out, b"IEND", &[]);
+        out
+    }
+
+    /// Frame `number`'s samples: a red ramp far finer than 8 bits, green
+    /// coding the frame number, and rows of full, partial and no alpha.
+    fn coded(number: u32, x: u32, y: u32) -> [u16; 4] {
+        let alpha = [65535, 40000, 0, 65535][y as usize];
+        [
+            30000 + x as u16 * 37,
+            number as u16 * 9000,
+            65535 - x as u16 * 500,
+            alpha,
+        ]
+    }
+
     #[test]
-    fn an_image_sequence_becomes_one_lossless_webm_clip_skipping_missing_numbers() {
-        let f = fixture();
-        // Frames 1, 2, 3, 5 (4 missing), chosen out of order with mixed padding.
-        let frames: Vec<_> = ["shot_005.png", "shot_1.png", "shot_003.png", "shot_02.png"]
+    fn an_image_sequence_is_read_in_place_at_its_depth_with_its_alpha() {
+        use pm_protocol::color::Precision;
+        use pm_protocol::common::{Size, Ticks};
+        use pm_render::{MapResolver, RenderRequest, Renderer};
+        for (depth, precision) in [(16, Precision::Float16), (32, Precision::Float32)] {
+            let (f, _session) = opened(&format!(
+                r##"{{"id":"p","name":"Film","compId":"c","w":64,"h":4,"fps":23.976,"dur":10,"bg":"#000000","colorDepth":{depth},"assets":{{}},"comps":{{}},"layers":[]}}"##,
+            ));
+            // Numbers 1 to 6 at 23.976 with 4 never rendered.
+            let frames: Vec<_> = [6, 1, 3, 2, 5]
+                .iter()
+                .map(|&n| {
+                    write(
+                        &f.root,
+                        &format!("shot.{n:04}.png"),
+                        &png16(64, 4, |x, y| coded(n, x, y)),
+                    )
+                })
+                .collect();
+            let progress = Arc::new(Mutex::new(String::new()));
+            let outcome = f
+                .runtime
+                .import_media(
+                    document(&f),
+                    &f.root,
+                    ImportRequest {
+                        paths: frames.clone(),
+                        place_at: Some(0.),
+                        sequence: Some(SequenceImport {
+                            fps: 23.976,
+                            progress: progress.clone(),
+                        }),
+                        ..Default::default()
+                    },
+                    &AtomicBool::new(false),
+                )
+                .unwrap();
+            assert_eq!(outcome.imported, ["shot.[0001-0006].png"], "{outcome:?}");
+            assert_eq!(
+                outcome.summary(),
+                "Imported shot.[0001-0006].png · frame 4 missing"
+            );
+            let published = f.actor.handle().published("p").unwrap();
+            let root = published.snapshot.root().unwrap().to_value();
+            let id = pm_kernel::asset_order::keys(&root).remove(0);
+            let asset = root.get("assets").unwrap().get(&id).unwrap();
+            let field = |key: &str| asset.get(key).and_then(Value::as_f64);
+            assert_eq!(asset.get("kind").unwrap().as_str(), Some("video"));
+            assert_eq!((field("w"), field("h")), (Some(64.), Some(4.)));
+            assert_eq!(asset.get("hasAudio").unwrap().as_bool(), Some(false));
+            let sequence = asset.get("imageSequence").unwrap();
+            let number = |key: &str| sequence.get(key).and_then(Value::as_f64);
+            assert_eq!(
+                (number("first"), number("last"), number("frames")),
+                (Some(1.), Some(6.), Some(6.))
+            );
+            assert!((field("dur").unwrap() - 6. * 1001. / 24000.).abs() < 1e-9);
+            // The asset retains the reference, not the pixels.
+            let manifest = f.root.join("retained.json");
+            published
+                .media
+                .get(&id)
+                .unwrap()
+                .copy_to(&manifest)
+                .unwrap();
+            assert!(std::fs::metadata(&manifest).unwrap().len() < 4096);
+            // The Project panel reads it as ready media, not a failed video.
+            assert_eq!(crate::delivery::probe_media(&manifest, "video"), Ok(()));
+
+            // A frame rendered into the hole later is picked up; one deleted
+            // after import is missing, never another frame.
+            write(
+                &f.root,
+                "shot.0004.png",
+                &png16(64, 4, |x, y| coded(4, x, y)),
+            );
+            std::fs::remove_file(f.root.join("shot.0005.png")).unwrap();
+            let mut resolver = MapResolver::default();
+            resolver.paths.insert(id.clone(), manifest);
+            let document = &published.snapshot.document;
+            let comp = published.snapshot.open_comp().unwrap();
+            {
+                let mut renderer = Renderer::headless().unwrap();
+                // At 16 bits a sample is within half a half-float step; an
+                // 8-bit read would be off by up to 1/510.
+                let tolerance = if precision == Precision::Float16 {
+                    3e-4
+                } else {
+                    2e-6
+                };
+                for k in 0..6u32 {
+                    // Composition frame k starts at k × 1001/24000 s exactly.
+                    let time = Ticks::new(i64::from(k) * 29_429_400).unwrap();
+                    // No background: the frame keeps the files' alpha.
+                    let mut request = RenderRequest::sized(Size::new(64, 4), precision);
+                    request.background = false;
+                    let frame = renderer
+                        .render(document, &comp, time, &request, &resolver)
+                        .unwrap();
+                    let shown = k + 1;
+                    if shown == 5 {
+                        assert_eq!(frame.failures.len(), 1, "{:?}", frame.failures);
+                        assert!(
+                            frame.failures[0].message.contains(
+                                "frame 5 of the image sequence is missing: shot.0005.png"
+                            ),
+                            "{:?}",
+                            frame.failures
+                        );
+                        continue;
+                    }
+                    assert!(
+                        frame.failures.is_empty(),
+                        "{precision:?} frame {k}: {:?}",
+                        frame.failures
+                    );
+                    let pixels = renderer.read_rgba(&frame).unwrap();
+                    let mut reds = std::collections::BTreeSet::new();
+                    for y in 0..4 {
+                        for x in 0..64 {
+                            let want = coded(shown, x, y).map(|v| f32::from(v) / 65535.);
+                            let at = ((y * 64 + x) * 4) as usize;
+                            let got = &pixels[at..at + 4];
+                            // Premultiplied, as the frame is read back.
+                            let want = [
+                                want[0] * want[3],
+                                want[1] * want[3],
+                                want[2] * want[3],
+                                want[3],
+                            ];
+                            for c in 0..4 {
+                                assert!(
+                                    (got[c] - want[c]).abs() <= tolerance,
+                                    "{precision:?} comp frame {k} (file {shown}) pixel {x},{y} channel {c}: {} vs {}",
+                                    got[c],
+                                    want[c]
+                                );
+                            }
+                            if y == 0 {
+                                reds.insert(got[0].to_bits());
+                            }
+                        }
+                    }
+                    // 64 reds within nine 8-bit codes stay apart.
+                    let apart = if precision == Precision::Float16 {
+                        40
+                    } else {
+                        64
+                    };
+                    assert!(
+                        reds.len() >= apart,
+                        "{precision:?}: {} distinct reds",
+                        reds.len()
+                    );
+                }
+            }
+        }
+    }
+
+    /// A sequence whose folder was renamed is relinked by choosing one of its
+    /// files there (Replace): the numbering and range are read again from
+    /// the new folder, a changed range and missing numbers are reported, and
+    /// its layers show the new folder's files.
+    #[test]
+    fn a_sparse_or_mixed_size_sequence_is_refused_in_plain_words() {
+        let (f, _session) = opened(
+            r##"{"id":"p","name":"Film","compId":"c","w":64,"h":4,"fps":24,"dur":10,"bg":"#000000","colorDepth":16,"assets":{},"comps":{},"layers":[]}"##,
+        );
+        let import = |request: ImportRequest| {
+            f.runtime
+                .import_media(document(&f), &f.root, request, &AtomicBool::new(false))
+        };
+        let sequence = || {
+            Some(SequenceImport {
+                fps: 24.,
+                progress: Default::default(),
+            })
+        };
+        // Two files a billion numbers apart: refused at once, with no look
+        // at the numbers between.
+        let sparse = f.root.join("sparse");
+        std::fs::create_dir(&sparse).unwrap();
+        let far: Vec<_> = [1, 1_000_000_001]
             .iter()
-            .map(|name| write(&f.root, name, PNG))
+            .map(|n| {
+                write(
+                    &sparse,
+                    &format!("shot.{n:010}.png"),
+                    &png16(64, 4, |x, y| coded(1, x, y)),
+                )
+            })
             .collect();
-        let progress = Arc::new(Mutex::new(String::new()));
+        let started = std::time::Instant::now();
+        let refused = import(ImportRequest {
+            paths: far,
+            sequence: sequence(),
+            ..Default::default()
+        })
+        .unwrap_err();
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        assert_eq!(
+            refused,
+            "These frames are numbered 1 to 1000000001, too far apart to be one sequence. Choose frames numbered closer together."
+        );
+        // A frame rendered at another size.
+        let renders = f.root.join("renders");
+        std::fs::create_dir(&renders).unwrap();
+        let mut frames: Vec<_> = (1..=3)
+            .map(|n| {
+                write(
+                    &renders,
+                    &format!("shot.{n:04}.png"),
+                    &png16(64, 4, |x, y| coded(n, x, y)),
+                )
+            })
+            .collect();
+        let odd = write(
+            &renders,
+            "shot.0004.png",
+            &png16(32, 4, |x, y| coded(4, x, y)),
+        );
+        frames.push(odd.clone());
+        let words = "shot.0004.png is 32×4, but the sequence’s first frame is 64×4. Render every frame at one size.";
+        let refused = import(ImportRequest {
+            paths: frames.clone(),
+            sequence: sequence(),
+            ..Default::default()
+        })
+        .unwrap_err();
+        assert_eq!(refused, words);
+        // Imported without it, then relinked to a folder holding it.
+        let imported = import(ImportRequest {
+            paths: frames[..3].to_vec(),
+            sequence: sequence(),
+            ..Default::default()
+        })
+        .unwrap();
+        let refused = import(ImportRequest {
+            paths: vec![frames[0].clone()],
+            replace: Some(imported.assets[0].clone()),
+            ..Default::default()
+        })
+        .unwrap_err();
+        assert_eq!(refused, words);
+    }
+
+    #[test]
+    fn a_sequence_relinked_by_one_of_its_files_reads_its_numbering_again() {
+        use pm_protocol::color::Precision;
+        use pm_protocol::common::{Size, Ticks};
+        use pm_render::{MapResolver, RenderRequest, Renderer};
+        let (f, _session) = opened(
+            r##"{"id":"p","name":"Film","compId":"c","w":64,"h":4,"fps":24,"dur":10,"bg":"#000000","colorDepth":16,"assets":{},"comps":{},"layers":[]}"##,
+        );
+        let renders = f.root.join("renders");
+        std::fs::create_dir(&renders).unwrap();
+        let frames: Vec<_> = (1..=6)
+            .map(|n| {
+                write(
+                    &renders,
+                    &format!("shot.{n:04}.png"),
+                    &png16(64, 4, |x, y| coded(n, x, y)),
+                )
+            })
+            .collect();
+        let import = |request: ImportRequest| {
+            f.runtime
+                .import_media(document(&f), &f.root, request, &AtomicBool::new(false))
+                .unwrap()
+        };
+        let imported = import(ImportRequest {
+            paths: frames,
+            place_at: Some(0.),
+            sequence: Some(SequenceImport {
+                fps: 24.,
+                progress: Default::default(),
+            }),
+            ..Default::default()
+        });
+        let id = imported.assets[0].clone();
+        // The folder is renamed; a frame is rendered past the end, one is lost.
+        let moved = f.root.join("renders v2");
+        std::fs::rename(&renders, &moved).unwrap();
+        write(
+            &moved,
+            "shot.0007.png",
+            &png16(64, 4, |x, y| coded(7, x, y)),
+        );
+        std::fs::remove_file(moved.join("shot.0003.png")).unwrap();
+        let relinked = import(ImportRequest {
+            paths: vec![moved.join("shot.0005.png")],
+            replace: Some(id.clone()),
+            ..Default::default()
+        });
+        assert_eq!(
+            relinked.summary(),
+            "Imported shot.[0001-0007].png · frames 1–7, were 1–6 · frame 3 missing"
+        );
+        assert_eq!(relinked.assets, std::slice::from_ref(&id));
+        let published = f.actor.handle().published("p").unwrap();
+        let root = published.snapshot.root().unwrap().to_value();
+        let asset = root.get("assets").unwrap().get(&id).unwrap();
+        let sequence = asset.get("imageSequence").unwrap();
+        let number = |key: &str| sequence.get(key).and_then(Value::as_f64);
+        assert_eq!(
+            (
+                number("first"),
+                number("last"),
+                number("frames"),
+                number("fps")
+            ),
+            (Some(1.), Some(7.), Some(7.), Some(24.))
+        );
+        let manifest = f.root.join("retained.json");
+        published
+            .media
+            .get(&id)
+            .unwrap()
+            .copy_to(&manifest)
+            .unwrap();
+        let read = pm_media::image::sequence::Manifest::read(&manifest)
+            .unwrap()
+            .unwrap();
+        assert_eq!(read.dir, moved);
+        let mut resolver = MapResolver::default();
+        resolver.paths.insert(id.clone(), manifest);
+        let comp = published.snapshot.open_comp().unwrap();
+        let mut renderer = Renderer::headless().unwrap();
+        let mut request = RenderRequest::sized(Size::new(64, 4), Precision::Float16);
+        request.background = false;
+        let at = |frame: i64| Ticks::new(frame * Ticks::from_whole_seconds(1).get() / 24).unwrap();
+        // The placed layer keeps its length (six frames): its fifth shows
+        // file 5, read from the new folder (the old one is gone).
+        let fifth = renderer
+            .render(
+                &published.snapshot.document,
+                &comp,
+                at(4),
+                &request,
+                &resolver,
+            )
+            .unwrap();
+        assert!(fifth.failures.is_empty(), "{:?}", fifth.failures);
+        let green = renderer.read_rgba(&fifth).unwrap()[1];
+        assert!((green - f32::from(coded(5, 0, 0)[1]) / 65535.).abs() < 3e-4);
+        let lost = renderer
+            .render(
+                &published.snapshot.document,
+                &comp,
+                at(2),
+                &request,
+                &resolver,
+            )
+            .unwrap();
+        assert!(
+            lost.failures[0]
+                .message
+                .contains("frame 3 of the image sequence is missing: shot.0003.png"),
+            "{:?}",
+            lost.failures
+        );
+    }
+
+    #[test]
+    fn stills_and_sound_a_pro_receives_import_and_draw_at_their_depth() {
+        use pm_protocol::color::Precision;
+        use pm_protocol::common::{Size, Ticks};
+        use pm_render::{MapResolver, RenderRequest, Renderer};
+        let scratch = tempfile::tempdir().unwrap();
+        let make = |name: &str, args: &[&str]| {
+            let path = scratch.path().join(name);
+            let status = std::process::Command::new(ffmpeg())
+                .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
+                .args(args)
+                .arg(&path)
+                .status()
+                .unwrap();
+            assert!(status.success(), "{name}");
+            path
+        };
+        let color = "color=c=0x336699:s=16x16";
+        let one = ["-frames:v", "1"];
+        // (file, decoded bits, float, scene-linear samples)
+        let stills = [
+            (
+                make("deep.tif", &[color, one[0], one[1], "-pix_fmt", "rgba64le"]),
+                16,
+                false,
+                false,
+            ),
+            (
+                make(
+                    "half.exr",
+                    &[
+                        color,
+                        one[0],
+                        one[1],
+                        "-pix_fmt",
+                        "gbrapf32le",
+                        "-format",
+                        "half",
+                    ],
+                ),
+                16,
+                true,
+                true,
+            ),
+            (
+                make(
+                    "float.exr",
+                    &[
+                        color,
+                        one[0],
+                        one[1],
+                        "-pix_fmt",
+                        "gbrpf32le",
+                        "-format",
+                        "float",
+                    ],
+                ),
+                32,
+                true,
+                true,
+            ),
+        ];
+        let srgb = |v: f32| {
+            if v <= 0.003_130_8 {
+                v * 12.92
+            } else {
+                1.055 * v.powf(1. / 2.4) - 0.055
+            }
+        };
+        for (path, bits, float, linear) in &stills {
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            let still = pm_media::image::read(path, &pm_media::pool::FramePool::new(0)).unwrap();
+            assert_eq!((still.bit_depth, still.float), (*bits, *float), "{name}");
+            let (f, _session) = opened(
+                r##"{"id":"p","name":"Film","compId":"c","w":16,"h":16,"fps":30,"dur":1,"bg":"#000000","colorDepth":32,"assets":{},"comps":{},"layers":[]}"##,
+            );
+            let outcome = f
+                .runtime
+                .import_media(
+                    document(&f),
+                    &f.root,
+                    ImportRequest {
+                        paths: vec![path.clone()],
+                        place_at: Some(0.),
+                        ..Default::default()
+                    },
+                    &AtomicBool::new(false),
+                )
+                .unwrap();
+            assert_eq!(outcome.imported, std::slice::from_ref(&name), "{outcome:?}");
+            let published = f.actor.handle().published("p").unwrap();
+            let root = published.snapshot.root().unwrap().to_value();
+            let id = pm_kernel::asset_order::keys(&root).remove(0);
+            let retained = f.root.join(&name);
+            published
+                .media
+                .get(&id)
+                .unwrap()
+                .copy_to(&retained)
+                .unwrap();
+            let mut resolver = MapResolver::default();
+            resolver.paths.insert(id, retained);
+            let mut renderer = Renderer::headless().unwrap();
+            let frame = renderer
+                .render(
+                    &published.snapshot.document,
+                    &published.snapshot.open_comp().unwrap(),
+                    Ticks::ZERO,
+                    &RenderRequest::sized(Size::new(16, 16), Precision::Float32),
+                    &resolver,
+                )
+                .unwrap();
+            assert!(frame.failures.is_empty(), "{name}: {:?}", frame.failures);
+            let pixel = &renderer.read_rgba(&frame).unwrap()[(8 * 16 + 8) * 4..][..3];
+            for (got, code) in pixel.iter().zip([0x33, 0x66, 0x99]) {
+                let v = code as f32 / 255.;
+                // Scene-linear files hold the code value as light.
+                let want = if *linear { srgb(v) } else { v };
+                assert!((got - want).abs() < 0.01, "{name}: {pixel:?}");
+            }
+        }
+        let tone = ["sine=f=440:d=1:sample_rate=48000"];
+        for (name, codec) in [("take.caf", "pcm_s24le"), ("take.aifc", "pcm_f32be")] {
+            let format = if name.ends_with("caf") { "caf" } else { "aiff" };
+            let path = make(name, &[tone[0], "-c:a", codec, "-f", format]);
+            let f = fixture();
+            let outcome = f
+                .runtime
+                .import_media(
+                    document(&f),
+                    &f.root,
+                    ImportRequest {
+                        paths: vec![path],
+                        ..Default::default()
+                    },
+                    &AtomicBool::new(false),
+                )
+                .unwrap();
+            assert_eq!(outcome.imported, [name], "{outcome:?}");
+            let root = f
+                .actor
+                .handle()
+                .published("p")
+                .unwrap()
+                .snapshot
+                .root()
+                .unwrap()
+                .to_value();
+            let asset = root
+                .get("assets")
+                .unwrap()
+                .get(&pm_kernel::asset_order::keys(&root)[0])
+                .unwrap()
+                .clone();
+            let field = |key: &str| asset.get(key).and_then(Value::as_f64);
+            assert_eq!(asset.get("kind").unwrap().as_str(), Some("audio"), "{name}");
+            assert_eq!(
+                (field("channels"), field("sampleRate")),
+                (Some(1.), Some(48000.)),
+                "{name}"
+            );
+            assert!(
+                (field("dur").unwrap() - 1.).abs() < 0.01,
+                "{name}: {asset:?}"
+            );
+        }
+        // Camera raw is named, not "unsupported".
+        let f = fixture();
+        let raw = write(&f.root, "A001.dng", b"II*\0");
         let outcome = f
             .runtime
             .import_media(
                 document(&f),
                 &f.root,
                 ImportRequest {
-                    paths: frames.clone(),
-                    place_at: Some(1.),
-                    sequence: Some(SequenceImport {
-                        fps: 12.,
-                        progress: progress.clone(),
-                    }),
+                    paths: vec![raw],
                     ..Default::default()
                 },
                 &AtomicBool::new(false),
             )
             .unwrap();
-        assert_eq!(outcome.imported, ["shot sequence.webm"], "{outcome:?}");
-        assert_eq!(*progress.lock().unwrap(), "Importing image sequence…");
-        for frame in &frames {
-            std::fs::remove_file(frame).unwrap();
-        }
-        let published = f.actor.handle().published("p").unwrap();
-        let root = published.snapshot.root().unwrap().to_value();
-        let ids = pm_kernel::asset_order::keys(&root);
-        assert_eq!(ids.len(), 1);
-        let asset = root.get("assets").unwrap().get(&ids[0]).unwrap();
-        let field = |key: &str| asset.get(key).and_then(Value::as_f64);
-        assert_eq!(asset.get("kind").unwrap().as_str(), Some("video"));
-        assert_eq!(field("w"), Some(2.));
-        assert_eq!(field("fps"), Some(12.));
-        let sequence = asset.get("imageSequence").unwrap();
-        assert_eq!(sequence.get("fps").and_then(Value::as_f64), Some(12.));
-        // Four images, not five numbers: missing numbers are skipped.
-        assert_eq!(sequence.get("frames").and_then(Value::as_f64), Some(4.));
-        assert!((field("dur").unwrap() - 4. / 12.).abs() < 0.01);
-        assert!(asset.get("sourcePath").is_none());
-        let copied = f.root.join("copied.webm");
-        published
-            .media
-            .get(&ids[0])
-            .unwrap()
-            .copy_to(&copied)
-            .unwrap();
-        assert_eq!(&std::fs::read(&copied).unwrap()[..4], b"\x1a\x45\xdf\xa3");
-        let open = published.snapshot.open_comp();
-        let composition =
-            pm_kernel::model::comp_node(published.snapshot.root().unwrap(), open.as_deref())
-                .unwrap()
-                .to_value();
-        let layer = &composition.get("layers").unwrap().as_array().unwrap()[0];
-        assert_eq!(layer.get("type").unwrap().as_str(), Some("video"));
-        assert_eq!(layer.get("from").unwrap().as_f64(), Some(1.));
+        assert_eq!(outcome.failed, [("A001.dng".to_owned(), RAW.to_owned())]);
     }
 
     #[test]
@@ -991,14 +1694,6 @@ mod tests {
             order_sequence(&p(&["/a/f_1.png", "/a/g_2.png"]))
                 .unwrap_err()
                 .starts_with("Choose images with the same name and extension")
-        );
-        assert_eq!(
-            sequence_name(Path::new("/a/render_v2-0001.png")),
-            "render_v2 sequence.webm"
-        );
-        assert_eq!(
-            sequence_name(Path::new("/a/0001.png")),
-            "Image sequence.webm"
         );
     }
 

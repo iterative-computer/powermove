@@ -215,6 +215,7 @@ impl FrameSpec {
             MotionBlurKind::Export
         });
         request.sampling = self.sampling();
+        request.read_ahead = self.read_ahead();
         // A capture and a settled paused frame are the final picture:
         // final output, as an export (effects at the composition's density
         // and over the whole frame, `pm_render::plan`).
@@ -243,6 +244,12 @@ impl FrameSpec {
     /// take the final one (Lanczos-3), so footage and precomps don't sharpen
     /// when playback stops. Its cost on a real project's playing frames was
     /// within run-to-run noise.
+    /// Frames of a playing viewer read media ahead (an image sequence's
+    /// next files); paused, dragged and exact frames read only their own.
+    pub(crate) fn read_ahead(&self) -> bool {
+        self.moment == Moment::Playing && !self.exact
+    }
+
     pub(crate) fn sampling(&self) -> pm_render::sampling::Sampling {
         if !self.exact && self.moment == Moment::Scrub && self.scale < 1. {
             pm_render::sampling::Sampling::Playback
@@ -387,6 +394,8 @@ struct MediaSeen {
     /// a frame is kept under them only when it read these very versions.
     stamps: Vec<crate::render_cache::Stamp>,
     looked: Instant,
+    /// The sequence watch's version when they were looked at.
+    sequences: u64,
 }
 impl MediaSeen {
     fn identity(&self) -> u64 {
@@ -1124,7 +1133,12 @@ impl Engine {
         let stands = self.media_look;
         #[cfg(not(test))]
         let stands = crate::render_cache::MEDIA_RECHECK;
-        let fresh = at.is_some_and(|at| self.media_seen[at].looked.elapsed() < stands);
+        // A sequence's files rendered again (the sequence watch published
+        // other members): looked at again now, not in two seconds.
+        let sequences = crate::sequence_watch::global().version();
+        let fresh = at.is_some_and(|at| {
+            self.media_seen[at].looked.elapsed() < stands && self.media_seen[at].sequences == sequences
+        });
         if let (Some(at), true) = (at, fresh) {
             self.media_seen[at].identity()
         } else {
@@ -1138,6 +1152,7 @@ impl Engine {
                     None => crate::render_cache::stamps(&scene.media, None),
                 },
                 looked: Instant::now(),
+                sequences,
             };
             let identity = seen.identity();
             let before = at.map(|at| self.media_seen.remove(at).identity());
@@ -2361,6 +2376,11 @@ mod sampling_tests {
             ..spec(Moment::Scrub, 0.5)
         };
         assert_eq!(capture.sampling(), Sampling::Final);
+        // Only playing frames read an image sequence's next files ahead.
+        assert!(spec(Moment::Playing, 1.).read_ahead());
+        assert!(!spec(Moment::Scrub, 0.5).read_ahead());
+        assert!(!spec(Moment::Paused, 1.).read_ahead());
+        assert!(!capture.read_ahead());
     }
 }
 
@@ -3792,6 +3812,154 @@ mod frame_cache_tests {
         }
         assert_eq!(from(0.5), 1, "a half-resolution paused frame is drawn");
         assert_eq!(from(1.), 2, "at Full the frame on disk is the picture");
+    }
+    /// An image sequence read in place, its frames rendered again on disk
+    /// (the everyday case: a 3D app writes them again) while the project is
+    /// open: the next frames show the new files, never a picture the viewer
+    /// cached or a frame the render cache holds of the earlier files; a
+    /// frame removed shows its Media Offline card.
+    #[test]
+    fn a_sequence_rendered_again_shows_its_new_files() {
+        use crate::render_cache::DiskFrames;
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("renders");
+        std::fs::create_dir(&folder).unwrap();
+        let frame = |n: u32| folder.join(format!("shot.{n:04}.bmp"));
+        // A 16×16 grey BMP of level `v`, written as a renderer does (a new
+        // file renamed over the old).
+        let render = |n: u32, v: u8| {
+            let (w, h) = (16u32, 16u32);
+            let mut b = Vec::new();
+            b.extend_from_slice(b"BM");
+            b.extend_from_slice(&(54 + w * h * 3).to_le_bytes());
+            b.extend_from_slice(&[0; 4]);
+            b.extend_from_slice(&54u32.to_le_bytes());
+            b.extend_from_slice(&40u32.to_le_bytes());
+            b.extend_from_slice(&(w as i32).to_le_bytes());
+            b.extend_from_slice(&(h as i32).to_le_bytes());
+            b.extend_from_slice(&1u16.to_le_bytes());
+            b.extend_from_slice(&24u16.to_le_bytes());
+            b.extend_from_slice(&[0; 24]);
+            b.extend(std::iter::repeat_n(v, (w * h * 3) as usize));
+            let staged = folder.join("staged.tmp");
+            std::fs::write(&staged, b).unwrap();
+            std::fs::rename(staged, frame(n)).unwrap();
+        };
+        for n in 1..=3 {
+            render(n, 40 * n as u8);
+        }
+        let manifest = pm_media::image::sequence::Manifest {
+            powermove_image_sequence: 1,
+            dir: folder.clone(),
+            prefix: "shot.".into(),
+            suffix: ".bmp".into(),
+            padding: 4,
+            first: 1,
+            last: 3,
+            rate: [30, 1],
+        };
+        let retained = dir.path().join("retained");
+        std::fs::write(&retained, manifest.to_bytes()).unwrap();
+        let project = r##"{"id":"P","name":"P","compId":"C","compName":"C","w":16,"h":16,"fps":30,"dur":1,"bg":"#000000",
+            "layers":[{"id":"s","type":"video","name":"shot","from":0,"dur":1,"on":true,"solo":false,"mblur":false,
+              "p":{"position.x":{"v":8,"kf":[],"expr":null},"position.y":{"v":8,"kf":[],"expr":null},"anchor.x":{"v":0,"kf":[],"expr":null},"anchor.y":{"v":0,"kf":[],"expr":null},"scale.x":{"v":100,"kf":[],"expr":null},"scale.y":{"v":100,"kf":[],"expr":null},"rotation":{"v":0,"kf":[],"expr":null},"opacity":{"v":100,"kf":[],"expr":null}},
+              "fx":[],"masks":[],"d":{"asset":"clip","fit":"stretch","w":16,"h":16}}],
+            "comps":{},"assets":{"clip":{"id":"clip","type":"video","name":"shot","w":16,"h":16,"dur":0.1,
+              "fps":30,"imageSequence":{"fps":30,"frames":3,"first":1,"last":3}}},
+            "markers":[],"work":[0,1],"params":{}}"##;
+        let scene = Scene {
+            doc: Arc::new(pm_model::Document::new(
+                Some(pm_model::canonical::canonical_project(
+                    pm_model::json::parse(project).unwrap(),
+                )),
+                1,
+            )),
+            comp: "C".into(),
+            media: Arc::new(pm_export::render::MediaPaths {
+                paths: [("clip".to_string(), retained)].into(),
+                ..Default::default()
+            }),
+            content: 1,
+        };
+        let watched = scene.media.paths["clip"].clone();
+        crate::sequence_watch::settle("rendered again test", &watched);
+        let disk = DiskFrames::default();
+        disk.set_storage(Some((dir.path().join("frames"), u64::MAX)))
+            .unwrap();
+        assert!(disk.observe(&scene, &[], None, None, None, 1, Ticks::ZERO));
+        disk.test_ready();
+        let mut engine = Engine::new(Gpu::new("sequence-rendered-again").unwrap()).unwrap();
+        engine.disk = Some(disk.clone());
+        let output = Output {
+            width: 16,
+            height: 16,
+            display: 0,
+            headroom: 1.,
+            crop: None,
+        };
+        let at = |n: i64| Ticks::new(n * pm_protocol::common::TICKS_PER_SECOND / 30).unwrap();
+        let spec = |moment, n| FrameSpec {
+            moment,
+            exact: false,
+            ..FrameSpec::exact(at(n), output)
+        };
+        // The picture's centre, as 8-bit grey.
+        let grey = |engine: &mut Engine, moment, n| {
+            let pixels = drawn(engine, &scene, spec(moment, n));
+            (pixels[8 * 16 + 8][0] * 255.0).round() as i64
+        };
+        // sRGB codes 40 and 80 read back through the viewer's surface.
+        let first = grey(&mut engine, Moment::Paused, 0);
+        assert!(first > 0, "file 1 is drawn");
+        // Frame 2 of the composition is on disk (as a fill writes it).
+        disk.test_put(1, 0.25);
+        let from_disk = grey(&mut engine, Moment::Playing, 1);
+
+        render(1, 200);
+        render(2, 220);
+        crate::sequence_watch::settle("rendered again test", &watched);
+        assert!(disk.observe(&scene, &[], None, None, None, 1, at(0)));
+        disk.test_ready();
+        let again = grey(&mut engine, Moment::Paused, 0);
+        assert!(
+            again > first + 50,
+            "the viewer's cached picture of the old file: {again}"
+        );
+        let playing = grey(&mut engine, Moment::Playing, 1);
+        assert_ne!(
+            playing, from_disk,
+            "the render cache's frame of the old file"
+        );
+        assert!(playing > again, "file 2 as rendered again: {playing}");
+
+        let before = grey(&mut engine, Moment::Paused, 2);
+        std::fs::remove_file(frame(3)).unwrap();
+        crate::sequence_watch::settle("rendered again test", &watched);
+        assert!(disk.observe(&scene, &[], None, None, None, 1, at(2)));
+        let sub = loop {
+            let sub = engine
+                .frame(
+                    &scene,
+                    spec(Moment::Paused, 2),
+                    None,
+                    &Default::default(),
+                    true,
+                    Arc::default(),
+                )
+                .unwrap()
+                .unwrap();
+            sub.commit();
+            sub.complete().unwrap();
+            if !sub.stand_ins {
+                break sub;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert_ne!(
+            (sub.pixels()[8 * 16 + 8][0] * 255.0).round() as i64,
+            before,
+            "file 3 removed: its card, not its last picture"
+        );
     }
     /// Two dragged frames of one render size at one time but different
     /// densities (output 256 at half resolution, output 128 at full) take

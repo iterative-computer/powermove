@@ -188,3 +188,50 @@ fn preview_memory_stays_accounted_while_consumers_hold_frames() {
     drop(frame);
     assert_eq!(service.apply_lease(lease).decoders, 0);
 }
+
+/// A sequence read in place (the file its asset retains) previews frame
+/// `first + n` at its rate, picks up a frame rendered into a gap later, and
+/// names a missing number rather than showing another frame.
+#[test]
+fn an_in_place_sequence_previews_by_number_and_names_a_missing_frame() {
+    let dir = tempfile::tempdir().unwrap();
+    for n in [9, 10, 12] {
+        let still = if n == 12 {
+            "still-alpha.png"
+        } else {
+            "still-red.png"
+        };
+        std::fs::copy(
+            fixtures(still),
+            dir.path().join(format!("frame_{n:03}.png")),
+        )
+        .unwrap();
+    }
+    let manifest = image::sequence::Manifest {
+        powermove_image_sequence: 1,
+        dir: dir.path().into(),
+        prefix: "frame_".into(),
+        suffix: ".png".into(),
+        padding: 3,
+        first: 9,
+        last: 12,
+        rate: [24_000, 1001],
+    };
+    let retained = dir.path().join("retained");
+    std::fs::write(&retained, manifest.to_bytes()).unwrap();
+    let mut reader = PreviewReader::open(&retained).unwrap();
+    assert!((reader.duration().unwrap() - 4.0 * 1001.0 / 24_000.0).abs() < 1e-12);
+    let frame = |n: f64| n * 1001.0 / 24_000.0;
+    assert_eq!(pixel(&reader.frame_at(frame(0.0)).unwrap(), 1, 1)[3], 255);
+    let last = reader.frame_at(frame(3.0)).unwrap();
+    assert_eq!(pixel(&last, last.decoded().format.width * 3 / 4, 1)[3], 0);
+    // Held at the end, as a clip's last frame.
+    assert!(reader.frame_at(frame(9.0)).is_ok());
+    let missing = reader.frame_at(frame(2.0)).unwrap_err().to_string();
+    assert!(
+        missing.contains("frame 11 of the image sequence is missing: frame_011.png"),
+        "{missing}"
+    );
+    std::fs::copy(fixtures("still-red.png"), dir.path().join("frame_011.png")).unwrap();
+    assert!(reader.frame_at(frame(2.0)).is_ok());
+}

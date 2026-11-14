@@ -1554,10 +1554,13 @@ fn sequence_sources_share_composition_slots_and_hd_colour_reading() {
         support::ticks(0.2),
         support::ticks(0.9),
     ];
-    for &time in &conformed_times {
+    // One slot rule for a sequence's files and renditions
+    // (`pm_media::image::sequence::sequence_slot`), at the conformed rate:
+    // 0.1, 0.2 and 0.9 s show slots 0, 1 and the last (2), read 1 ms inside.
+    for (&time, slot) in conformed_times.iter().zip([0.0, 1.0, 2.0]) {
         assert_eq!(
             pm_render::footage::source_time(Some(&record), time, Some(&interpretation)),
-            time
+            support::ticks(slot / 5.0 + 0.001)
         );
     }
     let conformed = renderer
