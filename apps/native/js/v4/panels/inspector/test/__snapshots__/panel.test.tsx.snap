@@ -1156,6 +1156,7 @@ exports[`spec §3: font-loading six-op tree, native validator and AX snapshot 1`
 {"op":"setProps","id":37,"patch":{"label":"Font"}}
 {"op":"setProps","id":37,"patch":{"disabled":false}}
 {"op":"setProps","id":37,"patch":{"style":{"minWidth":{"token":"metrics.hit"},"minHeight":{"token":"metrics.hit"},"color":{"token":"colors.text"},"symbolSize":{"token":"metrics.symbol_toolbar"},"background":{"token":"colors.field"},"borderRadius":{"token":"metrics.inner_radius"},"fontSize":{"token":"typography.body"}}}}
+{"op":"setProps","id":37,"patch":{"aria-haspopup":"menu"}}
 {"op":"setProps","id":37,"patch":{"metadata":{"symbol":""}}}
 {"op":"setProps","id":37,"patch":{"title":"Font"}}
 {"op":"setListeners","id":37,"flags":{"click":{"capture":false,"bubble":true,"preventDefault":false,"keys":[]}}}
@@ -1218,7 +1219,7 @@ tree
 {"children":[35],"id":34,"input":null,"listeners":{},"parent":31,"props":{"data-pm-slot":"label","id":"generated-label","label":"Font","style":{"color":{"token":"colors.secondary"},"fontSize":{"token":"typography.label"},"overflow":"hidden","textOverflow":"ellipsis","whiteSpace":"nowrap"},"title":"Font"},"text":"","type":"text"}
 {"children":[],"id":35,"input":null,"listeners":{},"parent":34,"props":{},"text":"Font","type":"text"}
 {"children":[37],"id":36,"input":null,"listeners":{},"parent":31,"props":{"data-pm-slot":"value"},"text":"","type":"div"}
-{"children":[38,40],"id":37,"input":null,"listeners":{"click":{"bubble":true,"capture":false,"keys":[],"preventDefault":false},"keydown":{"bubble":true,"capture":false,"keys":["Enter"," "],"preventDefault":true}},"parent":36,"props":{"data-pm-component":"toolbar-item","disabled":false,"id":"value:font","label":"Font","metadata":{"symbol":""},"preventDefault":{"keydown":["Enter"," "]},"style":{"background":{"token":"colors.field"},"borderRadius":{"token":"metrics.inner_radius"},"color":{"token":"colors.text"},"fontSize":{"token":"typography.body"},"minHeight":{"token":"metrics.hit"},"minWidth":{"token":"metrics.hit"},"symbolSize":{"token":"metrics.symbol_toolbar"}},"title":"Font"},"text":"","type":"button"}
+{"children":[38,40],"id":37,"input":null,"listeners":{"click":{"bubble":true,"capture":false,"keys":[],"preventDefault":false},"keydown":{"bubble":true,"capture":false,"keys":["Enter"," "],"preventDefault":true}},"parent":36,"props":{"aria-haspopup":"menu","data-pm-component":"toolbar-item","disabled":false,"id":"value:font","label":"Font","metadata":{"symbol":""},"preventDefault":{"keydown":["Enter"," "]},"style":{"background":{"token":"colors.field"},"borderRadius":{"token":"metrics.inner_radius"},"color":{"token":"colors.text"},"fontSize":{"token":"typography.body"},"minHeight":{"token":"metrics.hit"},"minWidth":{"token":"metrics.hit"},"symbolSize":{"token":"metrics.symbol_toolbar"}},"title":"Font"},"text":"","type":"button"}
 {"children":[39],"id":38,"input":null,"listeners":{},"parent":37,"props":{"style":{"flexGrow":1,"overflow":"hidden","textOverflow":"ellipsis","whiteSpace":"nowrap"}},"text":"","type":"text"}
 {"children":[],"id":39,"input":null,"listeners":{},"parent":38,"props":{},"text":"","type":"text"}
 {"children":[],"id":40,"input":null,"listeners":{},"parent":37,"props":{"attr":{"symbol":"chevron.up.chevron.down"},"style":{"color":{"token":"colors.text"},"symbolSize":{"token":"metrics.symbol_inline"}}},"text":"","type":"text"}
@@ -1264,7 +1265,7 @@ accessibility
 {"decrement":false,"disabled":false,"expanded":null,"id":38,"increment":false,"label":null,"role":"Label","step":null,"toggled":null,"value":null}
 {"decrement":false,"disabled":false,"expanded":null,"id":39,"increment":false,"label":null,"role":"Label","step":null,"toggled":null,"value":null}
 {"decrement":false,"disabled":false,"expanded":null,"id":40,"increment":false,"label":null,"role":"Label","step":null,"toggled":null,"value":null}
-{"focus":[6,7,16,27,37],"requests":[{"type":"font-menu","row":"font","anchor":37}]}"
+{"focus":[6,7,16,27,37],"requests":[{"type":"font-menu","row":"font","anchor":37,"current":""}]}"
 `;
 
 exports[`spec §3: hover six-op tree, native validator and AX snapshot 1`] = `

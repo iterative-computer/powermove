@@ -4261,6 +4261,137 @@ fn the_color_panel_lists_the_grade_and_writes_through_its_controls() {
     assert_eq!(state.value.as_f64(), Some(1.4));
 }
 
+/// A colour wheel, as a person drags it: the Color panel draws the wheel with
+/// one binding over its red, green and blue, and a drag writes all three in
+/// one gesture: the grade changes as one Undo step, the luma kept by the
+/// wheel's own values (the binding refuses a wrong length or a foreign row).
+#[test]
+fn a_color_wheel_drag_writes_red_green_and_blue_as_one_undo_step() {
+    let actor = actor();
+    let kernel = actor.handle();
+    select_layer(&kernel, "a");
+    let mut setup = data::Backend::new(
+        kernel.clone(),
+        pm_surface::host_api::Identity {
+            realm: "wheel-setup".into(),
+            generation: 1,
+            project: "synthetic".into(),
+        },
+        "layer-effects",
+        false,
+    )
+    .unwrap();
+    setup.sync().unwrap();
+    let request = setup
+        .model
+        .as_mut()
+        .unwrap()
+        .add_effect_at(Caller::native(), "a", "colorWheels", 0.)
+        .unwrap();
+    kernel.call("synthetic", request).wait().unwrap().unwrap();
+    let mut panels = Builtins::new(kernel.clone(), "synthetic", || {}).unwrap();
+    panels.update_facts(json!({"time":0,"playing":false,"stage":[640.,360.]}));
+    finish(panels.mount("color").unwrap());
+    // The Lift wheel the panel draws, and the binding it drags through.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let binding = loop {
+        let found = panels.take_publications().into_iter().rev().find_map(|p| {
+            p.surface.nodes().values().find_map(|n| {
+                (n.props.get("data-pm-component") == Some(&json!("color-wheel"))
+                    && n.props.get("label") == Some(&json!("Lift colour")))
+                .then(|| n.props["binding"].as_str().unwrap().to_owned())
+            })
+        });
+        if let Some(b) = found {
+            break b;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the panel never drew the Lift wheel"
+        );
+        thread::sleep(Duration::from_millis(5));
+    };
+    assert_eq!(
+        binding.matches('+').count(),
+        2,
+        "red, green and blue: {binding}"
+    );
+    let before = kernel.published("synthetic").unwrap().history.entries;
+    let ack = |pending: Result<
+        pm_kernel::Pending<std::result::Result<pm_kernel::Ack, pm_kernel::KernelFailure>>,
+    >| pending.unwrap().wait().unwrap().unwrap();
+    let gesture = match ack(panels.scrub_begin("color")).reply {
+        pm_kernel::Reply::Gesture(id) => id,
+        other => panic!("no gesture: {other:?}"),
+    };
+    for value in [json!([0.05, -0.02, 0.1]), json!([0.1, -0.04, 0.2])] {
+        ack(panels.scrub_step("color", &binding, gesture, value));
+    }
+    // A step of the wrong length is refused; the drag goes on.
+    assert!(
+        panels
+            .scrub_step("color", &binding, gesture, json!([0.3]))
+            .is_err()
+    );
+    ack(panels.scrub_finish("color", gesture, true));
+    let p = kernel.published("synthetic").unwrap();
+    assert_eq!(p.history.entries, before + 1, "one Undo step");
+    let backend = panels
+        .broker
+        .entry("color")
+        .unwrap()
+        .lock()
+        .unwrap()
+        .backend
+        .clone();
+    let projection = backend.lock().unwrap().projection().unwrap();
+    let mut model = pm_panel_inspector::Inspector::new(p, Default::default());
+    for (key, want) in [("liftRed", 0.1), ("liftGreen", -0.04), ("liftBlue", 0.2)] {
+        let id = projection["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["kind"] == "parameter" && r["parameter"]["key"] == key)
+            .unwrap()["parameter"]["id"]
+            .clone();
+        let id = pm_panel_inspector::PropertyId::from_value(
+            &pm_model::json::parse(id.as_str().unwrap()).unwrap(),
+        )
+        .unwrap();
+        let state = model
+            .binding_state(&pm_panel_inspector::Binding::Property(id), 0.)
+            .unwrap();
+        assert_eq!(state.value.as_f64(), Some(want), "{key}");
+    }
+    // A group naming rows of two effects, or out of order, is no binding.
+    let rows: Vec<&Value> = projection["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["kind"] == "parameter")
+        .collect();
+    let pick = |key: &str| {
+        rows.iter()
+            .find(|r| r["parameter"]["key"] == key)
+            .map(|r| r["parameter"].clone())
+            .unwrap()
+    };
+    let (r, g) = (pick("liftRed"), pick("liftGreen"));
+    let handle = format!(
+        "{}+{}",
+        r["binding"].as_str().unwrap(),
+        g["binding"].as_str().unwrap()
+    );
+    let ids = |list: &[&Value]| {
+        list.iter()
+            .map(|v| v["id"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    assert!(data::effect_binding_rows(&projection, &handle, &ids(&[&r, &g])).is_some());
+    assert!(data::effect_binding_rows(&projection, &handle, &ids(&[&g, &r])).is_none());
+    assert!(data::effect_binding_rows(&projection, &handle, &ids(&[&r, &r])).is_none());
+}
+
 /// Two Color Wheels on one layer both grade the picture, so the Color panel
 /// shows each with its own controls, switch and Reset (it showed the first
 /// and hid the second everywhere).
@@ -4344,7 +4475,13 @@ fn every_color_wheels_on_the_layer_has_its_controls_in_the_color_panel() {
             shown.contains(&format!("color:reset:{effect}")),
             "Color Wheels {effect} has no Reset: {shown:?}"
         );
-        for key in ["exposure", "liftMaster", "gainBlue"] {
+        // A wheel's red, green and blue are its drawn wheel (one control
+        // over the three); Tone and each Master are fields.
+        assert!(
+            shown.contains(&format!("color:wheel:{effect}:gain")),
+            "the Gain wheel of Color Wheels {effect} is not drawn"
+        );
+        for key in ["exposure", "liftMaster", "gainMaster"] {
             let row = rows
                 .iter()
                 .find(|r| {
@@ -4360,6 +4497,102 @@ fn every_color_wheels_on_the_layer_has_its_controls_in_the_color_panel() {
             );
         }
     }
+}
+
+/// Add Curve on a chosen channel: the Color panel's add intent carries the
+/// new effect's first values, so a Green curve is made on Green in one Undo
+/// step; a key the definition does not have, or a value outside its limits,
+/// is refused and changes nothing.
+#[test]
+fn a_curve_is_added_on_its_channel_in_one_undo_step() {
+    let actor = actor();
+    let kernel = actor.handle();
+    select_layer(&kernel, "a");
+    let mut panels = Builtins::new(kernel.clone(), "synthetic", || {}).unwrap();
+    panels.update_facts(json!({"time":0,"playing":false,"stage":[640.,360.]}));
+    finish(panels.mount("color").unwrap());
+    let backend = panels
+        .broker
+        .entry("color")
+        .unwrap()
+        .lock()
+        .unwrap()
+        .backend
+        .clone();
+    let send = |intent: Value| {
+        let projection = backend.lock().unwrap().projection().unwrap();
+        let args = json!({"documentId":projection["documentId"],"revision":projection["revision"],
+            "layer":"a","intent":intent});
+        let ticket = panels
+            .realms
+            .lock()
+            .unwrap()
+            .get("color")
+            .unwrap()
+            .eval(format!(
+                "__pmBuiltin.command('panel.effect-controls',{args})"
+            ))
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            if let Some(result) = ticket.try_take() {
+                return result;
+            }
+            assert!(Instant::now() < deadline, "v4 ticket timed out");
+            thread::sleep(Duration::from_millis(1));
+        }
+    };
+    let fx = || {
+        let p = kernel.published("synthetic").unwrap();
+        let model = pm_panel_inspector::Inspector::new(p, Default::default());
+        crate::data::wire(&model.layer("a").unwrap())["fx"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+    };
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while backend.lock().unwrap().projection().unwrap()["target"] != "Layer" {
+        assert!(Instant::now() < deadline, "the panel never saw the layer");
+        thread::sleep(Duration::from_millis(5));
+    }
+    let before = kernel.published("synthetic").unwrap().history.entries;
+    let result = send(json!({"type":"add","definition":"colorCurves","parameters":{"channel":2}}));
+    assert!(result.is_ok(), "{result:?}");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while fx().is_empty() {
+        assert!(Instant::now() < deadline, "the curve was never added");
+        for (_, ticket) in panels.publish() {
+            finish(ticket.unwrap());
+        }
+    }
+    let after = kernel.published("synthetic").unwrap();
+    assert_eq!(after.history.entries, before + 1, "one Undo step");
+    let added = fx();
+    assert_eq!(added.len(), 1);
+    assert_eq!(added[0]["type"], "colorCurves");
+    assert_eq!(added[0]["p"]["channel"]["v"], 2);
+    for refused in [
+        json!({"channel":1,"nope":3}),
+        json!({"channel":9}),
+        json!({"channel":{"v":1,"kf":[],"expr":null}}),
+    ] {
+        let _ = send(json!({"type":"add","definition":"colorCurves","parameters":refused}));
+    }
+    // A later valid add lands after the refused ones; they changed nothing.
+    send(json!({"type":"add","definition":"colorCurves","parameters":{"channel":3}})).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while fx().len() < 2 {
+        assert!(
+            Instant::now() < deadline,
+            "the second curve was never added"
+        );
+        for (_, ticket) in panels.publish() {
+            finish(ticket.unwrap());
+        }
+    }
+    let all = fx();
+    assert_eq!(all.len(), 2, "a refused add changes nothing: {all:?}");
+    assert_eq!(all[1]["p"]["channel"]["v"], 3);
 }
 
 /// Settings › Shortcuts: the app's page reaches the publication with its

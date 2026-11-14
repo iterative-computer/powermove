@@ -2602,6 +2602,10 @@ impl Controller {
         if crate::generated_panel::pick(self, &cmd.name, cx) {
             return true;
         }
+        if let Some(family) = cmd.name.strip_prefix("fontPick:") {
+            self.font_picked(family);
+            return true;
+        }
         match cmd.name.as_str() {
             "shortcuts" => {
                 let action = cmd.args.first().cloned().unwrap_or_default();

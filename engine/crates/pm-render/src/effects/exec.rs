@@ -1196,6 +1196,13 @@ impl<'c> Gpu<'c> {
     ) {
         let device = self.device;
         let queue = self.queue;
+        crate::slices::point(
+            self.effects,
+            device,
+            queue,
+            self.encoder,
+            crate::slices::Class::Effect,
+        );
         let format = out.format();
         let dummy = self.effects.dummy(device, queue, format);
         let linear = self.linear;
@@ -1291,6 +1298,13 @@ impl<'c> Gpu<'c> {
     /// A per-pixel pass of `source` into `out`: `clamp: true` (0..1), or
     /// the E encode and decode around legacy programs.
     fn simple_pass(&mut self, op: SimpleOp, source: &Target, out: &Target) {
+        crate::slices::point(
+            self.effects,
+            self.device,
+            self.queue,
+            self.encoder,
+            crate::slices::Class::Effect,
+        );
         let pipeline = self
             .effects
             .simple_pipeline(self.device, op, out.format())

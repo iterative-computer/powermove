@@ -1,6 +1,8 @@
 //! Shell contracts run headlessly; AppKit/GPUI presentation is macOS-only.
 pub mod agent_menu;
 #[cfg(target_os = "macos")]
+pub mod grade;
+#[cfg(target_os = "macos")]
 pub mod integration;
 pub mod keyboard;
 pub mod keymap;

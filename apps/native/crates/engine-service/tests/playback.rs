@@ -792,17 +792,19 @@ fn who_is_still_loading_changes_no_frame_or_render_identity() {
         })
     };
     v.resources(loading(1, &["a", "b", "c"])).unwrap();
-    // At rest: the first picture and its full-scale refinement have landed.
-    wait(&v, "the first frame", |s| s.frame.is_some());
-    let rest = Instant::now();
-    let mut stamp = v.stamp().unwrap();
-    while rest.elapsed() < Duration::from_millis(600) {
-        std::thread::sleep(Duration::from_millis(20));
-        stamp = v.stamp().unwrap();
-    }
-    wait(&v, "the frame of this content", |s| {
-        s.frame.as_ref().is_some_and(|f| f.stamp == stamp)
-    });
+    // At rest: the paused viewer's settled picture is on screen (it lands
+    // after its preview, however long the machine takes to draw it).
+    let stamp = wait(&v, "the settled picture", |s| {
+        s.frame.as_ref().is_some_and(|f| f.settled)
+    })
+    .frame
+    .unwrap()
+    .stamp;
+    assert_eq!(
+        v.stamp().unwrap(),
+        stamp,
+        "nothing after the settled picture"
+    );
     v.resources(loading(2, &["b", "c"])).unwrap();
     v.resources(loading(3, &["c"])).unwrap();
     assert_eq!(v.stamp().unwrap(), stamp, "names alone moved the stamp");
@@ -937,6 +939,30 @@ fn looping_still(service: &EngineService, still: &std::path::Path) -> Viewer {
 /// frame kept in memory is the picture of the media as it was observed.
 #[test]
 fn a_looping_frame_follows_a_still_saved_again_on_disk() {
+    a_looping_frame_follows(|still| grey_still(still, 220));
+}
+
+/// The same when the new file has the old one's length and its modification
+/// time is put back (the inode is the same): it is another version of the
+/// file all the same.
+#[test]
+fn a_looping_frame_follows_a_same_length_rewrite_with_its_time_put_back() {
+    a_looping_frame_follows(|still| {
+        let modified = std::fs::metadata(still).unwrap().modified().unwrap();
+        // The status-change time has the file system's resolution.
+        std::thread::sleep(Duration::from_millis(20));
+        grey_still(still, 220);
+        std::fs::File::options()
+            .write(true)
+            .open(still)
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
+    });
+}
+
+/// A composition looping one dark still, `save`d again (bright) meanwhile.
+fn a_looping_frame_follows(save: impl Fn(&std::path::Path)) {
     let dir = tempfile::tempdir().unwrap();
     let still = dir.path().join("still.bmp");
     grey_still(&still, 40);
@@ -966,7 +992,7 @@ fn a_looping_frame_follows_a_still_saved_again_on_disk() {
             .is_some_and(|f| f.moment == Moment::Playing && f.cache_hit)
     });
     let dark = shown(&inbox);
-    grey_still(&still, 220);
+    save(&still);
     // Media is looked at every 2 s.
     let start = Instant::now();
     let now = loop {

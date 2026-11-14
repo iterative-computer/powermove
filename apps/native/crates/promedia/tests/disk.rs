@@ -163,6 +163,63 @@ fn cache_detects_corruption_and_replaces_a_damaged_entry() {
     assert_eq!(c.presence(&k).unwrap(), None);
     c.discard(&k).unwrap();
 }
+/// Frames keyed by an earlier version can never be found again. Kept ones
+/// among them were skipped by every eviction and by Clear, and counted
+/// toward the limit for good: new frames were refused ("kept renders exceed
+/// quota"). Opening the folder under another key schema retires them all;
+/// entries of the current schema stay.
+#[test]
+fn cache_retires_the_entries_of_another_key_schema() {
+    let dir = tempfile::tempdir().unwrap();
+    let c = RenderCache::open(dir.path(), 200).unwrap();
+    // Written by an earlier version: one kept, one not.
+    let (kept, plain) = (
+        key(),
+        RenderKey {
+            ticks: 2002,
+            ..key()
+        },
+    );
+    c.put(&kept, &[7; 60]).unwrap();
+    c.keep_rendered(&kept, true).unwrap();
+    c.put(&plain, &[8; 20]).unwrap();
+    let now = RenderKey {
+        renderer_version: "test-v2".into(),
+        ..key()
+    };
+    // Unreachable under the new keys, and in the way: the kept frame can
+    // not be evicted for a new one.
+    assert!(
+        c.put(&now, &[9; 60]).is_err(),
+        "the old kept frame held the quota"
+    );
+    assert_eq!(
+        c.clear_unkept().unwrap(),
+        20 + 48,
+        "Clear leaves the kept one"
+    );
+    c.put(&plain, &[8; 20]).unwrap();
+    assert_eq!(
+        c.retire_other_schemas("keys v2").unwrap(),
+        (2, 60 + 48 + 20 + 48),
+        "both old entries, by their bytes on disk"
+    );
+    assert_eq!(c.presence(&kept).unwrap(), None);
+    assert!(
+        !dir.path()
+            .join(format!("{}.keep", kept.digest().unwrap()))
+            .exists(),
+        "its keep mark went with it"
+    );
+    c.put(&now, &[9; 60]).unwrap();
+    c.keep_rendered(&now, true).unwrap();
+    // The same schema again (the next launch): nothing is touched.
+    let again = RenderCache::open(dir.path(), 200).unwrap();
+    assert_eq!(again.retire_other_schemas("keys v2").unwrap(), (0, 0));
+    assert_eq!(again.presence(&now).unwrap(), Some(true));
+    // And another one retires these in turn.
+    assert_eq!(again.retire_other_schemas("keys v3").unwrap(), (1, 60 + 48));
+}
 #[test]
 fn cache_rejects_truncated_headers_lengths_and_magic() {
     for mode in 0..3 {

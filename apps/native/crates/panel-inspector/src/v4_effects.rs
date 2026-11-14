@@ -676,6 +676,35 @@ impl EffectsPanel {
                             if let Some(slot) = intent.get("slot") {
                                 add.index = Some(ordinal(slot)?.min(ids.len()));
                             }
+                            // Values the new effect starts with, in the same
+                            // Undo step (a curve made on its channel): plain
+                            // values of the definition's own parameters only.
+                            if let Some(initial) = intent.get("parameters") {
+                                let initial =
+                                    initial.as_object().ok_or(InspectorError::InvalidInput)?;
+                                for (key, value) in initial.iter() {
+                                    let param = add
+                                        .definition
+                                        .params
+                                        .iter()
+                                        .find(|p| *p.key == *key.to_string())
+                                        .ok_or(InspectorError::InvalidInput)?;
+                                    let fits = match value.as_f64() {
+                                        Some(n) => {
+                                            n.is_finite()
+                                                && param.min.is_none_or(|m| n >= m)
+                                                && param.max.is_none_or(|m| n <= m)
+                                        }
+                                        None => {
+                                            value.as_bool().is_some() || value.as_str().is_some()
+                                        }
+                                    };
+                                    if !fits {
+                                        return Err(InspectorError::InvalidInput);
+                                    }
+                                    add.parameters.insert(key.clone(), value.clone());
+                                }
+                            }
                             plan.selection = Some(EffectSelection {
                                 layer: Some(layer.clone()),
                                 ids: vec![add.effect_id.clone()],

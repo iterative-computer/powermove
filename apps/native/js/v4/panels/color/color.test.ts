@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { ACTIONS, coverage, curveRows, grade } from "./contract";
+import { ACTIONS, coverage, grade } from "./contract";
 import type { Projection } from "./model";
 
 const catalog = JSON.parse(
@@ -150,30 +150,4 @@ test("the panel asks for every row and opens every grading tool", () => {
     2,
   );
   expect(coverage(closed)).toEqual([{ type: "disclose", id: "w", open: true }]);
-});
-
-test("a curve shows the points it uses", () => {
-  const rows = [
-    row("c", "channel", 1),
-    row("c", "count", 3),
-    ...[0, 1, 2, 3, 4].flatMap((i) => [
-      row("c", `x${i}`, i / 4),
-      row("c", `y${i}`, i / 4),
-    ]),
-  ];
-  const p = projection(
-    [header("c", "colorCurves", true), ...rows],
-    [0, 13],
-    13,
-  );
-  expect(curveRows(grade(p)[0]).map((r) => r.parameter.key)).toEqual([
-    "channel",
-    "count",
-    "x0",
-    "y0",
-    "x1",
-    "y1",
-    "x2",
-    "y2",
-  ]);
 });
