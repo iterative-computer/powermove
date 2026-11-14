@@ -35,7 +35,8 @@ pub fn read_start(path: &Path) -> std::io::Result<()> {
     if std::fs::metadata(path)?.is_dir() {
         std::fs::read_dir(path)?.next().transpose()?;
     } else {
-        std::fs::File::open(path)?.read(&mut [0u8; 1])?;
+        // An empty file reads 0 bytes: readable all the same.
+        let _read = std::fs::File::open(path)?.read(&mut [0u8; 1])?;
     }
     Ok(())
 }
