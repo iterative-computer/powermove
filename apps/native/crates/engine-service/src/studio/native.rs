@@ -55,7 +55,7 @@ pub struct DocumentSource {
     view_composition: Option<String>,
     environment_maps: Mutex<Vec<(String, Arc<pm_studio3d_engine::environment::EnvironmentMap>)>>,
     height_maps: Mutex<Vec<((String, u32), Arc<Vec<f32>>)>>,
-    material_images: Mutex<Vec<(String, Arc<Vec<u8>>)>>,
+    material_images: Mutex<HashMap<String, std::sync::Weak<Vec<u8>>>>,
     vertex_attributes:
         Mutex<HashMap<(usize, usize, bool), Arc<pm_studio3d_engine::extract::VertexAttributes>>>,
     scatter_placements: Mutex<Vec<(String, Arc<Vec<pm_studio3d_engine::scatter::Instance>>)>>,
@@ -791,7 +791,7 @@ impl SceneSource for DocumentSource {
                                     }
                                     let pixels = imported::image(&resource, texture_index)?;
                                     let index = map_layers.len();
-                                    map_layers.push((*pixels).clone());
+                                    map_layers.push(pixels);
                                     map_indices.insert(key, index);
                                     index
                                 };

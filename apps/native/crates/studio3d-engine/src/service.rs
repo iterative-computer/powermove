@@ -119,7 +119,9 @@ pub struct StudioService {
     geometry_uploads: u64,
     scene_updates: u64,
     texture_uploads: u64,
-    texture_key: Option<Vec<u8>>,
+    // Retain the uploaded images, rather than another flattened copy.
+    // Sources can reuse these bytes without a second decoded-image cache.
+    uploaded_maps: Option<crate::extract::TextureMaps>,
 }
 
 impl StudioService {
@@ -325,16 +327,15 @@ impl StudioService {
                 shape: GeometryIdentity::shape(&extracted), instances: input.instances.clone(),
             });
         }
-        let texture_key = texture_key(input.maps.as_ref());
-        if self.texture_key.as_ref() != Some(&texture_key) {
+        if self.texture_uploads == 0 || self.uploaded_maps != input.maps {
             if let Some(maps) = &input.maps {
-                let pixels: Vec<_> = maps.layers.iter().flatten().copied().collect();
+                let pixels: Vec<_> = maps.layers.iter().flat_map(|m| m.iter()).copied().collect();
                 r.set_maps(&pixels, maps.width, maps.height, maps.layers.len() as u32);
             } else {
                 r.set_screen(&[0; 4], 1, 1);
             }
             self.texture_uploads += 1;
-            self.texture_key = Some(texture_key);
+            self.uploaded_maps = input.maps.clone();
         }
         if reset {
             r.set_camera(&input.scene);
@@ -587,16 +588,6 @@ impl StudioService {
     pub fn queue(&self) -> Option<&wgpu::Queue> {
         self.renderer.as_ref().map(Renderer::queue)
     }
-}
-
-fn texture_key(maps: Option<&crate::extract::TextureMaps>) -> Vec<u8> {
-    let Some(maps) = maps else { return vec![] };
-    let mut key = Vec::new();
-    key.extend_from_slice(&maps.width.to_le_bytes());
-    key.extend_from_slice(&maps.height.to_le_bytes());
-    key.extend_from_slice(&(maps.layers.len() as u64).to_le_bytes());
-    for layer in &maps.layers { key.extend_from_slice(layer); }
-    key
 }
 
 fn content(input: &SceneInput, e: &Extracted, geometry_epoch: u64) -> (Vec<u8>, usize) {

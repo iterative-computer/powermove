@@ -256,7 +256,7 @@ impl SceneSource for Screens {
         materials[1].maps[1] = 1.;
         input.materials = Some(materials);
         input.instances[1].material = 1;
-        let mut layers = vec![vec![255, 0, 0, 255], vec![0, 0, 255, 255]];
+        let mut layers = vec![Arc::new(vec![255, 0, 0, 255]), Arc::new(vec![0, 0, 255, 255])];
         if self.swapped.load(Ordering::SeqCst) {
             layers.swap(0, 1);
         }
@@ -360,7 +360,7 @@ impl SceneSource for GreyScreen {
             input.maps = Some(pm_studio3d_engine::extract::TextureMaps {
                 width: 1,
                 height: 1,
-                layers: vec![vec![128, 128, 128, 255]],
+                layers: vec![Arc::new(vec![128, 128, 128, 255])],
             });
         }
         Ok(input)
@@ -504,7 +504,7 @@ impl SceneSource for MappedMotion {
             materials[0].maps[0] = 0.;
             input.maps = Some(pm_studio3d_engine::extract::TextureMaps {
                 width: 1, height: 1,
-                layers: vec![if image == 0 {vec![255,0,0,255]} else {vec![0,0,255,255]}],
+                layers: vec![Arc::new(if image == 0 {vec![255,0,0,255]} else {vec![0,0,255,255]})],
             });
         }
         input.materials = Some(materials);
