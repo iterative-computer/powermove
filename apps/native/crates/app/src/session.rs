@@ -3121,6 +3121,22 @@ impl Controller {
                 }
                 self.seek(seconds);
             }
+            // Import/Export CDL…: a person picks the file; the agent names it.
+            "color.importCdl"
+            | "color.importCdlFile"
+            | "color.exportCdl"
+            | "color.exportCdlFile" => {
+                let path = cmd.args.first().and_then(|v| v.as_str()).map(PathBuf::from);
+                if cmd.name.ends_with("File") && path.is_none() {
+                    self.message = "Give the CDL file’s path.".into();
+                    return false;
+                }
+                if cmd.name.starts_with("color.import") {
+                    self.import_cdl(path, cx);
+                } else {
+                    self.export_cdl(path, cx);
+                }
+            }
             "transport.loop" => {
                 let on = cmd.args.first().and_then(|v| v.as_bool()) != Some(false);
                 if self.playback.looping != on {

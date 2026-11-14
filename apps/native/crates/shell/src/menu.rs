@@ -533,6 +533,8 @@ pub fn extras() -> Vec<(&'static str, Item)> {
         view("Keep Rendered", "viewer.keepRendered"),
         view("Delete Rendered Frames", "viewer.deleteRendered"),
         view("Apply LUT…", "viewer.applyLut"),
+        view("Import CDL…", "color.importCdl"),
+        view("Export CDL…", "color.exportCdl"),
         layer("Align Left", "alignLayers", "left"),
         layer("Align Horizontal Centres", "alignLayers", "hcenter"),
         layer("Align Right", "alignLayers", "right"),

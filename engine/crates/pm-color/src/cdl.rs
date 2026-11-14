@@ -279,7 +279,7 @@ pub fn to_wheels(cdl: &Cdl) -> Result<Vec<(String, f64)>, String> {
 /// = gain × (1 − lift), offset = gain × lift + offset, power = 2^−gamma per
 /// channel, saturation / 100. Refused when Temperature, Tint, Exposure or
 /// Contrast are in use, which a CDL can't hold.
-pub fn from_wheels(value: impl Fn(&str) -> f64) -> Result<Cdl, String> {
+pub fn from_wheels(mut value: impl FnMut(&str) -> f64) -> Result<Cdl, String> {
     let unheld: Vec<&str> = [
         ("temperature", "Temperature"),
         ("tint", "Tint"),

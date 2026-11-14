@@ -15,6 +15,9 @@ export const CURVES = "colorCurves";
 export const LUT = "applyColorLut";
 /** The app command that asks for a `.cube` or `.3dl` file and applies it. */
 export const LOAD_LUT = "viewer.applyLut";
+/** Import/Export CDL… (app commands; the agent's take a path). */
+export const IMPORT_CDL = "color.importCdl";
+export const EXPORT_CDL = "color.exportCdl";
 
 /** Color Wheels' controls, in the order a colourist reads them. */
 export const WHEEL_SECTIONS: { title: string; keys: string[] }[] = [
@@ -90,6 +93,14 @@ export const ACTIONS: { action: string; agent: string[] }[] = [
     // Adds Apply Color LUT, or relinks the one whose file is missing.
     action: "Load LUT…",
     agent: ["import_media", "apply_commands", "add_effect", "set_effect"],
+  },
+  {
+    action: "Import CDL…",
+    agent: ["run_command", "color.importCdlFile"],
+  },
+  {
+    action: "Export CDL…",
+    agent: ["run_command", "color.exportCdlFile"],
   },
   {
     action: "Copy and paste a grade",
