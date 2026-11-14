@@ -13,6 +13,8 @@ export const PANEL_TITLE = "Color";
 export const WHEELS = "colorWheels";
 export const CURVES = "colorCurves";
 export const LUT = "applyColorLut";
+/** Color Curves' Channel choice, in its option order. */
+export const CURVE_CHANNELS = ["Master", "Red", "Green", "Blue"];
 /** The app command that asks for a `.cube` or `.3dl` file and applies it. */
 export const LOAD_LUT = "viewer.applyLut";
 

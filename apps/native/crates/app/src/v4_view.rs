@@ -1190,6 +1190,10 @@ impl SurfaceView {
         })
         .detach();
     }
+    /// Where an anchor node was last drawn (window points).
+    pub fn anchor_bounds(&self, id: Id) -> Option<Bounds<Pixels>> {
+        self.anchors.borrow().get(&id).copied()
+    }
     pub fn change(&mut self, id: Id, value: Value, cx: &mut Context<Self>) {
         let Some(node) = self.publication.surface.node(id) else {
             return;
