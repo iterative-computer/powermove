@@ -540,6 +540,7 @@ impl Editor {
                 let edge = match edge {
                     "left" => Edge::Left,
                     "right" => Edge::Right,
+                    "top" => Edge::Top,
                     _ => Edge::Bottom,
                 };
                 self.layout.move_panel_to(id, DropTarget::Edge(edge))
@@ -1216,6 +1217,7 @@ impl Editor {
         for (label, edge) in [
             ("Dock Left", "left"),
             ("Dock Right", "right"),
+            ("Dock Top", "top"),
             ("Dock Bottom", "bottom"),
         ] {
             items.push(
@@ -1463,11 +1465,10 @@ impl Editor {
         let (ground, ground_alpha) = t.ground();
         // The sidebar column is the system's material (`Host::sync_sidebar`):
         // the ground is painted everywhere else.
-        let clear = if self.host.is_some() {
-            t.metrics.sidebar
-        } else {
-            0.
-        };
+        let clear = self
+            .host
+            .as_ref()
+            .map_or(0., |h| h.borrow().sidebar_width());
         div()
             .id("editor")
             .role(Role::Group)
@@ -2954,6 +2955,80 @@ mod tests {
             assert!(v.gesture.is_none(), "the resize ended");
             assert_eq!(widths(v), reached, "it kept the size it reached");
         });
+    }
+
+    /// A splitter shows the resize cursor under the pointer, along its whole
+    /// length and a little past each side of the gap, and keeps it for the
+    /// whole drag, wherever the pointer goes (owner feedback W1).
+    #[gpui::test]
+    fn splitters_show_the_resize_cursor_and_keep_it_while_dragging(cx: &mut TestAppContext) {
+        use gpui::{CursorStyle, Modifiers, MouseButton, point, px};
+        let tokens = Tokens::new(pm_design::Scheme::Dark, Default::default());
+        let (view, cx) = cx.add_window_view(|_, cx| Editor::new(tokens, None, cx));
+        // The headless window owns the cursor once it is active (as on macOS).
+        cx.update(|window, _| window.activate());
+        cx.run_until_parked();
+        let dividers = view.read_with(cx, |v, _| v.geometry.dividers.clone());
+        assert!(dividers.len() >= 3, "{dividers:?}");
+        let none = Modifiers::none();
+        for d in &dividers {
+            let r = d.rect;
+            let wanted = if d.horizontal {
+                CursorStyle::ResizeUpDown
+            } else {
+                CursorStyle::ResizeLeftRight
+            };
+            // Middle and both ends of its length; the gap's centre and a
+            // point just past its edge.
+            let along: Vec<(f32, f32)> = if d.horizontal {
+                vec![
+                    (r.x + r.w / 2., r.y + r.h / 2.),
+                    (r.x + 30., r.y + r.h / 2.),
+                    (r.x + r.w - 30., r.y + r.h / 2.),
+                    (r.x + r.w / 2., r.y - 1.),
+                ]
+            } else {
+                vec![
+                    (r.x + r.w / 2., r.y + r.h / 2.),
+                    (r.x + r.w / 2., r.y + 30.),
+                    (r.x + r.w / 2., r.y + r.h - 30.),
+                    (r.x + r.w + 1., r.y + r.h / 2.),
+                ]
+            };
+            for (x, y) in along {
+                cx.simulate_mouse_move(point(px(x), px(y)), None, none);
+                assert_eq!(cx.cursor_style(), wanted, "{d:?} at {x},{y}");
+            }
+        }
+        // Inside a panel, away from every gap, the cursor is the arrow.
+        let panel = view.read_with(cx, |v, _| v.geometry.panels[0].rect);
+        cx.simulate_mouse_move(
+            point(
+                px(panel.x + panel.w / 2.),
+                px(panel.y + panel.h / 2.),
+            ),
+            None,
+            none,
+        );
+        assert_eq!(cx.cursor_style(), CursorStyle::Arrow, "inside a panel");
+        // Dragging the first splitter far into a panel keeps its cursor.
+        let d = &dividers[0];
+        let (x, y) = (d.rect.x + d.rect.w / 2., d.rect.y + d.rect.h / 2.);
+        cx.simulate_mouse_move(point(px(x), px(y)), None, none);
+        cx.simulate_mouse_down(point(px(x), px(y)), MouseButton::Left, none);
+        let away = if d.horizontal {
+            (x + 40., y + 120.)
+        } else {
+            (x + 120., y + 40.)
+        };
+        cx.simulate_mouse_move(point(px(away.0), px(away.1)), MouseButton::Left, none);
+        let wanted = if d.horizontal {
+            CursorStyle::ResizeUpDown
+        } else {
+            CursorStyle::ResizeLeftRight
+        };
+        assert_eq!(cx.cursor_style(), wanted, "while dragging");
+        cx.simulate_mouse_up(point(px(away.0), px(away.1)), MouseButton::Left, none);
     }
 
     #[gpui::test]
