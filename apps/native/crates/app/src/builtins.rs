@@ -2095,6 +2095,9 @@ impl crate::gizmo::Host for ControllerDelegate {
             v.place_project_items(at, Some(0), cx);
         });
     }
+    fn drop_files(&self, paths: Vec<std::path::PathBuf>, alt: bool, cx: &mut App) {
+        let _ = self.0.update(cx, |v, cx| v.drop_on_viewer(paths, alt, cx));
+    }
     fn time(&self, cx: &App) -> f64 {
         self.0.upgrade().map_or(0., |c| c.read(cx).time())
     }

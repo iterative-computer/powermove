@@ -39,6 +39,8 @@ struct Recorder {
     parts: RefCell<Vec<(String, Option<u64>)>>,
     /// An entity `frame` reads, as the app's host reads its controller.
     lease: RefCell<Option<Entity<u8>>>,
+    /// Files dropped on the viewer.
+    files: RefCell<Vec<std::path::PathBuf>>,
 }
 /// The canvas editor without AppKit: typing is an event, as from NSTextView.
 #[derive(Default)]
@@ -155,6 +157,9 @@ impl Host for Recording {
     }
     fn input(&self, at: f64, _: &mut App) {
         self.0.stamps.borrow_mut().push(at);
+    }
+    fn drop_files(&self, paths: Vec<std::path::PathBuf>, _: bool, _: &mut App) {
+        self.0.files.borrow_mut().extend(paths);
     }
     fn shape_variant(&self, _: &App) -> String {
         self.0
@@ -2364,4 +2369,24 @@ fn lights_handles_and_the_camera_fit_the_overlay_budget(cx: &mut TestAppContext)
         n > 40 && n < pm_engine_service::OverlayGeometry::MAX_LINES,
         "{n} lines"
     );
+}
+
+/// Files dragged from Finder and released over the viewer are its: the
+/// host gets them (to import and place at the playhead), and the drop goes
+/// no further (the window's own drop would import them a second time).
+#[gpui::test]
+fn files_dropped_on_the_viewer_are_imported_there(cx: &mut TestAppContext) {
+    let mut s = stage(cx);
+    let at = s.point_of([320., 180.]);
+    let paths = vec![std::path::PathBuf::from("/media/drop-a.mov")];
+    s.vcx.simulate_event(gpui::FileDropEvent::Entered {
+        position: at,
+        paths: gpui::ExternalPaths(paths.clone().into()),
+    });
+    s.vcx
+        .simulate_event(gpui::FileDropEvent::Pending { position: at });
+    s.vcx
+        .simulate_event(gpui::FileDropEvent::Submit { position: at });
+    s.vcx.run_until_parked();
+    assert_eq!(*s.recorder.files.borrow(), paths);
 }

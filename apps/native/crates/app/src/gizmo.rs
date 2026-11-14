@@ -150,6 +150,9 @@ pub trait Host: 'static {
     /// The Project panel's dragged items dropped on the viewer: placed at
     /// the playhead, on top of the stack.
     fn drop_project_items(&self, _cx: &mut App) {}
+    /// Files from Finder dropped on the viewer: imported, and placed at the
+    /// playhead on top of the stack (`alt`: a folder keeps its files apart).
+    fn drop_files(&self, _paths: Vec<std::path::PathBuf>, _alt: bool, _cx: &mut App) {}
     fn playing(&self, cx: &App) -> bool;
     fn frame(&self, bounds: Bounds<Pixels>, cx: &App) -> Option<ViewFrame>;
     fn tool(&self, cx: &App) -> Tool;
@@ -2508,10 +2511,28 @@ fn overlay(poses: &[Pose], frame: ViewFrame, t: &pm_design::Tokens) -> Vec<Overl
 impl Render for GizmoSurface {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let this = cx.entity().downgrade();
+        // Media held over the viewer: an accent ring where it will land.
+        let accent = rgb(self.tokens.colors.accent);
+        let ring = px(self.tokens.metrics.border * 2.);
         div()
             .id("viewer-gizmos")
             .size_full()
             .cursor(self.cursor)
+            .on_drag_over::<ExternalPaths>(move |style, _, _, _| {
+                style.border(ring).border_color(accent)
+            })
+            .on_drop(cx.listener(|s, paths: &ExternalPaths, window, cx| {
+                cx.stop_propagation();
+                s.host
+                    .drop_files(paths.paths().to_vec(), window.modifiers().alt, cx);
+            }))
+            .on_drag_over::<crate::v4_view::PanelDrag>(move |style, drag, _, _| {
+                if drag.panel == pm_builtins::PROJECT_PANEL {
+                    style.border(ring).border_color(accent)
+                } else {
+                    style
+                }
+            })
             .on_drop(cx.listener(|s, drag: &crate::v4_view::PanelDrag, _, cx| {
                 if drag.panel == pm_builtins::PROJECT_PANEL {
                     cx.stop_propagation();
