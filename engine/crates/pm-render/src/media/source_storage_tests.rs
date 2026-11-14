@@ -104,7 +104,7 @@ fn a_still_larger_than_the_budget_stays_while_frames_draw_it() {
     let mut media = MediaCache::new(&gpu.device);
     media.trim_images(1);
     let frame = |media: &mut MediaCache, draw: bool| {
-        media.begin_frame();
+        media.begin_frame(false);
         let before = pm_perf::snapshot();
         if draw {
             let mut encoder = gpu.device.create_command_encoder(&Default::default());
@@ -1080,7 +1080,7 @@ fn image_frame(
     media: &mut MediaCache,
     paths: &[&PathBuf],
 ) -> u64 {
-    media.begin_frame();
+    media.begin_frame(false);
     let before = pm_perf::snapshot();
     let mut encoder = gpu.device.create_command_encoder(&Default::default());
     for path in paths {

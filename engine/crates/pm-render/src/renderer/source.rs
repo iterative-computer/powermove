@@ -153,7 +153,7 @@ impl Renderer {
         }
         // Each snapshot is a frame of the media cache: what earlier
         // snapshots read gives way to this one's within the budget.
-        self.media.begin_frame();
+        self.media.begin_source_frame();
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -264,7 +264,7 @@ impl Renderer {
             return Ok(vec![frame; times.len()]);
         }
         // The batch is one frame of the media cache.
-        self.media.begin_frame();
+        self.media.begin_source_frame();
         let row = output.width as usize * 4;
         let padded = row.div_ceil(256) * 256;
         let frame_stride = padded * output.height as usize;

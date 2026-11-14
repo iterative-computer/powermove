@@ -66,20 +66,18 @@ fn still_project() -> Still {
     }
 }
 
-/// Holds the prefetch worker inside its next decode (a read that does not
-/// return) until the sender is dropped.
+/// Holds the prefetch workers inside their next decode (a read that does
+/// not return) until the sender is dropped.
 fn stall(renderer: &Renderer) -> (std::sync::mpsc::Sender<()>, std::thread::JoinHandle<()>) {
-    let stall = renderer.media.still_stall();
-    let (locked, held) = std::sync::mpsc::channel();
+    let gate = renderer.media.still_decode_gate();
+    gate(true);
     let (go, release) = std::sync::mpsc::channel::<()>();
     let holder = std::thread::spawn(move || {
-        let _guard = stall.lock().unwrap();
-        locked.send(()).unwrap();
         // Released by the test, or after a long stall if the test failed
         // with a frame still waiting.
         let _ = release.recv_timeout(Duration::from_secs(3));
+        gate(false);
     });
-    held.recv().unwrap();
     (go, holder)
 }
 

@@ -556,25 +556,116 @@ impl Exec<'_> {
                         self.taken.push(target);
                     }
                     Source::Image {
-                        path, interpret, ..
+                        path,
+                        interpret,
+                        ahead,
+                        card_when_unreadable,
+                        sequence_size,
+                        ..
                     } => {
                         let edge = self.media.preview_media.then(|| r.source_edge()).flatten();
-                        match self.media.image_scaled(
-                            self.device,
-                            self.queue,
-                            self.pipelines,
-                            encoder,
-                            path,
-                            self.working,
-                            self.precision,
-                            interpret.as_ref(),
-                            edge,
-                        ) {
-                            Ok(t) => {
-                                r.view = Some(t.view.clone());
-                                self.prepare_level2(encoder, r, &t.texture, Some(0));
+                        // The next files of a playing sequence start decoding
+                        // on workers before this one is read.
+                        for next in ahead.iter() {
+                            self.media.prepare_image(next, edge, interpret.is_some());
+                        }
+                        // A sequence's file is read between two fresh looks
+                        // at it: a file that changed while it was read (a
+                        // renderer writing it now) is not drawn, and what was
+                        // read of it is dropped. A delivered frame reads it
+                        // again (a few times); a viewer draws the frame again,
+                        // and after a few such reads in a row shows its card
+                        // until the file changes again.
+                        let member = sequence_size.is_some();
+                        let attempts = if member && !*card_when_unreadable {
+                            3
+                        } else {
+                            1
+                        };
+                        let mut read = None;
+                        for attempt in 0..attempts {
+                            let before = member.then(|| crate::media::stat_stamp(path));
+                            #[cfg(test)]
+                            crate::media::DURING_READ.with(|hook| {
+                                if let Some(hook) = hook.borrow_mut().as_mut() {
+                                    hook(path);
+                                }
+                            });
+                            let result = self.media.image_scaled(
+                                self.device,
+                                self.queue,
+                                self.pipelines,
+                                encoder,
+                                path,
+                                self.working,
+                                self.precision,
+                                interpret.as_ref(),
+                                edge,
+                            );
+                            let changed = member && before != Some(crate::media::stat_stamp(path));
+                            if !changed {
+                                read = Some(result);
+                                break;
                             }
-                            Err(e) => self.fail(plan, draw, e),
+                            self.media.forget_still(path);
+                            if attempt + 1 < attempts {
+                                std::thread::sleep(std::time::Duration::from_millis(50));
+                            }
+                        }
+                        let unstable = if member {
+                            self.media.unstable_read(path, read.is_none())
+                        } else {
+                            0
+                        };
+                        let file = || path.file_name().unwrap_or_default().to_string_lossy();
+                        match read {
+                            // It kept changing while it was read.
+                            None if *card_when_unreadable => {
+                                if unstable >= 3 {
+                                    crate::media::note_decode_failed(path);
+                                }
+                                self.media.unreadable_found();
+                            }
+                            None => self.fail(
+                                plan,
+                                draw,
+                                MediaFailure::Failed(format!(
+                                    "{} changed while it was read; render it again once it is written",
+                                    file()
+                                )),
+                            ),
+                            Some(Ok(t)) => {
+                                // A sequence's file of another size, found as
+                                // it is read: never drawn stretched.
+                                let other = sequence_size.and_then(|(sw, sh)| {
+                                    crate::media::still_size(path)
+                                        .filter(|&(w, h)| (w as u32, h as u32) != (sw, sh))
+                                        .map(|size| (size, (f64::from(sw), f64::from(sh))))
+                                });
+                                match other {
+                                    None => {
+                                        r.view = Some(t.view.clone());
+                                        self.prepare_level2(encoder, r, &t.texture, Some(0));
+                                    }
+                                    Some(_) if *card_when_unreadable => {
+                                        self.media.unreadable_found();
+                                    }
+                                    Some((size, sequence)) => {
+                                        let message = crate::plan::other_size_message(
+                                            None, size, sequence, &file(),
+                                        );
+                                        self.fail(plan, draw, MediaFailure::Failed(message));
+                                    }
+                                }
+                            }
+                            // Found unreadable now (its facts may have been
+                            // read before, from a whole file): the frame is
+                            // drawn again, with the file's card.
+                            Some(Err(_)) if *card_when_unreadable => {
+                                crate::media::note_decode_failed(path);
+                                self.media.unreadable_found();
+                            }
+                            Some(Err(e)) => self.fail(plan, draw, e),
                         }
                     }
                     Source::Video {
@@ -1422,5 +1513,231 @@ mod uniform_pool_tests {
             }
             buffer = a;
         }
+    }
+}
+
+#[cfg(test)]
+mod sequence_read_tests {
+    use crate::{MapResolver, RenderRequest, Renderer};
+    use pm_protocol::color::Precision;
+    use pm_protocol::common::{Size, Ticks};
+    use std::path::{Path, PathBuf};
+
+    /// A 16×16 grey BMP of level `v`, written as a renderer does (a new
+    /// file renamed over the old one).
+    fn render(path: &Path, v: u8) {
+        let (w, h) = (16u32, 16u32);
+        let mut b = Vec::new();
+        b.extend_from_slice(b"BM");
+        b.extend_from_slice(&(54 + w * h * 3).to_le_bytes());
+        b.extend_from_slice(&[0; 4]);
+        b.extend_from_slice(&54u32.to_le_bytes());
+        b.extend_from_slice(&40u32.to_le_bytes());
+        b.extend_from_slice(&(w as i32).to_le_bytes());
+        b.extend_from_slice(&(h as i32).to_le_bytes());
+        b.extend_from_slice(&1u16.to_le_bytes());
+        b.extend_from_slice(&24u16.to_le_bytes());
+        b.extend_from_slice(&[0; 24]);
+        b.extend(std::iter::repeat_n(v, (w * h * 3) as usize));
+        let staged = path.with_extension("tmp");
+        std::fs::write(&staged, b).unwrap();
+        std::fs::rename(staged, path).unwrap();
+    }
+
+    struct Sequence {
+        _dir: tempfile::TempDir,
+        frames: Vec<PathBuf>,
+        document: pm_model::Document,
+        resolver: MapResolver,
+    }
+
+    /// Three frames (levels 40, 80, 120) at 30 fps, drawn over a 16×16
+    /// composition with no background.
+    fn sequence() -> Sequence {
+        let dir = tempfile::tempdir().unwrap();
+        let frames: Vec<PathBuf> = (1..=3)
+            .map(|n| dir.path().join(format!("shot.{n:04}.bmp")))
+            .collect();
+        for (n, frame) in frames.iter().enumerate() {
+            render(frame, 40 * (n as u8 + 1));
+        }
+        let manifest = pm_media::image::sequence::Manifest {
+            powermove_image_sequence: 1,
+            dir: dir.path().to_owned(),
+            prefix: "shot.".into(),
+            suffix: ".bmp".into(),
+            padding: 4,
+            first: 1,
+            last: 3,
+            rate: [30, 1],
+        };
+        let retained = dir.path().join("retained");
+        std::fs::write(&retained, manifest.to_bytes()).unwrap();
+        let ch = |v: f64| format!(r#"{{"v":{v},"kf":[],"expr":null}}"#);
+        let transform = [
+            ("position.x", 8.),
+            ("position.y", 8.),
+            ("anchor.x", 0.),
+            ("anchor.y", 0.),
+            ("scale.x", 100.),
+            ("scale.y", 100.),
+            ("rotation", 0.),
+            ("opacity", 100.),
+        ]
+        .map(|(k, v)| format!(r#""{k}":{}"#, ch(v)))
+        .join(",");
+        let project = format!(
+            r##"{{"id":"P","name":"P","compId":"C","compName":"C","w":16,"h":16,"fps":30,"dur":1,"bg":"#000000",
+            "backgroundFill":{{"type":"none","angle":0,"stops":[{{"id":"s1","color":"#000000","position":0}}]}},
+            "layers":[{{"id":"s","type":"video","name":"shot","from":0,"dur":1,"on":true,"solo":false,"mblur":false,
+              "p":{{{transform}}},"fx":[],"masks":[],"d":{{"asset":"clip","fit":"stretch","w":16,"h":16}}}}],
+            "comps":{{}},"assets":{{"clip":{{"id":"clip","type":"video","name":"shot","w":16,"h":16,"dur":0.1,
+              "fps":30,"imageSequence":{{"fps":30,"frames":3,"first":1,"last":3}}}}}},
+            "markers":[],"work":[0,1],"params":{{}}}}"##
+        );
+        let document = pm_model::Document::new(
+            Some(pm_model::canonical::canonical_project(
+                pm_model::json::parse(&project).unwrap(),
+            )),
+            1,
+        );
+        let mut resolver = MapResolver::default();
+        resolver.paths.insert("clip".into(), retained);
+        Sequence {
+            _dir: dir,
+            frames,
+            document,
+            resolver,
+        }
+    }
+
+    /// Frame `n`'s picture at the centre (RGBA), and its layer failures.
+    fn draw(renderer: &mut Renderer, s: &Sequence, n: i64) -> ([f32; 4], Vec<String>) {
+        let request = RenderRequest::at_scale(Size::new(16, 16), 1.0, Precision::Float16);
+        let time = Ticks::new(n * pm_protocol::common::TICKS_PER_SECOND / 30).unwrap();
+        let frame = renderer
+            .render(&s.document, "C", time, &request, &s.resolver)
+            .unwrap();
+        let rgba = renderer.read_rgba(&frame).unwrap();
+        let at = (8 * 16 + 8) * 4;
+        (
+            [rgba[at], rgba[at + 1], rgba[at + 2], rgba[at + 3]],
+            frame.failures.iter().map(|f| f.message.clone()).collect(),
+        )
+    }
+
+    fn while_read(hook: impl FnMut(&Path) + 'static) {
+        crate::media::DURING_READ.with(|h| *h.borrow_mut() = Some(Box::new(hook)));
+    }
+
+    fn level(rgba: [f32; 4]) -> u8 {
+        (rgba[0] * 255.0).round() as u8
+    }
+
+    /// A sequence's file written again while it is read (as a renderer
+    /// writes its output) is never drawn from what was read then: an
+    /// export reads it again and draws the new file; a viewer draws the
+    /// frame again; a file that keeps changing shows its card in a viewer
+    /// and fails an export, naming it.
+    #[test]
+    fn a_file_changing_while_it_is_read_is_never_drawn() {
+        let s = sequence();
+        // Export: the first read is spoilt by a write; the second is whole.
+        let mut export = Renderer::headless().unwrap();
+        let (frame, reads) = (
+            s.frames[0].clone(),
+            std::rc::Rc::new(std::cell::Cell::new(0)),
+        );
+        let counted = reads.clone();
+        while_read(move |_| {
+            counted.set(counted.get() + 1);
+            if counted.get() == 1 {
+                render(&frame, 200);
+            }
+        });
+        let (picture, failures) = draw(&mut export, &s, 0);
+        assert!(failures.is_empty(), "{failures:?}");
+        assert_eq!(reads.get(), 2, "read again");
+        assert!(level(picture) > 180, "the new file: {picture:?}");
+
+        // Viewer: the frame is a stand-in and is drawn again.
+        let mut viewer = Renderer::headless().unwrap();
+        viewer.set_isolate_layers(true);
+        let (frame, writes) = (
+            s.frames[1].clone(),
+            std::rc::Rc::new(std::cell::Cell::new(0)),
+        );
+        let counted = writes.clone();
+        while_read(move |_| {
+            counted.set(counted.get() + 1);
+            if counted.get() == 1 {
+                render(&frame, 220);
+            }
+        });
+        let landed = viewer.media_landed();
+        let (_, failures) = draw(&mut viewer, &s, 1);
+        assert!(failures.is_empty(), "{failures:?}");
+        assert_eq!(viewer.media_landed(), landed + 1, "asked to be drawn again");
+        let (picture, _) = draw(&mut viewer, &s, 1);
+        assert!(level(picture) > 200, "the file as written: {picture:?}");
+
+        // A file that changes at every read: the viewer shows its card after
+        // a few attempts; an export fails naming it.
+        let frame = s.frames[2].clone();
+        let mut flip = false;
+        while_read(move |_| {
+            flip = !flip;
+            render(&frame, if flip { 10 } else { 250 });
+        });
+        let mut last = None;
+        for _ in 0..8 {
+            let landed = viewer.media_landed();
+            let drawn = draw(&mut viewer, &s, 2);
+            if viewer.media_landed() == landed {
+                last = Some(drawn);
+                break;
+            }
+        }
+        let (card, failures) = last.expect("the viewer kept drawing the frame again");
+        assert!(failures.is_empty(), "{failures:?}");
+        assert!(
+            card[3] > 0.99 && ![10, 250].contains(&level(card)),
+            "its card: {card:?}"
+        );
+        // Written once more before the export reads it (its card held only
+        // for the state it was seen in).
+        render(&s.frames[2], 99);
+        let (_, failures) = draw(&mut Renderer::headless().unwrap(), &s, 2);
+        assert!(
+            failures
+                .iter()
+                .any(|f| f.contains("shot.0003.bmp") && f.contains("changed while it was read")),
+            "{failures:?}"
+        );
+        crate::media::DURING_READ.with(|h| *h.borrow_mut() = None);
+    }
+
+    /// A file whose facts were read already (at this stamp) and whose
+    /// pixels then fail to decode shows its card in a viewer, never a
+    /// blank layer.
+    #[test]
+    fn a_decode_failing_after_good_facts_shows_the_card() {
+        let s = sequence();
+        let (picture, failures) = draw(&mut Renderer::headless().unwrap(), &s, 0);
+        assert!(
+            failures.is_empty() && level(picture) > 30,
+            "{failures:?} {picture:?}"
+        );
+        let mut viewer = Renderer::headless().unwrap();
+        viewer.set_isolate_layers(true);
+        crate::media::FAIL_DECODE.with(|f| f.set(true));
+        let landed = viewer.media_landed();
+        let (_, failures) = draw(&mut viewer, &s, 0);
+        assert!(failures.is_empty(), "a blank layer: {failures:?}");
+        assert_eq!(viewer.media_landed(), landed + 1);
+        let (card, failures) = draw(&mut viewer, &s, 0);
+        crate::media::FAIL_DECODE.with(|f| f.set(false));
+        assert!(failures.is_empty(), "{failures:?}");
+        assert!(card[3] > 0.99, "its card: {card:?}");
     }
 }

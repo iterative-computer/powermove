@@ -13,6 +13,9 @@ mod sequence;
 mod store;
 
 #[cfg(feature = "generation")]
+pub use sequence::sequence_identity;
+
+#[cfg(feature = "generation")]
 pub use generate::{
     GeneratedProxy, GenerationControl, GenerationRequest, PauseReason, generate,
     generate_with_disk_probe,
@@ -27,7 +30,8 @@ pub use policy::{
 #[cfg(feature = "test-hooks")]
 pub use store::set_test_disk_reserve;
 pub use store::{
-    ProxyKey, ProxyRecipe, ProxyStore, StoredProxy, TEST_DISK_RESERVE_ENV, disk_guard, free_bytes,
+    ProxyKey, ProxyRecipe, ProxyStore, SEQUENCE_PIPELINE, StoredProxy, TEST_DISK_RESERVE_ENV,
+    disk_guard, free_bytes,
 };
 
 #[derive(Debug, thiserror::Error)]

@@ -208,11 +208,14 @@ function Action(props: {
   symbol?: string;
   tabIndex?: number;
   style?: SurfaceProps["style"];
+  /** It opens a menu: VoiceOver says so, and the menu hangs from it. */
+  menu?: boolean;
 }) {
-  const { onActivate, tooltip, symbol, ...rest } = props;
+  const { onActivate, tooltip, symbol, menu, ...rest } = props;
   return (
     <ToolbarItem
       {...rest}
+      {...(menu ? { "aria-haspopup": "menu" } : {})}
       metadata={{
         symbol:
           symbol ??
@@ -428,6 +431,7 @@ function Field({
           // A well that opens a menu: the value in the text ink and the
           // pop-up's chevrons at its trailing end.
           style={menuWell}
+          menu
           children={menuValue(
             typeof control.value === "string" && control.value
               ? control.value
@@ -438,6 +442,8 @@ function Field({
               type: "font-menu",
               row: row.id,
               anchor: event.currentTarget,
+              current:
+                typeof control.value === "string" ? control.value : undefined,
             })
           }
         />

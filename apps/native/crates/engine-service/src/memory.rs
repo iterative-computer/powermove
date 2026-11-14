@@ -7,8 +7,6 @@ pub struct CacheUsage {
     pub target_pool_idle: usize,
     pub targets_created: u64,
     pub image_bytes: u64,
-    /// Decoded stills held ahead of the playhead, before their upload.
-    pub still_prefetch_bytes: u64,
     pub converted_frame_bytes: u64,
     pub decoded_frame_bytes: u64,
     pub decoder_bytes: u64,
@@ -38,7 +36,6 @@ impl CacheUsage {
     pub fn resident_bytes(&self) -> u64 {
         self.target_pool_bytes
             + self.image_bytes
-            + self.still_prefetch_bytes
             + self.converted_frame_bytes
             + self.decoded_frame_bytes
             + self.decoder_bytes

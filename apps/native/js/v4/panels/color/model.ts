@@ -64,7 +64,12 @@ export type Intent =
   | { type: "range"; range: [number, number] }
   | { type: "disclose"; id: string; open: boolean }
   | { type: "toggle" | "reset" | "remove"; id: string }
-  | { type: "add"; definition: string }
+  | {
+      type: "add";
+      definition: string;
+      /** Values the new effect starts with, in the same Undo step. */
+      parameters?: Record<string, Json>;
+    }
   | {
       type: "parameter";
       id: string;

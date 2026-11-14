@@ -239,6 +239,9 @@ preserved by reverse migration; old checkpoint secrets must never overwrite them
 
 ## Verification and remaining integration
 
+Before a release, run `engine/scripts/realtime-gates.sh` on an idle Mac: the audio
+real-time deadlines that the default test run leaves out (`#[ignore]`) must pass.
+
 Linux: **33 Rust distribution/handoff tests, 20 Python packaging tests, and all
 75 existing pm-services tests pass**. Strict Clippy for distribution and services,
 Rust formatting, shell syntax, Python compilation and staged gitleaks checks pass.

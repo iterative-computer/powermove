@@ -4904,6 +4904,7 @@ dependencies = [
  "pm-studio3d-engine",
  "pm-text",
  "pm-time",
+ "png",
  "serde",
  "serde_json",
  "tempfile",
