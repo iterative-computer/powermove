@@ -1122,9 +1122,11 @@ export function ProjectPanel({
     service.run(
       service.page(
         offset,
+        // Never clamped to the items there are: media imported later
+        // joins this page with the next publication.
         Math.min(
-          view.page.total - offset,
-          Math.max(96, view.page.rows.length + layout.columns),
+          4096,
+          Math.max(FIRST_PAGE, view.page.rows.length + layout.columns),
         ),
         view.page.stamp,
       ),
