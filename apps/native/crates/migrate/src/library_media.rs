@@ -231,7 +231,7 @@ pub fn read_index(root: &Path) -> Result<Vec<DiskMediaRecord>> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(e.into()),
     }
-    let mut records = read_main_index(root)?;
+    let mut records = read_main_index(root, true)?;
     let indexed: std::collections::BTreeSet<String> =
         records.iter().map(|r| r.key.clone()).collect();
     records.extend(
@@ -243,7 +243,7 @@ pub fn read_index(root: &Path) -> Result<Vec<DiskMediaRecord>> {
     Ok(records)
 }
 
-fn read_main_index(root: &Path) -> Result<Vec<DiskMediaRecord>> {
+fn read_main_index(root: &Path, verify: bool) -> Result<Vec<DiskMediaRecord>> {
     let index = root.join("Index");
     match fs::symlink_metadata(&index) {
         Ok(m) => ensure!(m.is_dir(), "unsafe media index directory"),
@@ -278,7 +278,9 @@ fn read_main_index(root: &Path) -> Result<Vec<DiskMediaRecord>> {
             format!("{:x}", Sha256::digest(record.key.as_bytes())) == hash,
             "media key index mismatch"
         );
-        record.verify_owned()?;
+        if verify {
+            record.verify_owned()?;
+        }
         records.push(record);
     }
     Ok(records)
@@ -376,4 +378,72 @@ fn store_record(root: &Path, path: &Path, name_hash: &str) -> Option<DiskMediaRe
         key,
         raw,
     })
+}
+
+/// Read metadata only; owned paths refer to the live, read-only source profile.
+pub fn read_link_index(metadata_root: &Path, source_root: &Path) -> Result<Vec<DiskMediaRecord>> {
+    let mut records = read_main_index(metadata_root, false)?;
+    let owned = fs::read_dir(source_root)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .collect::<Vec<_>>();
+    for record in &mut records {
+        if let Some(path) = &record.owned_path {
+            record.owned_path = path.file_name().map(|name| source_root.join(name));
+        }
+        if record.owned_path.is_none() {
+            record.owned_path = owned
+                .iter()
+                .find(|p| {
+                    p.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.starts_with(&format!("{}.", record.sha256)))
+                })
+                .cloned();
+        }
+    }
+    let keys = metadata_root.join("keys");
+    if keys.is_dir() {
+        for entry in fs::read_dir(keys)? {
+            let path = entry?.path();
+            if path.extension().is_none_or(|x| x != "json") {
+                continue;
+            }
+            let raw: Value = serde_json::from_reader(open_regular(&path)?)?;
+            let Some(key) = raw.get("key").and_then(Value::as_str) else {
+                continue;
+            };
+            if records.iter().any(|r| r.key == key) {
+                continue;
+            }
+            let Some(hash) = raw.get("hash").and_then(Value::as_str).filter(|h| hex64(h)) else {
+                continue;
+            };
+            let Some(size) = raw.get("size").and_then(Value::as_u64) else {
+                continue;
+            };
+            records.push(DiskMediaRecord {
+                key: key.to_owned(),
+                size,
+                sha256: String::new(),
+                revision: raw
+                    .get("revision")
+                    .and_then(Value::as_str)
+                    .unwrap_or(hash)
+                    .into(),
+                mime: raw
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .unwrap_or("application/octet-stream")
+                    .into(),
+                owned_path: Some(source_root.join("objects").join(&hash[..2]).join(hash)),
+                source_path: None,
+                raw,
+            });
+        }
+    }
+    Ok(records)
 }

@@ -317,6 +317,24 @@ impl Snapshot {
             Ok(None)
         }
     }
+    /// Resolve deferred bytes in place without reading their contents.
+    pub fn linked_blob_path(&self, database: u64, number: u64) -> Result<Option<PathBuf>> {
+        if let Some(path) = self.blob_path(database, number)? {
+            return Ok(Some(path));
+        }
+        let relative = PathBuf::from(format!(
+            "{database:x}/{:02x}/{number:x}",
+            (number >> 8) & 255
+        ));
+        let Some(stamp) = self.inventory.deferred_blobs.get(&relative) else {
+            return Ok(None);
+        };
+        let Some(root) = self.inventory.source_roots.get(1) else {
+            return Ok(None);
+        };
+        let path = root.join(relative);
+        Ok(crate::linked::valid_file(&path, stamp.size).then_some(path))
+    }
     /// Materialize one captured identity into a caller-owned batch. A changed,
     /// replaced or missing source is refused; never read it as the old snapshot.
     pub fn copy_blob(
