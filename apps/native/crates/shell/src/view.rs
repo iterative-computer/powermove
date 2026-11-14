@@ -963,6 +963,91 @@ impl Editor {
             preview,
         }));
     }
+    /// A panel that is not in the workspace (the Agent popover, a window of
+    /// its own) dragged over it to `at` (this window's points): the same drop
+    /// preview a tab drag shows, for the panel as Pin would first place it.
+    /// True when a drop there would dock it.
+    pub fn drag_from_outside(&mut self, id: &str, at: (f32, f32), cx: &mut Context<Self>) -> bool {
+        let preview = self.outside_target(id, at, cx);
+        let original = match self.gesture.take() {
+            Some(Gesture::Panel(d)) => d.original,
+            _ => self.layout.clone(),
+        };
+        let point = point(px(at.0), px(at.1));
+        self.gesture = Some(Gesture::Panel(PanelDrag {
+            id: id.into(),
+            stack: false,
+            start: point,
+            original,
+            at: point,
+            moved: true,
+            preview,
+        }));
+        cx.notify();
+        preview.is_some()
+    }
+    /// Ends an outside drag as a drop: the panel docks where its preview
+    /// showed (the workspace changes as a Pin there would). False, with the
+    /// workspace untouched, when no target was lit.
+    pub fn drop_from_outside(&mut self, id: &str, cx: &mut Context<Self>) -> bool {
+        let Some(Gesture::Panel(drag)) = self.gesture.take() else {
+            return false;
+        };
+        let Some(preview) = drag.preview.filter(|_| drag.id == id) else {
+            cx.notify();
+            return false;
+        };
+        let panels = self.panels(cx);
+        let mut next = self.layout.clone();
+        let docked = next
+            .show_panel(id, &panels)
+            .and_then(|_| next.move_panel_to(id, preview.target).or(Ok(())));
+        if let Err(error) = docked {
+            self.status = error.to_string();
+            cx.notify();
+            return false;
+        }
+        self.layout = next;
+        self.slides.armed = true;
+        self.save();
+        cx.notify();
+        true
+    }
+    /// An outside drag let go off any target, or cancelled: no preview, the
+    /// workspace as it was.
+    pub fn cancel_from_outside(&mut self, cx: &mut Context<Self>) {
+        if let Some(Gesture::Panel(drag)) = self.gesture.take() {
+            self.layout = drag.original;
+            cx.notify();
+        }
+    }
+    /// Where a panel from outside would dock at `at`: the layout with it
+    /// shown (as Pin shows it) asked as for a tab drag; over the group Pin
+    /// puts it in, that group itself.
+    fn outside_target(&self, id: &str, at: (f32, f32), cx: &App) -> Option<DropPreview> {
+        let panels = self.panels(cx);
+        let mut with = self.layout.clone();
+        with.show_panel(id, &panels).ok()?;
+        with.drop_target_for(
+            &self.geometry,
+            self.dock_bounds,
+            at,
+            &self.tokens,
+            id,
+            false,
+        )
+        .or_else(|| {
+            let raw =
+                with.drop_target(&self.geometry, self.dock_bounds, at.0, at.1, &self.tokens)?;
+            let (dock, group, _) = with.find(id)?;
+            match raw.target {
+                DropTarget::Tab {
+                    dock: d, group: g, ..
+                } if (d, g) == (dock, group) => Some(raw),
+                _ => None,
+            }
+        })
+    }
     /// Completes a simulated drag like a mouse-up; returns the applied target.
     #[doc(hidden)]
     pub fn simulate_drop(&mut self) -> Option<DropTarget> {
@@ -2836,6 +2921,88 @@ mod tests {
                 );
             })
             .unwrap();
+    }
+
+    /// The Agent popover dragged over the workspace: the same drop preview a
+    /// tab drag shows; a drop docks it there, over Pin's place exactly as Pin,
+    /// and off every target changes nothing.
+    #[gpui::test]
+    fn a_panel_dragged_in_from_outside_docks_where_its_preview_shows(cx: &mut TestAppContext) {
+        let tokens = Tokens::new(pm_design::Scheme::Dark, Default::default());
+        let (view, cx) = cx.add_window_view(|_, cx| Editor::new(tokens, None, cx));
+        cx.run_until_parked();
+        view.update(cx, |v, _| {
+            if v.layout.find("agent").is_some() {
+                v.layout.close_panel("agent").unwrap();
+            }
+        });
+        cx.run_until_parked();
+        let before = view.read_with(cx, |v, _| v.layout.clone());
+        let rect_of = |v: &Editor, id: &str| {
+            let (d, g, _) = v.layout.find(id).unwrap();
+            v.geometry
+                .panels
+                .iter()
+                .find(|p| (p.dock, p.group) == (d, g))
+                .unwrap()
+                .rect
+        };
+        // 1. Over the viewer's right edge: lit, and it docks there.
+        let viewer = view.read_with(cx, |v, _| rect_of(v, "viewer"));
+        let at = (viewer.x + viewer.w * 0.92, viewer.y + viewer.h * 0.6);
+        assert!(view.update(cx, |v, cx| v.drag_from_outside("agent", at, cx)));
+        assert!(view.update(cx, |v, cx| v.drop_from_outside("agent", cx)));
+        let pinned = view.read_with(cx, |v, cx| {
+            let mut p = before.clone();
+            p.show_panel("agent", &v.panels(cx)).unwrap();
+            p
+        });
+        view.read_with(cx, |v, _| {
+            assert!(v.gesture.is_none());
+            assert!(v.layout.find("agent").is_some(), "docked");
+            assert_ne!(v.layout, pinned, "where it was dropped, not Pin's place");
+        });
+        // 2. Over the stack Pin puts it in: the same workspace as Pin.
+        view.update(cx, |v, cx| {
+            v.layout = before.clone();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let (d, g, _) = pinned.find("agent").unwrap();
+        let home = view.read_with(cx, |v, _| {
+            v.geometry
+                .panels
+                .iter()
+                .find(|p| (p.dock, p.group) == (d, g))
+                .unwrap()
+                .rect
+        });
+        let over = (home.x + home.w * 0.5, home.y + v_header(&view, cx) / 2.);
+        assert!(view.update(cx, |v, cx| v.drag_from_outside("agent", over, cx)));
+        assert!(view.update(cx, |v, cx| v.drop_from_outside("agent", cx)));
+        view.read_with(cx, |v, _| {
+            assert_eq!(v.layout.find("agent").map(|(d, g, _)| (d, g)), Some((d, g)));
+        });
+        // 3. Off every target: nothing lit, nothing docked.
+        view.update(cx, |v, cx| {
+            v.layout = before.clone();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(!view.update(cx, |v, cx| v.drag_from_outside("agent", (-500., -500.), cx)));
+        assert!(!view.update(cx, |v, cx| v.drop_from_outside("agent", cx)));
+        view.read_with(cx, |v, _| assert_eq!(v.layout, before));
+        view.update(cx, |v, cx| {
+            v.drag_from_outside("agent", at, cx);
+            v.cancel_from_outside(cx);
+        });
+        view.read_with(cx, |v, _| {
+            assert!(v.gesture.is_none());
+            assert_eq!(v.layout, before, "a cancelled drag leaves the workspace");
+        });
+    }
+    fn v_header(view: &gpui::Entity<Editor>, cx: &mut gpui::VisualTestContext) -> f32 {
+        view.read_with(cx, |v, _| v.tokens.metrics.header)
     }
 
     /// A drag whose release never reaches the window (AppKit delivered it

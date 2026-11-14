@@ -458,3 +458,25 @@ fn picker_pages_a_long_list_and_the_search_reaches_past_it() {
         "a family past the first page is one search away"
     );
 }
+#[test]
+fn a_row_that_stays_is_chosen_and_the_menu_stays_open() {
+    // The Agent's provider rows: choosing one keeps the menu for the
+    // provider's models; a model row closes it.
+    let mut p = Picker {
+        open: true,
+        choices: vec![
+            Choice::new("ChatGPT", "agentPick:0").stays(true),
+            Choice::new("Claude", "agentPick:1").stays(true),
+            Choice::new("GPT-6.1-Sol", "agentPick:2"),
+        ],
+        ..Default::default()
+    };
+    p.search("claude".into());
+    assert_eq!(p.navigate("down"), None);
+    assert_eq!(p.navigate("enter"), Some("agentPick:1".into()));
+    assert!(p.open, "a provider keeps the menu open");
+    p.search("sol".into());
+    p.navigate("down");
+    assert_eq!(p.navigate("enter"), Some("agentPick:2".into()));
+    assert!(!p.open, "a model closes it");
+}

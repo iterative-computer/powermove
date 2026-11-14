@@ -10,6 +10,9 @@ pub struct Choice {
     /// A font family the row's title is drawn in (a font picker previews
     /// each face in its own row).
     pub font: Option<String>,
+    /// Choosing it keeps the menu open (a provider row: its models follow
+    /// in the same menu); the owner sends the menu's new rows.
+    pub stays: bool,
 }
 impl Choice {
     pub fn new(label: impl Into<String>, command: impl Into<String>) -> Self {
@@ -25,6 +28,10 @@ impl Choice {
     }
     pub fn checked(mut self, on: bool) -> Self {
         self.checked = Some(on);
+        self
+    }
+    pub fn stays(mut self, on: bool) -> Self {
+        self.stays = on;
         self
     }
     pub fn in_font(mut self, family: impl Into<String>) -> Self {
@@ -158,8 +165,9 @@ impl Picker {
             "enter" => {
                 // Return with nothing lit does nothing.
                 let i = lit?;
-                self.open = false;
-                return Some(self.choices[self.filtered()[i]].command.clone());
+                let choice = &self.choices[self.filtered()[i]];
+                self.open = choice.stays;
+                return Some(choice.command.clone());
             }
             _ => None,
         };

@@ -170,6 +170,9 @@ pub struct SurfaceView {
     /// opened or closed: the chevron and the group's content follow the
     /// press in the next frame, the panel's own work after it.
     pub(crate) disclosures: HashMap<Id, bool>,
+    /// The control the left button is down on: it shows pressed (a deeper
+    /// wash than hover) until the button comes up, as a Mac button does.
+    pressed: Option<Id>,
     scrolls: BTreeMap<Id, ScrollHandle>,
     leases: BTreeMap<Id, Option<SharedString>>,
     option_sets: BTreeMap<Id, Value>,
@@ -258,6 +261,7 @@ impl SurfaceView {
             option_sets: BTreeMap::new(),
             focus: BTreeMap::new(),
             motion: Default::default(),
+            pressed: None,
             presence: HashMap::new(),
             subscriptions: BTreeMap::new(),
             origin: Rc::new(Cell::new(Point::default())),
@@ -471,6 +475,9 @@ impl SurfaceView {
         let prepared = self.prepared.clone();
         let live = |id: &Id| prepared.nodes.contains_key(id);
         self.controls.retain(|id, _| live(id));
+        if self.pressed.is_some_and(|id| !live(&id)) {
+            self.pressed = None;
+        }
         self.row_sources.retain(|id, _| live(id));
         self.scrolls.retain(|id, _| live(id));
         self.subscriptions.retain(|id, _| live(id));
@@ -2191,9 +2198,14 @@ impl SurfaceView {
             );
         }
         let wash = self.motion.hovers.amount(id);
-        if wash > 0. && !node.disabled {
+        let pressed = self.pressed == Some(id);
+        if (wash > 0. || pressed) && !node.disabled {
             let t = &self.table.tokens;
-            let alpha = (t.translucency.hover * wash * 255.).round() as u32;
+            let alpha = if pressed {
+                (t.translucency.selected * 255.).round() as u32
+            } else {
+                (t.translucency.hover * wash * 255.).round() as u32
+            };
             let mut layer = div().absolute().inset_0();
             layer.style().corner_radii = node.style.corner_radii.clone();
             children.push(
@@ -2615,6 +2627,33 @@ impl SurfaceView {
                 })
         });
         let wash = clickable && (node.component.is_some() || control_role);
+        if wash {
+            // Pressed while the button is down on it; any release ends it.
+            element = element
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |v, _: &MouseDownEvent, _, cx| {
+                        v.pressed = Some(id);
+                        cx.notify();
+                    }),
+                )
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|v, _: &MouseUpEvent, _, cx| {
+                        if v.pressed.take().is_some() {
+                            cx.notify();
+                        }
+                    }),
+                )
+                .on_mouse_up_out(
+                    MouseButton::Left,
+                    cx.listener(|v, _: &MouseUpEvent, _, cx| {
+                        if v.pressed.take().is_some() {
+                            cx.notify();
+                        }
+                    }),
+                );
+        }
         if wash || events.hover {
             element = element.on_hover(cx.listener(move |v, hovered: &bool, _, cx| {
                 if wash {

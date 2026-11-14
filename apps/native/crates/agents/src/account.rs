@@ -541,6 +541,36 @@ fn claude_models(binary: &PathBuf, vars: BTreeMap<String, String>) -> Result<Vec
         return Ok(claude_listing(list.into_iter().flatten()));
     }
 }
+/// The family and version a Claude model id names: `claude-opus-5-5` →
+/// ("opus", "5.5"), `claude-opus-5-5[1m]` the same, `claude-3-5-sonnet-20241022`
+/// → ("sonnet", "3.5"). A dated snapshot suffix is no part of the version.
+fn claude_version(id: &str) -> Option<(String, String)> {
+    let rest = id.strip_prefix("claude-")?;
+    let rest = rest.split('[').next().unwrap_or(rest);
+    let parts: Vec<&str> = rest.split('-').collect();
+    let family = parts
+        .iter()
+        .find(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_alphabetic()))?;
+    let version: Vec<&str> = parts
+        .iter()
+        .copied()
+        .filter(|p| (1..=2).contains(&p.len()) && p.chars().all(|c| c.is_ascii_digit()))
+        .collect();
+    (!version.is_empty()).then(|| (family.to_ascii_lowercase(), version.join(".")))
+}
+/// A display name with its version after the family word ("Opus (1M context)"
+/// → "Opus 5.5 (1M context)"); a name that is not the family's, or already
+/// carries the version, stays as given.
+fn versioned(name: &str, family: &str, version: &str) -> String {
+    if name.contains(version) {
+        return name.to_owned();
+    }
+    let first = name.split_whitespace().next().unwrap_or_default();
+    if !first.eq_ignore_ascii_case(family) {
+        return name.to_owned();
+    }
+    format!("{first} {version}{}", &name[first.len()..])
+}
 /// Claude Code's model list as the pickers show it: one row per model under
 /// its own name. Claude's own "Default (recommended)" row is no model; the
 /// model it resolves to is marked as the default instead.
@@ -579,8 +609,20 @@ fn claude_listing<'a>(entries: impl Iterator<Item = &'a Value>) -> Vec<Model> {
             .as_ref()
             .is_some_and(|d| *d == id || resolved.as_ref() == Some(d))
             && !models.iter().any(|m| m.default);
+        // Claude Code names its aliases without a version ("Opus"); the
+        // picker shows the one it runs, read from the id the alias resolves
+        // to (`claude-opus-5-5` → "Opus 5.5"). The alias stays the value.
+        let named = text(&entry["displayName"], 120).unwrap_or_else(|| id.clone());
+        let label = resolved
+            .as_deref()
+            .or(Some(id.as_str()))
+            .and_then(claude_version)
+            .map_or_else(
+                || named.clone(),
+                |(family, version)| versioned(&named, &family, &version),
+            );
         models.push(Model {
-            label: text(&entry["displayName"], 120).unwrap_or_else(|| id.clone()),
+            label,
             id,
             efforts,
             default: is_default,
@@ -780,6 +822,17 @@ mod tests {
         assert_eq!(models[0].aliases, ["claude-opus-5-5"]);
         assert_eq!(models[0].efforts, ["low", "high"]);
         // A default no row names is still listed, under its id.
+        // A 1M-context variant keeps its note after the version; a name
+        // that is not the family's is left as given.
+        let wide =
+            claude_listing([e("opus[1m]", "claude-opus-5-5[1m]", "Opus (1M context)")].iter());
+        assert_eq!(wide[0].label, "Opus 5.5 (1M context)");
+        assert_eq!(wide[0].id, "opus[1m]");
+        assert_eq!(versioned("Best", "opus", "5.5"), "Best");
+        assert_eq!(
+            claude_version("claude-3-5-sonnet-20241022"),
+            Some(("sonnet".into(), "3.5".into()))
+        );
         let only = claude_listing([e("default", "claude-next", "Default (recommended)")].iter());
         assert_eq!(
             (only[0].id.as_str(), only[0].default),
