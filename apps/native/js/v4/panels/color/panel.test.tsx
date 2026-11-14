@@ -171,3 +171,47 @@ test("grades stack in the order they apply, named apart, and move", async () => 
   ]);
   await root.dispose();
 });
+
+// C3: a grade turns off and on from its name as well as its box (a checkbox's
+// title is part of it, as on macOS), and a grade that is off can still be
+// set up: its wheels and curve stay editable.
+test("a grade's name turns it off and on, and an off grade stays editable", async () => {
+  const off = { ...tool("w", "colorWheels", "Color Wheels"), enabled: false };
+  const rows = [
+    off,
+    ...["Red", "Green", "Blue"].map((c) => wheelRow(`lift${c}`)),
+  ];
+  const { root, sent } = await mounted({
+    ...stacked([off]),
+    count: rows.length,
+    range: [0, rows.length],
+    rows,
+  } as Projection);
+  await event(root, named(root, `${PANEL_ID}:title:w`).id, "click");
+  expect(sent.filter((i) => i.type === "toggle")).toEqual([
+    { type: "toggle", id: "w" },
+  ]);
+  expect(named(root, `${PANEL_ID}:wheel:w:lift`).props.disabled).toBe(false);
+  await root.dispose();
+});
+
+function wheelRow(key: string) {
+  return {
+    kind: "parameter" as const,
+    id: `parameter:w.${key}`,
+    enabled: false,
+    parameter: {
+      id: `w.${key}`,
+      effect: "w",
+      key,
+      label: key,
+      binding: `b:w.${key}`,
+      value: 0,
+      control: "number" as const,
+      animated: false,
+      keyAtPlayhead: false,
+      mixed: false,
+      readonly: false,
+    },
+  };
+}

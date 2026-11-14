@@ -229,7 +229,8 @@ function Wheels({
           number,
           number,
         ];
-        const disabled = locked || !g.header.enabled || !group;
+        // A grade that is off can still be set up before it is turned on.
+        const disabled = locked || !group;
         return (
           // One instrument: its name, the wheel (its master on the bezel),
           // the master's field and the channels, on one plate.
@@ -384,7 +385,7 @@ function CurveControl({ g, locked }: { g: GradeEffect; locked: boolean }) {
         binding={group.binding}
         value={group.value}
         channel={channel}
-        disabled={locked || !g.header.enabled}
+        disabled={locked}
         onKeyDown={stop}
       />
     </div>
@@ -579,7 +580,25 @@ function ToolHeader({
           send({ type: "toggle", id });
         }}
       />
-      <text style={{ flexGrow: 1 }}>{title}</text>
+      {/* The name is part of the switch, as a checkbox's title is on macOS:
+          the box alone was a small target. */}
+      <div
+        id={`${PANEL_ID}:title:${id}`}
+        role="group"
+        label={title}
+        style={{
+          flexGrow: 1,
+          display: "flex",
+          alignSelf: "stretch",
+          alignItems: "center",
+        }}
+        onClick={(e) => {
+          stop(e);
+          if (editable) send({ type: "toggle", id });
+        }}
+      >
+        <text>{title}</text>
+      </div>
       {order(up, `Move ${title} Up`, "chevron.up")}
       {order(down, `Move ${title} Down`, "chevron.down")}
       <UI.ToolbarItem
