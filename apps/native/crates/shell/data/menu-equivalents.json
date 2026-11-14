@@ -51,7 +51,7 @@
     "id": "M009",
     "accelerator": "CommandOrControl+W",
     "command": "closeTab",
-    "label": "Close Tab"
+    "label": "Close Project"
   },
   {
     "id": "M010",
@@ -166,18 +166,6 @@
     "accelerator": "CommandOrControl+Shift+C",
     "command": "precompose",
     "label": "Pre-compose\u2026"
-  },
-  {
-    "id": "M029",
-    "accelerator": "Control+Tab",
-    "command": "nextTab",
-    "label": "Show Next Tab"
-  },
-  {
-    "id": "M030",
-    "accelerator": "Control+Shift+Tab",
-    "command": "previousTab",
-    "label": "Show Previous Tab"
   },
   {
     "id": "M031",

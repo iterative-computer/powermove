@@ -1978,12 +1978,9 @@ impl SurfaceView {
             };
             let mut slot = slot.id(("v4-control", id));
             if let Some(focus) = self.focus.get(&id) {
-                let t = &self.table.tokens;
-                let (ring, color, radius) = (
-                    px(t.metrics.border * 2.),
-                    rgb(t.colors.focus),
-                    px(t.metrics.control_radius),
-                );
+                // No focus ring on a control's slot (owner decision,
+                // 2026-11-14): a field keeps its own caret and selection.
+                let radius = px(self.table.tokens.metrics.control_radius);
                 let tab = node.tab_index.unwrap_or(0);
                 let handle = &focus.clone().tab_stop(tab >= 0).tab_index(tab.max(0));
                 let control = control.clone();
@@ -1991,7 +1988,6 @@ impl SurfaceView {
                     .track_focus(handle)
                     .tab_index(tab.max(0))
                     .rounded(radius)
-                    .focus_visible_style(move |s| s.ring(ring).ring_color(color))
                     .on_key_down(move |event: &KeyDownEvent, _, cx| {
                         let m = &event.keystroke.modifiers;
                         if m.platform || m.control || m.alt {
@@ -2168,8 +2164,8 @@ impl SurfaceView {
         }
         element = self.accessible(element, node);
         if let Some(focus) = self.focus.get(&id) {
-            let t = &self.table.tokens;
-            let (ring, color) = (px(t.metrics.border * 2.), rgb(t.colors.focus));
+            // No focus ring (owner decision, 2026-11-14): buttons and
+            // toggles show none, before or after a click.
             // A tracked handle carries its own tab settings (the element's
             // are ignored): `tabIndex` -1 stays focusable but out of the Tab
             // order, as on the web (a segmented control's other segments).
@@ -2177,8 +2173,7 @@ impl SurfaceView {
             let focus = &focus.clone().tab_stop(tab >= 0).tab_index(tab.max(0));
             element = element
                 .track_focus(focus)
-                .tab_index(tab.max(0))
-                .focus_visible_style(move |s| s.ring(ring).ring_color(color));
+                .tab_index(tab.max(0));
         }
         element = self.interactive(element, node, cx);
         element = self.decorate(element, node, window);

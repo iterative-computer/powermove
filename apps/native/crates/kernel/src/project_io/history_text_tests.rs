@@ -110,7 +110,7 @@ fn save_three(
         .unwrap();
     let history = match &plan.history {
         HistoryToWrite::Session(snapshot) => snapshot.to_saved(),
-        HistoryToWrite::Raw(value) => value.clone(),
+        HistoryToWrite::Raw(raw) => raw.value(),
     };
     let other = |twin: &Path, writer: Option<ReferenceWriter>| {
         let _ = fs::remove_file(twin);
@@ -744,18 +744,21 @@ fn history_only_media_keeps_the_history_plain() {
     reopened_alike(&files);
 }
 
-/// The old app's whole file-open path (`tests/v1_reader/read_file.ts`, run
-/// on exported v1.2.0 and v1.3.2 sources listed in `PM_V1_SRC`, separated by
-/// `:`): a fresh media store, open, Undo, Save As, reopen. The picture
-/// survives in the plain case (removed media) and the packed case (media the
-/// project still lists); the same removal written packed regardless loses
-/// it, which the witness must catch.
+/// The old app's file-open path (`tests/v1_reader/read_file.ts`) run on
+/// the exported `apps/desktop/src` of v1.2.0 and of v1.3.2, listed in
+/// `PM_V1_SRC` separated by `:`; the script checks each tree's modules are
+/// that tag's. A fresh media store, open, Undo through the app's own
+/// compositions and history modules, Save As, open again on another fresh
+/// store. The picture (bytes, asset and layer) survives in the plain case
+/// (removed media) and the packed case (media the project still lists); the
+/// same removal written packed regardless loses it, which the check must
+/// catch. Not run by a plain `cargo test` (it says so: ignored); run it with
+/// `PM_V1_SRC=... cargo test -p pm-kernel --lib the_old_app -- --ignored`.
 #[test]
+#[ignore = "needs PM_V1_SRC: the exported v1.2.0 and v1.3.2 desktop sources"]
 fn the_old_app_keeps_the_media_through_open_undo_and_save_as() {
-    let Some(sources) = std::env::var_os("PM_V1_SRC") else {
-        eprintln!("PM_V1_SRC not set: the old app's open path was not run");
-        return;
-    };
+    let sources = std::env::var_os("PM_V1_SRC")
+        .expect("PM_V1_SRC must list the exported v1.2.0 and v1.3.2 desktop sources");
     let dir = TempDir::new("v1-open");
     let write = |store: &mut DocumentStore, path: &Path, writer: Option<ReferenceWriter>| {
         let plan = store
@@ -798,25 +801,323 @@ fn the_old_app_keeps_the_media_through_open_undo_and_save_as() {
     );
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/v1_reader/read_file.ts");
     let bun = std::env::var_os("PM_TEST_BUN").unwrap_or_else(|| "bun".into());
+    let mut releases = Vec::new();
     for source in std::env::split_paths(&sources) {
         for (file, keeps) in [(&plain, true), (&packed, true), (&forced, false)] {
             let out = std::process::Command::new(&bun)
                 .arg(&script)
                 .arg(file)
                 .arg("m")
+                .arg("pic")
                 .env("V1_SRC", &source)
                 .output()
                 .expect("bun runs the old app's reader");
             let text = String::from_utf8_lossy(&out.stdout);
-            eprintln!("{} {}:\n{text}", source.display(), file.display());
-            assert_eq!(
-                out.status.success(),
-                keeps,
+            let what = format!(
                 "{} on {}: {text}{}",
                 source.display(),
                 file.display(),
                 String::from_utf8_lossy(&out.stderr)
             );
+            eprintln!("{what}");
+            let release = text
+                .lines()
+                .find_map(|l| l.strip_prefix("release: "))
+                .unwrap_or_else(|| panic!("not a v1.2.0 or v1.3.2 tree: {what}"))
+                .to_owned();
+            if keeps {
+                assert!(out.status.success(), "the picture was lost: {what}");
+            } else {
+                // Lost where the old app restores media, and said so.
+                assert_eq!(out.status.code(), Some(1), "{what}");
+                assert!(
+                    text.contains("open: open restores it into the media store: NO"),
+                    "{what}"
+                );
+            }
+            releases.push(release);
         }
     }
+    releases.sort();
+    releases.dedup();
+    assert_eq!(releases, ["v1.2.0", "v1.3.2"], "both releases must run");
+}
+
+/// "Finish Edit" seals an edit left open (`HistoryCall::Seal`) into a step
+/// of its own. A save while the edit was open wrote its change in the
+/// document but no step for it; the sealed step is new unsaved work, so the
+/// next Cmd-S is not skipped, and the writer writes that step from text of
+/// its own, never one cached for another step: byte for byte what
+/// `pack(to_saved())` writes, and reopened it is the step undone first.
+#[test]
+fn a_sealed_edit_is_its_own_step_and_unsaved_work() {
+    use crate::session::{SessionSource, ShellCall, ShellReply};
+    use crate::tx::{Call, Caller, GestureCall, HistoryCall, Reply, Request};
+    let dir = TempDir::new("sealed");
+    let files = Files::new(&dir);
+    let mut k = crate::Kernel::new(Default::default());
+    k.shell(ShellCall::AttachLibrary {
+        profile: dir.path("profile"),
+        format: crate::persistence::DiskFormat::V1_2,
+        electron_profile: None,
+    })
+    .unwrap();
+    let ShellReply::Opened { .. } = k
+        .shell(ShellCall::Open {
+            id: "p".into(),
+            source: SessionSource::New(project(6, false)),
+            electron_profile: None,
+        })
+        .unwrap()
+    else {
+        panic!("not opened")
+    };
+    let call = |k: &mut crate::Kernel, c: Call| {
+        k.handle("p", Request::new(Caller::native(), c))
+            .unwrap()
+            .reply
+            .unwrap()
+            .reply
+    };
+    let rename = |i: usize| Call::Transact {
+        label: Some("Rename".into()),
+        body: crate::WriteBody::Commands(vec![Command::SetLayerName {
+            layer_id: "L0".into(),
+            name: format!("Step {i}"),
+        }]),
+        expected_revision: None,
+    };
+    for i in 0..5 {
+        call(&mut k, rename(i));
+    }
+    fn store(k: &mut crate::Kernel) -> &mut DocumentStore {
+        k.project_mut("p").unwrap().store_mut()
+    }
+    let first = SaveTarget::SaveAs {
+        path: files.packed.clone(),
+        replace: false,
+    };
+    save_three(store(&mut k), first, &files, "before the edit");
+    call(
+        &mut k,
+        GestureCall::Begin {
+            label: "Move".into(),
+        }
+        .into(),
+    );
+    call(&mut k, rename(100));
+    save_three(
+        store(&mut k),
+        SaveTarget::InPlace,
+        &files,
+        "with the edit left open",
+    );
+    assert!(!store(&mut k).needs_save());
+    assert!(matches!(
+        call(&mut k, HistoryCall::Seal.into()),
+        Reply::Bool(true)
+    ));
+    assert!(
+        store(&mut k).needs_save(),
+        "the sealed edit is unsaved work"
+    );
+    let plan = store(&mut k)
+        .prepare_save(SaveTarget::InPlace, SaveOptions::default())
+        .unwrap();
+    assert!(plan.unchanged.is_none(), "Cmd-S after Finish Edit skipped");
+    drop(plan);
+    let layout = save_three(
+        store(&mut k),
+        SaveTarget::InPlace,
+        &files,
+        "after Finish Edit",
+    );
+    assert_ne!(layout, SaveLayout::Unchanged);
+    assert!(!store(&mut k).needs_save());
+    let mut reopened = open(&files.packed);
+    assert_eq!(reopened.history().labels().last(), Some(&"Move"));
+    reopened.undo().unwrap();
+    let name = |s: &DocumentStore| {
+        s.layers()
+            .iter()
+            .find(|l| l.id == "L0")
+            .map(|l| l.name.clone())
+    };
+    assert_eq!(name(&reopened).as_deref(), Some("Step 4"));
+    reopened_alike(&files);
+}
+
+/// Saves a small project to `path` and opens it again, as a person would.
+fn saved_and_opened(path: &Path) -> DocumentStore {
+    let mut store = DocumentStore::new_untitled(project(2, false));
+    let plan = store
+        .prepare_save(
+            SaveTarget::SaveAs {
+                path: path.to_owned(),
+                replace: false,
+            },
+            SaveOptions::default(),
+        )
+        .unwrap();
+    let receipt = run(plan);
+    store.finish_save(receipt).unwrap();
+    drop(store);
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    open(path)
+}
+
+/// One clean Cmd-S, optionally against another baseline for the file
+/// (standing in for what a racy open or a clock set back leaves behind):
+/// `Some(layout)` saved, `None` refused (the changed-on-disk handling).
+fn clean_cmd_s(
+    store: &mut DocumentStore,
+    baseline: Option<Arc<FileVersion>>,
+) -> Option<SaveLayout> {
+    let mut plan = store
+        .prepare_save(SaveTarget::InPlace, SaveOptions::default())
+        .unwrap();
+    assert!(plan.unchanged.is_some(), "clean");
+    if baseline.is_some() {
+        plan.unchanged = baseline;
+    }
+    let receipt = std::thread::spawn(move || plan.run())
+        .join()
+        .unwrap()
+        .ok()?;
+    let layout = receipt.layout;
+    store.finish_save(receipt).unwrap();
+    Some(layout)
+}
+
+/// Rewrites one byte of the document record in place: the same length and
+/// file, other bytes.
+fn rewrite_in_place(path: &Path) {
+    use std::os::unix::fs::FileExt;
+    let bytes = fs::read(path).unwrap();
+    let at = bytes
+        .windows(7)
+        .position(|w| w == b"Layer 0")
+        .expect("the layer name")
+        + 6;
+    let file = fs::OpenOptions::new().write(true).open(path).unwrap();
+    file.write_all_at(b"9", at as u64).unwrap();
+}
+
+/// Review w31 clean save, finding 3, as decided: on APFS (fine stamps) an
+/// ordinary open then Cmd-S skips without reading the file.
+#[test]
+fn an_apfs_open_then_cmd_s_skips_without_reading() {
+    let dir = TempDir::new("fine");
+    let path = dir.path("project.pmv");
+    let mut store = saved_and_opened(&path);
+    let version = store.file().version.clone().unwrap();
+    assert!(durable::fine_timestamps(&version.stat), "APFS stamps");
+    assert!(version.stat_proves_content());
+    let bytes = fs::read(&path).unwrap();
+    assert_eq!(clean_cmd_s(&mut store, None), Some(SaveLayout::Unchanged));
+    assert_eq!(durable::test_hooks::reads(&path), 0);
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+}
+
+/// On a coarse-timestamp volume a clean Cmd-S reads the file and compares
+/// its hash every time: unchanged bytes skip after one read, and the next
+/// clean Cmd-S reads again (nothing is kept between saves).
+#[test]
+fn a_coarse_volume_reads_the_bytes_on_every_clean_cmd_s() {
+    let dir = TempDir::new("coarse");
+    let path = dir.path("project.pmv");
+    let mut store = saved_and_opened(&path);
+    let version = store.file().version.clone().unwrap();
+    durable::test_hooks::treat_as_coarse(&version.stat);
+    assert!(!version.stat_proves_content());
+    let bytes = fs::read(&path).unwrap();
+    assert_eq!(clean_cmd_s(&mut store, None), Some(SaveLayout::Unchanged));
+    assert_eq!(durable::test_hooks::reads(&path), 1);
+    assert_eq!(clean_cmd_s(&mut store, None), Some(SaveLayout::Unchanged));
+    assert_eq!(durable::test_hooks::reads(&path), 2);
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+}
+
+/// The re-check's two sequences on a coarse volume, where another writer's
+/// rewrite in place within one stamp leaves the stat as it was. A long open
+/// whose clock sample ends up seconds past the stamps, with the document
+/// changed in place after it was parsed; and a clock set back after a clean
+/// Cmd-S proved the bytes. In both the baseline's stat is the file's and its
+/// hash is of other bytes: Cmd-S never skips.
+#[test]
+fn a_coarse_rewrite_under_the_same_stat_is_never_skipped() {
+    let second = 1_000_000_000i64;
+    for case in ["long open", "clock set back"] {
+        let dir = TempDir::new("coarse-rewrite");
+        let path = dir.path("project.pmv");
+        let mut store = saved_and_opened(&path);
+        let opened = store.file().version.clone().unwrap();
+        durable::test_hooks::treat_as_coarse(&opened.stat);
+        if case == "clock set back" {
+            // The bytes were proven by an earlier clean Cmd-S.
+            assert_eq!(clean_cmd_s(&mut store, None), Some(SaveLayout::Unchanged));
+        }
+        rewrite_in_place(&path);
+        let now = durable::lstat_file(&path).unwrap().unwrap();
+        // What the open (or the earlier proof) recorded: the stat the file
+        // shows now, the hash of the bytes read then, and a clock sample
+        // well past the stamps.
+        let newest = now.mtime_ns.max(now.ctime_ns) as i64;
+        let baseline = Arc::new(FileVersion {
+            stat: now,
+            stat_taken: newest + 3 * second,
+            ..(*opened).clone()
+        });
+        durable::test_hooks::treat_as_coarse(&baseline.stat);
+        assert!(!baseline.stat_proves_content(), "{case}");
+        assert_ne!(
+            clean_cmd_s(&mut store, Some(baseline)),
+            Some(SaveLayout::Unchanged),
+            "{case}: other bytes under the same stat were taken as ours"
+        );
+    }
+}
+
+/// A file whose document opening upgraded (old 3D objects) no longer is
+/// what the file holds: its first Cmd-S writes, with nothing unsaved; the
+/// one after that may skip.
+#[test]
+fn a_file_upgraded_on_open_is_written_by_its_first_cmd_s() {
+    let dir = TempDir::new("upgraded");
+    let path = dir.path("project.pmv");
+    let mut p = project(1, false);
+    p.as_object_mut()
+        .unwrap()
+        .get_mut("layers")
+        .unwrap()
+        .as_array_mut()
+        .unwrap()
+        .push(parse(r#"{"id":"M","type":"shape","name":"Model","from":0,"dur":5,"on":true,"p":{},"d":{"definition":"powermove.3d.obj-model"},"fx":[]}"#).unwrap());
+    let mut store = DocumentStore::new_untitled(p);
+    let plan = store
+        .prepare_save(
+            SaveTarget::SaveAs {
+                path: path.clone(),
+                replace: false,
+            },
+            SaveOptions::default(),
+        )
+        .unwrap();
+    let receipt = run(plan);
+    store.finish_save(receipt).unwrap();
+    drop(store);
+    let mut store = open(&path);
+    assert!(store.upgraded_on_open());
+    assert!(!store.needs_save());
+    let cmd_s = |store: &mut DocumentStore| {
+        let plan = store
+            .prepare_save(SaveTarget::InPlace, SaveOptions::default())
+            .unwrap();
+        let receipt = run(plan);
+        let layout = receipt.layout;
+        store.finish_save(receipt).unwrap();
+        layout
+    };
+    assert_ne!(cmd_s(&mut store), SaveLayout::Unchanged);
+    assert_eq!(cmd_s(&mut store), SaveLayout::Unchanged);
 }
