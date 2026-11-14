@@ -20,6 +20,21 @@ use std::rc::Rc;
 const POSTER_EVERY: std::time::Duration = std::time::Duration::from_secs(300);
 impl Controller {
     pub fn surface_command(&mut self, name: &str, cx: &mut Context<Self>) -> bool {
+        if self.page_command(name, cx) {
+            return true;
+        }
+        // Home and a project's own tab leave a page showing over it.
+        if matches!(name, "home" | "projects" | "leaveHome") && self.pages.shown.is_some() {
+            self.leave_page(cx);
+            if name == "leaveHome" {
+                self.hide_home(cx);
+                return true;
+            }
+            if !self.home_shown() {
+                self.show_home(cx);
+            }
+            return true;
+        }
         match name {
             "newProject" => self.new_project(cx),
             "openRecent" => self.show_home(cx),
@@ -167,10 +182,7 @@ impl Controller {
                 let window = self.account_window(cx);
                 crate::cloud::delete_account(window, cx)
             }
-            "store" => crate::store_window::open(
-                crate::store_window::Services::system(self.kernel.clone(), self.profile.clone()),
-                cx,
-            ),
+            "store" => self.open_tab_page("store", cx),
             _ => return false,
         }
         true

@@ -58,7 +58,10 @@ fn viewer_neither_accepts_nor_joins_tabs() {
     let g = l.geometry(BOUNDS, &t);
     for (source, target) in [("assets", "viewer"), ("viewer", "inspector")] {
         let r = panel(&l, target);
-        for y in [r.y + 2., r.y + r.h / 2., r.y + r.h * 0.9] {
+        // On the header (below the window's top-edge zone), the middle and
+        // near the bottom.
+        let header = r.y + t.metrics.dock_gap + 4.;
+        for y in [header, r.y + r.h / 2., r.y + r.h * 0.9] {
             assert!(matches!(
                 l.drop_target_for(&g, BOUNDS, (r.x + r.w / 2., y), &t, source, false)
                     .unwrap()
