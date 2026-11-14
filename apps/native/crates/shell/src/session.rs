@@ -72,7 +72,7 @@ impl Session {
     /// quitting an app" setting) only the key window's arrangement is restored.
     /// Each entry has a sane frame; tab members follow their leader.
     pub fn restore_plan(&self, all: bool) -> Vec<WindowState> {
-        let mut list: Vec<WindowState> = if all {
+        let list: Vec<WindowState> = if all {
             self.windows.clone()
         } else {
             self.key
@@ -86,16 +86,26 @@ impl Session {
                 .into_iter()
                 .collect()
         };
-        let ids: Vec<u64> = list.iter().map(|w| w.id).collect();
-        for w in &mut list {
-            w.frame = sane_frame(w.frame);
-            if w.tab_group.is_some_and(|g| g == w.id || !ids.contains(&g)) {
-                w.tab_group = None;
+        // One project per window: a tab group saved by an earlier version
+        // reopens as one window, showing the project that was in front (the
+        // key window when it is in the group, else the group's first). The
+        // others are not lost: their projects stay in the library (Recent).
+        let key = self.key;
+        let group = |w: &WindowState| w.tab_group.unwrap_or(w.id);
+        let mut kept: Vec<WindowState> = vec![];
+        for w in &list {
+            let g = group(w);
+            match kept.iter().position(|k| group(k) == g) {
+                Some(i) if Some(w.id) == key => kept[i] = w.clone(),
+                Some(_) => {}
+                None => kept.push(w.clone()),
             }
         }
-        // Leaders first so `addTabbedWindow` always has its leader open.
-        list.sort_by_key(|w| w.tab_group.is_some());
-        list
+        for w in &mut kept {
+            w.frame = sane_frame(w.frame);
+            w.tab_group = None;
+        }
+        kept
     }
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         let s: Self = serde_json::from_slice(&std::fs::read(path)?)?;

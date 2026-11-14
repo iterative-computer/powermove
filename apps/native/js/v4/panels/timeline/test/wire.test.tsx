@@ -172,9 +172,15 @@ test("a layer row's switches keep fixed columns at its trailing edge; the name g
     overflow: "hidden",
   });
   expect(switches.props.style).toMatchObject({ flexShrink: 0 });
-  // At rest (not hovered, not selected): five columns, the parent link and
-  // visibility drawn (as v1), Shy, Solo and Lock held open.
-  expect(switches.children.length).toBe(5);
+  // v1: the name is the reorder handle (the native surface lifts it).
+  expect(
+    byId(root, "timeline:name:layer:headline").props.metadata,
+  ).toMatchObject({
+    timelineLayerDrag: { layer: "headline" },
+  });
+  // At rest (not hovered, not selected): three columns, the parent link and
+  // visibility drawn (as v1), Lock held open. Shy and Solo have no button.
+  expect(switches.children.length).toBe(3);
   expect(byId(root, "timeline:parent:layer:headline")).toBeDefined();
   expect(byId(root, "timeline:visibility:layer:headline")).toBeDefined();
   for (const name of ["shy", "solo", "lock"])
@@ -184,7 +190,7 @@ test("a layer row's switches keep fixed columns at its trailing edge; the name g
     expect(slot.props.style).toMatchObject({
       minWidth: { token: "metrics.hit" },
     });
-  // Hovered: every switch, in the same five columns.
+  // Hovered: every switch, in the same three columns; never Shy or Solo.
   await root.render(
     <TimelinePanel
       frame={frame({
@@ -194,9 +200,11 @@ test("a layer row's switches keep fixed columns at its trailing edge; the name g
     />,
   );
   const hovered = byId(root, "timeline:row:layer:headline").children[1];
-  expect(hovered.children.length).toBe(5);
-  for (const name of ["parent", "shy", "solo", "lock", "visibility"])
+  expect(hovered.children.length).toBe(3);
+  for (const name of ["parent", "lock", "visibility"])
     expect(byId(root, `timeline:${name}:layer:headline`)).toBeDefined();
+  for (const name of ["shy", "solo"])
+    expect(byId(root, `timeline:${name}:layer:headline`)).toBeUndefined();
   await root.dispose();
 });
 
@@ -250,7 +258,7 @@ test("modifiers reach native selection, child switches never also select the row
     shiftKey: true,
     metaKey: true,
   });
-  await drive(root, "timeline:solo:layer:headline");
+  await drive(root, "timeline:lock:layer:headline");
   expect(actions).toEqual([
     {
       type: "selectRow",
@@ -262,7 +270,7 @@ test("modifiers reach native selection, child switches never also select the row
         ctrlKey: false,
       },
     },
-    { type: "switch", id: "layer:headline", name: "solo" },
+    { type: "switch", id: "layer:headline", name: "lock" },
   ]);
   await root.dispose();
 });

@@ -314,10 +314,9 @@ pub fn open_in_new_window(pending: Pending, cx: &mut App) {
     cx.defer(pm_shell::open_editor);
 }
 
-/// A project opened in a window that shows one (from Home, File ▸ Open, a
-/// dropped file, an agent): a window of its own joined to that window's
-/// tabs, as v1 added a tab. The project the window shows stays open and
-/// untouched; nothing is saved or closed without its own question.
+/// Was: a project opened as a tab of `leader`'s window. One project per
+/// window now (an open replaces the project shown, `Controller::replace_project`);
+/// kept for callers that still name a tab, it opens a window of its own.
 pub fn open_in_new_tab(pending: Pending, leader: u64, cx: &mut App) {
     cx.default_global::<Entries>()
         .next_window
@@ -376,6 +375,13 @@ impl EntryHook for Hook<'_> {
             .filter(|(e, _)| empty(e, cx))
             .min_by_key(|(_, w)| Some(*w) != active)
             .map(|(e, _)| e.clone());
+        // One project per window: with no empty window the front one's
+        // project gives way (asking about unsaved work first).
+        let target = target.or_else(|| {
+            live.iter()
+                .find(|(_, w)| Some(*w) == active)
+                .map(|(e, _)| e.clone())
+        });
         match target {
             Some(editor) => {
                 let path = path.to_path_buf();

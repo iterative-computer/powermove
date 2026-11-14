@@ -70,6 +70,7 @@ mod panel_bridge;
 #[cfg(all(test, target_os = "macos"))]
 mod panel_capture_tests;
 mod panel_library;
+mod ghost;
 mod panels;
 #[cfg(test)]
 mod parity_tests;
