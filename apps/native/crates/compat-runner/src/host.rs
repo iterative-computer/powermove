@@ -854,6 +854,8 @@ impl ExtensionHost {
             canvases: BTreeMap::new(),
             dom_waiting: VecDeque::new(),
             deferred: VecDeque::new(),
+            paced_moved: Paced::default(),
+            paced_presented: Paced::default(),
             disk: 0,
             store_revision: None,
             closing: Arc::default(),
@@ -1206,6 +1208,39 @@ struct StoreLive {
     extension: StoreExtension,
     views: Arc<ViewEvents>,
 }
+/// A notice the realm hears on every frame (the clock moved, a frame was
+/// presented). The next goes only once the realm has run the last: a realm
+/// slower than the frames would otherwise queue them faster than it runs
+/// them, and everything else asked of it (a viewer's raster batch, a
+/// panel's command) would wait behind seconds of stale notices. The newest
+/// waits in its slot (`Owner::moved`, `Owner::presented`) meanwhile.
+#[derive(Default)]
+struct Paced(Option<(std::time::Instant, Ticket<Evaluation>)>);
+impl Paced {
+    /// Whether the last notice is still running (never, unpaced: the
+    /// comparison runs keep the old behaviour behind `PM_REALM_UNPACED=1`).
+    fn running(&mut self, kind: &str) -> bool {
+        if unpaced() {
+            return false;
+        }
+        let Some((at, ticket)) = &self.0 else {
+            return false;
+        };
+        if ticket.try_take().is_none() {
+            return true;
+        }
+        trace(json!({"realm": kind, "ms": at.elapsed().as_secs_f64() * 1e3}));
+        self.0 = None;
+        false
+    }
+    fn sent(&mut self, ticket: Option<Ticket<Evaluation>>) {
+        self.0 = ticket.map(|t| (std::time::Instant::now(), t));
+    }
+}
+fn unpaced() -> bool {
+    static UNPACED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *UNPACED.get_or_init(|| std::env::var("PM_REALM_UNPACED").as_deref() == Ok("1"))
+}
 struct Owner {
     writer: Writer,
     /// This generation is sealed; the next realm starts a new one.
@@ -1246,6 +1281,10 @@ struct Owner {
     dom_waiting: VecDeque<Value>,
     /// Realm sources waiting for room in its queue (`eval`).
     deferred: VecDeque<String>,
+    /// The last time-moved and frame-presented notifications, while the
+    /// realm runs them ([`Paced`]).
+    paced_moved: Paced,
+    paced_presented: Paced,
     disk: u64,
     store_revision: Option<u64>,
     /// Set when this window's extensions stop; its export realms end too.
@@ -1257,14 +1296,19 @@ impl Owner {
         self.boot();
         loop {
             self.retry_deferred();
-            let wait = if self.deferred.is_empty() {
+            self.send_moved();
+            self.send_presented();
+            // A notification held for the realm goes as soon as it is free.
+            let held = self.moved.load(Ordering::Acquire) != 0
+                || self.presented.lock().unwrap().is_some();
+            let wait = if self.deferred.is_empty() && !held {
                 DISK_POLL
             } else {
                 Duration::from_millis(2)
             };
             let message = match input.recv_timeout(wait) {
                 Ok(message) => message,
-                Err(RecvTimeoutError::Timeout) if !self.deferred.is_empty() => continue,
+                Err(RecvTimeoutError::Timeout) if !self.deferred.is_empty() || held => continue,
                 Err(RecvTimeoutError::Timeout) => {
                     // Extensions change on disk: an agent's edit, a manual copy.
                     let stamp = self.stamp();
@@ -1356,6 +1400,58 @@ impl Owner {
             }
         }
     }
+    /// The app's clock moved ([`ExtensionHost::publish_time`]): the realm
+    /// hears the latest time once it has run the last notice.
+    fn send_moved(&mut self) {
+        if self.paced_moved.running("moved") {
+            return;
+        }
+        let moved = self.moved.swap(0, Ordering::AcqRel);
+        if moved == 0 {
+            return;
+        }
+        let Some(now) = self.realm.as_ref().map(|live| live.host.transport().time()) else {
+            return;
+        };
+        let source = format!(
+            "__compat.moved({now},{},{})",
+            moved & TIME_MOVED != 0,
+            moved & PLAY_MOVED != 0
+        );
+        let ticket = self.eval_ticket(&source);
+        self.paced_moved.sent(ticket);
+    }
+    /// The viewer presented a frame ([`ExtensionHost::frame_presented`]): the
+    /// realm hears the latest once it has run the last.
+    fn send_presented(&mut self) {
+        if self.paced_presented.running("presented") {
+            return;
+        }
+        let frame = self.presented.lock().unwrap().take();
+        if let Some(frame) = frame {
+            let ticket = self.eval_ticket(&format!("__compat.presented({frame})"));
+            self.paced_presented.sent(ticket);
+        }
+    }
+    /// [`Self::eval`], keeping the ticket.
+    fn eval_ticket(&mut self, source: &str) -> Option<Ticket<Evaluation>> {
+        let live = self.realm.as_ref()?;
+        if !self.deferred.is_empty() {
+            self.defer(source.to_owned());
+            return None;
+        }
+        match live.realm.eval(source) {
+            Ok(ticket) => Some(ticket),
+            Err(Error::Busy) => {
+                self.defer(source.to_owned());
+                None
+            }
+            Err(_) => {
+                let _ = self.inbox.send(Input::Failed(self.writer.generation));
+                None
+            }
+        }
+    }
     fn defer(&mut self, source: String) {
         // A realm this far behind is hung; the watchdog asks about it, and a
         // stopped realm restarts from the kernel's state, not from this queue.
@@ -1437,12 +1533,7 @@ impl Owner {
                 }
                 self.eval(&format!("__compat.shellState({state})"));
             }
-            Input::Presented => {
-                let frame = self.presented.lock().unwrap().take();
-                if let Some(frame) = frame {
-                    self.eval(&format!("__compat.presented({frame})"));
-                }
-            }
+            Input::Presented => self.send_presented(),
             Input::Rasters(batch, wire) => {
                 let ask = match &wire["ask"] {
                     Value::Object(_) => wire["ask"].clone(),
@@ -1486,17 +1577,7 @@ impl Owner {
                     json!(location)
                 ));
             }
-            Input::Moved => {
-                let moved = self.moved.swap(0, Ordering::AcqRel);
-                if let Some(live) = &self.realm {
-                    let now = live.host.transport().time();
-                    self.eval(&format!(
-                        "__compat.moved({now},{},{})",
-                        moved & TIME_MOVED != 0,
-                        moved & PLAY_MOVED != 0
-                    ));
-                }
-            }
+            Input::Moved => self.send_moved(),
             Input::Realm(writer, envelope) if writer == self.writer => self.realm_message(envelope),
             Input::Page(view, message) if view == u64::from(self.writer.generation) => {
                 self.page(message)

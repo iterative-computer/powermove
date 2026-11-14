@@ -57,7 +57,8 @@ fn drop_previews_cover_only_the_drop_zone() {
         .unwrap()
         .rect;
     let tab = l
-        .drop_target(&g, BOUNDS, viewer.x + 40., viewer.y + 4., &t)
+        // On its header, below the window's top-edge zone.
+        .drop_target(&g, BOUNDS, viewer.x + 40., viewer.y + t.metrics.dock_gap + 4., &t)
         .unwrap();
     assert!(matches!(tab.target, DropTarget::Split { .. }));
     assert!(tab.rect.h < viewer.h / 2.);
