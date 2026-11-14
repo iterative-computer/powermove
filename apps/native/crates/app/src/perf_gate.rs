@@ -86,7 +86,7 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                                 viewer.command(TransportCommand::SetLoop {
                                     range: Some(pm_protocol::common::TickRange {
                                         start: pm_protocol::common::Ticks::ZERO,
-                                        end: pm_protocol::common::Ticks::new((v.duration * pm_protocol::common::TICKS_PER_SECOND as f64) as i64)?,
+                                        end: pm_protocol::common::Ticks::new((v.duration() * pm_protocol::common::TICKS_PER_SECOND as f64) as i64)?,
                                     }),
                                 })?;
                             }
@@ -196,7 +196,7 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                         "no_drawable":status.as_ref().map(|s| s.no_drawable),
                         "held_frames":status.as_ref().map(|s| s.held_frames),
                         "metal_allocated_bytes":v.engine.metal_device().current_allocated_size(),
-                        "duration":v.duration,
+                        "duration":v.duration(),
                     });
                     // Viewer-2 / lifecycle fields (a second object keeps json! shallow).
                     // Shell 3 checks: toolbar title/subtitle, native tab group, AccentColor.
