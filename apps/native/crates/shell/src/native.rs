@@ -2446,32 +2446,21 @@ impl Host {
                             return std::ptr::null_mut();
                         }
                     }
-                    if host.borrow().keyboard_control_focus.get()
-                        && matches!(
-                            chord.as_str(),
-                            "enter" | "space" | "up" | "down" | "left" | "right"
-                        )
-                    {
-                        return event.as_ptr();
-                    }
-                    if splitter_focus
-                        && matches!(chord.as_str(), "up" | "down" | "left" | "right" | "enter")
-                    {
-                        return event.as_ptr();
-                    }
-                    // A control a click left the keyboard with keeps Return and
-                    // the arrows; Space plays, as in Electron (only a field
-                    // types it; keyboard navigation, above, presses with it).
-                    if control_keeps(&chord)
-                        && responder.as_ref().is_some_and(|r| unsafe {
-                            msg_send![&**r,isKindOfClass:NSControl::class()]
-                        })
-                    {
-                        return event.as_ptr();
-                    }
                     let field = responder.as_ref().is_some_and(|r| unsafe {
                         msg_send![&**r,isKindOfClass:NSTextView::class()]
                     });
+                    let control = responder.as_ref().is_some_and(|r| unsafe {
+                        msg_send![&**r,isKindOfClass:NSControl::class()]
+                    });
+                    if passes_straight(
+                        &chord,
+                        field,
+                        host.borrow().keyboard_control_focus.get(),
+                        splitter_focus,
+                        control,
+                    ) {
+                        return event.as_ptr();
+                    }
                     // P-TEXT: composition keystrokes belong to the OS input method.
                     // Never queue/replay a key that changes an active marked range.
                     if field
@@ -4100,6 +4089,29 @@ impl Drop for Host {
         self.viewer.removeFromSuperview();
     }
 }
+/// A key the focused control takes itself, ahead of the shortcut queue
+/// (Return, Space and the arrows under keyboard navigation; Return and the
+/// arrows on a clicked control or a divider). Never
+/// while text is being edited: there every key waits its turn in the queue,
+/// so a Space typed fast never overtakes the letters before it.
+fn passes_straight(
+    chord: &str,
+    editing_text: bool,
+    control_focus: bool,
+    splitter_focus: bool,
+    control: bool,
+) -> bool {
+    if editing_text {
+        return false;
+    }
+    let control_key = matches!(chord, "enter" | "space" | "up" | "down" | "left" | "right");
+    control_focus && control_key
+        // A control a click left the keyboard with keeps Return and the
+        // arrows; Space plays (`control_keeps`).
+        || control && control_keeps(chord)
+        || splitter_focus && matches!(chord, "up" | "down" | "left" | "right" | "enter")
+}
+
 fn chord(e: &NSEvent) -> String {
     let flags = e.modifierFlags();
     let mut s = String::new();
@@ -6151,6 +6163,24 @@ mod agent_status_tests {
     }
 }
 
+#[cfg(test)]
+mod key_order_tests {
+    use super::passes_straight;
+    /// Return, Space and the arrows go straight to a focused control or
+    /// divider, but never past the queue while text is being edited.
+    #[test]
+    fn keys_typed_into_text_never_skip_the_queue() {
+        assert!(passes_straight("space", false, true, false, false));
+        assert!(passes_straight("enter", false, false, false, true));
+        // A clicked control leaves Space to the editor (play).
+        assert!(!passes_straight("space", false, false, false, true));
+        assert!(passes_straight("left", false, false, true, false));
+        assert!(!passes_straight("a", false, true, false, false));
+        for key in ["space", "enter", "up", "left"] {
+            assert!(!passes_straight(key, true, true, true, true), "{key}");
+        }
+    }
+}
 /// The keys a control the pointer left the keyboard with keeps: Return and
 /// the arrows. Space is the editor's (play), as in Electron, where only a
 /// field types it.
