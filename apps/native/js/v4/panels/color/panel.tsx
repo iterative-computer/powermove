@@ -638,7 +638,10 @@ function ToolHeader({
           value={tool!.header.enabled}
           disabled={!editable}
           onKeyDown={stop}
-          onClick={(e) => {
+          onClick={stop}
+          // A person's click (the AppKit checkbox's action, the drawn box's
+          // click) and the agent's arrive as the box's change.
+          onChange={(e) => {
             stop(e);
             send({ type: "toggle", id });
           }}
