@@ -149,6 +149,97 @@ pub fn replaced_panel(manifest: &Value) -> Option<&'static str> {
         .map(|p| p.id.as_str())
         .find(|panel| replaces.iter().any(|r| r == panel))
 }
+/// `check` for an extension that came from elsewhere (the original app): its
+/// raw manifest is parsed first, and a v1–3 extension's `dependsOn` are
+/// installed into the same throwaway runtime before it, from the first of
+/// `roots` that has them, as the library loads them. Built-ins the app ships
+/// (`viewer`, `effects-basic`) are left to the loader. Without this, a guide
+/// that needs another extension reads `requires …` though both are present.
+pub fn check_with_dependencies(dir: &Path, raw: &Value, roots: &[PathBuf]) -> Result<(), String> {
+    let manifest = manifest::parse(raw)?;
+    let api = manifest["apiVersion"].as_u64().unwrap_or(1);
+    let depends = |m: &Value| -> Vec<String> {
+        m["dependsOn"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|d| d.as_str().map(str::to_owned))
+            .collect()
+    };
+    if api >= 4 || depends(&manifest).is_empty() {
+        return check(dir, &manifest);
+    }
+    let runner = CompatRunner::new(&pm_compat_runner::initial()).map_err(|e| e.to_string())?;
+    let compile = |dir: &Path, m: &Value| {
+        runner
+            .compile(
+                dir,
+                m["entry"].as_str().unwrap_or("index.ts"),
+                m["apiVersion"].as_u64().unwrap_or(1),
+            )
+            .map_err(|e| match e {
+                pm_runtime_v8::Error::Host(message) => message,
+                other => other.to_string(),
+            })
+    };
+    // Depth first, each once: dependencies install before what needs them.
+    let mut order: Vec<(PathBuf, Value)> = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    let mut stack: Vec<(String, bool)> = depends(&manifest)
+        .into_iter()
+        .rev()
+        .map(|d| (d, false))
+        .collect();
+    while let Some((id, expanded)) = stack.pop() {
+        let Some(found) = roots
+            .iter()
+            .map(|root| root.join(&id))
+            .find(|d| d.join("manifest.json").is_file())
+        else {
+            continue;
+        };
+        let raw: Value = std::fs::read(found.join("manifest.json"))
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .ok_or_else(|| format!("its dependency {id} has an unreadable manifest"))?;
+        let parsed = manifest::parse(&raw).map_err(|e| format!("its dependency {id}: {e}"))?;
+        if expanded {
+            order.push((found, parsed));
+            continue;
+        }
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        stack.push((id, true));
+        stack.extend(depends(&parsed).into_iter().rev().map(|d| (d, false)));
+    }
+    for (found, parsed) in &order {
+        let id = parsed["id"].as_str().unwrap_or_default().to_owned();
+        let graph = compile(found, parsed).map_err(|e| format!("its dependency {id}: {e}"))?;
+        let installed = runner
+            .install(parsed, &graph.to_json())
+            .map_err(|e| format!("its dependency {id}: {e}"))?;
+        if installed["ok"].as_bool() != Some(true) {
+            return Err(format!(
+                "its dependency {id} couldn’t load: {}",
+                installed["error"]["message"]
+                    .as_str()
+                    .unwrap_or("activation failed")
+            ));
+        }
+    }
+    let graph = compile(dir, &manifest)?;
+    let installed = runner
+        .install(&manifest, &graph.to_json())
+        .map_err(|e| e.to_string())?;
+    match installed["ok"].as_bool() {
+        Some(true) => Ok(()),
+        _ => Err(installed["error"]["message"]
+            .as_str()
+            .unwrap_or("activation failed")
+            .to_owned()),
+    }
+}
 /// Compile with the app's compiler, then activate in throwaway runtimes on a
 /// synthetic project: v1–3 in a trusted realm, v4 in its own panel isolate.
 pub fn check(dir: &Path, manifest: &Value) -> Result<(), String> {
