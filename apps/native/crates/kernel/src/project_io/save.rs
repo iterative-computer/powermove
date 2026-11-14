@@ -620,6 +620,7 @@ impl SavePlan {
     }
 
     fn attempt(&self, fault: Option<WriteFault>) -> Result<SaveReceipt, ProjectIoError> {
+        let mut lap = Lap::new();
         self.validate()?;
         let dest = &self.destination;
         // A save of the project (its lock held), not an export to a path
@@ -674,6 +675,7 @@ impl SavePlan {
             }
             source = Some(file);
         }
+        lap.mark("prior version checked and index read");
         let available: HashMap<&JsString, &Record> =
             index.iter().flatten().map(|r| (&r.id, r)).collect();
         let mut reused: Vec<Record> = Vec::new();
@@ -755,6 +757,7 @@ impl SavePlan {
                 SaveLayout::Compacted,
             )
         };
+        lap.mark(if layout == SaveLayout::Compacted { "new file created" } else { "previous file cloned and hashed" });
         let tmp_err = |e: io::Error| io_err(&temp.path, e);
         let limit = match fault {
             Some(WriteFault::DiskFullAfter(n) | WriteFault::DiskFullOnce(n)) => Some(n),
@@ -801,17 +804,20 @@ impl SavePlan {
         }
         drop(source);
         durable::check_version(dest, previous, false)?;
+        lap.mark("kept media copied");
 
         // The document record.
         let history = match &self.history {
             HistoryToWrite::Session(snapshot) => snapshot.to_saved(),
             HistoryToWrite::Raw(value) => value.clone(),
         };
+        lap.mark("history exported");
         // Freeze the requirement alongside this exact document/history revision.
         // Old shipped readers ignore it; the transition refusal is specified in
         // docs/native/file-guard.md. Never advertise a new container version that
         // our own production reader cannot reopen.
         let extra = file_guard::save_extra(self.document.root(), &history, &self.extra);
+        lap.mark("file guard");
         let doc_offset = out.offset;
         let mut sink = DocSink {
             out: &mut out,
@@ -834,6 +840,7 @@ impl SavePlan {
         }
         let doc_len = sink.len;
         let doc_sha = hex(&sink.hasher.finalize());
+        lap.mark("document written");
         drop(history);
         if !(2..=u32::MAX as u64).contains(&doc_len) {
             return Err(ProjectIoError::Invalid(
@@ -887,7 +894,9 @@ impl SavePlan {
         }
         #[cfg(not(unix))]
         let _ = kept_mode;
+        lap.mark("new media, index and footer written");
         durable::sync_file(&file).map_err(tmp_err)?;
+        lap.mark("synced");
 
         self.verify(
             &file,
@@ -898,6 +907,7 @@ impl SavePlan {
             &mut buf,
         )?;
         drop(file);
+        lap.mark("verified");
         if fault == Some(WriteFault::FailBeforePublish) {
             return Err(ProjectIoError::Invalid(
                 "Injected failure before publishing".into(),
@@ -937,6 +947,7 @@ impl SavePlan {
             }
         }
         let mut published = published?;
+        lap.mark("published");
         let unfinalized = published.unfinalized.take();
         let backup = published.backup.take().or(backup);
 
@@ -1058,6 +1069,19 @@ impl SavePlan {
             }
         }
         Ok(())
+    }
+}
+
+/// Phase times of one save attempt on stderr (`PM_SAVE_TRACE=1`).
+struct Lap(Option<std::time::Instant>);
+impl Lap {
+    fn new() -> Self {
+        Self(std::env::var_os("PM_SAVE_TRACE").map(|_| std::time::Instant::now()))
+    }
+    fn mark(&mut self, phase: &str) {
+        if let Some(at) = self.0.replace(std::time::Instant::now()) {
+            eprintln!("PM_SAVE {phase}: {:.0} ms", at.elapsed().as_secs_f64() * 1000.);
+        }
     }
 }
 
