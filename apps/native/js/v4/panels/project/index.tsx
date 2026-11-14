@@ -4,6 +4,7 @@ import {
   List,
   TextField,
   PushButton,
+  SegmentedControl,
   ToolbarItem,
   token,
 } from "../../src/components";
@@ -64,7 +65,14 @@ export interface GridLayout {
    * Never use a guessed column count or JS text measurement. */
   columns: number;
   rowHeight: number;
+  /** A grid card's thumbnail, in points (16:9 of its column). */
+  thumbWidth?: number;
+  thumbHeight?: number;
 }
+/** The panel's two layouts: source-list rows, or a grid of thumbnails. */
+export type ViewMode = "list" | "grid";
+/** The page the panel asks for first, and the least it asks for after. */
+export const FIRST_PAGE = 96;
 export interface NativeServices {
   /** Real registered local-text binding handles, supplied by the native host. */
   searchBinding: string;
@@ -98,6 +106,11 @@ export interface ProjectViewProps {
   restoring?: boolean;
   /** Poster keys are not resource leases; only a native resolver may supply these. */
   posters?: ReadonlyMap<string, string>;
+  /** The header's list/grid choice; absent, the header offers none. */
+  viewMode?: ViewMode;
+  onViewMode?(mode: ViewMode): void;
+  /** The list's width in points, as the host lays it out. */
+  onWidth?(width: number): void;
 }
 export function modifiers(event: SurfaceEvent): Modifiers {
   return {
@@ -154,6 +167,8 @@ export function ProjectView(props: ProjectViewProps) {
     setQuery(view.query);
   }, [view?.host_filter]);
   const [hovered, setHovered] = useState<string | null>(null);
+  /** The page last asked for by the list's range (offset, limit, document). */
+  const askedPage = useRef("");
   const [rename, setRename] = useState("");
   const [crumbFocus, setCrumbFocus] = useState(0);
   const document = view?.page.stamp.document;
@@ -269,13 +284,13 @@ export function ProjectView(props: ProjectViewProps) {
       }}
       preventDefault={{ keydown: ["Enter", "Escape"] }}
       onKeyDown={(e) => {
+        // Typing a name is the field's: no key moves or previews the grid.
+        e.stopPropagation();
         if (e.composing) return;
         if (e.key === "Escape") {
-          e.stopPropagation();
           input("CancelRename");
         }
         if (e.key === "Enter") {
-          e.stopPropagation();
           input({ CommitRename: { folder: folderId, value: rename } });
         }
       }}
@@ -438,7 +453,20 @@ export function ProjectView(props: ProjectViewProps) {
             !!view?.drop_target &&
             view.drop_target.folder === folderId,
         }}
-        style={{ ...target, ...text, display: "flex", flexDirection: "column" }}
+        style={{
+          ...target,
+          ...text,
+          display: "flex",
+          flexDirection: "column",
+          // Every card of a row is as wide (media-browser §2: columns of at
+          // least `thumbnail_min`, sharing the row); the thumbnail takes the
+          // row's height above the name and meta lines.
+          flexGrow: 1,
+          flexShrink: 1,
+          flexBasis: token("metrics.thumbnail_min"),
+          overflow: "hidden",
+          paddingBottom: token("metrics.inset"),
+        }}
         onPointerDown={(e) => pointer(row, "Down", e)}
         onClick={(e) => pointer(row, "Click", e)}
         onDoubleClick={(e) => pointer(row, "DoubleClick", e)}
@@ -451,44 +479,102 @@ export function ProjectView(props: ProjectViewProps) {
         onDragEnd={() => input("DragEnd")}
         {...(folderId ? dropHandlers(folderId) : {})}
       >
+        {/* Selected: a 2 pt accent ring outside the thumbnail, drawn as this
+            border and the thumbnail's own. */}
         <div
           style={{
-            background: token("colors.field"),
+            flexGrow: 1,
+            display: "flex",
+            flexDirection: "column",
             borderRadius: token("metrics.control_radius"),
+            borderWidth: token("metrics.border"),
+            borderColor: token(row.selected ? "colors.accent" : "colors.panel"),
           }}
         >
-          {poster ? <img resource={poster} alt={name} /> : null}
-          {duration !== null && duration !== undefined ? (
-            <text
-              style={{
-                fontSize: token("typography.minimum"),
-                color: token("colors.selected_text"),
-                fontVariantNumeric: "tabular-nums",
-              }}
-            >
-              {clock(duration)}
-            </text>
-          ) : null}
-          {comp?.open ? (
-            <text
-              label="Open in the timeline"
-              style={{ color: token("colors.accent") }}
-            />
-          ) : null}
-          {overlay?.overlay ? (
-            <text
-              style={{
-                fontSize: token("typography.minimum"),
-                color: token("colors.selected_text"),
-              }}
-              metadata={{ progress: asset?.[1].progress ?? null }}
-            >
-              {overlay.overlay}
-            </text>
-          ) : null}
-          {!view?.drag && (hovered === itemKey(row.id) || row.focused)
-            ? actionButtons(actions, "colors.selected_text")
-            : null}
+          <div
+            style={{
+              flexGrow: 1,
+              background: token("colors.field"),
+              borderRadius: token("metrics.inner_radius"),
+              borderWidth: token("metrics.border"),
+              borderColor: token(
+                row.selected ? "colors.accent" : "colors.field",
+              ),
+              overflow: "hidden",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+          >
+            {poster ? (
+              <img
+                resource={poster}
+                alt={name}
+                style={{ position: "absolute", inset: "fill" }}
+              />
+            ) : folderId || comp ? (
+              <text
+                attr={{ symbol: folderId ? "folder" : "film" }}
+                style={{
+                  color: token("colors.muted"),
+                  symbolSize: token("metrics.symbol_panel"),
+                }}
+              />
+            ) : null}
+            {duration !== null && duration !== undefined ? (
+              <text
+                style={{
+                  position: "absolute",
+                  left: token("metrics.gap"),
+                  top: token("metrics.gap"),
+                  paddingLeft: token("metrics.gap"),
+                  paddingRight: token("metrics.gap"),
+                  background: token("colors.media_badge"),
+                  borderRadius: token("metrics.capsule_radius"),
+                  fontSize: token("typography.minimum"),
+                  color: token("colors.selected_text"),
+                  fontVariantNumeric: "tabular-nums",
+                }}
+              >
+                {clock(duration)}
+              </text>
+            ) : null}
+            {comp?.open ? (
+              <text
+                label="Open in the timeline"
+                style={{ color: token("colors.accent") }}
+              />
+            ) : null}
+            {overlay?.overlay ? (
+              <text
+                style={{
+                  position: "absolute",
+                  left: token("metrics.gap"),
+                  bottom: token("metrics.gap"),
+                  paddingLeft: token("metrics.gap"),
+                  paddingRight: token("metrics.gap"),
+                  background: token("colors.media_badge"),
+                  borderRadius: token("metrics.capsule_radius"),
+                  fontSize: token("typography.minimum"),
+                  color: token("colors.selected_text"),
+                }}
+                metadata={{ progress: asset?.[1].progress ?? null }}
+              >
+                {overlay.overlay}
+              </text>
+            ) : null}
+            {!view?.drag && (hovered === itemKey(row.id) || row.focused) ? (
+              <div
+                style={{
+                  position: "absolute",
+                  right: token("metrics.gap"),
+                  bottom: token("metrics.gap"),
+                }}
+              >
+                {actionButtons(actions, "colors.selected_text")}
+              </div>
+            ) : null}
+          </div>
         </div>
         {folderId && view?.renaming === folderId ? (
           renameField(folderId, name)
@@ -497,11 +583,13 @@ export function ProjectView(props: ProjectViewProps) {
             title={name}
             style={{
               ...text,
+              height: token("metrics.field"),
               marginTop: token("metrics.gap"),
               background: row.selected ? token("colors.selected_fill") : null,
               borderRadius: token("metrics.capsule_radius"),
               overflow: "hidden",
               whiteSpace: "nowrap",
+              textOverflow: "ellipsis",
             }}
           >
             {name}
@@ -513,8 +601,10 @@ export function ProjectView(props: ProjectViewProps) {
             color: token(
               overlay?.detail ? `colors.${overlay.tone}` : "colors.muted",
             ),
+            height: token("metrics.field"),
             whiteSpace: "nowrap",
             overflow: "hidden",
+            textOverflow: "ellipsis",
           }}
         >
           {[meta(row), row.folder_path?.join(" / ")]
@@ -535,7 +625,9 @@ export function ProjectView(props: ProjectViewProps) {
     ),
   );
   const gridKey = (event: SurfaceEvent) => {
-    if (event.composing || event.target !== event.currentTarget) return;
+    // The list or one of its items: a click focuses the item it lands on,
+    // and its keys are the grid's (fields inside keep theirs, below).
+    if (event.composing) return;
     if (event.key === "F2" && view?.focused && "Folder" in view.focused) {
       input({ BeginRename: view.focused.Folder });
       return;
@@ -610,6 +702,18 @@ export function ProjectView(props: ProjectViewProps) {
             alignItems: "center",
           }}
         >
+          {props.viewMode && props.onViewMode ? (
+            <SegmentedControl
+              id="media:view"
+              label="View"
+              value={props.viewMode}
+              options={[
+                { id: "list", label: "List", symbol: "list.bullet" },
+                { id: "grid", label: "Grid", symbol: "square.grid.2x2" },
+              ]}
+              onChange={(mode) => props.onViewMode?.(mode as ViewMode)}
+            />
+          ) : null}
           <ToolbarItem
             label="Search Media"
             attr={{ symbol: "magnifyingglass" }}
@@ -849,7 +953,9 @@ export function ProjectView(props: ProjectViewProps) {
             count={count}
             range={[start, end]}
             itemSize={layout.rowHeight}
+            metadata={{ fixedItems: layout.columns > 1 }}
             onRangeChange={(e) => {
+              if (typeof e.width === "number") props.onWidth?.(e.width);
               if (!e.range) return;
               const [from, to] = e.range;
               if (
@@ -859,30 +965,60 @@ export function ProjectView(props: ProjectViewProps) {
                 (to - from) * layout.columns > 4096
               )
                 return;
-              props.page(
-                from * layout.columns,
-                Math.min(
-                  view.page.total - from * layout.columns,
-                  (to - from) * layout.columns,
-                ),
-              );
+              // The rows shown. A range that reaches the last row asks for a
+              // first page's worth more: the host's range stops at the rows
+              // there are now, and media imported later joins the end, which
+              // the next publication then brings without a scroll (the native
+              // model clamps to what exists).
+              const room = to >= count ? FIRST_PAGE : 0;
+              const offset = from * layout.columns;
+              const limit = Math.min(4096, (to - from) * layout.columns + room);
+              // Every wheel event reports the range; a page is asked for only
+              // when it moves (each one republishes and redraws the panel).
+              const key = `${offset}:${limit}:${view.page.stamp.document}`;
+              if (key === askedPage.current) return;
+              askedPage.current = key;
+              props.page(offset, limit);
             }}
           >
-            {Array.from({ length: end - start }, (_, index) => (
-              <div
-                key={start + index}
-                style={{
-                  display: "flex",
-                  // One column stacks full-width list rows; more columns lay cards out.
-                  flexDirection: layout.columns === 1 ? "column" : "row",
-                  gap: token("metrics.inset"),
-                }}
-              >
-                {view.page.rows
-                  .slice(index * layout.columns, (index + 1) * layout.columns)
-                  .map(layout.columns === 1 ? renderRow : renderCard)}
-              </div>
-            ))}
+            {Array.from({ length: end - start }, (_, index) => {
+              const rows = view.page.rows.slice(
+                index * layout.columns,
+                (index + 1) * layout.columns,
+              );
+              return (
+                <div
+                  key={start + index}
+                  style={{
+                    display: "flex",
+                    // One column stacks full-width list rows; more columns lay cards out.
+                    flexDirection: layout.columns === 1 ? "column" : "row",
+                    flexGrow: layout.columns === 1 ? null : 1,
+                    gap: token("metrics.inset"),
+                  }}
+                >
+                  {layout.columns === 1
+                    ? rows.map(renderRow)
+                    : [
+                        ...rows.map(renderCard),
+                        // A short last row keeps its cards a column wide.
+                        ...Array.from(
+                          { length: layout.columns - rows.length },
+                          (_, i) => (
+                            <div
+                              key={`space:${i}`}
+                              style={{
+                                flexGrow: 1,
+                                flexShrink: 1,
+                                flexBasis: token("metrics.thumbnail_min"),
+                              }}
+                            />
+                          ),
+                        ),
+                      ]}
+                </div>
+              );
+            })}
           </virtual-list>
         )}
         {view?.external_drag ? (
@@ -940,16 +1076,74 @@ export function ProjectView(props: ProjectViewProps) {
 }
 export function ProjectPanel({
   service,
+  layoutFor,
+  viewMode: initialMode,
+  onViewMode,
+  loadViewMode,
   ...props
-}: Omit<ProjectViewProps, "view" | "input" | "menu" | "page"> & {
+}: Omit<ProjectViewProps, "view" | "input" | "menu" | "page" | "onWidth"> & {
   service: ProjectService;
+  /** The host's layout for a view at a width (`project.layout`); with it the
+   * header offers the list/grid choice and the grid follows the width. */
+  layoutFor?(mode: ViewMode, width: number | null): GridLayout;
+  /** The open project's saved choice (asked again when another opens). */
+  loadViewMode?(): Promise<ViewMode>;
 }) {
   const [, update] = useState(0);
   useLayoutEffect(() => service.listen(() => update((n) => n + 1)), [service]);
+  const [mode, setMode] = useState<ViewMode>(initialMode ?? "list");
+  // Another project in this panel: its own list/grid choice.
+  const documentId = service.view?.page.stamp.document;
+  // `undefined` is never a document: the first one shown asks too.
+  const shownDocument = useRef<number | null | undefined>(undefined);
+  useLayoutEffect(() => {
+    if (documentId === shownDocument.current) return;
+    shownDocument.current = documentId;
+    let live = true;
+    void loadViewMode?.().then((next) => {
+      if (live) setMode(next);
+    });
+    return () => {
+      live = false;
+    };
+  }, [documentId]);
+  const [width, setWidth] = useState<number | null>(null);
+  const layout = layoutFor ? layoutFor(mode, width) : props.layout;
   const view = service.view;
+  // A new column count regroups the rows: ask for the page from the start
+  // of the row holding the first item shown, so rows begin at a column.
+  const columns = useRef(layout.columns);
+  useLayoutEffect(() => {
+    if (columns.current === layout.columns) return;
+    columns.current = layout.columns;
+    if (!view) return;
+    const offset =
+      Math.floor(view.page.offset / layout.columns) * layout.columns;
+    service.run(
+      service.page(
+        offset,
+        // Never clamped to the items there are: media imported later
+        // joins this page with the next publication.
+        Math.min(
+          4096,
+          Math.max(FIRST_PAGE, view.page.rows.length + layout.columns),
+        ),
+        view.page.stamp,
+      ),
+    );
+  }, [layout.columns]);
   return (
     <ProjectView
       {...props}
+      layout={layout}
+      viewMode={layoutFor ? mode : undefined}
+      onViewMode={(next) => {
+        setMode(next);
+        onViewMode?.(next);
+      }}
+      onWidth={(next) => {
+        if (next !== width) setWidth(next);
+      }}
       view={view}
       transportFailed={service.error !== null}
       errorSequence={service.errorSequence}

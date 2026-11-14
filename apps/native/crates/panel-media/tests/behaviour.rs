@@ -342,6 +342,17 @@ fn enter_adds_double_click_previews_and_space_toggles() {
     assert!(!p.preview.playing);
 }
 #[test]
+fn space_on_a_selected_item_keeps_the_selection_and_elsewhere_replaces_it() {
+    let (c, mut p, r) = setup();
+    pointer(&mut p, &c, &r, "a", Modifiers::default());
+    pointer(&mut p, &c, &r, "c", primary());
+    let o = key(&mut p, &c, &r, "c", Key::Space, Modifiers::default());
+    assert!(o.effects.contains(&Effect::TogglePreview("c".into())));
+    assert_eq!(p.selected_assets(), ["a", "c"]);
+    key(&mut p, &c, &r, "b", Key::Space, Modifiers::default());
+    assert_eq!(p.selected_assets(), ["b"]);
+}
+#[test]
 fn model_never_previews_and_still_has_no_transport() {
     let (c, mut p, r) = setup();
     assert!(

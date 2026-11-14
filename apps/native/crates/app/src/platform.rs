@@ -379,6 +379,50 @@ pub fn choose_paths(
 ) -> async_channel::Receiver<Vec<PathBuf>> {
     open_panel(window, !folders, folders, multiple, extensions, prompt)
 }
+#[derive(Debug, PartialEq)]
+enum ContentType<'a> {
+    Extension(&'a str),
+    Identifier(&'static str),
+}
+/// The types an open panel lets a person choose: files of `extensions`,
+/// and folders when it takes folders. Restricted to file types alone, the
+/// panel only opens a folder (Import goes into it) instead of choosing it.
+fn content_types<'a>(extensions: &[&'a str], folders: bool) -> Vec<ContentType<'a>> {
+    let mut types: Vec<ContentType<'a>> = extensions
+        .iter()
+        .map(|e| ContentType::Extension(e))
+        .collect();
+    if folders && !types.is_empty() {
+        types.push(ContentType::Identifier("public.folder"));
+    }
+    types
+}
+
+#[cfg(test)]
+mod open_panel_tests {
+    use super::{ContentType, content_types};
+    /// Import Media's panel takes media files and folders: a folder stays
+    /// choosable among the media types (else Import opens it), and a panel
+    /// for files alone lists file types only.
+    #[test]
+    fn a_panel_that_takes_folders_lets_a_folder_be_chosen() {
+        assert_eq!(
+            content_types(&["png", "mov"], true),
+            [
+                ContentType::Extension("png"),
+                ContentType::Extension("mov"),
+                ContentType::Identifier("public.folder")
+            ]
+        );
+        assert_eq!(
+            content_types(&["png"], false),
+            [ContentType::Extension("png")]
+        );
+        // No type filter at all: anything (folders included) is choosable.
+        assert!(content_types(&[], true).is_empty());
+    }
+}
+
 fn open_panel(
     window: &NSWindow,
     files: bool,
@@ -402,11 +446,19 @@ fn open_panel(
     panel.setAllowsMultipleSelection(multiple);
     panel.setPrompt(Some(&NSString::from_str(prompt)));
     panel.setCanCreateDirectories(folders && !files);
-    let types: Vec<Retained<AnyObject>> = extensions
-        .iter()
-        .filter_map(|extension| unsafe {
-            let extension = NSString::from_str(extension);
-            msg_send![objc2::class!(UTType), typeWithFilenameExtension: &*extension]
+    let types: Vec<Retained<AnyObject>> = content_types(extensions, folders)
+        .into_iter()
+        .filter_map(|kind| unsafe {
+            match kind {
+                ContentType::Extension(extension) => {
+                    let extension = NSString::from_str(extension);
+                    msg_send![objc2::class!(UTType), typeWithFilenameExtension: &*extension]
+                }
+                ContentType::Identifier(identifier) => {
+                    let identifier = NSString::from_str(identifier);
+                    msg_send![objc2::class!(UTType), typeWithIdentifier: &*identifier]
+                }
+            }
         })
         .collect();
     if !types.is_empty() {

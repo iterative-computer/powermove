@@ -758,8 +758,13 @@ impl MediaPanel {
                 } else {
                     match key {
                         Key::Enter => self.activate(c, r, &id, false, &mut out)?,
+                        // Space keeps a selection the item is in (Quick Look
+                        // shows all of it, as in Finder); outside it, the
+                        // item becomes the selection.
                         Key::Space => {
-                            self.select(&id, Modifiers::default(), &mut out.effects);
+                            if !self.is_selected(&id) {
+                                self.select(&id, Modifiers::default(), &mut out.effects);
+                            }
                             self.toggle_preview(c, r, &id, &mut out)?;
                         }
                         Key::Delete | Key::Backspace => {
