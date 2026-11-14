@@ -100,7 +100,7 @@ pub enum Finished {
     Paused,
     LowDisk(LowDisk),
     ProfileRefused(String),
-    Denied,
+    Denied(String),
     Failed(Failure, String),
 }
 #[derive(Debug)]
@@ -373,7 +373,8 @@ impl Flow {
                 self.model.gate = Gate::ProfileRefused;
                 vec![]
             }
-            Finished::Denied => {
+            Finished::Denied(reason) => {
+                self.model.keychain_error = Some(reason);
                 self.model.gate = Gate::Denied;
                 vec![]
             }
@@ -478,6 +479,8 @@ impl Flow {
                 vec![Effect::Run(Run::Ordinary)]
             }
             "resume_with_secret_consent" => {
+                self.model.keychain_error = None;
+                self.details = None;
                 self.model.gate = Gate::WaitingForMacos;
                 self.consent_run = true;
                 vec![Effect::Run(Run::WithConsent)]
@@ -732,6 +735,16 @@ pub fn spawn_run(
     activity: Arc<Activity>,
     tx: async_channel::Sender<Message>,
 ) {
+    spawn_run_with_keychain(config, run, pause, activity, tx, None);
+}
+fn spawn_run_with_keychain(
+    config: Config,
+    run: Run,
+    pause: Arc<AtomicBool>,
+    activity: Arc<Activity>,
+    tx: async_channel::Sender<Message>,
+    keychain: Option<MacKeychain>,
+) {
     let native = config.native_profile.clone();
     std::thread::spawn(move || {
         // Originals in folders macOS protects are opened only after the person
@@ -748,10 +761,10 @@ pub fn spawn_run(
             Run::Ordinary => pm_first_launch::run(&config, hook),
             Run::SkipConsent => pm_first_launch::skip_secret_consent(&config, hook),
             Run::Folders(choice) => pm_first_launch::run_with_folder_access(&config, choice, hook),
-            // Constructed only here, after the person's click for this request.
+            // Each attempt owns a fresh backend after the person’s click.
             Run::WithConsent => pm_first_launch::resume_with_secret_consent(
                 &config,
-                &mut MacKeychain::after_user_consent(),
+                &mut keychain.unwrap_or_else(MacKeychain::after_user_consent),
                 hook,
             ),
         };
@@ -788,8 +801,22 @@ fn classify(result: Result<Outcome>) -> Finished {
     if let Some(low) = error.downcast_ref::<LowDisk>() {
         return Finished::LowDisk(*low);
     }
-    if error.downcast_ref::<KeychainDenied>().is_some() {
-        return Finished::Denied;
+    if error.downcast_ref::<KeychainDenied>().is_some()
+        || error
+            .downcast_ref::<pm_first_launch::secrets::KeychainError>()
+            .is_some()
+    {
+        // The underlying backend error carries only a status and safe copy.
+        eprintln!("PM_KEYCHAIN consent failed: {error:#}");
+        return Finished::Denied(
+            error
+                .downcast_ref::<pm_first_launch::secrets::KeychainError>()
+                .map_or(
+                    "macOS couldn’t read the sign-in key. Try again, or continue and sign in here.",
+                    |e| e.message(),
+                )
+                .into(),
+        );
     }
     let details = format!("{error:#}");
     if error.downcast_ref::<ProfileRefused>().is_some() {
@@ -1023,13 +1050,47 @@ impl Driver {
                 Effect::Run(run) => {
                     self.pause.store(false, Ordering::Release);
                     if let Some(config) = self.library.plan.config.clone() {
-                        spawn_run(
-                            config,
-                            run,
-                            self.pause.clone(),
-                            self.activity.clone(),
-                            self.tx.clone(),
-                        );
+                        if run == Run::WithConsent {
+                            let (request, requested) = async_channel::bounded(1);
+                            let (reply, response) = std::sync::mpsc::sync_channel(1);
+                            let window = *self.window.borrow();
+                            // The worker asks only after validation and the durable
+                            // AccessStarted checkpoint. This task runs on main.
+                            cx.spawn(async move |cx| {
+                                if requested.recv().await.is_ok() {
+                                    let result = cx.update(|cx| {
+                                        cx.activate(true);
+                                        if let Some(window) = window {
+                                            let _ =
+                                                window.update(cx, |_, window, _| window.activate());
+                                        }
+                                        MacKeychain::read_on_main_thread()
+                                    });
+                                    let _ = reply.send(result);
+                                }
+                            })
+                            .detach();
+                            let access = MacKeychain::with_legacy_reader(move || {
+                                request.send_blocking(())?;
+                                response.recv()?
+                            });
+                            spawn_run_with_keychain(
+                                config,
+                                run,
+                                self.pause.clone(),
+                                self.activity.clone(),
+                                self.tx.clone(),
+                                Some(access),
+                            );
+                        } else {
+                            spawn_run(
+                                config,
+                                run,
+                                self.pause.clone(),
+                                self.activity.clone(),
+                                self.tx.clone(),
+                            );
+                        }
                         self.poll(cx);
                     }
                 }

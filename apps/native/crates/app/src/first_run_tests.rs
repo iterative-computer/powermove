@@ -84,6 +84,8 @@ fn the_default_profile_is_the_one_the_coordinator_writes() {
 fn an_override_never_reaches_the_real_profiles() {
     let (_temp, home) = home();
     let isolated = home.join("isolated");
+    source(&home.join(APPLICATION_SUPPORT));
+    write(&isolated.join("store/projects.json"), &json!([]));
     let plan = Plan::resolve(
         Some(isolated.clone()),
         None,
@@ -264,14 +266,24 @@ fn a_denied_keychain_offers_a_fresh_click_and_carrying_on_without() {
     flow.action("resume_with_secret_consent");
     assert_eq!(flow.frame().status.as_deref(), Some("Waiting for macOS…"));
     assert!(flow.frame().buttons.iter().all(|b| !b.enabled));
-    assert!(flow.message(Message::Finished(Finished::Denied)).is_empty());
+    assert!(
+        flow.message(Message::Finished(Finished::Denied(
+            pm_first_launch::secrets::KeychainError(-25300)
+                .message()
+                .into()
+        )))
+        .is_empty()
+    );
     let denied = flow.frame();
+    assert!(denied.line.contains("wasn’t found"));
     titled(&denied, "Keychain Access Wasn’t Allowed");
     assert_eq!(denied.default_action(), Some("skip_secret_consent"));
     assert_eq!(
         flow.action("resume_with_secret_consent"),
         vec![Effect::Run(Run::WithConsent)]
     );
+    assert!(flow.model.keychain_error.is_none());
+    assert!(!flow.frame().line.contains("wasn’t found"));
 }
 #[test]
 fn a_running_original_app_waits_and_the_copy_starts_when_it_quits() {
@@ -790,4 +802,38 @@ fn bring_in_copies_only_extensions_and_summarises_each_with_its_reason() {
     let mut again = Flow::new(plan);
     assert_eq!(again.start(), vec![Effect::ScanExtensions]);
     assert_eq!(scan_into(&mut again), vec![Effect::Enter(None)]);
+}
+
+#[test]
+fn existing_isolated_library_can_only_offer_extensions_with_an_explicit_source() {
+    let (_temp, home) = home();
+    let (default, native) = existing_library_with_original_extensions(&home);
+    let source = default.config.unwrap().electron_profile;
+    let isolated = Plan::resolve(
+        Some(native.clone()),
+        Some(source),
+        Some(home.into_os_string()),
+    )
+    .unwrap();
+    assert_eq!(isolated.launch, Launch::Fresh);
+    assert!(!isolated.onboard);
+    let mut flow = Flow::new(isolated);
+    assert_eq!(flow.start(), vec![Effect::ScanExtensions]);
+    assert!(scan_into(&mut flow).is_empty());
+    assert_eq!(flow.frame().surface, "N004");
+    assert!(!native.join("migration.json").exists());
+    assert_eq!(
+        flow.action("not_now"),
+        vec![Effect::DeclineExtensions, Effect::Enter(None)]
+    );
+}
+
+#[test]
+fn keychain_error_survives_the_consent_context() {
+    let error =
+        anyhow::Error::new(pm_first_launch::secrets::KeychainError(-25308)).context(KeychainDenied);
+    let Finished::Denied(reason) = classify(Err(error)) else {
+        panic!("expected a Keychain reason")
+    };
+    assert!(reason.contains("couldn’t show"));
 }
