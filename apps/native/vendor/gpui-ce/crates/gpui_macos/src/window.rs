@@ -3139,6 +3139,27 @@ unsafe extern "C" fn reset_cursor_rects(this: &Objc2Object, _: Sel) {
             CursorStyle::DragLink => msg_send![class!(NSCursor), dragLinkCursor],
             CursorStyle::DragCopy => msg_send![class!(NSCursor), dragCopyCursor],
             CursorStyle::ContextualMenu => msg_send![class!(NSCursor), contextualMenuCursor],
+            // Powermove: AppKit's own where it has one, else an SF Symbol.
+            CursorStyle::Move => extra_cursor(
+                &MOVE_CURSOR,
+                &[sel!(_moveCursor)],
+                "arrow.up.and.down.and.arrow.left.and.right",
+            ),
+            CursorStyle::Rotate => extra_cursor(
+                &ROTATE_CURSOR,
+                &[],
+                "arrow.trianglehead.clockwise.rotate.90",
+            ),
+            CursorStyle::ZoomIn => extra_cursor(
+                &ZOOM_IN_CURSOR,
+                &[sel!(zoomInCursor), sel!(_zoomInCursor)],
+                "plus.magnifyingglass",
+            ),
+            CursorStyle::ZoomOut => extra_cursor(
+                &ZOOM_OUT_CURSOR,
+                &[sel!(zoomOutCursor), sel!(_zoomOutCursor)],
+                "minus.magnifyingglass",
+            ),
         };
 
         let bounds: Objc2NSRect = msg_send![this as *const Objc2Object as ObjcId, bounds];
@@ -3176,6 +3197,103 @@ fn directional_resize_spec(
         ),
         _ => return None,
     })
+}
+
+static MOVE_CURSOR: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+static ROTATE_CURSOR: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+static ZOOM_IN_CURSOR: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+static ZOOM_OUT_CURSOR: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+
+/// Powermove: a cursor AppKit offers under one of `selectors`, or one drawn
+/// from the SF Symbol `symbol` (black on a heavier white outline, centred hot
+/// spot), made once and kept. Arrow when neither exists.
+unsafe fn extra_cursor(
+    cache: &std::sync::OnceLock<usize>,
+    selectors: &[Sel],
+    symbol: &str,
+) -> ObjcId {
+    let made = *cache.get_or_init(|| unsafe {
+        let cursor_class = class!(NSCursor);
+        for selector in selectors {
+            let has: Bool = msg_send![cursor_class, respondsToSelector: *selector];
+            if has.as_bool() {
+                let cursor: ObjcId = msg_send![cursor_class, performSelector: *selector];
+                if !cursor.is_null() {
+                    let _: ObjcId = msg_send![cursor, retain];
+                    return cursor as usize;
+                }
+            }
+        }
+        symbol_cursor(symbol) as usize
+    });
+    if made == 0 {
+        unsafe { msg_send![class!(NSCursor), arrowCursor] }
+    } else {
+        made as ObjcId
+    }
+}
+
+unsafe fn symbol_cursor(symbol: &str) -> ObjcId {
+    unsafe {
+        let tinted = |weight: f64, white: bool| -> ObjcId {
+            let name = ns_string(symbol);
+            let image: ObjcId = msg_send![
+                class!(NSImage),
+                imageWithSystemSymbolName: &*name,
+                accessibilityDescription: std::ptr::null_mut::<Objc2Object>()
+            ];
+            if image.is_null() {
+                return image;
+            }
+            let color: ObjcId = if white {
+                msg_send![class!(NSColor), whiteColor]
+            } else {
+                msg_send![class!(NSColor), blackColor]
+            };
+            let colors: ObjcId = msg_send![class!(NSArray), arrayWithObject: color];
+            let size: ObjcId = msg_send![
+                class!(NSImageSymbolConfiguration),
+                configurationWithPointSize: 14.0f64,
+                weight: weight
+            ];
+            let palette: ObjcId = msg_send![
+                class!(NSImageSymbolConfiguration),
+                configurationWithPaletteColors: colors
+            ];
+            let config: ObjcId = msg_send![size, configurationByApplyingConfiguration: palette];
+            msg_send![image, imageWithSymbolConfiguration: config]
+        };
+        // NSFontWeightHeavy (0.56) for the outline, Regular (0) on top.
+        let (outline, glyph) = (tinted(0.56, true), tinted(0., false));
+        if outline.is_null() || glyph.is_null() {
+            return std::ptr::null_mut();
+        }
+        let side = 24.0f64;
+        let canvas: ObjcId = msg_send![class!(NSImage), alloc];
+        let canvas: ObjcId = msg_send![canvas, initWithSize: NSSize::new(side, side)];
+        let _: () = msg_send![canvas, lockFocus];
+        for image in [outline, glyph] {
+            let size: NSSize = msg_send![image, size];
+            let rect = Objc2NSRect::new(
+                Objc2NSPoint::new((side - size.width) / 2., (side - size.height) / 2.),
+                size,
+            );
+            let _: () = msg_send![
+                image,
+                drawInRect: rect,
+                fromRect: Objc2NSRect::ZERO,
+                operation: 2usize,
+                fraction: 1.0f64
+            ];
+        }
+        let _: () = msg_send![canvas, unlockFocus];
+        let cursor: ObjcId = msg_send![class!(NSCursor), alloc];
+        msg_send![
+            cursor,
+            initWithImage: canvas,
+            hotSpot: Objc2NSPoint::new(side / 2., side / 2.)
+        ]
+    }
 }
 
 /// Uses AppKit's directional frame cursors when available, with a legacy fallback.

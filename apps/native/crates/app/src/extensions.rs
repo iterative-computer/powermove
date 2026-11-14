@@ -885,11 +885,30 @@ impl Controller {
         at: (f32, f32),
         cx: &mut Context<Self>,
     ) -> Option<Vec<MenuEntry>> {
+        self.extension_menu_with_tail(locations, entries, vec![], at, cx)
+    }
+    /// As `extension_menu`, with `tail` after what extensions add (the
+    /// viewer's composition rows close its canvas menu, as viewer.ts).
+    pub fn extension_menu_with_tail(
+        &mut self,
+        locations: Vec<(&'static str, Value)>,
+        entries: Vec<MenuEntry>,
+        tail: Vec<MenuEntry>,
+        at: (f32, f32),
+        cx: &mut Context<Self>,
+    ) -> Option<Vec<MenuEntry>> {
+        let with_tail = |mut entries: Vec<MenuEntry>| {
+            if !tail.is_empty() {
+                entries.push(MenuEntry::separator());
+                entries.extend(tail);
+            }
+            entries
+        };
         let compat = self.extensions.host.as_ref().is_some_and(|h| h.view() != 0);
         let runtime = self.builtins.runtime.clone().filter(|r| r.has_extensions());
         // With no realm nothing can add to it, so it opens right away.
         if !compat && runtime.is_none() {
-            return Some(entries);
+            return Some(with_tail(entries));
         }
         cx.spawn(async move |this, cx| {
             let (extra, locations) = match runtime {
@@ -912,7 +931,7 @@ impl Controller {
                     entries.push(MenuEntry::separator());
                     entries.extend(extra);
                 }
-                v.open_compat_menu(locations, entries, at, cx);
+                v.open_compat_menu(locations, with_tail(entries), at, cx);
             });
         })
         .detach();
