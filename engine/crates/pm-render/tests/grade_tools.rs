@@ -379,3 +379,36 @@ fn a_keyed_point_landing_on_another_is_one_point() {
     eprintln!("keyed: {d:e} from the reference");
     assert!(d < 2e-5, "{d:e}");
 }
+
+/// Values the controls can't hold (an expression's, or written by an older
+/// agent) are held to each control's range: the picture stays finite and is
+/// the one the range's end gives. 1e39 is a finite number that becomes an
+/// infinity at GPU precision.
+#[test]
+fn values_outside_the_controls_are_held_to_their_range() {
+    let mut renderer = Renderer::headless().unwrap();
+    let mut bits = |fx: Value| -> Vec<u32> {
+        let out = draw(&mut renderer, Some(fx));
+        assert!(out.iter().all(|v| v.is_finite()), "a value is not finite");
+        out.iter().map(|v| v.to_bits()).collect()
+    };
+    for (outside, held) in [
+        (json!({"exposure": 1024}), json!({"exposure": 8})),
+        (json!({"exposure": -1e39}), json!({"exposure": -8})),
+        (json!({"gainMaster": 1e39}), json!({"gainMaster": 8})),
+        (
+            json!({"saturation": 1e39, "contrast": -1e39}),
+            json!({"saturation": 200, "contrast": -100}),
+        ),
+    ] {
+        assert_eq!(
+            bits(effect("colorWheels", &outside)),
+            bits(effect("colorWheels", &held)),
+            "{outside}"
+        );
+    }
+    assert_eq!(
+        bits(curve(0, &[(0.0, 0.0), (0.5, 1e39), (1.0, 1.0)])),
+        bits(curve(0, &[(0.0, 0.0), (0.5, 2.0), (1.0, 1.0)])),
+    );
+}
