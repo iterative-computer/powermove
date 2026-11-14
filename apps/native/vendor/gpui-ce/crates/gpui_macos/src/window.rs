@@ -1061,7 +1061,14 @@ impl MacWindowState {
                         link = Retained::from_raw(raw).expect("CAMetalDisplayLink initialization");
                         self.renderer.set_display_link_bound(true);
                         let _: () = msg_send![&*link, setDelegate: view];
-                        let _: () = msg_send![&*link, setPreferredFrameLatency: 2.0_f32];
+                        // P-120: two frames of render-ahead. PM_GPUI_FRAME_LATENCY
+                        // (1.0-2.0) measures the input-to-glass cost of it.
+                        let latency = std::env::var("PM_GPUI_FRAME_LATENCY")
+                            .ok()
+                            .and_then(|v| v.parse::<f32>().ok())
+                            .filter(|v| (1.0..=2.0).contains(v))
+                            .unwrap_or(2.0);
+                        let _: () = msg_send![&*link, setPreferredFrameLatency: latency];
                     } else {
                         link = msg_send![view, displayLinkWithTarget: view, selector: sel!(pmDisplayLink:)];
                     }

@@ -140,6 +140,13 @@ pub struct Controller {
     pub home: bool,
     /// Home was drawn last frame (it refreshes and takes focus as it appears).
     pub(crate) home_visible: bool,
+    /// The pages open in this window's strip (Settings, the Store) and the
+    /// one showing over the project (`pages.rs`).
+    pub(crate) pages: crate::pages::Pages,
+    /// The Store, while its page is open.
+    pub(crate) store: Option<Entity<crate::store_window::StoreWindow>>,
+    /// A page was drawn last frame.
+    pub(crate) page_drawn: bool,
     /// A restored window is checking whether its project reopens.
     pub(crate) reopening: bool,
     /// Wakes the playback loop, which places the playhead layers.
@@ -370,7 +377,9 @@ impl pm_shell::integration::Integration for Bridge {
         })
     }
     fn home(&self, w: &mut Window, cx: &mut App) -> Option<AnyElement> {
-        self.0.update(cx, |v, cx| v.home_element(w, cx))
+        self.0.update(cx, |v, cx| {
+            v.page_element(w, cx).or_else(|| v.home_element(w, cx))
+        })
     }
     fn paints_own_ground(&self, id: &str, cx: &App) -> bool {
         id == "timeline" && !self.0.read(cx).extensions.owns_panel(id)
@@ -775,6 +784,9 @@ impl Controller {
             library: None,
             home: false,
             home_visible: false,
+            pages: Default::default(),
+            store: None,
+            page_drawn: false,
             reopening: false,
             playback_wake: None,
             errors: crate::error_log::shared(cx),
@@ -957,6 +969,7 @@ impl Controller {
             }
             p = Arc::new(next);
             self.published = Some(p.clone());
+            self.builtins.natives.published.replace(Some(p.clone()));
             self.bind_composition();
             self.apply_viewer_options();
             self.rebuild_popout_viewer();
@@ -1041,6 +1054,7 @@ impl Controller {
                 .as_deref()
                 .filter(|_| p.history.can_redo),
         );
+        self.builtins.natives.published.replace(Some(p.clone()));
         let shape = (self.duration(), self.work_area());
         self.published = Some(p);
         // A run in progress follows a changed duration or work area at once
@@ -1992,6 +2006,7 @@ impl Controller {
                 }
                 v.session = None;
                 v.published = None;
+                v.builtins.natives.published.replace(None);
                 v.mirror = None;
                 v.mcp.bind_window(v.window_key, None);
                 v.reopening_stopped = true;
@@ -2922,7 +2937,10 @@ impl Controller {
             "agent" => self.toggle_agent(window, cx),
             "bringWorkspace" => self.bring_workspace(window, cx),
             "quit" => cx.defer(crate::lifecycle::begin_quit),
-            "closeWindow" | "closeTab" => self.request_close(crate::lifecycle::Intent::Window, cx),
+            "closeWindow" | "closeTab" => {
+                gpui_macos::feel::note_now("tab.close");
+                self.request_close(crate::lifecycle::Intent::Window, cx)
+            }
             "cancel" | "deselect" if self.importing.is_some() => {
                 if let Some(cancel) = &self.importing {
                     cancel.store(true, std::sync::atomic::Ordering::Release);

@@ -26,6 +26,9 @@ pub mod agent;
 pub struct Natives {
     pub views: Rc<RefCell<BTreeMap<String, AnyView>>>,
     pub outline: Rc<Outline>,
+    /// The window's latest publication: what host-listed pop-up rows
+    /// (`HostRows`) are read from when a menu opens.
+    pub published: Rc<RefCell<Option<Arc<pm_kernel::Published>>>>,
 }
 /// Scroll and column geometry the timeline surface shares with its JSX outline.
 /// The outline row window stays JS; its position follows native scroll at once.
@@ -161,6 +164,12 @@ pub struct SurfaceView {
     natives: Natives,
     fields: BTreeMap<Id, Entity<TextField>>,
     controls: BTreeMap<Id, Entity<crate::v4_control::NativeControl>>,
+    /// Pop-ups whose rows the host lists, by the source they were given.
+    row_sources: HashMap<Id, (EntityId, Value)>,
+    /// Disclosure buttons pressed whose group the script has not yet shown
+    /// opened or closed: the chevron and the group's content follow the
+    /// press in the next frame, the panel's own work after it.
+    pub(crate) disclosures: HashMap<Id, bool>,
     scrolls: BTreeMap<Id, ScrollHandle>,
     leases: BTreeMap<Id, Option<SharedString>>,
     option_sets: BTreeMap<Id, Value>,
@@ -242,6 +251,8 @@ impl SurfaceView {
             natives,
             fields: BTreeMap::new(),
             controls: BTreeMap::new(),
+            row_sources: HashMap::new(),
+            disclosures: HashMap::new(),
             scrolls: BTreeMap::new(),
             leases: BTreeMap::new(),
             option_sets: BTreeMap::new(),
@@ -334,6 +345,12 @@ impl SurfaceView {
     }
     /// Compile off the main thread; only the newest publication installs.
     pub fn publish(&mut self, publication: Publication, cx: &mut Context<Self>) {
+        if crate::diag::enabled() {
+            crate::diag::line(
+                serde_json::json!({"ui": "publication", "panel": publication.panel,
+                "revision": publication.surface.revision(), "host": gpui_macos::feel::now()}),
+            );
+        }
         self.compile(publication, self.table.clone(), cx);
     }
     pub fn retheme(&mut self, tokens: pm_design::Tokens, cx: &mut Context<Self>) {
@@ -353,7 +370,15 @@ impl SurfaceView {
             let worker = table.clone();
             let prepared = cx
                 .background_executor()
-                .spawn(async move { Prepared::new(surface, &worker) })
+                .spawn(async move {
+                    let started = std::time::Instant::now();
+                    let prepared = Prepared::new(surface, &worker);
+                    if crate::diag::enabled() {
+                        crate::diag::line(serde_json::json!({"ui": "prepared",
+                            "ms": started.elapsed().as_secs_f64() * 1000.}));
+                    }
+                    prepared
+                })
                 .await;
             let mut compiled = Some(Compiled {
                 ticket,
@@ -386,6 +411,15 @@ impl SurfaceView {
         if compiled.ticket != self.latest {
             return;
         }
+        let _span = crate::diag::span("panel.install");
+        if crate::diag::enabled() {
+            crate::diag::line(
+                serde_json::json!({"ui": "install", "panel": compiled.publication.panel,
+                "host": gpui_macos::feel::now()}),
+            );
+            // The frame that shows it reaches the glass: its own feel line.
+            gpui_macos::feel::note_now("panel.install");
+        }
         self.parked = None;
         self.shown = compiled.ticket;
         if self.publication.generation != compiled.publication.generation {
@@ -394,7 +428,11 @@ impl SurfaceView {
         self.table = compiled.table;
         self.publication = compiled.publication;
         self.prepared = Rc::new(compiled.prepared);
-        self.reconcile(window, cx);
+        self.settle_disclosures();
+        {
+            let _span = crate::diag::span("panel.reconcile");
+            self.reconcile(window, cx);
+        }
         self.try_focus_text(cx);
         self.try_reveal(cx);
         if let Some(installed) = &self.installed {
@@ -414,6 +452,7 @@ impl SurfaceView {
     /// A new generation (an extension reloaded, a fork swapped in) reuses node
     /// ids, so nothing bound to the old tree may carry over.
     fn restart(&mut self) {
+        self.disclosures.clear();
         self.controls.clear();
         self.fields.clear();
         self.scrolls.clear();
@@ -432,6 +471,7 @@ impl SurfaceView {
         let prepared = self.prepared.clone();
         let live = |id: &Id| prepared.nodes.contains_key(id);
         self.controls.retain(|id, _| live(id));
+        self.row_sources.retain(|id, _| live(id));
         self.scrolls.retain(|id, _| live(id));
         self.subscriptions.retain(|id, _| live(id));
         self.fields.retain(|id, _| live(id));
@@ -442,6 +482,12 @@ impl SurfaceView {
             self.capture = None;
         }
         let surface = self.publication.surface.clone();
+        let mut mounts = (
+            0usize,
+            std::time::Duration::ZERO,
+            0usize,
+            std::time::Duration::ZERO,
+        );
         for view in prepared.nodes.values() {
             let id = view.id;
             let Some(node) = surface.node(id) else {
@@ -479,7 +525,19 @@ impl SurfaceView {
                 .then(|| control_kind(&self.publication.panel, node))
                 .flatten();
             if let Some(kind) = kind {
+                let started = std::time::Instant::now();
+                let existed = self.controls.contains_key(&id);
                 self.mount_control(kind, view, node, lease, window, cx);
+                self.host_rows(id, node, cx);
+                mounts.0 += 1;
+                mounts.1 += started.elapsed();
+                if crate::diag::enabled() && started.elapsed().as_secs_f64() > 0.0005 {
+                    crate::diag::line(
+                        serde_json::json!({"ui": "control", "popup": matches!(kind, crate::v4_control::Kind::Popup),
+                        "new": !existed, "options": options_len(node),
+                        "ms": started.elapsed().as_secs_f64() * 1000.}),
+                    );
+                }
                 // A native control is a Tab stop too: the panel draws its
                 // focus ring and forwards its keys (Full Keyboard Access).
                 // A search field and a segmented control take no forwarded
@@ -510,8 +568,98 @@ impl SurfaceView {
             {
                 continue;
             }
+            let started = std::time::Instant::now();
             self.mount_field(view, node, lease, window, cx);
+            mounts.2 += 1;
+            mounts.3 += started.elapsed();
         }
+        if crate::diag::enabled() {
+            crate::diag::line(
+                serde_json::json!({"ui": "reconcile", "nodes": prepared.nodes.len(),
+                "controls": mounts.0, "controls_ms": mounts.1.as_secs_f64() * 1000.,
+                "fields": mounts.2, "fields_ms": mounts.3.as_secs_f64() * 1000.}),
+            );
+        }
+    }
+    /// Whether a disclosure button shows its group open: the press not yet
+    /// published, else the publication.
+    pub(crate) fn disclosure_open(&self, id: Id) -> bool {
+        self.disclosures.get(&id).copied().unwrap_or_else(|| {
+            self.publication
+                .surface
+                .node(id)
+                .and_then(|n| n.props.get("aria-expanded"))
+                == Some(&Value::Bool(true))
+        })
+    }
+    /// A disclosure group's button: its heading, or the heading's first
+    /// part when the heading carries an accessory.
+    fn group_button(&self, group: &NodeView) -> Option<Id> {
+        let first = self.prepared.node(*group.children.first()?)?;
+        if first.component == Some(Component::DisclosureButton) {
+            return Some(first.id);
+        }
+        first.children.iter().copied().find(|c| {
+            self.prepared.node(*c).and_then(|n| n.component) == Some(Component::DisclosureButton)
+        })
+    }
+    /// Presses the publication now shows (or whose button is gone) need no
+    /// stand-in any more.
+    fn settle_disclosures(&mut self) {
+        let surface = self.publication.surface.clone();
+        self.disclosures.retain(|id, open| {
+            surface.node(*id).is_some_and(|n| {
+                (n.props.get("aria-expanded") == Some(&Value::Bool(true))) != *open
+            })
+        });
+    }
+    /// A pop-up whose rows the host lists (`HostRows`, kit `rows`): they are
+    /// read from the latest publication when its menu opens, on the main
+    /// thread, with no call to the panel's script. Built-in and extension
+    /// panels get the same.
+    fn host_rows(&mut self, id: Id, node: &pm_surface::Node, cx: &mut Context<Self>) {
+        let Some(control) = self.controls.get(&id) else {
+            return;
+        };
+        let source = host_rows_source(node);
+        let given = self.row_sources.get(&id);
+        if given.map(|(c, s)| (*c, s)) == source.as_ref().map(|s| (control.entity_id(), s))
+            || (given.is_none() && source.is_none())
+        {
+            return;
+        }
+        let entity = control.entity_id();
+        let provider = source.clone().map(|source| {
+            let published = self.natives.published.clone();
+            Rc::new(move || {
+                let started = std::time::Instant::now();
+                let p = published.borrow().clone();
+                let rows = p
+                    .and_then(|p| crate::layer_commands::host_rows(&p, &source))
+                    .unwrap_or_default();
+                if crate::diag::enabled() {
+                    crate::diag::line(serde_json::json!({"ui": "rows", "count": rows.len(),
+                        "ms": started.elapsed().as_secs_f64() * 1000.}));
+                }
+                rows
+            }) as crate::v4_control::RowSource
+        });
+        control.update(cx, |c, _| c.fill_rows(provider));
+        match source {
+            Some(source) => self.row_sources.insert(id, (entity, source)),
+            None => self.row_sources.remove(&id),
+        };
+    }
+    /// The rows a pop-up offers: the host's list when it has one (what its
+    /// menu shows when opened), else the published options.
+    pub(crate) fn offered_rows(&self, id: Id) -> Option<Value> {
+        if let Some((_, source)) = self.row_sources.get(&id)
+            && let Some(p) = self.natives.published.borrow().clone()
+            && let Some(rows) = crate::layer_commands::host_rows(&p, source)
+        {
+            return Some(Value::Array(rows));
+        }
+        self.option_sets.get(&id).cloned()
     }
     /// `role="status"` is a live region: a status that appears or changes is
     /// posted as an NSAccessibility announcement (VoiceOver reads it).
@@ -1102,6 +1250,11 @@ impl SurfaceView {
             .find(|n| n.cancel_change)
             .map(|n| n.id)
     }
+    /// A scrub or grading drag is in progress (tests).
+    #[cfg(test)]
+    pub fn scrubbing(&self) -> bool {
+        self.scrub.is_some()
+    }
     #[cfg(test)]
     pub fn first_number(&self) -> Option<String> {
         let mut numbers: Vec<_> = self
@@ -1252,6 +1405,13 @@ impl SurfaceView {
         let p = self.publication.clone();
         let event = event.to_owned();
         let semantic = self.prepared.node(id).and_then(|n| n.semantic.clone());
+        let sent = crate::diag::enabled().then(|| {
+            crate::diag::line(
+                serde_json::json!({"ui": "send", "panel": p.panel, "event": event,
+                "semantic": semantic, "host": gpui_macos::feel::now()}),
+            );
+            std::time::Instant::now()
+        });
         self.handling += 1;
         // Native planning can read model state. Keep its locks off the main thread.
         cx.spawn(async move |this, cx| {
@@ -1274,7 +1434,29 @@ impl SurfaceView {
                 Err(error) => Some(error.to_string()),
             };
             let _ = this.update(cx, |v, cx| {
+                if let Some(sent) = sent {
+                    crate::diag::line(
+                        serde_json::json!({"ui": "handled", "panel": v.publication.panel,
+                        "ms": sent.elapsed().as_secs_f64() * 1000.}),
+                    );
+                }
                 v.handling -= 1;
+                if v.disclosures.contains_key(&id) {
+                    // The script has the press. Its publication settles the
+                    // stand-in; one that never changes the group (refused)
+                    // lets the button show the panel's own state again.
+                    cx.spawn(async move |this, cx| {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_secs(2))
+                            .await;
+                        let _ = this.update(cx, |v, cx| {
+                            if v.disclosures.remove(&id).is_some() {
+                                cx.notify();
+                            }
+                        });
+                    })
+                    .detach();
+                }
                 if let Some(error) = error {
                     v.error = Some(error);
                     cx.notify();
@@ -1373,6 +1555,12 @@ impl SurfaceView {
             return;
         }
         match Component::of(&node) {
+            Some(Component::DisclosureButton) => {
+                let open = self.disclosure_open(id);
+                self.disclosures.insert(id, !open);
+                cx.notify();
+                self.send(id, "click", detail, cx);
+            }
             Some(Component::Checkbox | Component::Toggle | Component::Switch) => self.change(
                 id,
                 json!(
@@ -1385,11 +1573,10 @@ impl SurfaceView {
                 cx,
             ),
             Some(Component::PopUpButton) if self.appkit => {
-                let options = node
-                    .props
-                    .get("options")
-                    .and_then(Value::as_array)
-                    .cloned()
+                let options = self
+                    .offered_rows(id)
+                    .and_then(|rows| rows.as_array().cloned())
+                    .or_else(|| node.props.get("options").and_then(Value::as_array).cloned())
                     .unwrap_or_default();
                 let owner = cx.entity().downgrade();
                 crate::v4_native::menu(window, &options.clone(), cx, move |index, cx| {
@@ -1616,6 +1803,15 @@ impl SurfaceView {
                         return;
                     }
                     let _ = moved.update(cx, |v, cx| {
+                        // The button is up: a release that never reached this
+                        // window ends the gesture here, and the window's other
+                        // listeners see this move (owner feedback W4, W5).
+                        if (event.pressed_button.is_none() || !button_held())
+                            && (v.scrub.is_some() || v.capture.is_some())
+                        {
+                            v.release_pointer(event.position, 1, event.modifiers, cx);
+                            return;
+                        }
                         if v.scrub.is_some() {
                             cx.stop_propagation();
                             v.scrub_move(event, cx);
@@ -1640,35 +1836,55 @@ impl SurfaceView {
                         }
                     });
                 });
+                // A new press while a gesture is still held (its release
+                // never came) ends that gesture first, so the press does its
+                // own work and the window's moves are no longer held.
+                let pressed = weak.clone();
+                window.on_mouse_event(move |event: &MouseDownEvent, phase, _, cx| {
+                    if phase != DispatchPhase::Capture {
+                        return;
+                    }
+                    let _ = pressed.update(cx, |v, cx| {
+                        if v.scrub.is_some() || v.capture.is_some() {
+                            v.release_pointer(event.position, 1, event.modifiers, cx);
+                        }
+                    });
+                });
                 let released = weak.clone();
                 window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
                     if phase != DispatchPhase::Capture {
                         return;
                     }
                     let _ = released.update(cx, |v, cx| {
-                        v.scrub_release(true, cx);
-                        let Some(capture) = v.capture.take() else {
-                            return;
-                        };
-                        if v.prepared
-                            .node(capture.target)
-                            .is_some_and(|n| n.events.pointer_up)
-                        {
-                            let detail = v.detail(
-                                event.position,
-                                Some(capture.button),
-                                0,
-                                event.click_count,
-                                event.modifiers,
-                            );
-                            v.pointer(capture.target, "pointerup", detail, cx);
-                        }
+                        v.release_pointer(event.position, event.click_count, event.modifiers, cx)
                     });
                 });
             },
         )
         .absolute()
         .inset_0()
+    }
+    /// The pressed pointer comes up: a scrub or a grading drag ends (one
+    /// Undo step), a captured node hears `pointerup`.
+    fn release_pointer(
+        &mut self,
+        position: Point<Pixels>,
+        click_count: usize,
+        modifiers: Modifiers,
+        cx: &mut Context<Self>,
+    ) {
+        self.scrub_release(true, cx);
+        let Some(capture) = self.capture.take() else {
+            return;
+        };
+        if self
+            .prepared
+            .node(capture.target)
+            .is_some_and(|n| n.events.pointer_up)
+        {
+            let detail = self.detail(position, Some(capture.button), 0, click_count, modifiers);
+            self.pointer(capture.target, "pointerup", detail, cx);
+        }
     }
     fn element(
         &self,
@@ -1990,7 +2206,18 @@ impl SurfaceView {
             let (before, _) = geometry.spacers();
             children.push(div().flex_none().h(px(before as f32)).into_any_element());
         }
-        for child in &node.children {
+        // A group just closed by its button shows its heading alone now.
+        let shown = if node.component == Some(Component::DisclosureGroup)
+            && self
+                .group_button(node)
+                .and_then(|b| self.disclosures.get(&b))
+                == Some(&false)
+        {
+            1
+        } else {
+            usize::MAX
+        };
+        for child in node.children.iter().take(shown) {
             match self.prepared.node(*child) {
                 Some(c) if c.is_plain_text => {
                     if let Some(text) = &c.text {
@@ -2621,7 +2848,12 @@ impl SurfaceView {
             }
             // Drawn with their own canvas (`grade_canvas`).
             Kit::Wheel { .. } | Kit::Curve { .. } => {}
-            Kit::Disclosure(open) => {
+            Kit::Disclosure(published) => {
+                let open = &self
+                    .disclosures
+                    .get(&node.id)
+                    .copied()
+                    .unwrap_or(*published);
                 let group: SharedString = format!("disclosure-{}", node.id).into();
                 element = element.group(group.clone()).child(
                     div()
@@ -2795,6 +3027,7 @@ impl Render for SurfaceView {
         {
             self.renders += 1;
         }
+        let _span = crate::diag::span("panel.render");
         // Presences take their targets before the frame steps, so a surface
         // that just appeared or was marked closing starts moving now.
         let surface = self.publication.surface.clone();
@@ -3143,6 +3376,23 @@ impl Render for HeaderView {
     }
 }
 
+fn options_len(node: &pm_surface::Node) -> usize {
+    node.props
+        .get("options")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len)
+}
+
+/// A pop-up's `HostRows` (kit `rows`), from its metadata.
+fn host_rows_source(node: &pm_surface::Node) -> Option<Value> {
+    node.props
+        .get("metadata")
+        .and_then(|m| m.get("pmKit"))
+        .and_then(|k| k.get("rows"))
+        .filter(|r| r.is_object())
+        .cloned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::file_drop;
@@ -3182,5 +3432,15 @@ mod tests {
             drag.data["public.file-url"],
             json!(["/a b/clip.mov", "/c.png"])
         );
+    }
+}
+
+/// Whether the left button is down as the hardware has it (macOS); tests
+/// have no hardware button and follow their events alone.
+fn button_held() -> bool {
+    if cfg!(test) {
+        true
+    } else {
+        pm_shell::left_button_held()
     }
 }

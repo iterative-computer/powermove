@@ -157,8 +157,8 @@ impl SurfaceView {
             .unwrap_or(Value::Null)
     }
     fn options(&self, id: Id) -> Vec<Value> {
-        self.option_sets
-            .get(&id)
+        self.offered_rows(id)
+            .as_ref()
             .and_then(Value::as_array)
             .map(|options| {
                 options
@@ -342,7 +342,8 @@ impl SurfaceView {
             }
             Some("select") => {
                 let wanted = text("value").unwrap_or_default();
-                let options = self.option_sets.get(&id).and_then(Value::as_array);
+                let offered = self.offered_rows(id);
+                let options = offered.as_ref().and_then(Value::as_array);
                 let chosen = options
                     .into_iter()
                     .flatten()

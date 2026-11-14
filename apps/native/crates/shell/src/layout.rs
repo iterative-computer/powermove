@@ -242,12 +242,19 @@ impl Layout {
             .iter()
             .enumerate()
             .find(|(_, d)| d.id == "bottom" && shown(d));
+        // A dock dropped at the window's top edge: across the timeline's
+        // row, above the columns (the bottom dock's mirror).
+        let top = self
+            .docks
+            .iter()
+            .enumerate()
+            .find(|(_, d)| d.id == "top" && shown(d));
         // v1's arrangement: every other dock is a column, in authored order;
         // the fluid one (center, else the viewer's) takes the width left over.
         let columns: Vec<usize> = (0..self.docks.len())
             .filter(|&i| {
                 let d = &self.docks[i];
-                shown(&d) && d.id != "right" && d.id != "bottom"
+                shown(&d) && !is_band(&d.id) && d.id != "right"
             })
             .collect();
         let fluid = self.fluid(&columns);
@@ -281,7 +288,16 @@ impl Layout {
                 .min((bounds.h - upper_least(bounds, t) - gap).max(0.))
         });
         let bg = if bottom.is_some() { gap } else { 0. };
+        let th = top.map_or(0., |(_, d)| {
+            d.size
+                .unwrap_or(DEFAULT_TOP)
+                .max(dock_floor(d, t))
+                .min((bounds.h - bh - bg - upper_least(bounds, t) - gap).max(0.))
+        });
+        let tg = if top.is_some() { gap } else { 0. };
         let upper = bounds.h - bh - bg;
+        let columns_y = bounds.y + th + tg;
+        let columns_h = (upper - th - tg).max(0.);
         let row = (bounds.w - rw - rg).max(0.);
         let fixed_w: f32 = fixed.iter().map(|&i| width(&self.docks[i]) * factor).sum();
         let gaps_w = columns.len().saturating_sub(1) as f32 * gap;
@@ -298,9 +314,9 @@ impl Layout {
                 i,
                 Rect {
                     x,
-                    y: bounds.y,
+                    y: columns_y,
                     w,
-                    h: upper,
+                    h: columns_h,
                 },
             );
             x += w + gap;
@@ -324,6 +340,17 @@ impl Layout {
                     y: bounds.y + upper + bg,
                     w: row,
                     h: bh,
+                },
+            );
+        }
+        if let Some((i, _)) = top {
+            rects.insert(
+                i,
+                Rect {
+                    x: bounds.x,
+                    y: bounds.y,
+                    w: row,
+                    h: th,
                 },
             );
         }
@@ -374,6 +401,15 @@ impl Layout {
                     Rect {
                         x: rect.x,
                         y: rect.y - gap,
+                        w: rect.w,
+                        h: gap,
+                    },
+                )),
+                "top" => Some((
+                    true,
+                    Rect {
+                        x: rect.x,
+                        y: rect.y + rect.h,
                         w: rect.w,
                         h: gap,
                     },
@@ -438,7 +474,7 @@ impl Layout {
         let columns: Vec<usize> = (0..self.docks.len())
             .filter(|&i| {
                 let d = &self.docks[i];
-                !d.collapsed && !d.groups.is_empty() && d.id != "right" && d.id != "bottom"
+                !d.collapsed && !d.groups.is_empty() && d.id != "right" && !is_band(&d.id)
             })
             .collect();
         self.fluid(&columns).is_some_and(|f| dock > f)
@@ -502,10 +538,29 @@ impl Layout {
         let Some(current) = rect(divider.dock) else {
             return;
         };
-        if self.docks[divider.dock].id == "bottom" {
+        if is_band(&self.docks[divider.dock].id) {
+            // The other band and the columns' least height are what it may
+            // not take.
+            let gap = t.metrics.dock_gap;
+            let other: f32 = geometry
+                .panels
+                .iter()
+                .filter(|p| {
+                    p.dock != divider.dock
+                        && is_band(&self.docks[p.dock].id)
+                })
+                .map(|p| p.rect.h + gap)
+                .sum();
             let least = dock_floor(&self.docks[divider.dock], t);
-            let most = (bounds.h - upper_least(bounds, t) - t.metrics.dock_gap).max(least);
-            self.docks[divider.dock].size = Some((current.h - delta).clamp(least, most));
+            let most = (bounds.h - other - upper_least(bounds, t) - gap).max(least);
+            // The bottom band grows as its top edge moves up; the top band
+            // as its bottom edge moves down.
+            let grow = if self.docks[divider.dock].id == "top" {
+                delta
+            } else {
+                -delta
+            };
+            self.docks[divider.dock].size = Some((current.h + grow).clamp(least, most));
             return;
         }
         // Columns give and take with the fluid column only; every fixed
@@ -513,7 +568,7 @@ impl Layout {
         let columns: Vec<usize> = (0..self.docks.len())
             .filter(|&i| {
                 let d = &self.docks[i];
-                !d.collapsed && !d.groups.is_empty() && d.id != "bottom"
+                !d.collapsed && !d.groups.is_empty() && !is_band(&d.id)
             })
             .collect();
         let fluid = self.fluid(
@@ -578,6 +633,9 @@ impl Layout {
             Some(Edge::Right)
         } else if y >= bounds.y + bounds.h - band && x < row_end {
             Some(Edge::Bottom)
+        } else if y < bounds.y + gap && x < row_end {
+            // Narrower than the others: the headers along the top take tabs.
+            Some(Edge::Top)
         } else {
             None
         };
@@ -594,6 +652,11 @@ impl Layout {
                 },
                 Edge::Bottom => Rect {
                     y: bounds.y + bounds.h * (1. - EDGE_ZONE),
+                    h: bounds.h * EDGE_ZONE,
+                    w: row_end - bounds.x,
+                    ..bounds
+                },
+                Edge::Top => Rect {
                     h: bounds.h * EDGE_ZONE,
                     w: row_end - bounds.x,
                     ..bounds
@@ -654,7 +717,7 @@ impl Layout {
         // full-height right dock. The bottom dock has no columns.
         let dock_id = self.docks[p.dock].id.as_str();
         let beside = |after: bool| match dock_id {
-            "bottom" => false,
+            "bottom" | "top" => false,
             "right" => !after,
             _ => true,
         };
@@ -808,7 +871,7 @@ impl Layout {
                     .get(dock)
                     .ok_or_else(|| anyhow::anyhow!("Unknown dock"))?;
                 anyhow::ensure!(
-                    d.id != "bottom" && !(d.id == "right" && after),
+                    !is_band(&d.id) && !(d.id == "right" && after),
                     "No column there"
                 );
                 // A lone panel beside its own column changes nothing.
@@ -886,6 +949,7 @@ impl Layout {
                         Edge::Left => DEFAULT_LEFT,
                         Edge::Right => DEFAULT_RIGHT,
                         Edge::Bottom => DEFAULT_TIMELINE,
+                        Edge::Top => DEFAULT_TOP,
                     };
                     next.add_dock(dock(edge.dock_id(), Some(size), vec![moved]));
                 }
@@ -1362,6 +1426,7 @@ pub enum Edge {
     Left,
     Right,
     Bottom,
+    Top,
 }
 impl Edge {
     pub fn dock_id(self) -> &'static str {
@@ -1369,9 +1434,17 @@ impl Edge {
             Edge::Left => "left",
             Edge::Right => "right",
             Edge::Bottom => "bottom",
+            Edge::Top => "top",
         }
     }
 }
+/// A dock that runs across the timeline's row (the bottom one, or one
+/// dropped at the top edge) rather than standing as a column.
+fn is_band(id: &str) -> bool {
+    id == "bottom" || id == "top"
+}
+/// A top dock's height when a panel first lands at the top edge.
+const DEFAULT_TOP: f32 = 220.;
 /// Where a dragged panel tab lands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DropTarget {

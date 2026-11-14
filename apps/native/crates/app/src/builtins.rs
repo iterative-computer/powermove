@@ -54,6 +54,8 @@ pub struct Host {
     clock: crate::playback::PanelClock,
     /// The frame (ticks) Properties last followed while playing.
     followed: Option<i64>,
+    /// When Properties last followed while playing (`FOLLOW_EVERY` apart).
+    followed_at: Option<std::time::Instant>,
     headers: BTreeMap<String, Entity<crate::v4_view::HeaderView>>,
     pub(crate) ready: BTreeSet<String>,
     generations: BTreeMap<String, u64>,
@@ -484,14 +486,22 @@ impl Controller {
         let Some(frame) = crate::session::frame_start_at(self.rate, time) else {
             return;
         };
+        let now = std::time::Instant::now();
         if self.builtins.updating
             || self.builtins.followed == Some(frame)
             || !self.builtins.open.contains(PANEL)
             || !self.builtins.ready.contains(PANEL)
             || !follows_selection(self.published.as_deref())
+            || !follow_due(
+                self.builtins.followed,
+                self.builtins.followed_at,
+                frame,
+                now,
+            )
         {
             return;
         }
+        self.builtins.followed_at = Some(now);
         let Some(runtime) = self.builtins.runtime.clone() else {
             return;
         };
@@ -1033,9 +1043,7 @@ impl Controller {
             cx.notify();
             return;
         }
-        if let Some(handle) = self.builtins.windows.remove("settings") {
-            let _ = handle.update(cx, |_, w, _| w.remove_window());
-        }
+        self.close_tab_page("settings", cx);
         self.show_builtin("agent", window, cx);
         let Some(runtime) = self.builtins.runtime.clone() else {
             return;
@@ -1129,6 +1137,34 @@ impl Controller {
             // and Settings › Storage what both folders take now.
             self.refresh_waiting_folders(cx);
             self.refresh_storage(cx);
+            // Settings is a page of this window (owner feedback S2): the
+            // panel shows (on the page asked for) and the page comes forward.
+            let already = self.pages.open.iter().any(|p| p == "settings");
+            self.open_tab_page("settings", cx);
+            let Some(runtime) = self.builtins.runtime.clone() else {
+                return;
+            };
+            let page = self.builtins.settings_page.take();
+            if already && page.is_none() {
+                return;
+            }
+            let facts = (!already).then(|| self.facts(cx));
+            cx.background_executor()
+                .spawn(async move {
+                    if let Some(facts) = facts {
+                        runtime.update_facts(facts);
+                    }
+                    let shown = match &page {
+                        Some(page) => runtime.show_section("settings", page),
+                        None => runtime.show("settings"),
+                    };
+                    if let Ok(ticket) = shown {
+                        let _ = ticket.await;
+                    }
+                })
+                .detach();
+            let _ = window;
+            return;
         }
         if self.builtins.opening_windows.contains(id) {
             return;
@@ -1136,18 +1172,6 @@ impl Controller {
         if let Some(existing) = self.builtins.windows.get(id).copied()
             && existing.update(cx, |_, w, _| w.activate()).is_ok()
         {
-            if id == "settings"
-                && let Some(page) = self.builtins.settings_page.take()
-                && let Some(runtime) = self.builtins.runtime.clone()
-            {
-                cx.background_executor()
-                    .spawn(async move {
-                        if let Ok(ticket) = runtime.show_section("settings", &page) {
-                            let _ = ticket.await;
-                        }
-                    })
-                    .detach();
-            }
             return;
         }
         let Some(runtime) = self.builtins.runtime.clone() else {
@@ -1158,7 +1182,6 @@ impl Controller {
         let panel = id.to_string();
         let m = self.host.borrow().tokens.metrics;
         let (width, height, kind) = match id {
-            "settings" => (m.settings_width, m.settings_height, WindowKind::Normal),
             "agent" => (
                 m.agent_width,
                 m.agent_height.min(
@@ -1182,12 +1205,7 @@ impl Controller {
         } else {
             editor.origin + point(px(m.toolbar), px(m.toolbar))
         };
-        let title: SharedString = match id {
-            "agent" => "Agent",
-            "export" => "Export",
-            _ => "Settings",
-        }
-        .into();
+        let title: SharedString = if id == "agent" { "Agent" } else { "Export" }.into();
         let id = id.to_owned();
         let popover = (id == "agent").then(|| self.host.borrow().tokens.clone());
         // Export is a sheet on the window that asked for it; the Agent popover
@@ -1197,18 +1215,12 @@ impl Controller {
         // Controller update so the window can acquire its published panel safely.
         // The panel's first publication in this window already knows where it is shown.
         let facts = self.facts(cx);
-        let page = (id == "settings")
-            .then(|| self.builtins.settings_page.take())
-            .flatten();
         cx.spawn(async move |this, cx| {
             let told = runtime.clone();
             cx.background_executor()
                 .spawn(async move { told.update_facts(facts) })
                 .await;
-            let shown = match &page {
-                Some(page) => runtime.show_section(&id, page),
-                None => runtime.show(&id),
-            };
+            let shown = runtime.show(&id);
             if let Ok(ticket) = shown {
                 let _ = ticket.await;
             }
@@ -1232,10 +1244,7 @@ impl Controller {
             }
             let mut options = WindowOptions::new().kind(kind);
             options.parent = parent;
-            // Settings is laid out as Home is: a sidebar on the window's
-            // glass and a content sheet beside it.
-            let sidebar = (id == "settings").then(pm_shell::tokens);
-            if popover.is_some() || sidebar.as_ref().is_some_and(|t| t.translucent()) {
+            if popover.is_some() {
                 // Clear GPUI content over the native material (language §12).
                 options = options.macos_window_background(gpui::MacosWindowBackground::Transparent);
             }
@@ -1255,9 +1264,6 @@ impl Controller {
                 |window, cx| {
                     if let Some(tokens) = &popover {
                         pm_shell::popover_frame(window, tokens);
-                    }
-                    if let Some(tokens) = &sidebar {
-                        pm_shell::sidebar_frame(window, tokens, tokens.metrics.settings_sidebar);
                     }
                     cx.new(|cx| {
                         cx.observe(&owner, |_, _, cx| cx.notify()).detach();
@@ -1750,27 +1756,12 @@ impl Controller {
                     Ok(Value::Null)
                 }
                 "settings.close" => {
-                    if let Some(handle) = self.builtins.windows.remove("settings") {
-                        let _ = handle.update(cx, |_, w, _| w.remove_window());
-                    }
-                    gpui_macos::child_window::raise_if_active(&self.host.borrow().window);
+                    self.close_tab_page("settings", cx);
                     Ok(Value::Null)
                 }
-                "settings.title" => {
-                    if let Some(handle) = self.builtins.windows.get("settings") {
-                        let title = match request.input.as_str() {
-                            Some("project") => "Project",
-                            Some("general") => "General",
-                            Some("memory") => "Memory",
-                            Some("accounts") => "Accounts",
-                            Some("transcription") => "Transcription",
-                            Some("extensions") => "Extensions",
-                            _ => "Settings",
-                        };
-                        let _ = handle.update(cx, |_, w, _| w.set_window_title(title));
-                    }
-                    Ok(Value::Null)
-                }
+                // Settings is a page with its cell's title; its pages have
+                // no window title to name.
+                "settings.title" => Ok(Value::Null),
                 "settings.scroll" => {
                     if let Some(section) = request.input["section"].as_str()
                         && let Some(view) = self.builtins.views.get("settings")
@@ -2345,17 +2336,10 @@ impl Render for SurfaceWindow {
         }
         // Export is a sheet: no title bar band (its window fits its content).
         let sheet = self.panel == "export";
-        // Settings draws its own sheet beside a sidebar on the window's
-        // glass: the window paints only the ground around the sheet.
-        let sidebar = self.panel == "settings";
         let (mut fill, mut band) = (0, 0.);
-        let mut ground = None;
         let (head, body) = self.owner.update(cx, |v, cx| {
             let (header, colour, titlebar) = {
                 let t = &v.host.borrow().tokens;
-                if sidebar {
-                    ground = Some((t.ground(), t.metrics.settings_sidebar));
-                }
                 // The popover's content, its header too, is on solid
                 // `floating` inside the glass frame (agent-panel.md §8).
                 let colour = if popover {
@@ -2366,9 +2350,8 @@ impl Render for SurfaceWindow {
                 (t.metrics.header, colour, t.metrics.titlebar)
             };
             fill = colour;
-            // Windows with a transparent title bar keep their content below
-            // it; Settings keeps only its sidebar below the window buttons.
-            band = if popover || sheet || sidebar {
+            // Windows with a transparent title bar keep their content below it.
+            band = if popover || sheet {
                 0.
             } else {
                 titlebar
@@ -2407,18 +2390,7 @@ impl Render for SurfaceWindow {
             .size_full()
             .overflow_hidden()
             .pt(px(band))
-            .when(!sidebar, |d| d.bg(rgb(fill)))
-            .when_some(ground, |d, ((colour, alpha), side)| {
-                d.child(
-                    div()
-                        .absolute()
-                        .top_0()
-                        .bottom_0()
-                        .right_0()
-                        .left(px(side))
-                        .bg(gpui::rgba((colour << 8) | (alpha * 255.).round() as u32)),
-                )
-            })
+            .bg(rgb(fill))
             .children(head)
             .children(body)
     }
@@ -2623,9 +2595,31 @@ fn follows_selection(published: Option<&pm_kernel::Published>) -> bool {
     published.is_some_and(|p| !p.selection.layers().is_empty())
 }
 
+/// How often a playing Properties follows a selected layer: about ten times
+/// a second, as v1's inspector did (15 Hz). Each publication repaints the
+/// window, and with native controls hosted that present waits behind a
+/// control transaction: following every frame held Fable 5.5 at 36 s to
+/// 24 fps (drawable p95 52 ms) with an animated layer selected.
+const FOLLOW_EVERY: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Whether a playing Properties takes `frame` now: at most every
+/// `FOLLOW_EVERY`, except a jump (a seek or a loop wrap) of more than half a
+/// second, which shows at once. Pause, stop and selection changes publish
+/// through `update_builtins`, not here, so they are never held back.
+fn follow_due(
+    last_frame: Option<i64>,
+    last_at: Option<std::time::Instant>,
+    frame: i64,
+    now: std::time::Instant,
+) -> bool {
+    let jumped = last_frame
+        .is_none_or(|last| (frame - last).abs() > pm_protocol::common::TICKS_PER_SECOND / 2);
+    jumped || last_at.is_none_or(|at| now.duration_since(at) >= FOLLOW_EVERY)
+}
+
 #[cfg(test)]
 mod follow_selection_tests {
-    use super::follows_selection;
+    use super::{FOLLOW_EVERY, follow_due, follows_selection};
     use crate::v4_view_tests::{PROJECT, rig_project};
     use pm_kernel::{Caller, Request, SelectionCall};
     use std::time::{Duration, Instant};
@@ -2636,14 +2630,21 @@ mod follow_selection_tests {
     fn publications_while_playing(rig: &crate::v4_view_tests::Rig) -> usize {
         let _ = rig.runtime.take_publications();
         let mut published = 0;
-        for frame in 0..60 {
+        let tick = pm_protocol::common::TICKS_PER_SECOND / 30;
+        let start = Instant::now();
+        let (mut last_frame, mut last_at) = (None, None);
+        for frame in 0..60i64 {
             let p = rig.kernel.published(PROJECT);
-            if !follows_selection(p.as_deref()) {
+            let now = start + Duration::from_micros(33_333 * frame as u64);
+            if !follows_selection(p.as_deref())
+                || !follow_due(last_frame, last_at, frame * tick, now)
+            {
                 continue;
             }
+            (last_frame, last_at) = (Some(frame * tick), Some(now));
             let ticket = rig
                 .runtime
-                .follow_time("inspector", f64::from(frame) / 30., true)
+                .follow_time("inspector", frame as f64 / 30., true)
                 .expect("Properties is mounted")
                 .expect("follow_time");
             let deadline = Instant::now() + Duration::from_secs(20);
@@ -2690,11 +2691,38 @@ mod follow_selection_tests {
             .wait()
             .unwrap()
             .unwrap();
-        assert_eq!(
-            publications_while_playing(&rig),
-            60,
-            "a selected animated layer's values follow every frame"
+        let followed = publications_while_playing(&rig);
+        assert!(
+            (12..=20).contains(&followed),
+            "a selected animated layer follows ~10 times a second, not every frame: {followed}"
         );
     }
-}
 
+    /// Playing at 30 fps with a layer selected, Properties follows at most
+    /// every 100 ms (every fourth frame at 30 fps: 15 updates in 2 s), not every
+    /// frame; a seek shows at once.
+    #[::core::prelude::v1::test]
+    fn a_playing_selected_layer_follows_about_ten_times_a_second() {
+        let tick = pm_protocol::common::TICKS_PER_SECOND / 30;
+        let start = std::time::Instant::now();
+        let (mut last_frame, mut last_at, mut taken) = (None, None, 0);
+        for i in 0..60i64 {
+            let now = start + std::time::Duration::from_micros(33_333 * i as u64);
+            let frame = i * tick;
+            if follow_due(last_frame, last_at, frame, now) {
+                taken += 1;
+                (last_frame, last_at) = (Some(frame), Some(now));
+            }
+        }
+        assert!(
+            (12..=20).contains(&taken),
+            "2 s of playback took {taken} updates"
+        );
+        // A seek of more than half a second shows on the next frame.
+        let now = last_at.unwrap() + FOLLOW_EVERY / 4;
+        let seek = last_frame.unwrap() + 20 * tick;
+        let next = last_frame.unwrap() + tick;
+        assert!(follow_due(last_frame, last_at, seek, now));
+        assert!(!follow_due(last_frame, last_at, next, now));
+    }
+}

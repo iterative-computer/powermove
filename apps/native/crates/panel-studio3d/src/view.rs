@@ -16,6 +16,31 @@ fn composition(p: &Published) -> Result<Value> {
     )
     .map_err(Into::into)
 }
+/// Whether the open composition has a 3D layer (`schema::role`), read on
+/// the document tree.
+fn has_3d_layer(p: &Published) -> bool {
+    let Some(comp) = p
+        .snapshot
+        .root()
+        .and_then(|root| pm_kernel::model::comp_node(root, p.snapshot.open_comp().as_deref()))
+    else {
+        return false;
+    };
+    let Some(pm_model::NodeKind::Array(layers)) = comp.get("layers").map(pm_model::Node::kind)
+    else {
+        return false;
+    };
+    layers.iter().any(|layer| {
+        let definition = layer
+            .get("d")
+            .and_then(|d| d.get("definition"))
+            .map(pm_model::Node::kind);
+        matches!(definition, Some(pm_model::NodeKind::String(s))
+            if [schema::OBJECT, schema::LIGHT, schema::CAMERA]
+                .iter()
+                .any(|d| s.as_str() == Some(*d)))
+    })
+}
 fn selected(p: &Published) -> Result<Value> {
     if p.selection.layers().len() != 1 {
         return Err(invalid("Choose one 3D layer"));
@@ -911,6 +936,11 @@ pub fn set_up_studio(p: &Published, time: f64) -> Result<(String, Vec<Command>)>
 /// What the composition's 3D summary shows, or `None` when it has no 3D layer:
 /// its saved render quality and its World's sky (`none`, a preset or `hdri`).
 pub fn scene_summary(p: &Published) -> Result<Option<Value>> {
+    // Most compositions have no 3D layer: answer that from the tree, without
+    // converting every layer (and its keyframes) to JSON first.
+    if !has_3d_layer(p) {
+        return Ok(None);
+    }
     let comp = composition(p)?;
     let layers = comp["layers"].as_array().cloned().unwrap_or_default();
     if !layers.iter().any(|l| schema::role(l).is_some()) {

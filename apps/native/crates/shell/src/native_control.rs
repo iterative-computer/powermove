@@ -116,6 +116,9 @@ struct TargetState {
     /// its action has gone out.
     pending: std::cell::RefCell<Option<(Vec<Value>, Value)>>,
     popup: std::cell::RefCell<Option<Retained<NSPopUpButton>>>,
+    /// Rows the host lists when the menu opens (`NativeControl::fill_rows`):
+    /// the pop-up shows only its current row until then.
+    fill: std::cell::RefCell<Option<RowSource>>,
     kind: Kind,
     /// The window's content view: where the keyboard goes back to.
     content: Retained<NSView>,
@@ -150,6 +153,14 @@ define_class!(
             if self.ivars().pending.borrow().is_some(){
                 unsafe{let _:()=msg_send![self,performSelector:sel!(showPending),withObject:std::ptr::null::<AnyObject>(),afterDelay:0.0f64];}
             }
+        }
+        /// The menu is about to show (NSMenuDelegate): a pop-up whose rows
+        /// the host lists takes them now, with its current row selected.
+        #[unsafe(method(menuNeedsUpdate:))]
+        fn menu_needs_update(&self,_:&AnyObject){
+            let Some(fill)=self.ivars().fill.borrow().clone() else{return};
+            let Some(popup)=self.ivars().popup.borrow().clone() else{return};
+            fill_now(self,&popup,&fill);
         }
         #[unsafe(method(showPending))]
         fn show_pending(&self){
@@ -366,6 +377,7 @@ impl NativeControl {
                     tracking: std::cell::Cell::new(false),
                     pending: std::cell::RefCell::new(None),
                     popup: std::cell::RefCell::new(None),
+                    fill: std::cell::RefCell::new(None),
                     kind,
                     content: gpui.clone(),
                 })),
@@ -754,6 +766,15 @@ impl NativeControl {
             }
         }
     }
+    /// Rows this pop-up's menu lists when it opens, from `source` (a long
+    /// list the panel never builds: every layer a layer can follow). The
+    /// published `options` stay what the closed button shows.
+    pub fn fill_rows(&mut self, source: Option<RowSource>) {
+        let Control::Popup(v) = &self.control else {
+            return;
+        };
+        fill_rows_on(&self._target, v, source);
+    }
     pub fn update(
         &mut self,
         value: &Value,
@@ -970,6 +991,50 @@ fn set_rows(target: &Target, popup: &NSPopUpButton, next: &[Value], value: &Valu
         *state.options.borrow_mut() = next.to_vec();
     }
 }
+/// Lists a pop-up's rows when its menu opens.
+pub type RowSource = Rc<dyn Fn() -> Vec<Value>>;
+fn fill_rows_on(target: &Target, popup: &NSPopUpButton, source: Option<RowSource>) {
+    let on = source.is_some();
+    *target.ivars().fill.borrow_mut() = source;
+    if let Some(menu) = popup.menu() {
+        unsafe {
+            if on {
+                let _: () = msg_send![&*menu, setDelegate: target];
+            } else {
+                let none: *const AnyObject = std::ptr::null();
+                let _: () = msg_send![&*menu, setDelegate: none];
+            }
+        }
+    }
+}
+/// The rows the source lists now, the selected value kept selected (and
+/// listed, should the source no longer offer it).
+fn fill_now(target: &Target, popup: &NSPopUpButton, fill: &RowSource) {
+    let state = target.ivars();
+    let index = popup.indexOfSelectedItem();
+    let current = usize::try_from(index)
+        .ok()
+        .and_then(|i| state.options.borrow().get(i).cloned());
+    let mut rows = fill();
+    if rows.is_empty() {
+        // Nothing to list from (no project): the button's own rows stay.
+        return;
+    }
+    if let Some(current) = &current
+        && !rows.iter().any(|r| row_value(r) == row_value(current))
+    {
+        rows.insert(rows.len().min(1), current.clone());
+    }
+    if *state.options.borrow() != rows {
+        replace_rows(popup, &rows);
+        if let Some(current) = &current
+            && let Some(at) = rows.iter().position(|r| row_value(r) == row_value(current))
+        {
+            popup.selectItemAtIndex(at as isize);
+        }
+        *state.options.borrow_mut() = rows;
+    }
+}
 /// Tells `target` when the pop-up's menu opens and closes.
 fn watch_menu(target: &Target, popup: &NSPopUpButton) {
     *target.ivars().popup.borrow_mut() = Some(unsafe {
@@ -1007,6 +1072,7 @@ impl PopupRows {
                     tracking: std::cell::Cell::new(false),
                     pending: std::cell::RefCell::new(None),
                     popup: std::cell::RefCell::new(None),
+                    fill: std::cell::RefCell::new(None),
                     kind: Kind::Popup,
                     content,
                 })),
@@ -1029,6 +1095,18 @@ impl PopupRows {
     }
     pub fn update(&self, options: &[Value], value: &Value) {
         set_rows(&self.target, &self.popup, options, value);
+    }
+    pub fn fill_rows(&self, source: Option<RowSource>) {
+        fill_rows_on(&self.target, &self.popup, source);
+    }
+    /// What AppKit asks the menu's delegate just before the menu shows.
+    pub fn menu_will_show(&self) {
+        if let Some(menu) = self.popup.menu() {
+            let delegate: *mut AnyObject = unsafe { msg_send![&*menu, delegate] };
+            if !delegate.is_null() {
+                let _: () = unsafe { msg_send![delegate, menuNeedsUpdate: &*menu] };
+            }
+        }
     }
     /// The value the pop-up's action sends for the selected row.
     pub fn act(&self) {
