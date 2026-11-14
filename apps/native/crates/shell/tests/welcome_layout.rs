@@ -110,8 +110,12 @@ fn a_summary_breathes_wraps_and_scrolls_inside_the_window() {
                 })
                 .unwrap();
             cx.run_until_parked();
-            // The fade needs one layout to know there's more.
+            // The fade needs one layout to know there's more: the window asks
+            // for the next frame, which the headless harness draws on demand.
             cx.capture_screenshot(window.into()).unwrap();
+            cx.update_window(window.into(), |_, window, _| window.refresh())
+                .unwrap();
+            cx.run_until_parked();
             let image = cx.capture_screenshot(window.into()).unwrap();
             if let Ok(dir) = std::env::var("PM_WELCOME_CAPTURE") {
                 std::fs::create_dir_all(&dir).unwrap();
