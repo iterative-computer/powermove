@@ -253,7 +253,14 @@ export function EffectControls(props: PanelProps) {
           <UI.List
             id={`${PANEL_ID}:list`}
             label="Effects"
-            style={hit}
+            // The rows take the room the panel has left and scroll in it,
+            // never less than one row (a short dock left them none, U4).
+            style={{
+              ...hit,
+              flexGrow: 1,
+              flexShrink: 1,
+              minHeight: t("metrics.row"),
+            }}
             tabIndex={p.locked ? -1 : 0}
             disabled={p.locked}
             metadata={{
@@ -547,6 +554,7 @@ export function EffectControls(props: PanelProps) {
             style={{
               display: "flex",
               flexDirection: "row",
+              flexShrink: 0,
               paddingLeft: t("metrics.inset"),
               paddingRight: t("metrics.inset"),
               paddingBottom: t("metrics.inset"),

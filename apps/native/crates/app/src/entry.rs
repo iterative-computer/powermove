@@ -325,12 +325,21 @@ impl EntryHook for Hook<'_> {
             .filter(|(e, _)| empty(e, cx))
             .min_by_key(|(_, w)| Some(*w) != active)
             .map(|(e, _)| e.clone());
-        match target {
-            Some(editor) => {
+        // Else a tab of the window in use (the active one, else the first),
+        // as v1 added a tab: a window of its own behind the others came back
+        // under the first project when the app was brought forward (U3).
+        let leader = live
+            .iter()
+            .min_by_key(|(_, w)| Some(*w) != active)
+            .map(|(e, _)| e.read(cx).shell_window_id(cx))
+            .filter(|id| *id != 0);
+        match (target, leader) {
+            (Some(editor), _) => {
                 let path = path.to_path_buf();
                 editor.update(cx, |v, cx| v.open_file(path, cx));
             }
-            None => open_in_new_window(Pending::File(path.to_path_buf()), cx),
+            (None, Some(leader)) => open_in_new_tab(Pending::File(path.to_path_buf()), leader, cx),
+            (None, None) => open_in_new_window(Pending::File(path.to_path_buf()), cx),
         }
         Ok(())
     }

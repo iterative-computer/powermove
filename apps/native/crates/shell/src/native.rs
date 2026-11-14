@@ -688,7 +688,20 @@ fn join_tab_group(leader: u64, window: &NSWindow) -> bool {
     lead.addTabbedWindow_ordered(window, NSWindowOrderingMode::Above);
     hide_system_tab_bar(&lead);
     hide_system_tab_bar(window);
-    gpui_macos::child_window::present(window, true);
+    if app.isActive() {
+        gpui_macos::child_window::present(window, true);
+    } else {
+        // Opened while another app is in front (a file opened from Finder or
+        // a launcher): it is the tab shown and the key window when the app
+        // is brought forward, not the tab that was key before (U3).
+        unsafe {
+            let group: *mut AnyObject = msg_send![window, tabGroup];
+            if !group.is_null() {
+                let _: () = msg_send![group, setSelectedWindow: window];
+            }
+        }
+        window.makeKeyWindow();
+    }
     true
 }
 /// `SEL *` out-parameter of `menuHasKeyEquivalent:forEvent:target:action:`
