@@ -526,6 +526,18 @@ define_class!(
                 self.send(Command { name: "leaveHome".into(), args: vec![], token: None });
             }
         }
+        /// A page's cell (Settings, the Store) in the strip: it shows over
+        /// the project, as Home does. The tag is its place among the pages.
+        #[unsafe(method(selectPage:))]
+        fn select_page(&self, sender: &AnyObject) {
+            let index: isize = unsafe { msg_send![sender, tag] };
+            self.send(Command { name: format!("showPage:{index}"), args: vec![], token: None });
+        }
+        #[unsafe(method(closePage:))]
+        fn close_page(&self, sender: &AnyObject) {
+            let index: isize = unsafe { msg_send![sender, tag] };
+            self.send(Command { name: format!("closePage:{index}"), args: vec![], token: None });
+        }
         #[unsafe(method(closeTab:))]
         fn close_tab(&self, sender: &AnyObject) {
             let number: isize = unsafe { msg_send![sender, tag] };
@@ -2080,6 +2092,9 @@ pub struct Host {
     window_observers: Vec<Retained<ProtocolObject<dyn NSObjectProtocol>>>,
     /// Home shows over the docks (`set_home`).
     home: Cell<bool>,
+    /// The pages open in the strip (Settings, the Store: id and title) and
+    /// the one showing over the project, if any (`set_pages`).
+    pages: RefCell<(Vec<(String, String)>, Option<usize>)>,
     /// Home's sidebar material, under the GPUI view while Home shows.
     sidebar: RefCell<Option<Retained<NSView>>>,
 }
@@ -2249,6 +2264,7 @@ impl Host {
             tabs_shown: RefCell::default(),
             window_observers: Vec::new(),
             home: Cell::new(false),
+            pages: RefCell::default(),
             sidebar: RefCell::new(None),
         }));
         let weak = Rc::downgrade(&host);
@@ -2784,8 +2800,8 @@ impl Host {
                 window: w.windowNumber(),
                 title: w.title().to_string(),
                 edited: w.isDocumentEdited(),
-                // On Home the lit item is Home: no project tab is selected.
-                selected: !self.home.get() && (group.len() == 1 || w.windowNumber() == selected),
+                // On Home or a page the lit item is that: no project tab is.
+                selected: !self.aside() && (group.len() == 1 || w.windowNumber() == selected),
             })
             .collect();
         let (mtm, t, target) = (self.window.mtm(), &self.tokens, &self._target);
@@ -2812,7 +2828,16 @@ impl Host {
             - 2. * (height + TAB_GAP))
             .max(TAB_MIN)
             .floor();
-        if *self.tabs_shown.borrow() == (tabs.clone(), room) {
+        let pages = self.pages.borrow().clone();
+        // The strip redraws when a page opens, closes or shows as well.
+        let mut marked = tabs.clone();
+        marked.extend(pages.0.iter().enumerate().map(|(i, (_, title))| Tab {
+            window: -1 - i as isize,
+            title: title.clone(),
+            edited: false,
+            selected: pages.1 == Some(i),
+        }));
+        if *self.tabs_shown.borrow() == (marked.clone(), room) {
             return;
         }
         for view in self.tabs.subviews().to_vec() {
@@ -2986,6 +3011,69 @@ impl Host {
             view.restyle();
             x += width + TAB_GAP;
         }
+        // The open pages after the projects: a cell each, as a tab (its
+        // title, its close button), in a holder of its own so a drag along
+        // the strip reads the project tabs only.
+        for (index, (_, title)) in pages.0.iter().enumerate() {
+            let label = NSTextField::labelWithString(&NSString::from_str(title), mtm);
+            label.setFont(Some(&NSFont::systemFontOfSize_weight(
+                t.typography.title as f64,
+                unsafe { NSFontWeightRegular },
+            )));
+            label.setAccessibilityElement(false);
+            let size = label.fittingSize();
+            let width = (TAB_PAD + size.width - 2. * LABEL_PAD + TAB_PAD + TAB_CLOSE).ceil();
+            let name = NSString::from_str(title);
+            let button: Retained<TabButton> = unsafe {
+                msg_send![
+                    TabButton::class(),
+                    buttonWithTitle: &*name,
+                    target: &**target,
+                    action: sel!(selectPage:)
+                ]
+            };
+            button.setTransparent(true);
+            button.setFrame(NSRect::new(NSPoint::ZERO, NSSize::new(width, height)));
+            button.setTag(index as isize);
+            button.setAccessibilityIdentifier(Some(&NSString::from_str("shell.toolbar.page")));
+            button.setAccessibilitySelected(pages.1 == Some(index));
+            label.setFrame(NSRect::new(
+                NSPoint::new(TAB_PAD - LABEL_PAD, ((height - size.height) / 2.).floor()),
+                size,
+            ));
+            let close = unsafe {
+                NSButton::buttonWithImage_target_action(
+                    &glyph("xmark", &format!("Close {title}"), 8.5),
+                    Some(target),
+                    Some(sel!(closePage:)),
+                    mtm,
+                )
+            };
+            close.setBordered(false);
+            close.setTag(index as isize);
+            close.setToolTip(Some(&NSString::from_str(&format!("Close {title}"))));
+            close.setAccessibilityIdentifier(Some(&NSString::from_str("shell.toolbar.page.close")));
+            close.setFrame(NSRect::new(
+                NSPoint::new(width - TAB_CLOSE_PAD - TAB_CLOSE, (height - TAB_CLOSE) / 2.),
+                NSSize::new(TAB_CLOSE, TAB_CLOSE),
+            ));
+            let view = TabView::new(
+                mtm,
+                NSRect::new(NSPoint::ZERO, NSSize::new(width, height)),
+                Retained::into_super(Retained::into_super(label.clone())),
+                Some(close.clone()),
+                None,
+                false,
+                pages.1 == Some(index),
+            );
+            view.addSubview(&label);
+            view.addSubview(&button);
+            view.addSubview(&close);
+            holder(x, width).addSubview(&view);
+            view.reveal(false, false);
+            view.restyle();
+            x += width + TAB_GAP;
+        }
         // The strip's own buttons after the last tab: every project (once
         // they no longer fit), then a new one. Each is a quiet glyph in a
         // cell of its own, so the pointer finds the strip's fill under it.
@@ -3054,25 +3142,68 @@ impl Host {
         add.setAccessibilityIdentifier(Some(&NSString::from_str("shell.toolbar.newProject")));
         tool(&add, x);
         self.tabs_width.setConstant(x + height);
-        *self.tabs_shown.borrow_mut() = (tabs, room);
+        *self.tabs_shown.borrow_mut() = (marked, room);
+    }
+    /// Home or a page shows over the project.
+    fn aside(&self) -> bool {
+        self.home.get() || self.pages.borrow().1.is_some()
+    }
+    /// The pages open in the strip (id and title) and the one showing over
+    /// the project: its cell is lit, Home's is not, and the document's own
+    /// controls step aside as on Home.
+    pub fn set_pages(&self, pages: Vec<(String, String)>, shown: Option<usize>) {
+        let next = (pages, shown);
+        if *self.pages.borrow() == next {
+            return;
+        }
+        *self.pages.borrow_mut() = next;
+        self.restyle_aside();
+    }
+    /// Which page shows (`None`: the project or Home).
+    pub fn shown_page(&self) -> Option<String> {
+        let pages = self.pages.borrow();
+        pages.1.and_then(|i| pages.0.get(i)).map(|(id, _)| id.clone())
     }
     /// Home over the window: the Home item reads selected, and the
     /// document's own controls (tools, sidebars, Export, the title) step
     /// aside, as v1's titlebar hides Export and the panel library on Home.
     pub fn set_home(&self, home: bool) {
-        self._delegate.ivars().home.select(home);
         if self.home.get() == home {
+            self._delegate
+                .ivars()
+                .home
+                .select(home && self.pages.borrow().1.is_none());
             return;
         }
         self.home.set(home);
+        self.restyle_aside();
+    }
+    fn restyle_aside(&self) {
+        let aside = self.aside();
+        self._delegate
+            .ivars()
+            .home
+            .select(self.home.get() && self.pages.borrow().1.is_none());
+        // A page's sidebar is as wide as its own.
+        if let Some(view) = self.sidebar.borrow_mut().take() {
+            view.removeFromSuperview();
+        }
         self.sync_sidebar();
         self.sync_tabs();
         for item in self._toolbar.items().to_vec() {
             let name = item.itemIdentifier().to_string();
             // The tabs stay, as in v1's title bar on Home.
             if matches!(name.as_str(), "tools" | "add" | "export" | "panelLibrary") {
-                item.setHidden(home);
+                item.setHidden(aside);
             }
+        }
+    }
+    /// The width of the sidebar column under Home or the page showing.
+    pub fn sidebar_width(&self) -> f32 {
+        if self.pages.borrow().1.is_some() {
+            self.tokens.metrics.settings_sidebar
+        } else {
+            self.tokens.metrics.sidebar
         }
     }
     /// Home's sidebar is real system material in a column under the GPUI
@@ -3083,7 +3214,7 @@ impl Host {
     /// contrast whatever is behind the window.
     fn sync_sidebar(&self) {
         let mut slot = self.sidebar.borrow_mut();
-        if !self.home.get() {
+        if !self.aside() {
             if let Some(view) = slot.take() {
                 view.removeFromSuperview();
             }
@@ -3095,7 +3226,7 @@ impl Host {
         let view = sidebar_material(
             self.window.mtm(),
             &self.tokens,
-            self.tokens.metrics.sidebar,
+            self.sidebar_width(),
             self.content.bounds().size.height,
         );
         self.content.addSubview_positioned_relativeTo(

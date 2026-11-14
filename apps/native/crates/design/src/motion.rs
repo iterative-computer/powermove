@@ -101,9 +101,14 @@ pub const UNIT_PRECISION: f32 = 0.002;
 /// Rest precision for values in points (positions, sizes).
 pub const POINT_PRECISION: f32 = 0.05;
 const SUBSTEPS: usize = 4;
-/// A frame longer than this (a stall, the first frame after rest) steps as
-/// one 120 Hz frame, so a hitch never makes a value jump.
+/// The longest step the integration takes at once; a longer frame is
+/// stepped in pieces of this, so the spring stays stable.
 const MAX_STEP: f32 = 1. / 30.;
+/// The most one frame advances a value: a slow frame moves it by the time
+/// it took (as Core Animation does), so motion ends on time and a heavy
+/// surface isn't drawn again for every 1/120 s of an animation (Settings'
+/// page switches, owner feedback S1); a long stall catches up only this far.
+const MAX_FRAME: f32 = 0.25;
 
 impl<const N: usize> Animated<N> {
     pub fn new(value: [f32; N], spring: Spring, precision: f32) -> Self {
@@ -141,16 +146,13 @@ impl<const N: usize> Animated<N> {
             self.snap(self.target);
             return false;
         }
-        let dt = if dt > 0.1 {
-            1. / 120.
-        } else {
-            dt.clamp(0., MAX_STEP)
-        };
-        let h = dt / SUBSTEPS as f32;
+        let dt = dt.clamp(0., MAX_FRAME);
+        let pieces = (dt / MAX_STEP).ceil().max(1.) as usize;
+        let h = dt / (pieces * SUBSTEPS) as f32;
         let Spring { stiffness, damping } = self.spring;
         let mut moving = false;
         for i in 0..N {
-            for _ in 0..SUBSTEPS {
+            for _ in 0..pieces * SUBSTEPS {
                 self.velocity[i] +=
                     (stiffness * (self.target[i] - self.value[i]) - damping * self.velocity[i]) * h;
                 self.value[i] += self.velocity[i] * h;
