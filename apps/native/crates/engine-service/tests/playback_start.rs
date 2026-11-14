@@ -17,7 +17,8 @@ fn main() {
         let broker = broker.clone();
         move || {
             first_pictures_keep_the_text(broker.clone());
-            static_text_matches_across_stop(broker);
+            static_text_matches_across_stop(broker.clone());
+            paused_text_includes_zero_and_excludes_its_out_point(broker);
         }
     });
     while !scenario.is_finished() {
@@ -174,4 +175,41 @@ fn static_text_matches_across_stop(broker: pm_text::host::FontBroker) {
         );
     }
     println!("test static_text_matches_across_stop ... ok");
+}
+
+// Layer spans are [in, out): a paused picture at exactly zero must draw
+// the title, as must its last content frame; the exact out point must not.
+fn paused_text_includes_zero_and_excludes_its_out_point(broker: pm_text::host::FontBroker) {
+    let scene = scene();
+    let mut host = Headless::with_fonts(pm_render::text::host::RenderFonts::new(broker)).unwrap();
+    let output = Output {
+        width: 470,
+        height: 264,
+        display: 0,
+        headroom: 1.,
+        crop: None,
+    };
+    for (ticks, visible) in [
+        (0, true),
+        (TICKS_PER_SECOND - TICKS_PER_SECOND / 30, true),
+        (TICKS_PER_SECOND, false),
+    ] {
+        let pixels = host
+            .frame_spec_settled(
+                &scene,
+                FrameSpec {
+                    scale: FrameSpec::paused_full_scale(&scene, &output),
+                    exact: false,
+                    ..FrameSpec::exact(Ticks::new(ticks).unwrap(), output)
+                },
+                &Default::default(),
+            )
+            .unwrap();
+        let lit = pixels
+            .iter()
+            .filter(|p| p[0].max(p[1]).max(p[2]) > 0.1)
+            .count();
+        assert_eq!(lit > 500, visible, "paused ticks={ticks}: lit pixels={lit}");
+    }
+    println!("test paused_text_includes_zero_and_excludes_its_out_point ... ok");
 }
