@@ -1313,6 +1313,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                   ],
                                   "props": {
+                                    "id": "timeline:name:layer:headline",
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -2045,6 +2046,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                   ],
                                   "props": {
+                                    "id": "timeline:name:layer:headline",
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -2924,6 +2926,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                   ],
                                   "props": {
+                                    "id": "timeline:name:layer:headline",
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -3803,6 +3806,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                   ],
                                   "props": {
+                                    "id": "timeline:name:layer:headline",
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -4679,6 +4683,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                   ],
                                   "props": {
+                                    "id": "timeline:name:layer:headline",
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -5691,6 +5696,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                   ],
                                   "props": {
+                                    "id": "timeline:name:layer:headline",
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -6475,6 +6481,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                   ],
                                   "props": {
+                                    "id": "timeline:name:layer:headline",
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -7360,6 +7367,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                   ],
                                   "props": {
+                                    "id": "timeline:name:layer:headline",
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -7563,6 +7571,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                   ],
                                   "props": {
+                                    "id": "timeline:name:layer:kicker",
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -8306,6 +8315,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                   ],
                                   "props": {
+                                    "id": "timeline:name:layer:headline",
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -9038,6 +9048,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                   ],
                                   "props": {
+                                    "id": "timeline:name:layer:row-29990",
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -9238,6 +9249,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                   ],
                                   "props": {
+                                    "id": "timeline:name:layer:row-29991",
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -9438,6 +9450,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                   ],
                                   "props": {
+                                    "id": "timeline:name:layer:row-29992",
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -9638,6 +9651,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                   ],
                                   "props": {
+                                    "id": "timeline:name:layer:row-29993",
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -9838,6 +9852,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                   ],
                                   "props": {
+                                    "id": "timeline:name:layer:row-29994",
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -10038,6 +10053,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                   ],
                                   "props": {
+                                    "id": "timeline:name:layer:row-29995",
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -10238,6 +10254,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                   ],
                                   "props": {
+                                    "id": "timeline:name:layer:row-29996",
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -10438,6 +10455,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                   ],
                                   "props": {
+                                    "id": "timeline:name:layer:row-29997",
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -10638,6 +10656,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                   ],
                                   "props": {
+                                    "id": "timeline:name:layer:row-29998",
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -10838,6 +10857,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                   ],
                                   "props": {
+                                    "id": "timeline:name:layer:row-29999",
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -11038,6 +11058,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                   ],
                                   "props": {
+                                    "id": "timeline:name:layer:row-30000",
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -11238,6 +11259,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                   ],
                                   "props": {
+                                    "id": "timeline:name:layer:row-30001",
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -11438,6 +11460,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                   ],
                                   "props": {
+                                    "id": "timeline:name:layer:row-30002",
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -11638,6 +11661,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                   ],
                                   "props": {
+                                    "id": "timeline:name:layer:row-30003",
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -11838,6 +11862,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                   ],
                                   "props": {
+                                    "id": "timeline:name:layer:row-30004",
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -12038,6 +12063,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                   ],
                                   "props": {
+                                    "id": "timeline:name:layer:row-30005",
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -12238,6 +12264,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                   ],
                                   "props": {
+                                    "id": "timeline:name:layer:row-30006",
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -12438,6 +12465,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                   ],
                                   "props": {
+                                    "id": "timeline:name:layer:row-30007",
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -12638,6 +12666,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                   ],
                                   "props": {
+                                    "id": "timeline:name:layer:row-30008",
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -12838,6 +12867,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                   ],
                                   "props": {
+                                    "id": "timeline:name:layer:row-30009",
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -13038,6 +13068,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                   ],
                                   "props": {
+                                    "id": "timeline:name:layer:row-30010",
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -13238,6 +13269,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                   ],
                                   "props": {
+                                    "id": "timeline:name:layer:row-30011",
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -13438,6 +13470,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                   ],
                                   "props": {
+                                    "id": "timeline:name:layer:row-30012",
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -13638,6 +13671,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                   ],
                                   "props": {
+                                    "id": "timeline:name:layer:row-30013",
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -13838,6 +13872,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                   ],
                                   "props": {
+                                    "id": "timeline:name:layer:row-30014",
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -14038,6 +14073,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                   ],
                                   "props": {
+                                    "id": "timeline:name:layer:row-30015",
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -14238,6 +14274,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                   ],
                                   "props": {
+                                    "id": "timeline:name:layer:row-30016",
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -14438,6 +14475,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                   ],
                                   "props": {
+                                    "id": "timeline:name:layer:row-30017",
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -14638,6 +14676,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                   ],
                                   "props": {
+                                    "id": "timeline:name:layer:row-30018",
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -14838,6 +14877,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                   ],
                                   "props": {
+                                    "id": "timeline:name:layer:row-30019",
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -15600,6 +15640,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                   ],
                                   "props": {
+                                    "id": "timeline:name:layer:headline",
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -16362,6 +16403,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                   ],
                                   "props": {
+                                    "id": "timeline:name:layer:headline",
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -17835,6 +17877,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                   ],
                                   "props": {
+                                    "id": "timeline:name:layer:headline",
                                     "style": {
                                       "color": {
                                         "token": "colors.text",
@@ -18645,6 +18688,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "binding": "native:name",
                                     "control": "text",
                                     "data-pm-component": "text-field",
+                                    "id": "timeline:rename:layer:headline",
                                     "label": "Headline",
                                     "metadata": {
                                       "cancelChange": true,
@@ -18683,6 +18727,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "alignItems": "center",
                                   "display": "flex",
                                   "flexDirection": "row",
+                                  "flexGrow": 1,
                                   "gap": {
                                     "token": "metrics.gap",
                                   },

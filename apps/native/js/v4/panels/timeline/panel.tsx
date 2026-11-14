@@ -378,9 +378,9 @@ function Layer({
       <div
         style={{
           ...line,
-          // The name (or its field) takes the room the switches leave.
-          flexGrow: 1,
-          minWidth: 0,
+          // The rename field takes the room the switches leave (the name
+          // itself keeps to its text, which a double-click renames).
+          ...(row.nameEditor ? { flexGrow: 1 } : {}),
           gap: t("metrics.gap"),
           overflow: "hidden",
           paddingLeft: t("metrics.gap"),
@@ -448,7 +448,7 @@ function Layer({
         />
         {row.nameEditor ? (
           // The field takes the name's place across the column while it
-          // edits (a field has no width of its own).
+          // edits (a field in a row grows; the cluster gives it the room).
           <UI.TextField
             // Its own identity: its commit is carried to the newest tree
             // when the panel has published another on the way.
@@ -458,7 +458,6 @@ function Layer({
             binding={row.nameEditor.binding}
             tabIndex={-1}
             metadata={{ cancelChange: true }}
-            style={{ flexGrow: 1, flexShrink: 1, minWidth: 0 }}
             onChange={(e) =>
               send({ type: "editDone", value: String(e.value ?? "") })
             }
