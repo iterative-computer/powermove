@@ -734,7 +734,7 @@ pub const WAIT_STOPPED: &str = "The wait for extensions was stopped";
 
 /// Opt-in load timings on stderr (`PM_NATIVE_MAIN_TRACE=1`), seconds since
 /// this process's first trace line.
-fn trace(value: Value) {
+pub(crate) fn trace(value: Value) {
     static ON: std::sync::LazyLock<Option<std::time::Instant>> = std::sync::LazyLock::new(|| {
         (std::env::var("PM_NATIVE_MAIN_TRACE").as_deref() == Ok("1")).then(std::time::Instant::now)
     });
@@ -2003,8 +2003,28 @@ impl Owner {
     fn stamp(&self) -> u64 {
         discovery::stamp(&self.config.roots)
     }
+    /// Every found extension's record, compiled in the live realm's pool. The
+    /// compiler starts only for one missing from the compile cache.
+    fn compile_all(&mut self, found: &[Discovered]) -> Vec<Value> {
+        let live = self.realm.take().expect("a live realm to compile in");
+        self.confined.clear();
+        let records = {
+            let compiler = compile::LazySvelte::new(&live.pool);
+            found
+                .iter()
+                .map(|f| {
+                    let started = std::time::Instant::now();
+                    let record = self.compile(&compiler, f);
+                    trace(json!({"compiled": f.id, "ms": started.elapsed().as_millis() as u64}));
+                    record
+                })
+                .collect()
+        };
+        self.realm = Some(live);
+        records
+    }
     /// The record alone. Whether a Store extension's helper runs is `sync_stores`.
-    fn compile(&mut self, compiler: &SvelteCompiler, found: &Discovered) -> Value {
+    fn compile(&mut self, compiler: &compile::LazySvelte, found: &Discovered) -> Value {
         let enabled = self.enabled(&found.id);
         let graph = match &found.manifest {
             Ok(manifest) => compile::compile(
@@ -2237,6 +2257,7 @@ impl Owner {
         host.set_effects(Some(self.shared.effects.clone()));
         let pool = crate::pool(&format!("window:{}", self.config.project), host.clone())?;
         let realm = pool.realm(RealmKind::Compat)?;
+        trace(json!({"realm": "pool"}));
         crate::boot_realm(&realm, &host, "")?;
         *self.transport.lock().unwrap() = Some(host.clone());
         self.router = Some(
@@ -2287,30 +2308,8 @@ impl Owner {
             return;
         }
         trace(json!({"extensions": "realm"}));
-        let live = self.realm.as_ref().unwrap();
-        let compiler = match SvelteCompiler::new(&live.pool, 256 * 1024 * 1024, 8 * 1024 * 1024) {
-            Ok(compiler) => compiler,
-            Err(error) => {
-                self.shared.update(|p| {
-                    p.ready = true;
-                    p.toasts
-                        .push(format!("Extensions could not compile: {error}"))
-                });
-                return;
-            }
-        };
-        self.confined.clear();
         trace(json!({"extensions": "compile", "found": found.len()}));
-        self.records = found
-            .iter()
-            .map(|f| {
-                let started = std::time::Instant::now();
-                let record = self.compile(&compiler, f);
-                trace(json!({"compiled": f.id, "ms": started.elapsed().as_millis() as u64}));
-                record
-            })
-            .collect();
-        compiler.realm().close();
+        self.records = self.compile_all(&found);
         trace(json!({"extensions": "compiled"}));
         self.sync_stores();
         self.publish_records();
@@ -2372,14 +2371,7 @@ impl Owner {
             .iter()
             .map(|f| (f.id.clone(), f.directory.clone()))
             .collect();
-        let live = self.realm.as_ref().unwrap();
-        let Ok(compiler) = SvelteCompiler::new(&live.pool, 256 * 1024 * 1024, 8 * 1024 * 1024)
-        else {
-            return;
-        };
-        self.confined.clear();
-        let records: Vec<_> = found.iter().map(|f| self.compile(&compiler, f)).collect();
-        compiler.realm().close();
+        let records = self.compile_all(&found);
         let changed: Vec<_> = records
             .iter()
             .filter(|next| {

@@ -134,10 +134,13 @@ pub(crate) fn boot_realm(realm: &Realm, host: &NativeHost, prelude: &str) -> Res
     settled(realm, COMPAT_BUNDLE, 60)?;
     settled(realm, include_str!("canvas-dom.js"), 15)?;
     settled(realm, include_str!("bootstrap.js"), 15)?;
+    host::trace(serde_json::json!({"realm": "bundle"}));
     // A real project can be hundreds of megabytes: the realm parses it as JSON
     // through the engine channel, never as a source literal.
     host.stage()?;
+    host::trace(serde_json::json!({"realm": "staged"}));
     settled(realm, "__compat.create()", 60)?;
+    host::trace(serde_json::json!({"realm": "created"}));
     Ok(())
 }
 
@@ -336,7 +339,7 @@ impl CompatRunner {
         entry: &str,
         api_version: u64,
     ) -> Result<compile::ModuleGraph> {
-        let compiler = SvelteCompiler::new(&self._pool, 256 * 1024 * 1024, 8 * 1024 * 1024)?;
+        let compiler = compile::LazySvelte::new(&self._pool);
         compile::compile(directory, entry, api_version, &compiler, None).map_err(Error::Host)
     }
     pub fn install(&self, manifest: &Value, graph: &Value) -> Result<Value> {
@@ -691,6 +694,39 @@ mod tests {
             runner.json("atob('YQ'.repeat(200000)).length").unwrap(),
             json!(300000)
         );
+    }
+    /// TypeScript is transformed natively and a cached graph is read back: the
+    /// Svelte compiler (a realm of its own, slow to close) starts only for a
+    /// Svelte file that is not in the cache.
+    #[test]
+    fn only_an_uncached_svelte_file_starts_the_svelte_compiler() {
+        let runner = runner();
+        let root = tempfile::tempdir().unwrap();
+        let cache = root.path().join("cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        let script = root.path().join("script");
+        std::fs::create_dir_all(&script).unwrap();
+        std::fs::write(
+            script.join("index.ts"),
+            "export default function(_api: any): void {}",
+        )
+        .unwrap();
+        let panel = root.path().join("panel");
+        std::fs::create_dir_all(&panel).unwrap();
+        std::fs::write(
+            panel.join("index.ts"),
+            "import Panel from './Panel.svelte'; export default function(api: any){api.panels.register({id:'p',title:'P',component:Panel})}",
+        )
+        .unwrap();
+        std::fs::write(panel.join("Panel.svelte"), "<p>panel</p>").unwrap();
+        let compiled = |directory: &std::path::Path| {
+            let svelte = compile::LazySvelte::new(&runner._pool);
+            compile::compile(directory, "index.ts", 3, &svelte, Some(&cache)).unwrap();
+            svelte.started()
+        };
+        assert!(!compiled(&script), "TypeScript alone started it");
+        assert!(compiled(&panel), "a Svelte file compiles with it");
+        assert!(!compiled(&panel), "the cached graph started it again");
     }
     type Log<T> = Arc<std::sync::Mutex<Vec<T>>>;
     type RasterRunner = (CompatRunner, Log<Value>, Log<Value>, Log<(bool, u64)>);
