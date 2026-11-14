@@ -108,7 +108,11 @@ fn require_supported_media(cp: &Checkpoint, checkpoint_root: &Path) -> Result<()
     // refusal for malformed/unrecognized records and unindexed owned payloads;
     // merely preserving their bytes is not evidence of media migration.
     let media_root = checkpoint_root.join("profile/Media Store");
-    let records = pm_native_migrate::library_media::read_index(&media_root).map_err(|error| {
+    let records = pm_native_migrate::library_media::read_link_index(
+        &media_root,
+        &cp.source.join("Media Store"),
+    )
+    .map_err(|error| {
         anyhow::Error::new(MigrationRequirement::MainFileMediaAdapter).context(error)
     })?;
     let mut admitted = std::collections::BTreeSet::new();
@@ -711,51 +715,17 @@ fn media(
     closure: &ClosureInput,
     hook: &mut impl FnMut(Event) -> Result<()>,
 ) -> Result<Pass> {
-    let disk_records =
-        pm_native_migrate::library_media::read_index(&checkpoint_root.join("profile/Media Store"))?;
-    // Captured payloads sit in the checkpoint beside `native`; on APFS the
-    // Media Store copy clones them, so only bytes from another volume count.
-    let mut needed = 0u64;
-    for (_, records) in batches {
-        for r in records {
-            needed =
-                needed.saturating_add(disk::copy_cost(checkpoint_root, native, r.payload().size));
-        }
-    }
-    // Disk space is conservative; the bar counts only what will be read: every
-    // captured record, and an original only where nothing captured stands in.
-    let mut expected = disk_records.iter().map(|r| r.size).sum::<u64>();
-    for (snapshot, records) in batches {
-        for r in records {
-            if r.payload_path(snapshot)?.is_some() {
-                expected = expected.saturating_add(r.payload().size);
-            }
-        }
-    }
-    let captured = |key: &str| {
-        batches
-            .iter()
-            .any(|(_, rs)| rs.iter().any(|r| r.key == key))
-            || disk_records.iter().any(|r| r.key == key)
-    };
-    for r in &closure.references {
-        if let Some(p) = &r.source_path
-            && p.is_file()
-        {
-            let size = fs::metadata(p)?.len();
-            needed = needed.saturating_add(disk::copy_cost(p, native, size));
-            let stands_in = captured(&r.key) || r.legacy_id.as_deref().is_some_and(captured);
-            if !stands_in && !r.unreached && !r.poster {
-                expected = expected.saturating_add(size);
-            }
-        }
-    }
-    disk::space(native, needed)?;
-    source_access::begin_bytes(expected);
+    let cp: Checkpoint = disk::json(&checkpoint_root.join("checkpoint.json"))?;
+    let disk_records = pm_native_migrate::library_media::read_link_index(
+        &checkpoint_root.join("profile/Media Store"),
+        &cp.source.join("Media Store"),
+    )?;
+    disk::space(native, 0)?;
+    source_access::begin_bytes(0);
     let mut count = 0;
     // One record publication per source record, however many objects it has.
     let total = batches.iter().map(|(_, r)| r.len()).sum::<usize>() + disk_records.len();
-    migration::migrate_many_with_disk(
+    pm_native_migrate::linked::link_many_with_disk(
         &batches
             .iter()
             .map(|(s, r)| (s, r.as_slice()))

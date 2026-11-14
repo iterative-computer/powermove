@@ -9,14 +9,13 @@ use std::{
     path::{Path, PathBuf},
 };
 
-// Durable authored state, including interrupted extension/agent work. Runtime
+// Projects, settings and small authored state. Large scratch and media payloads
+// remain in the original profile. Runtime
 // credentials and unrelated terminal homes are never discovered or copied.
 const FAMILIES: &[&str] = &[
     "store",
-    // main c7f46a056: flat SHA-256 payloads / source links and Index records.
-    // Retain these verbatim alongside the verified file-index adapter.
+    // Retain media indexes; payloads are linked to the live source.
     "extensions",
-    "Agent Workspaces",
     "Agent State",
     "Agent Change History",
     "Agent Tasks",
@@ -28,13 +27,11 @@ const FAMILIES: &[&str] = &[
     "extensions-provenance.json",
     "onboarding-v1.json",
     "whats-new.json",
-    "transcription-cache",
     "transcription-warm.json",
-    "Media Store",
+    "Media Store/Index",
+    "Media Store/keys",
     "storage-upgrade-v1.json",
     "project-files.json",
-    "backups",
-    "recovery",
 ];
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Checkpoint {
@@ -136,8 +133,7 @@ impl Checkpoint {
                     if let Some(stem) = name.strip_suffix(".indexeddb.leveldb") {
                         let blobs = dir.with_file_name(format!("{stem}.indexeddb.blob"));
                         let out = PathBuf::from(format!("chromium/media-{}", indexeddb.len()));
-                        let bytes =
-                            disk::tree_bytes(&dir)?.saturating_add(disk::tree_bytes(&blobs)?);
+                        let bytes = disk::tree_bytes(&dir)?;
                         disk::space(
                             &stage,
                             disk::copy_cost(&dir, &stage, bytes).saturating_mul(2),
@@ -146,7 +142,9 @@ impl Checkpoint {
                             &dir,
                             blobs.is_dir().then_some(blobs.as_path()),
                             &stage.join(&out),
-                            BlobCopy::All,
+                            BlobCopy::Deferred {
+                                min_free: 5 * 1024 * 1024 * 1024,
+                            },
                         )?;
                         for payload in disk::walk(&stage.join(&out).join("blobs"))?.keys() {
                             let relative = out.join("blobs").join(payload);
@@ -262,16 +260,15 @@ impl Checkpoint {
     }
 }
 /// Bytes a capture copies: the file families, then each IndexedDB origin with its
-/// blobs, then Local Storage. Metadata only; the capture counts as it goes.
+/// records, then Local Storage. Metadata only; the capture counts as it goes.
 pub(crate) fn capture_bytes(source: &Path) -> Result<u64> {
     let mut total = inventory(source)?.values().map(|s| s.size).sum::<u64>();
     if let Ok(entries) = fs::read_dir(source.join("IndexedDB")) {
         for entry in entries {
             let dir = entry?.path();
             let name = dir.file_name().unwrap_or_default().to_string_lossy();
-            if let Some(stem) = name.strip_suffix(".indexeddb.leveldb") {
-                let blobs = dir.with_file_name(format!("{stem}.indexeddb.blob"));
-                total += disk::tree_bytes(&dir)? + disk::tree_bytes(&blobs)?;
+            if name.ends_with(".indexeddb.leveldb") {
+                total += disk::tree_bytes(&dir)?;
             }
         }
     }
@@ -353,11 +350,10 @@ pub(crate) fn file_target(path: &Path) -> Result<PathBuf> {
         .to_string_lossy()
         .starts_with("project-files.json.pending-")
         || [
-            "Media Store",
+            "Media Store/Index",
+            "Media Store/keys",
             "storage-upgrade-v1.json",
             "project-files.json",
-            "backups",
-            "recovery",
         ]
         .iter()
         .any(|name| first == *name)

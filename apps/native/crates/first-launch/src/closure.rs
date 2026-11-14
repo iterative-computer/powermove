@@ -5,9 +5,8 @@ use anyhow::{Result, ensure};
 use pm_kernel::{History, LibraryStore, library::legacy_apply_patches};
 use pm_native_migrate::{
     indexeddb::Record,
-    migration::{self, Availability, ClosureInput, OwnerKind, Reference},
+    migration::{Availability, ClosureInput, OwnerKind, Reference},
     snapshot::Snapshot,
-    source_access,
 };
 use serde_json::Value;
 use std::{collections::BTreeSet, path::Path};
@@ -19,9 +18,7 @@ pub(crate) fn inventory(
     batches: &[(Snapshot, Vec<Record>)],
     progress: &mut dyn FnMut(usize, usize) -> Result<()>,
 ) -> Result<ClosureInput> {
-    DIGESTS.with(|d| d.borrow_mut().clear());
     let found = inventory_pass(cp, root, batches, progress);
-    DIGESTS.with(|d| d.borrow_mut().clear());
     found
 }
 fn inventory_pass(
@@ -31,7 +28,10 @@ fn inventory_pass(
     progress: &mut dyn FnMut(usize, usize) -> Result<()>,
 ) -> Result<ClosureInput> {
     let profile = root.join("profile");
-    let disk_records = pm_native_migrate::library_media::read_index(&profile.join("Media Store"))?;
+    let disk_records = pm_native_migrate::library_media::read_link_index(
+        &profile.join("Media Store"),
+        &cp.source.join("Media Store"),
+    )?;
     let store = LibraryStore::open(&profile);
     let mut out = ClosureInput {
         inventoried: [
@@ -150,24 +150,19 @@ fn inventory_pass(
             if r.source_path.is_none() && !r.is_proxy() {
                 r.source_path = disk.source_path.clone();
             }
-            use pm_native_migrate::library_media::SourceStatus;
-            let status = disk.source_status()?;
-            if status == SourceStatus::Denied && r.before != Availability::Original {
-                r.unreached = true;
-            }
-            let available = matches!(status, SourceStatus::Owned | SourceStatus::Verified);
-            if available && let Some(path) = disk.owned_path.as_ref().or(disk.source_path.as_ref())
-            {
-                // Full main SHA-256 is already verified. Proxy provenance is
-                // still determined from authored asset metadata, never filename.
-                if !r.is_proxy()
-                    && (matches_original(path, r)?
-                        || (r.original_blake3.is_none() && r.fingerprint.is_none()))
-                {
-                    r.original_blake3 = Some(hashed(path)?);
-                    r.before = Availability::Original;
-                } else {
-                    r.before = Availability::ProxyOnly;
+            if let Some(path) = disk.source_path.as_ref().or(disk.owned_path.as_ref()) {
+                match disk::regular(path) {
+                    Ok(file) if file.metadata()?.len() == disk.size => {
+                        r.before = if r.is_proxy() {
+                            Availability::ProxyOnly
+                        } else {
+                            Availability::Original
+                        };
+                    }
+                    Err(e) if pm_native_migrate::source_access::is_unreached(&e) => {
+                        r.unreached = true
+                    }
+                    _ => {}
                 }
             }
         }
@@ -300,47 +295,40 @@ fn add(
             candidates.len() <= 1,
             "ambiguous media identity in checkpoint"
         );
-        // The captured payload is what the original app played. Prefer it, so an
-        // original in a folder macOS guards is read only when nothing else has it.
         if let Some((snapshot, record)) = candidates.first() {
-            let path = record.payload_path(snapshot)?;
-            if record.payload().size == 0 || path.is_some() {
-                let original = match &path {
-                    Some(path) if !r.is_proxy() => matches_original(path, &r)?,
-                    _ => false,
-                };
-                r.before = if original {
-                    Availability::Original
-                } else {
+            if snapshot
+                .linked_blob_path(record.database, record.payload().number)?
+                .is_some()
+            {
+                r.before = if r.is_proxy() {
                     Availability::ProxyOnly
+                } else {
+                    Availability::Original
                 };
             }
         }
-        // A project may name its media through a link (a moved or aliased
-        // folder). Read the file where it really is: reads never follow links.
         if let Some(path) = &r.source_path {
             r.source_path = Some(real_media_path(path));
         }
         if r.before != Availability::Original
-            && let Some(path) = r.source_path.clone()
-            && pm_native_migrate::library_media::is_resident(&path)?
+            && let Some(path) = &r.source_path
+            && pm_native_migrate::library_media::is_resident(path)?
         {
-            match matches_original(&path, &r) {
-                Ok(true) => {
-                    r.original_blake3 = Some(hashed(&path)?);
-                    r.before = Availability::Original;
+            match disk::regular(path) {
+                Ok(file) => {
+                    let expected = r
+                        .fingerprint
+                        .as_deref()
+                        .and_then(|f| f.strip_prefix("v2:"))
+                        .and_then(|f| f.split(':').next())
+                        .and_then(|s| s.parse::<u64>().ok());
+                    if expected.is_some_and(|size| file.metadata().is_ok_and(|m| m.len() == size)) {
+                        r.before = Availability::Original;
+                    }
                 }
-                Ok(false) => {}
-                Err(e) if source_access::is_unreached(&e) => r.unreached = true,
+                Err(e) if pm_native_migrate::source_access::is_unreached(&e) => r.unreached = true,
                 Err(e) => return Err(e),
             }
-        }
-        if r.before == Availability::Original
-            && r.original_blake3.is_none()
-            && let Some((snapshot, record)) = candidates.first()
-            && let Some(path) = record.payload_path(snapshot)?
-        {
-            r.original_blake3 = Some(hashed(&path)?);
         }
         // Posters are disposable renditions; record their absence explicitly
         // instead of turning a missing thumbnail into a missing original.
@@ -360,47 +348,6 @@ fn add(
         out.references.push(poster);
     }
     Ok(())
-}
-/// One pass reads each file once: history entries repeat the same assets, and a
-/// payload can stand behind many references. Keyed by identity, so a file that
-/// changes during the pass is read again.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-enum Digest {
-    Blake3,
-    Fingerprint,
-}
-type DigestKey = (std::path::PathBuf, Digest, u64, i64, i64);
-thread_local! {
-    static DIGESTS: std::cell::RefCell<std::collections::HashMap<DigestKey, String>> =
-        Default::default();
-}
-fn digest(path: &Path, kind: Digest, compute: impl FnOnce() -> Result<String>) -> Result<String> {
-    use std::os::unix::fs::MetadataExt;
-    let m = std::fs::symlink_metadata(path)?;
-    let key = (path.to_owned(), kind, m.len(), m.mtime(), m.mtime_nsec());
-    if let Some(hit) = DIGESTS.with(|d| d.borrow().get(&key).cloned()) {
-        return Ok(hit);
-    }
-    let value = compute()?;
-    DIGESTS.with(|d| d.borrow_mut().insert(key, value.clone()));
-    Ok(value)
-}
-fn hashed(path: &Path) -> Result<String> {
-    digest(path, Digest::Blake3, || Ok(disk::hash(path)?.0))
-}
-fn fingerprinted(path: &Path) -> Result<String> {
-    digest(path, Digest::Fingerprint, || {
-        migration::sampled_fingerprint(path)
-    })
-}
-fn matches_original(path: &Path, r: &Reference) -> Result<bool> {
-    if let Some(hash) = &r.original_blake3 {
-        return Ok(hashed(path)? == *hash);
-    }
-    if let Some(fp) = &r.fingerprint {
-        return Ok(fingerprinted(path)? == *fp);
-    }
-    Ok(false)
 }
 fn real_media_path(path: &Path) -> std::path::PathBuf {
     match std::fs::symlink_metadata(path) {

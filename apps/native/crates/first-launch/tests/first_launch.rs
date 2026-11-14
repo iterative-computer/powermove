@@ -151,12 +151,7 @@ fn generated_profile_migrates_copies_history_agents_gzip_local_storage_and_media
         0
     );
     assert!(config.native_profile.join("extensions-overlay").is_dir());
-    assert!(
-        config
-            .native_profile
-            .join("Agent Workspaces/synthetic/artifacts/result.txt")
-            .is_file()
-    );
+    assert!(!config.native_profile.join("Agent Workspaces").exists());
     assert_eq!(events.last(), Some(&Event::Complete));
 }
 #[test]
@@ -687,7 +682,7 @@ fn linked_native_file_parent_cannot_create_folders_in_electron() {
     .unwrap_err();
     symlink(
         &config.electron_profile,
-        config.native_profile.join("Agent Workspaces"),
+        config.native_profile.join("Agent State"),
     )
     .unwrap();
     let before = files(&config.electron_profile);
@@ -1122,9 +1117,10 @@ fn main_file_media_and_upgrade_receipt_are_preserved_and_never_reported_as_migra
         read::<Value>(&base.join(format!("Media Store/Index/{}.json", "b".repeat(64)))),
         record
     );
-    assert_eq!(
-        fs::read(base.join(format!("Media Store/{}.mp4", "a".repeat(64)))).unwrap(),
-        b"synthetic"
+    assert!(
+        !base
+            .join(format!("Media Store/{}.mp4", "a".repeat(64)))
+            .exists()
     );
     assert_eq!(
         read::<Value>(&base.join("storage-upgrade-v1.json"))["future"],
@@ -1419,10 +1415,7 @@ fn agent_work_links_and_special_files_are_left_behind_not_refused() {
     let copied = config
         .native_profile
         .join("Agent Workspaces/synthetic/artifacts/run/work");
-    assert_eq!(
-        fs::read_to_string(copied.join("notes.txt")).unwrap(),
-        "kept"
-    );
+    assert!(!copied.exists());
     for name in [
         "venv/bin/python",
         "venv/bin/python3",
