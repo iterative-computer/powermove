@@ -508,4 +508,20 @@ fn an_agent_reads_what_the_scopes_counted() {
     assert!(bands[1]["low"].is_null());
     assert_eq!(s["vectorscope"]["meanHueDegrees"], 135.0);
     assert_eq!(s["vectorscope"]["meanCb"], -0.25);
+    assert!(
+        s["luma"]["highestNits"].is_null(),
+        "display levels have no cd/m²"
+    );
+    // On PQ the top level is 10,000 cd/m² and level 2 of 8 reads its light.
+    let pq = ScopeFrame {
+        config: ScopeConfig {
+            signal: ScopeSignal::Pq,
+            ..frame.config
+        },
+        ..frame
+    };
+    let s = scope_summary(&pq);
+    assert_eq!(s["luma"]["highestNits"], 10000.0);
+    let expected = (pm_color::tonemap::pq_eotf(2. / 7.) * 10.).round() / 10.;
+    assert_eq!(s["waveformBands"][0]["lowNits"], expected);
 }
