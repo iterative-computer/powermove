@@ -1704,6 +1704,8 @@ mod tests {
             ),
             (Scale::Custom("custom".into()), 1280, 720, "work")
         );
+        let hlg = agent(json!({"dynamicRange": "hlg", "dolbyVision": false})).unwrap();
+        assert!(!hlg.dolby_vision && plain.dolby_vision);
         let mp4 = agent(json!({"codec": "hevc", "quality": "draft", "scale": 0.5})).unwrap();
         assert_eq!(
             (mp4.codec, mp4.quality.as_str(), mp4.scale),

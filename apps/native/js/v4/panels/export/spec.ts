@@ -198,7 +198,14 @@ export const sidecars = [
   { v: "srt", label: "SubRip (.srt)" },
   { v: "vtt", label: "WebVTT (.vtt)" },
 ];
+/** The name the sheet gives the HLG HEVC metadata macOS adds: factual
+ * wording only, no mark or logo, in one place so it can change. */
+export const dolbyVisionLabel = "Dolby Vision 8.4";
 export const rows = {
+  dolbyVision: [
+    dolbyVisionLabel,
+    "Metadata macOS adds to HLG HEVC for displays that use it. Players without it show the HLG picture.",
+  ],
   dynamicRange: [
     "Dynamic Range",
     "HDR keeps the project's light. SDR tone maps it to SDR white.",

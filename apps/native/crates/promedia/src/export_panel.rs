@@ -104,6 +104,12 @@ pub enum Codec {
 fn eight() -> u8 {
     8
 }
+fn yes() -> bool {
+    true
+}
+fn is_true(v: &bool) -> bool {
+    *v
+}
 /// How a delivery carries light. HDR needs an HDR project and a 10-bit codec;
 /// elsewhere the choice stays dormant, like every other format-only field.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -197,6 +203,10 @@ pub struct Options {
     /// The sound coding of a QuickTime export.
     #[serde(default, skip_serializing_if = "AudioCoding::is_default")]
     pub audio_coding: AudioCoding,
+    /// HLG HEVC: the Dolby Vision 8.4 metadata macOS's encoder adds. On
+    /// unless the person turns it off (older options: on).
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub dolby_vision: bool,
     /// Migration/extension fields survive every remember/preset round trip.
     #[serde(flatten)]
     pub opaque: BTreeMap<String, Value>,
@@ -226,6 +236,7 @@ impl Options {
             color_tag: ColorTag::default(),
             timecode: String::new(),
             audio_coding: AudioCoding::default(),
+            dolby_vision: true,
             opaque: BTreeMap::new(),
         }
     }
@@ -445,6 +456,10 @@ impl Intent {
                 self.options.format,
                 Format::Prores | Format::Mp4 | Format::Webm | Format::Png
             );
+        // HLG HEVC only: macOS adds Dolby Vision 8.4 there.
+        planned.delivery.without_dolby_vision = !self.options.dolby_vision
+            && self.options.format == Format::Mp4
+            && self.dynamic_range == DynamicRange::Hlg;
         planned.delivery.timecode = self.timecode.clone();
         planned.delivery.audio_coding = match self.audio_coding {
             AudioCoding::Pcm24 => None,

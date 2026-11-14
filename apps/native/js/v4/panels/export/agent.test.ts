@@ -53,15 +53,15 @@ test("every option a person has in the sheet for a video is an export_video fiel
   expect(missing).toEqual([]);
   // The rows of every video format are among them.
   for (const format of ["prores", "mp4", "webm"] as const)
-    for (const field of fields[format])
-      expect(sheet).toContain(field);
+    for (const field of fields[format]) expect(sheet).toContain(field);
 });
 
 test("export_video offers every choice the sheet does", () => {
   const choices = (key: string) =>
     (agent[key].enum ?? agent[key].oneOf?.[0]?.enum) as string[];
   expect(choices("format")).toEqual(["mp4", "prores", "webm"]);
-  const values = (list: { v: string | number }[]) => list.map((o) => o.v);
+  const values = (list: { v: string | number }[]) =>
+    list.map((o) => String(o.v));
   expect(choices("profile")).toEqual(values(profiles));
   expect(choices("codec")).toEqual(values(codecs));
   expect(choices("quality")).toEqual(values(qualities));

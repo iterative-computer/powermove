@@ -94,7 +94,7 @@ pub struct VideoOptions {
     pub sheet: serde_json::Map<String, Value>,
 }
 /// The Export sheet's options an agent gives under the sheet's own names.
-pub const SHEET_OPTIONS: [&str; 14] = [
+pub const SHEET_OPTIONS: [&str; 15] = [
     "profile",
     "codec",
     "quality",
@@ -109,6 +109,7 @@ pub const SHEET_OPTIONS: [&str; 14] = [
     "useProxies",
     "captionsBurn",
     "captionsSidecar",
+    "dolbyVision",
 ];
 impl VideoOptions {
     pub fn parse(a: &Value) -> Result<Self> {

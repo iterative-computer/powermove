@@ -416,6 +416,49 @@ fn hdr_delivery_picks_a_ten_bit_codec_and_bt2100_tags() {
     );
 }
 
+/// An HLG MP4 (HEVC) keeps the Dolby Vision 8.4 metadata macOS adds unless
+/// the person turns it off; nothing else asks for it, and older options
+/// read as on.
+#[test]
+fn hlg_hevc_keeps_dolby_vision_unless_turned_off() {
+    let mut options: Options = serde_json::from_value(serde_json::json!({
+        "format":"mp4","scale":1,"width":640,"height":360,"fps":30,"range":"all",
+        "quality":"high","mblur":false,"audio":false,"alpha":false,
+        "captionsBurn":false,"captionsSidecar":"none","dynamicRange":"hlg"
+    }))
+    .unwrap();
+    assert!(options.dolby_vision, "older options read as on");
+    assert!(
+        serde_json::to_value(&options)
+            .unwrap()
+            .get("dolbyVision")
+            .is_none()
+    );
+    let without = |options: &Options| {
+        options
+            .intent(false, 0)
+            .unwrap()
+            .engine_settings(hdr_base())
+            .unwrap()
+            .unwrap()
+            .delivery
+            .without_dolby_vision
+    };
+    assert!(!without(&options));
+    options.dolby_vision = false;
+    assert_eq!(
+        serde_json::to_value(&options).unwrap()["dolbyVision"],
+        false
+    );
+    assert!(without(&options));
+    // PQ and ProRes have no Dolby Vision to leave out.
+    options.dynamic_range = pm_promedia::export_panel::DynamicRange::Pq;
+    assert!(!without(&options));
+    options.dynamic_range = pm_promedia::export_panel::DynamicRange::Hlg;
+    options.format = Format::Prores;
+    assert!(!without(&options));
+}
+
 fn hdr_base() -> pm_protocol::priority::ExportSettings {
     use pm_protocol::common::{FrameRate, Size, TickRange, Ticks};
     use pm_protocol::priority::*;

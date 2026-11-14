@@ -373,6 +373,7 @@ fn studio_overlays_preserve_all_main_operations_and_unrelated_contracts() {
                     "useProxies",
                     "captionsBurn",
                     "captionsSidecar",
+                    "dolbyVision",
                     "studioQuality",
                     "studioRenderScale",
                 ]
