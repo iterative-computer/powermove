@@ -407,9 +407,20 @@ impl pm_shell::integration::Integration for Bridge {
             v.builtins.viewer_place = None;
             v.sync_extension_panels(open);
             v.sync_parking(open, cx);
+            let was_docked = v.builtins.agent_docked;
             v.builtins.agent_docked = open.contains(&"agent");
             if v.builtins.agent_docked {
                 v.builtins.agent_parked = false;
+            }
+            // Closing the docked Agent (its tab, its own Close) returns it to
+            // its popover, as the original app's did; the toolbar item's
+            // park hides it in place instead.
+            if crate::builtins::returns_to_popover(
+                was_docked,
+                v.builtins.agent_docked,
+                v.builtins.agent_parked,
+            ) {
+                v.host.borrow().send_command("agent", vec![]);
             }
         });
     }

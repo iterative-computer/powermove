@@ -1705,8 +1705,8 @@ impl Controller {
                     Ok(Value::Null)
                 }
                 "agent.close" => {
-                    // Docked, Close takes it out of the workspace: the Agent
-                    // item opens the popover again (agent-panel.md §1).
+                    // Docked, Close takes it out of the workspace and the
+                    // popover opens again (`returns_to_popover`, agent-panel.md §1).
                     if self.builtins.agent_docked {
                         self.host.borrow().send_command("panel:close:agent", vec![]);
                     }
@@ -2654,6 +2654,11 @@ fn agent_toggle(open: bool, since_dismissed: Option<std::time::Duration>) -> Age
         AgentToggle::Open
     }
 }
+/// The docked Agent left the workspace without being parked (closed, not
+/// hidden by its toolbar item): it comes back as the popover.
+pub(crate) fn returns_to_popover(was_docked: bool, docked: bool, parked: bool) -> bool {
+    was_docked && !docked && !parked
+}
 /// The popover gave up key: it closes when its own editor took it (a press
 /// outside the popover), never for another window or app.
 fn agent_dismisses(open: bool, editor_took_key: bool) -> bool {
@@ -2712,6 +2717,13 @@ mod popover_keys_tests {
 mod agent_close_tests {
     use super::*;
     use std::time::Duration;
+    #[::core::prelude::v1::test]
+    fn closing_the_docked_agent_returns_it_to_its_popover_and_parking_does_not() {
+        assert!(returns_to_popover(true, false, false), "closed: the popover");
+        assert!(!returns_to_popover(true, false, true), "parked: hidden in place");
+        assert!(!returns_to_popover(false, true, false), "docking is no return");
+        assert!(!returns_to_popover(false, false, false));
+    }
     #[::core::prelude::v1::test]
     fn the_toolbar_item_toggles_the_agent_popover_closed_and_open() {
         // The reported bug: the item only ever opened (activated) it.

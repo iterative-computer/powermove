@@ -814,9 +814,9 @@ mod tests {
         assert_eq!(
             rows,
             [
-                ("opus", "Opus", true),
-                ("fable", "Fable", false),
-                ("sonnet", "Sonnet", false)
+                ("opus", "Opus 5.5", true),
+                ("fable", "Fable 5.2", false),
+                ("sonnet", "Sonnet 5.5", false)
             ]
         );
         assert_eq!(models[0].aliases, ["claude-opus-5-5"]);
