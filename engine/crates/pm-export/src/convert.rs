@@ -98,6 +98,47 @@ pub struct EncoderInput {
     pub width: u32,
     pub height: u32,
     pub planes: Vec<Plane>,
+    /// An HDR frame's light as the file carries it, measured while it was
+    /// converted (`None` for SDR, or input converted elsewhere).
+    pub light: Option<FrameLight>,
+}
+
+/// A frame's light in cd/m²: its brightest pixel's largest of R, G and B,
+/// and the frame's average of that largest value (what MaxCLL and MaxFALL
+/// take the most of, CTA-861.3).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FrameLight {
+    pub peak: u16,
+    pub average: u16,
+}
+
+/// Each luma row's light as it is converted: rows may be converted more
+/// than once (a subsampled row is read by two blocks), always to the same
+/// values, so a row's measure is stored, not added.
+struct RowLight(Vec<[std::sync::atomic::AtomicU64; 2]>);
+
+impl RowLight {
+    fn new(rows: usize) -> Self {
+        Self((0..rows).map(|_| Default::default()).collect())
+    }
+    fn put(&self, y: usize, (peak, sum): (f64, f64)) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.0[y][0].store(peak.to_bits(), Relaxed);
+        self.0[y][1].store(sum.to_bits(), Relaxed);
+    }
+    fn frame(&self, pixels: usize) -> FrameLight {
+        use std::sync::atomic::Ordering::Relaxed;
+        let (mut peak, mut sum) = (0f64, 0f64);
+        for [p, s] in &self.0 {
+            peak = peak.max(f64::from_bits(p.load(Relaxed)));
+            sum += f64::from_bits(s.load(Relaxed));
+        }
+        let nits = |v: f64| v.round().clamp(0.0, f64::from(u16::MAX)) as u16;
+        FrameLight {
+            peak: nits(peak),
+            average: nits(sum / pixels.max(1) as f64),
+        }
+    }
 }
 
 /// The plane geometry of `format` at `width` × `height`: (samples per row, rows, 16-bit).
@@ -664,6 +705,7 @@ pub fn convert_tagged(
     // evaluated once: the values `ycc` gives, with each block's fit decided
     // once (on its first pixel, on the row it is sited on) for the pixels
     // sharing it.
+    let light = RowLight::new(if tags.is_hdr() { h } else { 0 });
     let fill = |y: usize, cache: &mut RowCache| {
         if cache.rows[y & 3].y == y {
             return;
@@ -684,13 +726,16 @@ pub fn convert_tagged(
         };
         if tags.is_hdr() {
             hdr_row.resize(w, ([0.0; 3], 0.0));
-            crate::hdr::output_row(
-                &frame.rgba[y * w * 4..(y + 1) * w * 4],
-                params.working,
-                params.alpha,
-                tags,
-                hdr,
-                hdr_row,
+            light.put(
+                y,
+                crate::hdr::output_row(
+                    &frame.rgba[y * w * 4..(y + 1) * w * 4],
+                    params.working,
+                    params.alpha,
+                    tags,
+                    hdr,
+                    hdr_row,
+                ),
             );
             for (x, value) in hdr_row.iter().enumerate() {
                 put(x, *value);
@@ -766,13 +811,16 @@ pub fn convert_tagged(
                     // An HDR row's transform, over the whole row at once.
                     if tags.is_hdr() {
                         hdr_row.resize(w, ([0.0; 3], 0.0));
-                        crate::hdr::output_row(
-                            &frame.rgba[y * w * 4..(y + 1) * w * 4],
-                            params.working,
-                            params.alpha,
-                            tags,
-                            scratch,
-                            hdr_row,
+                        light.put(
+                            y,
+                            crate::hdr::output_row(
+                                &frame.rgba[y * w * 4..(y + 1) * w * 4],
+                                params.working,
+                                params.alpha,
+                                tags,
+                                scratch,
+                                hdr_row,
+                            ),
                         );
                     }
                     for x in 0..w {
@@ -859,6 +907,7 @@ pub fn convert_tagged(
         width: frame.width,
         height: frame.height,
         planes,
+        light: tags.is_hdr().then(|| light.frame(w * h)),
     })
 }
 

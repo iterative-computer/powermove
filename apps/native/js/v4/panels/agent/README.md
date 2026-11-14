@@ -1,4 +1,35 @@
-# Agent built-in v4 panel — 2026-11-01
+# Agent built-in v4 panel
+
+## 2026-11-13 redesign: the original app's panel, natively
+
+`view.tsx` now follows the Electron Agent panel (`AgentPanel.svelte` and its
+`agent/` components) state for state, with the same copy and keyboard, drawn
+with the kit and `metrics.*`/`colors.*`/`typography.*` tokens only:
+
+- **Thread bar**: the thread pop-up (title, each thread's Current / Working… /
+  last-opened line) and New thread. No Pin: the native Agent is a popover.
+- **Conversation** (`present.ts`, ported from `activity-rows.ts`,
+  `work-groups.ts`, `errors/presentation.ts`): request bubbles, a finished
+  turn folded behind "Worked for 2m 30s", consecutive tool calls in one group
+  ("2 tool calls · 1 failed · 2s") whose rows show glyph, label, mono chip
+  and time and open onto their output, inline reasoning, question cards
+  (choices, typed answer, Skip/Answer), visual and media replies, rendered
+  results, and errors as title + words with Try Again and a Details well
+  (raw provider JSON is never the message). Prose is Markdown drawn as native
+  styled runs (`metadata.runs`). The transcript follows its end while the
+  reader is there (`data-pm-follow`) and offers Scroll to latest otherwise.
+- **Empty and connection states**: "Make your next move" with the three
+  suggestions per access mode; signed out → provider choice + Connect;
+  a stopped service → the error notice with Try Again.
+- **Composer**: field with attachments, + attach, Stop while working, Send
+  (accent when sendable, hidden while working on an empty draft), the
+  shortcuts menu with the original copy, and the provider / model / effort /
+  access row (access rows carry their one-line descriptions).
+- **Closing**: Escape in the composer reaches the model (shortcuts menu
+  first, then the popover); the window, the toolbar item and a press in the
+  editor close it too (`crates/app/src/builtins.rs`).
+
+The older lane notes below describe the 2026-11-01 provisional tree.
 
 **Partial implementation; blocked for native panel acceptance. All visual output is provisional
 until Opus review.** Entry: `index.ts`. Source spec:

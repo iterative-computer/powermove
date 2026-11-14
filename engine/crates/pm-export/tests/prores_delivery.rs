@@ -1608,7 +1608,7 @@ fn hdr_projects_deliver_pq_and_hlg_prores() {
             let mut s = settings(flavour, WireAlpha::None, (25, 1), 32, 0);
             s.color = color;
             let job = job(&doc, s, path.clone());
-            export(&mut renderer, &job);
+            let delivered = export(&mut renderer, &job);
             let visual = Movie::read(&path)
                 .unwrap()
                 .track(b"vide")
@@ -1651,9 +1651,15 @@ fn hdr_projects_deliver_pq_and_hlg_prores() {
                 0x00, 0x00, 0x00, 0x00,
             ];
             assert_eq!(visual.mdcv, Some(mastering), "{what}: mastering display");
-            // The composition's light level is not measured (no footage
-            // states one), so none is claimed.
-            assert_eq!(visual.clli, None, "{what}: content light level");
+            // The light level is the frames', measured as they were encoded.
+            let light = delivered.report.content_light.expect("measured");
+            let mut clli = light.peak.to_be_bytes().to_vec();
+            clli.extend_from_slice(&light.average.to_be_bytes());
+            assert_eq!(
+                visual.clli.map(|c| c.to_vec()),
+                Some(clli),
+                "{what}: content light level"
+            );
             let display = v["side_data_list"]
                 .as_array()
                 .and_then(|list| {

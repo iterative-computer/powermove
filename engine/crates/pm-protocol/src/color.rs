@@ -292,6 +292,58 @@ pub enum ColorMode {
     Hdr,
 }
 
+/// What an HDR project delivers: its transfer (`color.hdrTransfer`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum HdrTransfer {
+    /// SMPTE ST 2084, mastered to the project's peak.
+    #[default]
+    Pq,
+    /// ARIB STD-B67, displayed at the project's peak.
+    Hlg,
+}
+
+/// The project's Output (Settings › Project › Color): what its deliveries
+/// carry, and so what its viewer, scopes and clip defaults are set for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ProjectOutput {
+    /// SDR Rec. 709: HDR sources tone mapped to SDR white as they come in.
+    Sdr,
+    /// HDR PQ at the mastering peak.
+    Pq,
+    /// HDR HLG at the mastering peak.
+    Hlg,
+}
+
+impl ProjectOutput {
+    pub const ALL: [ProjectOutput; 3] = [ProjectOutput::Sdr, ProjectOutput::Pq, ProjectOutput::Hlg];
+
+    /// The id agents and the settings row use.
+    pub const fn id(self) -> &'static str {
+        match self {
+            ProjectOutput::Sdr => "sdr",
+            ProjectOutput::Pq => "pq",
+            ProjectOutput::Hlg => "hlg",
+        }
+    }
+
+    pub fn parse(id: &str) -> Option<ProjectOutput> {
+        Self::ALL.into_iter().find(|o| o.id() == id)
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            ProjectOutput::Sdr => "SDR Rec. 709",
+            ProjectOutput::Pq => "HDR PQ",
+            ProjectOutput::Hlg => "HDR HLG",
+        }
+    }
+
+    pub const fn hdr(self) -> bool {
+        !matches!(self, ProjectOutput::Sdr)
+    }
+}
+
 /// The project's `color` field as the engine sees it (Settings › Project › Color).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -307,6 +359,13 @@ pub struct ProjectColor {
         skip_serializing_if = "is_default_mastering_peak"
     )]
     pub mastering_peak: u16,
+    /// An HDR project's delivery transfer; PQ when absent.
+    #[serde(default, skip_serializing_if = "is_pq")]
+    pub hdr_transfer: HdrTransfer,
+}
+
+fn is_pq(transfer: &HdrTransfer) -> bool {
+    *transfer == HdrTransfer::Pq
 }
 
 const fn default_mastering_peak() -> u16 {
@@ -325,7 +384,17 @@ impl ProjectColor {
         precision: Precision::Float16,
         blend_domain: BlendDomain::HdrSafe,
         mastering_peak: default_mastering_peak(),
+        hdr_transfer: HdrTransfer::Pq,
     };
+
+    /// What the project delivers: SDR, or HDR in its transfer.
+    pub const fn output(&self) -> ProjectOutput {
+        match (self.mode, self.hdr_transfer) {
+            (ColorMode::Standard, _) => ProjectOutput::Sdr,
+            (ColorMode::Hdr, HdrTransfer::Pq) => ProjectOutput::Pq,
+            (ColorMode::Hdr, HdrTransfer::Hlg) => ProjectOutput::Hlg,
+        }
+    }
 
     pub const fn working(&self) -> WorkingEncoding {
         if self.linear_blending {

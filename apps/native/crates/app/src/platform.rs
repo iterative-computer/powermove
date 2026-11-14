@@ -641,6 +641,10 @@ fn review_destination(name: &str) -> Option<PathBuf> {
     let name = PathBuf::from(name).file_name()?.to_owned();
     Some(PathBuf::from(dir).join(name))
 }
+/// Development review launches choose export destinations without a panel.
+pub fn reviewing_saves() -> bool {
+    review_destination("x").is_some()
+}
 pub fn export_destination(
     window: &NSWindow,
     folder: bool,

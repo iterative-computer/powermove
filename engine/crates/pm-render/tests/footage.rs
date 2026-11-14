@@ -256,6 +256,68 @@ fn an_hdr_source_takes_the_tone_mapping_chosen_for_it() {
     }
 }
 
+/// The project's Output sets the clip defaults: an HDR clip keeps its light
+/// in either HDR output and is tone mapped only when the output is SDR; the
+/// HDR transfer (PQ or HLG) is a delivery choice and leaves the picture as is.
+#[test]
+fn an_hdr_clip_is_tone_mapped_only_when_the_output_is_sdr() {
+    let Some(path) = formats("hdr/hlg.mov") else {
+        return;
+    };
+    let src = MediaSource::open(&path).unwrap();
+    let v = src.probe.video.as_ref().unwrap();
+    let (w, h) = (v.width, v.height);
+    let mut r = Renderer::headless().unwrap();
+    let mut draw = |color: Value| {
+        let (mut doc, res) = document(&path, (w, h), 25.0, Some(json!({ "transfer": "hlg" })));
+        doc["color"] = color;
+        render(&mut r, &doc, (w, h), 0.13, &res)
+    };
+    let pq = draw(json!({ "mode": "hdr" }));
+    let hlg = draw(json!({ "mode": "hdr", "hdrTransfer": "hlg" }));
+    let sdr = draw(json!({ "mode": "standard", "hdrTransfer": "hlg" }));
+    assert_eq!(pq, hlg, "the HDR transfer leaves the picture as it is");
+    // The brightest light, as Rec. 709 luminance relative to SDR white
+    // (a saturated BT.2020 colour can leave one Rec. 709 channel above 1).
+    let top = |px: &[f32]| {
+        px.chunks(4)
+            .map(|p| {
+                let l = |c: f32| pm_color::transfer::display_decode(f64::from(c));
+                0.2126 * l(p[0]) + 0.7152 * l(p[1]) + 0.0722 * l(p[2])
+            })
+            .fold(0f64, f64::max)
+    };
+    assert!(
+        top(&hlg) > 1.5,
+        "HDR keeps light above SDR white: {}",
+        top(&hlg)
+    );
+    assert!(
+        top(&sdr) <= 1.0 + 1e-3,
+        "SDR tone maps to SDR white: {}",
+        top(&sdr)
+    );
+    // An SDR clip sits at SDR white (1.0 = 203 cd/m²) whatever the output.
+    let Some(path) = formats("video/color-p3.mov") else {
+        return;
+    };
+    let src = MediaSource::open(&path).unwrap();
+    let v = src.probe.video.as_ref().unwrap();
+    let (w, h) = (v.width, v.height);
+    let mut draw = |color: Value| {
+        let (mut doc, res) = document(&path, (w, h), 25.0, None);
+        doc["color"] = color;
+        render(&mut r, &doc, (w, h), 0.13, &res)
+    };
+    let sdr = draw(json!({ "mode": "standard" }));
+    for color in [
+        json!({ "mode": "hdr" }),
+        json!({ "mode": "hdr", "hdrTransfer": "hlg" }),
+    ] {
+        assert_eq!(draw(color.clone()), sdr, "{color}");
+    }
+}
+
 #[test]
 fn hdr_sources_are_tone_mapped_with_bt2390() {
     for (file, signal) in [

@@ -251,6 +251,7 @@ pub fn read(path: &Path, decode: bool) -> Result<(PngInfo, Option<EncoderInput>)
                 row_samples: w * 4,
                 rows: h,
             }],
+            light: None,
         }),
     ))
 }
@@ -391,6 +392,7 @@ impl Sink for PngSink {
             picture: Default::default(),
             notes: vec![],
             dolby_vision: None,
+            content_light: None,
             hardware_encoder: None,
             bytes,
             mix: None,

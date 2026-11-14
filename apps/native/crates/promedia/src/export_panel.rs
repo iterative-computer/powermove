@@ -36,7 +36,7 @@ impl Format {
             Self::Json => "Project File (.pmv)",
         }
     }
-    fn video(self) -> bool {
+    pub fn video(self) -> bool {
         matches!(self, Self::Prores | Self::Mp4 | Self::Webm)
     }
     /// Whether an export in this format uses the option `field` (v1

@@ -175,6 +175,16 @@ impl AgentLink {
             State::Unavailable => ("unavailable", status.detail.unwrap_or_else(signed_out)),
         }
     }
+    /// Nobody is signed in (or no API/local model is saved): the panel offers
+    /// to connect, rather than reporting a fault.
+    pub fn signed_out(&self, provider: Provider) -> bool {
+        match provider {
+            Provider::Compatible => self.compatible().is_none(),
+            _ => self
+                .accounts()
+                .is_some_and(|a| matches!(a.status(provider).state, State::Disconnected)),
+        }
+    }
     /// The saved API or local model connection (Settings › Accounts).
     pub fn compatible(&self) -> Option<pm_agents::compatible::Saved> {
         let host = self.environment.shared().as_ref()?.compatible.clone()?;
@@ -326,6 +336,8 @@ pub fn admit(action: &Value, connected: bool, live: bool) -> Result<(), String> 
                 || action["key"]["composing"] == true
                 || action["key"]["shiftKey"] == true
         }
+        Some("retry") => connected,
+        Some("connect") => true,
         // The model checks the command; /new, /model, /stop … need no account.
         Some("chooseSlash") => true,
         _ => false,

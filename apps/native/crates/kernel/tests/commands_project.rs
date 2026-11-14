@@ -988,6 +988,57 @@ fn hdr_moves_the_project_to_float_and_records_its_mastering_peak_in_one_undo() {
 }
 
 #[test]
+fn the_output_is_one_undoable_choice_that_reads_back_and_saves() {
+    use pm_protocol::color::ProjectOutput;
+    let mut store = store();
+    let output = |store: &DocumentStore| pm_kernel::model::project_output(store.root().unwrap());
+    assert_eq!(
+        output(&store),
+        ProjectOutput::Sdr,
+        "an existing project is SDR Rec. 709"
+    );
+    for choice in [
+        ProjectOutput::Hlg,
+        ProjectOutput::Pq,
+        ProjectOutput::Hlg,
+        ProjectOutput::Sdr,
+    ] {
+        store
+            .execute(
+                CompCommand::Set {
+                    patch: Box::new(CompPatch {
+                        output: Some(choice),
+                        ..Default::default()
+                    }),
+                }
+                .into(),
+                Origin::Interface,
+            )
+            .unwrap();
+        assert_eq!(output(&store), choice);
+        if choice.hdr() {
+            assert_eq!(
+                store
+                    .root()
+                    .unwrap()
+                    .get("colorDepth")
+                    .unwrap()
+                    .to_value()
+                    .as_f64(),
+                Some(32.)
+            );
+        }
+    }
+    // SDR keeps the HDR transfer chosen last, so turning HDR back on is HLG.
+    store.undo().unwrap();
+    assert_eq!(output(&store), ProjectOutput::Hlg);
+    store.undo().unwrap();
+    assert_eq!(output(&store), ProjectOutput::Pq);
+    let saved = pm_model::json::to_canonical_string(&store.root().unwrap().to_value());
+    assert!(saved.contains(r#""hdrTransfer":"pq""#), "{saved}");
+}
+
+#[test]
 fn interpretation_is_set_and_cleared_on_the_asset() {
     let mut store = store();
     let set = |store: &mut DocumentStore, interpret: Option<Value>| {

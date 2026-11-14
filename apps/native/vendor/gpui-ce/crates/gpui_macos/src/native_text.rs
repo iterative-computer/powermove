@@ -51,6 +51,7 @@ pub enum TextEvent {
     /// `italic`, `larger`, `smaller`, `larger10`, `smaller10`, `alignLeft`,
     /// `alignCenter`, `alignRight`, `up`, `down`, `shiftUp`, `shiftDown`).
     /// A plain multiline field sends `tab` / `backtab`: focus moves on.
+    /// A composer sends `escape`.
     Key(&'static str),
     /// Canvas only: the editor lost first responder.
     Blurred,
@@ -350,6 +351,12 @@ impl TextDelegate {
             }
             let s = self.ivars();
             s.emit(TextEvent::Submitted(s.editor.value()));
+            return true;
+        }
+        // Escape in a composer belongs to its host (close a menu, then the
+        // popover around it); AppKit's own cancelOperation: does nothing here.
+        if command == objc2::sel!(cancelOperation:) && self.ivars().kind == TextKind::Composer {
+            self.ivars().emit(TextEvent::Key("escape"));
             return true;
         }
         if self.ivars().kind == TextKind::Multiline
