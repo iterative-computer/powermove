@@ -373,6 +373,9 @@ function Layer({
       <div
         style={{
           ...line,
+          // The name (or its field) takes the room the switches leave.
+          flexGrow: 1,
+          minWidth: 0,
           gap: t("metrics.gap"),
           overflow: "hidden",
           paddingLeft: t("metrics.gap"),
@@ -439,12 +442,15 @@ function Layer({
           }}
         />
         {row.nameEditor ? (
+          // The field takes the name's place across the column while it
+          // edits (a field has no width of its own).
           <UI.TextField
             label={row.label}
             value={row.nameEditor.value}
             binding={row.nameEditor.binding}
             tabIndex={-1}
             metadata={{ cancelChange: true }}
+            style={{ flexGrow: 1, flexShrink: 1, minWidth: 0 }}
             onChange={(e) =>
               send({ type: "editDone", value: String(e.value ?? "") })
             }
