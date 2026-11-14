@@ -1888,6 +1888,9 @@ impl SurfaceView {
         element = self.decorate(element, node, window);
         if let Some(drawing) = self.grade_canvas(id, &node.kit, node.disabled) {
             element = element.relative().child(drawing);
+            if let Some(h) = self.grade_height(id, &node.kit) {
+                element = element.h(px(h));
+            }
             if !node.disabled {
                 element = element.on_mouse_down(
                     MouseButton::Left,

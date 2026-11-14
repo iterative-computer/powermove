@@ -103,6 +103,48 @@ impl FrameSpec {
             1.
         }
     }
+    /// Simple, static title cards can keep the composition's text pixel
+    /// grid during playback too. A Full pause then changes neither glyph
+    /// hinting nor weight. Effects, footage and animated titles retain
+    /// the normal playback resolution policy. One surface must fit in a
+    /// quarter of this renderer's existing grant; the output pool keeps its
+    /// half-grant bound, leaving room for text and intermediate targets.
+    pub fn text_grid_scale(scene: &Scene, output: &Output, grant: u64) -> Option<f64> {
+        use pm_eval::node;
+        let comp = pm_eval::Comp::resolve(&scene.doc, &scene.comp).ok()?;
+        let layers = node::array(comp.member("layers"))?;
+        let mut titles = 0;
+        let mut remaining = 4096;
+        for layer in layers {
+            if node::member(Some(layer), "on").is_some_and(|n| !node::truthy(Some(n)))
+                || node::is_str(node::member(Some(layer), "type"), "audio")
+            {
+                continue;
+            }
+            if !node::is_str(node::member(Some(layer), "type"), "text")
+                || node::truthy(node::member(Some(layer), "mblur"))
+                || ["parent", "group", "matteSource"]
+                    .iter()
+                    .any(|key| node::truthy(node::member(Some(layer), key)))
+                || !static_title(layer, 0, &mut remaining)
+            {
+                return None;
+            }
+            titles += 1;
+            if titles > 8 {
+                return None;
+            }
+        }
+        if titles == 0 {
+            return None;
+        }
+        let scale = Self::paused_full_scale(scene, output);
+        let size = composition_size(scene)?;
+        let bytes = u64::from(size.width)
+            .saturating_mul(u64::from(size.height))
+            .saturating_mul(8);
+        (bytes <= grant / 4).then_some(scale)
+    }
     /// Whether this frame is the final picture of its time: a capture, or
     /// the picture a paused viewer settles on, the whole composition at its
     /// own size (the refinement above the drawable's size, or the settled
@@ -266,6 +308,36 @@ fn composition_size(scene: &Scene) -> Option<Size> {
         (v.is_finite() && v >= 1. && v <= f64::from(u32::MAX)).then_some(v as u32)
     };
     Some(Size::new(side("w")?, side("h")?))
+}
+/// Bounded conservative check: a title with time-dependent channels,
+/// animators, effects or masks keeps the regular playback policy.
+fn static_title(node: &pm_model::Node, depth: usize, remaining: &mut usize) -> bool {
+    use pm_model::NodeKind;
+    if depth > 8 || *remaining == 0 {
+        return false;
+    }
+    *remaining -= 1;
+    match node.kind() {
+        NodeKind::Object(map) => map.iter().all(|(key, value)| {
+            if ["kf", "animators", "fx", "masks"]
+                .iter()
+                .any(|k| key.as_bytes() == k.as_bytes())
+            {
+                pm_eval::node::is_nullish(Some(value))
+                    || pm_eval::node::array(Some(value)).is_some_and(|a| a.is_empty())
+            } else if key.as_bytes() == b"expr" {
+                !pm_eval::node::truthy(Some(value))
+            } else {
+                static_title(value, depth + 1, remaining)
+            }
+        }),
+        NodeKind::Array(values) => {
+            values.len() <= 64
+                && values.iter().all(|v| static_title(v, depth + 1, remaining))
+        }
+        NodeKind::String(s) => s.as_bytes().len() <= 4096,
+        _ => true,
+    }
 }
 /// A frame that could not be drawn yet: the picture stays and it is drawn again.
 #[derive(Debug)]
@@ -1723,8 +1795,13 @@ impl Engine {
                 // viewer keeps its preview until one is handed over. A
                 // path-traced 3D scene's is: it is traced whole, with the
                 // viewer's tier, camera and progress, as the worker draws
-                // every 3D picture.
-                if !spec.exact && spec.final_picture(scene) && !self.draws_studio(scene) {
+                // every 3D picture. A bounded static title is cheap enough
+                // to keep its native grid here at Stop too.
+                if !spec.exact
+                    && spec.final_picture(scene)
+                    && !self.draws_studio(scene)
+                    && self.text_grid_scale(scene, &spec.output).is_none()
+                {
                     return Err(SettledPending.into());
                 }
                 let target = Target::wrap(surface.texture.clone());
@@ -2017,6 +2094,13 @@ impl Engine {
             stand_ins,
             compat_late,
         }))
+    }
+    /// Native text grids spend only the allowance already granted to this
+    /// renderer, and give way under pressure just like the other previews.
+    pub(crate) fn text_grid_scale(&self, scene: &Scene, output: &Output) -> Option<f64> {
+        (crate::memory::pressure() == crate::memory::Pressure::Normal)
+            .then(|| FrameSpec::text_grid_scale(scene, output, self.memory_client.grant()))
+            .flatten()
     }
     /// A pooled surface of `size` for a frame the cache will hold, making
     /// room in the cache first.
@@ -4604,5 +4688,57 @@ mod definitions_pending_tests {
             line(&["x.y"], &[]),
             "the extensions this project uses are loading (x.y)"
         );
+    }
+}
+
+#[cfg(test)]
+mod text_grid_tests {
+    use super::*;
+
+    fn title(extra: &str) -> Scene {
+        let project = format!(
+            r##"{{"id":"P","compId":"C","w":1920,"h":1080,"fps":30,"dur":3,
+            "layers":[{{"id":"T","type":"text","on":true,"from":0,"dur":3,{extra}}}]}}"##
+        );
+        Scene {
+            doc: Arc::new(pm_model::Document::new(
+                Some(pm_model::canonical::canonical_project(
+                    pm_model::json::parse(&project).unwrap(),
+                )),
+                1,
+            )),
+            comp: "C".into(),
+            media: Arc::default(),
+            content: 1,
+        }
+    }
+    #[test]
+    fn native_text_grids_admit_only_bounded_static_titles() {
+        let output = Output {
+            width: 1429,
+            height: 804,
+            display: 0,
+            headroom: 1.,
+            crop: None,
+        };
+        let plain = title(r#""d":{"text":"Title"},"p":{},"fx":[],"masks":[]"#);
+        assert!(FrameSpec::text_grid_scale(&plain, &output, 160 << 20).unwrap() > 1.);
+        assert!(FrameSpec::text_grid_scale(&plain, &output, 32 << 20).is_none());
+        for extra in [
+            r#""type":"video""#,
+            r#""fx":[{"id":"blur"}]"#,
+            r#""masks":[{"id":"mask"}]"#,
+            r#""mblur":true"#,
+            r#""parent":"animated-parent""#,
+            r#""matteSource":"footage""#,
+            r#""p":{"position.x":{"v":0,"kf":[{"t":0,"v":1}]}}"#,
+            r#""p":{"position.x":{"v":0,"expr":"time"}}"#,
+            r#""d":{"animators":[{"id":"letters"}]}"#,
+        ] {
+            assert!(
+                FrameSpec::text_grid_scale(&title(extra), &output, 160 << 20).is_none(),
+                "{extra}"
+            );
+        }
     }
 }

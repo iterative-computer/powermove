@@ -65,8 +65,9 @@ fn start(flow: &mut Flow) -> Vec<Effect> {
     let first = flow.start();
     drive(flow, first)
 }
+/// The title as it reads (a title set on two lines is one sentence).
 fn titled(frame: &Frame, title: &str) {
-    assert_eq!(frame.title, title, "{frame:?}");
+    assert_eq!(frame.title.replace('\n', " "), title, "{frame:?}");
 }
 
 #[test]
