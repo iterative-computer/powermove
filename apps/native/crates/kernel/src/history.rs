@@ -352,46 +352,25 @@ impl HistoryRecord {
     /// canonical `{"backward":…,"forward":…` exactly as that export
     /// serializes it. Built once from the same values the export builds.
     pub(crate) fn saved_text(&self) -> &SavedText {
-        self.saved_text.get_or_init(|| {
-            let (forward, backward) = self.saved_sides();
-            let mut entry = Map::new();
-            entry.insert("label", Value::from(self.label.as_str()));
-            entry.insert("forward", forward);
-            entry.insert("backward", backward);
-            let entry = Value::Object(entry);
-            // The file guard's test for id-keyed operations, on this entry.
-            let operations = ["forward", "backward"].iter().any(|side| {
-                entry
-                    .get(side)
-                    .and_then(Value::as_array)
-                    .is_some_and(|ops| {
-                        ops.iter().any(|op| {
-                            let op = op.get("patch").unwrap_or(op);
-                            op.get("op").and_then(Value::as_str).is_some()
-                        })
-                    })
-            });
-            let import = import_entry(&entry, false, None)
-                .map(|(_, _, _, bytes)| ImportFacts { bytes, operations });
-            let mut text = String::from("{\"backward\":");
-            pm_model::json::write::write_canonical(
-                entry.get("backward").expect("backward"),
-                &mut text,
-            );
-            text.push_str(",\"forward\":");
-            pm_model::json::write::write_canonical(
-                entry.get("forward").expect("forward"),
-                &mut text,
-            );
-            let len = text.len();
-            SavedText {
-                data: zstd::bulk::compress(text.as_bytes(), 3)
-                    .expect("history compression")
-                    .into(),
-                len,
-                import,
-            }
-        })
+        self.saved_forms();
+        self.saved_text.get().expect("saved forms")
+    }
+    /// The step's entry as `pack` reads it, made once.
+    pub(crate) fn packed_text(&self) -> &PackedText {
+        self.saved_forms();
+        self.packed_text.get().expect("saved forms")
+    }
+    /// Both saved forms of the step and what importing it finds, from one
+    /// decoding of its saved lists.
+    fn saved_forms(&self) {
+        if self.saved_text.get().is_some() && self.packed_text.get().is_some() {
+            return;
+        }
+        let (forward, backward) = self.saved_sides();
+        self.packed_text
+            .get_or_init(|| packed_form(&forward, &backward));
+        self.saved_text
+            .get_or_init(|| saved_form_text(&self.label, forward, backward));
     }
     /// The forward and backward lists `to_saved` stores for this step.
     fn saved_sides(&self) -> (Value, Value) {
@@ -400,52 +379,6 @@ impl HistoryRecord {
             Some((forward, backward)) => (list(forward), list(backward)),
             None => (self.forward.value(), self.inverse.value()),
         }
-    }
-    /// The step's entry as `pack` reads it, made once.
-    pub(crate) fn packed_text(&self) -> &PackedText {
-        self.packed_text.get_or_init(|| {
-            use pm_model::json::write::write_canonical;
-            let (forward, backward) = self.saved_sides();
-            let mut text = String::new();
-            fn put(text: &mut String, value: &Value) -> std::ops::Range<usize> {
-                let start = text.len();
-                write_canonical(value, text);
-                start..text.len()
-            }
-            let side = |list: &Value, text: &mut String| -> Vec<PackedPiece> {
-                list.as_array()
-                    .map(|patches| {
-                        patches
-                            .iter()
-                            .map(|patch| {
-                                if !record_array_patch(patch) {
-                                    return PackedPiece::Whole(put(text, patch));
-                                }
-                                let mut meta = patch.as_object().expect("checked").clone();
-                                let values = meta.remove("value").expect("checked");
-                                let meta = put(text, &Value::Object(meta));
-                                let items = values
-                                    .as_array()
-                                    .expect("checked")
-                                    .iter()
-                                    .map(|item| put(text, item))
-                                    .collect();
-                                PackedPiece::Records { meta, items }
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default()
-            };
-            let sides = [side(&forward, &mut text), side(&backward, &mut text)];
-            let len = text.len();
-            PackedText {
-                data: zstd::bulk::compress(text.as_bytes(), 3)
-                    .expect("history compression")
-                    .into(),
-                len,
-                sides,
-            }
-        })
     }
     /// What `History::import` makes of this step's saved entry.
     pub(crate) fn import_facts(&self) -> Result<ImportFacts, String> {
@@ -476,6 +409,92 @@ impl HistoryRecord {
             leaves(&self.forward.to_vec())?,
             leaves(&self.inverse.to_vec())?,
         ))
+    }
+}
+
+/// A step's saved entry as text (less its label) and what importing it finds.
+fn saved_form_text(label: &str, forward: Value, backward: Value) -> SavedText {
+    use pm_model::json::write::write_canonical;
+    let mut entry = Map::new();
+    entry.insert("label", Value::from(label));
+    entry.insert("forward", forward);
+    entry.insert("backward", backward);
+    let entry = Value::Object(entry);
+    // The file guard's test for id-keyed operations, on this entry.
+    let operations = ["forward", "backward"].iter().any(|side| {
+        entry
+            .get(side)
+            .and_then(Value::as_array)
+            .is_some_and(|ops| {
+                ops.iter().any(|op| {
+                    let op = op.get("patch").unwrap_or(op);
+                    op.get("op").and_then(Value::as_str).is_some()
+                })
+            })
+    });
+    let import = import_entry_bytes(&entry, None).map(|bytes| ImportFacts { bytes, operations });
+    let mut text = String::from("{\"backward\":");
+    write_canonical(entry.get("backward").expect("backward"), &mut text);
+    text.push_str(",\"forward\":");
+    write_canonical(entry.get("forward").expect("forward"), &mut text);
+    let len = text.len();
+    SavedText {
+        data: zstd::bulk::compress(text.as_bytes(), 1)
+            .expect("history compression")
+            .into(),
+        len,
+        import,
+    }
+}
+
+/// A step's entry as `pack` reads it: each patch whole, or a record array's
+/// metadata and its items.
+fn packed_form(forward: &Value, backward: &Value) -> PackedText {
+    use pm_model::json::write::write_canonical;
+    fn put(text: &mut String, value: &Value) -> std::ops::Range<usize> {
+        let start = text.len();
+        write_canonical(value, text);
+        start..text.len()
+    }
+    let side = |list: &Value, text: &mut String| -> Vec<PackedPiece> {
+        list.as_array()
+            .map(|patches| {
+                patches
+                    .iter()
+                    .map(|patch| {
+                        if !record_array_patch(patch) {
+                            return PackedPiece::Whole(put(text, patch));
+                        }
+                        let object = patch.as_object().expect("checked");
+                        let mut meta = Map::new();
+                        for (key, value) in object.iter() {
+                            if key.as_str() != Some("value") {
+                                meta.insert(key.clone(), value.clone());
+                            }
+                        }
+                        let meta = put(text, &Value::Object(meta));
+                        let items = object
+                            .get("value")
+                            .and_then(Value::as_array)
+                            .expect("checked")
+                            .iter()
+                            .map(|item| put(text, item))
+                            .collect();
+                        PackedPiece::Records { meta, items }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let mut text = String::new();
+    let sides = [side(forward, &mut text), side(backward, &mut text)];
+    let len = text.len();
+    PackedText {
+        data: zstd::bulk::compress(text.as_bytes(), 1)
+            .expect("history compression")
+            .into(),
+        len,
+        sides,
     }
 }
 
@@ -1232,6 +1251,78 @@ fn restored_assets(path: &[PathPart], value: &Value) -> Option<Value> {
     Some(value)
 }
 
+/// The canonical text `History::import` stores for one side of a saved
+/// entry with composition paths (no exact numbers to keep).
+fn entry_operations_text(e: &Map, side: &str) -> Result<String, String> {
+    let items = e
+        .get(side)
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("a history entry has no {side} list"))?;
+    let mut text = String::from("[");
+    for (i, item) in items.iter().enumerate() {
+        let source = item
+            .as_object()
+            .ok_or_else(|| format!("a {side} patch is malformed"))?;
+        let mut shape = Map::new();
+        for (key, value) in source.iter() {
+            shape.insert(
+                key.clone(),
+                if key.as_str() == Some("value") {
+                    Value::Null
+                } else {
+                    value.clone()
+                },
+            );
+        }
+        let op = Op::from_value(&Value::Object(shape))
+            .map_err(|_| format!("a {side} patch is malformed"))?;
+        if !valid_path(op.path()) {
+            return Err(format!("a {side} patch has an invalid path"));
+        }
+        let restored = source
+            .get("value")
+            .and_then(|v| restored_assets(op.path(), v));
+        let normalized = op.to_value();
+        let mut members: Vec<_> = normalized.as_object().unwrap().iter().collect();
+        members.sort_by_key(|(a, _)| *a);
+        if i > 0 {
+            text.push(',');
+        }
+        text.push('{');
+        for (j, (key, value)) in members.into_iter().enumerate() {
+            if j > 0 {
+                text.push(',');
+            }
+            pm_model::json::write_canonical(&Value::String(key.clone()), &mut text);
+            text.push(':');
+            let value = if key.as_str() == Some("value") {
+                restored.as_ref().or(source.get("value")).unwrap_or(value)
+            } else {
+                value
+            };
+            pm_model::json::write_canonical(value, &mut text);
+        }
+        text.push('}');
+    }
+    text.push(']');
+    Ok(text)
+}
+
+/// The byte size `History::import` measures for a saved entry, without
+/// keeping (or compressing) what it would store.
+fn import_entry_bytes(entry: &Value, open_comp: Option<&str>) -> Result<usize, String> {
+    let e = entry
+        .as_object()
+        .ok_or("a history entry is not an object")?;
+    e.get("label")
+        .and_then(Value::as_str)
+        .ok_or("a history entry has no label")?;
+    if needs_exact(entry) {
+        return import_entry(entry, false, open_comp).map(|(_, _, _, bytes)| bytes);
+    }
+    Ok(entry_operations_text(e, "forward")?.len() + entry_operations_text(e, "backward")?.len())
+}
+
 fn import_entry(
     entry: &Value,
     root_relative: bool,
@@ -1247,58 +1338,9 @@ fn import_entry(
         .to_owned();
     if !root_relative && !needs_exact(entry) {
         let operations = |side: &str| -> Result<StoredOps, String> {
-            let items = e
-                .get(side)
-                .and_then(Value::as_array)
-                .ok_or_else(|| format!("a history entry has no {side} list"))?;
-            let mut text = String::from("[");
-            for (i, item) in items.iter().enumerate() {
-                let source = item
-                    .as_object()
-                    .ok_or_else(|| format!("a {side} patch is malformed"))?;
-                let mut shape = Map::new();
-                for (key, value) in source.iter() {
-                    shape.insert(
-                        key.clone(),
-                        if key.as_str() == Some("value") {
-                            Value::Null
-                        } else {
-                            value.clone()
-                        },
-                    );
-                }
-                let op = Op::from_value(&Value::Object(shape))
-                    .map_err(|_| format!("a {side} patch is malformed"))?;
-                if !valid_path(op.path()) {
-                    return Err(format!("a {side} patch has an invalid path"));
-                }
-                let restored = source
-                    .get("value")
-                    .and_then(|v| restored_assets(op.path(), v));
-                let normalized = op.to_value();
-                let mut members: Vec<_> = normalized.as_object().unwrap().iter().collect();
-                members.sort_by_key(|(a, _)| *a);
-                if i > 0 {
-                    text.push(',');
-                }
-                text.push('{');
-                for (j, (key, value)) in members.into_iter().enumerate() {
-                    if j > 0 {
-                        text.push(',');
-                    }
-                    pm_model::json::write_canonical(&Value::String(key.clone()), &mut text);
-                    text.push(':');
-                    let value = if key.as_str() == Some("value") {
-                        restored.as_ref().or(source.get("value")).unwrap_or(value)
-                    } else {
-                        value
-                    };
-                    pm_model::json::write_canonical(value, &mut text);
-                }
-                text.push('}');
-            }
-            text.push(']');
-            Ok(StoredOps(CompactJson::text(text)))
+            Ok(StoredOps(CompactJson::text(entry_operations_text(
+                e, side,
+            )?)))
         };
         let (forward, backward) = (operations("forward")?, operations("backward")?);
         let bytes = forward.0.len + backward.0.len;
