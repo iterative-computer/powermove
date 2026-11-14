@@ -1682,8 +1682,10 @@ fn native_content_quad<'d>(
     let d = scope.ev.resolve_drawn_content(scope.comp, layer, time)?;
     match ty.as_str() {
         "shape" => {
-            if !crate::vector::level2(layer) {
-                let world = vector_world(scope, b, layer, time, scale)?;
+            let world = vector_world(scope, b, layer, time, scale)?;
+            if !crate::vector::level2(layer)
+                && (scope.is_3d_layer(layer)? || crate::raster_roi::at_rest(&world))
+            {
                 let density = crate::text::continuous_raster_scale(&world);
                 return Ok(
                     crate::vector::legacy_raster(scope, layer, &d, time, density)?.map(|q| {
@@ -2560,10 +2562,28 @@ fn text_quad<'d>(
             }
         }));
     }
-    // In 2D and 3D, Canvas2D first paints a layer-local bitmap at the compositor's
-    // quarter-step density, then WebGL samples it through the world matrix.
-    // Rasterizing after that matrix changes glyph phase, smoothing size and
-    // edge filtering, even for a fractional translation with no rotation.
+    // Preserve the resting Canvas mask weight. Transformed 2D text uses
+    // device coverage to avoid magnifying/filtering a bounded source bitmap.
+    // The existing 3D plane behavior is deliberately unchanged in this fix.
+    if !scope.is_3d_layer(layer)? && !crate::raster_roi::at_rest(&world) {
+        let m = kurbo::Affine::new(world);
+        let plan = if ty == "text" {
+            text.text_layer_level1_device(scope, layer, time, m, target)?
+        } else {
+            text.captions_layer_level1_device(scope, layer, time, m, target)?
+        };
+        for what in text.take_unsupported() {
+            b.unsupported
+                .push(Unsupported::layer(&comp_id, layer, Feature::Text(what)));
+        }
+        return Ok(plan.map(|p| {
+            let [x0, y0, x1, y1] = p.crop.map(f64::from);
+            Quad::Device {
+                source: Source::Text(Box::new(p)),
+                rect: [x0, y0, x1 - x0, y1 - y0],
+            }
+        }));
+    }
     let density = crate::text::continuous_raster_scale(&world);
     let quad = if ty == "text" {
         text.text_layer(scope, layer, time, density)?
