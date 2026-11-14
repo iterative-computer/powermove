@@ -732,6 +732,7 @@ fn gain_map_stills_read_as_hdr_or_as_their_sdr_base() {
         ("still-gainmap.avif", ImageFormat::Avif, ImageBackend::Dav1d),
     ] {
         let path = dir.join(name);
+        assert!(image::has_gain_map(&path).unwrap(), "{name}");
         let hdr = image::read(&path, &pool).unwrap();
         assert_eq!(
             (hdr.format, hdr.backend, hdr.bit_depth, hdr.color.cicp),
@@ -772,4 +773,15 @@ fn gain_map_stills_read_as_hdr_or_as_their_sdr_base() {
     // A JPEG or HEIC without a map reads as before.
     let plain = image::read(&fixtures_dir().join("still.heic"), &pool).unwrap();
     assert!(!plain.color.gain_map && plain.color.cicp.is_none());
+    for plain in ["still.heic", "still.avif", "still-red.png"] {
+        assert!(
+            !image::has_gain_map(&fixtures_dir().join(plain)).unwrap(),
+            "{plain}"
+        );
+    }
+    let pq = dir.join("still-hdr-pq.heic");
+    assert!(
+        !image::has_gain_map(&pq).unwrap(),
+        "an HDR HEIC is HDR without a map"
+    );
 }

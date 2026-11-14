@@ -241,8 +241,10 @@ pub struct Animation {
     pub loop_count: Option<u32>,
 }
 
-/// Which picture of a still with a gain map is read.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+/// Which picture of a still with a gain map is read (Interpret Footage's
+/// `gainMap`: `"hdr"`, `"sdrBase"`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum Rendition {
     /// The HDR picture: the base with its gain map applied at the headroom
     /// the map describes (BT.709 PQ, SDR white at 203 cd/m²).
@@ -270,19 +272,35 @@ pub fn read_with(path: &Path, pool: &FramePool, rendition: Rendition) -> Result<
     };
     let format = sniff(&head[..n]);
     let hdr = rendition == Rendition::Hdr;
-    let mapped = match format {
-        ImageFormat::Jpeg => jpeg_mpf(path)? && imageio::has_gain_map(path)?,
-        ImageFormat::Avif => {
-            head[..n].windows(4).any(|w| w == b"tmap") && imageio::has_gain_map(path)?
-        }
-        _ => false,
-    };
+    let mapped = !matches!(format, ImageFormat::Heif) && gain_map(path, format, &head[..n])?;
     if mapped && hdr {
         return imageio::read_still(path, pool, format, true);
     }
     let mut still = read_native(path, pool, format, hdr)?;
     still.color.gain_map |= mapped;
     Ok(still)
+}
+
+/// Whether the still at `path` carries a gain map (Interpret Footage offers
+/// its SDR base then).
+pub fn has_gain_map(path: &Path) -> Result<bool> {
+    let mut head = [0u8; 512];
+    let n = {
+        use std::io::Read;
+        std::fs::File::open(path)?.read(&mut head)?
+    };
+    gain_map(path, sniff(&head[..n]), &head[..n])
+}
+
+/// A JPEG, AVIF or HEIF still with a gain map, asking ImageIO only when the
+/// header has the structure one needs.
+fn gain_map(path: &Path, format: ImageFormat, head: &[u8]) -> Result<bool> {
+    Ok(match format {
+        ImageFormat::Jpeg => jpeg_mpf(path)? && imageio::has_gain_map(path)?,
+        ImageFormat::Avif => head.windows(4).any(|w| w == b"tmap") && imageio::has_gain_map(path)?,
+        ImageFormat::Heif => imageio::has_gain_map(path)?,
+        _ => false,
+    })
 }
 
 /// Whether a JPEG has an MPF segment (APP2 `MPF\0`) before its scan: where
