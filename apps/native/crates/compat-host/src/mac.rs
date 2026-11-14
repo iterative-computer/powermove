@@ -467,16 +467,30 @@ fn fail_task(task: &ProtocolObject<dyn WKURLSchemeTask>) {
 /// The shared page is never a drag destination. It spans the whole window
 /// under the native panels, and AppKit gives a drag to the registered view
 /// under the pointer whatever `hitTest:` answers, so a WKWebView registered
-/// for files (WebKit's default, set again as it joins a window) took every
-/// file dragged over the window, panels it does not show included. As in
-/// v1.2.0 (an extension panel's drop reached the window's own), files go to
-/// the native drop targets, and over an extension panel to the window's
-/// drop, which imports them.
+/// for files took every file dragged over the window, panels it does not
+/// show included. WebKit registers when it is made, when it joins a window
+/// and as its page loads, with no frame drawn after it on a window at rest:
+/// the page's view ([`PageView`]) ignores the registration, and anything
+/// registered before stays cleared here. As in v1.2.0 (an extension panel's
+/// drop reached the window's own), files go to the native drop targets, and
+/// over an extension panel to the window's drop, which imports them.
 fn refuse_drags(web: &WKWebView) {
     if web.registeredDraggedTypes().count() > 0 {
         web.unregisterDraggedTypes();
     }
 }
+
+define_class!(
+    #[unsafe(super(WKWebView, NSView, NSResponder, NSObject))]
+    #[thread_kind=MainThreadOnly]
+    #[name="PMCompatPageView"]
+    /// The extension page's WKWebView: never a drag destination.
+    struct PageView;
+    impl PageView {
+        #[unsafe(method(registerForDraggedTypes:))]
+        fn register_for_dragged_types(&self, _types: &NSArray<NSPasteboardType>) {}
+    }
+);
 
 // A shared full-window page with an exact mask and identical native hit geometry.
 define_class!(
@@ -627,9 +641,10 @@ impl MacDomHost {
                 .setJavaScriptCanOpenWindowsAutomatically(!trust.is_store());
         }
         let frame = NSRect::new(NSPoint::ZERO, NSSize::new(1., 1.));
-        let web = unsafe {
-            WKWebView::initWithFrame_configuration(WKWebView::alloc(mtm), frame, &config)
+        let page: Retained<PageView> = unsafe {
+            msg_send![PageView::alloc(mtm), initWithFrame: frame, configuration: &*config]
         };
+        let web: Retained<WKWebView> = Retained::into_super(page);
         unsafe {
             web.setNavigationDelegate(Some(ProtocolObject::from_ref(&*bridge)));
             web.setUIDelegate(Some(ProtocolObject::from_ref(&*bridge)));
