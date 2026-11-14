@@ -307,6 +307,27 @@ impl FfDecoder {
         pool: FramePool,
         threads: i32,
     ) -> Result<Self> {
+        Self::new_for_purpose(
+            input,
+            stream,
+            name,
+            pool,
+            threads,
+            crate::vt::DecodePurpose::Export,
+        )
+    }
+
+    /// Interactive VP9 uses slice threading. Frame threading queues later
+    /// pictures and pins additional reference buffers; a small viewer lease
+    /// repeatedly loses that state and seeks again. Export keeps its threads.
+    pub fn new_for_purpose(
+        input: &Input,
+        stream: usize,
+        name: Option<&str>,
+        pool: FramePool,
+        threads: i32,
+        purpose: crate::vt::DecodePurpose,
+    ) -> Result<Self> {
         unsafe {
             let par = input.par(stream);
             let codec = match name {
@@ -336,6 +357,12 @@ impl FfDecoder {
             }
             (*ctx).pkt_timebase = (*input.st(stream)).time_base;
             (*ctx).thread_count = threads;
+            if purpose == crate::vt::DecodePurpose::Display
+                && (*par).codec_id == ff::AV_CODEC_ID_VP9
+                && crate::decode::diag::knob("PM_ABL_VP9_FRAME_THREADS") != Some(1)
+            {
+                (*ctx).thread_type = ff::FF_THREAD_SLICE as i32;
+            }
             let op = Box::into_raw(Box::new(Opaque { pool: pool.clone() }));
             (*ctx).opaque = op as *mut c_void;
             (*ctx).get_format = Some(get_format);

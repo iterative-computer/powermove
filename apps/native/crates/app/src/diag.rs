@@ -18,6 +18,13 @@ fn start() -> Instant {
     *START.get_or_init(Instant::now)
 }
 
+/// Wall-clock milliseconds, to line these up with other processes' traces.
+fn wall_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
+}
+
 pub fn line(value: serde_json::Value) {
     if enabled() {
         let mut value = value;
@@ -26,6 +33,7 @@ pub fn line(value: serde_json::Value) {
                 "t".into(),
                 (start().elapsed().as_secs_f64() * 1000.).round().into(),
             );
+            map.insert("w".into(), wall_ms().into());
         }
         // A writer thread: stderr is a file, and a write that waited on a
         // busy disk held the main thread for a second (soak, 2026-11-09).

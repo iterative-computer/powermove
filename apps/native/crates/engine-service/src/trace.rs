@@ -18,6 +18,9 @@ pub struct Trace {
     pub count_work: bool,
     /// The render's work counters (`pm_perf`, the render thread's own).
     pub work: pm_perf::Counters,
+    /// Source presentation indices of stand-ins, in draw order (as in
+    /// `pm_render::Rendered::stand_ins`; zero can also denote a still).
+    pub source_stand_ins: Vec<usize>,
     pub drawable_asked: f64,
     pub drawable_acquired: f64,
     pub encode_end: f64,

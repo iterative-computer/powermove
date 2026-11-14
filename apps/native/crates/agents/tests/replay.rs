@@ -145,24 +145,25 @@ fn mcp(fixture: &Value) -> (Observations, Observations) {
     (expected, actual)
 }
 
-/// The integration's live MCP catalog is pinned main plus the two selected
-/// Studio contracts. Keep the tagged transcript immutable and its full delta
-/// visible, while requiring that delta to match these exact source inputs.
+/// The live MCP catalog is pinned main plus the native Studio, project, media
+/// and command contracts. Keep the tagged transcript immutable and its full
+/// delta visible, requiring that delta to match these exact source inputs.
 fn current_mcp_catalog(reference: &Observations) -> Observations {
     let main = include_bytes!("../../mcp/fixtures/catalog-main-c7f46a056.json");
-    let studio = include_bytes!("../../mcp/fixtures/scene3d-source-catalog.json");
     assert_eq!(
         replay::sha256(main),
         "8e0ae6094bd7149703ba9a49aec8e334fd21b1d58d75c4d72494fccd1a8ddddd"
     );
-    assert_eq!(
-        replay::sha256(studio),
-        "c5c11bcbda88e89ccdd01b9ddad75787a3495f1b2cec04b084298b8b91b5c5e1"
-    );
     let mut catalog: Value = serde_json::from_slice(main).unwrap();
-    let studio: Value = serde_json::from_slice(studio).unwrap();
-    assert_eq!(studio["tools"].as_array().unwrap().len(), 2);
-    for replacement in studio["tools"].as_array().unwrap() {
+    // Independently pin every source contract; never derive expected output
+    // from the implementation being tested or loosen the transport comparison.
+    let source = include_bytes!("../../mcp/fixtures/studio3d-native-catalog.json");
+    assert_eq!(
+        replay::sha256(source),
+        "573e05f3a51d1bbebf033924526f63fc034fac705e911a7f404cc031d1ad675f"
+    );
+    let source: Value = serde_json::from_slice(source).unwrap();
+    for replacement in source["tools"].as_array().unwrap() {
         let tool = catalog["tools"]
             .as_array_mut()
             .unwrap()
@@ -171,6 +172,46 @@ fn current_mcp_catalog(reference: &Observations) -> Observations {
             .unwrap();
         *tool = replacement.clone();
     }
+    let source = include_bytes!("../../mcp/fixtures/project-native-catalog.json");
+    assert_eq!(
+        replay::sha256(source),
+        "09cc13cd70c2fa65a361eed1f6558cc168239af8f5de635a5569f34914fd6cbf"
+    );
+    let source: Value = serde_json::from_slice(source).unwrap();
+    for replacement in source["tools"].as_array().unwrap() {
+        let tool = catalog["tools"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|tool| tool["name"] == replacement["name"])
+            .unwrap();
+        *tool = replacement.clone();
+    }
+    let source = include_bytes!("../../mcp/fixtures/media-native-catalog.json");
+    assert_eq!(
+        replay::sha256(source),
+        "efcb76e37c4072ecf7a28971dc1b901fa9d7b021da64bab632ccab65fa40dd22"
+    );
+    let source: Value = serde_json::from_slice(source).unwrap();
+    for replacement in source["tools"].as_array().unwrap() {
+        let tool = catalog["tools"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|tool| tool["name"] == replacement["name"])
+            .unwrap();
+        *tool = replacement.clone();
+    }
+    let source = include_bytes!("../../mcp/fixtures/native-tools.json");
+    assert_eq!(
+        replay::sha256(source),
+        "b6137e1e42bedfc3c5d60d27c5890990d5f0272adaae228af1fb5cdda422fbad"
+    );
+    let source: Value = serde_json::from_slice(source).unwrap();
+    catalog["tools"]
+        .as_array_mut()
+        .unwrap()
+        .extend(source.as_array().unwrap().iter().cloned());
     let mut expected = Observations {
         wire: reference.wire.clone(),
         events: reference.events.clone(),

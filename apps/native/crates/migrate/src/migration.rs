@@ -28,6 +28,12 @@ use std::{
 #[serde(rename_all = "camelCase")]
 pub struct KeyRecord {
     pub key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_blake3: Option<String>,
     pub hash: String,
     pub size: u64,
     #[serde(rename = "type")]
@@ -789,14 +795,19 @@ fn import_empty(root: &Path, key: &str, mime: &str, revision: Option<&str>) -> R
         },
     )
 }
-struct ImportInfo<'a> {
-    key: &'a str,
-    mime: &'a str,
-    revision: Option<&'a str>,
-    at: Option<f64>,
-    expected: Option<&'a str>,
+pub(crate) struct ImportInfo<'a> {
+    pub(crate) key: &'a str,
+    pub(crate) mime: &'a str,
+    pub(crate) revision: Option<&'a str>,
+    pub(crate) at: Option<f64>,
+    pub(crate) expected: Option<&'a str>,
 }
-fn import_file(root: &Path, source: &Path, size: u64, info: ImportInfo<'_>) -> Result<KeyRecord> {
+pub(crate) fn import_file(
+    root: &Path,
+    source: &Path,
+    size: u64,
+    info: ImportInfo<'_>,
+) -> Result<KeyRecord> {
     let ImportInfo {
         key,
         mime,
@@ -804,7 +815,10 @@ fn import_file(root: &Path, source: &Path, size: u64, info: ImportInfo<'_>) -> R
         at,
         expected,
     } = info;
-    check_space(root, size)?;
+    // A same-volume APFS import is a clone; a streamed copy checks space itself.
+    if !crate::snapshot::clone_volume(source, root) {
+        check_space(root, size)?;
+    }
     let (hash, read_size) = hash_file_counted(source)?;
     ensure!(read_size == size, "source length changed");
     if let Some(expected) = expected {
@@ -830,6 +844,9 @@ fn import_file(root: &Path, source: &Path, size: u64, info: ImportInfo<'_>) -> R
     }
     let record = KeyRecord {
         key: key.into(),
+        path: None,
+        sha256: None,
+        expected_blake3: None,
         hash: hash.clone(),
         size,
         mime: mime.into(),

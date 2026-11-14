@@ -655,6 +655,55 @@ fn an_effect_still_loading_is_waited_for_never_bypassed() {
     );
 }
 
+/// A frame that waited long for an extension's effect is drawn the moment the
+/// effect registers, not after the backoff its retries reached (up to a
+/// second; it delayed the first picture of a project with extension effects).
+#[test]
+fn a_frame_waiting_for_an_effect_draws_the_moment_it_registers() {
+    let tinted = snapshot(&format!(
+        r##"{{"id":"P","name":"P","compId":"C","compName":"C","w":640,"h":360,"fps":30,"dur":3,"bg":"#000000",
+        "layers":[{}],"comps":{{}},"assets":{{}},"markers":[],"work":[0,3],"params":{{}}}}"##,
+        shape("top", "#FF0000", 320.).replace(
+            r#""fx":[]"#,
+            r#""fx":[{"id":"e1","type":"ext.invert","on":true,"p":{}}]"#
+        )
+    ));
+    let service = service("effect-lands");
+    let v = service
+        .viewer(config(tinted, MediaCatalog::default(), output(320, 180)))
+        .unwrap();
+    let snapshot = |generation, definitions| {
+        Arc::new(pm_engine_service::resources::ResourceSnapshot {
+            generation,
+            definitions,
+            pending: true,
+            loading: vec![("ext".into(), "Acme Effects".into())],
+            ..Default::default()
+        })
+    };
+    v.resources(snapshot(1, vec![])).unwrap();
+    // The wait line appears on a refusal some seconds in: its retries are a
+    // second apart by now, and one has just been made.
+    wait(&v, "the wait named", |s| s.error.is_some());
+    let mut invert = pm_render::all_builtin_definitions()
+        .definitions
+        .into_iter()
+        .find(|d| d.id.as_str() == "invert")
+        .unwrap();
+    invert.id = "ext.invert".into();
+    invert.origin = pm_protocol::definitions::DefinitionOrigin::Local;
+    let registered = Instant::now();
+    v.resources(snapshot(2, vec![invert])).unwrap();
+    wait(&v, "the effect registered", |s| {
+        s.frame.as_ref().is_some_and(|f| f.gpu_ok)
+    });
+    assert!(
+        registered.elapsed() < Duration::from_millis(400),
+        "drawn {:?} after the effect registered",
+        registered.elapsed()
+    );
+}
+
 /// Every viewer of a window (the editor's, a popped-out one) follows the
 /// window's extensions as they are now: one opened while an effect loads draws
 /// it once it registers instead of keeping its first snapshot forever, and

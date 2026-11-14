@@ -913,12 +913,15 @@ fn layer_param(param: &Value) -> Option<pm_panel_inspector::LayerParam> {
     })
 }
 
-/// Settings › Media's fact (rows, storage use, folders) changes the Settings
-/// publication: it has no revision of its own, so its content is the stamp.
+/// Settings › Media's and › Storage's facts (rows, storage use, folders) change
+/// the Settings publication: they have no revision of their own, so their
+/// content is the stamp.
 fn media_stamp(facts: &Value) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hash = std::collections::hash_map::DefaultHasher::new();
     facts["mediaSettings"].to_string().hash(&mut hash);
+    // Settings › Storage: a new measurement or a removal redraws its rows.
+    facts["storageSettings"].to_string().hash(&mut hash);
     // Settings › General › Timeline › Hover to Scrub follows View ▸ Skimming.
     facts["skimming"].as_bool().hash(&mut hash);
     // Settings › Shortcuts: its page is rebuilt with a new stamp.

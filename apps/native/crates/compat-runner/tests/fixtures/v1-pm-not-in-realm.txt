@@ -68,7 +68,6 @@ captionsHidden
 closeWindow
 cmd
 colorField
-commandForAsset
 commands
 confirmCloseProject
 dismissToast

@@ -158,15 +158,7 @@ fn every_change_in_the_original_app_comes_in_unrenamed_and_the_source_stays() {
             .is_err(),
         "shared extension copies stay sealed after a merge"
     );
-    assert_eq!(
-        fs::read(
-            config
-                .native_profile
-                .join("Agent Workspaces/synthetic/artifacts/result.txt")
-        )
-        .unwrap(),
-        b"later synthetic result"
-    );
+    assert!(!config.native_profile.join("Agent Workspaces").exists());
     let entries = local_storage(&config);
     assert_eq!(entries.as_array().unwrap().len(), 1);
     assert_eq!(entries[0]["key"], "pm.later");
@@ -215,6 +207,7 @@ fn native_work_stays_and_a_change_on_both_sides_keeps_both() {
     let native_ext = config.native_profile.join("store/ext.synthetic.json");
     fs::write(&native_ext, br#"{"count":7,"unknown":true,"nativeOnly":1}"#).unwrap();
     let artifact = "Agent Workspaces/synthetic/artifacts/result.txt";
+    fs::create_dir_all(config.native_profile.join(artifact).parent().unwrap()).unwrap();
     fs::write(config.native_profile.join(artifact), b"native artifact").unwrap();
     fs::write(config.electron_profile.join(artifact), b"original artifact").unwrap();
 
@@ -246,13 +239,14 @@ fn native_work_stays_and_a_change_on_both_sides_keeps_both() {
             .iter()
             .any(|c| c.kind == ConflictKind::Setting && c.id == "theme")
     );
-    assert!(conflicts.iter().any(|c| c.kind == ConflictKind::File));
+    assert!(!conflicts.iter().any(|c| c.kind == ConflictKind::File));
+    assert_eq!(
+        fs::read(config.native_profile.join(artifact)).unwrap(),
+        b"native artifact"
+    );
     let base = state(&config).delta_base.unwrap();
     let delta_dir = config.native_profile.join("first-launch-deltas").join(base);
-    assert_eq!(
-        fs::read(delta_dir.join("profile").join(artifact)).unwrap(),
-        b"original artifact"
-    );
+    assert!(!delta_dir.join("profile").join(artifact).exists());
     let rows = report::load(&config.native_profile).unwrap();
     assert_eq!(
         rows.sections()[&ReportKind::Conflicts].len(),

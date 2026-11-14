@@ -500,6 +500,10 @@ struct View {
     /// Override answers of its document landed since the worker last
     /// looked.
     answers: bool,
+    /// What a refused picture waited for may have landed (override answers,
+    /// new definitions): it is tried again at once, not after the backoff
+    /// its retries reached.
+    retry_now: bool,
     skim_audio: Option<bool>,
     media_mode: MediaMode,
     paths: Arc<pm_export::render::MediaPaths>,
@@ -1196,6 +1200,7 @@ impl Viewer {
         v.stamp.sequence += 1;
         bump_site(line!(), "");
         v.dirty = true;
+        v.retry_now = true;
         // What a held frame said it was waiting for may be over: its line
         // goes now, not when the next frame finally lands (a frame still
         // waiting says for what on its next try).
@@ -1428,6 +1433,7 @@ impl EngineService {
                 for v in state.views.values_mut() {
                     if v.stamp.doc_id == doc_id {
                         v.answers = true;
+                        v.retry_now = true;
                         v.dirty |= every;
                     }
                 }
@@ -1585,6 +1591,7 @@ impl EngineService {
                 skim_rate: pm_protocol::common::PlaybackRate::NORMAL,
                 skim_moved: false,
                 answers: false,
+                retry_now: false,
                 skim_audio: None,
                 media_mode: MediaMode::default(),
                 paths,
@@ -1635,6 +1642,8 @@ struct Runtime {
     grid: Option<(f64, f64)>,
     /// Refreshes ahead of the target at which a playing frame is encoded.
     ahead: f64,
+    /// The content frame at the playing speed (s), for Auto's playback rule.
+    content_frame: f64,
     /// Stamp/time already submitted. Repeating identical pixels at the
     /// display rate only queues more drawables behind the compositor.
     last: Option<(Stamp, Ticks)>,
@@ -1663,6 +1672,9 @@ struct Runtime {
     /// A clock that stops on its own still owes the exact stopped frame.
     was_playing: bool,
     auto: policy::AutoQuality,
+    /// A playing frame at reduced resolution was just held for extension
+    /// layers (Auto plays the next at full resolution).
+    held_for_overrides: bool,
     /// A transient refusal: draw again no earlier than this.
     not_before: f64,
     /// Frames in a row the layer gave no drawable (`nextDrawable` returned
@@ -1788,6 +1800,9 @@ struct SettleAsk {
     mastering: color::Mastering,
     resources: Arc<resources::ResourceSnapshot>,
 }
+/// The longest lead of a playing frame, in refreshes (50 ms at 120 Hz):
+/// what an edit made while playing waits at most before it is drawn.
+const MAX_LEAD_REFRESHES: f64 = 6.;
 /// A jump of more frames than this (2 s at 24 fps) between played frames
 /// is a seek, not a stall; a short seek taken for one only renders more.
 const DROPS_AT_MOST: i64 = 48;
@@ -1844,7 +1859,7 @@ fn ask_ahead(
         return;
     }
     let speed = rate.num as f64 / rate.den.max(1) as f64;
-    let Some((lead, frames)) = store.ahead(spec.time.get(), speed) else {
+    let Some((lead, frames)) = store.ahead(spec.time.get(), speed, spec.scale) else {
         return;
     };
     let step = frame * i64::from(rate.num.signum());
@@ -2384,6 +2399,12 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                     };
                     r.auto.record_still(cost, r.interval * 1000., f.spec.scale);
                 }
+                // A playing frame drawn here (not read from either cache).
+                if t.gpu_ok && !t.cache_hit && t.disk != 2 && f.spec.moment == Moment::Playing {
+                    let cost = (t.completed - t.worker_start) * 1000.;
+                    r.auto
+                        .record_play(cost, r.content_frame * 1000., f.spec.scale);
+                }
                 // Frames skipped between two played ones at normal speed
                 // didn't play in real time: background rendering renders
                 // them.
@@ -2429,6 +2450,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                         serde_json::json!({
                             "interval": r.map(|r| r.interval), "ahead": r.map(|r| r.ahead),
                             "stand_ins": f.submission.stand_ins, "late_layers": f.late_layers,
+                            "source_stand_ins": t.source_stand_ins,
                             "skipped_targets": v.status.skipped_targets, "held_frames": v.status.held_frames,
                             "render_gpu_ms": render_gpu_ms,
                             "picture": traced_picture
@@ -2770,6 +2792,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                     last: None,
                     represented: None,
                     ahead: 1.,
+                    content_frame: 0.,
                     scrub: false,
                     stand_in: None,
                     refine_at: None,
@@ -2778,6 +2801,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                     full_for: None,
                     was_playing: false,
                     auto: Default::default(),
+                    held_for_overrides: false,
                     not_before: 0.,
                     drawable_misses: 0,
                     refusals: 0,
@@ -2893,17 +2917,23 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             if flights.len() >= 3 || flights.iter().filter(|f| f.id == id).count() >= 3 {
                 continue;
             }
-            // Encode two refreshes ahead while playing: WindowServer misses
-            // the vsync when GPU completion lands within ~2 ms of target.
-            // Only when content changes at most every other refresh: each
-            // drawable is then held about one refresh longer, which three
-            // drawables absorb at half rate but not at the full refresh rate.
+            // A playing frame starts a whole content frame before its vsync
+            // (24 fps at 120 Hz: five refreshes), so one that takes most of
+            // its content frame still lands on its own refresh; the timed
+            // present holds a finished frame in the layer until then, so
+            // pictures land on the refresh grid at the content's cadence.
+            // At least two refreshes when content changes at most every
+            // other refresh (WindowServer misses the vsync when GPU
+            // completion lands within ~2 ms of it): a drawable waits then
+            // at most one content frame, which three drawables absorb at
+            // one picture per content frame but not at the refresh rate.
             let speed = sample.rate.num.unsigned_abs() as f64 / sample.rate.den.max(1) as f64;
             let frame = v.config.rate.exact_frame_ticks().unwrap_or(1) as f64
                 / pm_protocol::common::TICKS_PER_SECOND as f64
                 / speed.max(1e-6);
+            r.content_frame = frame;
             r.ahead = if !legacy && frame >= 1.99 * interval {
-                2.
+                (frame / interval + 1e-3).floor().clamp(2., MAX_LEAD_REFRESHES)
             } else {
                 1.
             };
@@ -2927,6 +2957,9 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 v.stamp.sequence += 1;
                 bump_site(line!(), "");
                 v.dirty = true;
+            }
+            if std::mem::take(&mut v.retry_now) {
+                r.not_before = r.not_before.min(now);
             }
             // Override answers landed for this viewer's document. A picture
             // that waits for them (refused, drawn with a stand-in, or not
@@ -3065,6 +3098,11 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             let budget = frame.max(interval);
             let full = FrameSpec::paused_full_scale(&scene, &v.config.output);
             let settling = r.full_for == Some(v.stamp);
+            // Extension layers ahead play at full resolution (Auto).
+            r.auto.overrides(
+                engine.compat().is_some_and(|s| s.overrides_ahead()) || r.held_for_overrides,
+            );
+            r.held_for_overrides = false;
             let quality = if capture {
                 1.
             } else {
@@ -3534,7 +3572,25 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                                 },
                             )
                         });
-                        if let (Some(needs), Some(store)) = (pending.clone(), engine.compat()) {
+                        if spec.moment == Moment::Playing && pending.is_some() && spec.scale < 1. {
+                            // Override answers are per resolution: at a
+                            // reduced one there is no earlier answer to draw
+                            // these layers from, so playback goes back to full.
+                            if let Some(r) = runtime.get_mut(&id) {
+                                r.held_for_overrides = true;
+                            }
+                        }
+                        if spec.moment == Moment::Playing && pending.is_some() {
+                            // A playing frame held for its override layers
+                            // is gone by when they land: the realm is asked
+                            // ahead of the playhead at this frame's scale, so
+                            // the frames that follow find their answers (it
+                            // asked nothing new while no frame was drawn).
+                            let rate = runtime.get(&id).map(|r| r.transport.rate());
+                            ask_ahead(&mut engine, &shared.disk, &scene, spec, rate);
+                        } else if let (Some(needs), Some(store)) =
+                            (pending.clone(), engine.compat())
+                        {
                             store.request(needs);
                             if let Some(ahead) = ahead {
                                 store.request_behind(ahead);
@@ -5746,6 +5802,47 @@ mod worker_tests {
         assert!(
             !asked.lock().unwrap().is_empty(),
             "the layers were asked for"
+        );
+        v.retire();
+    }
+
+    /// A picture that waited long for its override layers is drawn the moment
+    /// their answers land, not after the backoff its retries reached (up to a
+    /// second: twice that on a project's first picture, as each load step's
+    /// new wrappers asked again).
+    #[test]
+    fn a_picture_waiting_for_its_layers_draws_the_moment_they_are_answered() {
+        let service = EngineService::start(pm_gpu::Gpu::new("answers-land-test").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        wait_for(&v, "a first frame", |s| {
+            s.frame.as_ref().is_some_and(|f| f.gpu_ok)
+        });
+        let (store, asked) = overridden(&service, &v);
+        v.scrub(seconds(2.)).unwrap();
+        // The wait line appears on a refusal some seconds in: retries are a
+        // second apart by now, and one has just been made.
+        wait_for(&v, "the wait line", |s| s.error.is_some());
+        let needs: Vec<_> = std::mem::take(&mut *asked.lock().unwrap());
+        assert!(!needs.is_empty(), "the layers were asked for");
+        let stamp = v.stamp().unwrap();
+        let answered = std::time::Instant::now();
+        store.answer_all(
+            1,
+            1,
+            needs
+                .into_iter()
+                .map(|n| (n, compat::Reply::Draw(compat::hidden_raster())))
+                .collect(),
+        );
+        wait_for(&v, "the answered picture", |s| {
+            s.frame
+                .as_ref()
+                .is_some_and(|f| f.gpu_ok && f.stamp == stamp)
+        });
+        assert!(
+            answered.elapsed() < Duration::from_millis(400),
+            "drawn {:?} after its answers landed",
+            answered.elapsed()
         );
         v.retire();
     }

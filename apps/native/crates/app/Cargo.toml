@@ -62,6 +62,7 @@ pm-panel-media = { path = "../panel-media" }
 pm-panel-studio3d = { path = "../panel-studio3d" }
 pm-scene3d = { path = "../scene3d" }
 pm-first-launch = { path = "../first-launch" }
+pm-native-migrate = { path = "../migrate" }
 pm-services = { path = "../services" }
 pm-captions = { path = "../../../../engine/crates/pm-captions" }
 pm-transcribe = { path = "../transcribe" }

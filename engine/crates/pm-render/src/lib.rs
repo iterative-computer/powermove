@@ -45,6 +45,7 @@ pub mod parity;
 mod pipelines;
 pub mod plan;
 mod renderer;
+mod raster_roi;
 mod request;
 pub mod retime;
 pub mod reuse;
