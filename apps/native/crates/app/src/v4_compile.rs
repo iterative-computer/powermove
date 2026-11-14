@@ -212,6 +212,7 @@ pub struct NodeView {
     pub timeline_scrub: Option<(SharedString, SharedString)>,
     /// The timeline's layer name: a press there can lift into a reorder.
     pub timeline_layer_drag: Option<SharedString>,
+    pub timeline_parent_pick: Option<SharedString>,
     pub outline_column: bool,
     pub outline_first: Option<SharedString>,
     pub outline_window: Option<(usize, usize)>,
@@ -834,6 +835,11 @@ fn compile(
                 SharedString::from(t.get("path")?.as_str()?.to_owned()),
             ))
         }),
+        timeline_parent_pick: meta
+            .and_then(|m| m.get("timelineParentPick"))
+            .and_then(|t| t.get("layer"))
+            .and_then(Value::as_str)
+            .map(|layer| SharedString::from(layer.to_owned())),
         timeline_layer_drag: meta
             .and_then(|m| m.get("timelineLayerDrag"))
             .and_then(|t| t.get("layer"))

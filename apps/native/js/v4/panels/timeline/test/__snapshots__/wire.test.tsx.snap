@@ -1388,6 +1388,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "metadata": {
                                       "designTodo": "T1",
                                       "requiredSymbol": "link",
+                                      "timelineParentPick": {
+                                        "layer": "headline",
+                                      },
                                     },
                                     "style": {
                                       "color": {
@@ -2210,6 +2213,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "metadata": {
                                       "designTodo": "T1",
                                       "requiredSymbol": "link",
+                                      "timelineParentPick": {
+                                        "layer": "headline",
+                                      },
                                     },
                                     "style": {
                                       "color": {
@@ -3045,6 +3051,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "metadata": {
                                       "designTodo": "T1",
                                       "requiredSymbol": "link",
+                                      "timelineParentPick": {
+                                        "layer": "headline",
+                                      },
                                     },
                                     "style": {
                                       "color": {
@@ -3880,6 +3889,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "metadata": {
                                       "designTodo": "T1",
                                       "requiredSymbol": "link",
+                                      "timelineParentPick": {
+                                        "layer": "headline",
+                                      },
                                     },
                                     "style": {
                                       "color": {
@@ -4712,6 +4724,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "metadata": {
                                       "designTodo": "T1",
                                       "requiredSymbol": "link",
+                                      "timelineParentPick": {
+                                        "layer": "headline",
+                                      },
                                     },
                                     "style": {
                                       "color": {
@@ -5783,6 +5798,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "metadata": {
                                       "designTodo": "T1",
                                       "requiredSymbol": "link",
+                                      "timelineParentPick": {
+                                        "layer": "headline",
+                                      },
                                     },
                                     "style": {
                                       "color": {
@@ -6657,6 +6675,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "metadata": {
                                       "designTodo": "T1",
                                       "requiredSymbol": "link",
+                                      "timelineParentPick": {
+                                        "layer": "headline",
+                                      },
                                     },
                                     "style": {
                                       "color": {
@@ -7498,6 +7519,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "metadata": {
                                       "designTodo": "T1",
                                       "requiredSymbol": "link",
+                                      "timelineParentPick": {
+                                        "layer": "headline",
+                                      },
                                     },
                                     "style": {
                                       "color": {
@@ -7785,6 +7809,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "metadata": {
                                       "designTodo": "T1",
                                       "requiredSymbol": "link",
+                                      "timelineParentPick": {
+                                        "layer": "kicker",
+                                      },
                                     },
                                     "style": {
                                       "color": {
@@ -8618,6 +8645,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "metadata": {
                                       "designTodo": "T1",
                                       "requiredSymbol": "link",
+                                      "timelineParentPick": {
+                                        "layer": "headline",
+                                      },
                                     },
                                     "style": {
                                       "color": {
@@ -9440,6 +9470,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "metadata": {
                                       "designTodo": "T1",
                                       "requiredSymbol": "link",
+                                      "timelineParentPick": {
+                                        "layer": "row-29990",
+                                      },
                                     },
                                     "style": {
                                       "color": {
@@ -9724,6 +9757,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "metadata": {
                                       "designTodo": "T1",
                                       "requiredSymbol": "link",
+                                      "timelineParentPick": {
+                                        "layer": "row-29991",
+                                      },
                                     },
                                     "style": {
                                       "color": {
@@ -10008,6 +10044,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "metadata": {
                                       "designTodo": "T1",
                                       "requiredSymbol": "link",
+                                      "timelineParentPick": {
+                                        "layer": "row-29992",
+                                      },
                                     },
                                     "style": {
                                       "color": {
@@ -10292,6 +10331,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "metadata": {
                                       "designTodo": "T1",
                                       "requiredSymbol": "link",
+                                      "timelineParentPick": {
+                                        "layer": "row-29993",
+                                      },
                                     },
                                     "style": {
                                       "color": {
@@ -10576,6 +10618,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "metadata": {
                                       "designTodo": "T1",
                                       "requiredSymbol": "link",
+                                      "timelineParentPick": {
+                                        "layer": "row-29994",
+                                      },
                                     },
                                     "style": {
                                       "color": {
@@ -10860,6 +10905,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "metadata": {
                                       "designTodo": "T1",
                                       "requiredSymbol": "link",
+                                      "timelineParentPick": {
+                                        "layer": "row-29995",
+                                      },
                                     },
                                     "style": {
                                       "color": {
@@ -11144,6 +11192,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "metadata": {
                                       "designTodo": "T1",
                                       "requiredSymbol": "link",
+                                      "timelineParentPick": {
+                                        "layer": "row-29996",
+                                      },
                                     },
                                     "style": {
                                       "color": {
@@ -11428,6 +11479,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "metadata": {
                                       "designTodo": "T1",
                                       "requiredSymbol": "link",
+                                      "timelineParentPick": {
+                                        "layer": "row-29997",
+                                      },
                                     },
                                     "style": {
                                       "color": {
@@ -11712,6 +11766,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "metadata": {
                                       "designTodo": "T1",
                                       "requiredSymbol": "link",
+                                      "timelineParentPick": {
+                                        "layer": "row-29998",
+                                      },
                                     },
                                     "style": {
                                       "color": {
@@ -11996,6 +12053,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "metadata": {
                                       "designTodo": "T1",
                                       "requiredSymbol": "link",
+                                      "timelineParentPick": {
+                                        "layer": "row-29999",
+                                      },
                                     },
                                     "style": {
                                       "color": {
@@ -12280,6 +12340,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "metadata": {
                                       "designTodo": "T1",
                                       "requiredSymbol": "link",
+                                      "timelineParentPick": {
+                                        "layer": "row-30000",
+                                      },
                                     },
                                     "style": {
                                       "color": {
@@ -12564,6 +12627,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "metadata": {
                                       "designTodo": "T1",
                                       "requiredSymbol": "link",
+                                      "timelineParentPick": {
+                                        "layer": "row-30001",
+                                      },
                                     },
                                     "style": {
                                       "color": {
@@ -12848,6 +12914,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "metadata": {
                                       "designTodo": "T1",
                                       "requiredSymbol": "link",
+                                      "timelineParentPick": {
+                                        "layer": "row-30002",
+                                      },
                                     },
                                     "style": {
                                       "color": {
@@ -13132,6 +13201,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "metadata": {
                                       "designTodo": "T1",
                                       "requiredSymbol": "link",
+                                      "timelineParentPick": {
+                                        "layer": "row-30003",
+                                      },
                                     },
                                     "style": {
                                       "color": {
@@ -13416,6 +13488,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "metadata": {
                                       "designTodo": "T1",
                                       "requiredSymbol": "link",
+                                      "timelineParentPick": {
+                                        "layer": "row-30004",
+                                      },
                                     },
                                     "style": {
                                       "color": {
@@ -13700,6 +13775,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "metadata": {
                                       "designTodo": "T1",
                                       "requiredSymbol": "link",
+                                      "timelineParentPick": {
+                                        "layer": "row-30005",
+                                      },
                                     },
                                     "style": {
                                       "color": {
@@ -13984,6 +14062,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "metadata": {
                                       "designTodo": "T1",
                                       "requiredSymbol": "link",
+                                      "timelineParentPick": {
+                                        "layer": "row-30006",
+                                      },
                                     },
                                     "style": {
                                       "color": {
@@ -14268,6 +14349,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "metadata": {
                                       "designTodo": "T1",
                                       "requiredSymbol": "link",
+                                      "timelineParentPick": {
+                                        "layer": "row-30007",
+                                      },
                                     },
                                     "style": {
                                       "color": {
@@ -14552,6 +14636,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "metadata": {
                                       "designTodo": "T1",
                                       "requiredSymbol": "link",
+                                      "timelineParentPick": {
+                                        "layer": "row-30008",
+                                      },
                                     },
                                     "style": {
                                       "color": {
@@ -14836,6 +14923,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "metadata": {
                                       "designTodo": "T1",
                                       "requiredSymbol": "link",
+                                      "timelineParentPick": {
+                                        "layer": "row-30009",
+                                      },
                                     },
                                     "style": {
                                       "color": {
@@ -15120,6 +15210,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "metadata": {
                                       "designTodo": "T1",
                                       "requiredSymbol": "link",
+                                      "timelineParentPick": {
+                                        "layer": "row-30010",
+                                      },
                                     },
                                     "style": {
                                       "color": {
@@ -15404,6 +15497,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "metadata": {
                                       "designTodo": "T1",
                                       "requiredSymbol": "link",
+                                      "timelineParentPick": {
+                                        "layer": "row-30011",
+                                      },
                                     },
                                     "style": {
                                       "color": {
@@ -15688,6 +15784,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "metadata": {
                                       "designTodo": "T1",
                                       "requiredSymbol": "link",
+                                      "timelineParentPick": {
+                                        "layer": "row-30012",
+                                      },
                                     },
                                     "style": {
                                       "color": {
@@ -15972,6 +16071,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "metadata": {
                                       "designTodo": "T1",
                                       "requiredSymbol": "link",
+                                      "timelineParentPick": {
+                                        "layer": "row-30013",
+                                      },
                                     },
                                     "style": {
                                       "color": {
@@ -16256,6 +16358,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "metadata": {
                                       "designTodo": "T1",
                                       "requiredSymbol": "link",
+                                      "timelineParentPick": {
+                                        "layer": "row-30014",
+                                      },
                                     },
                                     "style": {
                                       "color": {
@@ -16540,6 +16645,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "metadata": {
                                       "designTodo": "T1",
                                       "requiredSymbol": "link",
+                                      "timelineParentPick": {
+                                        "layer": "row-30015",
+                                      },
                                     },
                                     "style": {
                                       "color": {
@@ -16824,6 +16932,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "metadata": {
                                       "designTodo": "T1",
                                       "requiredSymbol": "link",
+                                      "timelineParentPick": {
+                                        "layer": "row-30016",
+                                      },
                                     },
                                     "style": {
                                       "color": {
@@ -17108,6 +17219,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "metadata": {
                                       "designTodo": "T1",
                                       "requiredSymbol": "link",
+                                      "timelineParentPick": {
+                                        "layer": "row-30017",
+                                      },
                                     },
                                     "style": {
                                       "color": {
@@ -17392,6 +17506,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "metadata": {
                                       "designTodo": "T1",
                                       "requiredSymbol": "link",
+                                      "timelineParentPick": {
+                                        "layer": "row-30018",
+                                      },
                                     },
                                     "style": {
                                       "color": {
@@ -17676,6 +17793,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "metadata": {
                                       "designTodo": "T1",
                                       "requiredSymbol": "link",
+                                      "timelineParentPick": {
+                                        "layer": "row-30019",
+                                      },
                                     },
                                     "style": {
                                       "color": {
@@ -18528,6 +18648,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "metadata": {
                                       "designTodo": "T1",
                                       "requiredSymbol": "link",
+                                      "timelineParentPick": {
+                                        "layer": "headline",
+                                      },
                                     },
                                     "style": {
                                       "color": {
@@ -19380,6 +19503,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "metadata": {
                                       "designTodo": "T1",
                                       "requiredSymbol": "link",
+                                      "timelineParentPick": {
+                                        "layer": "headline",
+                                      },
                                     },
                                     "style": {
                                       "color": {
@@ -20952,6 +21078,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "metadata": {
                                       "designTodo": "T1",
                                       "requiredSymbol": "link",
+                                      "timelineParentPick": {
+                                        "layer": "headline",
+                                      },
                                     },
                                     "style": {
                                       "color": {
@@ -21867,6 +21996,9 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     "metadata": {
                                       "designTodo": "T1",
                                       "requiredSymbol": "link",
+                                      "timelineParentPick": {
+                                        "layer": "headline",
+                                      },
                                     },
                                     "style": {
                                       "color": {

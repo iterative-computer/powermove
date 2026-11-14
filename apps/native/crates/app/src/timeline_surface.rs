@@ -230,6 +230,13 @@ struct Press {
     release: Option<Job>,
 }
 enum Gesture {
+    ParentPick {
+        ids: Vec<String>,
+        origin: Point<Pixels>,
+        at: Point<Pixels>,
+        target: Option<String>,
+        moved: bool,
+    },
     Idle,
     Pressed(Press),
     Dragging {
@@ -1725,6 +1732,94 @@ impl TimelineSurface {
         self.clamp_scroll();
         self.changed(false, cx);
     }
+    pub fn press_parent(&mut self, layer: String, origin: Point<Pixels>) {
+        let selected = self.model.selection.layers();
+        let ids = if selected.contains(&layer) {
+            selected.to_vec()
+        } else {
+            vec![layer]
+        };
+        let ids: Vec<_> = ids
+            .into_iter()
+            .filter(|id| {
+                self.model
+                    .index
+                    .layer(id)
+                    .is_some_and(|l| !l.effectively_locked && l.kind != "audio")
+            })
+            .collect();
+        if !ids.is_empty() {
+            self.gesture = Gesture::ParentPick {
+                ids,
+                origin,
+                at: origin,
+                target: None,
+                moved: false,
+            };
+        }
+    }
+    fn parent_target(&self, ids: &[String], position: Point<Pixels>) -> Option<String> {
+        if !self.bounds.contains(&position) {
+            return None;
+        }
+        let (_, y) = self.local(position);
+        let frame = self.frame.as_ref()?;
+        let row = self
+            .scene
+            .as_ref()?
+            .layer_row_at(frame.viewport, &self.tokens, y)?;
+        let RowId::Layer(id) = pm_panel_timeline::v4::parse_row(&row.id).ok()? else {
+            return None;
+        };
+        // v1 wouldCycle also rejects an ancestor group, and a group's descendants.
+        let ancestors = |start: &str| {
+            let mut result = BTreeSet::new();
+            let mut at = self
+                .model
+                .index
+                .layer(start)
+                .and_then(|l| l.group.as_deref());
+            while let Some(group) = at {
+                if !result.insert(group.to_owned()) {
+                    break;
+                }
+                at = self
+                    .model
+                    .index
+                    .layer(group)
+                    .and_then(|l| l.group.as_deref());
+            }
+            result
+        };
+        if ids.iter().any(|child| ancestors(child).contains(&id)) {
+            return None;
+        }
+        let mut candidate = Some(id.as_str());
+        let mut seen = BTreeSet::new();
+        if self.model.index.layer(&id)?.kind == "audio" {
+            return None;
+        }
+        while let Some(parent) = candidate {
+            if ids.iter().any(|child| child == parent) || !seen.insert(parent) {
+                return None;
+            }
+            if ids.iter().any(|child| {
+                self.model
+                    .index
+                    .layer(child)
+                    .is_some_and(|l| l.kind == "group")
+                    && ancestors(parent).contains(child)
+            }) {
+                return None;
+            }
+            candidate = self
+                .model
+                .index
+                .layer(parent)
+                .and_then(|l| l.parent.as_deref());
+        }
+        Some(id)
+    }
     pub fn press_property(&mut self, layer: String, path: String, origin: Point<Pixels>) {
         self.gesture = Gesture::Pressed(Press {
             origin,
@@ -1881,6 +1976,24 @@ impl TimelineSurface {
     fn on_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) -> bool {
         if self.graph_grab.is_some() && matches!(self.gesture, Gesture::Dragging { .. }) {
             self.graph_at = Some(event.position);
+        }
+        if let Gesture::ParentPick { ids, origin, .. } = &self.gesture {
+            let target = self.parent_target(ids, event.position);
+            let delta = event.position - *origin;
+            let travel = f32::from(delta.x).hypot(f32::from(delta.y));
+            if let Gesture::ParentPick {
+                at,
+                target: next,
+                moved,
+                ..
+            } = &mut self.gesture
+            {
+                *at = event.position;
+                *next = target;
+                *moved |= travel >= self.tokens.metrics.panel_drag_threshold;
+            }
+            cx.notify();
+            return true;
         }
         let held = match self.gesture {
             Gesture::Zoom => Some((Part::Zoom, 0.)),
@@ -2131,6 +2244,22 @@ impl TimelineSurface {
         (self.graph_grab, self.graph_at, self.graph_box) = (None, None, None);
         match std::mem::replace(&mut self.gesture, Gesture::Idle) {
             Gesture::Idle => return false,
+            Gesture::ParentPick {
+                ids, target, moved, ..
+            } => {
+                if moved {
+                    if let Some(target) = target {
+                        self.queue.push_back(Job::Apply(self.model.parent(
+                            &ids,
+                            Some(target),
+                            self.delegate.time(cx),
+                        )));
+                    }
+                } else {
+                    self.delegate
+                        .run("timeline.parentMenu", vec![serde_json::json!(ids)], cx);
+                }
+            }
             // A click on a name stays the row's own (it selects).
             Gesture::LayerPress { .. } => return false,
             // One undo step ("Move layers"), through the model's drop.
@@ -3568,6 +3697,29 @@ impl Render for TimelineSurface {
                                     .border_color(rgb(tokens.colors.secondary)),
                             );
                         }
+                        if let Some(surface) = this.upgrade() {
+                            let surface = surface.read(cx);
+                            if let Gesture::ParentPick { origin, at, target, moved: true, .. } = &surface.gesture {
+                                // v1 installParentPickwhip: the same cubic and target label.
+                                let mut line = PathBuilder::stroke(px(2.));
+                                line.move_to(*origin);
+                                line.cubic_bezier_to(*at, *origin + point(px(60.), px(0.)), *at - point(px(60.), px(0.)));
+                                if let Ok(line) = line.build() { window.paint_path(line, rgb(tokens.colors.accent)); }
+                                let label = target.as_ref().and_then(|id| surface.model.index.layer(id)).map(|l| format!("Parent to {}", l.name.to_string_lossy())).unwrap_or_else(|| "Pick a parent · Esc to cancel".into());
+                                if target.is_some() {
+                                    if let (Some(scene), Some(frame)) = (&surface.scene, &surface.frame) {
+                                        let (_, y) = surface.local(*at);
+                                        if let Some(row) = scene.layer_row_at(frame.viewport, &tokens, y) {
+                                            window.paint_quad(PaintQuad::new(Bounds::new(bounds.origin + point(px(0.), px(row.top as f32)), size(bounds.size.width, px(row.height as f32)))).background(rgba((tokens.colors.accent << 8) | 0x29)));
+                                        }
+                                    }
+                                }
+                                let runs = [TextRun { len: label.len(), font: window.text_style().font(), color: rgb_to_hsla(rgb(tokens.colors.text)), background_color: None, underline: None, strikethrough: None, letter_spacing: None }];
+                                let text = window.text_system().shape_line(label.into(), px(12.), &runs);
+                                let label_at = point((at.x + px(12.)).min(surface.bounds.right() - px(200.)), at.y - px(12.));
+                                let _ = text.paint(label_at, px(16.), TextAlign::Left, None, window, cx);
+                            }
+                        }
                         let moved = this.clone();
                         window.on_mouse_event(move |e: &MouseMoveEvent, phase, _, cx| {
                             if phase == DispatchPhase::Capture {
@@ -3592,9 +3744,16 @@ impl Render for TimelineSurface {
                             }
                         });
                         let released = this.clone();
-                        window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
+                        window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
                             if phase == DispatchPhase::Capture {
                                 let _ = released.update(cx, |s, cx| {
+                                    if let Gesture::ParentPick { ids, .. } = &s.gesture {
+                                        let next = s.parent_target(ids, event.position);
+                                        if let Gesture::ParentPick { target, at, .. } = &mut s.gesture {
+                                            *target = next;
+                                            *at = event.position;
+                                        }
+                                    }
                                     s.on_up(cx);
                                 });
                             }

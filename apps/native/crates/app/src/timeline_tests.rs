@@ -2112,6 +2112,55 @@ fn joined_position_value_columns_scrub_one_axis_and_undo(cx: &mut TestAppContext
 }
 
 #[gpui::test]
+fn parent_pick_links_the_target_row_and_undo_restores_it(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    let origin = s.at(0, 0.5);
+    let target = s.at(1, 1.);
+    // Escape cancels the pick without changing either layer.
+    s.surface
+        .update(&mut s.vcx, |t, _| t.press_parent("l0".into(), origin));
+    s.vcx
+        .simulate_mouse_move(target, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    s.surface.update(&mut s.vcx, |t, cx| {
+        assert!(t.cancel(cx));
+    });
+    s.vcx
+        .simulate_mouse_up(target, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    assert!(s.surface.read_with(&s.vcx, |t, _| {
+        t.model().index.layer("l0").unwrap().parent.is_none()
+    }));
+    s.surface
+        .update(&mut s.vcx, |t, _| t.press_parent("l0".into(), origin));
+    s.vcx
+        .simulate_mouse_move(target, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    s.vcx
+        .simulate_mouse_up(target, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    let parent = |s: &Stage, id| {
+        s.surface.read_with(&s.vcx, |t, _| {
+            t.model().index.layer(id).unwrap().parent.clone()
+        })
+    };
+    assert_eq!(parent(&s, "l0").as_deref(), Some("l1"));
+    assert!(s.recorder.reports.borrow().is_empty());
+    // Parenting the parent to its child would make a cycle.
+    s.surface
+        .update(&mut s.vcx, |t, _| t.press_parent("l1".into(), target));
+    s.vcx
+        .simulate_mouse_move(origin, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    s.vcx
+        .simulate_mouse_up(origin, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    assert_eq!(parent(&s, "l1"), None);
+    s.undo(cx);
+    assert_eq!(parent(&s, "l0"), None);
+}
+
+#[gpui::test]
 fn clicking_an_axis_value_opens_its_editor_without_an_edit(cx: &mut TestAppContext) {
     let mut s = stage_project(cx, axis_project());
     let at = s.at(0, 0.5);

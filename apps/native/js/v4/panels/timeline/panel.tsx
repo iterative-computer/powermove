@@ -55,6 +55,7 @@ function Icon(props: {
   tabIndex?: number;
   key?: string;
   children?: ComponentChildren;
+  parentPick?: string;
 }) {
   // DESIGN-TODO(opus) T1: kit has no symbol slot. This is a neutral, labelled
   // control with inspectable required symbol, not a text/emoji icon substitute.
@@ -63,7 +64,13 @@ function Icon(props: {
       id={props.id}
       label={props.label}
       title={props.title ?? props.label}
-      metadata={{ requiredSymbol: props.symbol, designTodo: "T1" }}
+      metadata={{
+        requiredSymbol: props.symbol,
+        designTodo: "T1",
+        ...(props.parentPick
+          ? { timelineParentPick: { layer: props.parentPick } }
+          : {}),
+      }}
       disabled={props.disabled}
       active={props.active}
       tabIndex={props.tabIndex}
@@ -488,6 +495,7 @@ function Layer({
           item.on || item.always || show ? (
             <Icon
               key={item.name}
+              parentPick={item.name === "parent" ? row.layer : undefined}
               id={`timeline:${item.name}:${row.id}`}
               label={item.label}
               symbol={item.symbol}
