@@ -1666,6 +1666,23 @@ impl Renderer {
         self.binds.clear();
     }
 
+    /// [`Self::release_idle_media`], keeping the decoders of the clips under
+    /// the paused playhead (their references only) so Play continues them.
+    pub fn release_idle_media_keeping_decoders(&mut self) {
+        self.media.release_idle_frames_keeping(true);
+        self.binds.clear();
+    }
+
+    /// Closes the decoders kept by [`Self::release_idle_media_keeping_decoders`].
+    pub fn release_kept_decoders(&mut self) {
+        self.media.release_kept_decoders();
+    }
+
+    /// Decoders kept open while paused.
+    pub fn kept_decoders(&self) -> usize {
+        self.media.kept_decoders()
+    }
+
     /// Recording has submitted every reference from this frame. Its working
     /// set may exceed a standing cache grant; stop retaining that excess now.
     /// Command buffers own the resources their GPU work still needs.

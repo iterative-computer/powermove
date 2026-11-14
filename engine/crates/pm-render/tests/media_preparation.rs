@@ -135,6 +135,28 @@ fn display_preparation_caches_selected_frame_for_first_render() {
     cold.wait_idle();
     assert!(cold_frame.failures.is_empty(), "{:?}", cold_frame.failures);
     assert_eq!(prepared_rgba, cold.read_rgba(&cold_frame).unwrap());
+
+    // Playback's later planning pass must leave the decoder of a clip
+    // already being displayed alone. Its display worker reads ahead itself.
+    let ahead = pm_protocol::common::Ticks::new(pm_time::TICKS_PER_SECOND).unwrap();
+    let prepared = renderer
+        .prepare_media(&document, "Ptest-root", ahead, &request, &assets)
+        .unwrap();
+    assert!(prepared.failures.is_empty(), "{:?}", prepared.failures);
+    assert_eq!(prepared.videos.len(), 1);
+    assert_eq!(prepared.queued_videos, 0);
+    assert!(renderer.finish_media_preparation().is_empty());
+
+    // Export still explicitly prepares its own independent decoder.
+    let export = RenderRequest {
+        export: true,
+        ..request.clone()
+    };
+    let prepared = renderer
+        .prepare_media(&document, "Ptest-root", ahead, &export, &assets)
+        .unwrap();
+    assert_eq!(prepared.queued_videos, 1);
+    assert!(renderer.finish_media_preparation().is_empty());
 }
 
 #[test]

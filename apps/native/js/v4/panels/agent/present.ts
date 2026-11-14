@@ -939,13 +939,12 @@ export const ACCESS = {
   },
 } as const;
 export const EFFORT: Record<string, string> = {
-  "": "Default",
   none: "None",
   minimal: "Minimal",
   low: "Low",
   medium: "Medium",
   high: "High",
-  xhigh: "XHigh",
+  xhigh: "Extra high",
   max: "Max",
   ultra: "Ultra",
 };

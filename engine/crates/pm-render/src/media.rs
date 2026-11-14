@@ -1354,10 +1354,12 @@ struct FrameKey {
 pub const DEFAULT_FRAME_CACHE: usize = 64 << 20;
 
 /// The video frame cache's and the still look-ahead's parts of one decoded
-/// frame allowance: half each while a playing frame reads stills ahead,
-/// otherwise the stills keep a small part for a still about to enter.
-fn still_share(lease: MediaLease, look_ahead: bool) -> (MediaLease, usize) {
-    let stills = if look_ahead {
+/// frame allowance. Reserve a still share only after a still was requested;
+/// video can use the idle reservation without increasing their total.
+fn still_share(lease: MediaLease, look_ahead: bool, wanted: bool) -> (MediaLease, usize) {
+    let stills = if !wanted {
+        0
+    } else if look_ahead {
         lease.frame_cache / 2
     } else {
         stills::MAX_READY_BYTES.min(lease.frame_cache / 2)
@@ -1429,6 +1431,9 @@ pub struct MediaCache {
     pub(crate) draw_edge: Option<u32>,
     /// Stills decoded ahead of the playhead ([`Self::prepare_image`]).
     stills: stills::StillPrefetch,
+    /// Recent still requests: the two-second look-ahead has time to reach
+    /// its image, then an unused reservation returns to video.
+    still_prepared_at: Option<std::time::Instant>,
     /// Open video sources with the file's size and modification time when
     /// opened: a file replaced at the same path is reopened.
     sources: BTreeMap<PathBuf, ((u64, u128), Arc<MediaSource>)>,
@@ -1436,6 +1441,9 @@ pub struct MediaCache {
     frames: BTreeMap<FrameKey, (Target, u64)>,
     frame_epoch: u64,
     frame_seen: BTreeMap<PathBuf, u64>,
+    /// Display streams read by recent frames. Background preparation must
+    /// not seek their pooled decoder ahead of the playing picture.
+    video_seen: HashMap<(PathBuf, u64), u64>,
     /// The last presented frame asked of each source while scrubbing
     /// (PM_FIX_WAIT_STEP).
     scrub_last: BTreeMap<PathBuf, usize>,
@@ -1517,11 +1525,13 @@ impl MediaCache {
             preview_video: false,
             draw_edge: None,
             stills: Default::default(),
+            still_prepared_at: None,
             sources: BTreeMap::new(),
             source_seen: BTreeMap::new(),
             frames: BTreeMap::new(),
             frame_epoch: 0,
             frame_seen: BTreeMap::new(),
+            video_seen: HashMap::new(),
             scrub_last: BTreeMap::new(),
             next_texture_revision: 0,
             interpretations: BTreeMap::new(),
@@ -1574,6 +1584,7 @@ impl MediaCache {
         interpret: Option<&Interpretation>,
         edge: Option<u32>,
     ) -> Result<Target, MediaFailure> {
+        self.note_image_request();
         let (len, modified) = stamp(path)
             .ok_or_else(|| MediaFailure::Failed(format!("{} is offline", path.display())))?;
         let key = ImageKey {
@@ -1840,8 +1851,18 @@ impl MediaCache {
         {
             return;
         }
+        self.note_image_request();
         let ask = stills::StillAsk::of(edge, interpret);
         self.stills.request(path, (len, modified), ask, &self.pool);
+    }
+
+    fn note_image_request(&mut self) {
+        let was_idle = self.still_prepared_at.is_none();
+        self.still_prepared_at = Some(std::time::Instant::now());
+        if was_idle {
+            // Recall the video's loan before decoding or uploading an image.
+            self.apply_shares();
+        }
     }
 
     /// Waits for the stills asked for ahead (headless tests and performance
@@ -2053,6 +2074,11 @@ impl MediaCache {
         source_exact: bool,
     ) -> Result<Option<Target>, MediaFailure> {
         let src = self.source(path)?;
+        if !export && !source_exact {
+            self.service.note_display(src.id, instance);
+            self.video_seen
+                .insert((path.to_path_buf(), instance), self.frame_epoch);
+        }
         let none = Interpretation::default();
         let interp = interpret.unwrap_or(&none);
         video_drawable(&src, interp).map_err(|m| MediaFailure::Unsupported(Feature::Media(m)))?;
@@ -2429,6 +2455,9 @@ impl MediaCache {
         } else {
             self.frame_epoch
         });
+        if self.look_ahead && !self.idle_media {
+            self.apply_shares();
+        }
     }
 
     /// Evicts stills last read before frame `floor`, oldest first, until
@@ -2578,21 +2607,43 @@ impl MediaCache {
     }
 
     /// Applies the renderer's shares of the engine's lease to its decode
-    /// service: the frame cache evicts down to `lease.frame_cache` at once
-    /// and idle decoders close past `lease.decoders`. Returns what the
-    /// service holds afterwards.
+    /// service. The frame cache stays within its maximum; warm decoder
+    /// references can borrow its unused capacity within the same combined
+    /// allowance. A zero decoder share closes idle sessions.
     pub fn apply_lease(&mut self, lease: MediaLease) -> MediaUsage {
         *self.lease.lock().unwrap() = lease;
         self.apply_shares()
     }
 
-    /// Divides the decoded frame allowance between the video frame cache
-    /// and the stills decoded ahead: together they hold at most the lease.
+    /// An empty still-image cache can lend its reservation to playing video.
+    /// A preparation or direct image request recalls it before admission.
+    fn image_loan(&self, lease: MediaLease) -> usize {
+        if self.look_ahead
+            && self.images.is_empty()
+            && self.still_prepared_at.is_none()
+            && lease.frame_cache > 0
+            && lease.decoders > 0
+        {
+            usize::try_from(self.image_budget).unwrap_or(usize::MAX)
+        } else {
+            0
+        }
+    }
+
+    /// Divides the decoded frame allowance between video and upcoming stills.
+    /// Video may borrow an empty image cache's reservation, within the same
+    /// total of the two allowances; any image request recalls it first.
     fn apply_shares(&mut self) -> MediaUsage {
-        let lease = *self.lease.lock().unwrap();
-        let (frames, stills) = still_share(lease, self.look_ahead);
-        self.stills.set_limit(stills);
-        self.service.apply_lease(frames);
+        let mut lease = *self.lease.lock().unwrap();
+        lease.frame_cache = lease.frame_cache.saturating_add(self.image_loan(lease));
+        let (frames, stills) = still_share(lease, self.look_ahead, self.still_prepared_at.is_some());
+        if stills <= self.stills.limit() {
+            self.stills.set_limit(stills);
+            self.service.apply_lease(frames);
+        } else {
+            self.service.apply_lease(frames);
+            self.stills.set_limit(stills);
+        }
         self.media_usage()
     }
 
@@ -2611,10 +2662,19 @@ impl MediaCache {
             self.look_ahead = look_ahead;
             if !look_ahead {
                 self.stills.clear();
+                self.still_prepared_at = None;
             }
             if !self.idle_media {
                 self.apply_shares();
             }
+        }
+        if self
+            .still_prepared_at
+            .is_some_and(|at| at.elapsed() >= std::time::Duration::from_secs(3))
+        {
+            self.stills.clear();
+            self.still_prepared_at = None;
+            self.apply_shares();
         }
         if self.idle_media {
             self.apply_shares();
@@ -2631,6 +2691,8 @@ impl MediaCache {
         });
         self.frame_seen
             .retain(|_, seen| frame.wrapping_sub(*seen) <= 30);
+        self.video_seen
+            .retain(|_, seen| frame.wrapping_sub(*seen) <= 30);
         self.recount();
     }
 
@@ -2641,17 +2703,53 @@ impl MediaCache {
         self.begin_frame(self.look_ahead);
     }
 
+    /// Closes the decoders [`Self::release_idle_frames_keeping`] kept.
+    pub fn release_kept_decoders(&mut self) {
+        self.service.release_kept();
+        self.recount();
+    }
+
+    /// Decoders kept open for the clips under the paused playhead.
+    pub fn kept_decoders(&self) -> usize {
+        self.service.kept_sessions()
+    }
+
     /// Queue-owned GPU references remain valid; this only drops cache handles.
     pub fn release_idle_frames(&mut self) {
+        self.release_idle_frames_keeping(false);
+    }
+
+    /// [`Self::release_idle_frames`]; with `keep_decoders`, the decoder of
+    /// each video the last frame drew (the clips under the paused playhead)
+    /// stays open with its references only, no decoded frames, so Play
+    /// continues its run. Drawing again, [`Self::release_kept_decoders`] or
+    /// a project's release ends it.
+    pub fn release_idle_frames_keeping(&mut self, keep_decoders: bool) {
+        let keep: Vec<(u64, pm_media::decode::service::InstanceId)> = if keep_decoders {
+            self.video_seen
+                .iter()
+                .filter(|(_, seen)| **seen == self.frame_epoch)
+                .filter_map(|((path, instance), _)| {
+                    self.sources.get(path).map(|(_, src)| (src.id, *instance))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         self.stills.clear();
+        self.still_prepared_at = None;
         self.stills.set_limit(0);
         self.frames.clear();
         self.retired_frames.clear();
         self.free_frames.clear();
         self.frame_seen.clear();
+        self.video_seen.clear();
         self.viewer.release(None);
         self.source_viewer.release(None);
-        self.service.release(None, None);
+        if keep.is_empty() {
+            self.service.release(None, None);
+        }
+        self.service.keep_idle(&keep);
         self.service.apply_lease(MediaLease {
             frame_cache: 0,
             decoders: 0,
@@ -2722,6 +2820,100 @@ mod source_storage_tests;
 mod still_share_tests {
     use super::*;
 
+    #[test]
+    fn an_empty_image_cache_lends_only_until_a_real_image_is_prepared() {
+        let gpu = pm_gpu::Gpu::new("empty-image-cache-loan").unwrap();
+        let mut media = MediaCache::new(&gpu.device);
+        let lease = MediaLease {
+            frame_cache: 64 << 10,
+            decoders: 64 << 10,
+        };
+        let images = 8 << 20;
+        media.trim_images(images);
+        media.apply_lease(lease);
+        media.begin_frame(true);
+        assert_eq!(
+            media.service.usage().cache.budget,
+            lease.frame_cache + images as usize
+        );
+        let video = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/vp9-opus.webm");
+        let source = media.source(&video).unwrap();
+        {
+            let mut session = media
+                .service
+                .session(&source, 7, pm_media::vt::DecodePurpose::Display)
+                .unwrap();
+            for n in 0..12 {
+                session.frame(n).unwrap();
+            }
+        }
+        let usage = media.media_usage();
+        let base = lease.frame_cache + lease.decoders;
+        assert!(
+            usage.frame_cache + usage.decoders > base,
+            "the video must use its loan: {usage:?}"
+        );
+        assert!(
+            usage.frame_cache + usage.decoders <= base + images as usize,
+            "{usage:?}"
+        );
+
+        let still = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/stills2/png-chrm-srgb-gama-8.png");
+        media.prepare_image(&still, Some(64), false);
+        assert_eq!(media.service.usage().cache.budget, lease.frame_cache / 2);
+        media.wait_for_stills();
+        assert!(media.stills.held() > 0);
+        let usage = media.media_usage();
+        assert!(
+            usage.frame_cache + usage.decoders <= base,
+            "recall before the image: {usage:?}"
+        );
+        assert_eq!(
+            media.image_budget, images,
+            "the total reservation did not grow"
+        );
+
+        media.still_prepared_at =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(4));
+        media.begin_frame(true);
+        assert_eq!(
+            media.service.usage().cache.budget,
+            lease.frame_cache + images as usize
+        );
+        media.begin_frame(false);
+        assert_eq!(media.service.usage().cache.budget, lease.frame_cache);
+    }
+
+    #[test]
+    fn video_borrows_an_idle_still_reservation_and_yields_before_the_image() {
+        let gpu = pm_gpu::Gpu::new("still-reservation-loan").unwrap();
+        let mut media = MediaCache::new(&gpu.device);
+        media.trim_images(0);
+        let lease = MediaLease {
+            frame_cache: 8 << 20,
+            decoders: 8 << 20,
+        };
+        media.begin_frame(true);
+        media.apply_lease(lease);
+        assert_eq!(media.service.usage().cache.budget, lease.frame_cache);
+        assert_eq!(media.stills.limit(), 0);
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/stills2/png-chrm-srgb-gama-8.png");
+        media.prepare_image(&path, Some(64), false);
+        assert_eq!(media.service.usage().cache.budget, lease.frame_cache / 2);
+        assert_eq!(media.stills.limit(), lease.frame_cache / 2);
+        media.wait_for_stills();
+        assert!(media.stills.held() > 0);
+        assert!(media.media_usage().frame_cache <= lease.frame_cache);
+        media.still_prepared_at =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(4));
+        media.begin_frame(true);
+        assert_eq!(media.stills.held(), 0);
+        assert_eq!(media.stills.limit(), 0);
+        assert_eq!(media.service.usage().cache.budget, lease.frame_cache);
+    }
+
     /// The video frame cache and the stills decoded ahead share one
     /// decoded frame allowance: their parts sum to it, playing or not.
     #[test]
@@ -2731,17 +2923,19 @@ mod still_share_tests {
             decoders: 64 << 20,
         };
         for look_ahead in [false, true] {
-            let (frames, stills) = still_share(lease, look_ahead);
+            let (frames, stills) = still_share(lease, look_ahead, true);
             assert_eq!(frames.frame_cache + stills, lease.frame_cache);
             assert_eq!(frames.decoders, lease.decoders);
         }
-        assert_eq!(still_share(lease, true).1, 256 << 20);
-        assert_eq!(still_share(lease, false).1, stills::MAX_READY_BYTES);
+        assert_eq!(still_share(lease, true, true).1, 256 << 20);
+        assert_eq!(still_share(lease, false, true).1, stills::MAX_READY_BYTES);
         let none = MediaLease {
             frame_cache: 0,
             decoders: 0,
         };
-        assert_eq!(still_share(none, true), (none, 0));
+        assert_eq!(still_share(none, true, true), (none, 0));
+        assert_eq!(still_share(lease, true, false), (lease, 0));
+        assert_eq!(still_share(lease, false, false), (lease, 0));
     }
 }
 

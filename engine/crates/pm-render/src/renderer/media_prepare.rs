@@ -201,6 +201,7 @@ impl Renderer {
                 v.instance,
                 v.seconds,
                 request.export,
+                request.read_ahead,
                 v.interpret.as_ref(),
                 v.composition,
             ) {
