@@ -113,7 +113,7 @@ pub fn eetf(e: f64, source_peak: f64) -> f64 {
 
 /// The BT.2390 EETF from `source_peak` to `target_peak` cd/m². Black stays at
 /// zero, so the toe term is zero.
-fn eetf_to(e: f64, source_peak: f64, target_peak: f64) -> f64 {
+pub(crate) fn eetf_to(e: f64, source_peak: f64, target_peak: f64) -> f64 {
     let pw = pq_inverse_eotf(source_peak);
     let max_lum = pq_inverse_eotf(target_peak) / pw;
     let e1 = (e / pw).clamp(0.0, 1.0);

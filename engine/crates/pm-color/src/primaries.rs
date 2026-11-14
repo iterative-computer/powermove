@@ -118,7 +118,7 @@ fn xyz(c: [f64; 2]) -> [f64; 3] {
     [c[0] / c[1], 1.0, (1.0 - c[0] - c[1]) / c[1]]
 }
 
-fn inverse(m: &Mat3) -> Mat3 {
+pub(crate) fn inverse(m: &Mat3) -> Mat3 {
     let det = m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
         - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
         + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
@@ -142,7 +142,7 @@ fn inverse(m: &Mat3) -> Mat3 {
     ]
 }
 
-fn mul(a: &Mat3, b: &Mat3) -> Mat3 {
+pub(crate) fn mul(a: &Mat3, b: &Mat3) -> Mat3 {
     let mut out = [[0.0; 3]; 3];
     for (i, row) in out.iter_mut().enumerate() {
         for (j, v) in row.iter_mut().enumerate() {
@@ -188,12 +188,20 @@ pub fn conversion(from: Primaries, to: Primaries) -> Option<Mat3> {
 /// Annex E), as an ICC profile's PCS adaptation does. `None` for
 /// unspecified primaries.
 pub fn conversion_from(c: &Chromaticities, to: Primaries) -> Option<Mat3> {
+    Some(conversion_between(c, &chromaticities(to)?))
+}
+
+/// The linear-light conversion between two sets of chromaticities, the
+/// source white adapted to the destination's with Bradford when they differ.
+pub fn conversion_between(c: &Chromaticities, dst: &Chromaticities) -> Mat3 {
     const BRADFORD: Mat3 = [
         [0.8951, 0.2664, -0.1614],
         [-0.7502, 1.7135, 0.0367],
         [0.0389, -0.0685, 1.0296],
     ];
-    let dst = chromaticities(to)?;
+    if c.w == dst.w {
+        return mul(&inverse(&rgb_to_xyz(dst)), &rgb_to_xyz(c));
+    }
     let (sw, dw) = (apply(&BRADFORD, xyz(c.w)), apply(&BRADFORD, xyz(dst.w)));
     let scale = [
         [dw[0] / sw[0], 0.0, 0.0],
@@ -201,10 +209,7 @@ pub fn conversion_from(c: &Chromaticities, to: Primaries) -> Option<Mat3> {
         [0.0, 0.0, dw[2] / sw[2]],
     ];
     let adapt = mul(&inverse(&BRADFORD), &mul(&scale, &BRADFORD));
-    Some(mul(
-        &inverse(&rgb_to_xyz(&dst)),
-        &mul(&adapt, &rgb_to_xyz(c)),
-    ))
+    mul(&inverse(&rgb_to_xyz(dst)), &mul(&adapt, &rgb_to_xyz(c)))
 }
 
 /// Applies a row-major matrix.

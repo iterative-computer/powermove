@@ -127,7 +127,7 @@ fn cdl(x: [f64; 3], slope: [f64; 3], offset: [f64; 3], power: [f64; 3], sat: f64
 fn neutral_grading_tools_return_the_same_bits() {
     let mut renderer = Renderer::headless().unwrap();
     let input = draw(&mut renderer, None);
-    for id in ["colorWheels", "colorCurves"] {
+    for id in ["colorWheels", "colorCurves", "colorSpaceTransform"] {
         let output = draw(&mut renderer, Some(effect(id, &json!({}))));
         let changed = input
             .iter()
@@ -437,4 +437,176 @@ fn a_cdl_file_in_color_wheels_grades_as_the_cdl() {
     let d = worst(&input, &output, |x| cdl::apply(&correction, x));
     eprintln!("CDL file in Color Wheels: {d:e} from the CDL");
     assert!(d < 2e-5, "{d:e}");
+}
+
+/// Color Space Transform against its f64 reference (`pm_color::cst`), on the
+/// whole field (codes below black and above white included): camera logs to
+/// display, HDR to SDR through every tone mapping method, HLG to PQ, log to
+/// ACEScct, and both gamut mappings. The worst difference, relative above
+/// 1, is printed; each must stay under half a 10-bit code (f32 against f64
+/// through log, power and PQ curves; the largest, BT.2446 Method C near the
+/// top of PQ, is a near-cancellation of its inverse crosstalk then the sRGB
+/// encode's slope, about 4e-5 in linear light).
+#[test]
+fn color_space_transform_matches_its_reference() {
+    use pm_color::cst::{self, Settings};
+    assert_eq!(pm_fx_defs::grade::CST_GAMUTS, cst::GAMUTS);
+    assert_eq!(pm_fx_defs::grade::CST_TRANSFERS, cst::TRANSFERS);
+    assert_eq!(pm_fx_defs::grade::CST_TONE_MAPPING, cst::TONE_MAPPING);
+    assert_eq!(pm_fx_defs::grade::CST_GAMUT_MAPPING, cst::GAMUT_MAPPING);
+    let mut renderer = Renderer::headless().unwrap();
+    let input = draw(&mut renderer, None);
+    let base = Settings::default();
+    let cases: Vec<(&str, Settings)> = vec![
+        (
+            "S-Log3 S-Gamut3.Cine to Rec. 709",
+            Settings {
+                input_gamut: 6,
+                input_transfer: 10,
+                ..base
+            },
+        ),
+        (
+            "LogC4 AWG4 to ACEScct AP1",
+            Settings {
+                input_gamut: 9,
+                input_transfer: 13,
+                output_gamut: 4,
+                output_transfer: 7,
+                ..base
+            },
+        ),
+        (
+            "Rec. 709 to Rec. 2020 gamma 2.4, clipped",
+            Settings {
+                output_gamut: 2,
+                output_transfer: 3,
+                gamut_mapping: 1,
+                ..base
+            },
+        ),
+        (
+            "V-Log V-Gamut to Rec. 709, ACES RGC",
+            Settings {
+                input_gamut: 7,
+                input_transfer: 11,
+                gamut_mapping: 2,
+                ..base
+            },
+        ),
+        (
+            "HLG to PQ (Rec. 2020)",
+            Settings {
+                input_gamut: 2,
+                input_transfer: 6,
+                output_gamut: 2,
+                output_transfer: 5,
+                ..base
+            },
+        ),
+        (
+            "Log3G10 RWG to ACEScc AP0",
+            Settings {
+                input_gamut: 10,
+                input_transfer: 14,
+                output_gamut: 3,
+                output_transfer: 8,
+                ..base
+            },
+        ),
+        (
+            "BMD Film to Rec. 709 camera",
+            Settings {
+                input_gamut: 11,
+                input_transfer: 15,
+                output_transfer: 4,
+                ..base
+            },
+        ),
+        (
+            "F-Log 2020 to N-Log 2020",
+            Settings {
+                input_gamut: 2,
+                input_transfer: 16,
+                output_gamut: 2,
+                output_transfer: 17,
+                ..base
+            },
+        ),
+        (
+            "Apple Log to gamma 2.2 P3",
+            Settings {
+                input_gamut: 2,
+                input_transfer: 9,
+                output_gamut: 1,
+                output_transfer: 2,
+                ..base
+            },
+        ),
+        (
+            "LogC3 AWG3 to linear Rec. 709",
+            Settings {
+                input_gamut: 8,
+                input_transfer: 12,
+                output_transfer: 1,
+                ..base
+            },
+        ),
+        (
+            "S-Log3 S-Gamut3 to sRGB",
+            Settings {
+                input_gamut: 5,
+                input_transfer: 10,
+                ..base
+            },
+        ),
+    ];
+    let hdr = Settings {
+        input_gamut: 2,
+        input_transfer: 5,
+        source_peak: 4000.,
+        ..base
+    };
+    let mut all = cases;
+    for (name, tone) in [
+        ("BT.2390 per channel", 1),
+        ("BT.2390 luminance", 2),
+        ("BT.2390 saturation", 3),
+        ("BT.2446 A", 4),
+        ("BT.2446 C", 5),
+    ] {
+        all.push((name, Settings { tone, ..hdr }));
+    }
+    all.push((
+        "PQ 4000 to PQ 1000, BT.2390",
+        Settings {
+            output_gamut: 2,
+            output_transfer: 5,
+            tone: 1,
+            ..hdr
+        },
+    ));
+    for (name, s) in all {
+        let p = json!({
+            "inputGamut": s.input_gamut, "inputTransfer": s.input_transfer,
+            "outputGamut": s.output_gamut, "outputTransfer": s.output_transfer,
+            "toneMapping": s.tone, "sourcePeak": s.source_peak, "targetPeak": s.target_peak,
+            "desaturation": s.desaturation, "gamutMapping": s.gamut_mapping,
+        });
+        let output = draw(&mut renderer, Some(effect("colorSpaceTransform", &p)));
+        let mut worst = 0f64;
+        for (i, o) in input.chunks_exact(4).zip(output.chunks_exact(4)) {
+            let want = cst::transform([i[0], i[1], i[2]].map(f64::from), &s);
+            for c in 0..3 {
+                assert!(
+                    o[c].is_finite() && want[c].is_finite(),
+                    "{name}: {i:?} {o:?} {want:?}"
+                );
+                let d = (f64::from(o[c]) - want[c]).abs() / want[c].abs().max(1.);
+                worst = worst.max(d);
+            }
+        }
+        eprintln!("{name}: {worst:e} from the reference");
+        assert!(worst < 0.5 / 1023., "{name}: {worst:e}");
+    }
 }

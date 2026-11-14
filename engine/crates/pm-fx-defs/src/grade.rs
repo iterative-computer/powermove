@@ -26,6 +26,52 @@ pub const WHEEL_NAMES: [(&str, &str, f64, [f64; 2]); 4] = [
 /// The channels one Color Curves effect bends, as its Channel choice: a full
 /// RGB curves grade is a Master curve followed by one per channel.
 pub const CURVE_CHANNELS: [&str; 4] = ["Master", "Red", "Green", "Blue"];
+pub const CST: &str = "colorSpaceTransform";
+/// Color Space Transform's choices, in `pm_color::cst`'s order (pm-render's
+/// grade tests hold the two lists equal).
+pub const CST_GAMUTS: [&str; 12] = [
+    "Rec. 709 / sRGB",
+    "P3-D65",
+    "Rec. 2020",
+    "ACES AP0 (ACES2065-1)",
+    "ACES AP1 (ACEScg)",
+    "Sony S-Gamut3",
+    "Sony S-Gamut3.Cine",
+    "Panasonic V-Gamut",
+    "ARRI Wide Gamut 3",
+    "ARRI Wide Gamut 4",
+    "RED Wide Gamut RGB",
+    "Blackmagic Wide Gamut (Gen 5)",
+];
+pub const CST_TRANSFERS: [&str; 18] = [
+    "sRGB (working)",
+    "Linear",
+    "Gamma 2.2",
+    "Gamma 2.4 (BT.1886)",
+    "Rec. 709 (camera)",
+    "PQ (ST 2084)",
+    "HLG (BT.2100)",
+    "ACEScct",
+    "ACEScc",
+    "Apple Log",
+    "Sony S-Log3",
+    "Panasonic V-Log",
+    "ARRI LogC3 (EI 800)",
+    "ARRI LogC4",
+    "RED Log3G10",
+    "Blackmagic Film (Gen 5)",
+    "Fujifilm F-Log",
+    "Nikon N-Log",
+];
+pub const CST_TONE_MAPPING: [&str; 6] = [
+    "None",
+    "BT.2390 (per channel)",
+    "BT.2390 (luminance)",
+    "BT.2390 (saturation preserving)",
+    "BT.2446 Method A",
+    "BT.2446 Method C",
+];
+pub const CST_GAMUT_MAPPING: [&str; 3] = ["None", "Clip", "ACES Reference Gamut Compression"];
 
 #[allow(clippy::too_many_arguments)]
 fn number(
@@ -197,9 +243,75 @@ fn curves() -> Definition {
     )
 }
 
+/// A choice among `labels`, its first the default.
+fn choice(key: &str, label: &str, group: &str, labels: &[&str]) -> Parameter {
+    serde_json::from_value(json!({
+        "k": key, "label": label, "group": group, "def": 0, "min": 0,
+        "max": labels.len() - 1, "step": 1, "advanced": false,
+        "options": labels.iter().enumerate()
+            .map(|(v, label)| json!({"v": v, "label": label})).collect::<Vec<_>>(),
+    }))
+    .expect("a choice")
+}
+
+/// Color Space Transform (`pm_color::cst`): read the layer in one gamut and
+/// transfer, tone and gamut map, write in another. The defaults change
+/// nothing.
+fn color_space_transform() -> Definition {
+    let params = vec![
+        choice("inputGamut", "Gamut", "Input", &CST_GAMUTS),
+        choice("inputTransfer", "Transfer", "Input", &CST_TRANSFERS),
+        choice("outputGamut", "Gamut", "Output", &CST_GAMUTS),
+        choice("outputTransfer", "Transfer", "Output", &CST_TRANSFERS),
+        choice("toneMapping", "Method", "Tone Mapping", &CST_TONE_MAPPING),
+        number(
+            "sourcePeak",
+            "Source Peak",
+            "Tone Mapping",
+            1000.,
+            [100., 10000.],
+            1.,
+            "cd/m²",
+            false,
+        ),
+        number(
+            "targetPeak",
+            "Target Peak (HDR)",
+            "Tone Mapping",
+            1000.,
+            [100., 10000.],
+            1.,
+            "cd/m²",
+            false,
+        ),
+        number(
+            "desaturation",
+            "Highlight Desaturation",
+            "Tone Mapping",
+            15.,
+            [0., 100.],
+            1.,
+            "%",
+            false,
+        ),
+        choice(
+            "gamutMapping",
+            "Method",
+            "Gamut Mapping",
+            &CST_GAMUT_MAPPING,
+        ),
+    ];
+    definition(
+        CST,
+        "Color Space Transform",
+        params,
+        include_str!("color-space-transform.glsl"),
+    )
+}
+
 /// Adds the grading effects after main's, each at revision 1.
 pub(crate) fn add(main: &mut MainEffects) {
-    for definition in [wheels(), curves()] {
+    for definition in [wheels(), curves(), color_space_transform()] {
         main.shaders.push(EffectShader {
             id: definition.id.clone(),
             version: 1,
