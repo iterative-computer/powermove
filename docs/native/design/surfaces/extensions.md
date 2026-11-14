@@ -53,8 +53,8 @@ loads…`. No buttons: it is quick, and quitting is safe.
 | Stopped (folder unreadable, locked) | `Your Extensions Couldn’t Be Brought In` |
 
 Line: `{n} brought in, {n} already in Powermove and {n} couldn’t load. Your original app
-stays unchanged.` (parts that are zero are left out). Card: `Brought in`, `Already in
-Powermove`, `Couldn’t load`, `Skipped`. List: every extension with its reason,
+stays unchanged.` (parts that are zero are left out). No counts card: the line has the
+counts, and the room goes to the list. List: every extension with its reason,
 problems first: couldn't load (`exclamationmark.triangle.fill`, `c.warning`), skipped
 and already here (`info.circle`), brought in (`checkmark.circle.fill`, `c.success`).
 

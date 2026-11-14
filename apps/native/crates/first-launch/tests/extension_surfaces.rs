@@ -182,20 +182,8 @@ fn n006_summarises_every_extension_with_its_reason_problems_first() {
         "43 brought in, 1 already in Powermove and 1 couldn’t load. Your original app stays unchanged."
     );
     assert_eq!(ids(&model), ["open_native"]);
-    let rows: Vec<_> = model
-        .rows()
-        .into_iter()
-        .map(|r| (r.title, r.value))
-        .collect();
-    assert_eq!(
-        rows,
-        [
-            ("Brought in".into(), "43".into()),
-            ("Already in Powermove".into(), "1".into()),
-            ("Couldn’t load".into(), "1".into()),
-            ("Skipped".into(), "1".into()),
-        ]
-    );
+    // The line gives the counts; the summary's room goes to the list.
+    assert!(model.rows().is_empty());
     let items = model.items();
     let order: Vec<_> = items.iter().map(|i| (i.id.as_str(), i.tone)).collect();
     assert_eq!(

@@ -118,14 +118,6 @@ impl Model {
             }
         }
     }
-    fn skipped_in_result(&self) -> usize {
-        self.result.as_ref().map_or(0, |r| {
-            r.entries
-                .iter()
-                .filter(|e| e.outcome == TransferOutcome::Skipped)
-                .count()
-        })
-    }
     /// The engine copies every extension, then checks each one: `done` runs
     /// over twice the entries. The phase, and how far into it (1-based).
     pub fn phase(&self) -> Option<(Phase, usize, usize)> {
@@ -264,7 +256,7 @@ impl Model {
             default,
         }
     }
-    /// The counts card: one row per kind that has any, or the running bar.
+    /// The offer's counts card (a row per kind that has any), or the running bar.
     pub fn rows(&self) -> Vec<StepRow> {
         let row = |title: &str, n: usize| StepRow {
             title: title.into(),
@@ -298,14 +290,8 @@ impl Model {
                     active: Some(Some(p.done.min(p.total) as f64 / p.total as f64)),
                 }];
             }
-            Gate::Done => {
-                let r = self.result.clone().unwrap_or_default();
-                rows.push(row("Brought in", r.brought_in));
-                rows.push(row("Already in Powermove", r.already_present));
-                rows.push(row("Couldn’t load", r.could_not_load));
-                rows.push(row("Skipped", self.skipped_in_result()));
-            }
-            Gate::Failed => {}
+            // The line already gives the counts: the list gets the room.
+            Gate::Done | Gate::Failed => {}
         }
         rows.retain(|r| r.value != "0");
         rows
