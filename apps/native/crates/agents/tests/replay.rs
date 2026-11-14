@@ -160,7 +160,7 @@ fn current_mcp_catalog(reference: &Observations) -> Observations {
     let source = include_bytes!("../../mcp/fixtures/studio3d-native-catalog.json");
     assert_eq!(
         replay::sha256(source),
-        "573e05f3a51d1bbebf033924526f63fc034fac705e911a7f404cc031d1ad675f"
+        "179da9003bafb4ed6741e2d1e4282026db871f3a9dfbef64e024e3c5aa93732e"
     );
     let source: Value = serde_json::from_slice(source).unwrap();
     for replacement in source["tools"].as_array().unwrap() {
