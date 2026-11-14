@@ -468,6 +468,9 @@ fn hash_project_file(
 
 /// Opens a project file. **Blocking**: run it off the UI thread.
 pub fn open_project(path: &Path, options: OpenOptions) -> Result<OpenedProject, ProjectIoError> {
+    // Before the first read of the file: the version's stat proves its bytes
+    // later only if this sample is past the tick of its stamps.
+    let taken = durable::wall_ns();
     // Non-blocking open: a named pipe or device would otherwise block the
     // kernel thread forever before the regular-file check below can refuse
     // it. The flag changes nothing for reads of a regular file.
@@ -509,7 +512,6 @@ pub fn open_project(path: &Path, options: OpenOptions) -> Result<OpenedProject, 
         Vec::new()
     };
     let hash = hash_project_file(&file, path, before.size, &verify)?;
-    let taken = durable::StatTaken::now();
     let after = durable::stat_of(&file.metadata().map_err(|e| io_err(path, e))?);
     if before.size != after.size
         || before.mtime_ns != after.mtime_ns

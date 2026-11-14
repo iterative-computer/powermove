@@ -672,10 +672,10 @@ impl SavePlan {
     /// range of that file. Bytes held anywhere else (library media found for
     /// assets the file lacks, an import, legacy base64 media) are written.
     ///
-    /// The equal stat proves the bytes only when it was taken after the tick
-    /// of the file's newest timestamp ([`FileVersion::stat_proves_content`]);
-    /// otherwise the file is read and its hash must be the version's (once:
-    /// the proof is kept on the version), or the save writes.
+    /// The equal stat proves the bytes only on a volume with fine timestamps,
+    /// sampled after the newest stamp's tick
+    /// ([`FileVersion::stat_proves_content`]); otherwise the file is read and
+    /// its hash must be the version's, every time, or the save writes.
     fn unchanged_receipt(&self) -> Option<SaveReceipt> {
         let version = self.unchanged.as_ref()?;
         let now = lstat_file(&self.destination).ok().flatten()?;
@@ -686,18 +686,20 @@ impl SavePlan {
             return None;
         }
         let trace = std::env::var_os("PM_SAVE_TRACE").is_some();
+        // A stat that cannot prove the bytes (coarse timestamps, or sampled
+        // within the tick): the file is read and its hash must be this
+        // version's, every time; nothing is kept for the next save.
         if !version.stat_proves_content() {
+            #[cfg(test)]
+            durable::test_hooks::note_read(&self.destination);
             let read = FileVersion::read(&self.destination).ok().flatten()?;
             let same = read.stat.same_file(&version.stat) && read.hash == version.hash;
             if trace {
-                eprintln!(
-                    "PM_SAVE stat taken within the timestamps' tick: bytes read, same: {same}"
-                );
+                eprintln!("PM_SAVE the stat proves nothing here: bytes read, same: {same}");
             }
             if !same {
                 return None;
             }
-            version.proven_at(read.stat_taken_ns());
         }
         let in_file = |entry: &MediaEntry| match &entry.source {
             MediaSource::Embedded { file, .. } => {
@@ -766,7 +768,7 @@ impl SavePlan {
         let publish = match publish {
             Publish::Replace(v) => {
                 durable::check_version(dest, Some(&v), false)?;
-                let stat_taken = durable::StatTaken::now();
+                let stat_taken = durable::wall_ns();
                 let stat = lstat_file(dest)?.ok_or(ProjectIoError::ChangedOnDisk)?;
                 Publish::Replace(FileVersion {
                     stat,

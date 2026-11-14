@@ -947,73 +947,135 @@ fn a_sealed_edit_is_its_own_step_and_unsaved_work() {
     reopened_alike(&files);
 }
 
-/// Review w31 clean save, finding 3. An ordinary open on APFS: the stat
-/// proves the bytes and a clean Cmd-S writes nothing without reading the
-/// file. A baseline whose stat was taken within the tick of the file's
-/// newest timestamp proves nothing: equal bytes are proven by their hash
-/// (once; the proof is kept), and other bytes under the same stat (a
-/// rewrite in place within that tick) make the save write.
-#[test]
-fn a_racy_stat_is_checked_by_the_bytes() {
-    let dir = TempDir::new("racy");
-    let path = dir.path("project.pmv");
+/// Saves a small project to `path` and opens it again, as a person would.
+fn saved_and_opened(path: &Path) -> DocumentStore {
     let mut store = DocumentStore::new_untitled(project(2, false));
     let plan = store
         .prepare_save(
             SaveTarget::SaveAs {
-                path: path.clone(),
+                path: path.to_owned(),
                 replace: false,
             },
             SaveOptions::default(),
         )
         .unwrap();
     let receipt = run(plan);
-    eprintln!(
-        "own write: the stat proves the bytes: {}",
-        receipt.version.stat_proves_content()
-    );
     store.finish_save(receipt).unwrap();
     drop(store);
-    let cmd_s = |store: &mut DocumentStore, baseline: Option<Arc<FileVersion>>| {
-        let mut plan = store
-            .prepare_save(SaveTarget::InPlace, SaveOptions::default())
-            .unwrap();
-        assert!(plan.unchanged.is_some(), "clean");
-        if baseline.is_some() {
-            plan.unchanged = baseline;
-        }
-        let receipt = run(plan);
-        let layout = receipt.layout;
-        store.finish_save(receipt).unwrap();
-        layout
-    };
-    // The file was written well before it is opened: provable.
     std::thread::sleep(std::time::Duration::from_millis(5));
-    let mut store = open(&path);
-    let opened = store.file().version.clone().unwrap();
-    assert!(opened.stat_proves_content(), "an ordinary open on APFS");
+    open(path)
+}
+
+/// One clean Cmd-S, optionally against another baseline for the file
+/// (standing in for what a racy open or a clock set back leaves behind):
+/// `Some(layout)` saved, `None` refused (the changed-on-disk handling).
+fn clean_cmd_s(
+    store: &mut DocumentStore,
+    baseline: Option<Arc<FileVersion>>,
+) -> Option<SaveLayout> {
+    let mut plan = store
+        .prepare_save(SaveTarget::InPlace, SaveOptions::default())
+        .unwrap();
+    assert!(plan.unchanged.is_some(), "clean");
+    if baseline.is_some() {
+        plan.unchanged = baseline;
+    }
+    let receipt = std::thread::spawn(move || plan.run())
+        .join()
+        .unwrap()
+        .ok()?;
+    let layout = receipt.layout;
+    store.finish_save(receipt).unwrap();
+    Some(layout)
+}
+
+/// Rewrites one byte of the document record in place: the same length and
+/// file, other bytes.
+fn rewrite_in_place(path: &Path) {
+    use std::os::unix::fs::FileExt;
+    let bytes = fs::read(path).unwrap();
+    let at = bytes
+        .windows(7)
+        .position(|w| w == b"Layer 0")
+        .expect("the layer name")
+        + 6;
+    let file = fs::OpenOptions::new().write(true).open(path).unwrap();
+    file.write_all_at(b"9", at as u64).unwrap();
+}
+
+/// Review w31 clean save, finding 3, as decided: on APFS (fine stamps) an
+/// ordinary open then Cmd-S skips without reading the file.
+#[test]
+fn an_apfs_open_then_cmd_s_skips_without_reading() {
+    let dir = TempDir::new("fine");
+    let path = dir.path("project.pmv");
+    let mut store = saved_and_opened(&path);
+    let version = store.file().version.clone().unwrap();
+    assert!(durable::fine_timestamps(&version.stat), "APFS stamps");
+    assert!(version.stat_proves_content());
     let bytes = fs::read(&path).unwrap();
-    assert_eq!(cmd_s(&mut store, None), SaveLayout::Unchanged);
+    assert_eq!(clean_cmd_s(&mut store, None), Some(SaveLayout::Unchanged));
+    assert_eq!(durable::test_hooks::reads(&path), 0);
     assert_eq!(fs::read(&path).unwrap(), bytes);
-    // The same stat, taken within the tick: equal bytes, proven by the hash.
-    let racy = |hash: &str| {
-        Arc::new(FileVersion {
-            hash: hash.to_owned(),
-            stat_taken: durable::StatTaken::default(),
+}
+
+/// On a coarse-timestamp volume a clean Cmd-S reads the file and compares
+/// its hash every time: unchanged bytes skip after one read, and the next
+/// clean Cmd-S reads again (nothing is kept between saves).
+#[test]
+fn a_coarse_volume_reads_the_bytes_on_every_clean_cmd_s() {
+    let dir = TempDir::new("coarse");
+    let path = dir.path("project.pmv");
+    let mut store = saved_and_opened(&path);
+    let version = store.file().version.clone().unwrap();
+    durable::test_hooks::treat_as_coarse(&version.stat);
+    assert!(!version.stat_proves_content());
+    let bytes = fs::read(&path).unwrap();
+    assert_eq!(clean_cmd_s(&mut store, None), Some(SaveLayout::Unchanged));
+    assert_eq!(durable::test_hooks::reads(&path), 1);
+    assert_eq!(clean_cmd_s(&mut store, None), Some(SaveLayout::Unchanged));
+    assert_eq!(durable::test_hooks::reads(&path), 2);
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+}
+
+/// The re-check's two sequences on a coarse volume, where another writer's
+/// rewrite in place within one stamp leaves the stat as it was. A long open
+/// whose clock sample ends up seconds past the stamps, with the document
+/// changed in place after it was parsed; and a clock set back after a clean
+/// Cmd-S proved the bytes. In both the baseline's stat is the file's and its
+/// hash is of other bytes: Cmd-S never skips.
+#[test]
+fn a_coarse_rewrite_under_the_same_stat_is_never_skipped() {
+    let second = 1_000_000_000i64;
+    for case in ["long open", "clock set back"] {
+        let dir = TempDir::new("coarse-rewrite");
+        let path = dir.path("project.pmv");
+        let mut store = saved_and_opened(&path);
+        let opened = store.file().version.clone().unwrap();
+        durable::test_hooks::treat_as_coarse(&opened.stat);
+        if case == "clock set back" {
+            // The bytes were proven by an earlier clean Cmd-S.
+            assert_eq!(clean_cmd_s(&mut store, None), Some(SaveLayout::Unchanged));
+        }
+        rewrite_in_place(&path);
+        let now = durable::lstat_file(&path).unwrap().unwrap();
+        // What the open (or the earlier proof) recorded: the stat the file
+        // shows now, the hash of the bytes read then, and a clock sample
+        // well past the stamps.
+        let newest = now.mtime_ns.max(now.ctime_ns) as i64;
+        let baseline = Arc::new(FileVersion {
+            stat: now,
+            stat_taken: newest + 3 * second,
             ..(*opened).clone()
-        })
-    };
-    let equal = racy(&opened.hash);
-    assert!(!equal.stat_proves_content());
-    assert_eq!(
-        cmd_s(&mut store, Some(equal.clone())),
-        SaveLayout::Unchanged
-    );
-    assert!(equal.stat_proves_content(), "the proof is kept");
-    assert_eq!(fs::read(&path).unwrap(), bytes);
-    // Other bytes than the ones read, under the same stat: written.
-    let other = racy(&"0".repeat(64));
-    assert_ne!(cmd_s(&mut store, Some(other)), SaveLayout::Unchanged);
+        });
+        durable::test_hooks::treat_as_coarse(&baseline.stat);
+        assert!(!baseline.stat_proves_content(), "{case}");
+        assert_ne!(
+            clean_cmd_s(&mut store, Some(baseline)),
+            Some(SaveLayout::Unchanged),
+            "{case}: other bytes under the same stat were taken as ours"
+        );
+    }
 }
 
 /// A file whose document opening upgraded (old 3D objects) no longer is
