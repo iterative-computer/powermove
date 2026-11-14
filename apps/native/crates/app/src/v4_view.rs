@@ -151,6 +151,8 @@ pub struct SurfaceView {
     scrub_busy: bool,
     scrub_shown: Option<(Id, f64)>,
     grade_drawn: grade::Drawn,
+    /// Each wheel's puck on its way to where its values put it.
+    grade_motion: grade::Motion,
     move_busy: bool,
     /// Last label of each `role="status"` node; `None` until the first frame,
     /// so a panel's opening state is not read out.
@@ -222,6 +224,7 @@ impl SurfaceView {
             scrub_busy: false,
             scrub_shown: None,
             grade_drawn: Default::default(),
+            grade_motion: Default::default(),
             move_busy: false,
             statuses: None,
             queued_move: None,
@@ -1786,6 +1789,22 @@ impl SurfaceView {
             }
         }
         let mut children: Vec<AnyElement> = vec![];
+        // `data-pm-variant="plate"`: the grading material under a group (the
+        // Colour panel's sections stand on what its wheels are made of).
+        if crate::v4_compile::variant_of(&self.publication.surface, id) == Some("plate") {
+            let tokens = self.table.tokens.clone();
+            children.push(
+                canvas(
+                    |_, _, _| (),
+                    move |bounds, _, window, _| {
+                        pm_shell::grade::paint_plate(bounds, &tokens, window)
+                    },
+                )
+                .absolute()
+                .inset_0()
+                .into_any_element(),
+            );
+        }
         // A disabled field mounts no editor; it still shows its value, dimmed.
         if let Some(text) = self.disabled_field_text(node) {
             let t = &self.table.tokens;
