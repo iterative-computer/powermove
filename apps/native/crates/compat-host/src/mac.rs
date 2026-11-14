@@ -464,7 +464,24 @@ fn fail_task(task: &ProtocolObject<dyn WKURLSchemeTask>) {
     }
 }
 
-// The shared page's web view. It spans the whole window under the native
+/// The shared page is never a drag destination. It spans the whole window
+/// under the native panels, and AppKit gives a drag to the registered view
+/// under the pointer whatever `hitTest:` answers, so a WKWebView registered
+/// for files took every file dragged over the window, panels it does not
+/// show included. WebKit registers when it is made, when it joins a window
+/// and as its page loads, with no frame drawn after it on a window at rest:
+/// the page's view ([`PageView`]) ignores the registration, and anything
+/// registered before stays cleared here. As in v1.2.0 (an extension panel's
+/// drop reached the window's own), files go to the native drop targets, and
+/// over an extension panel to the window's drop, which imports them.
+fn refuse_drags(web: &WKWebView) {
+    if web.registeredDraggedTypes().count() > 0 {
+        web.unregisterDraggedTypes();
+    }
+}
+
+// The shared page's web view. It is never a drag destination (above), and
+// it spans the whole window under the native
 // panels and, once a person has clicked an extension panel, holds the
 // keyboard: AppKit then sent it every plain mouse move in the window, so the
 // timeline, the viewer and every native panel lost their hover (no whiter rim,
@@ -479,6 +496,10 @@ define_class!(
     #[name="PMCompatWebView"]
     struct PageView;
     impl PageView {
+        /// WebKit registers for files as it is made, joins a window and
+        /// loads: ignored, so the page never takes a Finder drop.
+        #[unsafe(method(registerForDraggedTypes:))]
+        fn register_for_dragged_types(&self, _types: &NSArray<NSPasteboardType>) {}
         #[unsafe(method(mouseMoved:))]
         fn mouse_moved(&self, event: &NSEvent) {
             match self.native_under(event) {
@@ -518,9 +539,31 @@ define_class!(
             let y=self.bounds().size.height-local.y;
             if self.ivars().borrow().iter().any(|r|r.contains(local.x,y)){unsafe{msg_send![super(self),hitTest:point]}}else{None}
         }
+        /// S5: a key the page leaves (WebKit hands it on up the responder
+        /// chain: no field took it, no page script stopped it) goes back to
+        /// the editor, as Electron's window listener runs it: the editor's
+        /// view takes the keyboard and the key is delivered again, so Space
+        /// plays and the timeline's keys run after a click in a DOM panel.
+        #[unsafe(method(keyDown:))]
+        fn key_down(&self,event:&NSEvent){
+            let Some(editor)=self.editor_view() else{return};
+            let Some(window)=self.window() else{return};
+            if window.makeFirstResponder(Some(&editor)){
+                NSApplication::sharedApplication(MainThreadMarker::from(self)).postEvent_atStart(event,true);
+            }
+        }
     }
 );
 impl SlotView {
+    /// The editor's GPUI view beside this slot (the content's key handler).
+    fn editor_view(&self) -> Option<Retained<NSView>> {
+        let parent = unsafe { self.superview() }?;
+        parent
+            .subviews()
+            .to_vec()
+            .into_iter()
+            .find(|v| v.class().name().to_bytes() == b"GPUIView")
+    }
     fn new(mtm: MainThreadMarker, frame: NSRect) -> Retained<Self> {
         unsafe {
             msg_send![super(Self::alloc(mtm).set_ivars(RefCell::new(vec![]))),initWithFrame:frame]
@@ -668,6 +711,7 @@ impl MacDomHost {
                 &NSString::from_str("drawsBackground"),
             );
         }
+        refuse_drags(&web);
         let slot = SlotView::new(mtm, frame);
         slot.addSubview(&web);
         slot.setAccessibilityElement(true);
@@ -895,6 +939,7 @@ impl MacDomHost {
             NSWindowOrderingMode::Below,
             Some(gpui),
         );
+        refuse_drags(&self.web);
     }
     /// Shell rectangles the shared document shows through this frame.
     pub fn set_regions(&mut self, regions: Vec<Rect>) -> Result<()> {
@@ -924,6 +969,7 @@ impl MacDomHost {
             NSSize::new(viewport.w, viewport.h),
         ));
         self.slot.clip(self.shared.panels.borrow().visible());
+        refuse_drags(&self.web);
         self.shared.geometry_dirty.set(false);
         Ok(())
     }

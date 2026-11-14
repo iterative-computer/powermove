@@ -82,6 +82,22 @@ pub struct Editor {
     session_path: Option<PathBuf>,
     session_pending: bool,
     tool: String,
+    /// A passing message in the status bar (the original app's toasts:
+    /// “Moved Effects above Viewer”, “Move cancelled”), and when it came.
+    notice: Option<(String, std::time::Instant)>,
+    /// The splitter the pointer is over (dock, group, horizontal) and how far
+    /// along it, for the glow that follows the pointer.
+    split_hover: Option<((usize, Option<usize>, bool), f32)>,
+    /// A drag of a splitter between two panels has passed its dead zone.
+    resize_live: bool,
+}
+/// The original app's name for a dock: “Left dock”, “Bottom dock”.
+fn dock_label(id: &str) -> String {
+    let mut chars = id.chars();
+    match chars.next() {
+        Some(first) => format!("{}{} dock", first.to_uppercase(), chars.as_str()),
+        None => "Dock".into(),
+    }
 }
 /// The window session file. `PM_NATIVE_SHELL_STATE` names an isolated state
 /// file; its directory then holds the session.
@@ -133,7 +149,99 @@ impl Editor {
             session_path,
             session_pending: false,
             tool: "toolSelect".into(),
+            notice: None,
+            split_hover: None,
+            resize_live: false,
         }
+    }
+    /// Shows `text` in the status bar for a moment.
+    fn notify_status(&mut self, text: String, cx: &mut Context<Self>) {
+        let at = std::time::Instant::now();
+        // As long as the app's other status notes hold.
+        let hold = Duration::from_secs_f64(self.tokens.motion.note_hold);
+        self.notice = Some((text, at));
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(hold).await;
+            let _ = this.update(cx, |v, cx| {
+                if v.notice.as_ref().is_some_and(|(_, when)| *when == at) {
+                    v.notice = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+    /// The dragged panel's name, or its stack's names joined (“Effects +
+    /// Takes”), as the original app's drag card says it.
+    fn moving_name(&self, id: &str, stack: bool, panels: &layout::Panels) -> String {
+        match self.layout.find(id) {
+            Some((d, g, _)) if stack => self.layout.docks[d].groups[g]
+                .tabs
+                .iter()
+                .map(|t| panels.title(t).to_string())
+                .collect::<Vec<_>>()
+                .join(" + "),
+            _ => panels.title(id).to_string(),
+        }
+    }
+    /// The panel or dock a drop is named after, in this layout.
+    fn near_name(&self, near: layout::Near, panels: &layout::Panels) -> (String, &'static str) {
+        let title = |d: usize, g: usize| {
+            self.layout
+                .docks
+                .get(d)
+                .and_then(|dock| dock.groups.get(g))
+                .map_or_else(String::new, |g| panels.title(g.active()).to_string())
+        };
+        match near {
+            layout::Near::Tab(d, g) => (title(d, g), "tab"),
+            layout::Near::Above(d, g) => (title(d, g), "above"),
+            layout::Near::Below(d, g) => (title(d, g), "below"),
+            layout::Near::Dock(d) => (
+                dock_label(self.layout.docks.get(d).map_or("", |d| d.id.as_str())),
+                "dock",
+            ),
+            layout::Near::Edge(e) => (dock_label(e.dock_id()), "dock"),
+            layout::Near::Nothing => (String::new(), "dock"),
+        }
+    }
+    /// The drag card's second line: where the panel would go.
+    fn destination(&self, drag: &PanelDrag, panels: &layout::Panels) -> String {
+        if let Some(p) = drag.preview {
+            let (name, kind) = self.near_name(p.near, panels);
+            return match kind {
+                "tab" => format!("Tab with {name}"),
+                "above" => format!("Above {name}"),
+                "below" => format!("Below {name}"),
+                _ => format!("Place in {name}"),
+            };
+        }
+        match self.layout.drop_outcome(
+            &self.geometry,
+            self.dock_bounds,
+            (f32::from(drag.at.x), f32::from(drag.at.y)),
+            &self.tokens,
+            &drag.id,
+            drag.stack,
+        ) {
+            layout::DropOutcome::Here => "Already here".into(),
+            _ => "Not a drop zone".into(),
+        }
+    }
+    /// A drag in progress put back as it began: Escape, or the window
+    /// losing focus (the original app cancels then).
+    pub fn cancel_gesture(&mut self, cx: &mut Context<Self>) {
+        let Some(g) = self.gesture.take() else {
+            return;
+        };
+        let moved = matches!(&g, Gesture::Panel(d) if d.moved);
+        self.layout = g.original();
+        self.resize_live = false;
+        if moved {
+            self.notify_status("Move cancelled".into(), cx);
+        }
+        cx.notify();
     }
     /// Binds this editor to a session window and restores its project/workspace.
     pub fn restore(&mut self, state: &WindowState) {
@@ -549,12 +657,58 @@ impl Editor {
                 let (id, target) = rest.split_once(':').unwrap_or((rest, ""));
                 self.layout.place_relative(id, target, verb)
             }
+            // Maximize Panel, or Restore Panel Size on the maximized stack.
             ("panel", "maximize") => {
-                if self.layout.open_panels().contains(&rest) {
+                let in_stack = |m: &str| {
+                    self.layout.find(rest).is_some_and(|(d, g, _)| {
+                        self.layout.docks[d].groups[g].tabs.iter().any(|t| t == m)
+                    })
+                };
+                if self.maximized_panel.as_deref().is_some_and(in_stack) {
+                    self.maximized_panel = None;
+                } else if self.layout.open_panels().contains(&rest) {
                     self.maximized_panel = Some(rest.into());
-                    cx.notify();
                 }
+                cx.notify();
                 return true;
+            }
+            // panel:tabwith:<target>:<id> — Add Panel as Tab: a closed panel
+            // opens there, an open one moves there; it shows.
+            ("panel", "tabwith") => {
+                let (target, id) = rest.split_once(':').unwrap_or((rest, ""));
+                let mut next = self.layout.clone();
+                let opened = if next.find(id).is_none() {
+                    next.show_panel(id, &panels)
+                } else {
+                    Ok(())
+                };
+                opened
+                    .and_then(|_| next.place_relative(id, target, "group"))
+                    .map(|_| self.layout = next)
+            }
+            ("panel", "closeothers") => {
+                if let Some((d, g, _)) = self.layout.find(rest) {
+                    for t in self.layout.docks[d].groups[g].tabs.clone() {
+                        if t != rest {
+                            self.parked.remove(&t);
+                        }
+                    }
+                }
+                self.layout.close_others(rest)
+            }
+            // panel:column:<id>:left|right — a new column beside its dock.
+            ("panel", "column") => {
+                let (id, side) = rest.rsplit_once(':').unwrap_or((rest, ""));
+                match self.layout.find(id) {
+                    Some((dock, ..)) => self.layout.move_panel_to(
+                        id,
+                        DropTarget::Beside {
+                            dock,
+                            after: side == "right",
+                        },
+                    ),
+                    None => Err(anyhow::anyhow!("Unknown panel")),
+                }
             }
             // panel:addto:<dock>:<group>:<id> — the header's + menu.
             ("panel", "addto") => {
@@ -909,8 +1063,8 @@ impl Editor {
             "newWindow" => crate::open_editor(cx),
             "newTab" => crate::open_editor_tab(cx, self.window_id),
             "deselect" | "cancel" => {
-                if let Some(g) = self.gesture.take() {
-                    self.layout = g.original();
+                if self.gesture.is_some() {
+                    self.cancel_gesture(cx);
                 } else {
                     handled = false;
                 }
@@ -985,16 +1139,45 @@ impl Editor {
         let Some(g) = self.gesture.take() else {
             return;
         };
+        self.resize_live = false;
         if let Gesture::Panel(drag) = g
             && drag.moved
-            && let Some(p) = drag.preview
-            && let Err(err) = if drag.stack {
-                self.layout.move_stack_to(&drag.id, p.target)
-            } else {
-                self.layout.move_panel_to(&drag.id, p.target)
-            }
         {
-            self.status = err.to_string();
+            // The original app says what happened: where it went, that it
+            // was already there, or that it was no drop zone.
+            let panels = self.panels(cx);
+            let name = self.moving_name(&drag.id, drag.stack, &panels);
+            let message = match drag.preview {
+                Some(p) => {
+                    let (near, kind) = self.near_name(p.near, &panels);
+                    let moved = if drag.stack {
+                        self.layout.move_stack_to(&drag.id, p.target)
+                    } else {
+                        self.layout.move_panel_to(&drag.id, p.target)
+                    };
+                    match moved {
+                        Ok(()) => match kind {
+                            "tab" => format!("{name} tabbed with {near}"),
+                            "above" => format!("Moved {name} above {near}"),
+                            "below" => format!("Moved {name} below {near}"),
+                            _ => format!("Moved {name} → {near}"),
+                        },
+                        Err(err) => err.to_string(),
+                    }
+                }
+                None => match self.layout.drop_outcome(
+                    &self.geometry,
+                    self.dock_bounds,
+                    (f32::from(drag.at.x), f32::from(drag.at.y)),
+                    &self.tokens,
+                    &drag.id,
+                    drag.stack,
+                ) {
+                    layout::DropOutcome::Here => format!("{name} is already here"),
+                    _ => format!("Drop on a panel or dock to move {name}"),
+                },
+            };
+            self.notify_status(message, cx);
         }
         // A panel let go in a new place travels there.
         self.slides.armed = true;
@@ -1197,60 +1380,98 @@ impl Editor {
     }
     /// Context menu for a panel tab (also its header). The panel's current
     /// dock carries a checkmark.
+    /// A panel's menu (right-click on its header or a tab, or its “…”
+    /// button), as the original app's: Maximize Panel (or Restore Panel
+    /// Size), Add Panel as Tab, then the closing group. The docking moves
+    /// this app adds (window edges, a column beside, the top band) stay in
+    /// one Dock submenu at the end.
     pub fn tab_menu_entries(&self, id: &str, cx: &App) -> Vec<MenuEntry> {
         let panels = self.panels(cx);
-        let title = panels.title(id);
         let current = self
             .layout
             .docks
             .iter()
             .find(|d| d.groups.iter().any(|g| g.tabs.iter().any(|t| t == id)))
             .map(|d| d.id.as_str());
-        let mut items = vec![];
-        if layout::closable(id) {
-            items.push(MenuEntry::item(
-                format!("Close {title}"),
-                format!("panel:close:{id}"),
-            ));
+        let stack: Vec<String> = self
+            .layout
+            .find(id)
+            .map(|(d, g, _)| self.layout.docks[d].groups[g].tabs.clone())
+            .unwrap_or_default();
+        let maximized = self
+            .maximized_panel
+            .as_deref()
+            .is_some_and(|m| stack.iter().any(|t| t == m));
+        let mut items = vec![MenuEntry::item(
+            if maximized {
+                "Restore Panel Size"
+            } else {
+                "Maximize Panel"
+            },
+            format!("panel:maximize:{id}"),
+        )];
+        // Any panel can join this one as a tab: a closed one opens here, an
+        // open one moves here. The viewer takes no tabs.
+        if layout::stacks(id) {
+            let mut addable: Vec<&str> = panels
+                .ids()
+                .into_iter()
+                .filter(|p| layout::stacks(p) && !stack.iter().any(|t| t == p))
+                .collect();
+            addable.sort_by_key(|p| panels.title(p).to_lowercase());
+            if !addable.is_empty() {
+                items.push(MenuEntry::submenu(
+                    "Add Panel as Tab",
+                    addable
+                        .into_iter()
+                        .map(|p| {
+                            MenuEntry::item(panels.title(p), format!("panel:tabwith:{id}:{p}"))
+                        })
+                        .collect(),
+                ));
+            }
+        }
+        let others = stack.iter().any(|t| t != id && layout::closable(t));
+        if layout::closable(id) || others {
             items.push(MenuEntry::separator());
         }
+        if layout::closable(id) {
+            items.push(MenuEntry::item("Close Panel", format!("panel:close:{id}")));
+        }
+        if others {
+            items.push(MenuEntry::item(
+                "Close Other Panels in Group",
+                format!("panel:closeothers:{id}"),
+            ));
+        }
+        // This app's own docking moves, kept for the menu and the keyboard.
+        let mut dock = vec![];
         for (label, edge) in [
-            ("Dock Left", "left"),
-            ("Dock Right", "right"),
-            ("Dock Top", "top"),
-            ("Dock Bottom", "bottom"),
+            ("Left Edge", "left"),
+            ("Right Edge", "right"),
+            ("Top Edge", "top"),
+            ("Bottom Edge", "bottom"),
         ] {
-            items.push(
+            dock.push(
                 MenuEntry::item(label, format!("panel:dock:{id}:{edge}"))
                     .checked(current == Some(edge)),
             );
         }
-        for (label, verb) in [
-            ("Group With", "group"),
-            ("Dock Above", "above"),
-            ("Dock Below", "below"),
-        ] {
-            let children = self
-                .layout
-                .open_panels()
-                .into_iter()
-                .filter(|target| {
-                    *target != id
-                        && (verb != "group" || (layout::stacks(id) && layout::stacks(target)))
-                })
-                .map(|target| {
-                    MenuEntry::item(panels.title(target), format!("panel:{verb}:{id}:{target}"))
-                })
-                .collect();
-            items.push(MenuEntry::submenu(label, children));
+        if !matches!(current, Some("bottom" | "top")) {
+            dock.push(MenuEntry::separator());
+            dock.push(MenuEntry::item(
+                "New Column to the Left",
+                format!("panel:column:{id}:left"),
+            ));
+            if current != Some("right") {
+                dock.push(MenuEntry::item(
+                    "New Column to the Right",
+                    format!("panel:column:{id}:right"),
+                ));
+            }
         }
-        items.push(MenuEntry::item(
-            "Maximize Panel",
-            format!("panel:maximize:{id}"),
-        ));
         items.push(MenuEntry::separator());
-        items.push(MenuEntry::item("Save Workspace…", "layout:save"));
-        items.push(MenuEntry::item("Reset Workspace", "layout:reset"));
+        items.push(MenuEntry::submenu("Dock", dock));
         items
     }
     fn tab_menu(&self, id: &str, position: Point<Pixels>, cx: &mut App) {
@@ -1283,22 +1504,9 @@ impl Editor {
         }
         items.push(MenuEntry::separator());
         items.push(MenuEntry::item("Save Workspace…", "layout:save"));
-        h.borrow()
-            .context_menu(&items, f32::from(position.x), f32::from(position.y));
-    }
-    fn add_menu(&self, dock: usize, group: usize, position: Point<Pixels>, cx: &App) {
-        let Some(h) = &self.host else { return };
-        let open = self.layout.open_panels();
-        let panels = self.panels(cx);
-        let items: Vec<_> = panels
-            .ids()
-            .into_iter()
-            .filter(|p| !open.contains(p))
-            .map(|p| MenuEntry::item(panels.title(p), format!("panel:addto:{dock}:{group}:{p}")))
-            .collect();
-        if items.is_empty() {
-            return;
-        }
+        // Was in the panel menu; the original app's panel menu has no
+        // workspace items.
+        items.push(MenuEntry::item("Reset Workspace", "layout:reset"));
         h.borrow()
             .context_menu(&items, f32::from(position.x), f32::from(position.y));
     }
@@ -1695,12 +1903,29 @@ impl Render for Editor {
                     }
                     match &mut this.gesture {
                         Some(Gesture::Resize(d, start, original)) => {
-                            this.layout = original.clone();
                             let delta = if d.horizontal {
                                 f32::from(e.position.y - start.y)
                             } else {
                                 f32::from(e.position.x - start.x)
                             };
+                            // The glow follows the pointer along the gap.
+                            let along = if d.horizontal {
+                                f32::from(e.position.x) - d.rect.x
+                            } else {
+                                f32::from(e.position.y) - d.rect.y
+                            };
+                            this.split_hover = Some(((d.dock, d.group, d.horizontal), along));
+                            // Between two panels the original app waits for
+                            // 2 pt before it resizes.
+                            if d.group.is_some()
+                                && !this.resize_live
+                                && delta.abs() < this.tokens.metrics.splitter_dead_zone
+                            {
+                                cx.notify();
+                                return;
+                            }
+                            this.resize_live = true;
+                            this.layout = original.clone();
                             this.layout.resize(d, delta, this.dock_bounds, &this.tokens);
                             cx.notify();
                         }
@@ -1708,7 +1933,7 @@ impl Render for Editor {
                             drag.at = e.position;
                             let dx = f32::from(e.position.x - drag.start.x);
                             let dy = f32::from(e.position.y - drag.start.y);
-                            drag.moved |= dx.hypot(dy) >= this.tokens.metrics.drag_threshold;
+                            drag.moved |= dx.hypot(dy) >= this.tokens.metrics.panel_drag_threshold;
                             drag.preview = drag
                                 .moved
                                 .then(|| {
@@ -1754,10 +1979,7 @@ impl Render for Editor {
             }))
             .on_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| {
                 if e.keystroke.key == "escape" {
-                    if let Some(g) = this.gesture.take() {
-                        this.layout = g.original();
-                        cx.notify();
-                    }
+                    this.cancel_gesture(cx);
                     return;
                 }
                 if let Some(d) = this.split_focus.clone() {
@@ -1765,11 +1987,9 @@ impl Render for Editor {
                     let delta = match key {
                         "left" | "up" => -this.tokens.metrics.keyboard_step,
                         "right" | "down" => this.tokens.metrics.keyboard_step,
+                        // Return puts a dock back at its size (the original app).
                         "enter" => {
-                            if d.group.is_none() {
-                                let dock = &mut this.layout.docks[d.dock];
-                                dock.collapsed = !dock.collapsed;
-                            }
+                            this.layout.reset_dock(&d);
                             0.
                         }
                         _ => return,
@@ -1800,6 +2020,8 @@ impl Render for Editor {
             integration.open_panels(&self.layout.open_panels(), cx);
         }
         let mut native_bodies = vec![];
+        // Where each header's tabs are drawn, for drops over a header.
+        let mut tab_spans: HashMap<(usize, usize), Vec<(usize, f32, f32)>> = HashMap::new();
         for p in ordered {
             let group = &self.layout.docks[p.dock].groups[p.group];
             let id = group.active().to_string();
@@ -1810,6 +2032,8 @@ impl Render for Editor {
                 .is_some_and(|i| i.native_panel(&id, cx));
             let tabs = group.tabs.clone();
             let active = group.active;
+            // Folded to its header (a double-click on the header).
+            let collapsed = group.collapsed && !is_viewer;
             // Quiet text tabs (language §9): each takes its title's width plus
             // the leading close slot, trailing padding and the pill spacing.
             // The leading close slot is the panel inset, and tab groups start
@@ -1841,7 +2065,7 @@ impl Render for Editor {
                 .corner(&t, m.panel_radius)
                 .elevated(&t, pm_design::Elevation::Panel)
                 .overflow_hidden();
-            if body_native {
+            if body_native && !collapsed {
                 // A native body (an extension's web page) takes the pointer
                 // where it shows, so it stops short of the dividers' grab.
                 let edge = m.border.max(m.splitter_reach);
@@ -1915,6 +2139,17 @@ impl Render for Editor {
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, e: &MouseDownEvent, window, cx| {
+                        // A double-click folds the panel to its header, and
+                        // opens it again (the original app).
+                        if e.click_count >= 2 {
+                            this.gesture = None;
+                            if this.layout.toggle_collapsed(&header_id) {
+                                this.slides.armed = true;
+                                this.save();
+                            }
+                            cx.notify();
+                            return;
+                        }
                         this.begin_panel_drag(&header_id, e.position, true);
                         this.watch_release(cx);
                         window.focus(&this.focus, cx);
@@ -1943,9 +2178,24 @@ impl Render for Editor {
                     .items_center()
                     .gap(px(TAB_SPACING))
                     .when(multi, |s| s.flex_1().min_w(px(0.)).overflow_hidden());
+                let mut span_x = p.rect.x + if multi { 0. } else { m.inset };
+                let mut spans = vec![];
                 for (ti, tab) in tabs.iter().enumerate() {
                     if !tab_track.visible.contains(&ti) {
                         continue;
+                    }
+                    {
+                        let full = if multi {
+                            widths[ti] - TAB_SPACING
+                        } else {
+                            title_width(panels.title(tab), t.typography.title, w)
+                        };
+                        let drawn = match tab_track.active_limit.filter(|_| ti == active) {
+                            Some(limit) => full.min(limit),
+                            None => full,
+                        };
+                        spans.push((ti, span_x, span_x + drawn));
+                        span_x += drawn + TAB_SPACING;
                     }
                     let tabid = tab.clone();
                     let menu_id = tab.clone();
@@ -2053,6 +2303,7 @@ impl Render for Editor {
                         ),
                     );
                 }
+                tab_spans.insert((p.dock, p.group), spans);
                 header = header.child(strip);
                 if !tab_track.overflow.is_empty() {
                     let entries: Vec<_> = tab_track
@@ -2122,20 +2373,23 @@ impl Render for Editor {
                         .child(custom),
                 );
             } else if !is_viewer {
-                let (dock, gi) = (p.dock, p.group);
-                let add_group: SharedString = format!("add-{}-{}", p.dock, p.group).into();
+                // The original app's “…” button: this panel's menu (Add Panel
+                // as Tab is in it).
+                let options_group: SharedString = format!("options-{}-{}", p.dock, p.group).into();
+                let options_id = id.clone();
+                let options_title = format!("{} Options", panels.title(&id));
                 header = header.child(
                     div()
-                        .id(format!("add-{}-{}", p.dock, p.group))
-                        .group(add_group.clone())
+                        .id(format!("options-{}-{}", p.dock, p.group))
+                        .group(options_group.clone())
                         .role(Role::Button)
-                        .aria_label("Add Panel")
+                        .aria_label(options_title.clone())
                         .tab_index(tabs.len() as isize)
                         .focus_style(|s| s.ring(px(m.border * 2.)).ring_color(rgb(c.focus)))
                         .on_click(cx.listener(move |this, e: &ClickEvent, _, cx| {
-                            this.add_menu(dock, gi, e.position(), cx)
+                            this.tab_menu(&options_id, e.position(), cx)
                         }))
-                        .tooltip(tooltip(&t, "Add Panel"))
+                        .tooltip(tooltip(&t, &options_title))
                         .ml_auto()
                         .relative()
                         .size(px(m.hit))
@@ -2145,7 +2399,7 @@ impl Render for Editor {
                         .rounded(px(m.control_radius))
                         .hover_style(|s| s.bg(rgb(c.hover)))
                         .child(crate::symbol::symbol(
-                            "plus",
+                            "ellipsis",
                             m.symbol_panel,
                             crate::symbol::Weight::Medium,
                             c.secondary,
@@ -2160,9 +2414,9 @@ impl Render for Editor {
                                 .items_center()
                                 .justify_center()
                                 .opacity(0.)
-                                .group_hover_style(add_group, |s| s.opacity(1.))
+                                .group_hover_style(options_group, |s| s.opacity(1.))
                                 .child(crate::symbol::symbol(
-                                    "plus",
+                                    "ellipsis",
                                     m.symbol_panel,
                                     crate::symbol::Weight::Medium,
                                     c.text,
@@ -2173,6 +2427,10 @@ impl Render for Editor {
                 );
             }
             panel = panel.child(header);
+            if collapsed {
+                root = root.child(panel);
+                continue;
+            }
             let content = self
                 .integration
                 .as_ref()
@@ -2223,6 +2481,7 @@ impl Render for Editor {
             }
             root = root.child(panel);
         }
+        self.geometry.tabs = tab_spans;
         if let Some(integration) = &self.integration {
             // Every panel on screen, built-in or an extension's: the viewer
             // and the timeline are not native bodies but are shown.
@@ -2235,6 +2494,57 @@ impl Render for Editor {
         for (i, d) in self.geometry.dividers.clone().into_iter().enumerate() {
             let divd = d.clone();
             let key_divider = d.clone();
+            let hover_divider = d.clone();
+            let hover_key = (d.dock, d.group, d.horizontal);
+            // The original app's splitter: a short accent glow in the gap
+            // that follows the pointer, while hovered or dragged; none while
+            // a panel is being moved.
+            let resizing_this = matches!(&self.gesture, Some(Gesture::Resize(g, ..))
+                if (g.dock, g.group, g.horizontal) == hover_key);
+            let glow = self
+                .split_hover
+                .filter(|(k, _)| *k == hover_key)
+                .filter(|_| !dragging && (self.gesture.is_none() || resizing_this))
+                .map(|(_, along)| {
+                    let reach = m.splitter_reach;
+                    let length = if d.horizontal { d.rect.w } else { d.rect.h };
+                    let glow_len = m.splitter_glow.min(length);
+                    let start = (along - glow_len / 2.).clamp(0., (length - glow_len).max(0.));
+                    let thick = m.splitter_glow_width;
+                    let across = if d.horizontal { d.rect.h } else { d.rect.w };
+                    // Inside the hit area, which reaches `reach` past the gap.
+                    let offset = reach + (across - thick) / 2.;
+                    let half = |first: bool| {
+                        let (from, to) = if first { (0., 1.) } else { (1., 0.) };
+                        let angle = if d.horizontal { 90. } else { 180. };
+                        div()
+                            .flex_1()
+                            .bg(linear_gradient(
+                                angle,
+                                linear_color_stop(crate::kit::ink(c.accent, from), 0.),
+                                linear_color_stop(crate::kit::ink(c.accent, to), 1.),
+                            ))
+                    };
+                    let bar = div()
+                        .absolute()
+                        .flex()
+                        .rounded(px(thick / 2.))
+                        .child(half(true))
+                        .child(half(false));
+                    if d.horizontal {
+                        bar.flex_row()
+                            .left(px(start))
+                            .top(px(offset))
+                            .w(px(glow_len))
+                            .h(px(thick))
+                    } else {
+                        bar.flex_col()
+                            .top(px(start))
+                            .left(px(offset))
+                            .h(px(glow_len))
+                            .w(px(thick))
+                    }
+                });
             // As in Final Cut and After Effects, the splitter is the gap
             // itself: nothing is drawn on it, the resize cursor says it can
             // be dragged, along its whole length and a few points into the
@@ -2265,9 +2575,9 @@ impl Render for Editor {
                         let delta = match e.keystroke.key.as_str() {
                             "left" | "up" => -this.tokens.metrics.keyboard_step,
                             "right" | "down" => this.tokens.metrics.keyboard_step,
+                            // Return puts a dock back at its size (the original app).
                             "enter" if key_divider.group.is_none() => {
-                                this.layout.docks[key_divider.dock].collapsed =
-                                    !this.layout.docks[key_divider.dock].collapsed;
+                                this.layout.reset_dock(&key_divider);
                                 0.
                             }
                             _ => return,
@@ -2282,6 +2592,26 @@ impl Render for Editor {
                     } else {
                         CursorStyle::ResizeLeftRight
                     })
+                    // The glow follows the pointer along the gap.
+                    .on_mouse_move(cx.listener(move |this, e: &MouseMoveEvent, _, cx| {
+                        let along = if hover_divider.horizontal {
+                            f32::from(e.position.x) - hover_divider.rect.x
+                        } else {
+                            f32::from(e.position.y) - hover_divider.rect.y
+                        };
+                        this.split_hover = Some((hover_key, along));
+                        cx.notify();
+                    }))
+                    .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                        if !*hovered
+                            && this.split_hover.is_some_and(|(k, _)| k == hover_key)
+                            && !matches!(this.gesture, Some(Gesture::Resize(..)))
+                        {
+                            this.split_hover = None;
+                            cx.notify();
+                        }
+                    }))
+                    .children(glow)
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, e: &MouseDownEvent, window, cx| {
@@ -2293,6 +2623,23 @@ impl Render for Editor {
                             if let Some(h) = &this.host {
                                 h.borrow_mut().splitter_focus = true;
                             }
+                            // A double-click puts a dock back at its size
+                            // (the original app); between panels it does nothing.
+                            if e.click_count >= 2 {
+                                this.gesture = None;
+                                if this.layout.reset_dock(&divd) {
+                                    this.slides.armed = true;
+                                    this.save();
+                                }
+                                cx.notify();
+                                return;
+                            }
+                            // A folded panel beside it opens first, so the
+                            // drag has room to work with.
+                            if this.layout.expand_beside(&divd) {
+                                this.save();
+                            }
+                            this.resize_live = false;
                             this.gesture = Some(Gesture::Resize(
                                 divd.clone(),
                                 e.position,
@@ -2305,15 +2652,37 @@ impl Render for Editor {
                     ),
             );
         }
-        // Drop preview and a ghost label that follows the pointer. Work-surface
+        // Drop preview and a card that follows the pointer. Work-surface
         // overlays stay solid tints (no glass below the controls band).
         if let Some(Gesture::Panel(drag)) = &self.gesture
             && drag.moved
         {
+            let drag = drag.clone();
+            let moving = self.moving_name(&drag.id, drag.stack, &panels);
             if let Some(p) = drag.preview {
-                // Only the drop zone: a light wash of the accent inside a 2 pt
-                // accent outline, so the panels it would cover stay in view
-                // (an opaque wash hid them while their hosted controls showed).
+                // The original app outlines the panel it lands on or beside.
+                let target = match p.near {
+                    layout::Near::Tab(d, g) | layout::Near::Above(d, g) | layout::Near::Below(d, g) => self
+                        .geometry
+                        .panels
+                        .iter()
+                        .find(|q| (q.dock, q.group) == (d, g))
+                        .map(|q| (d, g, q.rect)),
+                    _ => None,
+                };
+                if let Some((_, _, r)) = target {
+                    root = root.child(
+                        positioned(r)
+                            .id("drop-frame")
+                            .rounded(px(m.panel_radius))
+                            .border(px(m.drop_stroke))
+                            .border_color(rgb(c.accent)),
+                    );
+                }
+                // Where the panel lands: a light wash of the accent inside a
+                // 2 pt accent outline, so the panels it would cover stay in
+                // view (an opaque wash hid them while their hosted controls
+                // showed).
                 root = root.child(
                     positioned(p.rect)
                         .id("drop-preview")
@@ -2322,21 +2691,68 @@ impl Render for Editor {
                         .border_color(rgb(c.accent))
                         .bg(tint(c.accent, t.translucency.selected)),
                 );
+                // Joining a stack: a tab marks its place in the header.
+                if let (DropTarget::Tab { index, .. }, Some((d, g, r))) = (p.target, target) {
+                    let spans = self.geometry.tabs.get(&(d, g));
+                    let x = spans
+                        .and_then(|s| s.iter().find(|(i, ..)| *i == index).map(|(_, l, _)| *l))
+                        .or_else(|| spans.and_then(|s| s.last()).map(|(_, _, r)| r + TAB_SPACING))
+                        .unwrap_or(r.x + m.inset);
+                    let x = x.min(r.x + r.w - m.hit * 2.).max(r.x);
+                    root = root.child(
+                        div()
+                            .id("drop-tab")
+                            .absolute()
+                            .left(px(x))
+                            .top(px(r.y + (m.header - m.hit) / 2.))
+                            .h(px(m.hit))
+                            .max_w(px((r.x + r.w - x - m.gap).max(m.hit)))
+                            .px(px(m.gap))
+                            .flex()
+                            .items_center()
+                            .rounded(px(m.control_radius))
+                            .bg(rgb(c.accent_wash))
+                            .border(px(m.border))
+                            .border_color(rgb(c.accent))
+                            .text_color(rgb(c.text))
+                            .text_size(px(t.typography.title))
+                            .font_weight(FontWeight(t.typography.medium_weight))
+                            .whitespace_nowrap()
+                            .overflow_hidden()
+                            .child(moving.clone()),
+                    );
+                }
             }
+            // The card: what moves and where it would go.
+            let destination = self.destination(&drag, &panels);
             root = root.child(
                 div()
                     .id("drag-ghost")
                     .absolute()
                     .left(drag.at.x + px(12.))
-                    .top(drag.at.y + px(10.))
-                    .px(px(10.))
-                    .py(px(4.))
+                    .top(drag.at.y + px(12.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(m.border))
+                    .px(px(m.gap + 2.))
+                    .py(px(m.gap - 2.))
                     .rounded(px(m.control_radius))
                     .bg(rgb(c.floating))
                     .elevated(&t, pm_design::Elevation::Menu)
                     .shadow_md()
-                    .font_weight(FontWeight::MEDIUM)
-                    .child(panels.title(&drag.id).to_string()),
+                    .child(
+                        div()
+                            .font_weight(FontWeight(t.typography.semibold_weight))
+                            .whitespace_nowrap()
+                            .child(moving),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(t.typography.minimum))
+                            .text_color(rgb(c.secondary))
+                            .whitespace_nowrap()
+                            .child(destination),
+                    ),
             );
         }
         let workspace = workspace::record_name(&self.record).to_owned();
@@ -2346,7 +2762,9 @@ impl Render for Editor {
             .integration
             .as_ref()
             .map_or_else(|| self.status.clone(), |i| i.status(cx));
-        let left = if left.is_empty() {
+        let left = if let Some((notice, _)) = &self.notice {
+            notice.clone()
+        } else if left.is_empty() {
             self.status.clone()
         } else {
             left

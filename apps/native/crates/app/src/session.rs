@@ -2967,6 +2967,12 @@ impl Controller {
                     }
                 }
             }
+            // The gear and ⌘, toggle: Settings showing closes, back to the
+            // tab it came forward over; open behind another tab, it comes
+            // forward. Its rows have saved as they changed (as its × closes).
+            "settings" if self.pages.toggle_closes("settings") => {
+                self.close_tab_page("settings", cx)
+            }
             "settings" => self.show_builtin(&cmd.name, window, cx),
             "agent" => self.toggle_agent(window, cx),
             "bringWorkspace" => self.bring_workspace(window, cx),

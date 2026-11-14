@@ -194,6 +194,9 @@ pub struct NodeView {
     pub native: Option<SharedString>,
     pub kit: Kit,
     pub virtual_window: Option<pm_builtins::virtualization::Window>,
+    /// What a dragged item is, for its drop targets (`metadata.item` as
+    /// text: an Effects row's effect id).
+    pub drag_item: Option<SharedString>,
     pub is_plain_text: bool,
     pub binding: Option<SharedString>,
     pub number: Option<NumberFacts>,
@@ -791,7 +794,12 @@ fn compile(
         })
         .flatten();
     let meta = node.props.get("metadata");
+    let drag_item = meta
+        .and_then(|m| m.get("item"))
+        .and_then(Value::as_str)
+        .map(|s| SharedString::from(s.to_owned()));
     NodeView {
+        drag_item,
         well: slot_control
             && matches!(
                 component,
