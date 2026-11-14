@@ -488,6 +488,7 @@ impl Controller {
             || self.builtins.followed == Some(frame)
             || !self.builtins.open.contains(PANEL)
             || !self.builtins.ready.contains(PANEL)
+            || !follows_selection(self.published.as_deref())
         {
             return;
         }
@@ -1260,12 +1261,20 @@ impl Controller {
                     }
                     cx.new(|cx| {
                         cx.observe(&owner, |_, _, cx| cx.notify()).detach();
+                        let keys = PopoverKeys::new(cx);
                         if panel == "agent" {
+                            // Its own keys reach it from the first moment,
+                            // before anything inside is clicked.
+                            keys.claim(window, cx);
                             // A press anywhere in the editor closes the
                             // popover, as a popover does (the original app's
                             // outside-press dismissal).
                             cx.observe_window_activation(window, |this: &mut SurfaceWindow, window, cx| {
                                 if window.is_window_active() {
+                                    // Key again (a reopen, a return from
+                                    // another window): Escape still reaches
+                                    // it with nothing inside focused.
+                                    this.keys.claim(window, cx);
                                     return;
                                 }
                                 let owner = this.owner.clone();
@@ -1279,7 +1288,7 @@ impl Controller {
                             })
                             .detach();
                         }
-                        SurfaceWindow { owner, panel }
+                        SurfaceWindow { owner, panel, keys }
                     })
                 },
             );
@@ -2298,12 +2307,42 @@ impl crate::gizmo::Host for ControllerDelegate {
 struct SurfaceWindow {
     owner: Entity<Controller>,
     panel: String,
+    keys: PopoverKeys,
+}
+/// A popover's own keys. With nothing focused GPUI delivers a key to the
+/// window's root only, so the popover's root holds focus whenever nothing
+/// inside does; a focused control inside still sees keys first, and what it
+/// leaves bubbles to the root (Escape closes the popover).
+pub(crate) struct PopoverKeys {
+    pub(crate) focus: FocusHandle,
+}
+impl PopoverKeys {
+    pub(crate) fn new(cx: &mut App) -> Self {
+        Self {
+            focus: cx.focus_handle(),
+        }
+    }
+    /// Nothing in the window is focused: the popover's root takes focus.
+    pub(crate) fn claim(&self, window: &mut Window, cx: &mut App) {
+        if window.focused(cx).is_none() {
+            window.focus(&self.focus, cx);
+        }
+    }
+    /// Plain Escape, the popover's dismissal key.
+    pub(crate) fn dismisses(e: &KeyDownEvent) -> bool {
+        let m = e.keystroke.modifiers;
+        e.keystroke.key == "escape" && !(m.platform || m.control || m.alt || m.shift)
+    }
 }
 impl Render for SurfaceWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let size = window.viewport_size();
         let panel = self.panel.clone();
         let popover = self.panel == "agent";
+        if popover {
+            // A focused control that went away leaves nothing focused.
+            self.keys.claim(window, cx);
+        }
         // Export is a sheet: no title bar band (its window fits its content).
         let sheet = self.panel == "export";
         // Settings draws its own sheet beside a sidebar on the window's
@@ -2354,11 +2393,9 @@ impl Render for SurfaceWindow {
                 // Escape closes the popover from anywhere in it; a control
                 // that uses Escape itself (a menu, the composer's shortcuts)
                 // handles it first. Deferred: this window is the one going.
-                d.on_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| {
-                    let m = e.keystroke.modifiers;
-                    if e.keystroke.key == "escape"
-                        && !(m.platform || m.control || m.alt || m.shift)
-                    {
+                d.track_focus(&self.keys.focus)
+                .on_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| {
+                    if PopoverKeys::dismisses(e) {
                         cx.stop_propagation();
                         let owner = this.owner.clone();
                         cx.defer(move |cx| {
@@ -2409,6 +2446,55 @@ fn agent_toggle(open: bool, since_dismissed: Option<std::time::Duration>) -> Age
 /// outside the popover), never for another window or app.
 fn agent_dismisses(open: bool, editor_took_key: bool) -> bool {
     open && editor_took_key
+}
+#[cfg(test)]
+mod popover_keys_tests {
+    use super::PopoverKeys;
+    use gpui::{
+        Context, FocusHandle, InteractiveElement, IntoElement, KeyDownEvent, ParentElement,
+        Render, Styled, TestAppContext, Window, div,
+    };
+    /// A popover's root as SurfaceWindow draws it: its keys, a control inside.
+    struct Popover {
+        keys: PopoverKeys,
+        inner: FocusHandle,
+        dismissed: usize,
+    }
+    impl Render for Popover {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            self.keys.claim(window, cx);
+            div()
+                .track_focus(&self.keys.focus)
+                .on_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| {
+                    if PopoverKeys::dismisses(e) {
+                        this.dismissed += 1;
+                        cx.stop_propagation();
+                    }
+                }))
+                .size_full()
+                .child(div().track_focus(&self.inner).size_full())
+        }
+    }
+    #[gpui::test]
+    fn escape_dismisses_a_reopened_popover_with_nothing_inside_focused(cx: &mut TestAppContext) {
+        // The reported path: reopened, nothing clicked, Escape.
+        let (view, vcx) = cx.add_window_view(|_, cx| Popover {
+            keys: PopoverKeys::new(cx),
+            inner: cx.focus_handle(),
+            dismissed: 0,
+        });
+        let mut vcx = vcx.clone();
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("escape");
+        assert_eq!(view.read_with(&vcx, |p, _| p.dismissed), 1);
+        // A focused control inside: Escape it leaves still bubbles up.
+        view.update_in(&mut vcx, |p, window, cx| window.focus(&p.inner, cx));
+        vcx.simulate_keystrokes("escape");
+        assert_eq!(view.read_with(&vcx, |p, _| p.dismissed), 2);
+        // Modified Escape is not the dismissal key.
+        vcx.simulate_keystrokes("shift-escape");
+        assert_eq!(view.read_with(&vcx, |p, _| p.dismissed), 2);
+    }
 }
 #[cfg(test)]
 mod agent_close_tests {
@@ -2526,3 +2612,89 @@ pub fn timeline_chrome(
     }
     t
 }
+
+/// Whether Properties has anything to follow while playing: a selected layer's
+/// values move with time. With nothing selected it shows the composition's
+/// fields, which don't, and republishing them every frame repainted the window
+/// for nothing; with native controls hosted that held each present behind a
+/// control transaction (Fable 5.5 at 36 s: 24 fps with Properties open, 29.5
+/// closed).
+fn follows_selection(published: Option<&pm_kernel::Published>) -> bool {
+    published.is_some_and(|p| !p.selection.layers().is_empty())
+}
+
+#[cfg(test)]
+mod follow_selection_tests {
+    use super::follows_selection;
+    use crate::v4_view_tests::{PROJECT, rig_project};
+    use pm_kernel::{Caller, Request, SelectionCall};
+    use std::time::{Duration, Instant};
+
+    /// Plays 60 content frames through the gate `follow_playback` uses and the
+    /// production Properties realm, and counts the publications that reach the
+    /// app. Each one repaints the window.
+    fn publications_while_playing(rig: &crate::v4_view_tests::Rig) -> usize {
+        let _ = rig.runtime.take_publications();
+        let mut published = 0;
+        for frame in 0..60 {
+            let p = rig.kernel.published(PROJECT);
+            if !follows_selection(p.as_deref()) {
+                continue;
+            }
+            let ticket = rig
+                .runtime
+                .follow_time("inspector", f64::from(frame) / 30., true)
+                .expect("Properties is mounted")
+                .expect("follow_time");
+            let deadline = Instant::now() + Duration::from_secs(20);
+            loop {
+                if let Some(result) = ticket.try_take() {
+                    result.expect("Properties publish");
+                    break;
+                }
+                assert!(Instant::now() < deadline, "Properties did not settle");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            published += rig
+                .runtime
+                .take_publications()
+                .iter()
+                .filter(|p| p.panel == "inspector")
+                .count();
+        }
+        published
+    }
+
+    /// 98eb42792 republished Properties on every content frame while playing,
+    /// even with nothing selected (composition fields, which don't change with
+    /// time). That repaint held Fable 5.5 to 24 fps with Properties open.
+    #[::core::prelude::v1::test]
+    fn properties_follows_playback_only_with_a_selected_layer() {
+        // One shape whose opacity animates 0 → 100 over its 10 s.
+        let rig = rig_project(
+            "inspector",
+            r##"{"id":"synthetic","name":"Synthetic Film","compId":"c","w":640,"h":360,"fps":30,"dur":10,"bg":"#000000","assets":{},"comps":{},"layers":[{"id":"a","type":"shape","name":"Headline","from":0,"dur":10,"on":true,"lock":false,"p":{"opacity":{"v":100,"kf":[{"t":0,"v":0},{"t":10,"v":100}]},"position.x":{"v":320,"kf":[]},"position.y":{"v":180,"kf":[]}},"d":{"w":100,"h":100},"fx":[]}]}"##,
+        );
+        assert!(!follows_selection(None));
+        assert_eq!(
+            publications_while_playing(&rig),
+            0,
+            "nothing selected: no publication per frame"
+        );
+        let select = SelectionCall::Layers {
+            ids: vec!["a".into()],
+            add: false,
+        };
+        rig.kernel
+            .call(PROJECT, Request::new(Caller::native(), select))
+            .wait()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            publications_while_playing(&rig),
+            60,
+            "a selected animated layer's values follow every frame"
+        );
+    }
+}
+

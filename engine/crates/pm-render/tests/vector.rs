@@ -137,7 +137,7 @@ fn star_polygon(w: f64, h: f64, points: u32) -> Vec<(f64, f64)> {
 }
 
 #[test]
-fn native_shape_edges_are_analytic_and_legacy_sources_keep_canvas_filtering() {
+fn transformed_shape_edges_are_analytic_for_both_compatibility_levels() {
     let mut renderer = Renderer::headless().unwrap();
     let (rotation, scale) = (17.0, 130.0);
     let ellipse = json!({ "shape": "ellipse", "w": 150, "h": 96, "color": "#FFFFFF", "stroke": 0 });
@@ -184,9 +184,9 @@ fn native_shape_edges_are_analytic_and_legacy_sources_keep_canvas_filtering() {
             &mut renderer,
             vec![placed(name, "shape", d, 1, rotation, scale)],
         );
-        assert_ne!(
+        assert_eq!(
             level1, level2,
-            "{name}: legacy sources retain Canvas texture filtering"
+            "{name}: transformed legacy shapes must retain analytic edges"
         );
         let e = edge_error(&level2, &reference);
         eprintln!(
@@ -791,72 +791,116 @@ fn fractional_translation_reuses_the_legacy_shape_source_pixel_grid() {
     assert!((matrices[1][4] - matrices[0][4] - 0.125).abs() < 1e-9);
 }
 
-/// Electron projects the same local canvas when a layer's 3D switch is
-/// enabled. A flat plane must therefore preserve fractional edge phases.
+/// Legacy 3D shapes use the same projected geometry as native shapes,
+/// including thin strokes and true perspective; text has its own policy.
 #[test]
-fn a_legacy_shape_keeps_its_canvas_when_3d_is_enabled() {
+fn legacy_3d_shape_edges_keep_projected_coverage() {
     let mut renderer = Renderer::headless().unwrap();
-    for rotation in [0.0, 17.0] {
+    for tilt in [0.0, 30.0, 60.0] {
         let mut l = placed(
             "shape",
             "shape",
-            json!({ "shape": "ellipse", "w": 75.0, "h": 49.0, "color": "#8AB4F8", "stroke": 0 }),
+            json!({ "shape": "ellipse", "w": 17.0, "h": 11.0,
+                "color": "#00000000", "stroke": 0.6, "strokeColor": "#FFFFFF" }),
             1,
-            rotation,
-            123.0,
+            7.0,
+            400.0,
         );
-        set(&mut l, "position.x", json!(128.125));
+        l["threeD"] = json!(true);
+        set(&mut l, "rotation.y", json!(tilt));
+        set(&mut l, "position.x", json!(128.375));
         set(&mut l, "position.y", json!(128.375));
-        let flat = render_rgba(
+        let legacy = render_rgba(
             &mut renderer,
             project(W, H, 2.0, no_fill(), vec![l.clone()]),
             &MapResolver::default(),
         );
-        l["threeD"] = json!(true);
-        let plane = render_rgba(
+        l["compat"] = json!(2);
+        let native = render_rgba(
             &mut renderer,
             project(W, H, 2.0, no_fill(), vec![l]),
             &MapResolver::default(),
         );
-        let max = flat
+        assert!(legacy.chunks_exact(4).any(|p| p[3] > 0.1));
+        let max = legacy
             .iter()
-            .zip(&plane)
+            .zip(&native)
             .map(|(a, b)| (a - b).abs())
             .fold(0.0f32, f32::max);
         assert!(
-            max < 1.0 / 255.0,
-            "flat legacy plane changes its canvas edge by {max}"
+            max < 1e-5,
+            "tilt {tilt}: legacy vector lost projected coverage: {max}"
         );
     }
 }
 
-/// Cropping a canvas to its ink must retain the transparent texels that
-/// bilinear filtering reads. Otherwise a subpixel-height rule's cropped
-/// quad can miss every output pixel center and disappear.
+/// Turning a legacy 2D group into a flat 3D plane keeps its child canvas
+/// phases. Explicit 3D vector layers have the separate sharp path above.
 #[test]
-fn a_legacy_subpixel_rule_retains_its_canvas_filter_border() {
+fn a_legacy_2d_shape_in_a_3d_group_keeps_its_canvas() {
     let mut renderer = Renderer::headless().unwrap();
-    let l = placed(
-        "rule",
+    let mut shape = placed(
         "shape",
-        json!({ "shape": "rect", "w": 100, "h": 1, "radius": 0,
-            "color": "#FFFFFF", "stroke": 0 }),
+        "shape",
+        json!({"shape":"ellipse", "w":83.5, "h":61.25, "color":"#FFFFFF", "stroke":0}),
         1,
         0.0,
-        200.0 / 3.0,
+        100.0,
     );
-    let alpha = render_alpha(&mut renderer, vec![l]);
-    // The quarter-step density is .75. A 9-unit padded canvas becomes
-    // seven texels high, with .75 coverage in row 3. Projected at 2/3,
-    // the two adjacent pixel centers read that row with weight 5/12.
-    let expected = 0.75 * (5.0 / 12.0);
-    for y in [127, 128] {
-        let a = alpha[(y * W + 128) as usize];
-        assert!(
-            (a - expected).abs() < 0.004,
-            "rule row {y}: {a} instead of {expected}"
+    set(&mut shape, "position.x", json!(128.125));
+    set(&mut shape, "position.y", json!(128.375));
+    shape["group"] = json!("plane");
+    let mut group = layer("plane", "group", json!({}), 0.0, 0.0, 2.0);
+    let flat = render_rgba(
+        &mut renderer,
+        project(W, H, 2.0, no_fill(), vec![group.clone(), shape.clone()]),
+        &MapResolver::default(),
+    );
+    group["threeD"] = json!(true);
+    let plane = render_rgba(
+        &mut renderer,
+        project(W, H, 2.0, no_fill(), vec![group, shape]),
+        &MapResolver::default(),
+    );
+    assert!(plane.chunks_exact(4).any(|p| p[3] > 0.1));
+    let max = flat
+        .iter()
+        .zip(&plane)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f32, f32::max);
+    assert!(
+        max < 1.0 / 255.0,
+        "3D group changed the legacy child canvas: {max}"
+    );
+}
+
+/// At rest the transparent Canvas filter border keeps a one-pixel rule
+/// visible in both adjacent rows. A 2/3 scale instead uses exact device area.
+#[test]
+fn subpixel_rules_keep_canvas_filter_support_at_rest_and_device_area_when_scaled() {
+    let mut renderer = Renderer::headless().unwrap();
+    for (scale, expected) in [(100.0, 0.5), (200.0 / 3.0, 1.0 / 3.0)] {
+        let l = placed(
+            "rule",
+            "shape",
+            json!({"shape":"rect", "w":100, "h":1, "radius":0,
+                "color":"#FFFFFF", "stroke":0}),
+            1,
+            0.0,
+            scale,
         );
+        let alpha = render_alpha(&mut renderer, vec![l]);
+        // At rest a local ink texel is sampled half into each output row.
+        // At 2/3 scale, the device path covers one third of each row;
+        // the old Canvas-resampled .3125 expectation does not apply.
+        for y in [127, 128] {
+            let a = alpha[(y * W + 128) as usize];
+            assert!(
+                (a - expected).abs() < 0.004,
+                "scale {scale}, rule row {y}: {a} instead of {expected}"
+            );
+        }
+        assert_eq!(alpha[(126 * W + 128) as usize], 0.0);
+        assert_eq!(alpha[(129 * W + 128) as usize], 0.0);
     }
-    assert_eq!(alpha[(126 * W + 128) as usize], 0.0);
-    assert_eq!(alpha[(129 * W + 128) as usize], 0.0);
 }

@@ -66,6 +66,11 @@ pub struct EffectFrame {
     pub scale: (f64, f64),
     /// Composition time in seconds.
     pub time: f64,
+    /// Final output (exports, captures): extension shaders read the output
+    /// raster as in Electron. Viewer frames give them composition pixels at
+    /// the frame's density, so a reduced-resolution frame is the full
+    /// picture sampled down.
+    pub final_output: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
