@@ -1264,7 +1264,7 @@ accessibility
 {"decrement":false,"disabled":false,"expanded":null,"id":38,"increment":false,"label":null,"role":"Label","step":null,"toggled":null,"value":null}
 {"decrement":false,"disabled":false,"expanded":null,"id":39,"increment":false,"label":null,"role":"Label","step":null,"toggled":null,"value":null}
 {"decrement":false,"disabled":false,"expanded":null,"id":40,"increment":false,"label":null,"role":"Label","step":null,"toggled":null,"value":null}
-{"focus":[6,7,16,27,37],"requests":[{"type":"font-menu","row":"font","anchor":37}]}"
+{"focus":[6,7,16,27,37],"requests":[{"type":"font-menu","row":"font","anchor":37,"current":""}]}"
 `;
 
 exports[`spec §3: hover six-op tree, native validator and AX snapshot 1`] = `

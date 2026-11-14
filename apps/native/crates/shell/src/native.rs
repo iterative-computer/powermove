@@ -2060,16 +2060,7 @@ impl Host {
         let choices = base_choices();
         let palette = Popup::new(&window, &t, Surface::Palette, choices.clone(), tx.clone());
         palette.borrow_mut().shortcuts = shortcut_glyphs();
-        let fields = Popup::new(
-            &window,
-            &t,
-            Surface::Menu,
-            ["Position", "Scale", "Rotation", "Opacity"]
-                .iter()
-                .map(|n| Choice::new(*n, format!("field:{n}")))
-                .collect(),
-            tx.clone(),
-        );
+        let fields = Popup::new(&window, &t, Surface::Menu, field_choices(), tx.clone());
         let (tabs, tabs_width) = (
             delegate.ivars().tabs.clone(),
             delegate.ivars().tabs_width.clone(),
@@ -3804,8 +3795,37 @@ impl Host {
         if other.borrow().model.open {
             other.borrow_mut().hide();
         }
+        if field && !self.fields.borrow().model.open {
+            let mut p = self.fields.borrow_mut();
+            p.model.choices = field_choices();
+            (p.anchor, p.model.page, p.dismiss) = (None, None, None);
+        }
         let p = if field { &self.fields } else { &self.palette };
         p.borrow_mut().toggle();
+    }
+    /// A menu a control of ours opens (the font picker): `choices` under
+    /// the control at `anchor` (this window's GPUI points), `page` rows at a
+    /// time with the search narrowing the rest; `dismiss` is sent if it
+    /// closes with nothing chosen.
+    pub fn open_menu(
+        &mut self,
+        choices: Vec<Choice>,
+        anchor: Option<crate::layout::Rect>,
+        page: Option<usize>,
+        dismiss: Option<String>,
+    ) {
+        if self.palette.borrow().model.open {
+            self.palette.borrow_mut().hide();
+        }
+        if self.fields.borrow().model.open {
+            self.fields.borrow_mut().hide();
+        }
+        let h = self.content.bounds().size.height;
+        let anchor = anchor.map(|r| self.window.convertRectToScreen(rect(r, h)));
+        let mut p = self.fields.borrow_mut();
+        p.model.choices = choices;
+        (p.anchor, p.model.page, p.dismiss) = (anchor, page, dismiss);
+        p.toggle();
     }
     pub fn system(&self, name: &str) -> bool {
         let app = NSApplication::sharedApplication(MainThreadMarker::new().unwrap());
@@ -3998,8 +4018,9 @@ define_class!(
             if let Some(p) = self.ivars().upgrade() {
                 let mut p = p.borrow_mut();
                 let index = sender.tag() as usize;
-                if let Some(c) = p.model.choices.get(index) {
-                    let (name, args) = menu::split_palette_command(&c.command);
+                if let Some(command) = p.model.choices.get(index).map(|c| c.command.clone()) {
+                    p.picked = true;
+                    let (name, args) = menu::split_palette_command(&command);
                     let _ = p.sender.try_send(Command { name: name.to_owned(), args, token: None });
                 }
                 p.hide();
@@ -4503,6 +4524,13 @@ fn popup_material(
 fn popup_highlight(t: &Tokens) -> Retained<NSColor> {
     native_color(t.colors.text).colorWithAlphaComponent(t.translucency.selected as f64)
 }
+/// The field menu's own rows (`fieldMenu`).
+fn field_choices() -> Vec<Choice> {
+    ["Position", "Scale", "Rotation", "Opacity"]
+        .iter()
+        .map(|n| Choice::new(*n, format!("field:{n}")))
+        .collect()
+}
 fn popup_label(text: &str, size: f32, ink: u32, mtm: MainThreadMarker) -> Retained<NSTextField> {
     let label = NSTextField::labelWithString(&NSString::from_str(text), mtm);
     label.setFont(Some(&NSFont::systemFontOfSize(size as f64)));
@@ -4570,6 +4598,12 @@ pub struct Popup {
     /// Tallest the panel may grow (`palette_height` / `field_menu_height`).
     max_height: f32,
     row_focus: bool,
+    /// Where a menu a control opened hangs from (screen points: the
+    /// control's frame); `None` places it as the palette.
+    anchor: Option<NSRect>,
+    /// The command sent when the menu closes with nothing chosen.
+    dismiss: Option<String>,
+    picked: bool,
 }
 impl Popup {
     fn new(
@@ -4674,6 +4708,9 @@ impl Popup {
             previous: None,
             max_height: height,
             row_focus: false,
+            anchor: None,
+            dismiss: None,
+            picked: false,
         }));
         let target: Retained<PopupTarget> = unsafe {
             msg_send![
@@ -4728,6 +4765,8 @@ impl Popup {
             .into_iter()
             .map(|i| (i, self.model.choices[i].clone()))
             .collect();
+        // A long list (every installed font) shows a page; typing narrows it.
+        let more_rows = Some(self.model.unlisted()).filter(|n| *n > 0);
         let width = self.window.frame().size.width;
         let (inset, row_h) = (shape.inset as f64, shape.row as f64);
         let checks = chosen.iter().any(|(_, c)| c.checked.is_some());
@@ -4799,6 +4838,17 @@ impl Popup {
                     .push(Retained::into_super(Retained::into_super(mark)));
             }
             let title = popup_label(&c.label, t.typography.body, t.colors.text, mtm);
+            if let Some(family) = &c.font
+                && let Some(face) = NSFontManager::sharedFontManager(mtm)
+                    .fontWithFamily_traits_weight_size(
+                        &NSString::from_str(family),
+                        NSFontTraitMask::empty(),
+                        5,
+                        t.typography.reading as f64,
+                    )
+            {
+                title.setFont(Some(&face));
+            }
             centred(&title, lead, y, row_h, (trailing - lead).max(0.));
             self.list.addSubview(&title);
             self.parts
@@ -4829,6 +4879,19 @@ impl Popup {
                 rect,
                 button,
             });
+            y += row_h;
+        }
+        if let Some(rest) = more_rows {
+            let note = popup_label(
+                &format!("{rest} more · type to narrow"),
+                caption,
+                t.colors.muted,
+                mtm,
+            );
+            centred(&note, edge, y, row_h, width - edge * 2.);
+            self.list.addSubview(&note);
+            self.parts
+                .push(Retained::into_super(Retained::into_super(note)));
             y += row_h;
         }
         if chosen.is_empty() {
@@ -5061,13 +5124,46 @@ impl Popup {
         self.previous = self.parent.firstResponder();
         self.lit = false;
         self.glider.setAlphaValue(0.);
+        self.picked = false;
         self.refresh();
         let p = self.parent.frame();
         let s = self.window.frame().size;
-        self.window.setFrameOrigin(NSPoint::new(
-            p.origin.x + (p.size.width - s.width) / 2.,
-            p.origin.y + p.size.height - s.height - self.tokens.metrics.toolbar as f64,
-        ));
+        let origin = match self.anchor {
+            // Under the control that opened it, its trailing edge on the
+            // control's (as a field's pop-up menu); above it if there is no
+            // room below; always inside the window.
+            Some(a) => {
+                let gap = self.tokens.metrics.gap as f64;
+                let below = a.origin.y - gap - s.height;
+                let y = if below >= p.origin.y {
+                    below
+                } else {
+                    a.origin.y + a.size.height + gap
+                };
+                let x = (a.origin.x + a.size.width - s.width)
+                    .min(p.origin.x + p.size.width - s.width)
+                    .max(p.origin.x);
+                NSPoint::new(x, y)
+            }
+            None => NSPoint::new(
+                p.origin.x + (p.size.width - s.width) / 2.,
+                p.origin.y + p.size.height - s.height - self.tokens.metrics.toolbar as f64,
+            ),
+        };
+        self.window.setFrameOrigin(origin);
+        // Opens on the current choice, in view (nothing lit).
+        if let Some(row) = self.rows.iter().find(|row| {
+            self.model
+                .filtered()
+                .get(row.place)
+                .is_some_and(|i| self.model.choices.get(*i).and_then(|c| c.checked) == Some(true))
+        }) {
+            let mut rect = row.rect;
+            let room = self.scroll.frame().size.height;
+            rect.origin.y = (rect.origin.y - (room - rect.size.height) / 2.).max(0.);
+            rect.size.height = room;
+            self.list.scrollRectToVisible(rect);
+        }
         unsafe {
             let _: () = msg_send![NSObject::class(),cancelPreviousPerformRequestsWithTarget:&*self.window,selector:sel!(orderOut:),object:std::ptr::null::<AnyObject>()];
         }
@@ -5081,6 +5177,18 @@ impl Popup {
     }
     fn hide(&mut self) {
         self.model.open = false;
+        // Closed with nothing chosen: the one who asked hears so.
+        if !std::mem::take(&mut self.picked)
+            && let Some(name) = self.dismiss.take()
+        {
+            let (name, args) = menu::split_palette_command(&name);
+            let _ = self.sender.try_send(Command {
+                name: name.to_owned(),
+                args,
+                token: None,
+            });
+        }
+        self.dismiss = None;
         self.rest();
         gpui_macos::child_window::forget(&self.window);
         let duration = animate(&self.window, false, &self.tokens, &mut self.spring);
@@ -5146,6 +5254,7 @@ impl Popup {
         };
         let before = self.model.lit();
         if let Some(name) = self.model.navigate(key) {
+            self.picked = true;
             let _ = self.sender.try_send(Command {
                 name,
                 args: vec![],

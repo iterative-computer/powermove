@@ -438,6 +438,8 @@ function Field({
               type: "font-menu",
               row: row.id,
               anchor: event.currentTarget,
+              current:
+                typeof control.value === "string" ? control.value : undefined,
             })
           }
         />
