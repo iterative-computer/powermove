@@ -570,6 +570,7 @@ impl Journal {
     /// ([`recover_from`]), and a large project is not rewritten just to be
     /// opened or saved. The superseded sessions hold nothing the base lacks
     /// and are deleted at once.
+    #[allow(clippy::too_many_arguments)]
     pub fn create(
         durability: &Durability,
         project_dir: &Path,
@@ -578,11 +579,20 @@ impl Journal {
         initial: CheckpointState,
         supersedes: Vec<PathBuf>,
         saved: bool,
+        ancestors: Vec<Ancestor>,
     ) -> io::Result<Journal> {
         let dir = project_dir.join(session_name());
         fs::create_dir_all(&dir)?;
         sync_dir(project_dir)?;
-        let bases = vec![Ancestor::start(base)];
+        // Recovered work also descends from what the session it replaces
+        // descended from (the file it was opened on, the saves it made): a
+        // later crash on that unchanged file recovers in place, not as a copy.
+        let mut bases = vec![Ancestor::start(base)];
+        for ancestor in ancestors {
+            if bases.len() < MAX_BASES && !bases.contains(&ancestor) {
+                bases.push(ancestor);
+            }
+        }
         // Adopted recovered work starts from checkpoint 0, not the base.
         // Until that lands, the session it supersedes here still holds the
         // state, and recovery continues from it.
@@ -1289,6 +1299,71 @@ pub enum Recovery {
     /// The journal cannot be replayed (no checkpoint and no matching base
     /// document). The files are kept.
     Unrecoverable { session: PathBuf, reason: String },
+}
+
+/// What a session that cannot be replayed holds, read leniently so the
+/// person can be told what is lost: its files stay on disk.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LostWork {
+    /// Document changes recorded (published revisions).
+    pub changes: usize,
+    /// The undo steps recorded, by name, oldest first (the last few).
+    pub steps: Vec<String>,
+    /// When the session began, and when it last wrote (seconds since the
+    /// epoch).
+    pub from: Option<u64>,
+    pub until: Option<u64>,
+}
+
+/// [`LostWork`] of `session`: every record line that parses, whatever
+/// stopped the replay.
+pub fn lost_work(session: &Path) -> LostWork {
+    const STEPS: usize = 5;
+    let mut lost = LostWork::default();
+    for n in numbered(session, "journal-", ".log") {
+        let path = session.join(segment_name(n));
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        for line in text.lines().skip(1) {
+            let Some((_, json)) = line.split_once(' ') else {
+                continue;
+            };
+            let Ok(value) = parse(json) else { continue };
+            match value.get("t").and_then(Value::as_str) {
+                Some("rev") => lost.changes += 1,
+                Some("push" | "squash") => {
+                    let label = value
+                        .get("label")
+                        .and_then(Value::as_str)
+                        .unwrap_or("Edit")
+                        .to_owned();
+                    if lost.steps.last() != Some(&label) {
+                        lost.steps.push(label);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let modified = std::fs::metadata(&path)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs());
+        lost.until = lost.until.max(modified);
+    }
+    if lost.steps.len() > STEPS {
+        lost.steps.drain(..lost.steps.len() - STEPS);
+    }
+    // Session folders are named `s<nanoseconds since the epoch>-<pid>`.
+    lost.from = session
+        .file_name()
+        .and_then(|n| n.to_str())
+        .and_then(|n| n.strip_prefix('s'))
+        .and_then(|n| n.split('-').next())
+        .and_then(|n| n.parse::<u128>().ok())
+        .map(|nanos| (nanos / 1_000_000_000) as u64);
+    lost
 }
 
 /// Recovers the newest session of a project. `current_base`: the canonical

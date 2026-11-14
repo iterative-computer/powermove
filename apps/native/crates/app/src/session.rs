@@ -1669,16 +1669,19 @@ impl Controller {
                 });
                 if let Some(recovery) = recovery {
                     let answer = this.update(cx, |v, _| {
-                        if matches!(
-                            reply,
-                            ShellReply::RecoveryRequired {
-                                recovery: RecoveryResult::Unrecoverable { .. },
-                                ..
-                            }
-                        ) {
-                            v.errors
-                                .borrow_mut()
-                                .push("Project", &recovery.alert.message);
+                        if let ShellReply::RecoveryRequired {
+                            recovery: RecoveryResult::Unrecoverable { reason, .. },
+                            ..
+                        } = &reply
+                        {
+                            // The log has what the alert leaves out: why.
+                            v.errors.borrow_mut().push(
+                                "Project",
+                                &format!(
+                                    "{} {} The recovery data could not be replayed: {reason}.",
+                                    recovery.alert.message, recovery.alert.informative
+                                ),
+                            );
                         }
                         v.recovery_pending = true;
                         v.mcp.awaiting_recovery(Some(name.clone()));

@@ -280,6 +280,8 @@ pub enum RecoveryResult {
     },
     Unrecoverable {
         reason: String,
+        /// What the session held: kept on disk, said to the person.
+        lost: crate::journal::LostWork,
     },
     /// Unsaved work left for another file (`name`, no longer where it was)
     /// whose saved content is exactly this file's. It may be this file
@@ -2068,8 +2070,9 @@ impl Kernel {
                         project: id.clone(),
                         truncated: r.truncated,
                     },
-                    Recovery::Unrecoverable { reason, .. } => RecoveryResult::Unrecoverable {
+                    Recovery::Unrecoverable { reason, session } => RecoveryResult::Unrecoverable {
                         reason: reason.clone(),
+                        lost: crate::journal::lost_work(session),
                     },
                     _ => unreachable!(),
                 },
@@ -2215,7 +2218,10 @@ impl Kernel {
         };
         let recovery = match recovered {
             Recovery::Nothing => RecoveryResult::None,
-            Recovery::Unrecoverable { reason, .. } => RecoveryResult::Unrecoverable { reason },
+            Recovery::Unrecoverable { reason, session } => RecoveryResult::Unrecoverable {
+                lost: crate::journal::lost_work(&session),
+                reason,
+            },
             Recovery::Copy { recovered, .. } => {
                 let truncated = recovered.truncated;
                 let crashed = recovered.session.clone();
@@ -2228,6 +2234,7 @@ impl Kernel {
             }
             Recovery::Recovered(recovered) => {
                 let truncated = recovered.truncated;
+                let ancestors = recovered.bases.clone();
                 source = match source {
                     OpenSource::LibraryWithFile { mut file, .. } => {
                         file.envelope.workspace = Some(recovered.workspace);
@@ -2239,6 +2246,7 @@ impl Kernel {
                                 history: Some(recovered.history),
                             },
                             supersedes: vec![recovered.session],
+                            ancestors,
                         }
                     }
                     OpenSource::File(mut opened) => {
@@ -2248,6 +2256,7 @@ impl Kernel {
                         OpenSource::RecoveredFile {
                             opened,
                             supersedes: vec![recovered.session],
+                            ancestors,
                         }
                     }
                     _ => OpenSource::Recovered {
@@ -2286,7 +2295,11 @@ impl Kernel {
                 ) => slot == &lib.id && lib.journal_applied == 0 && !lib.from_autosave,
                 _ => false,
             };
-        let mut info = self.open_known(&id, source, known)?;
+        let durable_id = match &destination {
+            Destination::Library(slot) if *slot != id => Some(slot.clone()),
+            _ => None,
+        };
+        let mut info = self.open_known(&id, source, known, durable_id.as_deref())?;
         // What the first save would work out about a long undo history on
         // this thread is worked out beside it instead, from now.
         if let Some(p) = self.project(&id) {
@@ -2378,10 +2391,13 @@ impl Kernel {
         let v = pm_model::canonical::realize_project(
             recovered.document.to_value().unwrap_or(Value::Null),
         );
-        let name = format!(
-            "{} — Recovered",
-            v.get("name").and_then(Value::as_str).unwrap_or("Project")
-        );
+        // One suffix, however many times its work was recovered.
+        const SUFFIX: &str = " — Recovered";
+        let mut stem = v.get("name").and_then(Value::as_str).unwrap_or("Project");
+        while let Some(shorter) = stem.strip_suffix(SUFFIX) {
+            stem = shorter;
+        }
+        let name = format!("{stem}{SUFFIX}");
         let history = recovered.history.snapshot().to_saved_packed();
         let workspace = recovered.workspace.clone();
         let mut meta = Value::Object(Map::new());

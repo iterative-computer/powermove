@@ -65,16 +65,61 @@ pub fn after_stop(mut alert: Alert<Action>, name: &str) -> Alert<Action> {
     alert.message = format!("“{name}” stopped after an internal error with unsaved changes.");
     alert
 }
-pub fn unrecoverable(name: &str, saved_file_exists: bool) -> Alert<Action> {
+/// "12:35" in local time.
+fn clock(seconds: u64) -> String {
+    // "YYYY-MM-DD HH.MM.SS"
+    let local = pm_kernel::project_io::local_time(seconds);
+    local
+        .get(11..16)
+        .map_or(local.clone(), |hm| hm.replace('.', ":"))
+}
+
+/// What could not be recovered, in words: how many changes, when, and
+/// the names of their last steps.
+fn lost_in_words(lost: &pm_kernel::journal::LostWork) -> Option<String> {
+    if lost.changes == 0 && lost.steps.is_empty() {
+        return None;
+    }
+    let count = match lost.changes {
+        0 => "Changes".to_owned(),
+        1 => "1 change".to_owned(),
+        n => format!("{n} changes"),
+    };
+    let when = match (lost.from.map(clock), lost.until.map(clock)) {
+        (Some(a), Some(b)) if a != b => format!(" made between {a} and {b}"),
+        (_, Some(t)) | (Some(t), None) => format!(" made at {t}"),
+        _ => String::new(),
+    };
+    let steps = if lost.steps.is_empty() {
+        String::new()
+    } else {
+        let names: Vec<String> = lost.steps.iter().map(|s| format!("“{s}”")).collect();
+        format!(" ({})", names.join(", "))
+    };
+    Some(format!("{count}{when}{steps}"))
+}
+
+pub fn unrecoverable(
+    name: &str,
+    saved_file_exists: bool,
+    lost: &pm_kernel::journal::LostWork,
+) -> Alert<Action> {
     let mut buttons = Vec::new();
     if saved_file_exists {
         buttons.push(Button::new("Open Saved Version", Action::OpenSavedVersion).default());
     }
     let ok = Button::new("OK", Action::Acknowledge).cancel();
     buttons.push(if saved_file_exists { ok } else { ok.default() });
+    let informative = match lost_in_words(lost) {
+        Some(what) => format!(
+            "{what} couldn’t be added to the saved project, which is unchanged. They’re kept \
+             with Powermove’s recovery data. Details are in Window ▸ Error Log."
+        ),
+        None => "The saved project is unchanged. Details are in Window ▸ Error Log.".into(),
+    };
     Alert::new(
         format!("“{name}” couldn’t be recovered."),
-        "The saved project is unchanged. Details are in Window ▸ Error Log.",
+        informative,
         buttons,
     )
 }
@@ -105,7 +150,7 @@ impl PreparedRecovery {
             | RecoveryResult::OfferCopy { truncated, .. } => {
                 ask_recovery(name, *truncated, archive_recently_deleted)
             }
-            RecoveryResult::Unrecoverable { .. } => unrecoverable(name, saved_exists),
+            RecoveryResult::Unrecoverable { lost, .. } => unrecoverable(name, saved_exists, lost),
             RecoveryResult::FromOtherFile {
                 name: from,
                 truncated,
