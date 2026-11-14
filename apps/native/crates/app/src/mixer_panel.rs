@@ -468,17 +468,20 @@ fn render(
         .as_ref()
         .map(|p| p.selection.layers().iter().cloned().collect())
         .unwrap_or_default();
-    let (c, m) = (&t.colors, &t.metrics);
+    let m = &t.metrics;
     let this = cx.entity();
-    // The strips fill the panel's height; they scroll sideways only.
+    // The strips fill the panel's height and scroll sideways; Master stands
+    // at the trailing edge, apart by whitespace, and never scrolls (as v1).
     let mut row = div()
-        .id("mixer")
-        .w_full()
-        .h(px(height))
+        .id("mixer-strips")
+        .flex_1()
+        .min_w_0()
+        .h_full()
         .flex()
         .flex_row()
-        .gap(px(m.gap))
-        .p(px(m.gap))
+        .gap(px(m.border * 2.))
+        .py(px(m.gap))
+        .pl(px(m.gap))
         .overflow_x_scroll();
     // A live drag follows the pointer anywhere in the window and always
     // sees its release, as the gizmos do.
@@ -515,20 +518,27 @@ fn render(
             .size_0(),
         );
     }
-    row = row.child(strip_view(v, None, master, &t, false, this.clone(), cx));
-    row = row.child(
-        div()
-            .flex_none()
-            .w(px(m.border))
-            .h_full()
-            .bg(rgb(c.separator)),
-    );
     for strip in strips {
         let on = selected.contains(&strip.id);
         let gain = strip.gain;
         row = row.child(strip_view(v, Some(strip), gain, &t, on, this.clone(), cx));
     }
-    row.into_any_element()
+    let master = div()
+        .flex_none()
+        .h_full()
+        .py(px(m.gap))
+        .pl(px(m.inset))
+        .pr(px(m.gap))
+        .child(strip_view(v, None, master, &t, false, this.clone(), cx));
+    div()
+        .id("mixer")
+        .w_full()
+        .h(px(height))
+        .flex()
+        .flex_row()
+        .child(row)
+        .child(master)
+        .into_any_element()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -591,10 +601,18 @@ fn strip_view(
                 .role(Role::Button)
                 .aria_label(label)
                 .size(px(m.keyframe))
+                // As v1: the level's diamond shows under the pointer, or
+                // when the level is animated.
+                .when(!s.animated, |d| {
+                    d.opacity(0.)
+                        .group_hover_style(SharedString::from(format!("{key}-strip-group")), |s| {
+                            s.opacity(1.)
+                        })
+                })
                 .child({
                     let (edge, fill) = (
                         rgb(if s.animated { c.text } else { c.muted }),
-                        (!s.key_at_time).then(|| rgb(c.panel_secondary)),
+                        (!s.key_at_time).then(|| rgb(c.panel)),
                     );
                     let inset = px(m.border * 1.5);
                     canvas(
@@ -903,8 +921,7 @@ fn strip_view(
         .items_center()
         .gap(px(m.gap))
         .p(px(m.gap))
-        .rounded(px(m.control_radius))
-        .bg(rgb(c.panel_secondary))
+        .group(SharedString::from(format!("{key}-strip-group")))
         .child(diamond)
         .child(readout)
         .child(middle)
