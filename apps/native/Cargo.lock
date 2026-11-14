@@ -4899,6 +4899,7 @@ dependencies = [
  "pm-perf",
  "pm-promedia",
  "pm-protocol",
+ "pm-proxy",
  "pm-render",
  "pm-scene3d",
  "pm-studio3d-engine",

@@ -1055,9 +1055,45 @@ fn a_tooltip_never_repeats_the_text_in_view(cx: &mut TestAppContext) {
         json!({"title":"Reset Effect","data-pm-component":"toolbar-item","label":"Reset Gaussian Blur","metadata":{"symbol":"arrow.counterclockwise"}}),
         &["click"],
     ));
+    // A row's value well that opens a menu: its row says "Font", it shows
+    // its value; an icon-only menu button beside it.
+    ops.extend(node_ops(
+        5,
+        1,
+        "div",
+        json!({"data-pm-component":"inspector-row","label":"Font"}),
+        &[],
+    ));
+    ops.extend(node_ops(
+        6,
+        5,
+        "button",
+        json!({"title":"Font","data-pm-component":"toolbar-item","label":"Font","aria-haspopup":"menu"}),
+        &["click"],
+    ));
+    ops.extend(node_ops(7, 6, "text", json!({}), &[]));
+    ops.push(Op::SetText {
+        id: 7,
+        text: "SF Pro Display".into(),
+    });
+    ops.extend(node_ops(
+        8,
+        1,
+        "button",
+        json!({"title":"More","data-pm-component":"toolbar-item","label":"More","aria-haspopup":"menu","metadata":{"symbol":"ellipsis"}}),
+        &["click"],
+    ));
     let (view, vcx) = window(cx, &rig, synthetic(&rig, ops), Default::default());
     vcx.run_until_parked();
     let shown = view.read_with(&vcx, |v, _| (v.shown_text(2, 3), v.shown_text(4, 3)));
     assert_eq!(shown.0, "Gaussian Blur", "the title is in view: no tooltip");
     assert_eq!(shown.1, "", "an icon says nothing: its title stays");
+    let tips = view.read_with(&vcx, |v, _| {
+        [2, 4, 6, 8].map(|id| v.tooltip_title(id).map(|t| t.to_string()))
+    });
+    assert_eq!(
+        tips,
+        [None, Some("Reset Effect".into()), None, Some("More".into())],
+        "no tooltip repeats the view or stands over a value's menu; icons keep theirs"
+    );
 }

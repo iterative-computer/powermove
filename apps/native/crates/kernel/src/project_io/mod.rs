@@ -530,7 +530,10 @@ pub fn open_project(path: &Path, options: OpenOptions) -> Result<OpenedProject, 
 /// Legacy files predate native colour management. Keep their preview intent
 /// on each asset so saving to PMV4 does not lose it, and native imports keep
 /// their tagged/HDR reading. Explicit Interpret Footage fields still win.
-fn adopt_electron_rendering(project: &mut Value, legacy_container: bool) {
+/// Projects read from a v1 library slot take the same rule as a PMV4 file
+/// (`LibraryStore::load`), so a project reads its video the same however it
+/// is opened, and a Save As and reopen never changes the picture.
+pub(crate) fn adopt_electron_rendering(project: &mut Value, legacy_container: bool) {
     let has_3d = |comp: &Value| {
         comp.get("layers")
             .and_then(Value::as_array)

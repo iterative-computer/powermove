@@ -18,6 +18,9 @@ float pm_tangent(float xs[15],float ys[15],int n,int i){
  float ha=xs[i]-xs[i-1],hb=xs[i+1]-xs[i];
  return 3.*(ha+hb)/((2.*hb+ha)/a+(hb+2.*ha)/b);
 }
+// Held to [lo, hi], an infinity at its nearer end, NaN at `nan` (by bits:
+// fast math folds NaN compares).
+float pm_held(float v,float lo,float hi,float nan){uint b=floatBitsToUint(v);if((b&0x7f800000u)!=0x7f800000u)return clamp(v,lo,hi);if((b&0x007fffffu)!=0u)return nan;return (b&0x80000000u)!=0u?lo:hi;}
 float pm_curve(float xs[15],float ys[15],int n,float v){
  // One point left: the line of slope 1 through it.
  if(n<2)return ys[0]+(v-xs[0]);
@@ -30,8 +33,11 @@ float pm_curve(float xs[15],float ys[15],int n,float v){
 }
 void main(){
  vec4 c=texture(u_tex,v_st);if(c.a<=0.){o=c;return;}
- int n=int(clamp(u_count,2.,15.)+.5);
+ int n=int(pm_held(u_count,2.,15.,2.)+.5);
  float xs[15]=float[15](u_x0,u_x1,u_x2,u_x3,u_x4,u_x5,u_x6,u_x7,u_x8,u_x9,u_x10,u_x11,u_x12,u_x13,u_x14),ys[15]=float[15](u_y0,u_y1,u_y2,u_y3,u_y4,u_y5,u_y6,u_y7,u_y8,u_y9,u_y10,u_y11,u_y12,u_y13,u_y14);
+ // Points are held to the editor's range (In 0..1, Out -1..2); one that is
+ // not a number waits at white, as an unused point does.
+ for(int i=0;i<15;i++){float d=i==0?0.:1.;xs[i]=pm_held(xs[i],0.,1.,d);ys[i]=pm_held(ys[i],-1.,2.,d);}
  // Points are read in input order, however they were written.
  int id[15]=int[15](0,1,2,3,4,5,6,7,8,9,10,11,12,13,14);
  for(int i=1;i<15;i++){if(i>=n)break;float kx=xs[i],ky=ys[i];int ki=id[i];int j=i-1;while(j>=0&&xs[j]>kx){xs[j+1]=xs[j];ys[j+1]=ys[j];id[j+1]=id[j];j--;}xs[j+1]=kx;ys[j+1]=ky;id[j+1]=ki;}

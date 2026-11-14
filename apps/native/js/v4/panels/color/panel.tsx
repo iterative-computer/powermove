@@ -5,6 +5,8 @@ import { ColorModel, type Intent, type ParameterRow } from "./model";
 import {
   CURVES,
   CURVE_CHANNELS,
+  EXPORT_CDL,
+  IMPORT_CDL,
   LOAD_LUT,
   LUT,
   PANEL_ID,
@@ -119,7 +121,27 @@ export function ColorPanel({ controller: c, command }: ColorProps) {
               tool={wheels}
               send={send}
               editable={editable}
-              action={wheels ? undefined : add(WHEELS, "Add Color Wheels")}
+              action={
+                <>
+                  {wheels ? null : add(WHEELS, "Add Color Wheels")}
+                  <SectionAction
+                    id={`${PANEL_ID}:import-cdl`}
+                    label="Import CDL…"
+                    symbol="square.and.arrow.down"
+                    disabled={!editable}
+                    onActivate={() => command(IMPORT_CDL)}
+                  />
+                  {wheels && (
+                    <SectionAction
+                      id={`${PANEL_ID}:export-cdl`}
+                      label="Export CDL…"
+                      symbol="square.and.arrow.up"
+                      disabled={p.target !== "Layer"}
+                      onActivate={() => command(EXPORT_CDL)}
+                    />
+                  )}
+                </>
+              }
             >
               {wheels ? wheelControls(wheels) : null}
               {moreWheels.map((g) => (

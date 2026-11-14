@@ -13,9 +13,11 @@ pub fn audio(id: &str, from: f64, dur: f64, track: i32) -> Json {
     c["type"] = json!("audio");
     c
 }
+/// The source asset is shaped as a v1 one is after opening: no `timing`, and
+/// the v1 video reading marker opening adds (so a save and reopen keeps it).
 pub fn store(layers: Vec<Json>) -> DocumentStore {
     let p = json!({"id":"P","name":"Pro fixture","compId":"C1","fps":30,"dur":40,"w":100,"h":100,"bg":"#000000",
-        "assets":{"src":{"id":"src","kind":"video","name":"Synthetic","dur":100,"hasAudio":true}},"layers":layers});
+        "assets":{"src":{"id":"src","kind":"video","name":"Synthetic","dur":100,"hasAudio":true,"videoColor":"electron"}},"layers":layers});
     DocumentStore::new_untitled(pm_model::json::parse(&p.to_string()).unwrap())
 }
 pub fn abc() -> DocumentStore {
