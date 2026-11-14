@@ -187,7 +187,7 @@ impl Controller {
                 ("tool", ui("studioTool", "move")),
                 ("axes", ui("studioAxes", "scene")),
                 ("views", ui("studioViews", "1")),
-                ("tier", ui("studioTier", "live")),
+                ("tier", ui("studioTier", "fast")),
             ];
             pm_shell::check_view3d(&|group, value| {
                 current.iter().any(|(g, v)| *g == group && v == value)

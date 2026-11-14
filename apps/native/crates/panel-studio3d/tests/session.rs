@@ -242,8 +242,8 @@ fn quality_and_tiers_support_orthographic_without_document_edits() {
     drive(&mut s, "preview", json!("quality"));
     let before = root(&a);
     let history = a.handle().published("p").unwrap().history.entries;
-    assert_eq!(publish(&mut s)["tier"], "live");
-    for tier in ["refine", "final", "live"] {
+    assert_eq!(publish(&mut s)["tier"], "fast");
+    for tier in ["refine", "final", "live", "fast"] {
         drive(&mut s, "tier", json!(tier));
         assert_eq!(publish(&mut s)["tier"], tier);
     }
