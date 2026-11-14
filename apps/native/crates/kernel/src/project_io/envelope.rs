@@ -21,7 +21,7 @@ use pm_model::{JsString, Map, Node, NodeKind, Value};
 pub(crate) struct DocumentParts<'a> {
     pub root: Option<&'a Node>,
     pub had_comps: bool,
-    pub history: &'a Value,
+    pub history: HistoryPart<'a>,
     pub workspace: Option<&'a Value>,
     pub extra: &'a Map,
 }
@@ -178,6 +178,13 @@ fn write_project(root: &Node, had_comps: bool, sink: &mut impl Sink) {
 }
 
 /// Writes the whole document record.
+/// The `history` member: a value as written, or this session's stack
+/// written step by step from text each step made once (the same bytes).
+pub(crate) enum HistoryPart<'a> {
+    Value(&'a Value),
+    Session(&'a crate::history::HistorySnapshot),
+}
+
 pub(crate) fn write_document(parts: &DocumentParts<'_>, sink: &mut impl Sink) {
     sink.push_str("{");
     key(sink, "v");
@@ -193,7 +200,10 @@ pub(crate) fn write_document(parts: &DocumentParts<'_>, sink: &mut impl Sink) {
     sink.push_str(",");
     key(sink, "history");
     sink.push_str(":");
-    write_canonical(parts.history, sink);
+    match parts.history {
+        HistoryPart::Value(history) => write_canonical(history, sink),
+        HistoryPart::Session(snapshot) => snapshot.write_saved(sink),
+    }
     sink.push_str(",");
     key(sink, "ws");
     sink.push_str(":");

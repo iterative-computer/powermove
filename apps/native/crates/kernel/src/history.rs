@@ -199,6 +199,36 @@ pub struct HistoryRecord {
     /// The assets the step refers to ([`Self::referenced_assets`]), found
     /// once and shared by every copy.
     assets: Arc<std::sync::OnceLock<Box<[String]>>>,
+    /// The step's entry exactly as the saved history writes it
+    /// ([`Self::saved_text`]), made once and shared by every copy.
+    saved_text: Arc<std::sync::OnceLock<SavedText>>,
+}
+
+/// One step's saved entry as canonical JSON text, compressed: what
+/// `to_saved` writes for it before its label. A save writes these bytes
+/// instead of rebuilding and serializing the step again.
+#[derive(Debug)]
+pub(crate) struct SavedText {
+    data: Box<[u8]>,
+    len: usize,
+    /// What reading the entry back finds (`History::import` of a history
+    /// saved with composition paths, which never consults the open
+    /// composition), for the file guard.
+    import: Result<ImportFacts, String>,
+}
+/// What `History::import` makes of one saved entry, as the file guard asks.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ImportFacts {
+    /// The imported record's byte size (the import budget's measure).
+    pub bytes: usize,
+    /// The entry is saved as id-keyed operations rather than leaf patches.
+    pub operations: bool,
+}
+impl SavedText {
+    fn text(&self) -> String {
+        let bytes = zstd::bulk::decompress(&self.data, self.len).expect("internal history bytes");
+        String::from_utf8(bytes).expect("canonical history text")
+    }
 }
 
 impl HistoryRecord {
@@ -276,7 +306,65 @@ impl HistoryRecord {
         self.referenced_assets();
         if self.is_document() {
             self.digest();
+            self.saved_text();
         }
+    }
+    /// The entry `to_saved` writes for this step, less its label: the
+    /// canonical `{"backward":…,"forward":…` exactly as that export
+    /// serializes it. Built once from the same values the export builds.
+    pub(crate) fn saved_text(&self) -> &SavedText {
+        self.saved_text.get_or_init(|| {
+            let (forward, backward) = self.saved_sides();
+            let mut entry = Map::new();
+            entry.insert("label", Value::from(self.label.as_str()));
+            entry.insert("forward", forward);
+            entry.insert("backward", backward);
+            let entry = Value::Object(entry);
+            // The file guard's test for id-keyed operations, on this entry.
+            let operations = ["forward", "backward"].iter().any(|side| {
+                entry
+                    .get(side)
+                    .and_then(Value::as_array)
+                    .is_some_and(|ops| {
+                        ops.iter().any(|op| {
+                            let op = op.get("patch").unwrap_or(op);
+                            op.get("op").and_then(Value::as_str).is_some()
+                        })
+                    })
+            });
+            let import = import_entry(&entry, false, None)
+                .map(|(_, _, _, bytes)| ImportFacts { bytes, operations });
+            let mut text = String::from("{\"backward\":");
+            pm_model::json::write::write_canonical(
+                entry.get("backward").expect("backward"),
+                &mut text,
+            );
+            text.push_str(",\"forward\":");
+            pm_model::json::write::write_canonical(
+                entry.get("forward").expect("forward"),
+                &mut text,
+            );
+            let len = text.len();
+            SavedText {
+                data: zstd::bulk::compress(text.as_bytes(), 3)
+                    .expect("history compression")
+                    .into(),
+                len,
+                import,
+            }
+        })
+    }
+    /// The forward and backward lists `to_saved` stores for this step.
+    fn saved_sides(&self) -> (Value, Value) {
+        let list = |p: Vec<Patch>| Value::Array(p.iter().map(Patch::to_value).collect());
+        match self.saved_form() {
+            Some((forward, backward)) => (list(forward), list(backward)),
+            None => (self.forward.value(), self.inverse.value()),
+        }
+    }
+    /// What `History::import` makes of this step's saved entry.
+    pub(crate) fn import_facts(&self) -> Result<ImportFacts, String> {
+        self.saved_text().import.clone()
     }
     pub(crate) fn saved_form(&self) -> Option<(Vec<Patch>, Vec<Patch>)> {
         if let Some(saved) = &self.saved {
@@ -345,6 +433,19 @@ pub struct History {
     /// External entries with a cleanup that fell off the stack, waiting for
     /// the kernel to ask their realm to run it.
     retired: Vec<ExternalRef>,
+    /// The file guard's verdict on document states it has judged, by state
+    /// token, each with the outside-write count it was judged under.
+    guard_states: GuardStates,
+}
+/// Shared by a history and its snapshots: whether a document state (named
+/// by its token, judged under an outside-write count) needs the native
+/// reader (the project file guard).
+pub(crate) type GuardStates = Arc<std::sync::Mutex<GuardMemo>>;
+#[derive(Debug, Default)]
+pub(crate) struct GuardMemo {
+    pub states: std::collections::HashMap<u64, (u64, bool)>,
+    /// Saves that had to replay the whole history (diagnostics, tests).
+    pub full_replays: u64,
 }
 
 impl Default for History {
@@ -364,6 +465,8 @@ pub struct HistoryMark {
 pub struct HistorySnapshot {
     records: Vec<HistoryRecord>,
     cursor: usize,
+    base_token: u64,
+    guard_states: GuardStates,
 }
 
 impl History {
@@ -379,6 +482,7 @@ impl History {
             max_entries,
             max_bytes,
             base_token: next_token(),
+            guard_states: Default::default(),
             retired: Vec::new(),
         }
     }
@@ -566,6 +670,7 @@ impl History {
             selection: None,
             digest: Default::default(),
             assets: Default::default(),
+            saved_text: Default::default(),
         });
         self.total_bytes += bytes;
         self.cursor = self.entries.len();
@@ -599,6 +704,7 @@ impl History {
             selection: None,
             digest: Default::default(),
             assets: Default::default(),
+            saved_text: Default::default(),
         });
         self.total_bytes += bytes;
         self.cursor = self.entries.len();
@@ -629,6 +735,7 @@ impl History {
             selection: Some(Arc::new((before, after))),
             digest: Default::default(),
             assets: Default::default(),
+            saved_text: Default::default(),
         });
         self.total_bytes += bytes;
         self.cursor = self.entries.len();
@@ -811,10 +918,17 @@ impl History {
         }
         next == theirs.len()
     }
+    /// Saves of this history whose file guard replayed the whole history.
+    #[cfg(test)]
+    pub(crate) fn full_replays(&self) -> u64 {
+        self.guard_states.lock().expect("guard states").full_replays
+    }
     pub fn snapshot(&self) -> HistorySnapshot {
         HistorySnapshot {
             records: self.entries.clone(),
             cursor: self.cursor,
+            base_token: self.base_token,
+            guard_states: self.guard_states.clone(),
         }
     }
 }
@@ -965,6 +1079,7 @@ impl History {
                 selection: None,
                 digest: Default::default(),
                 assets: Default::default(),
+                saved_text: Default::default(),
             });
             history.total_bytes += bytes;
         }
@@ -977,6 +1092,25 @@ impl History {
         history.trim();
         Ok(history)
     }
+}
+
+/// How many entries `History::import` keeps of a saved history with these
+/// imported record sizes and `applied` applied: the same budget steps as
+/// import (distant redo first, then the oldest), on sizes alone.
+pub(crate) fn import_kept(bytes: &[usize], applied: usize) -> usize {
+    let (max_entries, max_bytes) = (MAX_ENTRIES, DEFAULT_MAX_BYTES);
+    let mut len = bytes.len();
+    let mut total: usize = bytes.iter().sum();
+    while total > max_bytes && len > applied {
+        len -= 1;
+        total -= bytes[len];
+    }
+    let mut first = 0;
+    while len - first > max_entries || total > max_bytes && len - first > 1 {
+        total -= bytes[first];
+        first += 1;
+    }
+    len - first
 }
 
 /// One saved history entry: its label, forward and backward operations
@@ -1161,6 +1295,56 @@ impl HistorySnapshot {
 
     pub fn records(&self) -> &[HistoryRecord] {
         &self.records
+    }
+
+    /// Writes exactly `write_canonical(&self.to_saved())`, each step from
+    /// the entry text it made once ([`HistoryRecord::saved_text`]) rather
+    /// than rebuilding the whole history as values on every save.
+    pub fn write_saved<S: pm_model::json::write::Sink>(&self, sink: &mut S) {
+        use pm_model::json::write::write_canonical;
+        let applied = self.records[..self.cursor]
+            .iter()
+            .filter(|r| r.is_document())
+            .count();
+        // Keys in canonical order: entries, index, paths, version.
+        sink.push_str("{\"entries\":[");
+        for (i, r) in self.records.iter().filter(|r| r.is_document()).enumerate() {
+            if i > 0 {
+                sink.push_str(",");
+            }
+            sink.push_str(&r.saved_text().text());
+            sink.push_str(",\"label\":");
+            write_canonical(&Value::from(r.label.as_str()), sink);
+            sink.push_str("}");
+        }
+        sink.push_str("],\"index\":");
+        write_canonical(&Value::Number(applied as f64 - 1.0), sink);
+        sink.push_str(",\"paths\":");
+        write_canonical(&Value::from("composition"), sink);
+        sink.push_str(",\"version\":");
+        write_canonical(&Value::Number(1.0), sink);
+        sink.push_str("}");
+    }
+
+    /// The document records in order, the base state's token and how many
+    /// are applied: the states the file guard reconstructs. `None` when a
+    /// realm's step is on the stack: it changes the document outside the
+    /// saved history, so the states around it are not what replaying the
+    /// saved steps makes.
+    pub(crate) fn guard_chain(&self) -> Option<(Vec<&HistoryRecord>, u64, usize)> {
+        if self.records.iter().any(|r| r.external.is_some()) {
+            return None;
+        }
+        let documents: Vec<&HistoryRecord> =
+            self.records.iter().filter(|r| r.is_document()).collect();
+        let applied = self.records[..self.cursor]
+            .iter()
+            .filter(|r| r.is_document())
+            .count();
+        Some((documents, self.base_token, applied))
+    }
+    pub(crate) fn guard_states(&self) -> &GuardStates {
+        &self.guard_states
     }
 
     /// `packHistory(export())`: the dictionary form `projectHistory.<id>`
