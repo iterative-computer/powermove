@@ -80,6 +80,9 @@ pub struct Frame {
     pub note: Option<String>,
     pub buttons: Vec<Button>,
     pub default: Option<String>,
+    /// Centred, the title on its own lines, the button under it (the
+    /// Welcome); other frames read from the leading edge.
+    pub centred: bool,
 }
 impl Frame {
     /// Return activates this. Disabled buttons never do.

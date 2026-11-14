@@ -61,8 +61,11 @@ impl Plan {
         let launch = config
             .as_ref()
             .map_or(Launch::Fresh, pm_first_launch::detect);
+        // A development review may walk onboarding on an isolated profile.
+        let review =
+            cfg!(debug_assertions) && std::env::var_os("PM_NATIVE_REVIEW_ONBOARDING").is_some();
         Some(Self {
-            onboard: !isolated && !onboarding_completed(&profile),
+            onboard: (!isolated || review) && !onboarding_completed(&profile),
             config,
             profile,
             launch,
@@ -511,7 +514,9 @@ impl Flow {
             Onboard::Animation | Onboard::Welcome => Frame {
                 surface: "S107".into(),
                 animate: true,
-                title: "Welcome to Powermove.".into(),
+                // Two lines, as v1.2.0 (read as one sentence).
+                title: "Welcome to\nPowermove.".into(),
+                centred: true,
                 buttons: vec![Button::new("begin", "Begin")],
                 default: Some("begin".into()),
                 ..Frame::default()
@@ -883,6 +888,32 @@ impl Driver {
                 match opened {
                     Ok(handle) => {
                         *self.window.borrow_mut() = Some(handle);
+                        // A development review walks to a step: the steps it
+                        // names (`--review-onboarding begin,continue`), never
+                        // the last one, which finishes and writes.
+                        #[cfg(debug_assertions)]
+                        if let Ok(steps) = std::env::var("PM_NATIVE_REVIEW_ONBOARDING") {
+                            let ids: Vec<String> = steps
+                                .split(',')
+                                .filter(|s| {
+                                    matches!(*s, "begin" | "continue" | "back")
+                                        || s.starts_with("choose:")
+                                })
+                                .map(str::to_owned)
+                                .collect();
+                            let driver = self.clone();
+                            cx.spawn(async move |cx| {
+                                cx.background_executor()
+                                    .timer(std::time::Duration::from_secs(1))
+                                    .await;
+                                let _ = cx.update(|cx| {
+                                    for id in ids {
+                                        driver.step(|flow| flow.action(&id), cx);
+                                    }
+                                });
+                            })
+                            .detach();
+                        }
                         animating
                     }
                     Err(error) => {
