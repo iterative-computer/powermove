@@ -261,6 +261,10 @@ pub struct Request {
     pub effort: Option<String>,
     pub access: Access,
     pub approval: ApprovalMode,
+    /// The person accepted Full access for this thread (its consent card):
+    /// only then does a Computer-access run get computer authority. Runs
+    /// that reach Computer access any other way are refused (`Authority`).
+    pub computer_consent: bool,
     /// Existing private directory the run works in.
     pub workspace: PathBuf,
     /// Attached images, written inside `workspace`, for the provider to see.
@@ -288,7 +292,7 @@ pub fn launch(environment: &Environment, mut request: Request) -> Result<Handle,
             Value::Array(request.files.clone())
         );
     }
-    let authority = Authority::new(request.access, request.approval, false)?;
+    let authority = Authority::new(request.access, request.approval, request.computer_consent)?;
     let grant = grants::issue(&request.run, request.access)
         .map_err(|e| format!("The agent's tool access couldn't be prepared: {e}"))?;
     let token = grant.token().to_owned();
