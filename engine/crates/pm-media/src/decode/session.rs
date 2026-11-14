@@ -225,6 +225,17 @@ impl Session {
             && s >= self.next
     }
 
+    /// Sample `s` when this session's run has already passed it and does not
+    /// keep it in its window: how many samples back from the run's position
+    /// it is, and how many samples a seek back to it decodes again. `None`
+    /// when continuing (or a forward seek) reaches it.
+    pub(crate) fn passed(&self, s: usize) -> Option<(usize, usize)> {
+        if self.window.contains_key(&s) || self.run_start.is_none() || s >= self.next {
+            return None;
+        }
+        Some((self.next - s, s + 1 - self.index.sync_for(s)))
+    }
+
     /// As [`sample`](Session::sample), asking `stop` between batches of
     /// samples whether to give up (a newer request superseded this one).
     /// A stopped request returns `None` and leaves the run where it got to:
