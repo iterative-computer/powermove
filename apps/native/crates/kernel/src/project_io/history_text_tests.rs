@@ -744,18 +744,21 @@ fn history_only_media_keeps_the_history_plain() {
     reopened_alike(&files);
 }
 
-/// The old app's whole file-open path (`tests/v1_reader/read_file.ts`, run
-/// on exported v1.2.0 and v1.3.2 sources listed in `PM_V1_SRC`, separated by
-/// `:`): a fresh media store, open, Undo, Save As, reopen. The picture
-/// survives in the plain case (removed media) and the packed case (media the
-/// project still lists); the same removal written packed regardless loses
-/// it, which the witness must catch.
+/// The old app's file-open path (`tests/v1_reader/read_file.ts`) run on
+/// the exported `apps/desktop/src` of v1.2.0 and of v1.3.2, listed in
+/// `PM_V1_SRC` separated by `:`; the script checks each tree's modules are
+/// that tag's. A fresh media store, open, Undo through the app's own
+/// compositions and history modules, Save As, open again on another fresh
+/// store. The picture (bytes, asset and layer) survives in the plain case
+/// (removed media) and the packed case (media the project still lists); the
+/// same removal written packed regardless loses it, which the check must
+/// catch. Not run by a plain `cargo test` (it says so: ignored); run it with
+/// `PM_V1_SRC=... cargo test -p pm-kernel --lib the_old_app -- --ignored`.
 #[test]
+#[ignore = "needs PM_V1_SRC: the exported v1.2.0 and v1.3.2 desktop sources"]
 fn the_old_app_keeps_the_media_through_open_undo_and_save_as() {
-    let Some(sources) = std::env::var_os("PM_V1_SRC") else {
-        eprintln!("PM_V1_SRC not set: the old app's open path was not run");
-        return;
-    };
+    let sources = std::env::var_os("PM_V1_SRC")
+        .expect("PM_V1_SRC must list the exported v1.2.0 and v1.3.2 desktop sources");
     let dir = TempDir::new("v1-open");
     let write = |store: &mut DocumentStore, path: &Path, writer: Option<ReferenceWriter>| {
         let plan = store
@@ -798,25 +801,44 @@ fn the_old_app_keeps_the_media_through_open_undo_and_save_as() {
     );
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/v1_reader/read_file.ts");
     let bun = std::env::var_os("PM_TEST_BUN").unwrap_or_else(|| "bun".into());
+    let mut releases = Vec::new();
     for source in std::env::split_paths(&sources) {
         for (file, keeps) in [(&plain, true), (&packed, true), (&forced, false)] {
             let out = std::process::Command::new(&bun)
                 .arg(&script)
                 .arg(file)
                 .arg("m")
+                .arg("pic")
                 .env("V1_SRC", &source)
                 .output()
                 .expect("bun runs the old app's reader");
             let text = String::from_utf8_lossy(&out.stdout);
-            eprintln!("{} {}:\n{text}", source.display(), file.display());
-            assert_eq!(
-                out.status.success(),
-                keeps,
+            let what = format!(
                 "{} on {}: {text}{}",
                 source.display(),
                 file.display(),
                 String::from_utf8_lossy(&out.stderr)
             );
+            eprintln!("{what}");
+            let release = text
+                .lines()
+                .find_map(|l| l.strip_prefix("release: "))
+                .unwrap_or_else(|| panic!("not a v1.2.0 or v1.3.2 tree: {what}"))
+                .to_owned();
+            if keeps {
+                assert!(out.status.success(), "the picture was lost: {what}");
+            } else {
+                // Lost where the old app restores media, and said so.
+                assert_eq!(out.status.code(), Some(1), "{what}");
+                assert!(
+                    text.contains("open: open restores it into the media store: NO"),
+                    "{what}"
+                );
+            }
+            releases.push(release);
         }
     }
+    releases.sort();
+    releases.dedup();
+    assert_eq!(releases, ["v1.2.0", "v1.3.2"], "both releases must run");
 }
