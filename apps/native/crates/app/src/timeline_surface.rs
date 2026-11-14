@@ -1372,7 +1372,10 @@ impl TimelineSurface {
         let mods = Self::mods(event.modifiers);
         let additive = mods.shift || mods.command();
         if y < m.ruler as f64 {
-            if frame.hit_op("work-area", x, y, 0.).is_some() && mods.alt {
+            // v1: the work area's bar (its thin strip at the top of the
+            // ruler) moves it on a plain drag; ⌥ moves it from anywhere on
+            // the ruler; the rest of the ruler scrubs.
+            if frame.hit_op("work-area", x, y, 0.).is_some() && (mods.alt || y <= WORK_BAR_STRIP) {
                 self.gesture = Gesture::Pressed(Press {
                     origin: event.position,
                     spec: Some(Spec::WorkMove),
@@ -1991,7 +1994,9 @@ impl TimelineSurface {
         let delta = event.delta.pixel_delta(window.line_height());
         let (dx, dy) = (f32::from(delta.x) as f64, f32::from(delta.y) as f64);
         let (x, y) = self.local(event.position);
-        if event.modifiers.alt || event.modifiers.platform {
+        // ⌘, ⌥ or Control with the wheel zooms the time (v1, as a trackpad
+        // pinch reads).
+        if event.modifiers.alt || event.modifiers.platform || event.modifiers.control {
             if x >= self.view.layer_column {
                 self.zoom_at(x, (dy * WHEEL_ZOOM).exp(), cx);
             }
@@ -3855,3 +3860,6 @@ pub fn least_layer_column(m: &pm_design::Metrics) -> f64 {
 /// How far either side of a work-area edge its handle takes hold (pt): a
 /// 12 pt zone over the ruler's height, as v1's (WORK_BAR.hit).
 const WORK_HANDLE_REACH: f64 = 6.;
+/// v1's work-area bar: the top strip of the ruler a plain drag moves it by
+/// (WORK_BAR.height with a point of grace).
+const WORK_BAR_STRIP: f64 = 6.;

@@ -384,6 +384,59 @@ fn a_work_area_handle_takes_the_press_and_moves_its_edge_without_seeking(cx: &mu
         s.recorder.seeks.borrow()
     );
 }
+/// v1: a plain drag on the work area's bar (the ruler's top strip) moves
+/// the whole work area, keeping its length.
+#[gpui::test]
+fn a_plain_drag_on_the_work_area_bar_moves_it(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    let v = s
+        .surface
+        .read_with(&s.vcx, |t, _| t.frame().unwrap().viewport);
+    let origin = s.origin();
+    let x_of =
+        |seconds: f64| origin.x + px((v.layer_column + (seconds - v.scroll_time) * v.pps) as f32);
+    // Narrow it first: its in point to 2 s.
+    let mid = origin.y + px(tokens().metrics.ruler / 2.);
+    s.drag(
+        cx,
+        point(x_of(0.) + px(5.), mid),
+        point(x_of(2.), mid),
+        Modifiers::none(),
+    );
+    let before = s
+        .surface
+        .read_with(&s.vcx, |t, _| t.scene().unwrap().work_area);
+    let strip = origin.y + px(3.);
+    s.drag(
+        cx,
+        point(x_of(4.), strip),
+        point(x_of(5.), strip),
+        Modifiers::none(),
+    );
+    let after = s
+        .surface
+        .read_with(&s.vcx, |t, _| t.scene().unwrap().work_area);
+    assert!(
+        (after.0 - before.0 - 1.).abs() < 0.05,
+        "{before:?} {after:?}"
+    );
+    assert!((after.1 - after.0 - (before.1 - before.0)).abs() < 0.05);
+}
+/// v1: Control with the wheel zooms the time, as ⌘ and ⌥ do.
+#[gpui::test]
+fn control_and_the_wheel_zoom_the_time(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    let pps = s.surface.read_with(&s.vcx, |t, _| t.pps());
+    let at = s.at(0, 1.);
+    s.vcx.simulate_event(ScrollWheelEvent {
+        position: at,
+        delta: ScrollDelta::Pixels(point(px(0.), px(-40.))),
+        modifiers: Modifiers::control(),
+        ..Default::default()
+    });
+    s.idle(cx);
+    assert_ne!(s.surface.read_with(&s.vcx, |t, _| t.pps()), pps);
+}
 /// Layer ids in stacking order (top first), and each layer's group.
 fn stack(s: &Stage) -> Vec<(String, Option<String>)> {
     s.surface.read_with(&s.vcx, |t, _| {
