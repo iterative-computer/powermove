@@ -18,6 +18,15 @@ use pm_render::{RenderRequest, Renderer};
 
 /// A still drawn alone at its own size (32-bit float, over transparent).
 fn render(renderer: &mut Renderer, path: &Path) -> (Vec<f32>, usize, usize) {
+    render_in(renderer, path, None)
+}
+
+/// [`render`] in a project with the given `color` setting.
+fn render_in(
+    renderer: &mut Renderer,
+    path: &Path,
+    color: Option<serde_json::Value>,
+) -> (Vec<f32>, usize, usize) {
     use serde_json::json;
     use support::doc::*;
     let pool = pm_media::pool::FramePool::new(0);
@@ -42,6 +51,9 @@ fn render(renderer: &mut Renderer, path: &Path) -> (Vec<f32>, usize, usize) {
         )],
     );
     value["colorDepth"] = serde_json::json!(32);
+    if let Some(color) = color {
+        value["color"] = color;
+    }
     asset(&mut value, "clip", "image", &ext, w as u32, h as u32, 1.0);
     let mut resolver = pm_render::MapResolver::default();
     resolver.paths.insert("clip".into(), path.to_path_buf());
@@ -343,7 +355,7 @@ struct ImageIo<'a> {
     /// EXIF orientation property (1 when `None`).
     orientation: Option<u16>,
     /// Color space the image is tagged with before encoding: `device`
-    /// (ImageIO embeds no profile), `srgb`, `p3`, `adobe`; the source's
+    /// (ImageIO embeds no profile), `srgb`, `p3`, `adobe`, `pq`, `hlg`; the source's
     /// when `None` (ImageIO embeds sRGB for an untagged PNG).
     color_space: Option<&'a str>,
     /// TIFF compression tag value.
@@ -372,6 +384,8 @@ let spaces: [String: CGColorSpace] = [
   "srgb": CGColorSpace(name: CGColorSpace.sRGB)!,
   "p3": CGColorSpace(name: CGColorSpace.displayP3)!,
   "adobe": CGColorSpace(name: CGColorSpace.adobeRGB1998)!,
+  "pq": CGColorSpace(name: CGColorSpace.itur_2100_PQ)!,
+  "hlg": CGColorSpace(name: CGColorSpace.itur_2100_HLG)!,
 ]
 if a[4] != "-" { img = img.copy(colorSpace: spaces[a[4]]!)! }
 var props: [CFString: Any] = [kCGImagePropertyOrientation: Int(a[5])!]
@@ -1125,4 +1139,94 @@ fn h273_log_png_tags_decode_in_float_at_every_sample() {
             assert_eq!(pixel[3], 1.0);
         }
     }
+}
+
+/// PQ and HLG stills (PNG cICP; AVIF and HEIF `nclx` read the same code
+/// points) keep their light in an HDR project: 1.0 = 203 cd/m², PQ absolute,
+/// HLG displayed at its 1000 cd/m² nominal peak (BT.2100 system gamma 1.2),
+/// so HLG 0.75 is reference white (BT.2408). In an SDR project the same
+/// files are tone mapped (`native_exr_dpx_and_png_metadata_are_supported`
+/// and stills2 hold that reading to the f64 reference).
+#[test]
+fn pq_and_hlg_stills_keep_their_light_in_an_hdr_project() {
+    let d = dir().join("hdr-stills");
+    std::fs::create_dir_all(&d).unwrap();
+    let pq = |nits: f64| {
+        let y = (nits / 10_000.0).powf(2610.0 / 16384.0);
+        ((3424.0 / 4096.0 + 2413.0 / 128.0 * y) / (1.0 + 2392.0 / 128.0 * y)).powf(2523.0 / 32.0)
+    };
+    let hlg_nits = |e: f64| {
+        let (a, b, c) = (0.178_832_77, 0.284_668_92, 0.559_910_73);
+        let scene = if e <= 0.5 {
+            e * e / 3.0
+        } else {
+            (((e - c) / a).exp() + b) / 12.0
+        };
+        1000.0 * scene.powf(1.2)
+    };
+    let cases: [(&str, u8, Vec<(f64, f64)>); 2] = [
+        (
+            "pq",
+            16,
+            [100.0, 203.0, 1000.0].map(|n| (pq(n), n)).to_vec(),
+        ),
+        (
+            "hlg",
+            18,
+            [0.5, 0.75, 1.0].map(|e| (e, hlg_nits(e))).to_vec(),
+        ),
+    ];
+    let mut renderer = Renderer::headless().unwrap();
+    for (name, transfer, levels) in cases {
+        let mut raw = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut raw, levels.len() as u32, 1);
+            encoder.set_color(png::ColorType::Rgb);
+            encoder.set_depth(png::BitDepth::Sixteen);
+            let rgb: Vec<u8> = levels
+                .iter()
+                .flat_map(|(code, _)| {
+                    let v = ((code * 65535.0).round() as u16).to_be_bytes();
+                    [v, v, v].concat()
+                })
+                .collect();
+            encoder
+                .write_header()
+                .unwrap()
+                .write_image_data(&rgb)
+                .unwrap();
+        }
+        let path = d.join(format!("{name}.png"));
+        std::fs::write(&path, with_chunk(&raw, b"cICP", &[9, transfer, 0, 1])).unwrap();
+        let hdr = serde_json::json!({ "mode": "hdr" });
+        let (px, ..) = render_in(&mut renderer, &path, Some(hdr));
+        for (i, (code, nits)) in levels.iter().enumerate() {
+            let got = f64::from(pm_color::transfer::display_decode_f32(px[i * 4 + 1]));
+            let want = nits / 203.0;
+            eprintln!("{name} {code:.4}: {got:.4} (want {want:.4}, {nits:.1} cd/m²)");
+            assert!(
+                (got - want).abs() <= 1e-3 * want.max(1.0),
+                "{name} {code}: {got} vs {want}"
+            );
+        }
+        // The same samples as a HEIC ImageIO writes in BT.2100: ImageIO's
+        // reader labels its samples SDR, so the still is refused with its
+        // reason rather than drawn wrong (listed in the colour notes).
+        let heic = d.join(format!("{name}.heic"));
+        imageio_write(
+            &path,
+            &heic,
+            "public.heic",
+            &ImageIo {
+                color_space: Some(name),
+                ..Default::default()
+            },
+        );
+        assert!(
+            unsupported(&heic).contains("HEIF PQ/HLG stills"),
+            "{name}.heic: {}",
+            unsupported(&heic)
+        );
+    }
+    std::fs::remove_dir_all(&d).ok();
 }

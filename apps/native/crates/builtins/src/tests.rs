@@ -4379,17 +4379,20 @@ fn the_color_panel_lists_the_grade_and_writes_through_its_controls() {
                 .map(str::to_owned)
         })
         .collect();
+    // Every grade in the order it applies, each under its own name (an
+    // extension's included), and the panel's Add actions.
     for label in [
         "Amount",
         "Input Space",
         "Color Wheels",
         "Lift",
         "Temperature",
-        "Curves",
+        "Add Curve",
         "Load LUT…",
-        "Color Space Transform",
-        "More",
+        "Add Color Space Transform",
+        "Synthetic Look",
         "Strength",
+        "Remove Color Wheels",
     ] {
         assert!(
             labels.iter().any(|l| l == label),
