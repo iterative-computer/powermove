@@ -750,7 +750,7 @@ impl Controller {
             let cropped = free || self.host.borrow().viewer_crop.get().is_some();
             self.builtins.frame_outline.show(
                 &self.host.borrow(),
-                !cropped && crate::panels::needs_frame_outline(self.background, t.colors.viewer),
+                !cropped && crate::panels::needs_frame_outline(self.background, t.viewer_surround()),
                 t.colors.separator,
                 t.metrics.border,
             );

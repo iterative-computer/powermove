@@ -2052,7 +2052,7 @@ impl Host {
             let _: () = msg_send![layer.as_ptr() as *mut AnyObject,setWantsExtendedDynamicRangeContent:true];
         }
         if let Some(l) = viewer.layer() {
-            l.setBackgroundColor(Some(&native_color(t.colors.viewer).CGColor()));
+            l.setBackgroundColor(Some(&native_color(t.viewer_surround()).CGColor()));
         }
         content.addSubview_positioned_relativeTo(&viewer, NSWindowOrderingMode::Below, Some(&gpui));
         let backdrop = backdrop(mtm, &content);
@@ -3253,7 +3253,7 @@ impl Host {
         appearance(&self.window, &t);
         ground(&self.window, &self.backdrop, &t);
         if let Some(layer) = self.viewer.layer() {
-            layer.setBackgroundColor(Some(&native_color(t.colors.viewer).CGColor()));
+            layer.setBackgroundColor(Some(&native_color(t.viewer_surround()).CGColor()));
         }
         for (popup, surface) in [
             (&self.palette, Surface::Palette),
@@ -3280,7 +3280,7 @@ impl Host {
     /// Opt in to a clipped content layer. Standalone shell keeps its placeholder.
     pub fn viewer_transform(&mut self, dimensions: [f64; 2], zoom: Option<f64>, pan: [f64; 2]) {
         if self.viewer_transform.is_none() {
-            viewer_slot::clip(&self.viewer, &self.layer, self.tokens.colors.viewer);
+            viewer_slot::clip(&self.viewer, &self.layer, self.tokens.viewer_surround());
         }
         if self.viewer_transform != Some((dimensions, zoom, pan)) {
             // Re-place the content layer on the next composition frame.

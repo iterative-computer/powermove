@@ -641,6 +641,12 @@ macro_rules! patchable {
     }};
 }
 impl Tokens {
+    /// The ground around the composition in the viewer: the panel tint over
+    /// the window ground, as the viewer's own header bar shows it, so the
+    /// canvas sits inside its panel instead of in a darker hole.
+    pub fn viewer_surround(&self) -> u32 {
+        color::mix(self.colors.window, self.colors.panel, self.translucency.panel)
+    }
     pub fn new(scheme: Scheme, accessibility: Accessibility) -> Self {
         let colors = Colors::of(scheme);
         let ground = colors.window;
