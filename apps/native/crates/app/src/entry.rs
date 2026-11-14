@@ -123,6 +123,19 @@ pub fn receive(urls: Vec<String>, cx: &mut App) {
             }
             continue;
         }
+        // `review/hit/<x,y>/<file>`: the view AppKit finds at a window point
+        // (top-left origin, points) and its registered drag ancestors.
+        #[cfg(debug_assertions)]
+        if let Some(rest) = raw.strip_prefix("powermove://review/hit/") {
+            if let Some((at, file)) = rest.split_once('/') {
+                let file = url::form_urlencoded::parse(format!("x={file}").as_bytes())
+                    .next()
+                    .map(|(_, v)| v.into_owned())
+                    .unwrap_or_default();
+                let _ = std::fs::write(file, review_hit(at));
+            }
+            continue;
+        }
         // `review/thumbs/<file>`: the Project grid's thumbnail state.
         #[cfg(debug_assertions)]
         if let Some(file) = raw.strip_prefix("powermove://review/thumbs/") {
@@ -166,6 +179,43 @@ pub fn receive(urls: Vec<String>, cx: &mut App) {
         }
     }
     drain(cx);
+}
+
+#[cfg(debug_assertions)]
+fn review_hit(at: &str) -> String {
+    use objc2_app_kit::NSApplication;
+    let Some((x, y)) = at
+        .split_once(',')
+        .and_then(|(x, y)| Some((x.parse::<f64>().ok()?, y.parse::<f64>().ok()?)))
+    else {
+        return "bad point".into();
+    };
+    let mtm = objc2::MainThreadMarker::new().expect("main thread");
+    let mut out = String::new();
+    for window in NSApplication::sharedApplication(mtm).windows().iter() {
+        if !window.isVisible() {
+            continue;
+        }
+        let Some(content) = window.contentView() else {
+            continue;
+        };
+        let Some(frame) = (unsafe { content.superview() }) else {
+            continue;
+        };
+        let height = frame.bounds().size.height;
+        let point = objc2_foundation::NSPoint::new(x, height - y);
+        let mut view = frame.hitTest(point);
+        out.push_str(&format!("window {:?}\n", window.title().to_string()));
+        while let Some(v) = view {
+            out.push_str(&format!(
+                "  {} drag-types={}\n",
+                v.class().name().to_string_lossy(),
+                v.registeredDraggedTypes().count()
+            ));
+            view = unsafe { v.superview() };
+        }
+    }
+    out
 }
 
 #[cfg(debug_assertions)]
