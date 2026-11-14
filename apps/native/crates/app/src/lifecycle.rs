@@ -32,6 +32,16 @@ pub fn close_state(p: Option<&Published>, opening: bool, saving: bool) -> CloseS
         CloseState::Clean
     }
 }
+/// The edit a close stops at: the kernel holds an entry open while the
+/// project is neither opening nor asking the person something else. The
+/// person is asked to finish it (`Controller::ask_finish_edit`); `None`:
+/// another reason holds the close, or nothing does.
+fn open_edit(p: Option<&Published>, opening: bool, asking: bool) -> Option<String> {
+    if opening || asking {
+        return None;
+    }
+    p?.entry.as_ref().map(|e| e.label.clone())
+}
 /// What a Quit waits for at a window that cannot close this moment, when
 /// that is work which ends on its own: a save in flight, a project still
 /// opening, another project operation. The quit goes on when it has ended
@@ -61,6 +71,9 @@ struct QuitCoordinator {
     discard: bool,
     /// The running-export question is on screen.
     asking_exports: bool,
+    /// A SIGTERM (logout, shutdown, a script) started the quit: nobody is
+    /// there to answer, so an edit left open is finished, not asked about.
+    terminating: bool,
     /// A second Quit's prompt is showing: the window and its sheet, ended
     /// before the app terminates (AppKit refuses to while a sheet is up).
     asking_now: Option<(
@@ -83,6 +96,7 @@ fn cancel_quit(cx: &mut App) {
         let q = cx.global_mut::<QuitCoordinator>();
         q.quitting = false;
         q.discard = false;
+        q.terminating = false;
         q.asking_now = None;
         q.queue.clear();
         q.host.closing.store(false, Ordering::Release);
@@ -208,6 +222,11 @@ pub fn begin_quit(cx: &mut App) {
 fn start_quit(cx: &mut App) {
     let q = cx.global_mut::<QuitCoordinator>();
     q.quitting = true;
+    // SIGTERM: nobody is there to answer a Save question. Unsaved work is
+    // archived as Don't Save archives it (recoverable), and the app ends.
+    if q.terminating {
+        q.discard = true;
+    }
     q.queue = q.controllers.clone();
     q.host.closing.store(true, Ordering::Release);
     let controllers = q.controllers.clone();
@@ -221,7 +240,7 @@ fn start_quit(cx: &mut App) {
     q.queue = questions_first(std::mem::take(&mut q.queue), |weak| {
         asked.contains(&weak.entity_id())
     });
-    let [first, _, ..] = &dirty[..] else {
+    let ([first, _, ..], false) = (&dirty[..], cx.global::<QuitCoordinator>().discard) else {
         return next_quit(cx);
     };
     // S002: two or more dirty projects get one question before any per-project sheet.
@@ -493,6 +512,7 @@ pub fn install(entity: &Entity<Controller>, window: &mut Window, cx: &mut App) {
             quitting: false,
             discard: false,
             asking_exports: false,
+            terminating: false,
             asking_now: None,
             host,
         });
@@ -506,7 +526,10 @@ pub fn install(entity: &Entity<Controller>, window: &mut Window, cx: &mut App) {
         let terminations = crate::platform::terminations();
         cx.spawn(async move |cx| {
             while terminations.recv().await.is_ok() {
-                cx.update(begin_quit);
+                cx.update(|cx| {
+                    cx.global_mut::<QuitCoordinator>().terminating = true;
+                    begin_quit(cx)
+                });
             }
         })
         .detach();
@@ -638,6 +661,77 @@ impl Controller {
         .detach();
         true
     }
+    /// This window in front (its tab selected), so what a close waits on is
+    /// seen. Not in a development lane launch, which never takes the front.
+    fn show_window(&self) {
+        if !gpui_macos::child_window::would_hold() {
+            self.host.borrow().window.makeKeyAndOrderFront(None);
+        }
+    }
+    /// A close or quit met an edit the kernel still holds open (`label`):
+    /// the person finishes it (sealed as one step they can undo, then the
+    /// close goes on, asking about unsaved changes as usual) or cancels. A
+    /// quit from SIGTERM has nobody to ask and finishes it. Nothing is lost:
+    /// the recovery journal stays until a save succeeds.
+    fn ask_finish_edit(&mut self, intent: Intent, label: String, cx: &mut Context<Self>) {
+        use crate::alert::{Alert, Button, Key};
+        let Some(project) = self.session.as_ref().map(|s| s.project.clone()) else {
+            return;
+        };
+        let kernel = self.kernel.clone();
+        let terminating = intent == Intent::Quit && cx.global::<QuitCoordinator>().terminating;
+        self.errors.borrow_mut().push(
+            "Project",
+            &format!("A close waited on an edit left open: “{label}”."),
+        );
+        let answer = (!terminating).then(|| {
+            self.show_window();
+            let name = self
+                .published
+                .as_ref()
+                .and_then(|p| p.snapshot.root()?.get("name").and_then(crate::node_string))
+                .unwrap_or("Untitled")
+                .to_owned();
+            Alert::new(
+                format!("“{name}” has an edit that hasn’t finished: {label}."),
+                "Finish it to keep it as one step you can undo, then close. Nothing is lost either way: your recovery copy stays until the project is saved.",
+                vec![
+                    Button::new(
+                        if intent == Intent::Quit {
+                            "Finish Edit and Quit"
+                        } else {
+                            "Finish Edit and Close"
+                        },
+                        true,
+                    )
+                    .default(),
+                    Button::new("Cancel", false).cancel().key(Key::Escape),
+                ],
+            )
+            .sheet(&self.host.borrow().window)
+        });
+        cx.spawn(async move |this, cx| {
+            let finish = match answer {
+                Some(rx) => rx.recv().await.ok().flatten() == Some(true),
+                None => true,
+            };
+            if finish {
+                let seal = pm_kernel::Request::new(
+                    pm_kernel::Caller::native(),
+                    pm_kernel::HistoryCall::Seal,
+                );
+                let _ = kernel.call(&project, seal).await;
+            }
+            let _ = this.update(cx, |v, cx| {
+                if finish {
+                    v.request_close(intent, cx);
+                } else if intent == Intent::Quit {
+                    cancel_quit(cx);
+                }
+            });
+        })
+        .detach();
+    }
     pub fn request_close(&mut self, intent: Intent, cx: &mut Context<Self>) {
         if self.close_pending {
             if intent == Intent::Quit {
@@ -731,9 +825,17 @@ impl Controller {
                 cx.notify();
                 return;
             }
+            // An edit still open in the kernel (one whose owner never ended
+            // it): the person is asked, in front, in this project's window.
+            CloseState::Busy if let Some(label) = open_edit(p.as_deref(), self.opening, asking) => {
+                self.ask_finish_edit(intent, label, cx);
+                return;
+            }
             CloseState::Busy => {
                 self.message =
                     "Finish the active edit, open or recovery decision before closing.".into();
+                // What holds the close is in this window: show it.
+                self.show_window();
                 cancel_quit(cx);
                 cx.notify();
                 return;
@@ -1395,6 +1497,72 @@ mod tests {
             close_state(k.published("test").as_deref(), false, false),
             CloseState::Busy
         );
+        actor.shutdown();
+    }
+    /// A drag whose owner never ended it held the project's entry open: a
+    /// Quit was refused in a status line nobody saw and could never finish.
+    /// The close names that edit; finishing it (Seal) lets the close go on
+    /// with the usual Save question, and the edit is one step Undo takes back.
+    #[test]
+    fn an_edit_left_open_is_named_and_finishing_it_lets_the_close_go_on() {
+        let (_dir, actor, _session) = fixture();
+        let k = actor.handle();
+        k.call_blocking(
+            "test",
+            Request::new(
+                Caller::native(),
+                GestureCall::Begin {
+                    label: "Move".into(),
+                },
+            ),
+        )
+        .unwrap();
+        edit(&k);
+        let p = k.published("test");
+        assert_eq!(close_state(p.as_deref(), false, false), CloseState::Busy);
+        assert_eq!(
+            open_edit(p.as_deref(), false, false).as_deref(),
+            Some("Move")
+        );
+        // Opening, or another question on screen, holds the close instead.
+        assert_eq!(open_edit(p.as_deref(), true, false), None);
+        assert_eq!(open_edit(p.as_deref(), false, true), None);
+        k.call_blocking("test", Request::new(Caller::native(), HistoryCall::Seal))
+            .unwrap();
+        let p = k.published("test");
+        assert_eq!(close_state(p.as_deref(), false, false), CloseState::Dirty);
+        assert_eq!(open_edit(p.as_deref(), false, false), None);
+        assert!(
+            p.unwrap().history.can_undo,
+            "the finished edit is one undo step"
+        );
+        actor.shutdown();
+    }
+    /// Undo with an edit left open (a move whose drag never sent its end):
+    /// the move is what is undone, and the next edit is a step of its own.
+    #[test]
+    fn undo_after_an_edit_left_open_undoes_that_edit() {
+        let (_dir, actor, _session) = fixture();
+        let k = actor.handle();
+        k.call_blocking(
+            "test",
+            Request::new(
+                Caller::native(),
+                GestureCall::Begin {
+                    label: "Move".into(),
+                },
+            ),
+        )
+        .unwrap();
+        edit(&k);
+        for call in crate::session::undo_calls(true) {
+            k.call_blocking("test", Request::new(Caller::native(), call))
+                .unwrap();
+        }
+        let p = k.published("test").unwrap();
+        assert!(p.entry.is_none(), "no edit is left open");
+        assert!(!p.history.can_undo, "the move was undone");
+        assert!(p.history.can_redo, "and can be redone");
         actor.shutdown();
     }
 }

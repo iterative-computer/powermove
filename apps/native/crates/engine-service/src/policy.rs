@@ -141,6 +141,12 @@ pub const AUTO_FLOOR: f64 = 0.5;
 /// Half resolution costs about a quarter of the fill, so a reduced frame this
 /// far under a refresh predicts a full-resolution frame inside it.
 const UNDER: f64 = 0.2;
+/// Where a slow drag goes when half resolution is still slow.
+pub const AUTO_DRAG_FLOOR: f64 = 0.25;
+/// A dragged frame at [`AUTO_FLOOR`] slower than this many refreshes drags at
+/// [`AUTO_DRAG_FLOOR`] (a heavy project: extension layers, glows at 6K); one
+/// at the lower floor under half a refresh goes back to [`AUTO_FLOOR`].
+const SLOW_REDUCED: f64 = 2.;
 
 /// A dragged playhead waits this long without moving before its frame is
 /// drawn again exact (After Effects' adaptive resolution).
@@ -180,6 +186,9 @@ const QUICK_PLAYS: u32 = 24;
 #[derive(Debug, Clone, Default)]
 pub struct AutoQuality {
     slow_stills: bool,
+    /// Dragged frames are slow at half resolution too: they drag at
+    /// [`AUTO_DRAG_FLOOR`].
+    slower_stills: bool,
     slow_play: bool,
     /// Consecutive full playing frames over their content frame.
     late_plays: u32,
@@ -199,8 +208,14 @@ impl AutoQuality {
         }
         if scale >= 1. {
             self.slow_stills = cost_ms > interval_ms;
-        } else if cost_ms < UNDER * interval_ms {
-            self.slow_stills = false;
+            self.slower_stills = false;
+        } else if scale >= AUTO_FLOOR {
+            if cost_ms < UNDER * interval_ms {
+                self.slow_stills = false;
+            }
+            self.slower_stills = cost_ms > SLOW_REDUCED * interval_ms;
+        } else if cost_ms < 0.5 * interval_ms {
+            self.slower_stills = false;
         }
     }
     /// A playing frame drawn at `scale` took `cost_ms` (start to GPU done)
@@ -239,6 +254,9 @@ impl Quality {
     /// slow playback.
     pub fn scale(self, auto: &AutoQuality, moment: Moment) -> f64 {
         match self {
+            Self::Auto if moment == Moment::Scrub && auto.slow_stills && auto.slower_stills => {
+                AUTO_DRAG_FLOOR
+            }
             Self::Auto if moment == Moment::Scrub && auto.slow_stills => AUTO_FLOOR,
             Self::Auto if moment == Moment::Playing && auto.slow_play => AUTO_FLOOR,
             Self::Auto | Self::Full => 1.,
@@ -255,6 +273,35 @@ mod tests {
     /// Playback in Auto goes to half resolution only after frames keep
     /// missing their content frame, comes back only after a run of cheap
     /// reduced frames, and never touches a stop or a fixed quality.
+    /// A drag on a heavy project: full is slow, so half; half is still over
+    /// two refreshes, so a quarter; a quarter well under a refresh goes back
+    /// to half, and a full frame inside a refresh back to full.
+    #[test]
+    fn a_slow_drag_goes_to_a_quarter_and_back() {
+        let refresh = 1000. / 60.;
+        let mut auto = AutoQuality::default();
+        let drag = |a: &AutoQuality| Quality::Auto.scale(a, Moment::Scrub);
+        auto.record_still(80., refresh, 1.);
+        assert_eq!(drag(&auto), AUTO_FLOOR);
+        auto.record_still(109., refresh, AUTO_FLOOR);
+        assert_eq!(drag(&auto), AUTO_DRAG_FLOOR);
+        assert_eq!(
+            Quality::Auto.scale(&auto, Moment::Playing),
+            1.,
+            "playback untouched"
+        );
+        auto.record_still(12., refresh, AUTO_DRAG_FLOOR);
+        assert_eq!(drag(&auto), AUTO_DRAG_FLOOR, "not yet under half a refresh");
+        auto.record_still(6., refresh, AUTO_DRAG_FLOOR);
+        assert_eq!(drag(&auto), AUTO_FLOOR);
+        auto.record_still(10., refresh, 1.);
+        assert_eq!(drag(&auto), 1.);
+        assert_eq!(
+            Quality::Half.scale(&auto, Moment::Scrub),
+            0.5,
+            "a fixed quality stays"
+        );
+    }
     #[test]
     fn slow_playback_plays_at_half_with_hysteresis() {
         let frame = 1000. / 24.;

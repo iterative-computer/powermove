@@ -2486,10 +2486,16 @@ impl MediaCache {
         self.frame_budget = budget;
         self.free_frames.clear();
         self.retired_frames.clear();
+        // The frames the last render read stay (the next frame of a drag
+        // draws the same clip frame, only moved; a 6K source's one frame is
+        // larger than the whole budget), unless memory is critically short:
+        // what one frame draws is the bound, and idle release drops them.
+        let keep = (!self.image_pressure).then_some(self.frame_epoch);
         while self.frame_bytes() > budget {
             let Some(key) = self
                 .frames
                 .keys()
+                .filter(|k| keep.is_none() || self.frame_seen.get(&k.path).copied() != keep)
                 .min_by_key(|k| self.frame_seen.get(&k.path).copied().unwrap_or(0))
                 .cloned()
             else {

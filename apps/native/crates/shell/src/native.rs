@@ -3590,6 +3590,10 @@ impl Host {
     pub fn viewer_layer(&self) -> metal::MetalLayer {
         self.layer.clone()
     }
+    /// The viewer's view: the app draws the on-canvas outline in its layer.
+    pub fn viewer_view(&self) -> Retained<NSView> {
+        self.viewer.clone()
+    }
     /// A closed document must not leave its drawable pool in the Home
     /// window. The presenter and placement binding release their old layer
     /// separately; the next layout sizes this fresh, configured layer.

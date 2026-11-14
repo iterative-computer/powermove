@@ -181,7 +181,7 @@ pub struct Controller {
     pub closing_note: Option<String>,
     pub close_window: Option<gpui::AnyWindowHandle>,
     pub close_operation: Option<crate::mcp::Operation>,
-    pub gizmo_lines: Vec<pm_engine_service::OverlayLine>,
+    pub gizmo_layer: Option<crate::gizmo_layer::GizmoLayer>,
     /// The toolbar tool, mirrored from shell commands for native surfaces.
     pub tool: String,
     /// The Shape tool's variant (`rect`, `rounded`, `ellipse`, `polygon`, `star`).
@@ -508,6 +508,17 @@ fn composition_size(w: f64, h: f64) -> [f64; 2] {
 fn left_at(clock: Option<f64>, asked: Option<f64>) -> f64 {
     clock.or(asked).unwrap_or(0.)
 }
+/// The history calls an Undo makes. An edit left open (its owner never
+/// ended it) would take the Undo into itself, so it is sealed first and is
+/// the step undone.
+pub(crate) fn undo_calls(left_open: bool) -> Vec<HistoryCall> {
+    let mut calls = Vec::with_capacity(2);
+    if left_open {
+        calls.push(HistoryCall::Seal);
+    }
+    calls.push(HistoryCall::Undo);
+    calls
+}
 impl Controller {
     /// Toggles that are on: menu checkmarks, and `list_commands` for agents.
     pub(crate) fn checked_commands(&self, cx: &App) -> std::collections::BTreeSet<String> {
@@ -809,7 +820,7 @@ impl Controller {
             closing_note: None,
             close_window: None,
             close_operation: None,
-            gizmo_lines: vec![],
+            gizmo_layer: None,
             tool: "toolSelect".into(),
             shape_variant: "rect".into(),
             view: Default::default(),
@@ -1131,6 +1142,17 @@ impl Controller {
                 .detach();
             }
         }
+    }
+    /// The kernel holds an edit open although nothing is being edited: no
+    /// pointer button is down (a drag, a scrub) and no text is being typed.
+    pub fn edit_left_open(&self, cx: &App) -> bool {
+        self.published.as_ref().is_some_and(|p| p.entry.is_some())
+            && objc2_app_kit::NSEvent::pressedMouseButtons() == 0
+            && !self
+                .builtins
+                .gizmos
+                .as_ref()
+                .is_some_and(|g| g.read(cx).text_open().is_some())
     }
     pub fn call(&mut self, call: Call, cx: &mut Context<Self>) {
         let input = pm_engine_service::trace::enabled().then(Self::event_time);
@@ -3012,7 +3034,11 @@ impl Controller {
             "save" => self.save(None, cx),
             "saveAs" => self.save_dialog(cx),
             "export" => self.show_builtin("export", window, cx),
-            "undo" | "contextUndo" => self.call(Call::History(HistoryCall::Undo), cx),
+            "undo" | "contextUndo" => {
+                for call in undo_calls(self.edit_left_open(cx)) {
+                    self.call(Call::History(call), cx);
+                }
+            }
             "redo" | "contextRedo" => self.call(Call::History(HistoryCall::Redo), cx),
             "precompose" => {
                 let Some(published) = self.published.clone() else {

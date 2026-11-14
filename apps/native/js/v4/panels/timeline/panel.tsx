@@ -378,6 +378,9 @@ function Layer({
       <div
         style={{
           ...line,
+          // The rename field takes the room the switches leave (the name
+          // itself keeps to its text, which a double-click renames).
+          ...(row.nameEditor ? { flexGrow: 1 } : {}),
           gap: t("metrics.gap"),
           overflow: "hidden",
           paddingLeft: t("metrics.gap"),
@@ -444,7 +447,12 @@ function Layer({
           }}
         />
         {row.nameEditor ? (
+          // The field takes the name's place across the column while it
+          // edits (a field in a row grows; the cluster gives it the room).
           <UI.TextField
+            // Its own identity: its commit is carried to the newest tree
+            // when the panel has published another on the way.
+            id={`timeline:rename:${row.id}`}
             label={row.label}
             value={row.nameEditor.value}
             binding={row.nameEditor.binding}
@@ -456,6 +464,10 @@ function Layer({
           />
         ) : (
           <text
+            // A stable identity: the double-click that renames lands after
+            // the first click's selection has re-rendered the row, and the
+            // host carries an event to the newest tree only by its id.
+            id={`timeline:name:${row.id}`}
             title={row.label}
             style={{
               ...text,
