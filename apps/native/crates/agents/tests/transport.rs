@@ -286,7 +286,7 @@ fn codex_exec_receives_eof_before_starting_work() {
     let h = transport::spawn(
         ProcessSpec {
             executable: "/usr/bin/python3".into(),
-            args: vec!["-c".into(), "import sys,pathlib; assert sys.stdin.read() == ''; pathlib.Path('stdin-closed').write_text('yes')".into()],
+            args: vec!["-c".into(), "import sys,pathlib,time; assert sys.stdin.read() == ''; time.sleep(2.2); pathlib.Path('stdin-closed').write_text('yes')".into()],
             cwd: t.0.clone(),
             env: BTreeMap::new(),
         },
@@ -300,7 +300,7 @@ fn codex_exec_receives_eof_before_starting_work() {
         },
         vec![],
     );
-    let end = Instant::now() + Duration::from_secs(3);
+    let end = Instant::now() + Duration::from_secs(5);
     while Instant::now() < end && !t.0.join("stdin-closed").exists() {
         thread::sleep(Duration::from_millis(5));
     }
