@@ -86,3 +86,41 @@ test("the enable checkbox turns its tool off and on", async () => {
   ]);
   await root.dispose();
 });
+
+const tool = (id: string, definition: string, label = definition) => ({
+  kind: "effect" as const,
+  id,
+  definition,
+  grade: true,
+  label,
+  enabled: true,
+  expanded: true,
+});
+
+const stacked = (headers: ReturnType<typeof tool>[]) =>
+  ({
+    ...projection,
+    count: headers.length,
+    range: [0, headers.length],
+    rows: headers,
+  }) as Projection;
+
+// C1: every grade can be removed from its own header, the first Color
+// Wheels included (it had Reset but no Remove).
+test("every grade, the first Color Wheels included, has a Remove", async () => {
+  const grades = [
+    tool("w1", "colorWheels", "Color Wheels"),
+    tool("c1", "colorCurves", "Color Curves"),
+    tool("l1", "applyColorLut", "Apply Color LUT"),
+    tool("t1", "colorSpaceTransform", "Color Space Transform"),
+  ];
+  const { root, sent } = await mounted(stacked(grades));
+  for (const g of grades) {
+    const remove = named(root, `${PANEL_ID}:remove:${g.id}`);
+    await event(root, remove.id, "click");
+  }
+  expect(sent.filter((i) => i.type === "remove")).toEqual(
+    grades.map((g) => ({ type: "remove", id: g.id })),
+  );
+  await root.dispose();
+});

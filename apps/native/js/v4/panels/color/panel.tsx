@@ -527,7 +527,8 @@ function Subheading({ title }: { title: string }) {
   );
 }
 
-/** A section; with `tool`, its header carries the tool's switch and Reset. */
+/** A section; with `tool`, its header carries the tool's switch, Reset and
+ * Remove. */
 function Section({
   title,
   tool,
@@ -556,6 +557,7 @@ function Section({
         send={send}
         editable={editable}
         action={action}
+        removable
       />
       {children}
     </div>
