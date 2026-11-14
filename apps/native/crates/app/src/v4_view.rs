@@ -2142,19 +2142,33 @@ impl SurfaceView {
                 cx.defer_in(window, move |v, _, cx| v.range_change(id, geometry, cx));
             }));
             // A list laid out from its width (a grid's columns) hears of a
-            // new width once its frame has it.
-            if let Some(scroll) = self.scrolls.get(&id) {
-                let width = f32::from(scroll.bounds().size.width);
-                if width > 0. && self.list_widths.get(&id) != Some(&width) {
-                    let view = cx.entity().downgrade();
-                    cx.defer(move |cx| {
-                        let _ = view.update(cx, |v, cx| {
-                            v.list_widths.insert(id, width);
-                            v.range_change(id, geometry, cx);
-                        });
-                    });
-                }
-            }
+            // new width as soon as a frame lays it out (measured after
+            // layout: a panel maximized or resized draws nothing more until
+            // something else does, so a check while rendering saw the size
+            // before and the grid kept its old columns).
+            let known = self.list_widths.get(&id).copied();
+            let view = cx.entity().downgrade();
+            element = element.child(
+                canvas(
+                    move |bounds, _, cx| {
+                        let width = f32::from(bounds.size.width);
+                        if width > 0. && known != Some(width) {
+                            let view = view.clone();
+                            cx.defer(move |cx| {
+                                let _ = view.update(cx, |v, cx| {
+                                    if v.list_widths.get(&id) != Some(&width) {
+                                        v.list_widths.insert(id, width);
+                                        v.range_change(id, geometry, cx);
+                                    }
+                                });
+                            });
+                        }
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full(),
+            );
         }
         // A floating surface springs in when it appears and out while its
         // panel keeps it for the exit (`pmKit.closing`): opacity, and a
