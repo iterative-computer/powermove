@@ -58,9 +58,12 @@ pub fn page_bundle(dark: bool, increase_contrast: bool, reduce_transparency: boo
         (true, true, true) => edition!("dark-contrast-solid.css"),
     };
     let scheme = if dark { "dark" } else { "light" };
+    // The theme's variables, then the kit's look for plain controls an
+    // extension leaves to the browser (zero specificity: its own rules win).
+    let css = format!("{css}\n{}", include_str!("extension-base.css"));
     format!(
         "{PAGE_BUNDLE}\n(()=>{{const s=document.createElement('style');s.textContent={};document.head.prepend(s);document.documentElement.dataset.theme={};}})();",
-        serde_json::to_string(css).expect("CSS is a string"),
+        serde_json::to_string(&css).expect("CSS is a string"),
         serde_json::to_string(scheme).expect("scheme is a string"),
     )
 }
@@ -1930,5 +1933,24 @@ mod tests {
         let runner = runner();
         let value=runner.json("(()=>{const draw=ccw=>{const x=__compat.realm.createCanvas(8,8).getContext('2d');x.arc(4,4,3,0,Math.PI/2,ccw);x.lineTo(4,4);x.fill();return JSON.stringify(x.getImageData(0,0,8,8).data)};const x=__compat.realm.createCanvas(1,1).getContext('2d');x.rect(0,0,1,1);let refused=false;try{x.fill('invalid-rule')}catch{refused=true}return [draw(1)===draw(true),draw(1)!==draw(false),refused,x.getImageData(0,0,1,1).data]})()").unwrap();
         assert_eq!(value, json!([true, true, true, [0, 0, 0, 0]]));
+    }
+}
+
+#[cfg(test)]
+mod page_style_tests {
+    /// Extension panels' plain controls take the kit's look in every
+    /// appearance, after the theme's variables they are written in.
+    #[test]
+    fn every_page_bundle_carries_the_base_stylesheet_after_the_theme() {
+        for dark in [false, true] {
+            for contrast in [false, true] {
+                for solid in [false, true] {
+                    let page = super::page_bundle(dark, contrast, solid);
+                    let base = page.find("select.sel").expect("base stylesheet");
+                    let theme = page.find("--bg-field").expect("theme variables");
+                    assert!(theme < base, "the theme comes first");
+                }
+            }
+        }
     }
 }

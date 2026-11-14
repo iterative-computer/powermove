@@ -1,0 +1,119 @@
+/* An extension panel's plain controls in the kit's look, without the extension
+   changing: what v1's app stylesheet gave them. Every rule but the kit's own
+   pop-up has no specificity (:where), so whatever an extension styles itself
+   still wins; these only fill what it left to the browser. */
+
+:where([data-pm-contribution]) {
+  font-family: var(--f-ui);
+  font-size: var(--fs-md);
+  color: var(--tx);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Text buttons: one height, the label on one line (an ellipsis before a
+   wrap). A button holding more than text (a card with its picture, a game's
+   stage) keeps the layout its extension gave it. */
+:where([data-pm-contribution])
+  :where(button:not(:has(*)), input[type="button"], input[type="submit"], input[type="reset"]) {
+  box-sizing: border-box;
+  height: var(--ctl-h);
+  padding: 0 8px;
+  flex: none;
+  max-width: 100%;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font: inherit;
+  color: var(--tx);
+  background: var(--bg-field);
+  border: 0;
+  border-radius: var(--r-base);
+  cursor: default;
+}
+:where([data-pm-contribution]) :where(button:not(:has(*)):not(:disabled):hover) {
+  background: var(--bg-hover);
+}
+:where([data-pm-contribution]) :where(button:not(:has(*)):disabled) {
+  color: var(--disabled);
+}
+/* A row of text buttons wraps between them, never inside one. */
+:where([data-pm-contribution]) :where(:has(> button:not(:has(*)))) {
+  flex-wrap: wrap;
+  row-gap: 6px;
+}
+
+/* Fields: the kit's well. */
+:where([data-pm-contribution])
+  :where(
+    input:not([type="checkbox"], [type="radio"], [type="range"], [type="color"], [type="file"], [type="button"], [type="submit"], [type="reset"]),
+    select
+  ) {
+  box-sizing: border-box;
+  height: var(--ctl-h);
+  min-width: 0;
+  max-width: 100%;
+  padding: 0 8px;
+  font: inherit;
+  color: var(--tx);
+  background-color: var(--bg-field);
+  border: 0;
+  border-radius: var(--r-base);
+}
+:where([data-pm-contribution]) :where(textarea) {
+  box-sizing: border-box;
+  max-width: 100%;
+  padding: 6px 8px;
+  font: inherit;
+  color: var(--tx);
+  background: var(--bg-field);
+  border: 0;
+  border-radius: var(--r-base);
+}
+:where([data-pm-contribution]) :where(input, textarea)::placeholder {
+  color: var(--tx-3);
+}
+/* A pop-up shows its value and the pop-up chevrons at the trailing end; the
+   kit's SelectField (`select.sel`) asked v1's stylesheet for that and set the
+   code face meant for numbers. */
+:where([data-pm-contribution]) :where(select),
+[data-pm-contribution] select.sel {
+  appearance: none;
+  width: 100%;
+  padding-right: 22px;
+  font-family: var(--f-ui);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='12' viewBox='0 0 8 12' fill='none' stroke='%23999' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M1 4.5 4 1.5 7 4.5M1 7.5 4 10.5 7 7.5'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 7px center;
+  background-size: 8px 12px;
+}
+
+/* Links read as links: the accent, a light underline that strengthens on
+   hover (an extension's own colour still wins). */
+:where([data-pm-contribution]) :where(a[href]) {
+  color: var(--accent);
+  text-decoration-line: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+  text-decoration-color: color-mix(in srgb, currentColor 35%, transparent);
+  cursor: pointer;
+}
+:where([data-pm-contribution]) :where(a[href]:hover) {
+  text-decoration-color: currentColor;
+}
+
+/* A label and its field on a row: the label takes the label column, as
+   Properties' rows do, so every field of the panel starts on one x. */
+:where([data-pm-contribution])
+  :where(:has(> :is(span, label):first-child + :is(div, input, select, textarea))) {
+  column-gap: 8px;
+}
+:where([data-pm-contribution])
+  :where(:has(> :is(span, label):first-child + :is(div, input, select, textarea)))
+  > :where(:is(span, label):first-child) {
+  flex: none;
+  width: min(36%, 120px);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--tx-2);
+}
