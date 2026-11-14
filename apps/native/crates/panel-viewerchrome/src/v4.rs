@@ -32,7 +32,10 @@ impl Session {
     ) -> Result<Plan, Error> {
         let mut normalized = request.clone();
         match request.get("element").and_then(Value::as_str) {
-            Some("viewer.quality") | Some("viewer.studio.menu") | Some("viewer.studio.views") => {}
+            Some("viewer.quality")
+            | Some("viewer.studio.menu")
+            | Some("viewer.studio.views")
+            | Some("viewer.studio.tier") => {}
             Some(s) if s.starts_with("viewer.studio.light") => {}
             Some("viewer.zoom") => {
                 let (element, argument) = match request.get("argument") {
@@ -119,7 +122,9 @@ impl Session {
             if studio {
                 let tier = match model.ui.viewer.get("studioTier").and_then(Value::as_str) {
                     Some("refine") => "refine",
-                    _ => "live",
+                    Some("live") => "live",
+                    // Unset: the Fast raster (the engine's default too).
+                    _ => "fast",
                 };
                 let read = |k: &str, d: &'static str| {
                     model

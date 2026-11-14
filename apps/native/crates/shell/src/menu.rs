@@ -115,7 +115,8 @@ pub fn view3d() -> Vec<Item> {
         ("Two Views", "views", "2"),
         ("Four Views", "views", "4"),
         ("", "", ""),
-        ("Fast Preview", "tier", "live"),
+        ("Fast Preview", "tier", "fast"),
+        ("Rendered Preview", "tier", "live"),
         ("Quality Preview", "tier", "refine"),
     ]
     .iter()
@@ -483,13 +484,6 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
                 Item::command("Panel Library", "panelLibrary", ""),
                 Item::command("Maximize Panel", "maximizePanel", "`"),
                 Item::command("Restore Panel", "restorePanel", ""),
-                sep(),
-                Item::command("New Tab", "newTab", ""),
-                m("nextTab"),
-                m("previousTab"),
-                Item::command("Move Tab to New Window", "moveTabToNewWindow", ""),
-                Item::role("Merge All Windows", "mergeAllWindows:", ""),
-                Item::role("Show All Tabs", "toggleTabOverview:", ""),
                 sep(),
                 Item::command("Store", "store", ""),
                 Item::command("Background Tasks", "backgroundTasks", "cmd+9"),

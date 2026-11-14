@@ -464,6 +464,67 @@ fn fail_task(task: &ProtocolObject<dyn WKURLSchemeTask>) {
     }
 }
 
+/// The shared page is never a drag destination. It spans the whole window
+/// under the native panels, and AppKit gives a drag to the registered view
+/// under the pointer whatever `hitTest:` answers, so a WKWebView registered
+/// for files took every file dragged over the window, panels it does not
+/// show included. WebKit registers when it is made, when it joins a window
+/// and as its page loads, with no frame drawn after it on a window at rest:
+/// the page's view ([`PageView`]) ignores the registration, and anything
+/// registered before stays cleared here. As in v1.2.0 (an extension panel's
+/// drop reached the window's own), files go to the native drop targets, and
+/// over an extension panel to the window's drop, which imports them.
+fn refuse_drags(web: &WKWebView) {
+    if web.registeredDraggedTypes().count() > 0 {
+        web.unregisterDraggedTypes();
+    }
+}
+
+// The shared page's web view. It is never a drag destination (above), and
+// it spans the whole window under the native
+// panels and, once a person has clicked an extension panel, holds the
+// keyboard: AppKit then sent it every plain mouse move in the window, so the
+// timeline, the viewer and every native panel lost their hover (no whiter rim,
+// no trim grip, no row switches) and WebKit's cursor reset to an arrow over
+// them, until the next click elsewhere. A move or cursor update over the
+// window's own content (outside the extension panels, where the native view
+// answers the hit test) goes to that view instead; over a panel it is
+// WebKit's.
+define_class!(
+    #[unsafe(super(WKWebView))]
+    #[thread_kind=MainThreadOnly]
+    #[name="PMCompatWebView"]
+    struct PageView;
+    impl PageView {
+        /// WebKit registers for files as it is made, joins a window and
+        /// loads: ignored, so the page never takes a Finder drop.
+        #[unsafe(method(registerForDraggedTypes:))]
+        fn register_for_dragged_types(&self, _types: &NSArray<NSPasteboardType>) {}
+        #[unsafe(method(mouseMoved:))]
+        fn mouse_moved(&self, event: &NSEvent) {
+            match self.native_under(event) {
+                Some(view) => unsafe { msg_send![&*view, mouseMoved: event] },
+                None => unsafe { msg_send![super(self), mouseMoved: event] },
+            }
+        }
+        #[unsafe(method(cursorUpdate:))]
+        fn cursor_update(&self, event: &NSEvent) {
+            if self.native_under(event).is_none() {
+                unsafe { msg_send![super(self), cursorUpdate: event] }
+            }
+        }
+    }
+);
+impl PageView {
+    /// The native view under `event`'s pointer, when it is not this page
+    /// (the pointer is outside every extension panel).
+    fn native_under(&self, event: &NSEvent) -> Option<Retained<NSView>> {
+        let window = self.window()?;
+        let hit = window.contentView()?.hitTest(event.locationInWindow())?;
+        (!hit.isDescendantOf(self)).then_some(hit)
+    }
+}
+
 // A shared full-window page with an exact mask and identical native hit geometry.
 define_class!(
     #[unsafe(super(NSView))]
@@ -478,9 +539,31 @@ define_class!(
             let y=self.bounds().size.height-local.y;
             if self.ivars().borrow().iter().any(|r|r.contains(local.x,y)){unsafe{msg_send![super(self),hitTest:point]}}else{None}
         }
+        /// S5: a key the page leaves (WebKit hands it on up the responder
+        /// chain: no field took it, no page script stopped it) goes back to
+        /// the editor, as Electron's window listener runs it: the editor's
+        /// view takes the keyboard and the key is delivered again, so Space
+        /// plays and the timeline's keys run after a click in a DOM panel.
+        #[unsafe(method(keyDown:))]
+        fn key_down(&self,event:&NSEvent){
+            let Some(editor)=self.editor_view() else{return};
+            let Some(window)=self.window() else{return};
+            if window.makeFirstResponder(Some(&editor)){
+                NSApplication::sharedApplication(MainThreadMarker::from(self)).postEvent_atStart(event,true);
+            }
+        }
     }
 );
 impl SlotView {
+    /// The editor's GPUI view beside this slot (the content's key handler).
+    fn editor_view(&self) -> Option<Retained<NSView>> {
+        let parent = unsafe { self.superview() }?;
+        parent
+            .subviews()
+            .to_vec()
+            .into_iter()
+            .find(|v| v.class().name().to_bytes() == b"GPUIView")
+    }
     fn new(mtm: MainThreadMarker, frame: NSRect) -> Retained<Self> {
         unsafe {
             msg_send![super(Self::alloc(mtm).set_ivars(RefCell::new(vec![]))),initWithFrame:frame]
@@ -520,6 +603,12 @@ pub struct MacDomHost {
     slot: Retained<SlotView>,
     activity: Option<Activity>,
     job_count: u32,
+    /// Where the page's own content may show, when narrower than the
+    /// regions (`set_content_regions`); `None`: everywhere they show.
+    content: Option<Vec<Rect>>,
+    /// The panels' colour under the page (sRGB, 0–1), shown where the
+    /// regions show and the content does not (`set_fill`).
+    fill: Option<[f64; 4]>,
 }
 struct Activity {
     policy: WKInactiveSchedulingPolicy,
@@ -613,8 +702,10 @@ impl MacDomHost {
                 .setJavaScriptCanOpenWindowsAutomatically(!trust.is_store());
         }
         let frame = NSRect::new(NSPoint::ZERO, NSSize::new(1., 1.));
-        let web = unsafe {
-            WKWebView::initWithFrame_configuration(WKWebView::alloc(mtm), frame, &config)
+        let web: Retained<WKWebView> = unsafe {
+            let page: Retained<PageView> =
+                msg_send![PageView::alloc(mtm), initWithFrame: frame, configuration: &*config];
+            Retained::into_super(page)
         };
         unsafe {
             web.setNavigationDelegate(Some(ProtocolObject::from_ref(&*bridge)));
@@ -626,6 +717,7 @@ impl MacDomHost {
                 &NSString::from_str("drawsBackground"),
             );
         }
+        refuse_drags(&web);
         let slot = SlotView::new(mtm, frame);
         slot.addSubview(&web);
         slot.setAccessibilityElement(true);
@@ -639,6 +731,8 @@ impl MacDomHost {
             slot,
             activity: None,
             job_count: 0,
+            content: None,
+            fill: None,
         };
         host.load();
         Ok(host)
@@ -853,6 +947,7 @@ impl MacDomHost {
             NSWindowOrderingMode::Below,
             Some(gpui),
         );
+        refuse_drags(&self.web);
     }
     /// Shell rectangles the shared document shows through this frame.
     pub fn set_regions(&mut self, regions: Vec<Rect>) -> Result<()> {
@@ -865,6 +960,29 @@ impl MacDomHost {
             self.shared.geometry_dirty.set(true);
         }
         Ok(())
+    }
+    /// Where the page's content may show within the regions: a panel whose
+    /// content the page has not moved yet shows its fill there instead of
+    /// another panel's content. `None` shows it wherever the regions do.
+    pub fn set_content_regions(&mut self, content: Option<Vec<Rect>>) -> Result<()> {
+        if let Some(c) = &content
+            && (c.len() > 256 || c.iter().any(|r| !r.valid()))
+        {
+            return Err(Error::InvalidGeometry);
+        }
+        if self.content != content {
+            self.content = content;
+            self.shared.geometry_dirty.set(true);
+        }
+        Ok(())
+    }
+    /// The colour shown under the page within its regions (the panels'
+    /// ground), sRGB red, green, blue and alpha in 0–1.
+    pub fn set_fill(&mut self, fill: Option<[f64; 4]>) {
+        if self.fill != fill {
+            self.fill = fill;
+            self.shared.geometry_dirty.set(true);
+        }
     }
     /// Called in P-LAYER's present callback, in the same CATransaction as GPUI.
     /// No JS call or wait occurs here.
@@ -882,6 +1000,43 @@ impl MacDomHost {
             NSSize::new(viewport.w, viewport.h),
         ));
         self.slot.clip(self.shared.panels.borrow().visible());
+        // The fill shows within the regions; the page's content only where
+        // its own mask lets it.
+        self.slot.setWantsLayer(true);
+        if let Some(layer) = self.slot.layer() {
+            let color = self.fill.map(|[r, g, b, a]| {
+                NSColor::colorWithSRGBRed_green_blue_alpha(r, g, b, a).CGColor()
+            });
+            layer.setBackgroundColor(color.as_deref());
+        }
+        self.web.setWantsLayer(true);
+        if let Some(layer) = self.web.layer() {
+            match &self.content {
+                Some(rects) => {
+                    let path = CGMutablePath::new();
+                    // WebKit's view is flipped (its layer's geometry with it):
+                    // the mask's rectangles are in window points from the top.
+                    let h = self.web.bounds().size.height;
+                    let flipped = self.web.isFlipped();
+                    for r in rects {
+                        let y = if flipped { r.y } else { h - r.y - r.h };
+                        unsafe {
+                            CGMutablePath::add_rect(
+                                Some(&path),
+                                std::ptr::null(),
+                                NSRect::new(NSPoint::new(r.x, y), NSSize::new(r.w, r.h)),
+                            );
+                        }
+                    }
+                    let mask = objc2_quartz_core::CAShapeLayer::new();
+                    mask.setFrame(self.web.bounds());
+                    mask.setPath(Some(&path));
+                    unsafe { layer.setMask(Some(&mask)) }
+                }
+                None => unsafe { layer.setMask(None) },
+            }
+        }
+        refuse_drags(&self.web);
         self.shared.geometry_dirty.set(false);
         Ok(())
     }

@@ -15,25 +15,53 @@ const TITLE: &str = "Import Image Sequence";
 const INTRO: &str = "Turn your numbered images into one clip.";
 const SKIPPED: &str = "You can still import. Missing frames show as Media Offline until they are rendered into the folder.";
 
+/// A frame file's run: its name before the frame number and its image
+/// extension (`shot.` and `png` for `shot.0001.png`).
+fn frame(path: &std::path::Path) -> Option<(String, String)> {
+    let name = path.file_name()?.to_str()?;
+    let (stem, extension) = name.rsplit_once('.')?;
+    let extension = extension.to_ascii_lowercase();
+    let prefix = stem.trim_end_matches(|c: char| c.is_ascii_digit());
+    (ACCEPT.contains(&extension.as_str()) && prefix.len() < stem.len())
+        .then(|| (prefix.to_owned(), extension))
+}
+
 /// `sequenceCandidate`: two or more files sharing a name and image extension,
 /// each ending in a frame number.
 pub fn candidate(paths: &[PathBuf]) -> bool {
-    fn frame(path: &std::path::Path) -> Option<(String, String)> {
-        let name = path.file_name()?.to_str()?;
-        let (stem, extension) = name.rsplit_once('.')?;
-        let extension = extension.to_ascii_lowercase();
-        let prefix = stem.trim_end_matches(|c: char| c.is_ascii_digit());
-        (ACCEPT.contains(&extension.as_str()) && prefix.len() < stem.len())
-            .then(|| (prefix.to_owned(), extension))
-    }
     let first = paths.first().and_then(|p| frame(p));
     paths.len() >= 2 && first.is_some() && paths.iter().all(|p| frame(p) == first)
+}
+
+/// What picked or dropped files offer as one image sequence, as After
+/// Effects' Import does: numbered files chosen together (v1.2.0's rule), or
+/// one numbered frame with others of its run beside it in its folder (the
+/// same name before the number and the same extension), which offers the
+/// whole run in name order.
+pub fn offered(paths: &[PathBuf]) -> Option<Vec<PathBuf>> {
+    match paths {
+        [one] => {
+            let run = frame(one)?;
+            let mut frames: Vec<PathBuf> = std::fs::read_dir(one.parent()?)
+                .ok()?
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|p| p.is_file() && frame(p).as_ref() == Some(&run))
+                .collect();
+            frames.sort();
+            (frames.len() >= 2).then_some(frames)
+        }
+        _ => candidate(paths).then(|| paths.to_vec()),
+    }
 }
 
 /// What the sheet shows for one selection, recomputed as the rate is typed.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Choice {
     pub selected: Vec<PathBuf>,
+    /// What Individual Images imports: what the person picked (one frame
+    /// whose run was offered, or the frames themselves).
+    pub individual: Vec<PathBuf>,
     /// The frames in order, or why they can't import.
     pub ordered: Result<Vec<PathBuf>, String>,
     gaps: Vec<(i64, i64)>,
@@ -56,14 +84,24 @@ impl Choice {
             .map(|s| s.gaps)
             .unwrap_or_default();
         Self {
+            individual: selected.clone(),
             selected,
             ordered,
             gaps,
             required,
         }
     }
+    /// Individual Images imports `picked` instead of every frame.
+    pub fn picked(mut self, picked: Vec<PathBuf>) -> Self {
+        self.individual = picked;
+        self
+    }
     pub fn count(&self) -> String {
-        format!("{} frames selected", self.selected.len())
+        if self.individual.len() < self.selected.len() {
+            format!("{} frames in this folder", self.selected.len())
+        } else {
+            format!("{} frames selected", self.selected.len())
+        }
     }
     pub fn files(&self) -> String {
         let name = |p: Option<&PathBuf>| {
@@ -138,11 +176,40 @@ impl Choice {
                 frames: self.ordered.clone().ok()?,
                 fps: Self::fps(fps)?,
             }),
-            "individual" if !self.required => Some(Answer::Individual(self.selected.clone())),
+            "individual" if !self.required => Some(Answer::Individual(self.individual.clone())),
             "reimport" => Some(Answer::Reimport),
             _ => None,
         }
     }
+}
+
+/// The import an answer asks for, its layers landing at `place` (a time and
+/// a place in the stack); `None` for Reimport….
+fn request(
+    answer: Answer,
+    place: Option<(f64, Option<usize>)>,
+    folder: Option<String>,
+) -> Option<ImportRequest> {
+    let (place_at, place_index) = (place.map(|(at, _)| at), place.and_then(|(_, i)| i));
+    let (paths, sequence) = match answer {
+        Answer::Sequence { frames, fps } => (
+            frames,
+            Some(SequenceImport {
+                fps,
+                progress: Default::default(),
+            }),
+        ),
+        Answer::Individual(paths) => (paths, None),
+        Answer::Reimport => return None,
+    };
+    Some(ImportRequest {
+        paths,
+        place_at,
+        place_index,
+        folder,
+        sequence,
+        ..Default::default()
+    })
 }
 
 /// `fps` as the field shows it: `30`, `29.97`.
@@ -165,8 +232,8 @@ impl Controller {
                 && !paths.is_empty()
             {
                 let _ = this.update(cx, |v, cx| {
-                    let at = Some(v.time());
-                    v.choose_sequence(paths, true, at, None, cx)
+                    let at = Some((v.time(), None));
+                    v.choose_sequence(paths, None, true, at, None, cx)
                 });
             }
         })
@@ -174,17 +241,22 @@ impl Controller {
     }
 
     /// The sheet for `paths`; its answer imports one clip, the separate
-    /// images, or chooses again. Layers land at `place_at`, as the import
-    /// that brought the files would have placed them.
+    /// images (`picked`, else the frames), or chooses again. Layers land at
+    /// `place` (a time and a place in the stack), as the import that
+    /// brought the files would have placed them.
     pub(crate) fn choose_sequence(
         &mut self,
         paths: Vec<PathBuf>,
+        picked: Option<Vec<PathBuf>>,
         required: bool,
-        place_at: Option<f64>,
+        place: Option<(f64, Option<usize>)>,
         folder: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        let choice = Choice::new(paths, required);
+        let mut choice = Choice::new(paths, required);
+        if let Some(picked) = picked {
+            choice = choice.picked(picked);
+        }
         let fps = rate_text(self.composition_fps());
         let (window, tokens) = {
             let host = self.host.borrow();
@@ -215,29 +287,12 @@ impl Controller {
                 open.close();
                 let answer = choice.answer(&action, &rate);
                 let _ = this.update(cx, |v, cx| match answer {
-                    Some(Answer::Sequence { frames, fps }) => {
-                        let progress = Default::default();
-                        v.import(
-                            ImportRequest {
-                                paths: frames,
-                                place_at,
-                                folder: folder.clone(),
-                                sequence: Some(SequenceImport { fps, progress }),
-                                ..Default::default()
-                            },
-                            cx,
-                        );
+                    Some(Answer::Reimport) => v.repick_sequence(required, place, folder, cx),
+                    Some(answer) => {
+                        if let Some(request) = request(answer, place, folder.clone()) {
+                            v.import(request, cx);
+                        }
                     }
-                    Some(Answer::Individual(paths)) => v.import(
-                        ImportRequest {
-                            paths,
-                            place_at,
-                            folder: folder.clone(),
-                            ..Default::default()
-                        },
-                        cx,
-                    ),
-                    Some(Answer::Reimport) => v.repick_sequence(required, place_at, folder, cx),
                     None => {}
                 });
                 return;
@@ -250,7 +305,7 @@ impl Controller {
     fn repick_sequence(
         &mut self,
         required: bool,
-        place_at: Option<f64>,
+        place: Option<(f64, Option<usize>)>,
         folder: Option<String>,
         cx: &mut Context<Self>,
     ) {
@@ -260,7 +315,7 @@ impl Controller {
                 && !paths.is_empty()
             {
                 let _ = this.update(cx, |v, cx| {
-                    v.choose_sequence(paths, required, place_at, folder, cx)
+                    v.choose_sequence(paths, None, required, place, folder, cx)
                 });
             }
         })
@@ -339,6 +394,93 @@ fn sheet(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One numbered frame picked or dropped offers its whole run, as After
+    /// Effects' Import does: the frames beside it with the same name before
+    /// the number and the same extension, in order; Individual Images
+    /// imports only the frame the person picked. A lone numbered file, or
+    /// one without a number, offers nothing.
+    #[test]
+    fn one_numbered_frame_offers_its_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = |name: &str| {
+            let p = dir.path().join(name);
+            std::fs::write(&p, b"png").unwrap();
+            p
+        };
+        for name in [
+            "shot.0003.png",
+            "shot.0001.png",
+            "shot.0002.PNG",
+            "shot.0001.exr",
+            "take.0001.png",
+        ] {
+            file(name);
+        }
+        let notes = file("notes.txt");
+        let picked = dir.path().join("shot.0002.PNG");
+        let run = offered(std::slice::from_ref(&picked)).unwrap();
+        let names: Vec<_> = run
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["shot.0001.png", "shot.0002.PNG", "shot.0003.png"]);
+        let choice = Choice::new(run.clone(), false).picked(vec![picked.clone()]);
+        assert_eq!(choice.count(), "3 frames in this folder");
+        assert_eq!(
+            choice.answer("individual", "30"),
+            Some(Answer::Individual(vec![picked]))
+        );
+        assert_eq!(
+            choice.answer("import", "30"),
+            Some(Answer::Sequence {
+                frames: run,
+                fps: 30.
+            })
+        );
+        assert_eq!(offered(&[notes]), None);
+        let lone = tempfile::tempdir().unwrap();
+        let only = lone.path().join("render.0001.png");
+        std::fs::write(&only, b"png").unwrap();
+        assert_eq!(offered(&[only]), None);
+        // Several picked together: v1.2.0's rule, those frames only.
+        let two = [
+            dir.path().join("shot.0001.png"),
+            dir.path().join("shot.0003.png"),
+        ];
+        assert_eq!(offered(&two), Some(two.to_vec()));
+    }
+
+    /// The sheet's import lands where the drop that brought the frames
+    /// would have placed them: its time and its place in the stack.
+    #[test]
+    fn a_sequence_lands_at_its_drops_time_and_row() {
+        let frames = vec![
+            PathBuf::from("/r/shot.0001.png"),
+            PathBuf::from("/r/shot.0002.png"),
+        ];
+        let sequence = request(
+            Answer::Sequence {
+                frames: frames.clone(),
+                fps: 24.,
+            },
+            Some((5., Some(1))),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            (sequence.paths, sequence.place_at, sequence.place_index),
+            (frames.clone(), Some(5.), Some(1))
+        );
+        assert!(sequence.sequence.is_some());
+        let individual = request(Answer::Individual(frames), Some((5., Some(1))), None).unwrap();
+        assert_eq!(
+            (individual.place_at, individual.place_index),
+            (Some(5.), Some(1))
+        );
+        assert!(individual.sequence.is_none());
+        assert!(request(Answer::Reimport, None, None).is_none());
+    }
 
     fn paths(names: &[&str]) -> Vec<PathBuf> {
         names

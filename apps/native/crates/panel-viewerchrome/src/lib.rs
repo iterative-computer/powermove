@@ -796,7 +796,7 @@ fn studio_action(group: &str, value: &str) -> Result<Action, Error> {
             .ok_or(Error::Invalid("studio setting"))
     }
     Ok(match group {
-        "tier" => Action::StudioUi("studioTier", one(value, &["live", "refine"])?),
+        "tier" => Action::StudioUi("studioTier", one(value, &["fast", "live", "refine"])?),
         "tool" => Action::StudioUi(
             "studioTool",
             one(

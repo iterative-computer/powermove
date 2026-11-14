@@ -80,6 +80,26 @@ fn clicks_land_on_their_frames() {
     }
 }
 
+/// A layer that starts before its composition sounds there from the
+/// matching source time, as Electron's `audioLayers`/`plan` play it since
+/// 16087057b (Fable 5.5's music bed at -1.933 s played 1.933 s late when
+/// the start was clamped to 0).
+#[test]
+fn a_negative_start_plays_from_the_matching_source_time() {
+    let dir = temp_dir("negative-start");
+    let file = dir.join("clicks.wav");
+    let len = SR as usize * 4;
+    // Clicks at source 1.5 s and 2.5 s.
+    let at = [SR as usize * 3 / 2, SR as usize * 5 / 2];
+    write_wav(&file, SR, &[clicks(len, &at, 0.9), clicks(len, &at, 0.9)]);
+    let doc = project(30.0, 3.0, &[audio("A", "click", -1.0, 4.0, "", "")], &[], "");
+    let rig = Rig::new(&[("click", &file)]);
+    let mut m = rig.mixer(doc, "C", MixFormat::stereo(SR));
+    let out = rig.render(&mut m, 0, SR as i64 * 3, 4096);
+    // Film time = source time - 1 s: 0.5 s and 1.5 s.
+    assert_eq!(peaks(&out[0], 0.3), vec![SR as usize / 2, SR as usize * 3 / 2]);
+}
+
 #[test]
 fn exported_sample_counts_are_exact() {
     // A range of whole frames at 29.97 covers round(duration × sr) samples.

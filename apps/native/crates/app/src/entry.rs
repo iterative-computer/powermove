@@ -116,6 +116,18 @@ pub fn receive(urls: Vec<String>, cx: &mut App) {
             }
             continue;
         }
+        // `review/dragtypes/<file>`: every view of every window that is
+        // registered for drags (AppKit's candidates for a drop), written
+        // to `file`: its class, frame in the window, whether hidden, types.
+        #[cfg(debug_assertions)]
+        if let Some(file) = raw.strip_prefix("powermove://review/dragtypes/") {
+            let file = url::form_urlencoded::parse(format!("x={file}").as_bytes())
+                .next()
+                .map(|(_, v)| v.into_owned())
+                .unwrap_or_default();
+            let _ = std::fs::write(file, review_drag_types());
+            continue;
+        }
         #[cfg(debug_assertions)]
         if let Some(rest) = raw.strip_prefix("powermove://review/files/") {
             review_files(rest, cx);
@@ -127,6 +139,45 @@ pub fn receive(urls: Vec<String>, cx: &mut App) {
         }
     }
     drain(cx);
+}
+
+#[cfg(debug_assertions)]
+fn review_drag_types() -> String {
+    use objc2_app_kit::{NSApplication, NSView};
+    fn walk(view: &NSView, depth: usize, out: &mut String) {
+        let types = view.registeredDraggedTypes();
+        if types.count() > 0 {
+            let frame = view.convertRect_toView(view.bounds(), None);
+            let names: Vec<String> = types.iter().map(|t| t.to_string()).collect();
+            out.push_str(&format!(
+                "{:depth$}{} frame=({:.0},{:.0} {:.0}x{:.0}) hidden={} types={}\n",
+                "",
+                view.class().name().to_string_lossy(),
+                frame.origin.x,
+                frame.origin.y,
+                frame.size.width,
+                frame.size.height,
+                view.isHiddenOrHasHiddenAncestor(),
+                names.join(","),
+            ));
+        }
+        for child in view.subviews().iter() {
+            walk(&child, depth + 1, out);
+        }
+    }
+    let mtm = objc2::MainThreadMarker::new().expect("main thread");
+    let mut out = String::new();
+    for window in NSApplication::sharedApplication(mtm).windows().iter() {
+        out.push_str(&format!(
+            "window {:?} visible={}\n",
+            window.title().to_string(),
+            window.isVisible()
+        ));
+        if let Some(root) = window.contentView().and_then(|v| unsafe { v.superview() }) {
+            walk(&root, 1, &mut out);
+        }
+    }
+    out
 }
 
 /// `<project name>/<context-menu label>`, percent-encoded, on Home.
@@ -183,8 +234,8 @@ fn review_files(rest: &str, cx: &mut App) {
         editor.update(cx, |v, cx| match route.as_str() {
             "drop" => v.import_dropped(paths, cx),
             "sequence" => {
-                let at = Some(v.time());
-                v.choose_sequence(paths, true, at, None, cx)
+                let at = Some((v.time(), None));
+                v.choose_sequence(paths, None, true, at, None, cx)
             }
             // What Paste reads from the pasteboard, from a file: reviews
             // never overwrite the person's clipboard.
@@ -263,10 +314,9 @@ pub fn open_in_new_window(pending: Pending, cx: &mut App) {
     cx.defer(pm_shell::open_editor);
 }
 
-/// A project opened in a window that shows one (from Home, File ▸ Open, a
-/// dropped file, an agent): a window of its own joined to that window's
-/// tabs, as v1 added a tab. The project the window shows stays open and
-/// untouched; nothing is saved or closed without its own question.
+/// Was: a project opened as a tab of `leader`'s window. One project per
+/// window now (an open replaces the project shown, `Controller::replace_project`);
+/// kept for callers that still name a tab, it opens a window of its own.
 pub fn open_in_new_tab(pending: Pending, leader: u64, cx: &mut App) {
     cx.default_global::<Entries>()
         .next_window
@@ -325,6 +375,13 @@ impl EntryHook for Hook<'_> {
             .filter(|(e, _)| empty(e, cx))
             .min_by_key(|(_, w)| Some(*w) != active)
             .map(|(e, _)| e.clone());
+        // One project per window: with no empty window the front one's
+        // project gives way (asking about unsaved work first).
+        let target = target.or_else(|| {
+            live.iter()
+                .find(|(_, w)| Some(*w) == active)
+                .map(|(e, _)| e.clone())
+        });
         match target {
             Some(editor) => {
                 let path = path.to_path_buf();

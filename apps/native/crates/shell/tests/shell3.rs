@@ -21,9 +21,16 @@ fn drop_previews_cover_only_the_drop_zone() {
     let l = Layout::preset("design");
     let t = tokens();
     let g = l.geometry(BOUNDS, &t);
-    // Edges: the outer quarter of the docking area, never a whole dock.
+    // Edges (where no dock stands): the outer quarter of the docking area,
+    // never a whole dock.
+    let full = l;
+    let mut l = full.clone();
+    for id in ["assets", "layer-effects", "inspector", "fxbrowser", "timeline"] {
+        l.close_panel(id).unwrap();
+    }
+    let g = l.geometry(BOUNDS, &t);
     let left = l
-        .drop_target(&g, BOUNDS, BOUNDS.x + 2., BOUNDS.y + 300., &t)
+        .drop_target(&g, BOUNDS, BOUNDS.x - 2., BOUNDS.y + 300., &t)
         .unwrap();
     assert_eq!(left.target, DropTarget::Edge(Edge::Left));
     assert_eq!(
@@ -34,13 +41,13 @@ fn drop_previews_cover_only_the_drop_zone() {
         }
     );
     let right = l
-        .drop_target(&g, BOUNDS, BOUNDS.x + BOUNDS.w - 2., BOUNDS.y + 300., &t)
+        .drop_target(&g, BOUNDS, BOUNDS.x + BOUNDS.w + 2., BOUNDS.y + 300., &t)
         .unwrap();
     assert_eq!(right.target, DropTarget::Edge(Edge::Right));
     assert_eq!(right.rect.x + right.rect.w, BOUNDS.x + BOUNDS.w);
     assert_eq!(right.rect.w, BOUNDS.w * EDGE_ZONE);
     let bottom = l
-        .drop_target(&g, BOUNDS, 600., BOUNDS.y + BOUNDS.h - 2., &t)
+        .drop_target(&g, BOUNDS, 600., BOUNDS.y + BOUNDS.h + 2., &t)
         .unwrap();
     assert_eq!(bottom.target, DropTarget::Edge(Edge::Bottom));
     assert_eq!(bottom.rect.h, BOUNDS.h * EDGE_ZONE);
@@ -50,6 +57,8 @@ fn drop_previews_cover_only_the_drop_zone() {
         assert!(p.rect.w * p.rect.h < BOUNDS.w * BOUNDS.h * 0.3);
     }
     // Viewer offers only above/below; no tab target.
+    let l = full;
+    let g = l.geometry(BOUNDS, &t);
     let viewer = g
         .panels
         .iter()
@@ -73,12 +82,12 @@ fn drop_previews_cover_only_the_drop_zone() {
         .unwrap();
     assert!(matches!(half.target, DropTarget::Split { .. }));
     assert!(half.rect.h < viewer.h / 2. + 0.5);
-    // Near its side, beside it: half its width.
+    // Near its side: never a new column (the original app), below it here.
     let side = l
         .drop_target(&g, BOUNDS, viewer.x + 40., viewer.y + viewer.h * 0.6, &t)
         .unwrap();
-    assert!(matches!(side.target, DropTarget::Beside { after: false, .. }));
-    assert!(side.rect.w < viewer.w / 2. + 0.5);
+    assert!(matches!(side.target, DropTarget::Split { .. }));
+    assert!(side.rect.h < viewer.h / 2. + 0.5);
 }
 
 #[test]
@@ -102,23 +111,34 @@ fn tab_menu_checks_the_current_dock_and_says_workspace() {
         .unwrap();
     window
         .update(&mut cx, |v, _, cx| {
+            // The original app's panel menu, then this app's Dock moves in
+            // one submenu whose current edge carries the checkmark.
+            let dock_checked = |entries: &[pm_shell::MenuEntry]| -> Vec<String> {
+                entries
+                    .iter()
+                    .filter(|e| e.label == "Dock")
+                    .flat_map(|e| e.children.iter())
+                    .filter(|e| e.checked)
+                    .map(|e| e.label.clone())
+                    .collect()
+            };
             let entries = v.tab_menu_entries("inspector", cx);
-            let checked: Vec<_> = entries.iter().filter(|e| e.checked).collect();
-            assert_eq!(checked.len(), 1);
-            assert_eq!(checked[0].label, "Dock Right");
-            assert!(entries.iter().any(|e| e.label == "Save Workspace…"));
-            assert!(entries.iter().any(|e| e.label == "Reset Workspace"));
-            assert!(entries.iter().all(|e| !e.label.contains("Layout")));
+            let labels: Vec<&str> = entries.iter().map(|e| e.label.as_str()).collect();
+            assert_eq!(labels[0], "Maximize Panel");
+            assert!(labels.contains(&"Add Panel as Tab"));
+            assert!(labels.contains(&"Close Panel"));
+            assert_eq!(dock_checked(&entries), ["Right Edge"]);
+            assert!(entries.iter().all(|e| !e.label.contains("Workspace")));
             // Moving the panel moves the checkmark.
             assert!(v.run_shell_command("panel:dock:inspector:left", cx));
             let entries = v.tab_menu_entries("inspector", cx);
-            let checked: Vec<_> = entries.iter().filter(|e| e.checked).collect();
-            assert_eq!(checked[0].label, "Dock Left");
-            // The viewer cannot be closed.
+            assert_eq!(dock_checked(&entries), ["Left Edge"]);
+            // The viewer cannot be closed and takes no tabs.
             let viewer = v.tab_menu_entries("viewer", cx);
             assert!(viewer.iter().all(|e| !e.label.starts_with("Close")));
+            assert!(viewer.iter().all(|e| e.label != "Add Panel as Tab"));
             // It sits in the centre column, which is not a dock choice.
-            assert_eq!(viewer.iter().filter(|e| e.checked).count(), 0);
+            assert!(dock_checked(&viewer).is_empty());
         })
         .unwrap();
 }

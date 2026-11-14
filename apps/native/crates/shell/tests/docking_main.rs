@@ -217,6 +217,7 @@ fn overflow_keeps_active_and_never_loses_a_tab() {
         tabs: (0..12).map(|i| format!("tab-{i}")).collect(),
         active: 10,
         size: None,
+        collapsed: false,
     };
     let t = tokens();
     let widths: Vec<f32> = (0..12).map(|i| 40. + 6. * i as f32).collect();
