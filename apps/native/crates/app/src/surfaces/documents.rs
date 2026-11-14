@@ -414,7 +414,7 @@ pub fn unidentified_leftovers(name: &str, file: &str, count: usize) -> Alert<Act
             "The file “{file}” is incomplete or damaged. A save of it that did not finish left {files} next to it that Powermove couldn’t identify, so nothing was put in its place. {they_are} hidden: in Finder, open the project’s folder and press Shift-Command-Period to see {them}. Nothing was moved or removed."
         ),
         vec![
-            Button::new("OK", Action::Ok).default(),
+            Button::new("OK", Action::Ok).default().cancel(),
             Button::new("Show in Finder", Action::ShowInFinder),
         ],
     )
@@ -475,7 +475,7 @@ pub fn open_error(name: &str, failure: OpenFailure, path_exists: bool) -> Alert<
         ),
     };
     // S004 makes OK the default even though Show in Finder is written first.
-    let mut buttons = vec![Button::new("OK", Action::Ok).default()];
+    let mut buttons = vec![Button::new("OK", Action::Ok).default().cancel()];
     if path_exists {
         buttons.push(Button::new("Show in Finder", Action::ShowInFinder));
     }
