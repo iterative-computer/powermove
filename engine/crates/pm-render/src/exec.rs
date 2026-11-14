@@ -388,6 +388,17 @@ impl Exec<'_> {
             if matches!(draw.content, Content::Composite(_)) {
                 continue;
             }
+            // A frame drawn in slices gives way here: the layers after
+            // this one are left out of a frame that is abandoned.
+            if !crate::slices::point(
+                self.effects,
+                self.device,
+                self.queue,
+                encoder,
+                crate::slices::Class::Draw,
+            ) {
+                break;
+            }
             let mut r = Resolved {
                 matrix: draw.matrix,
                 view: None,

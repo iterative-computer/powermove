@@ -65,6 +65,8 @@ fn damaged(message: &str) -> io::Error {
 }
 
 const MAGIC: &[u8; 8] = b"PMFRAME1";
+/// The record of the key schema a folder's entries are of.
+const SCHEMA: &str = ".pm-render-schema";
 const HEADER: usize = 48;
 const MAX_ENTRY_BYTES: u64 = 1024 * 1024 * 1024;
 impl RenderCache {
@@ -227,6 +229,46 @@ impl RenderCache {
         } else {
             BarState::Missing
         })
+    }
+    /// Retires the entries of every other key schema. `schema` names how
+    /// the caller keys its frames (the key's layout, the stored format, the
+    /// renderer): an entry written under another one can never be
+    /// addressed again, yet it counts toward the quota, and a kept one is
+    /// skipped by every eviction and by Clear for good. The folder records
+    /// the schema its entries are of; when that is another one (or the
+    /// folder predates the record) every entry and keep mark in it is
+    /// removed and the record rewritten. Call before the first write under
+    /// `schema`. Returns the entries and bytes freed.
+    pub fn retire_other_schemas(&self, schema: &str) -> io::Result<(u64, u64)> {
+        no_links(&self.root)?;
+        let record = self.root.join(SCHEMA);
+        match fs::read(&record) {
+            Ok(found) if found == schema.as_bytes() => return Ok((0, 0)),
+            Ok(_) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+        let (mut entries, mut bytes) = (0u64, 0u64);
+        for entry in fs::read_dir(&self.root)? {
+            let path = entry?.path();
+            let frame = path.extension().is_some_and(|s| s == "frame");
+            if !frame && path.extension().is_none_or(|s| s != "keep") {
+                continue;
+            }
+            regular(&path)?;
+            let len = fs::metadata(&path)?.len();
+            fs::remove_file(&path)?;
+            if frame {
+                entries += 1;
+                bytes = bytes.saturating_add(len);
+            }
+        }
+        // Recorded once they are gone: interrupted, the next open goes on.
+        let partial = self.root.join(format!(".schema-{}", std::process::id()));
+        fs::write(&partial, schema)?;
+        fs::rename(&partial, &record)?;
+        File::open(&self.root)?.sync_all()?;
+        Ok((entries, bytes))
     }
     /// Removes every frame not marked Keep Rendered; returns the bytes freed.
     pub fn clear_unkept(&self) -> io::Result<u64> {

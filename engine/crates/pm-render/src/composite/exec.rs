@@ -304,6 +304,11 @@ impl Exec<'_> {
                 pending.extend(r);
                 continue;
             };
+            // A frame drawn in slices that is giving way records no further
+            // node: each would run its whole effect chain for nothing.
+            if self.effects.slices.as_ref().is_some_and(|s| s.stopped()) {
+                break;
+            }
             // Everything beneath the node goes into the accumulator first.
             self.draw_pass(encoder, plan, &pending, pass_region, &acc, !cleared);
             cleared = true;

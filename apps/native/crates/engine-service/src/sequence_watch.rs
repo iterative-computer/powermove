@@ -18,56 +18,54 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
 
 use pm_media::image::sequence::Manifest;
+use pm_text::file_version::FileVersion;
 
 /// How often tracked sequences are looked at again without being asked
 /// (files on network volumes send no change events).
 const RECONCILE: Duration = Duration::from_secs(2);
 
-/// One numbered file's identity: length, modification and change times
-/// (ns), inode, device. `None`: no file.
-pub type MemberStamp = Option<(u64, i128, i128, u64, u64)>;
+/// One numbered file's identity: its version (`pm_text::file_version`,
+/// the identity media files and rendered frames are named by: length,
+/// modification and change times, inode, device). `None`: no file.
+pub type MemberStamp = Option<FileVersion>;
 
 /// What the watch looks at a file with (a test stands in for a slow volume).
 pub type Stat = Arc<dyn Fn(&Path) -> MemberStamp + Send + Sync>;
 
 /// A file's [`MemberStamp`] from the file system.
 pub fn member_stamp(path: &Path) -> MemberStamp {
-    use std::os::unix::fs::MetadataExt;
-    let meta = std::fs::metadata(path).ok().filter(|m| m.is_file())?;
-    let ns = |s: i64, n: i64| i128::from(s) * 1_000_000_000 + i128::from(n);
-    Some((
-        meta.len(),
-        ns(meta.mtime(), meta.mtime_nsec()),
-        ns(meta.ctime(), meta.ctime_nsec()),
-        meta.ino(),
-        meta.dev(),
-    ))
+    std::fs::metadata(path)
+        .ok()
+        .filter(|m| m.is_file())
+        .map(|m| FileVersion::read(&m))
 }
 
 /// The member generation of `sequence`: a digest of every numbered file's
-/// stamp, from the first number to the last.
+/// version, from the first number to the last.
 pub fn generation(sequence: &Manifest) -> u64 {
-    generation_with(sequence, &member_stamp)
+    digest(&members_with(sequence, &member_stamp))
 }
 
-fn generation_with(sequence: &Manifest, stat: &dyn Fn(&Path) -> MemberStamp) -> u64 {
-    let mut hash = blake3::Hasher::new_derive_key("powermove sequence members v1");
-    for number in sequence.first..=sequence.last {
-        match stat(&sequence.file(number)) {
-            Some((len, modified, changed, inode, device)) => {
-                hash.update(&[1]);
-                hash.update(&len.to_le_bytes());
-                hash.update(&modified.to_le_bytes());
-                hash.update(&changed.to_le_bytes());
-                hash.update(&inode.to_le_bytes());
-                hash.update(&device.to_le_bytes());
-            }
-            None => {
-                hash.update(&[0]);
-            }
-        }
-    }
-    u64::from_le_bytes(hash.finalize().as_bytes()[..8].try_into().unwrap())
+/// Each numbered file and its version (the empty version for a missing
+/// number), first to last.
+fn members_with(
+    sequence: &Manifest,
+    stat: &dyn Fn(&Path) -> MemberStamp,
+) -> Vec<(PathBuf, FileVersion)> {
+    (sequence.first..=sequence.last)
+        .map(|n| {
+            let file = sequence.file(n);
+            let version = stat(&file).unwrap_or_default();
+            (file, version)
+        })
+        .collect()
+}
+
+fn digest(members: &[(PathBuf, FileVersion)]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    members.hash(&mut hash);
+    hash.finish()
 }
 
 /// What the watch last published.
@@ -77,6 +75,9 @@ pub struct Snapshot {
     pub version: u64,
     /// Each tracked sequence's manifest path and member generation.
     pub generations: HashMap<PathBuf, u64>,
+    /// Each tracked sequence's numbered files and their versions: what a
+    /// frame of it reads, as keys name it (`crate::render_cache::stamps`).
+    pub members: HashMap<PathBuf, Arc<Vec<(PathBuf, FileVersion)>>>,
 }
 
 /// Called on the watch's thread with the manifests whose files changed;
@@ -191,6 +192,7 @@ fn run(inner: std::sync::Weak<Inner>) {
             state.tracked.values().flatten().cloned().collect()
         };
         let mut generations = HashMap::new();
+        let mut members = HashMap::new();
         for file in &files {
             let stamp = (watch.stat)(file);
             let entry = manifests.entry(file.clone()).or_insert((None, None));
@@ -198,10 +200,9 @@ fn run(inner: std::sync::Weak<Inner>) {
                 *entry = (stamp, Manifest::read(file).ok().flatten());
             }
             if let Some(sequence) = &entry.1 {
-                generations.insert(
-                    file.clone(),
-                    generation_with(sequence, &|p| (watch.stat)(p)),
-                );
+                let files = members_with(sequence, &|p| (watch.stat)(p));
+                generations.insert(file.clone(), digest(&files));
+                members.insert(file.clone(), Arc::new(files));
             }
         }
         manifests.retain(|f, _| files.contains(f));
@@ -217,6 +218,7 @@ fn run(inner: std::sync::Weak<Inner>) {
             state.snapshot = Arc::new(Snapshot {
                 version: state.snapshot.version + u64::from(!changed.is_empty() || grew),
                 generations,
+                members,
             });
         }
         if !changed.is_empty() {

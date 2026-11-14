@@ -843,13 +843,15 @@ impl CoreTextRegistry {
             return Some(f.clone());
         }
         let meta = std::fs::metadata(path).ok()?;
-        let modified = meta
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let key = source_key(&path.to_string_lossy(), meta.len(), modified);
+        let version = crate::file_version::FileVersion::read(&meta);
+        // One blob per version of the file: a rewrite in place that keeps
+        // its length and puts its modification time back is another font.
+        let changed = (version.changed.0 as u128) * 1_000_000_000 + version.changed.1 as u128;
+        let key = source_key(
+            &path.to_string_lossy(),
+            version.len,
+            (changed << 64) | u128::from(version.modified),
+        );
         // System fonts and root-owned fonts only an administrator can write
         // (`/Library/Fonts`: SF Pro alone is 26 MB) are mapped, clean pages
         // macOS can drop; other files are read, so a font the user's own
@@ -866,6 +868,9 @@ impl CoreTextRegistry {
         self.blobs.insert(key.clone(), data.clone());
         self.files
             .insert(path.to_path_buf(), (data.clone(), key.clone()));
+        // Whoever holds work to these bytes sees the file change under them
+        // (`system_fonts::refresh`, `system_fonts::Fence`).
+        crate::system_fonts::note_read(path, version);
         Some((data, key))
     }
 
@@ -878,14 +883,23 @@ impl CoreTextRegistry {
         let url = unsafe { ct.attribute(kCTFontURLAttribute) }
             .and_then(|u| u.downcast::<CFURL>().ok())
             .and_then(|u| u.to_file_path());
-        if let Some(path) = url
-            && let Some((data, key)) = self.file_bytes(&path)
+        if let Some(path) = &url
+            && let Some((data, key)) = self.file_bytes(path)
             && let Some(index) = face_index(data.as_slice(), &[&ps, &cg_ps])
         {
             return (data, index, key);
         }
         // No file (or no matching face in it): rebuild an sfnt from the
-        // tables CoreText serves, as Skia does for HarfBuzz on macOS.
+        // tables CoreText serves, as Skia does for HarfBuzz on macOS. The
+        // tables are of the font's file as it is now: its version is
+        // recorded as a read, so whoever holds work to the fonts read
+        // holds it to this file too.
+        if let Some(path) = &url
+            && !self.files.contains_key(path.as_path())
+            && let Some(version) = crate::file_version::FileVersion::of(path)
+        {
+            crate::system_fonts::note_read(path, version);
+        }
         if let Some((d, key)) = self.table_fonts.get(&ps) {
             return (d.clone(), 0, key.clone());
         }
@@ -1364,22 +1378,13 @@ struct Custom {
 #[derive(Clone, PartialEq, Eq)]
 struct FontFileStamp {
     path: PathBuf,
-    len: u64,
-    modified: Option<std::time::SystemTime>,
-    device: u64,
-    inode: u64,
-    changed: (i64, i64),
+    version: crate::file_version::FileVersion,
 }
 impl FontFileStamp {
     fn new(path: &std::path::Path, meta: &std::fs::Metadata) -> Self {
-        use std::os::unix::fs::MetadataExt;
         Self {
             path: path.into(),
-            len: meta.len(),
-            modified: meta.modified().ok(),
-            device: meta.dev(),
-            inode: meta.ino(),
-            changed: (meta.ctime(), meta.ctime_nsec()),
+            version: crate::file_version::FileVersion::read(meta),
         }
     }
 }
