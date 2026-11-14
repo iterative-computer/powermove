@@ -457,23 +457,21 @@ fn a_real_control_click_edits_the_document_and_undo_reverts(cx: &mut TestAppCont
     let first = publication(&rig);
     let (view, mut vcx) = window(cx, &rig, first, Default::default());
     vcx.run_until_parked();
-    let id = view.read_with(&vcx, |v, _| v.semantic_id_starting("timeline:solo:"));
+    // A layer row's Visibility switch (always on the row).
+    let id = view.read_with(&vcx, |v, _| v.semantic_id_starting("timeline:visibility:"));
     let name = id.unwrap();
     let at = bounds(&mut vcx, &name).center();
-    let solo = |rig: &Rig| {
-        let p = rig.kernel.published(PROJECT).unwrap();
-        pm_kernel::model::list_layers(p.snapshot.root().unwrap(), None)[0].solo
+    // Every layer shows; the click hides the row's layer.
+    let visible = |kernel: &pm_kernel::KernelHandle| {
+        let p = kernel.published(PROJECT).unwrap();
+        pm_kernel::model::list_layers(p.snapshot.root().unwrap(), None)
+            .iter()
+            .all(|l| l.visible)
     };
-    assert!(solo(&rig));
+    assert!(visible(&rig.kernel));
     vcx.simulate_click(at, Modifiers::none());
     let check = rig.kernel.clone();
-    settle(cx, move |_| {
-        !pm_kernel::model::list_layers(
-            check.published(PROJECT).unwrap().snapshot.root().unwrap(),
-            None,
-        )[0]
-        .solo
-    });
+    settle(cx, move |_| !visible(&check));
     rig.kernel
         .call(
             PROJECT,
@@ -485,7 +483,7 @@ fn a_real_control_click_edits_the_document_and_undo_reverts(cx: &mut TestAppCont
         .wait()
         .unwrap()
         .unwrap();
-    assert!(solo(&rig));
+    assert!(visible(&rig.kernel));
 }
 /// Dragging a real Properties number field writes through one kernel gesture.
 #[gpui::test]
