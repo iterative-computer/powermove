@@ -72,6 +72,26 @@ impl std::fmt::Display for MigrationRequirement {
     }
 }
 impl std::error::Error for MigrationRequirement {}
+/// `Media Store/<64 hex>.<ext>`: how the original app names owned payloads.
+fn leftover_payload(path: &Path) -> bool {
+    let mut parts = path.components();
+    let (Some(first), Some(name), None) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    if first.as_os_str() != "Media Store" {
+        return false;
+    }
+    let name = name.as_os_str().to_string_lossy();
+    let Some((hash, extension)) = name.split_once('.') else {
+        return false;
+    };
+    hash.len() == 64
+        && hash
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        && (1..=8).contains(&extension.len())
+        && extension.bytes().all(|b| b.is_ascii_alphanumeric())
+}
 fn require_supported_media(cp: &Checkpoint, checkpoint_root: &Path) -> Result<()> {
     let paths = cp
         .files
@@ -88,7 +108,11 @@ fn require_supported_media(cp: &Checkpoint, checkpoint_root: &Path) -> Result<()
     // refusal for malformed/unrecognized records and unindexed owned payloads;
     // merely preserving their bytes is not evidence of media migration.
     let media_root = checkpoint_root.join("profile/Media Store");
-    let records = pm_native_migrate::library_media::read_index(&media_root).map_err(|error| {
+    let records = pm_native_migrate::library_media::read_link_index(
+        &media_root,
+        &cp.source.join("Media Store"),
+    )
+    .map_err(|error| {
         anyhow::Error::new(MigrationRequirement::MainFileMediaAdapter).context(error)
     })?;
     let mut admitted = std::collections::BTreeSet::new();
@@ -103,7 +127,14 @@ fn require_supported_media(cp: &Checkpoint, checkpoint_root: &Path) -> Result<()
             admitted.insert(Path::new("Media Store").join(name));
         }
     }
-    if paths.iter().any(|path| !admitted.contains(*path)) {
+    // The original app finds media only through its Index. A content-named
+    // payload no record names is a leftover (an interrupted import, a removed
+    // item): unreachable there too, so it stays preserved in the checkpoint
+    // and is no reason to refuse the library. Anything else unknown still is.
+    if paths
+        .iter()
+        .any(|path| !admitted.contains(*path) && !leftover_payload(path))
+    {
         return Err(MigrationRequirement::MainFileMediaAdapter.into());
     }
     Ok(())
@@ -684,48 +715,17 @@ fn media(
     closure: &ClosureInput,
     hook: &mut impl FnMut(Event) -> Result<()>,
 ) -> Result<Pass> {
-    let disk_records =
-        pm_native_migrate::library_media::read_index(&checkpoint_root.join("profile/Media Store"))?;
-    let mut needed = 0u64;
-    for (_, records) in batches {
-        for r in records {
-            needed = needed.saturating_add(r.payload().size);
-        }
-    }
-    // Disk space is conservative; the bar counts only what will be read: every
-    // captured record, and an original only where nothing captured stands in.
-    let mut expected = disk_records.iter().map(|r| r.size).sum::<u64>();
-    for (snapshot, records) in batches {
-        for r in records {
-            if r.payload_path(snapshot)?.is_some() {
-                expected = expected.saturating_add(r.payload().size);
-            }
-        }
-    }
-    let captured = |key: &str| {
-        batches
-            .iter()
-            .any(|(_, rs)| rs.iter().any(|r| r.key == key))
-            || disk_records.iter().any(|r| r.key == key)
-    };
-    for r in &closure.references {
-        if let Some(p) = &r.source_path
-            && p.is_file()
-        {
-            let size = fs::metadata(p)?.len();
-            needed = needed.saturating_add(size);
-            let stands_in = captured(&r.key) || r.legacy_id.as_deref().is_some_and(captured);
-            if !stands_in && !r.unreached && !r.poster {
-                expected = expected.saturating_add(size);
-            }
-        }
-    }
-    disk::space(native, needed)?;
-    source_access::begin_bytes(expected);
+    let cp: Checkpoint = disk::json(&checkpoint_root.join("checkpoint.json"))?;
+    let disk_records = pm_native_migrate::library_media::read_link_index(
+        &checkpoint_root.join("profile/Media Store"),
+        &cp.source.join("Media Store"),
+    )?;
+    disk::space(native, 0)?;
+    source_access::begin_bytes(0);
     let mut count = 0;
     // One record publication per source record, however many objects it has.
     let total = batches.iter().map(|(_, r)| r.len()).sum::<usize>() + disk_records.len();
-    migration::migrate_many_with_disk(
+    pm_native_migrate::linked::link_many_with_disk(
         &batches
             .iter()
             .map(|(s, r)| (s, r.as_slice()))
@@ -747,17 +747,158 @@ fn media(
         },
     )
 }
+fn available_media_keys(native: &Path) -> BTreeSet<String> {
+    use sha2::{Digest, Sha256};
+    let root = native.join("Media Store");
+    let mut keys = BTreeSet::new();
+    for file in fs::read_dir(root.join("keys"))
+        .ok()
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        let Ok(input) = File::open(file.path()) else {
+            continue;
+        };
+        let Ok(key) = serde_json::from_reader::<_, migration::KeyRecord>(input) else {
+            continue;
+        };
+        if file.file_name().to_string_lossy()
+            != format!("{:x}.json", Sha256::digest(key.key.as_bytes()))
+            || key.hash.len() != 64
+            || !key.hash.bytes().all(|b| b.is_ascii_hexdigit())
+        {
+            continue;
+        }
+        let valid = |path: &Path| {
+            fs::symlink_metadata(path).is_ok_and(|m| m.is_file() && m.len() == key.size)
+        };
+        let external = key
+            .path
+            .as_ref()
+            .is_some_and(|p| p.is_absolute() && valid(p));
+        if external || valid(&root.join("objects").join(&key.hash[..2]).join(&key.hash)) {
+            keys.insert(key.key);
+        }
+    }
+    keys
+}
+// A file cannot lend an offline asset its index does not name. This negative
+// check reads only container metadata; possible matches still use the kernel's
+// normal identity/checksum proof, including legacy inline-media handling.
+fn may_lend(path: &Path, wanted: &BTreeSet<String>, stored: &BTreeSet<String>) -> bool {
+    (|| -> Result<bool> {
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(path)?;
+        ensure!(file.metadata()?.is_file(), "not a regular project file");
+        let container = pm_model::container::read_container(
+            &file,
+            pm_model::container::ReadOptions {
+                verify_media: false,
+            },
+        )?;
+        let doc = &container.document;
+        let project = doc.get("proj").unwrap_or(doc);
+        let needed = |id: &str| {
+            if !wanted.contains(id) || stored.contains(id) {
+                return false;
+            }
+            let Some(asset) = project
+                .get("assets")
+                .and_then(|a| a.get(id))
+                .filter(|a| a.as_object().is_some())
+            else {
+                return true;
+            };
+            let key = asset
+                .get("storageKey")
+                .and_then(KernelValue::as_str)
+                .unwrap_or(id);
+            let fingerprint = asset
+                .get("fingerprint")
+                .and_then(KernelValue::as_str)
+                .map(|fp| format!("media:{fp}"));
+            // Every matching identity uses these same keys in for_copy. If any
+            // is already available, its store bytes win and the file lends none.
+            !stored.contains(key)
+                && !stored.contains(id)
+                && !fingerprint.as_ref().is_some_and(|fp| stored.contains(fp))
+        };
+        if container
+            .media
+            .iter()
+            .chain(&container.archived_media)
+            .any(|r| r.id.as_str().is_some_and(needed))
+        {
+            return Ok(true);
+        }
+        for root in [doc, project] {
+            for field in ["media", "nativeLegacyMediaArchive"] {
+                if let Some(map) = root.get(field).and_then(KernelValue::as_object)
+                    && map.iter().any(|(id, _)| id.as_str().is_some_and(needed))
+                {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    })()
+    .unwrap_or(true)
+}
 fn summary(native: &Path, state: &State, pass: &Pass) -> Outcome {
     // Media the original app had lost from its store but kept in a project's
     // file are not offline: the copy reads them from that file.
+    let stored_keys = available_media_keys(native);
     let mut lent = std::collections::BTreeMap::new();
+    let mut wanted = std::collections::BTreeMap::<String, BTreeSet<String>>::new();
+    for entry in pass
+        .closure
+        .iter()
+        .filter(|e| e.status == migration::Status::AlreadyOffline)
+    {
+        if let Some(copy) = state.receipts.get(&entry.reference.owner)
+            && let Some(id) = &entry.reference.legacy_id
+        {
+            wanted
+                .entry(copy.native.clone())
+                .or_default()
+                .insert(id.clone());
+        }
+    }
     let mut offline = |e: &&migration::ClosureEntry| {
         let Some(copy) = state.receipts.get(&e.reference.owner) else {
             return true;
         };
-        let ids = lent
-            .entry(copy.native.clone())
-            .or_insert_with(|| pm_kernel::embedded_media::lent(native, &copy.native));
+        let ids = lent.entry(copy.native.clone()).or_insert_with(|| {
+            // A missing association cannot lend bytes. Read its small metadata
+            // before asking the kernel to load the full project and history.
+            let store = LibraryStore::open(native);
+            let can_lend = ["projectMeta", "projectState"].into_iter().any(|prefix| {
+                store
+                    .read(&format!("{prefix}.{}", copy.native))
+                    .ok()
+                    .flatten()
+                    .and_then(|m| {
+                        m.get("embeddedMedia")
+                            .and_then(|m| m.get("path"))
+                            .and_then(KernelValue::as_str)
+                            .map(PathBuf::from)
+                    })
+                    .is_some_and(|p| {
+                        p.is_file()
+                            && wanted
+                                .get(&copy.native)
+                                .is_some_and(|ids| may_lend(&p, ids, &stored_keys))
+                    })
+            });
+            if can_lend {
+                pm_kernel::embedded_media::lent(native, &copy.native)
+            } else {
+                BTreeSet::new()
+            }
+        });
         !e.reference
             .legacy_id
             .as_ref()
@@ -768,17 +909,23 @@ fn summary(native: &Path, state: &State, pass: &Pass) -> Outcome {
         history_refusals: state.history_refusals.len(),
         missing_projects: state.missing_projects.len(),
         blocked_owners: pass.blocked_owners.len(),
+        // Files, not references: undo history and every project that uses
+        // one repeat the same media.
         proxy_only: pass
             .closure
             .iter()
             .filter(|e| e.status == migration::Status::ProxyOnly)
-            .count(),
+            .map(media_file)
+            .collect::<BTreeSet<_>>()
+            .len(),
         already_offline: pass
             .closure
             .iter()
             .filter(|e| e.status == migration::Status::AlreadyOffline)
             .filter(&mut offline)
-            .count(),
+            .map(media_file)
+            .collect::<BTreeSet<_>>()
+            .len(),
         // Files, not references: undo history repeats the same original.
         not_reached: pass
             .closure
@@ -788,6 +935,13 @@ fn summary(native: &Path, state: &State, pass: &Pass) -> Outcome {
             .collect::<BTreeSet<_>>()
             .len(),
     }
+}
+/// One media file: its path when it has one, else its media key.
+fn media_file(e: &migration::ClosureEntry) -> String {
+    e.reference.source_path.as_ref().map_or_else(
+        || e.reference.key.clone(),
+        |p| p.to_string_lossy().into_owned(),
+    )
 }
 fn bootstrap(
     cp: &Checkpoint,
@@ -829,8 +983,10 @@ fn bootstrap(
             place_file(&root.join("profile").join(relative), &target, entry, native)?;
         }
         state.imported_files.insert(relative.clone());
-        publish(native, state)?;
     }
+    // Files have been fsynced. This receipt supplies one full storage barrier
+    // for the batch before any callback can observe it as complete.
+    publish(native, state)?;
     disk::private_dir(&native.join("extensions-overlay"))?;
     seal_shared(&native.join("extensions-shared"))
 }
@@ -865,14 +1021,20 @@ fn place_file(from: &Path, target: &Path, entry: &disk::FileEntry, native: &Path
         target.parent().unwrap().canonicalize()?.starts_with(native),
         "native file destination escaped profile"
     );
-    let temp = target.with_extension("first-launch-copy");
+    let temp = target.with_file_name(format!(
+        "{}.first-launch-copy",
+        target
+            .file_name()
+            .context("missing filename")?
+            .to_string_lossy()
+    ));
     if temp.exists() {
         disk::archive(&temp)?;
     }
-    let copied = disk::copy(from, &temp)?;
+    let copied = disk::copy_staged(from, &temp)?;
     ensure!(copied.hash == entry.hash, "checkpoint copy differs");
     fs::rename(temp, target)?;
-    File::open(target.parent().unwrap())?.sync_all()?;
+    disk::sync_staged(&File::open(target.parent().unwrap())?)?;
     Ok(())
 }
 const PROJECT_FAMILIES: [&str; 9] = [

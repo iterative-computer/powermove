@@ -162,6 +162,14 @@ pub fn new3d() -> Vec<Item> {
         ("Sun", "sun"),
         ("Camera", "camera"),
         ("", ""),
+        // Light presets, placed for the selected model and the shot (the
+        // same `light_preset` operation agents use).
+        ("Rim Strip Left", "preset:rim_left"),
+        ("Rim Strip Right", "preset:rim_right"),
+        ("Top Softbox", "preset:top"),
+        ("Edge Highlight Card", "preset:edge_card"),
+        ("Strip Light", "preset:strip"),
+        ("", ""),
         ("Sky", "sky"),
         ("Fog Volume", "fog"),
         ("Terrain", "terrain"),
@@ -525,6 +533,10 @@ pub fn extras() -> Vec<(&'static str, Item)> {
         view("Show Blue Channel", "viewer.showBlue"),
         view("Show Alpha Channel", "viewer.showAlpha"),
         view("Show Alpha Overlay", "viewer.showAlphaOverlay"),
+        view(
+            "Show Over-Range and Out-of-Gamut",
+            "viewer.showRangeOverlay",
+        ),
         view("Popout Viewer", "viewer.popout"),
         view("Toggle Proxies", "viewer.toggleProxies"),
         view("Skimming", "toggleSkimming"),
@@ -666,4 +678,22 @@ pub fn glyphs(chord: &str) -> String {
     };
     s.push_str(&k);
     s
+}
+
+/// WebKit owns DOM editing, just as AppKit's text editor owns native fields.
+pub(crate) fn owns_text_edit(is_text_view: bool, class_name: &str) -> bool {
+    is_text_view || class_name.contains("WK") || class_name.contains("Web")
+}
+
+#[cfg(test)]
+mod edit_responder_tests {
+    #[test]
+    fn edit_commands_reach_native_fields_and_extension_dom_inputs() {
+        for class in ["WKWebView", "WKContentView", "WebHTMLView"] {
+            assert!(super::owns_text_edit(false, class), "{class}");
+        }
+        assert!(super::owns_text_edit(true, "NSTextView"));
+        assert!(!super::owns_text_edit(false, "GPUIView"));
+        assert!(!super::owns_text_edit(false, "NSButton"));
+    }
 }

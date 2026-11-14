@@ -201,6 +201,7 @@ impl Overrides {
             let rasters = rasters
                 .as_ref()
                 .ok_or("This window has no layer raster worker")?;
+            let started = std::time::Instant::now();
             let painted = rasters.raster(BaseRequest {
                 document: request.document,
                 composition: request.composition,
@@ -221,6 +222,10 @@ impl Overrides {
                     height,
                 }),
             })?;
+            let ms = started.elapsed().as_millis() as u64;
+            if ms >= 20 {
+                crate::diag::line(json!({"rasters": "base", "ms": ms}));
+            }
             Ok(painted.map(|r| BaseRasterReply {
                 width: r.width,
                 height: r.height,
@@ -244,6 +249,21 @@ impl Overrides {
                 }
                 None => return,
             };
+            if crate::diag::enabled() {
+                let kinds: Vec<&str> = answers
+                    .iter()
+                    .map(|a| match a {
+                        RasterAnswer::Native => "native",
+                        RasterAnswer::Hidden => "hidden",
+                        RasterAnswer::Retry => "retry",
+                        RasterAnswer::Moved => "moved",
+                        RasterAnswer::Failed(_) => "failed",
+                        RasterAnswer::Unavailable(_) => "unavailable",
+                        RasterAnswer::Raster { .. } => "raster",
+                    })
+                    .collect();
+                crate::diag::line(json!({"rasters": "answer", "batch": batch, "kinds": kinds}));
+            }
             let answered = needs
                 .into_iter()
                 .zip(answers.into_iter().map(answer_of))
@@ -291,6 +311,9 @@ impl Overrides {
                     .lock()
                     .unwrap()
                     .open(Asker::Viewer(revision, epoch, needs));
+                crate::diag::line(
+                    json!({"rasters": "ask", "batch": batch, "needs": wire.len(), "revision": revision}),
+                );
                 realm.ask(batch, Value::Array(wire), json!({"revision": revision}));
             },
         )));

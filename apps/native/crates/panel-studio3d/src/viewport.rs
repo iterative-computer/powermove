@@ -13,6 +13,7 @@ use pm_scene3d::{
     geometry::{AssetGeometry, NoAssets, RetainedAssets},
     navigation::{Bounds, Lens, Pose, Vec3, add, cross, dot, length, mul, normalize, sub},
     schema::{self, Role},
+    to_model,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -25,9 +26,15 @@ pub struct Item {
     pub bounds: Bounds,
     /// Where handles sit: the layer's world origin.
     pub pivot: Vec3,
-    /// The light's aim point, for lights.
+    /// The light's aim point, for lights (world space).
     pub target: Option<Vec3>,
+    /// The light's target channels (`light.targetX/Y/Z`), which an aim drag
+    /// edits by the same world delta it moves the point.
+    pub aim: Option<Vec3>,
     pub light: Option<String>,
+    /// A light's emitter: softbox width and height, and a spotlight's spread
+    /// (degrees). Zeros for everything else.
+    pub shape: Vec3,
     /// Evaluated channels at the time: position (scene units), rotation
     /// x/y/z (degrees) and scale x/y/z (percent).
     pub position: Vec3,
@@ -407,7 +414,7 @@ pub fn scene(p: &Published, time: f64) -> Result<Scene> {
         })
     };
     let mut items = vec![];
-    for l in &layers {
+    for (index, l) in layers.iter().enumerate() {
         let Some(role) = schema::role(l) else {
             continue;
         };
@@ -455,7 +462,9 @@ pub fn scene(p: &Published, time: f64) -> Result<Scene> {
                     bounds,
                     pivot: translation(world),
                     target: None,
+                    aim: None,
                     light: None,
+                    shape: [0.; 3],
                 });
             }
             Role::Light => {
@@ -479,7 +488,21 @@ pub fn scene(p: &Published, time: f64) -> Result<Scene> {
                     },
                     pivot,
                     target: r.targets.get(&id).copied(),
+                    aim: Some(light_values(
+                        p,
+                        index,
+                        &data["light"]["p"],
+                        time,
+                        ["targetX", "targetY", "targetZ"],
+                    )),
                     light: data["light"]["type"].as_str().map(str::to_owned),
+                    shape: light_values(
+                        p,
+                        index,
+                        &data["light"]["p"],
+                        time,
+                        ["width", "height", "angle"],
+                    ),
                 });
             }
             Role::Camera => {}
@@ -493,6 +516,29 @@ pub fn scene(p: &Published, time: f64) -> Result<Scene> {
         items,
         revision: p.revision(),
         time,
+    })
+}
+/// A light's own channels (`light.<key>`) at the time, through the kernel's
+/// property evaluation as the light tool reads them; 0 where unset.
+fn light_values(
+    p: &Published,
+    index: usize,
+    props: &serde_json::Value,
+    time: f64,
+    keys: [&str; 3],
+) -> Vec3 {
+    let mut mirror = pm_kernel::QueryMirror::new(p);
+    let open = p.snapshot.open_comp();
+    std::array::from_fn(|i| {
+        let q = serde_json::json!({"op":"evP","comp":open,"open":open,"layer":index,"t":time,
+            "key":format!("light.{}", keys[i]),"prop":props[keys[i]]});
+        mirror
+            .queries()
+            .query(&to_model(&q))
+            .ok()
+            .and_then(|v| from_model(&v).ok())
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.)
     })
 }
 /// The pose Frame moves Free View to: the selection, or everything.
@@ -586,7 +632,9 @@ mod tests {
             bounds: b(z),
             pivot: [0., 0., z],
             target: None,
+            aim: None,
             light: None,
+            shape: [0.; 3],
             position: [0., 0., z],
             rotation: [0.; 3],
             scale: [100.; 3],

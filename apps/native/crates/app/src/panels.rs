@@ -102,6 +102,14 @@ pub fn fit_scale(body_w: f32, body_h: f32, comp: [f64; 2], margin: f32) -> f64 {
     w.min(h).max(0.01)
 }
 
+/// The scale at which the composition covers the whole body, edge to edge,
+/// centred (3D Free View): no letterbox, no pasteboard.
+pub fn cover_scale(body_w: f32, body_h: f32, comp: [f64; 2]) -> f64 {
+    let w = body_w.max(1.) as f64 / comp[0].max(1.);
+    let h = body_h.max(1.) as f64 / comp[1].max(1.);
+    w.max(h).max(0.01)
+}
+
 /// Display name of a layer kind (`Video`, `Text`, …).
 #[cfg(test)]
 pub fn kind_name(kind: &str) -> String {
@@ -327,6 +335,25 @@ mod tests {
             status_line(false, true, 5, 9),
         ] {
             assert!(!s.contains("Writable") && !s.contains("Opened"), "{s}");
+        }
+    }
+}
+#[cfg(test)]
+mod cover_tests {
+    /// Free View covers the whole viewer body at any size: no letterbox on
+    /// either axis, centred, so the image is never smaller than the body.
+    #[test]
+    fn the_editor_view_covers_the_body_at_any_size() {
+        for (w, h) in [(765., 366.), (400., 600.), (1600., 400.), (640., 360.)] {
+            let s = super::cover_scale(w, h, [1920., 1080.]);
+            assert!(
+                1920. * s >= w as f64 - 1e-6 && 1080. * s >= h as f64 - 1e-6,
+                "{w}x{h}"
+            );
+            assert!(
+                (1920. * s - w as f64).abs() < 1e-6 || (1080. * s - h as f64).abs() < 1e-6,
+                "{w}x{h}: one axis fits exactly"
+            );
         }
     }
 }

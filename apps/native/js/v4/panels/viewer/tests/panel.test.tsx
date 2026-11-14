@@ -446,3 +446,69 @@ test("the transport runs the app's own commands, once each", async () => {
   ]);
   await root.dispose();
 });
+test("with a timeline in the workspace the viewer shows no transport or timecode", async () => {
+  const { root } = recorder();
+  const s = fixture();
+  s.host.transport = null;
+  await root.render(<ViewerPanel state={s} actions={actions} />);
+  const ids = root.inspect().nodes.map((n) => String(n.props.id));
+  expect(ids.some((id) => id.startsWith("viewer.transport"))).toBe(false);
+  expect(ids).not.toContain("viewer.time");
+  expect(ids).not.toContain("viewer.duration");
+  // The view's own controls stay.
+  expect(ids).toContain("viewer.zoom");
+  await root.dispose();
+  // Without a timeline, the viewer carries both.
+  const { root: alone } = recorder();
+  await alone.render(<ViewerPanel state={fixture()} actions={actions} />);
+  const shown = alone.inspect().nodes.map((n) => String(n.props.id));
+  expect(shown).toContain("viewer.time");
+  expect(shown).toContain("viewer.transport.play");
+  await alone.dispose();
+});
+test("a 3D composition adds no toolbar; away from the shot one top-left control returns", async () => {
+  const seen: [string, unknown][] = [];
+  const drive = (id: string, v?: unknown) => void seen.push([id, v]);
+  const at = (look: "camera" | "free") => {
+    const s = fixture();
+    s.model!.studio = { tier: "live", tool: "move", look };
+    return s;
+  };
+  const { root } = recorder();
+  await root.render(
+    <ViewerPanel state={at("camera")} actions={{ ...actions, drive }} />,
+  );
+  let nodes = root.inspect().nodes;
+  // No 3D group in the bar, no Light panel, no return control on the shot.
+  for (const id of [
+    "viewer.studio",
+    "viewer.studio.tool",
+    "viewer.studio.look",
+    "viewer.studio.tier",
+    "viewer.studio.lightPanel",
+    "viewer.studio.viewCamera",
+  ])
+    expect(nodes.some((n) => n.props.id === id)).toBe(false);
+  await root.dispose();
+  const { root: free } = recorder();
+  await free.render(
+    <ViewerPanel state={at("free")} actions={{ ...actions, drive }} />,
+  );
+  nodes = free.inspect().nodes;
+  const ret = nodes.find((n) => n.props.id === "viewer.studio.viewCamera")!;
+  expect(ret).toBeDefined();
+  expect(ret.props.label).toBe("View camera");
+  const box = nodes.find((n) => n.props.id === "viewer.studio.return")!;
+  const style = box.props.style as Record<string, unknown>;
+  expect(style.left).toBeDefined();
+  expect(style.top).toBeDefined();
+  expect(style.bottom).toBeUndefined();
+  expect(nodes.some((n) => n.text === "Return to Camera")).toBe(false);
+  // The zoom slot names the editor view.
+  expect(nodes.find((n) => n.props.id === "viewer.zoom")!.props.label).toBe(
+    "Editor View",
+  );
+  await free.drive(ret.id, "click", {});
+  expect(seen).toEqual([["viewer.studio.look", "camera"]]);
+  await free.dispose();
+});

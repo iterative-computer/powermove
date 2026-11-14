@@ -94,6 +94,10 @@ pub enum Channels {
     Alpha = 4,
     /// The picture, with what is transparent tinted.
     AlphaOverlay = 5,
+    /// The picture, with what its delivery cannot hold tinted: light over
+    /// the peak (SDR white, or an HDR project's master) magenta, colour
+    /// outside the delivery's gamut (Rec. 709, or Rec. 2020 for HDR) cyan.
+    RangeOverlay = 6,
 }
 #[repr(C)]
 pub(crate) struct OverlayParams {
@@ -106,7 +110,9 @@ pub(crate) struct OverlayParams {
     output: [f32; 4],
     canvas: [f32; 4],
     drawable: [f32; 2],
-    pad2: [f32; 2],
+    /// [`Channels::RangeOverlay`]: the peak in relative light (1.0 is SDR
+    /// white), and 1 when the delivery's gamut is Rec. 2020.
+    range: [f32; 2],
     lines: [OverlayLine; OverlayGeometry::MAX_LINES],
 }
 impl OverlayGeometry {
@@ -162,7 +168,7 @@ impl OverlayGeometry {
             output: [0.; 4],
             canvas: [0.; 4],
             drawable: [0.; 2],
-            pad2: [0.; 2],
+            range: [1., 0.],
             lines: [OverlayLine::default(); Self::MAX_LINES],
         };
         p.lines[..self.lines.len()].copy_from_slice(&self.lines);
@@ -494,6 +500,10 @@ struct View {
     /// Override answers of its document landed since the worker last
     /// looked.
     answers: bool,
+    /// What a refused picture waited for may have landed (override answers,
+    /// new definitions): it is tried again at once, not after the backoff
+    /// its retries reached.
+    retry_now: bool,
     skim_audio: Option<bool>,
     media_mode: MediaMode,
     paths: Arc<pm_export::render::MediaPaths>,
@@ -1190,6 +1200,7 @@ impl Viewer {
         v.stamp.sequence += 1;
         bump_site(line!(), "");
         v.dirty = true;
+        v.retry_now = true;
         // What a held frame said it was waiting for may be over: its line
         // goes now, not when the next frame finally lands (a frame still
         // waiting says for what on its next try).
@@ -1422,6 +1433,7 @@ impl EngineService {
                 for v in state.views.values_mut() {
                     if v.stamp.doc_id == doc_id {
                         v.answers = true;
+                        v.retry_now = true;
                         v.dirty |= every;
                     }
                 }
@@ -1579,6 +1591,7 @@ impl EngineService {
                 skim_rate: pm_protocol::common::PlaybackRate::NORMAL,
                 skim_moved: false,
                 answers: false,
+                retry_now: false,
                 skim_audio: None,
                 media_mode: MediaMode::default(),
                 paths,
@@ -2437,6 +2450,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                         serde_json::json!({
                             "interval": r.map(|r| r.interval), "ahead": r.map(|r| r.ahead),
                             "stand_ins": f.submission.stand_ins, "late_layers": f.late_layers,
+                            "source_stand_ins": t.source_stand_ins,
                             "skipped_targets": v.status.skipped_targets, "held_frames": v.status.held_frames,
                             "render_gpu_ms": render_gpu_ms,
                             "picture": traced_picture
@@ -2867,6 +2881,8 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 recorder.record(serde_json::json!({
                     "audio_start": true, "at": now, "viewer_id": id,
                     "wait_ms": waited as f64 / 1e3, "fallback": fallback,
+                    "output_latency_us": sample.output_latency_us,
+                    "sample_host_us": sample.host_time.get(), "sample_media": sample.media_time.get(),
                 }));
             }
             changed |= v
@@ -2943,6 +2959,9 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 v.stamp.sequence += 1;
                 bump_site(line!(), "");
                 v.dirty = true;
+            }
+            if std::mem::take(&mut v.retry_now) {
+                r.not_before = r.not_before.min(now);
             }
             // Override answers landed for this viewer's document. A picture
             // that waits for them (refused, drawn with a stand-in, or not
@@ -3029,9 +3048,13 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             let shown = plan.map(|p| p.shown);
             let media = if let Some(shown) = shown {
                 let at = |s: f64| {
-                    sample.media_time_at(
-                        pm_protocol::common::HostMicros::new((s.max(0.) * 1e6) as u64).unwrap(),
-                    )
+                    let host = (s.max(0.) * 1e6) as u64;
+                    if pm_media::decode::diag::knob("PM_ABL_PLAY_START_FENCE") == Some(0) {
+                        // The old projection, for a controlled latency A/B.
+                        sample.media_time_at(pm_protocol::common::HostMicros::new(host).unwrap())
+                    } else {
+                        Ticks::new(r.transport.clock.picture_at(host as i64)).unwrap_or(Ticks::ZERO)
+                    }
                 };
                 let plain = at(shown);
                 let lead = at(shown + interval / 2.);
@@ -5785,6 +5808,47 @@ mod worker_tests {
         assert!(
             !asked.lock().unwrap().is_empty(),
             "the layers were asked for"
+        );
+        v.retire();
+    }
+
+    /// A picture that waited long for its override layers is drawn the moment
+    /// their answers land, not after the backoff its retries reached (up to a
+    /// second: twice that on a project's first picture, as each load step's
+    /// new wrappers asked again).
+    #[test]
+    fn a_picture_waiting_for_its_layers_draws_the_moment_they_are_answered() {
+        let service = EngineService::start(pm_gpu::Gpu::new("answers-land-test").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        wait_for(&v, "a first frame", |s| {
+            s.frame.as_ref().is_some_and(|f| f.gpu_ok)
+        });
+        let (store, asked) = overridden(&service, &v);
+        v.scrub(seconds(2.)).unwrap();
+        // The wait line appears on a refusal some seconds in: retries are a
+        // second apart by now, and one has just been made.
+        wait_for(&v, "the wait line", |s| s.error.is_some());
+        let needs: Vec<_> = std::mem::take(&mut *asked.lock().unwrap());
+        assert!(!needs.is_empty(), "the layers were asked for");
+        let stamp = v.stamp().unwrap();
+        let answered = std::time::Instant::now();
+        store.answer_all(
+            1,
+            1,
+            needs
+                .into_iter()
+                .map(|n| (n, compat::Reply::Draw(compat::hidden_raster())))
+                .collect(),
+        );
+        wait_for(&v, "the answered picture", |s| {
+            s.frame
+                .as_ref()
+                .is_some_and(|f| f.gpu_ok && f.stamp == stamp)
+        });
+        assert!(
+            answered.elapsed() < Duration::from_millis(400),
+            "drawn {:?} after its answers landed",
+            answered.elapsed()
         );
         v.retire();
     }

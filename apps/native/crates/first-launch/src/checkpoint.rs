@@ -9,14 +9,13 @@ use std::{
     path::{Path, PathBuf},
 };
 
-// Durable authored state, including interrupted extension/agent work. Runtime
+// Projects, settings and small authored state. Large scratch and media payloads
+// remain in the original profile. Runtime
 // credentials and unrelated terminal homes are never discovered or copied.
 const FAMILIES: &[&str] = &[
     "store",
-    // main c7f46a056: flat SHA-256 payloads / source links and Index records.
-    // Retain these verbatim alongside the verified file-index adapter.
+    // Retain media indexes; payloads are linked to the live source.
     "extensions",
-    "Agent Workspaces",
     "Agent State",
     "Agent Change History",
     "Agent Tasks",
@@ -28,13 +27,11 @@ const FAMILIES: &[&str] = &[
     "extensions-provenance.json",
     "onboarding-v1.json",
     "whats-new.json",
-    "transcription-cache",
     "transcription-warm.json",
-    "Media Store",
+    "Media Store/Index",
+    "Media Store/keys",
     "storage-upgrade-v1.json",
     "project-files.json",
-    "backups",
-    "recovery",
 ];
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Checkpoint {
@@ -95,9 +92,15 @@ impl Checkpoint {
                 disk::walk(&source.join("IndexedDB"))?,
                 disk::walk(&source.join("Local Storage"))?,
             );
-            let needed = before.keys().try_fold(0u64, |n, p| {
-                Ok::<_, anyhow::Error>(n.saturating_add(fs::metadata(source.join(p))?.len()))
-            })?;
+            // The stage and the later native copy are both clones on the
+            // same APFS volume; only families on another volume cost bytes.
+            let needed = before.iter().fold(0u64, |n, (p, stamp)| {
+                let family = p
+                    .components()
+                    .next()
+                    .map_or(p.as_path(), |c| Path::new(c.as_os_str()));
+                n.saturating_add(disk::copy_cost(&source.join(family), &stage, stamp.size))
+            });
             disk::space(&stage, needed.saturating_mul(2))?;
             let profile = stage.join("profile");
             disk::private_dir(&profile)?;
@@ -105,7 +108,7 @@ impl Checkpoint {
             for p in before.keys() {
                 let target = profile.join(p);
                 disk::private_dir(target.parent().unwrap())?;
-                files.insert(p.clone(), disk::copy(&source.join(p), &target)?);
+                files.insert(p.clone(), disk::copy_staged(&source.join(p), &target)?);
             }
             let dbroot = stage.join("chromium");
             disk::private_dir(&dbroot)?;
@@ -130,14 +133,18 @@ impl Checkpoint {
                     if let Some(stem) = name.strip_suffix(".indexeddb.leveldb") {
                         let blobs = dir.with_file_name(format!("{stem}.indexeddb.blob"));
                         let out = PathBuf::from(format!("chromium/media-{}", indexeddb.len()));
-                        let bytes =
-                            disk::tree_bytes(&dir)?.saturating_add(disk::tree_bytes(&blobs)?);
-                        disk::space(&stage, bytes.saturating_mul(2))?;
+                        let bytes = disk::tree_bytes(&dir)?;
+                        disk::space(
+                            &stage,
+                            disk::copy_cost(&dir, &stage, bytes).saturating_mul(2),
+                        )?;
                         Snapshot::capture(
                             &dir,
                             blobs.is_dir().then_some(blobs.as_path()),
                             &stage.join(&out),
-                            BlobCopy::All,
+                            BlobCopy::Deferred {
+                                min_free: 5 * 1024 * 1024 * 1024,
+                            },
                         )?;
                         for payload in disk::walk(&stage.join(&out).join("blobs"))?.keys() {
                             let relative = out.join("blobs").join(payload);
@@ -158,7 +165,10 @@ impl Checkpoint {
             let local = source.join("Local Storage/leveldb");
             let local_storage = if local.is_dir() {
                 let out = PathBuf::from("chromium/local-storage");
-                disk::space(&stage, disk::tree_bytes(&local)?)?;
+                disk::space(
+                    &stage,
+                    disk::copy_cost(&local, &stage, disk::tree_bytes(&local)?),
+                )?;
                 Snapshot::capture(&local, None, &stage.join(&out), BlobCopy::All)?;
                 Some(out)
             } else {
@@ -250,16 +260,15 @@ impl Checkpoint {
     }
 }
 /// Bytes a capture copies: the file families, then each IndexedDB origin with its
-/// blobs, then Local Storage. Metadata only; the capture counts as it goes.
+/// records, then Local Storage. Metadata only; the capture counts as it goes.
 pub(crate) fn capture_bytes(source: &Path) -> Result<u64> {
     let mut total = inventory(source)?.values().map(|s| s.size).sum::<u64>();
     if let Ok(entries) = fs::read_dir(source.join("IndexedDB")) {
         for entry in entries {
             let dir = entry?.path();
             let name = dir.file_name().unwrap_or_default().to_string_lossy();
-            if let Some(stem) = name.strip_suffix(".indexeddb.leveldb") {
-                let blobs = dir.with_file_name(format!("{stem}.indexeddb.blob"));
-                total += disk::tree_bytes(&dir)? + disk::tree_bytes(&blobs)?;
+            if name.ends_with(".indexeddb.leveldb") {
+                total += disk::tree_bytes(&dir)?;
             }
         }
     }
@@ -286,13 +295,13 @@ fn inventory(source: &Path) -> Result<BTreeMap<PathBuf, disk::Stamp>> {
         let path = source.join(family);
         if path.is_file() {
             out.extend(
-                disk::walk(&path)?
+                disk::walk_source(&path, &[])?
                     .into_values()
                     .map(|v| (PathBuf::from(family), v)),
             );
         } else {
             out.extend(
-                disk::walk_filtered(
+                disk::walk_source(
                     &path,
                     if *family == "extensions" {
                         &["node_modules", "extensions-build", ".git", ".cache"]
@@ -311,7 +320,7 @@ fn inventory(source: &Path) -> Result<BTreeMap<PathBuf, disk::Stamp>> {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().into_owned();
         if name.starts_with("project-files.json.pending-") && name.ends_with(".json") {
-            for stamp in disk::walk(&entry.path())?.into_values() {
+            for stamp in disk::walk_source(&entry.path(), &[])?.into_values() {
                 out.insert(PathBuf::from(&name), stamp);
             }
         }

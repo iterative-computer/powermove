@@ -151,7 +151,12 @@ impl Client {
     }
     fn start_turn(&mut self, id: &str, now: u64, e: &mut Effects) {
         let t = &self.turns[id];
-        let mut p = json!({"threadId":t.thread,"input":Self::input(&t.run.prompt,&t.run.image_paths),"cwd":t.run.cwd,"approvalPolicy":"never","sandboxPolicy":{"type":"readOnly"},"outputSchema":t.run.schema.as_ref().unwrap_or(&json!({"type":"object"}))});
+        let mut p = json!({"threadId":t.thread,"input":Self::input(&t.run.prompt,&t.run.image_paths),"cwd":t.run.cwd,"approvalPolicy":"never","sandboxPolicy":{"type":"readOnly"}});
+        // Only a real schema: the API refuses an object schema without
+        // `properties`, and agent replies are read as plain text.
+        if let Some(schema) = &t.run.schema {
+            p["outputSchema"] = schema.clone();
+        }
         if let Some(m) = &t.run.model {
             p["model"] = json!(m);
         }

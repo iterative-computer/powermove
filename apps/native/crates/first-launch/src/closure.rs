@@ -5,9 +5,8 @@ use anyhow::{Result, ensure};
 use pm_kernel::{History, LibraryStore, library::legacy_apply_patches};
 use pm_native_migrate::{
     indexeddb::Record,
-    migration::{self, Availability, ClosureInput, OwnerKind, Reference},
+    migration::{Availability, ClosureInput, OwnerKind, Reference},
     snapshot::Snapshot,
-    source_access,
 };
 use serde_json::Value;
 use std::{collections::BTreeSet, path::Path};
@@ -19,9 +18,7 @@ pub(crate) fn inventory(
     batches: &[(Snapshot, Vec<Record>)],
     progress: &mut dyn FnMut(usize, usize) -> Result<()>,
 ) -> Result<ClosureInput> {
-    DIGESTS.with(|d| d.borrow_mut().clear());
     let found = inventory_pass(cp, root, batches, progress);
-    DIGESTS.with(|d| d.borrow_mut().clear());
     found
 }
 fn inventory_pass(
@@ -31,7 +28,10 @@ fn inventory_pass(
     progress: &mut dyn FnMut(usize, usize) -> Result<()>,
 ) -> Result<ClosureInput> {
     let profile = root.join("profile");
-    let disk_records = pm_native_migrate::library_media::read_index(&profile.join("Media Store"))?;
+    let disk_records = pm_native_migrate::library_media::read_link_index(
+        &profile.join("Media Store"),
+        &cp.source.join("Media Store"),
+    )?;
     let store = LibraryStore::open(&profile);
     let mut out = ClosureInput {
         inventoried: [
@@ -77,17 +77,23 @@ fn inventory_pass(
                             // Discover full objects in dictionaries as well as reachable
                             // documents. Both patch directions can retain payloads.
                             add(&mut out, id, OwnerKind::Undo, &convert(&saved)?, batches)?;
-                            let base = pm_model::canonical::canonical_project(p.project.clone());
+                            let base = asset_state(&p.project);
                             let mut undo = Some(base.clone());
                             for entry in entries[..history.applied()].iter().rev() {
-                                legacy_apply_patches(&mut undo, entry.get("backward").unwrap());
+                                legacy_apply_patches(
+                                    &mut undo,
+                                    &asset_patches(entry.get("backward").unwrap()),
+                                );
                                 if let Some(v) = &undo {
                                     add(&mut out, id, OwnerKind::Undo, &convert(v)?, batches)?;
                                 }
                             }
                             let mut redo = Some(base);
                             for entry in &entries[history.applied()..] {
-                                legacy_apply_patches(&mut redo, entry.get("forward").unwrap());
+                                legacy_apply_patches(
+                                    &mut redo,
+                                    &asset_patches(entry.get("forward").unwrap()),
+                                );
                                 if let Some(v) = &redo {
                                     add(&mut out, id, OwnerKind::Redo, &convert(v)?, batches)?;
                                 }
@@ -150,25 +156,21 @@ fn inventory_pass(
             if r.source_path.is_none() && !r.is_proxy() {
                 r.source_path = disk.source_path.clone();
             }
-            use pm_native_migrate::library_media::SourceStatus;
-            let status = disk.source_status()?;
-            if status == SourceStatus::Denied && r.before != Availability::Original {
-                r.unreached = true;
-            }
-            let available = matches!(status, SourceStatus::Owned | SourceStatus::Verified);
-            if available && let Some(path) = disk.owned_path.as_ref().or(disk.source_path.as_ref())
+            if disk
+                .source_path
+                .as_ref()
+                .or(disk.owned_path.as_ref())
+                .is_some_and(|path| {
+                    pm_native_migrate::library_media::is_present(path)
+                        && std::fs::symlink_metadata(path)
+                            .is_ok_and(|m| m.is_file() && m.len() == disk.size)
+                })
             {
-                // Full main SHA-256 is already verified. Proxy provenance is
-                // still determined from authored asset metadata, never filename.
-                if !r.is_proxy()
-                    && (matches_original(path, r)?
-                        || (r.original_blake3.is_none() && r.fingerprint.is_none()))
-                {
-                    r.original_blake3 = Some(hashed(path)?);
-                    r.before = Availability::Original;
+                r.before = if r.is_proxy() {
+                    Availability::ProxyOnly
                 } else {
-                    r.before = Availability::ProxyOnly;
-                }
+                    Availability::Original
+                };
             }
         }
     }
@@ -176,10 +178,104 @@ fn inventory_pass(
         .retain(|r| seen.insert(serde_json::to_string(r).unwrap()));
     Ok(out)
 }
+// Media closure depends on asset state, not layer geometry or animation data.
+// Replay the same asset patches on a projected document so a long edit history
+// does not repeatedly clone/serialize the entire project at every undo step.
+fn asset_state(value: &pm_model::json::Value) -> pm_model::json::Value {
+    let mut out = pm_model::json::Value::Object(Default::default());
+    if let Some(assets) = value.get("assets") {
+        out.as_object_mut()
+            .unwrap()
+            .insert("assets", assets.clone());
+    }
+    out
+}
+fn asset_patches(value: &pm_model::json::Value) -> pm_model::json::Value {
+    let patches = value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|patch| {
+            let path = patch
+                .get("path")
+                .and_then(pm_model::json::Value::as_array)?;
+            if let Some(first) = path.first() {
+                return (first.as_str() == Some("assets")).then(|| patch.clone());
+            }
+            let mut patch = patch.clone();
+            if let Some(value) = patch.get("value") {
+                let projected = asset_state(value);
+                patch.as_object_mut().unwrap().insert("value", projected);
+            }
+            Some(patch)
+        })
+        .collect();
+    pm_model::json::Value::Array(patches)
+}
 fn convert(v: &pm_model::json::Value) -> Result<Value> {
-    Ok(serde_json::from_str(&pm_model::json::to_canonical_string(
-        v,
-    ))?)
+    // Copy only fields consumed by Reference. Geometry can be enormous, and
+    // serializing/parsing it into a second JSON representation costs no media
+    // information. Still walk unknown containers so nested asset owners survive.
+    fn record(v: &pm_model::json::Value, id: Option<&str>) -> Result<Value> {
+        let mut out = serde_json::Map::new();
+        for field in [
+            "id",
+            "storageKey",
+            "fingerprint",
+            "sourceHash",
+            "blake3",
+            "sourcePath",
+            "revision",
+            "playbackProxy",
+            "playbackProxyVersion",
+        ] {
+            if let Some(value) = v.get(field) {
+                out.insert(
+                    field.into(),
+                    serde_json::from_str(&pm_model::json::to_canonical_string(value))?,
+                );
+            }
+        }
+        if !out.contains_key("id")
+            && let Some(id) = id
+        {
+            out.insert("id".into(), Value::String(id.into()));
+        }
+        Ok(Value::Object(out))
+    }
+    fn walk(v: &pm_model::json::Value, out: &mut Vec<Value>) -> Result<()> {
+        match v {
+            pm_model::json::Value::Object(m) => {
+                if let Some(map) = v.get("assets").and_then(pm_model::json::Value::as_object) {
+                    for (id, asset) in map.iter() {
+                        if asset.as_object().is_some() {
+                            out.push(record(asset, id.as_str())?);
+                        }
+                    }
+                }
+                if v.get("id").is_some()
+                    && ["storageKey", "fingerprint", "playbackProxy", "sourcePath"]
+                        .iter()
+                        .any(|k| v.get(k).is_some())
+                {
+                    out.push(record(v, None)?);
+                }
+                for (_, value) in m.iter() {
+                    walk(value, out)?;
+                }
+            }
+            pm_model::json::Value::Array(a) => {
+                for value in a {
+                    walk(value, out)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+    let mut out = Vec::new();
+    walk(v, &mut out)?;
+    Ok(Value::Array(out))
 }
 fn assets(v: &Value, out: &mut Vec<Value>) {
     match v {
@@ -300,42 +396,36 @@ fn add(
             candidates.len() <= 1,
             "ambiguous media identity in checkpoint"
         );
-        // The captured payload is what the original app played. Prefer it, so an
-        // original in a folder macOS guards is read only when nothing else has it.
         if let Some((snapshot, record)) = candidates.first() {
-            let path = record.payload_path(snapshot)?;
-            if record.payload().size == 0 || path.is_some() {
-                let original = match &path {
-                    Some(path) if !r.is_proxy() => matches_original(path, &r)?,
-                    _ => false,
-                };
-                r.before = if original {
-                    Availability::Original
-                } else {
+            if snapshot
+                .linked_blob_path(record.database, record.payload().number)?
+                .is_some()
+            {
+                r.before = if r.is_proxy() {
                     Availability::ProxyOnly
+                } else {
+                    Availability::Original
                 };
             }
+        }
+        if let Some(path) = &r.source_path {
+            r.source_path = Some(real_media_path(path));
         }
         if r.before != Availability::Original
-            && let Some(path) = r.source_path.clone()
-            && pm_native_migrate::library_media::is_resident(&path)?
+            && let Some(path) = &r.source_path
+            && pm_native_migrate::library_media::is_present(path)
         {
-            match matches_original(&path, &r) {
-                Ok(true) => {
-                    r.original_blake3 = Some(hashed(&path)?);
-                    r.before = Availability::Original;
-                }
-                Ok(false) => {}
-                Err(e) if source_access::is_unreached(&e) => r.unreached = true,
-                Err(e) => return Err(e),
+            let expected = r
+                .fingerprint
+                .as_deref()
+                .and_then(|f| f.strip_prefix("v2:"))
+                .and_then(|f| f.split(':').next())
+                .and_then(|s| s.parse::<u64>().ok());
+            if expected.is_some_and(|size| {
+                std::fs::symlink_metadata(path).is_ok_and(|m| m.is_file() && m.len() == size)
+            }) {
+                r.before = Availability::Original;
             }
-        }
-        if r.before == Availability::Original
-            && r.original_blake3.is_none()
-            && let Some((snapshot, record)) = candidates.first()
-            && let Some(path) = record.payload_path(snapshot)?
-        {
-            r.original_blake3 = Some(hashed(&path)?);
         }
         // Posters are disposable renditions; record their absence explicitly
         // instead of turning a missing thumbnail into a missing original.
@@ -356,44 +446,37 @@ fn add(
     }
     Ok(())
 }
-/// One pass reads each file once: history entries repeat the same assets, and a
-/// payload can stand behind many references. Keyed by identity, so a file that
-/// changes during the pass is read again.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-enum Digest {
-    Blake3,
-    Fingerprint,
-}
-type DigestKey = (std::path::PathBuf, Digest, u64, i64, i64);
-thread_local! {
-    static DIGESTS: std::cell::RefCell<std::collections::HashMap<DigestKey, String>> =
-        Default::default();
-}
-fn digest(path: &Path, kind: Digest, compute: impl FnOnce() -> Result<String>) -> Result<String> {
-    use std::os::unix::fs::MetadataExt;
-    let m = std::fs::symlink_metadata(path)?;
-    let key = (path.to_owned(), kind, m.len(), m.mtime(), m.mtime_nsec());
-    if let Some(hit) = DIGESTS.with(|d| d.borrow().get(&key).cloned()) {
-        return Ok(hit);
+fn real_media_path(path: &Path) -> std::path::PathBuf {
+    match std::fs::symlink_metadata(path) {
+        Ok(m) if m.file_type().is_symlink() => path
+            .canonicalize()
+            .ok()
+            .filter(|real| real.is_file())
+            .unwrap_or_else(|| path.to_path_buf()),
+        _ => path.to_path_buf(),
     }
-    let value = compute()?;
-    DIGESTS.with(|d| d.borrow_mut().insert(key, value.clone()));
-    Ok(value)
 }
-fn hashed(path: &Path) -> Result<String> {
-    digest(path, Digest::Blake3, || Ok(disk::hash(path)?.0))
-}
-fn fingerprinted(path: &Path) -> Result<String> {
-    digest(path, Digest::Fingerprint, || {
-        migration::sampled_fingerprint(path)
-    })
-}
-fn matches_original(path: &Path, r: &Reference) -> Result<bool> {
-    if let Some(hash) = &r.original_blake3 {
-        return Ok(hashed(path)? == *hash);
+
+#[cfg(test)]
+mod projection_tests {
+    use super::*;
+    #[test]
+    fn projected_history_matches_full_replay_for_partial_assets_and_root_replacement() {
+        let parse = |text| pm_model::json::parse(text).unwrap();
+        let base = parse(
+            r#"{"assets":{"a":{"id":"a","storageKey":"old","sourcePath":"/old"}},"layers":[{"name":"layer"}]}"#,
+        );
+        let mut full = Some(base.clone());
+        let mut projected = Some(asset_state(&base));
+        for text in [
+            r#"[{"exists":true,"path":["layers",0,"name"],"value":"edited"},{"exists":true,"path":["assets","a","storageKey"],"value":"new"}]"#,
+            r#"[{"exists":true,"path":[],"value":{"assets":{"b":{"id":"b","sourcePath":"/b"}},"layers":[{}]}}]"#,
+            r#"[{"exists":false,"path":["assets","b"]}]"#,
+        ] {
+            let patches = parse(text);
+            legacy_apply_patches(&mut full, &patches);
+            legacy_apply_patches(&mut projected, &asset_patches(&patches));
+            assert_eq!(full.as_ref().map(asset_state), projected);
+        }
     }
-    if let Some(fp) = &r.fingerprint {
-        return Ok(fingerprinted(path)? == *fp);
-    }
-    Ok(false)
 }

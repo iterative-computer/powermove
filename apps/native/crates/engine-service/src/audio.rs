@@ -74,18 +74,29 @@ pub const WARM_IDLE: Duration = Duration::from_millis(100);
 /// speaker.
 pub const SIM_AUDIO_ENV: &str = "POWERMOVE_ENGINE_SIM_AUDIO";
 pub const SIM_LATENCY_US: u32 = 10_000;
+/// Diagnostic latency of the simulated device only. Physical devices keep
+/// their reported latency; no system audio setting is changed.
+pub const SIM_LATENCY_ENV: &str = "POWERMOVE_ENGINE_SIM_LATENCY_US";
+
+fn simulation_latency(value: Option<&str>) -> u32 {
+    value
+        .and_then(|v| v.parse::<u32>().ok())
+        .filter(|v| *v <= 1_000_000)
+        .unwrap_or(SIM_LATENCY_US)
+}
 
 /// A simulated output device on its own thread ([`SIM_AUDIO_ENV`]).
 struct SimDevice {
     stop: Arc<std::sync::atomic::AtomicBool>,
     thread: Option<JoinHandle<()>>,
+    latency_us: u32,
 }
 
 impl SimDevice {
     const RATE: u32 = 48_000;
     const BUFFER: usize = 512;
 
-    fn start(mut side: pm_audio::playback::DeviceSide) -> Self {
+    fn start(mut side: pm_audio::playback::DeviceSide, latency_us: u32) -> Self {
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let stopped = stop.clone();
         let thread = std::thread::Builder::new()
@@ -110,7 +121,11 @@ impl SimDevice {
                 }
             })
             .ok();
-        Self { stop, thread }
+        Self {
+            stop,
+            thread,
+            latency_us,
+        }
     }
 }
 
@@ -976,16 +991,17 @@ impl Control {
         let rate = pm_audio::mixer::project_sample_rate(&self.doc);
         let cache = SourceCache::new(SOURCE_BUDGET, DECODE_WORKERS);
         let started = if std::env::var(SIM_AUDIO_ENV).as_deref() == Ok("1") {
+            let latency_us = simulation_latency(std::env::var(SIM_LATENCY_ENV).ok().as_deref());
             Playback::start_headless(
                 MixFormat::stereo(rate),
                 cache,
                 PlaybackConfig::default(),
                 SimDevice::RATE,
                 2,
-                SIM_LATENCY_US,
+                latency_us,
             )
             .map(|(playback, side)| {
-                self.sim = Some(SimDevice::start(side));
+                self.sim = Some(SimDevice::start(side, latency_us));
                 playback
             })
         } else {
@@ -1006,7 +1022,7 @@ impl Control {
                 status.latency_us = playback
                     .device()
                     .map(|d| d.latency_us())
-                    .or(self.sim.as_ref().map(|_| SIM_LATENCY_US));
+                    .or(self.sim.as_ref().map(|sim| sim.latency_us));
                 status.error = None;
                 drop(status);
                 *self.clock.lock().unwrap_or_else(|e| e.into_inner()) =
@@ -1106,6 +1122,16 @@ mod tests {
     use pm_model::json::parse;
 
     use super::*;
+
+    #[test]
+    fn simulated_output_latency_defaults_and_stays_bounded() {
+        assert_eq!(simulation_latency(None), SIM_LATENCY_US);
+        assert_eq!(simulation_latency(Some("160000")), 160_000);
+        assert_eq!(simulation_latency(Some("0")), 0);
+        for value in ["-1", "garbage", "1000001", "4294967296"] {
+            assert_eq!(simulation_latency(Some(value)), SIM_LATENCY_US);
+        }
+    }
 
     fn write_wav(path: &Path, rate: u32, planar: &[Vec<f32>]) {
         let frames = planar[0].len();

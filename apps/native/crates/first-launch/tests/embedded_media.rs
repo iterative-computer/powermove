@@ -238,7 +238,7 @@ fn media_the_library_store_holds_are_read_from_the_store() {
         .clone();
     assert!(
         matches!(&item.source, pm_kernel::project_io::MediaSource::File { path, .. }
-            if path.starts_with(config.native_profile.join("Media Store/objects"))),
+            if path.starts_with(config.electron_profile.join("Media Store/objects"))),
         "{:?}",
         item.source
     );

@@ -119,8 +119,11 @@ pub(crate) fn projection(p: &Published, time: f64, settings: &Settings) -> Resul
     if kind == Kind::Spot {
         rows.push(json!({"id":"spread","label":"Spread","value":s.angle,"min":1,"max":89,"log":false,"tooltip":"How wide the spotlight’s beam is."}));
     }
-    if let Some(k) = l["d"]["data"]["light"]["p"]["color"]
+    // The colour is a plain value or a channel (`{"v": "#FFF3E2", …}`).
+    let color = &l["d"]["data"]["light"]["p"]["color"];
+    if let Some(k) = color
         .as_str()
+        .or(color["v"].as_str())
         .and_then(light_tool::kelvin_of)
     {
         rows.push(json!({"id":"temperature","label":"Temperature","value":k,"min":1800,"max":12000,"log":false,"unit":"K","tooltip":"Warm (low) to cool (high) light colour."}));

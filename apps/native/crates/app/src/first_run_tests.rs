@@ -206,7 +206,8 @@ fn outcomes_that_need_review_stop_on_the_summary() {
         &support.join("Powermove/onboarding-v1.json"),
         &json!({"version":1}),
     );
-    // A slot the index lists but the store can't load.
+    // A slot the index lists with nothing saved behind it: nothing was lost,
+    // so it reads as a note, not a warning.
     write(
         &support.join("Powermove/store/projects.json"),
         &json!([{"id":"p","name":"Synthetic project"},{"id":"gone","name":"Unreadable"}]),
@@ -216,8 +217,12 @@ fn outcomes_that_need_review_stop_on_the_summary() {
     let frame = flow.frame();
     titled(&frame, "Your Library Is Ready");
     assert_eq!(frame.rows.len(), 1);
-    assert_eq!(frame.rows[0].severity, Severity::Warning);
-    assert!(frame.rows[0].text.starts_with("1 project couldn’t be read"));
+    assert_eq!(frame.rows[0].severity, Severity::Note);
+    assert!(
+        frame.rows[0]
+            .text
+            .starts_with("1 project in the original app’s list had nothing saved")
+    );
     assert_eq!(flow.action("show_report"), vec![Effect::ShowReport]);
     assert_eq!(flow.action("open_native"), vec![Effect::Enter(None)]);
 }

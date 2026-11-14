@@ -306,6 +306,17 @@ impl TransportClock {
         self.wrap(self.unwrapped_at(at))
     }
 
+    /// The picture at host µs `at`. Before the run's first audible frame,
+    /// keep its starting picture: extrapolating a future audio anchor can
+    /// otherwise wrap a pre-roll time to the end of the work area.
+    pub fn picture_at(&self, at: i64) -> i64 {
+        if self.run_starts_at(at).is_some() {
+            self.wrap(self.run_start)
+        } else {
+            self.media_at(at)
+        }
+    }
+
     fn discontinuity(&mut self) {
         self.epoch = self.epoch.wrapping_add(1).max(1);
     }
@@ -560,6 +571,55 @@ mod tests {
             running.media_time.get(),
             30 * FRAME + TICKS_PER_SECOND / 5 - TICKS_PER_SECOND * 110 / 1000
         );
+    }
+
+    #[test]
+    fn pictures_before_an_audio_start_never_wrap_to_the_loop_end() {
+        let range = TickRange {
+            start: Ticks::ZERO,
+            end: Ticks::from_whole_seconds(3),
+        };
+        for latency in [20_000, 160_000] {
+            for from in [0, TICKS_PER_SECOND] {
+                let mut clock = TransportClock::new(TICKS_PER_SECOND / 30);
+                clock.apply(TransportCommand::SetLoop { range: Some(range) }, 0);
+                clock.hold(from, 1_000_000);
+                let mut heard = audio(
+                    7,
+                    TransportState::Playing,
+                    1_000_000 + latency,
+                    from,
+                    Some(range),
+                );
+                heard.output_latency_us = latency as u32;
+                clock.follow(&heard);
+                for elapsed in (0..latency).step_by(1_000) {
+                    assert_eq!(
+                        clock.picture_at((1_000_000 + elapsed) as i64),
+                        from,
+                        "from {from}, latency {latency}, elapsed {elapsed}"
+                    );
+                }
+                let start = (1_000_000 + latency) as i64;
+                assert_eq!(clock.picture_at(start), from);
+                assert_eq!(
+                    clock.picture_at(start + 100_000),
+                    from + TICKS_PER_SECOND / 10
+                );
+                // The start fence must not prevent a later, real loop wrap.
+                assert_eq!(clock.picture_at(start + 3_000_000), from);
+            }
+        }
+    }
+
+    #[test]
+    fn reverse_pictures_wait_at_the_run_start_too() {
+        let mut clock = TransportClock::new(FRAME);
+        clock.hold(TICKS_PER_SECOND, 1_000_000);
+        clock.play_at(PlaybackRate { num: -1, den: 1 }, 1_000_000, 1_160_000);
+        assert_eq!(clock.picture_at(1_000_000), TICKS_PER_SECOND);
+        assert_eq!(clock.picture_at(1_160_000), TICKS_PER_SECOND);
+        assert_eq!(clock.picture_at(1_260_000), TICKS_PER_SECOND * 9 / 10);
     }
 
     #[test]

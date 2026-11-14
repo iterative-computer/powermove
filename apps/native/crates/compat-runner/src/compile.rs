@@ -2,7 +2,9 @@
 //! transformed on its own; V8 then links the graph with real ES module semantics,
 //! so nothing here reimplements scope hoisting. Source text never executes here.
 use crate::manifest;
-use pm_runtime_v8::{SvelteCompiler, SvelteUnit, module_imports, strip_typescript, wait_until};
+use pm_runtime_v8::{
+    RuntimePool, SvelteCompiler, SvelteUnit, module_imports, strip_typescript, wait_until,
+};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
@@ -91,11 +93,46 @@ fn normalize(path: &Path) -> PathBuf {
     out
 }
 
+/// The Svelte compiler, started on first use: a load whose extensions are all
+/// in the compile cache never starts or closes its realm.
+pub struct LazySvelte<'a> {
+    pool: &'a RuntimePool,
+    made: std::cell::OnceCell<Result<SvelteCompiler, String>>,
+}
+impl<'a> LazySvelte<'a> {
+    pub fn new(pool: &'a RuntimePool) -> Self {
+        Self {
+            pool,
+            made: std::cell::OnceCell::new(),
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn started(&self) -> bool {
+        self.made.get().is_some()
+    }
+    fn get(&self) -> Result<&SvelteCompiler, String> {
+        self.made
+            .get_or_init(|| {
+                SvelteCompiler::new(self.pool, 256 * 1024 * 1024, 8 * 1024 * 1024)
+                    .map_err(|e| format!("Extensions could not compile: {e}"))
+            })
+            .as_ref()
+            .map_err(Clone::clone)
+    }
+}
+impl Drop for LazySvelte<'_> {
+    fn drop(&mut self) {
+        if let Some(Ok(compiler)) = self.made.get() {
+            compiler.realm().close();
+        }
+    }
+}
+
 struct Sources<'a> {
     /// A v4 surface extension: JSX, and the published `powermove/*` modules.
     surface: bool,
     root: PathBuf,
-    svelte: &'a SvelteCompiler,
+    svelte: &'a LazySvelte<'a>,
     seen: BTreeMap<PathBuf, String>,
     bytes: usize,
     graph: ModuleGraph,
@@ -154,6 +191,7 @@ impl Sources<'_> {
         let filename = file.to_string_lossy();
         let mut ticket = self
             .svelte
+            .get()?
             .compile(source, &filename, unit)
             .map_err(|e| e.to_string())?;
         let result = wait_until(&mut ticket, Instant::now() + Duration::from_secs(60))
@@ -300,7 +338,7 @@ pub fn compile(
     directory: &Path,
     entry: &str,
     api_version: u64,
-    svelte: &SvelteCompiler,
+    svelte: &LazySvelte,
     cache: Option<&Path>,
 ) -> Result<ModuleGraph, String> {
     let root = fs::canonicalize(directory).map_err(|e| e.to_string())?;

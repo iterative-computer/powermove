@@ -562,6 +562,11 @@ impl Drop for SessionGuard<'_> {
                     .is_none_or(|l| l.is_empty());
             if zero || svc.decoders_over() {
                 s.clear_window();
+                // Returned window buffers are free pool storage now. Release
+                // those before deciding the decoder itself cannot fit: closing
+                // a warm decoder to reclaim reusable free buffers forces the
+                // next playing frame to open and seek all over again.
+                svc.trim_free();
                 if !keep && (zero || svc.decoders_over()) {
                     drop(s);
                     svc.open_sessions.fetch_sub(1, Ordering::Relaxed);

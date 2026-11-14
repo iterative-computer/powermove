@@ -1780,6 +1780,9 @@ impl Engine {
                     t.render_cpu_ms = crate::trace::thread_cpu_ms() - cpu_start;
                     if let Some(work) = work {
                         t.work = pm_perf::snapshot().since(&work);
+                        if let Ok(rendered) = &rendered {
+                            t.source_stand_ins = rendered.stand_ins.clone();
+                        }
                     }
                     t.images_over = self.renderer.image_over_budget();
                 }
@@ -1894,6 +1897,13 @@ impl Engine {
                 self.mastering.with_peaks(v.source_peak, v.mastering_peak)
             })
             .params()?;
+        // What the delivery holds, for the range overlay: an HDR project's
+        // master in Rec. 2020, or SDR white in Rec. 709 (an SDR project, or
+        // an HDR project's SDR view, whose picture is already toned).
+        params.range = match hdr {
+            Some(v) if params.output[0] != 3. => [v.mastering_peak / 203., 1.],
+            _ => [1., 0.],
+        };
         params.reduced = u32::from(size != Size::new(output.width, output.height));
         params.whole = u32::from(whole);
         params.drawable = [output.width as f32, output.height as f32];
@@ -2033,6 +2043,22 @@ impl Engine {
         }
         self.pool
             .retain(|s| s.size == size || Arc::strong_count(s) > 1);
+        // The half-grant bound covers the output surfaces in flight too,
+        // including frames with stand-ins (which never enter `self.cache`).
+        // Keeping a full cache beside those surfaces starved video decode
+        // at large preview sizes and reopened its decoder on every frame.
+        while self.pool.iter().filter(|s| s.size == size).count() >= capacity
+            && !self
+                .pool
+                .iter()
+                .any(|s| s.size == size && Arc::strong_count(s) == 1)
+        {
+            if self.cache.pop_front().is_none() {
+                // Only pinned surfaces remain. A frame in flight cannot be
+                // reclaimed; the existing eleven-surface bound still applies.
+                break;
+            }
+        }
         let free = self
             .pool
             .iter()
@@ -3121,6 +3147,66 @@ mod lifetime_tests {
 }
 
 #[cfg(test)]
+mod playback_pool_tests {
+    use super::*;
+
+    #[test]
+    fn in_flight_stand_ins_share_the_output_cache_allowance() {
+        let mut engine =
+            Engine::without_definitions(Gpu::new("playback-output-pool").unwrap(), None).unwrap();
+        let size = Size::new(1920, 1080);
+        let bytes = u64::from(size.width) * u64::from(size.height) * 8;
+        let capacity =
+            (FRAME_CACHE_BYTES.min(engine.memory_client.grant() / 2) / bytes).clamp(1, 8) as usize;
+        let project = pm_model::json::parse(r##"{"id":"P","compId":"C","w":1920,"h":1080,"fps":30,"dur":2,"layers":[],"comps":{},"assets":{}}"##).unwrap();
+        let scene = Scene {
+            doc: Arc::new(pm_model::Document::new(
+                Some(pm_model::canonical::canonical_project(project)),
+                1,
+            )),
+            comp: "C".into(),
+            media: Arc::default(),
+            content: 1,
+        };
+        let spec = FrameSpec::exact(
+            Ticks::ZERO,
+            Output {
+                width: size.width,
+                height: size.height,
+                display: 0,
+                headroom: 1.,
+                crop: None,
+            },
+        );
+        let mut key = engine.cache_key(&scene, &spec, size);
+        let mut flights = VecDeque::new();
+        for n in 0..32 {
+            if flights.len() == 3 {
+                flights.pop_front();
+            }
+            let surface = engine.cache_surface(size).unwrap();
+            if n % 2 == 0 {
+                key.time = n;
+                engine.cache.push_back(CachedFrame {
+                    key,
+                    composition: scene.comp.clone(),
+                    surface: surface.clone(),
+                    failures: Arc::default(),
+                });
+            }
+            // Alternate exact cached pictures and uncached stand-ins, with
+            // the same three in-flight references the playing viewer holds.
+            flights.push_back(surface);
+            assert!(
+                engine.pool.len() <= capacity.max(3),
+                "frame {n}: {} surfaces for an allowance of {capacity}",
+                engine.pool.len()
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod paused_media_tests {
     use super::*;
     /// A 64 × 64 composition showing 480 px of 3-px stripes at 6.25 %.
@@ -3362,13 +3448,23 @@ mod viewer_output_tests {
                 {"id":"a","color":"#000000","position":0},{"id":"b","color":"#FFFFFF","position":100}]},"##;
         let scene = columns_in(2, 16., project);
         let (w, h) = (64u32, 36u32);
-        let spec = FrameSpec::exact(Ticks::ZERO, Output { headroom: 4., ..output(w, h) });
+        let spec = FrameSpec::exact(
+            Ticks::ZERO,
+            Output {
+                headroom: 4.,
+                ..output(w, h)
+            },
+        );
         let content = pm_render::media::hdr_content(&scene.doc, &scene.comp, scene.media.as_ref());
         let delivered = |engine: &mut Engine, hdr: bool| {
             let tone = pm_render::OutputTone::for_target(content.peak_nits as f32, 300., hdr);
-            let rgba = engine.export_toned(&scene, Ticks::ZERO, Size::new(w, h), tone).unwrap();
+            let rgba = engine
+                .export_toned(&scene, Ticks::ZERO, Size::new(w, h), tone)
+                .unwrap();
             rgba.chunks_exact(4)
-                .map(|p| [p[0], p[1], p[2]].map(|v| f64::from(pm_color::transfer::display_decode_f32(v))))
+                .map(|p| {
+                    [p[0], p[1], p[2]].map(|v| f64::from(pm_color::transfer::display_decode_f32(v)))
+                })
                 .collect::<Vec<_>>()
         };
         let to_709 = pm_color::primaries::conversion(
@@ -3377,9 +3473,18 @@ mod viewer_output_tests {
         )
         .unwrap();
         let shown = |engine: &mut Engine, mastering| {
+            // As the viewer draws: the view's tone taken for the scene first.
             engine.mastering = mastering;
+            engine.sync_tone(&scene);
             let sub = engine
-                .frame(&scene, spec, None, &Default::default(), true, Arc::default())
+                .frame(
+                    &scene,
+                    spec,
+                    None,
+                    &Default::default(),
+                    true,
+                    Arc::default(),
+                )
                 .unwrap()
                 .unwrap();
             sub.commit();
@@ -3416,6 +3521,51 @@ mod viewer_output_tests {
         assert!(d < 2e-3, "EDR view {d:e}");
         let lit = hdr_file[(h as usize / 2) * w as usize + 8];
         eprintln!("a pushed column in the PQ delivery's frame: {lit:?} (1.0 = 203 cd/m²)");
+    }
+    /// The range overlay tints what the delivery cannot hold: white pushed a
+    /// stop in an SDR project is over SDR white (magenta); the same light in
+    /// an HDR project's SDR view is toned within white first, so nothing is
+    /// tinted. The picture a capture reads is never tinted.
+    #[test]
+    fn the_range_overlay_tints_what_the_delivery_cannot_hold() {
+        let mut engine = Engine::new(Gpu::new("range-overlay-test").unwrap()).unwrap();
+        let spec = FrameSpec::exact(Ticks::ZERO, output(64, 36));
+        let overlay =
+            crate::OverlayGeometry::lossy([]).with_channels(crate::Channels::RangeOverlay);
+        let (captured, shown) = draw_with(
+            &mut engine,
+            &columns(1, 64.),
+            spec,
+            Mastering::LinearP3,
+            &overlay,
+        );
+        let shown = shown.expect("the presented picture");
+        assert!(
+            shown[0] > shown[1] * 1.5 && shown[2] > shown[1] * 1.5,
+            "over white is tinted magenta: {shown:?}"
+        );
+        assert!(
+            captured.iter().all(|c| *c > 1.5),
+            "a capture is the engine's frame: {captured:?}"
+        );
+        // As the viewer draws: the view's tone taken for the scene first.
+        // Another scene for the engine (its own content counter).
+        let hdr = Scene {
+            content: 2,
+            ..hdr_columns()
+        };
+        engine.mastering = Mastering::LinearP3;
+        engine.sync_tone(&hdr);
+        assert!(
+            engine.output_tone.is_some(),
+            "the SDR view of an HDR project is toned"
+        );
+        let (_, toned) = draw_with(&mut engine, &hdr, spec, Mastering::LinearP3, &overlay);
+        let toned = toned.expect("the presented picture");
+        assert!(
+            (toned[0] - toned[1]).abs() < 0.01 && (toned[2] - toned[1]).abs() < 0.01,
+            "the SDR view of an HDR project holds its toned white: {toned:?}"
+        );
     }
     /// The trace's picture hash reads the picture presented, as stored: in
     /// an SDR view that is the clipped picture on screen, not the engine's

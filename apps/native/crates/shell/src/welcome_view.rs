@@ -354,9 +354,12 @@ impl Render for WelcomeView {
                     Severity::Danger => c.danger,
                     Severity::Note => c.secondary,
                 };
+                // Long lines wrap inside the card at any width: the text may
+                // shrink below its natural width, the symbol stays on line one.
                 card = card.child(
                     div()
                         .flex()
+                        .items_start()
                         .gap(px(m.gap))
                         .p(px(m.inset))
                         .text_size(px(t.typography.body))
@@ -367,7 +370,13 @@ impl Render for WelcomeView {
                             tone,
                             window,
                         )))
-                        .child(div().text_color(rgb(c.text)).child(row.text.clone())),
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .text_color(rgb(c.text))
+                                .child(row.text.clone()),
+                        ),
                 );
             }
             content = content.child(card);
