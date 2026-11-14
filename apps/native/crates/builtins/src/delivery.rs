@@ -776,7 +776,7 @@ type ProbeKey = (PathBuf, String, (u64, i64, i64, u64));
 /// decode, so one file is probed once however many revisions observe it.
 #[derive(Default)]
 pub struct MediaProbes {
-    results: Mutex<HashMap<ProbeKey, Result<(), String>>>,
+    results: Mutex<HashMap<ProbeKey, Result<Option<String>, String>>>,
     runs: AtomicU64,
 }
 impl MediaProbes {
@@ -785,7 +785,7 @@ impl MediaProbes {
         self.runs.load(Ordering::Relaxed)
     }
     #[cfg(target_os = "macos")]
-    fn result(&self, path: &Path, kind: &str) -> Result<(), String> {
+    fn result(&self, path: &Path, kind: &str) -> Result<Option<String>, String> {
         use std::os::unix::fs::MetadataExt;
         let metadata = std::fs::metadata(path).map_err(|e| e.to_string())?;
         let key = (
@@ -802,7 +802,7 @@ impl MediaProbes {
             return known.clone();
         }
         self.runs.fetch_add(1, Ordering::Relaxed);
-        let result = probe_media(path, kind);
+        let result = probe_media_hdr(path, kind);
         let mut results = self.results.shared();
         if results.len() >= 16_384 {
             results.clear();
@@ -812,6 +812,11 @@ impl MediaProbes {
     }
 }
 pub(crate) fn probe_media(path: &Path, kind: &str) -> Result<(), String> {
+    probe_media_hdr(path, kind).map(|_| ())
+}
+/// [`probe_media`], with what a video's light is when it is HDR ("HLG",
+/// "HDR10", "Dolby Vision 8.4"), for the Project panel.
+pub(crate) fn probe_media_hdr(path: &Path, kind: &str) -> Result<Option<String>, String> {
     // A sequence read in place is ready when its first file on disk reads
     // as a still (each frame is checked again when it is drawn).
     if kind == "video"
@@ -821,13 +826,15 @@ pub(crate) fn probe_media(path: &Path, kind: &str) -> Result<(), String> {
             .map(|n| sequence.file(n))
             .find(|f| f.is_file())
             .ok_or("No file of the image sequence is in its folder")?;
-        return probe_media(&first, "image");
+        return probe_media(&first, "image").map(|_| None);
     }
     match kind {
-        "image" => pm_render::media::probe_image(path).map_err(|issue| match issue {
-            pm_render::media::ProbeIssue::Unreadable(message) => message,
-            pm_render::media::ProbeIssue::Unsupported(feature) => feature.to_string(),
-        }),
+        "image" => pm_render::media::probe_image(path)
+            .map(|_| None)
+            .map_err(|issue| match issue {
+                pm_render::media::ProbeIssue::Unreadable(message) => message,
+                pm_render::media::ProbeIssue::Unsupported(feature) => feature.to_string(),
+            }),
         #[cfg(not(target_os = "macos"))]
         "video" => Err("Video decoding needs macOS".into()),
         #[cfg(target_os = "macos")]
@@ -845,13 +852,19 @@ pub(crate) fn probe_media(path: &Path, kind: &str) -> Result<(), String> {
                 .session(&source, 0, pm_media::vt::DecodePurpose::Display)
                 .map_err(|e| e.to_string())?;
             // Indexing alone cannot prove that an original decodes.
-            decoder.frame(0).map(|_| ()).map_err(|e| e.to_string())
+            decoder.frame(0).map_err(|e| e.to_string())?;
+            Ok(source
+                .probe
+                .video
+                .as_ref()
+                .and_then(|v| v.color.hdr.as_ref())
+                .map(|hdr| hdr.label()))
         }),
         _ => {
             let cache = pm_audio::SourceCache::new(1024 * 1024, 1);
             cache
                 .open(path, None)
-                .and_then(|source| cache.block(&source, 0, true).map(|_| ()))
+                .and_then(|source| cache.block(&source, 0, true).map(|_| None))
                 .map_err(|e| e.to_string())
         }
     }
@@ -871,6 +884,7 @@ pub fn observe_media(
     let catalog = Catalog::new(project.into(), snapshot.clone())
         .map_err(|_| "The project's media could not be read")?;
     let mut states = BTreeMap::new();
+    let mut hdrs = BTreeMap::new();
     for (id, asset) in &catalog.assets {
         let availability = match originals.get(id) {
             None => Availability::Offline,
@@ -889,7 +903,10 @@ pub fn observe_media(
                     continue;
                 }
                 match probes.result(path, &asset.kind) {
-                    Ok(()) => Availability::Ready,
+                    Ok(hdr) => {
+                        hdrs.insert(id.clone(), hdr);
+                        Availability::Ready
+                    }
                     Err(e) => Availability::Failed(e),
                 }
             }
@@ -903,6 +920,7 @@ pub fn observe_media(
                 } else {
                     ProxyStatus::Absent
                 },
+                hdr: hdrs.remove(id).flatten(),
                 ..Default::default()
             },
         );
@@ -932,6 +950,78 @@ mod probe_tests {
         std::fs::write(&file, b"replaced bytes").unwrap();
         observe_media("p", &snapshot, &originals, &BTreeMap::new(), &probes).unwrap();
         assert_eq!(probes.runs(), 2, "a changed file is decoded again");
+    }
+
+    /// An HDR video says what its light is in the Project panel: an HLG
+    /// HEVC file with Dolby Vision 8.4 (as an iPhone or an HLG export writes
+    /// it), the same picture without it, and an SDR file saying nothing.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_hdr_video_says_what_its_light_is() {
+        use pm_export::*;
+        let directory = tempfile::tempdir().unwrap();
+        let write = |name: &str, tags: ColorTags| {
+            let path = directory.path().join(name);
+            let mut job = export(ExportSpec {
+                width: 320,
+                height: 180,
+                rate: pm_time::Rate::new(24, 1).unwrap(),
+                frames: 4,
+                codec: Codec::Hevc {
+                    bitrate_bps: 4_000_000,
+                    ten_bit: true,
+                },
+                container: Container::Mov,
+                tags,
+                alpha: AlphaOutput::None,
+                working: WorkingEncoding::Standard,
+                dither: Dither::Off,
+                audio: None,
+                timecode: None,
+                destination: path.clone(),
+                overwrite: Overwrite::Replace,
+                mode: None,
+            })
+            .unwrap();
+            let rgba = [0.4f32, 0.5, 0.6, 1.0].repeat(320 * 180);
+            for _ in 0..4 {
+                job.push_frame(&pm_export::convert::WorkingFrame {
+                    width: 320,
+                    height: 180,
+                    rgba: &rgba,
+                })
+                .unwrap();
+            }
+            job.finish().unwrap();
+            path
+        };
+        let hlg = |dolby_vision| ColorTags::Rec2100Hlg {
+            white_nits: 203,
+            peak_nits: 1000,
+            metadata: None,
+            dolby_vision,
+        };
+        let originals = BTreeMap::from([
+            ("dv".to_owned(), write("dv.mov", hlg(true))),
+            ("hlg".to_owned(), write("hlg.mov", hlg(false))),
+            ("sdr".to_owned(), write("sdr.mov", ColorTags::Rec709QuickTime)),
+        ]);
+        let project = pm_model::json::parse(
+            r##"{"id":"p","name":"Synthetic","compId":"c","w":64,"h":36,"fps":30,"dur":1,"bg":"#000000","assets":{"dv":{"name":"dv.mov","kind":"video"},"hlg":{"name":"hlg.mov","kind":"video"},"sdr":{"name":"sdr.mov","kind":"video"}},"comps":{},"layers":[]}"##,
+        )
+        .unwrap();
+        let snapshot = pm_kernel::DocumentStore::new_untitled(project).snapshot();
+        let stamp = pm_panel_media::Catalog::new("p".into(), snapshot.clone())
+            .unwrap()
+            .stamp;
+        let observed =
+            observe_media("p", &snapshot, &originals, &BTreeMap::new(), &MediaProbes::default())
+                .unwrap();
+        use pm_panel_media::MediaRuntime;
+        let hdr = |id: &str| observed.state(&stamp, id).hdr;
+        assert_eq!(hdr("dv").as_deref(), Some("Dolby Vision 8.4"));
+        assert_eq!(hdr("hlg").as_deref(), Some("HLG"));
+        assert_eq!(hdr("sdr"), None);
     }
 
     /// A LUT asset (Apply LUT…, an agent's import) is ready when its file is

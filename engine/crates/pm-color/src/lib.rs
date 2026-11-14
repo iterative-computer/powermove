@@ -29,6 +29,7 @@
 pub mod alpha;
 pub mod camera_log;
 pub mod cdl;
+pub mod cst;
 pub mod chroma;
 pub mod cicp;
 pub mod delivery;

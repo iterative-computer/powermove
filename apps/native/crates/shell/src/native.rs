@@ -1804,6 +1804,135 @@ impl ToolbarDelegate {
     }
 }
 
+/// The toolbar Agent item's state (agent-panel.md §1, v1 launcher status):
+/// idle, working (an accent ring turns around the glyph) or needing an
+/// answer (an accent dot; it wins over the ring), with background runs.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AgentStatus {
+    pub working: bool,
+    pub attention: bool,
+    /// `m:ss` of the run in view, for the tooltip.
+    pub elapsed: Option<String>,
+    pub background: usize,
+}
+impl AgentStatus {
+    pub fn tooltip(&self) -> String {
+        if self.attention {
+            "Agent needs your answer".into()
+        } else if self.working {
+            match &self.elapsed {
+                Some(e) => format!("Agent is working · {e}"),
+                None => "Agent is working".into(),
+            }
+        } else {
+            "Ask the Agent".into()
+        }
+    }
+}
+/// The Agent item's glyph: the toolbar symbol in accent ink with a three-
+/// quarter ring at `turn` (working), or with a dot at its top trailing
+/// corner (attention). Idle is the plain template symbol.
+fn agent_toolbar_image(status: &AgentStatus, turn: f64, t: &Tokens) -> Retained<NSImage> {
+    let glyph = toolbar_symbol("sparkles", "Agent", t);
+    if !status.working && !status.attention {
+        return glyph;
+    }
+    let size = t.metrics.symbol_toolbar as f64 + 8.;
+    let accent = t.colors.accent;
+    let (working, attention) = (status.working && !status.attention, status.attention);
+    let dot = t.metrics.status_dot as f64;
+    let draw = block2::RcBlock::new(move |rect: NSRect| -> objc2::runtime::Bool {
+        let inner = glyph.size();
+        let at = NSRect::new(
+            NSPoint::new(
+                (rect.size.width - inner.width) / 2.,
+                (rect.size.height - inner.height) / 2.,
+            ),
+            inner,
+        );
+        glyph.drawInRect(at);
+        // The glyph in accent ink.
+        native_color(accent).set();
+        NSRectFillUsingOperation(at, NSCompositingOperation::SourceAtop);
+        if working {
+            let path = NSBezierPath::bezierPath();
+            let centre = NSPoint::new(rect.size.width / 2., rect.size.height / 2.);
+            let start = 90. - turn * 360.;
+            path.appendBezierPathWithArcWithCenter_radius_startAngle_endAngle_clockwise(
+                centre,
+                rect.size.width / 2. - 1.,
+                start,
+                start - 270.,
+                true,
+            );
+            path.setLineWidth(1.5);
+            native_color(accent).setStroke();
+            path.stroke();
+        }
+        if attention {
+            let r = NSRect::new(
+                NSPoint::new(rect.size.width - dot, rect.size.height - dot),
+                NSSize::new(dot, dot),
+            );
+            native_color(accent).setFill();
+            NSBezierPath::bezierPathWithOvalInRect(r).fill();
+        }
+        objc2::runtime::Bool::YES
+    });
+    let image =
+        NSImage::imageWithSize_flipped_drawingHandler(NSSize::new(size, size), false, &draw);
+    image.setAccessibilityDescription(Some(&NSString::from_str("Agent")));
+    image
+}
+impl Host {
+    /// Shows the agent's state on the toolbar's Agent item: its glyph (a
+    /// turning ring while working, still under Reduce Motion; a dot when it
+    /// needs an answer) and its tooltip.
+    pub fn set_agent_status(&mut self, status: AgentStatus) {
+        if status == self.agent_status {
+            return;
+        }
+        let Some(item) = self
+            ._toolbar
+            .items()
+            .iter()
+            .find(|i| i.itemIdentifier().to_string() == "agent")
+        else {
+            return;
+        };
+        let tokens = self.tokens.clone();
+        item.setToolTip(Some(&NSString::from_str(&status.tooltip())));
+        let turning = status.working && !status.attention && !tokens.accessibility.reduce_motion;
+        if !turning {
+            if let Some(timer) = self.agent_timer.take() {
+                timer.invalidate();
+            }
+            item.setImage(Some(&agent_toolbar_image(&status, 0., &tokens)));
+        } else if self.agent_timer.is_none() {
+            let started = std::time::Instant::now();
+            let shown = status.clone();
+            let item = item.clone();
+            let step =
+                block2::RcBlock::new(move |_: std::ptr::NonNull<objc2_foundation::NSTimer>| {
+                    let turn = started.elapsed().as_secs_f64() % 1.;
+                    item.setImage(Some(&agent_toolbar_image(&shown, turn, &tokens)));
+                });
+            let timer = unsafe {
+                objc2_foundation::NSTimer::timerWithTimeInterval_repeats_block(
+                    1. / 30.,
+                    true,
+                    &step,
+                )
+            };
+            unsafe {
+                objc2_foundation::NSRunLoop::mainRunLoop()
+                    .addTimer_forMode(&timer, objc2_foundation::NSRunLoopCommonModes);
+            }
+            self.agent_timer = Some(timer);
+        }
+        self.agent_status = status;
+    }
+}
 /// Toolbar subtitle for a document: `Saving…` while a save runs, else
 /// `Edited` when there are unsaved changes, else nothing.
 pub fn document_subtitle(edited: bool, saving: bool) -> &'static str {
@@ -1898,6 +2027,10 @@ pub struct Host {
     /// Last published viewer geometry (`Some(None)` = hidden); `None` before the first frame.
     last_geometry: Option<Option<SlotGeometry>>,
     _toolbar: Retained<NSToolbar>,
+    /// What the toolbar's Agent item shows, and the timer that turns its
+    /// working ring.
+    agent_status: AgentStatus,
+    agent_timer: Option<Retained<objc2_foundation::NSTimer>>,
     _delegate: Retained<ToolbarDelegate>,
     _target: Retained<Target>,
     observer: Option<Retained<ProtocolObject<dyn NSObjectProtocol>>>,
@@ -2083,6 +2216,8 @@ impl Host {
             viewer_crop: Rc::new(Cell::new(None)),
             last_geometry: None,
             _toolbar: toolbar,
+            agent_status: AgentStatus::default(),
+            agent_timer: None,
             _delegate: delegate,
             _target: target,
             observer: None,
@@ -3809,8 +3944,12 @@ impl Host {
     /// the control at `anchor` (this window's GPUI points), `page` rows at a
     /// time with the search narrowing the rest; `dismiss` is sent if it
     /// closes with nothing chosen.
+    /// Opens the field menu under `anchor` (in `owner`'s content points, the
+    /// editor window's when `None`). It belongs to that window: it stands
+    /// above it (the Agent popover's own menus) and gives it focus back.
     pub fn open_menu(
         &mut self,
+        owner: Option<Retained<NSWindow>>,
         choices: Vec<Choice>,
         anchor: Option<crate::layout::Rect>,
         page: Option<usize>,
@@ -3823,9 +3962,13 @@ impl Host {
         if self.fields.borrow().model.open {
             self.fields.borrow_mut().hide();
         }
-        let h = self.content.bounds().size.height;
-        let anchor = anchor.map(|r| self.window.convertRectToScreen(rect(r, h)));
+        let owner = owner.unwrap_or_else(|| self.window.clone());
+        let h = owner
+            .contentView()
+            .map_or(0., |content| content.bounds().size.height);
+        let anchor = anchor.map(|r| owner.convertRectToScreen(rect(r, h)));
         let mut p = self.fields.borrow_mut();
+        p.parent = owner;
         p.model.choices = choices;
         (p.anchor, p.model.page, p.dismiss) = (anchor, page, dismiss);
         p.search
@@ -5208,13 +5351,20 @@ impl Popup {
             self.window.clone(),
             self.previous.clone(),
         );
+        // Only while the app is active (P-CHILD): making a window key in an
+        // inactive app marks it active for a moment, and the next menu then
+        // ordered itself in as a real child that hid with its window.
         let restore = block2::RcBlock::new(move || {
             let app = NSApplication::sharedApplication(MainThreadMarker::new().unwrap());
             let another_window = app.keyWindow().is_some_and(|key| {
                 key.windowNumber() != popup.windowNumber()
                     && key.windowNumber() != parent.windowNumber()
             });
-            if !another_window && parent.isVisible() && parent.attachedSheet().is_none() {
+            if app.isActive()
+                && !another_window
+                && parent.isVisible()
+                && parent.attachedSheet().is_none()
+            {
                 parent.makeKeyWindow();
                 parent.makeFirstResponder(previous.as_deref());
             }
@@ -5915,5 +6065,24 @@ mod tab_layout_tests {
     #[test]
     fn one_tab_in_no_room_is_still_a_tab() {
         assert_eq!(tab_layout(&[150.], 0, 10.), (0, vec![TAB_MIN], false));
+    }
+}
+#[cfg(test)]
+mod agent_status_tests {
+    use super::AgentStatus;
+    #[test]
+    fn the_agent_item_says_what_the_agent_is_doing_and_attention_wins() {
+        assert_eq!(AgentStatus::default().tooltip(), "Ask the Agent");
+        let working = AgentStatus {
+            working: true,
+            elapsed: Some("1:04".into()),
+            ..Default::default()
+        };
+        assert_eq!(working.tooltip(), "Agent is working · 1:04");
+        let asking = AgentStatus {
+            attention: true,
+            ..working
+        };
+        assert_eq!(asking.tooltip(), "Agent needs your answer");
     }
 }

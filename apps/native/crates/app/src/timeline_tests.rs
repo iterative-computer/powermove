@@ -24,6 +24,8 @@ pub(crate) struct Recorder {
     /// The kernel the layer menu reads its rows from.
     pub published: RefCell<Option<pm_kernel::KernelHandle>>,
     pub skimming: std::cell::Cell<bool>,
+    /// How often the panel said the time under it moved (scroll, zoom, size).
+    pub moved: std::cell::Cell<usize>,
 }
 pub(crate) struct Recording(pub Rc<Recorder>);
 impl Delegate for Recording {
@@ -42,6 +44,9 @@ impl Delegate for Recording {
     }
     fn skim(&self, seconds: Option<f64>, _: &mut App) {
         self.0.skims.borrow_mut().push(seconds);
+    }
+    fn view_moved(&self, _: &mut App) {
+        self.0.moved.set(self.0.moved.get() + 1);
     }
     fn skimming(&self, _: &App) -> bool {
         self.0.skimming.get()
@@ -1014,6 +1019,11 @@ fn the_time_field_seeks_to_typed_timecode(cx: &mut TestAppContext) {
         .view
         .read_with(&s.vcx, |v, _| v.cancellable_field())
         .expect("time field");
+    // The native timecode layer steps aside only while the field is open.
+    assert!(
+        s.view
+            .read_with(&s.vcx, |v, _| v.field_open("timeline:time"))
+    );
     s.view.update(&mut s.vcx, |v, cx| {
         v.change(field, serde_json::json!("2:15"), cx)
     });
@@ -1026,6 +1036,10 @@ fn the_time_field_seeks_to_typed_timecode(cx: &mut TestAppContext) {
         s.view
             .read_with(&s.vcx, |v, _| v.cancellable_field())
             .is_none()
+    );
+    assert!(
+        !s.view
+            .read_with(&s.vcx, |v, _| v.field_open("timeline:time"))
     );
 }
 #[gpui::test]
@@ -1163,6 +1177,33 @@ fn a_wheel_burst_writes_the_view_once_it_rests(cx: &mut TestAppContext) {
         .advance_clock(crate::gizmo::NAVIGATION_IDLE * 2);
     s.idle(cx);
     assert_eq!(stored(&s), Some(shown));
+}
+/// The playhead is a native layer GPUI never repaints: paused, a scroll is
+/// the only thing that moves the time under it, so the panel must say so or
+/// the head stays put on screen while the ruler slides beneath it.
+#[gpui::test]
+fn scrolling_paused_tells_the_app_to_place_the_playhead_again(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    let at = s.at(0, 1.);
+    s.idle(cx);
+    let before = s.recorder.moved.get();
+    s.vcx.simulate_event(ScrollWheelEvent {
+        position: at,
+        delta: ScrollDelta::Pixels(point(px(-120.), px(0.))),
+        modifiers: Modifiers::none(),
+        ..Default::default()
+    });
+    s.idle(cx);
+    assert!(s.surface.read_with(&s.vcx, |t, _| t.scroll_time()) > 0.);
+    assert!(
+        s.recorder.moved.get() > before,
+        "the scroll reached the playhead"
+    );
+    // A repaint that moves nothing asks for nothing.
+    let settled = s.recorder.moved.get();
+    s.surface.update(&mut s.vcx, |_, cx| cx.notify());
+    s.idle(cx);
+    assert_eq!(s.recorder.moved.get(), settled);
 }
 #[gpui::test]
 fn right_click_runs_a_native_menu_action_on_the_kernel(cx: &mut TestAppContext) {

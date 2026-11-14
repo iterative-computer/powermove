@@ -153,6 +153,26 @@ pub enum HdrFormat {
     },
 }
 
+/// The name the app gives Dolby Vision metadata: factual wording only, no
+/// mark or logo, in one place so it can change.
+pub const DOLBY_VISION: &str = "Dolby Vision";
+
+impl HdrFormat {
+    /// What a clip is, in a few words ("HLG", "HDR10",
+    /// "Dolby Vision 8.4").
+    pub fn label(&self) -> String {
+        match self {
+            HdrFormat::Hdr10 => "HDR10".into(),
+            HdrFormat::Hlg => "HLG".into(),
+            HdrFormat::DolbyVision {
+                profile,
+                base_compatibility,
+                ..
+            } => format!("{DOLBY_VISION} {profile}.{base_compatibility}"),
+        }
+    }
+}
+
 /// The color section of a probe.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]

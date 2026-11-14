@@ -42,3 +42,11 @@ test("Changed exposes warning detail and locate without inventing readiness", ()
     "Delete Media",
   ]);
 });
+test("an HDR video's row says what its light is, after its format", () => {
+  const row = asset("a", "Ready");
+  if (!("Asset" in row.data)) throw new Error("asset row");
+  const plain = meta(row);
+  row.data.Asset[1].hdr = "Dolby Vision 8.4";
+  const [format, ...rest] = plain.split(" · ");
+  expect(meta(row)).toBe([format, "Dolby Vision 8.4", ...rest].join(" · "));
+});

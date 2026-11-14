@@ -856,6 +856,104 @@ impl Builtins {
         link.publish_now();
         Ok(())
     }
+    /// The toolbar Agent item's facts: a run going (in view or behind),
+    /// a question or approval waiting, the run in view's time, and how many
+    /// threads run behind the one in view.
+    pub fn agent_status(&self) -> (bool, bool, Option<u64>, usize) {
+        let Ok((agent, _)) = self.agent_state() else {
+            return (false, false, None, 0);
+        };
+        let state = agent.shared();
+        let panel = &state.panel;
+        let Ok(session) = panel.session(panel.active_id()) else {
+            return (false, false, None, 0);
+        };
+        let background = panel.background_runs();
+        (
+            session.run.is_some() || background > 0,
+            session.needs_answer(),
+            session.elapsed_ms(agent_host::now_ms()),
+            background,
+        )
+    }
+    /// The agent panel's state and link, for an answer the window gives.
+    fn agent_state(
+        &self,
+    ) -> std::result::Result<(agent_host::SharedAgent, Arc<agent_host::AgentLink>), String> {
+        let backend = self
+            .backend("agent")
+            .map_err(|_| "The Agent panel closed.")?;
+        let backend = backend.shared();
+        Ok((
+            backend
+                .native
+                .agent
+                .clone()
+                .ok_or("The Agent panel closed.")?,
+            backend.native.agent_link.clone(),
+        ))
+    }
+    /// The window confirmed deleting a thread (its alert): its history goes;
+    /// a running thread stops first and goes once its run has settled.
+    pub fn agent_delete_thread(&self, thread: &str) -> std::result::Result<(), String> {
+        let (agent, link) = self.agent_state()?;
+        let now = agent_host::now_ms();
+        let stop = {
+            let mut state = agent.shared();
+            let stop = state
+                .panel
+                .archive_thread(thread, &format!("thread{now:x}"), true, now)
+                .map_err(|e| format!("{e:?}"))?;
+            state
+                .panel
+                .save(
+                    &mut models::KernelStore::new(
+                        self.broker.kernel.clone(),
+                        self.broker.application,
+                    ),
+                    now,
+                )
+                .map_err(|e| format!("{e:?}"))?;
+            stop
+        };
+        if let Some(stop) = stop {
+            agent_host::run_effect(
+                &agent,
+                &link,
+                &self.broker.kernel,
+                self.broker.application,
+                &stop,
+            )?;
+        }
+        link.touch();
+        link.publish_now();
+        Ok(())
+    }
+    /// The window's Full Access alert answered (`accepted`: Allow).
+    pub fn agent_consent(&self, effect: u64, accepted: bool) -> std::result::Result<(), String> {
+        let (agent, link) = self.agent_state()?;
+        let now = agent_host::now_ms();
+        {
+            let mut state = agent.shared();
+            state
+                .panel
+                .acknowledge(effect, accepted)
+                .map_err(|e| format!("{e:?}"))?;
+            state
+                .panel
+                .save(
+                    &mut models::KernelStore::new(
+                        self.broker.kernel.clone(),
+                        self.broker.application,
+                    ),
+                    now,
+                )
+                .map_err(|e| format!("{e:?}"))?;
+        }
+        link.touch();
+        link.publish_now();
+        Ok(())
+    }
     /// What `thread_read` adds from this window's live Agent panel: the
     /// running trace as text, open questions, and the run. `None` when the
     /// panel holds no session for the thread.

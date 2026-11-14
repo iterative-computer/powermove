@@ -88,13 +88,21 @@ impl Window {
         let selection = session.draft.text_selection();
         value["draft"] = json!({"text":text,"selection":[selection.start,selection.end],"armed":session.draft.armed()});
         value["rows"] = json!({"count":count,"range":[range.start,range.end],"items":items});
+        let mut threads = panel.summaries();
         value["threadTitle"] = json!(
-            panel
-                .summaries()
-                .into_iter()
+            threads
+                .iter()
                 .find(|s| s.id == self.thread)
-                .map(|s| s.title)
+                .map(|s| s.title.clone())
                 .unwrap_or_default()
+        );
+        // The thread picker's list, the latest first (v1 ThreadPicker).
+        threads.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        value["threads"] = json!(
+            threads
+                .iter()
+                .map(|t| json!({"id":t.id,"title":t.title,"busy":t.busy,"updatedAt":t.updated_at}))
+                .collect::<Vec<_>>()
         );
         value["elapsedMs"] = json!(session.elapsed_ms(now));
         value["stopping"] = json!(session.run.as_ref().is_some_and(|r| r.stopping));
@@ -297,6 +305,8 @@ pub fn dispatch(
             panel.switch(string(action, "id")?)?;
             None
         }
+        // Asks first: the host's confirmation, then the host archives it.
+        "deleteThread" => panel.archive_thread(string(action, "id")?, "", false, now)?,
         "disclose" => {
             let id = string(action, "id")?;
             let open = boolean(action, "open")?;

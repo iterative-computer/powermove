@@ -4,6 +4,8 @@
 
 #![cfg(target_os = "macos")]
 
+mod support;
+
 use std::path::Path;
 use std::process::Command;
 
@@ -238,5 +240,134 @@ fn hlg_hevc_carries_dolby_vision_8_4_unless_turned_off() {
     // Apple's reading (AVFoundation's format description).
     let apple = pm_export::mac::reader::video_extensions(&on).unwrap();
     eprintln!("MEASURE AVFoundation extensions with Dolby Vision on: {apple:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The composition's frames drawing `clip` full frame, as an export hands
+/// them to its encoder.
+fn drawn(clip: &Path) -> Vec<pm_export::convert::EncoderInput> {
+    use pm_export::pipeline::test_sinks::MemorySink;
+    use pm_export::render::*;
+    use pm_protocol::color::{OutputColor, Precision, QuickTimeTag};
+    use pm_protocol::common::{FrameRate, Size, TICKS_PER_SECOND, TickRange, Ticks};
+    use pm_protocol::priority::{
+        AlphaOutput as WireAlpha, ExportFormat, ExportSettings, QualityTier,
+    };
+    use serde_json::json;
+    use support::doc::*;
+    let dur = FRAMES as f64 / 24.0;
+    let mut doc = project(
+        W,
+        H,
+        dur,
+        no_fill(),
+        vec![layer(
+            "v",
+            "video",
+            json!({ "asset": "clip", "fit": "stretch", "w": W, "h": H, "trim": 0, "speed": 1 }),
+            f64::from(W) / 2.0,
+            f64::from(H) / 2.0,
+            dur,
+        )],
+    );
+    doc["fps"] = json!(24);
+    asset(&mut doc, "clip", "video", "mov", W, H, dur);
+    let mut media = MediaPaths::default();
+    media.insert("clip", clip.to_path_buf());
+    let job = ExportJob {
+        document: std::sync::Arc::new(load(&doc)),
+        composition: "Ptest-root".into(),
+        settings: ExportSettings {
+            format: ExportFormat::H264,
+            alpha: WireAlpha::None,
+            quality: QualityTier::Max,
+            size: Size::new(W, H),
+            frame_rate: FrameRate::new(24, 1),
+            range: TickRange {
+                start: Ticks::ZERO,
+                end: Ticks::new(FRAMES as i64 * TICKS_PER_SECOND / 24).unwrap(),
+            },
+            audio: false,
+            audio_index_playhead: None,
+            motion_blur: false,
+            color: OutputColor::Rec709QuickTime {
+                candidate: QuickTimeTag::Cicp1_13_1,
+            },
+            precision: Precision::Float32,
+            dither: false,
+            draft_from_proxies: false,
+            delivery: Default::default(),
+        },
+        media: std::sync::Arc::new(media),
+        destination: "/unused.mp4".into(),
+        overwrite: Overwrite::Fail,
+        mode: None,
+        seed: 1,
+    };
+    let plan = plan_export(&job).unwrap();
+    let mut renderer = pm_render::Renderer::headless().unwrap();
+    run_export_into(
+        &mut renderer,
+        &job,
+        plan,
+        MemorySink::default(),
+        &Unrestricted,
+        &std::sync::atomic::AtomicBool::new(false),
+        &mut |_| {},
+    )
+    .unwrap()
+    .frames
+}
+
+/// A Dolby Vision 8.4 clip (as an iPhone or an HLG export writes it) reads
+/// as its HLG base layer: probed as HLG BT.2020 with Dolby Vision 8.4, so
+/// named in Interpret Footage and the Project panel, and drawn exactly as
+/// the same HLG picture without the metadata.
+#[test]
+fn a_dolby_vision_8_4_clip_reads_as_its_hlg_base_layer() {
+    let dir = std::env::temp_dir().join(format!("pm-export-dv-in-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (on, off) = (dir.join("on.mov"), dir.join("off.mov"));
+    hlg_hevc(&on, true);
+    hlg_hevc(&off, false);
+    let probed = pm_media::probe::probe(&on).unwrap().probe;
+    let video = probed.video.as_ref().unwrap();
+    assert_eq!(
+        video.color.hdr,
+        Some(pm_media::probe::color::HdrFormat::DolbyVision {
+            profile: 8,
+            level: 1,
+            base_compatibility: 4
+        })
+    );
+    assert_eq!(
+        video.color.hdr.as_ref().unwrap().label(),
+        "Dolby Vision 8.4"
+    );
+    assert_eq!(
+        video.color.interpreted.transfer,
+        pm_protocol::color::Transfer::Hlg
+    );
+    assert_eq!(
+        video.color.interpreted.primaries,
+        pm_protocol::color::Primaries::Bt2020
+    );
+    let facts = pm_media::facts::media_facts(&on, None).unwrap();
+    assert!(
+        facts
+            .facts
+            .iter()
+            .any(|f| f.label == "HDR" && f.value.starts_with("Dolby Vision profile 8.4")),
+        "{:?}",
+        facts.facts
+    );
+    let (a, b) = (drawn(&on), drawn(&off));
+    assert_eq!(a.len(), FRAMES as usize);
+    for (n, (x, y)) in a.iter().zip(&b).enumerate() {
+        assert!(
+            x.planes == y.planes,
+            "frame {n} differs from the same HLG picture without Dolby Vision"
+        );
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }

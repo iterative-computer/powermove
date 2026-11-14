@@ -196,7 +196,7 @@ fn valid_style(key: &str, value: &Value, table: &Value) -> bool {
         "textAlign" => &["left", "right", "center"][..],
         "fontVariantNumeric" => &["tabular-nums"][..],
         "overflow" => &["hidden", "visible", "scroll"][..],
-        "textOverflow" => &["ellipsis"][..],
+        "textOverflow" => &["ellipsis", "middle"][..],
         "whiteSpace" => &["nowrap", "normal"][..],
         _ => &[][..],
     };

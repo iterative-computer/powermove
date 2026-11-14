@@ -14,6 +14,8 @@ export interface Snapshot {
   projectId: string;
   threadId: string;
   threadTitle?: string;
+  /** Every thread of this project, the latest first (the thread picker). */
+  threads?: { id: string; title: string; busy: boolean; updatedAt: number }[];
   runId: string | null;
   phase: string;
   sendable: boolean;
@@ -101,6 +103,7 @@ export type Action =
   | {
       type:
         | "switchThread"
+        | "deleteThread"
         | "removeAttachment"
         | "openAttachment"
         | "openVisual"
