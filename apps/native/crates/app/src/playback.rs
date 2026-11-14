@@ -303,10 +303,12 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                         let _:()=msg_send![&*layers.timecode,setForegroundColor:&*cg!(colors.text)];
                         if let Some(p)=&playhead { p.style(&host.tokens, scale); }
                         let geometry=v.builtins.timeline_place;
+                        let seconds=head_time.get()as f64/pm_protocol::common::TICKS_PER_SECOND as f64;
+                        // Playing, the timeline pages to keep its head in sight (v1).
+                        if playing && let Some(t)=&v.builtins.timeline { t.update(cx,|t,cx|t.follow_playhead(seconds,cx)); }
                         let (pps,scroll_time,column)=v.builtins.timeline.as_ref().map_or((100.,0.,0.),|t|t.read(cx).time_mapping());
                         // The playhead ends where the tracks do, above the bottom bar.
                         let bar=v.builtins.timeline.as_ref().map_or(0.,|t|t.read(cx).bar_height()) as f32;
-                        let seconds=head_time.get()as f64/pm_protocol::common::TICKS_PER_SECOND as f64;
                         let offset=column+(seconds-scroll_time)*pps;
                         // A clear ground over the translucent header. The time is this
                         // layer's paused too: the panel hears play start and stop only

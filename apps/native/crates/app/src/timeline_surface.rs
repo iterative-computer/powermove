@@ -1148,6 +1148,30 @@ impl TimelineSurface {
         });
         self.pump(cx);
     }
+    /// Playing, the view turns a page to keep the head in sight, as v1: once
+    /// the head is within 50 points (or a tenth of the tracks) of the right
+    /// edge it comes back a fifth of the way in; behind the left edge (a
+    /// loop, or playing backwards) it goes to four fifths. Paging rather than
+    /// pinning the head keeps everything else still between pages.
+    pub fn follow_playhead(&mut self, time: f64, cx: &mut Context<Self>) {
+        // A scrub or drag of the person's own leads the view.
+        if !matches!(self.gesture, Gesture::Idle) {
+            return;
+        }
+        let Some(width) = self.time_width() else {
+            return;
+        };
+        let pps = self.view.pps;
+        let Some(at) = follow_page((time - self.view.scroll_time) * pps, width) else {
+            return;
+        };
+        let before = self.view.scroll_time;
+        self.view.scroll_time = time - at / pps;
+        self.clamp_time();
+        if self.view.scroll_time != before {
+            self.changed_while_hot(cx);
+        }
+    }
     pub fn time_mapping(&self) -> (f64, f64, f64) {
         self.shown
     }
@@ -3335,6 +3359,17 @@ impl TimelineSurface {
         vec![line.into_any_element(), label.into_any_element()]
     }
 }
+/// Where a playing head at `x` (points into a time area `width` wide)
+/// should stand after a page turn, or `None` while it is in sight (v1).
+fn follow_page(x: f64, width: f64) -> Option<f64> {
+    if x > width - 50f64.min(width * 0.1) {
+        Some(width * 0.2)
+    } else if x < 0. {
+        Some(width * 0.8)
+    } else {
+        None
+    }
+}
 /// What the timeline's paint can leave out without changing a pixel: ops
 /// wholly off the canvas, and keyframe glyphs the scene marked covered by an
 /// identical one on the same device pixel (`Op::covered`). Dense keys (a
@@ -3989,6 +4024,19 @@ mod cull_tests {
         }
     }
 
+    #[test]
+    fn a_playing_head_turns_the_page_at_the_edges_as_v1() {
+        // In sight: no page turn.
+        assert_eq!(super::follow_page(0., 1000.), None);
+        assert_eq!(super::follow_page(949., 1000.), None);
+        // Within 50 points of the right edge: back to a fifth of the way in.
+        assert_eq!(super::follow_page(951., 1000.), Some(200.));
+        // A narrow area turns a tenth from its edge.
+        assert_eq!(super::follow_page(181., 200.), Some(40.));
+        assert_eq!(super::follow_page(179., 200.), None);
+        // Behind the left edge (a loop, or backwards): four fifths in.
+        assert_eq!(super::follow_page(-1., 1000.), Some(800.));
+    }
     #[test]
     fn only_covered_and_off_canvas_ops_are_left_out() {
         let cull = Cull::new(size(px(400.), px(100.)));
