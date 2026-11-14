@@ -1635,7 +1635,11 @@ fn an_effect_dropped_on_a_layers_bar_goes_to_that_layer(cx: &mut TestAppContext)
         panic!("row 1 is a layer: {row}");
     };
     s.vcx.update(|_, cx| {
-        let drag = crate::v4_view::PanelDrag::of("effects", "Gaussian Blur", Some("gaussianBlur"));
+        let drag = crate::v4_view::PanelDrag::of(
+            crate::timeline_surface::EFFECTS_PANEL,
+            "Gaussian Blur",
+            Some("gaussianBlur"),
+        );
         let view = cx.new(|_| drag.clone());
         cx.start_drag(gpui::AnyDrag::new(drag, view));
     });
@@ -1648,7 +1652,7 @@ fn an_effect_dropped_on_a_layers_bar_goes_to_that_layer(cx: &mut TestAppContext)
     assert_eq!(
         *s.recorder.effect_drops.borrow(),
         [crate::timeline_surface::EffectDrop {
-            panel: "effects".into(),
+            panel: crate::timeline_surface::EFFECTS_PANEL.into(),
             definition: "gaussianBlur".into(),
             label: "Gaussian Blur".into(),
             layer: Some(layer),

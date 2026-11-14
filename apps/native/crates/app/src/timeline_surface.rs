@@ -41,8 +41,19 @@ pub enum Dropped {
     /// What the Project panel is dragging.
     ProjectItems,
 }
-/// The Effects panel's id: its rows drag effects onto layers.
-pub const EFFECTS_PANEL: &str = "effects";
+/// The Effects panel's id (`js/v4/app/panels.json`): its rows drag effects
+/// onto layers.
+pub const EFFECTS_PANEL: &str = "fxbrowser";
+
+#[cfg(test)]
+mod panel_id_tests {
+    /// The Effects panel the drop targets listen for is a built-in panel.
+    #[test]
+    fn the_effects_panel_id_is_a_built_in_panel() {
+        assert!(pm_builtins::builtin_panel(super::EFFECTS_PANEL).is_some());
+        assert!(pm_builtins::builtin_panel(pm_builtins::PROJECT_PANEL).is_some());
+    }
+}
 /// An effect dragged from the Effects panel `panel` dropped on `layer`'s row
 /// (`None`: no row there, and the selected layer takes it, as v1.2.0).
 #[derive(Clone, Debug, PartialEq)]
