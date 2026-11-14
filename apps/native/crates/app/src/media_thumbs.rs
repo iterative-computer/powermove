@@ -85,6 +85,19 @@ impl Thumbs {
         }
         out
     }
+    /// Development builds' review route: what this is doing.
+    #[cfg(debug_assertions)]
+    pub fn report(&self) -> String {
+        format!(
+            "on={} asked={} ready={} queued={} running={} generation={}",
+            self.on,
+            self.asked.len(),
+            self.ready.len(),
+            self.queue.len(),
+            self.running,
+            self.generation
+        )
+    }
     pub fn generation(&self) -> u64 {
         self.generation
     }
@@ -417,6 +430,51 @@ mod tests {
     }
 }
 
+/// What `record` (an asset of the document) is made into: its kind as
+/// imports write it (`kind`) or as older projects have it (`type`), and a
+/// video's poster time from its length (`dur`): v1.2.0's, a tenth in, at
+/// most half a second.
+fn item_of(id: &str, record: &pm_model::doc::Node, path: PathBuf) -> Option<Item> {
+    let text = |key: &str| {
+        record
+            .get(key)
+            .and_then(|v| v.to_value().as_str().map(str::to_owned))
+    };
+    let kind = text("kind").or_else(|| text("type"))?;
+    let duration = ["dur", "duration"]
+        .iter()
+        .find_map(|key| record.get(key).and_then(|d| d.to_value().as_f64()))
+        .filter(|d| d.is_finite() && *d > 0.);
+    matches!(kind.as_str(), "video" | "image" | "audio").then(|| Item {
+        asset: id.to_owned(),
+        at: (kind == "video").then(|| duration.map_or(0., |d| (d * 0.1).min(0.5))),
+        kind,
+        path,
+    })
+}
+
+#[cfg(test)]
+mod item_tests {
+    use super::*;
+    fn node(json: &str) -> pm_model::doc::Node {
+        pm_model::doc::Node::from_value(pm_model::json::parse(json).unwrap(), 1)
+    }
+    /// Assets of both shapes get thumbnails: imported (`kind`, `dur`) and
+    /// from older projects (`type`); compositions and models do not.
+    #[test]
+    fn assets_of_either_shape_get_a_thumbnail() {
+        let p = PathBuf::from("/m/a.mov");
+        let imported = item_of("a", &node(r#"{"kind":"video","dur":3}"#), p.clone()).unwrap();
+        assert_eq!(imported.kind, "video");
+        assert!((imported.at.unwrap() - 0.3).abs() < 1e-9);
+        let older = item_of("a", &node(r#"{"type":"video","dur":20}"#), p.clone()).unwrap();
+        assert_eq!(older.at, Some(0.5));
+        let still = item_of("b", &node(r#"{"type":"image"}"#), p.clone()).unwrap();
+        assert_eq!((still.kind.as_str(), still.at), ("image", None));
+        assert!(item_of("c", &node(r#"{"type":"model"}"#), p).is_none());
+    }
+}
+
 impl crate::session::Controller {
     /// The grid is shown (or the person chose it): make the open project's
     /// thumbnails from here on.
@@ -444,27 +502,11 @@ impl crate::session::Controller {
         else {
             return;
         };
-        let text = |node: &pm_model::doc::Node, key: &str| {
-            node.get(key)
-                .and_then(|v| v.to_value().as_str().map(str::to_owned))
-        };
         let items: Vec<Item> = assets
             .iter()
             .filter_map(|(id, record)| {
                 let id = id.as_str()?;
-                let kind = text(record, "kind")?;
-                let path = self.media_base.originals.get(id)?.clone();
-                let duration = record
-                    .get("duration")
-                    .and_then(|d| d.to_value().as_f64())
-                    .filter(|d| d.is_finite() && *d > 0.);
-                matches!(kind.as_str(), "video" | "image" | "audio").then(|| Item {
-                    asset: id.to_owned(),
-                    // v1.2.0's poster time: a tenth in, at most half a second.
-                    at: (kind == "video").then(|| duration.map_or(0., |d| (d * 0.1).min(0.5))),
-                    kind,
-                    path,
-                })
+                item_of(id, record, self.media_base.originals.get(id)?.clone())
             })
             .collect();
         self.thumbs.want(items);

@@ -1380,7 +1380,7 @@ impl Controller {
             // snapshot, before the panel is marked ready. The request only
             // asks the viewer to measure and edits nothing, so it never
             // waits on the panel.
-            let measure_only = request.operation == "export.estimate";
+            let measure_only = answers_before_ready(&request.operation);
             if !measure_only
                 && (!self.builtins.ready.contains(&request.panel)
                     || self.builtins.generations.get(&request.panel) != Some(&request.generation))
@@ -2820,6 +2820,14 @@ mod follow_selection_tests {
     }
 }
 
+/// Requests answered while their panel is still mounting: they only read
+/// or measure, never edit. The Export sheet asks for its 3D estimate from its
+/// first snapshot; the Project panel asks for its list/grid choice before
+/// its first render (refused, its grid drew no thumbnails).
+fn answers_before_ready(operation: &str) -> bool {
+    matches!(operation, "export.estimate" | "project.view")
+}
+
 /// The Project panel's view for `project` in the per-project choices at
 /// `path`: `set` saves one, else the saved one (a grid until chosen).
 fn project_view(
@@ -2853,6 +2861,14 @@ fn project_view(
 
 #[cfg(test)]
 mod project_view_tests {
+    /// The Project panel's first question (its list/grid choice) is answered
+    /// while it mounts; edits still wait for the panel.
+    #[test]
+    fn the_view_choice_is_answered_while_the_panel_mounts() {
+        assert!(super::answers_before_ready("project.view"));
+        assert!(super::answers_before_ready("export.estimate"));
+        assert!(!super::answers_before_ready("project.effect"));
+    }
     /// Each project keeps its own list/grid choice; one never chosen opens
     /// as a grid, as v1.2.0's Project panel was.
     #[test]
