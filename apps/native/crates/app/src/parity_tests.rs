@@ -437,6 +437,7 @@ fn the_layer_menu_has_the_shipped_rows_in_the_shipped_order() {
     assert_eq!(
         labels(&menu(&desk, "a", 1.)),
         [
+            "Rename…",
             "Duplicate",
             "Group",
             "Simplify Keyframes",
@@ -509,6 +510,7 @@ fn the_layer_menu_has_the_shipped_rows_in_the_shipped_order() {
     assert_eq!(
         labels(&menu(&desk, "locked", 1.)),
         [
+            "(Rename…)",
             "(Duplicate)",
             "(Group)",
             "(Simplify Keyframes)",

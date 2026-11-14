@@ -790,6 +790,19 @@ impl TimelineModel {
         p.calls.push(SelectionCall::Keys(selected).into());
         Ok(p)
     }
+    /// v1's separateDimensionsItem: the selection when the row's layer is
+    /// in it, else that layer; locked layers stay as they are.
+    fn separate_targets(&self, layer: &str) -> Vec<String> {
+        let selected = self.selection.layers();
+        let ids: Vec<String> = if selected.iter().any(|id| id == layer) {
+            selected.to_vec()
+        } else {
+            vec![layer.to_owned()]
+        };
+        ids.into_iter()
+            .filter(|id| self.index.layer(id).is_some_and(|l| !l.effectively_locked))
+            .collect()
+    }
     pub fn require_channel(&self, layer: &str, channel: &str) -> Result<(), ModelError> {
         let l = self
             .index
@@ -1788,6 +1801,19 @@ impl TimelineModel {
                             .is_some_and(|c| !c.keys.is_empty()),
                     false,
                 );
+                // v1's separateDimensionsItem: on a Position row, checked
+                // while its layer's dimensions are separate.
+                if channel == "position" || channel.starts_with("position.") {
+                    let separated = self
+                        .index
+                        .layer(layer)
+                        .is_some_and(|l| l.separate_dimensions);
+                    add(
+                        "track.separate",
+                        !self.separate_targets(layer).is_empty(),
+                        separated,
+                    );
+                }
             }
             Context::Layer { .. } => add("layer.shared-menu", true, false),
             Context::Graph { series } => {
@@ -1929,6 +1955,41 @@ impl TimelineModel {
             "track.paste" => {
                 return Err(ModelError::MissingHost("clipboard payload: use paste_keys"));
             }
+            "track.separate" => {
+                let Context::Track { layer, .. } = context else {
+                    return Err(ModelError::InvalidGesture);
+                };
+                let separated = !self
+                    .index
+                    .layer(layer)
+                    .is_some_and(|l| l.separate_dimensions);
+                let commands = self
+                    .separate_targets(layer)
+                    .into_iter()
+                    .map(|layer_id| {
+                        pm_kernel::commands::layers::LayerCommand::Set {
+                            layer_id,
+                            patch: pm_kernel::commands::layers::LayerPatch {
+                                separate_dimensions: Some(separated),
+                                ..Default::default()
+                            },
+                        }
+                        .into()
+                    })
+                    .collect();
+                let mut plan = Plan::edit(commands, self.index.revision);
+                if let Some(pm_kernel::Call::Transact { label, .. }) = plan.calls.first_mut() {
+                    *label = Some(
+                        if separated {
+                            "Separate Dimensions"
+                        } else {
+                            "Join Dimensions"
+                        }
+                        .into(),
+                    );
+                }
+                plan
+            }
             "layer.shared-menu" => {
                 if let Context::Layer { id } = context {
                     Plan {
@@ -2013,6 +2074,7 @@ pub fn menu_label(id: &str) -> &'static str {
         "track.add" => "Add Keyframe",
         "track.paste" => "Paste Keyframes",
         "track.clear" => "Remove All Keyframes",
+        "track.separate" => "Separate Dimensions",
         "layer.shared-menu" => "Layer Options…",
         "graph.value" => "Value Graph",
         "graph.speed" => "Speed Graph",

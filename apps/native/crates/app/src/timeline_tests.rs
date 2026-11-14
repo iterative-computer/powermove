@@ -438,6 +438,120 @@ fn control_and_the_wheel_zoom_the_time(cx: &mut TestAppContext) {
     s.idle(cx);
     assert_ne!(s.surface.read_with(&s.vcx, |t, _| t.pps()), pps);
 }
+/// v1: a double-click on a key opens the Keyframe Value editor.
+#[gpui::test]
+fn a_double_click_on_a_key_opens_its_value_editor(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    keyed(&mut s, cx, &[0.5, 1.]);
+    let key = op_center(&mut s, "key:");
+    s.vcx.simulate_click(key, Modifiers::none());
+    s.idle(cx);
+    s.vcx.simulate_event(MouseDownEvent {
+        button: MouseButton::Left,
+        position: key,
+        modifiers: Modifiers::none(),
+        click_count: 2,
+        first_mouse: false,
+    });
+    s.vcx
+        .simulate_mouse_up(key, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    assert!(
+        s.recorder
+            .commands
+            .borrow()
+            .iter()
+            .any(|c| c == "keyframeValue"),
+        "{:?}",
+        s.recorder.commands.borrow()
+    );
+}
+/// v1: ⌥-dragging the last of the selected keys stretches their timing from
+/// the first; the first stays where it is.
+#[gpui::test]
+fn option_dragging_the_last_selected_key_stretches_the_keys(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    let ids = keyed(&mut s, cx, &[0.5, 1.]);
+    let key = op_center(&mut s, "key:");
+    // Both keys, by a marquee from empty space.
+    let start = s.at(0, 3.);
+    s.drag(cx, start, key + point(px(-12.), px(6.)), Modifiers::none());
+    let pps = s.surface.read_with(&s.vcx, |t, _| t.pps()) as f32;
+    let last = point(s.at(0, 1.).x, key.y);
+    s.drag(
+        cx,
+        last,
+        last + point(px(pps / 2.), px(0.)),
+        Modifiers::alt(),
+    );
+    assert!(
+        s.recorder.reports.borrow().is_empty(),
+        "{:?}",
+        s.recorder.reports.borrow()
+    );
+    assert!(
+        (key_time(&s, &ids[0]) - 0.5).abs() < 1e-6,
+        "{}",
+        key_time(&s, &ids[0])
+    );
+    assert!(key_time(&s, &ids[1]) > 1.3, "{}", key_time(&s, &ids[1]));
+}
+/// v1: a property row's name offers its lane's menu, Separate Dimensions on
+/// Position.
+#[gpui::test]
+fn a_property_rows_name_offers_its_lane_menu(cx: &mut TestAppContext) {
+    let project = r##"{"id":"integration","name":"Synthetic Film","compId":"c","w":640,"h":360,"fps":30,"dur":10,"assets":{},"comps":{},"layers":[{"id":"l0","type":"shape","name":"Box","from":0,"dur":2,"on":true,"p":{"opacity":{"v":100,"kf":[]},"position.x":{"v":10,"kf":[]},"position.y":{"v":20,"kf":[]}},"d":{"w":100,"h":100},"fx":[]}]}"##;
+    let mut s = stage_project(cx, project.into());
+    s.surface.update(&mut s.vcx, |t, cx| {
+        t.command("timeline.revealProperty:p", 0., None, false, cx)
+    });
+    s.idle(cx);
+    let row = bounds(&mut s.vcx, r#"timeline:row:["property","l0","position.x"]"#);
+    s.vcx.simulate_event(MouseDownEvent {
+        button: MouseButton::Right,
+        position: row.center(),
+        modifiers: Modifiers::none(),
+        click_count: 1,
+        first_mouse: false,
+    });
+    s.idle(cx);
+    let menus = s.recorder.menus.borrow();
+    let labels: Vec<String> = menus
+        .last()
+        .map(|m| {
+            m.iter()
+                .filter_map(|r| r["label"].as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    for label in ["Add Keyframe", "Paste Keyframes", "Separate Dimensions"] {
+        assert!(labels.iter().any(|l| l == label), "{labels:?}");
+    }
+}
+/// v1's pointers: ↔ over the ruler, a hand over a key, an open hand over a
+/// clip's body.
+#[gpui::test]
+fn the_timeline_shows_v1s_pointers(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    keyed(&mut s, cx, &[0.5]);
+    let cursor = |s: &mut Stage, at: Point<Pixels>, cx: &mut TestAppContext| {
+        s.vcx.simulate_mouse_move(at, None, Modifiers::none());
+        s.idle(cx);
+        s.surface.read_with(&s.vcx, |t, _| t.cursor_style())
+    };
+    let ruler = point(
+        s.at(0, 1.).x,
+        s.origin().y + px(tokens().metrics.ruler / 2.),
+    );
+    assert_eq!(
+        cursor(&mut s, ruler, cx),
+        gpui::CursorStyle::ResizeLeftRight
+    );
+    let key = op_center(&mut s, "key:");
+    assert_eq!(cursor(&mut s, key, cx), gpui::CursorStyle::PointingHand);
+    let body = s.at(1, 1.5);
+    assert_eq!(cursor(&mut s, body, cx), gpui::CursorStyle::OpenHand);
+}
 /// Layer ids in stacking order (top first), and each layer's group.
 fn stack(s: &Stage) -> Vec<(String, Option<String>)> {
     s.surface.read_with(&s.vcx, |t, _| {

@@ -3349,6 +3349,32 @@ impl Controller {
                     cx,
                 );
             }
+            // v1: Return (and the row menu's Rename…) opens the selected
+            // layer's name field in the timeline; a text layer's Return edits
+            // its text first (text.editSelected steps aside otherwise).
+            "renameLayer" => {
+                let Some(runtime) = self.builtins.runtime.clone() else {
+                    return false;
+                };
+                let Some(p) = self.published.clone() else {
+                    return false;
+                };
+                let [id] = p.selection.layers() else {
+                    return false;
+                };
+                let row =
+                    pm_panel_timeline::v4::row_id(&pm_panel_timeline::RowId::Layer(id.clone()));
+                let Ok(ticket) =
+                    runtime.timeline_action(serde_json::json!({"type":"rename","id":row}))
+                else {
+                    return false;
+                };
+                cx.spawn(async move |this, cx| {
+                    let _ = ticket.await;
+                    let _ = this.update(cx, |v, cx| v.drain_builtins(cx));
+                })
+                .detach();
+            }
             "toggleLayerStrips" => {
                 let Some(runtime) = self.builtins.runtime.clone() else {
                     return false;

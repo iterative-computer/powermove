@@ -161,6 +161,11 @@ enum Spec {
     WorkIn,
     WorkOut,
     WorkMove,
+    /// ⌥ on a key: stretch the selected keys' timing (the grabbed key's
+    /// composition time).
+    StretchKeys {
+        grabbed: f64,
+    },
 }
 enum Job {
     Sync,
@@ -1525,9 +1530,17 @@ impl TimelineSurface {
         }
         let slop = ((m.hit - m.keyframe) as f64 / 2.).max(0.);
         if let Some((on, key)) = frame.hit_layer_key(x, y, slop)
-            && let Some((layer, channel, _)) = self.model.index.key_on(&on, &key)
+            && let Some((layer, channel, hit)) = self.model.index.key_on(&on, &key)
         {
+            // v1: a double-click on a key opens its value editor, for the
+            // whole selection when the key is part of it (the first click
+            // selected it).
+            if event.click_count == 2 {
+                self.delegate.command("keyframeValue", cx);
+                return;
+            }
             let selected = self.model.selection.key_selected(&on, &key);
+            let grabbed = layer.from + hit.time;
             let (layer, channel) = (layer.id.clone(), channel.path.clone());
             self.queue.push_back(Job::SelectKey {
                 layer: layer.clone(),
@@ -1536,9 +1549,16 @@ impl TimelineSurface {
                 additive,
                 dragging: true,
             });
+            // v1: ⌥ stretches the selected keys' timing from the far end
+            // when the first or last of them is grabbed.
+            let spec = if mods.alt && !additive && !mods.command() {
+                Spec::StretchKeys { grabbed }
+            } else {
+                Spec::Keys
+            };
             self.gesture = Gesture::Pressed(Press {
                 origin: event.position,
-                spec: Some(Spec::Keys),
+                spec: Some(spec),
                 release: (additive && selected).then_some(Job::SelectKey {
                     layer,
                     channel,
@@ -1904,6 +1924,9 @@ impl TimelineSurface {
                 .expanded_ids(&moving)
                 .iter()
                 .any(|id| index.layer(id).is_none_or(|l| l.effectively_locked));
+            if !locked {
+                self.cursor = CursorStyle::ClosedHand;
+            }
             self.gesture = if locked {
                 Gesture::Idle
             } else {
@@ -1948,6 +1971,10 @@ impl TimelineSurface {
                     _ => None,
                 };
                 let time = self.delegate.time(cx);
+                // v1: a clip being moved is held (grabbing).
+                if matches!(spec, Spec::Layers | Spec::Duplicate) {
+                    self.cursor = CursorStyle::ClosedHand;
+                }
                 self.queue.push_back(Job::Begin(spec, time));
                 self.gesture = Gesture::Dragging {
                     origin,
@@ -2208,25 +2235,43 @@ impl TimelineSurface {
             return;
         };
         let ruler = self.tokens.metrics.ruler as f64;
+        // v1: a property row's name offers its lane's menu (Add Keyframe at
+        // the playhead, Paste, Remove All, Separate Dimensions).
+        let mut column_track = None;
         if x < self.view.layer_column {
             let row = self
                 .scene
                 .as_ref()
                 .and_then(|s| s.row_at(y - ruler + self.view.scroll_y))
                 .and_then(|r| pm_panel_timeline::v4::parse_row(&r.id).ok());
-            if let Some(RowId::Layer(id)) = row {
-                self.layer_menu(id, window, cx);
+            match row {
+                Some(RowId::Layer(id)) => {
+                    self.layer_menu(id, window, cx);
+                    return;
+                }
+                Some(RowId::Property { layer_id, channel }) => {
+                    column_track = Some(MenuContext::Track {
+                        layer: layer_id,
+                        channel,
+                    });
+                }
+                _ => return,
             }
-            return;
         }
-        let time = self.time_at(x);
+        let time = if column_track.is_some() {
+            self.delegate.time(cx)
+        } else {
+            self.time_at(x)
+        };
         let at = |kind: &str, layer: Option<&str>| {
             vec![(
                 "timeline:context",
                 serde_json::json!({"kind":kind,"layerId":layer,"time":time}),
             )]
         };
-        let context = if y < ruler {
+        let context = if let Some(track) = column_track {
+            track
+        } else if y < ruler {
             match frame.hit_op("marker:", x, y, 2.) {
                 Some(op) => MenuContext::Marker {
                     id: op.id["marker:".len()..].to_owned(),
@@ -2441,6 +2486,15 @@ impl TimelineSurface {
                 CursorStyle::ResizeColumn
             } else if self.work_handle_at(x, y).is_some() {
                 CursorStyle::ResizeLeftRight
+            } else if x >= self.view.layer_column && (0. ..m.ruler as f64).contains(&y) {
+                // v1: the ruler scrubs.
+                CursorStyle::ResizeLeftRight
+            } else if self.frame.as_ref().is_some_and(|f| {
+                f.hit_layer_key(x, y, ((m.hit - m.keyframe) as f64 / 2.).max(0.))
+                    .is_some()
+            }) {
+                // v1: a key is a thing to press.
+                CursorStyle::PointingHand
             } else if let Some((id, Some(_))) = self.frame.as_ref().and_then(|f| f.hit_clip(x, y))
                 // A locked layer's ends offer no trim.
                 && !self.frame.as_ref().is_some_and(|f| {
@@ -2450,6 +2504,15 @@ impl TimelineSurface {
                 })
             {
                 CursorStyle::ResizeLeftRight
+            } else if let Some((id, None)) = self.frame.as_ref().and_then(|f| f.hit_clip(x, y))
+                && !self
+                    .model
+                    .index
+                    .layer(id)
+                    .is_some_and(|l| l.effectively_locked)
+            {
+                // v1: a clip's body grabs.
+                CursorStyle::OpenHand
             } else {
                 CursorStyle::Arrow
             };
@@ -2524,6 +2587,10 @@ impl TimelineSurface {
         self.view.layer_column
     }
     #[cfg(test)]
+    /// The pointer the timeline shows (tests).
+    pub fn cursor_style(&self) -> CursorStyle {
+        self.cursor
+    }
     pub fn model(&self) -> Arc<TimelineModel> {
         self.model.clone()
     }
@@ -2804,6 +2871,35 @@ fn drag_kind(model: &TimelineModel, spec: Spec, time: f64) -> Result<DragKind, S
         Spec::Trim(Edge::Out) => DragKind::TrimOut { ids },
         Spec::Offset => DragKind::QuickOffsetLayers { ids },
         Spec::Keys => DragKind::Keys { ids: keys },
+        Spec::StretchKeys { grabbed } => {
+            // v1's keyframeStretchAnchor: two or more keys apart, grabbed at
+            // the first or last; anything else moves them.
+            let times: Vec<f64> = keys
+                .iter()
+                .filter_map(|id| model.index.key(id).map(|(l, _, k)| l.from + k.time))
+                .collect();
+            let first = times.iter().copied().fold(f64::INFINITY, f64::min);
+            let last = times.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            let anchor = (times.len() >= 2 && last - first >= 1e-9)
+                .then(|| {
+                    if (grabbed - last).abs() < 1e-6 {
+                        Some(first)
+                    } else if (grabbed - first).abs() < 1e-6 {
+                        Some(last)
+                    } else {
+                        None
+                    }
+                })
+                .flatten();
+            match anchor {
+                Some(anchor_time) => DragKind::StretchKeys {
+                    ids: keys,
+                    anchor_time,
+                    grabbed_time: grabbed,
+                },
+                None => DragKind::Keys { ids: keys },
+            }
+        }
         Spec::GraphKeys => DragKind::GraphKeys { ids: keys },
         Spec::Transform { keys, anchor } => DragKind::TransformKeys {
             ids: keys,
