@@ -844,7 +844,17 @@ impl Editor {
             }
             "maximizePanel" => {
                 if self.maximized_panel.take().is_none() {
-                    let at = window.mouse_position();
+                    // The panel under the pointer as it is now (a key press
+                    // right after coming to the app: GPUI has not seen the
+                    // pointer move), else the focused one, else the viewer.
+                    let at = self
+                        .host
+                        .as_ref()
+                        .map(|h| {
+                            let (x, y) = h.borrow().pointer();
+                            point(px(x), px(y))
+                        })
+                        .unwrap_or_else(|| window.mouse_position());
                     self.maximized_panel = self
                         .geometry
                         .panels
@@ -863,6 +873,12 @@ impl Editor {
                                         .get(*id)
                                         .is_some_and(|f| f.is_focused(window))
                                 })
+                                .cloned()
+                        })
+                        .or_else(|| {
+                            self.panel_order
+                                .iter()
+                                .find(|id| id.as_str() == layout::VIEWER)
                                 .cloned()
                         });
                     handled = self.maximized_panel.is_some();
@@ -2968,6 +2984,43 @@ mod tests {
     /// A splitter shows the resize cursor under the pointer, along its whole
     /// length and a little past each side of the gap, and keeps it for the
     /// whole drag, wherever the pointer goes (owner feedback W1).
+    /// U1: Maximize Panel (`) with the pointer over no panel and nothing
+    /// focused still maximizes something: the viewer; pressed again, it
+    /// restores.
+    #[gpui::test]
+    fn maximize_panel_falls_back_to_the_viewer(cx: &mut TestAppContext) {
+        use gpui::{Modifiers, point, px};
+        let tokens = Tokens::new(pm_design::Scheme::Dark, Default::default());
+        let (view, cx) = cx.add_window_view(|_, cx| Editor::new(tokens, None, cx));
+        cx.run_until_parked();
+        // Over the window's title band: no panel there.
+        cx.simulate_mouse_move(point(px(4.), px(4.)), None, Modifiers::none());
+        cx.update(|w, cx| {
+            view.update(cx, |v, cx| {
+                v.command(
+                    crate::Command {
+                        name: "maximizePanel".into(),
+                        args: vec![],
+                        token: None,
+                    },
+                    w,
+                    cx,
+                );
+                assert_eq!(v.maximized_panel.as_deref(), Some(crate::layout::VIEWER));
+                v.command(
+                    crate::Command {
+                        name: "maximizePanel".into(),
+                        args: vec![],
+                        token: None,
+                    },
+                    w,
+                    cx,
+                );
+                assert_eq!(v.maximized_panel, None);
+            })
+        });
+    }
+
     #[gpui::test]
     fn every_divider_grabs_along_its_whole_length_in_every_workspace(cx: &mut TestAppContext) {
         use gpui::{CursorStyle, Modifiers, point, px, size};

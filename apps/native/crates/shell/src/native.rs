@@ -3612,6 +3612,20 @@ impl Host {
         self.viewer
             .setAccessibilityLabel(Some(&NSString::from_str(label)));
     }
+    /// Where the pointer is now, in the window content's points (top-left),
+    /// read from AppKit: GPUI's last pointer position is stale when the
+    /// pointer came in without the window seeing it move (an app switch).
+    pub fn pointer(&self) -> (f32, f32) {
+        let p = self
+            .gpui
+            .convertPoint_fromView(self.window.mouseLocationOutsideOfEventStream(), None);
+        let y = if self.gpui.isFlipped() {
+            p.y
+        } else {
+            self.gpui.bounds().size.height - p.y
+        };
+        (p.x as f32, y as f32)
+    }
     pub fn toolbar_inset(&self) -> f32 {
         (self.gpui.bounds().size.height - self.window.contentLayoutRect().size.height).max(0.)
             as f32
