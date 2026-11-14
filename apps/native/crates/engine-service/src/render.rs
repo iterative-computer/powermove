@@ -3358,6 +3358,19 @@ mod viewer_output_tests {
             content: 1,
         }
     }
+    /// HLG codes of BT.2020 light (1.0 = 203 cd/m²) shown at `peak`, as an
+    /// HLG delivery writes them (pm-export hdr.rs `output_ycbcra`, private).
+    fn hlg_codes(light: [f64; 3], peak: f64) -> [f64; 3] {
+        let gamma = 1.2 + 0.42 * (peak / 1000.0).log10();
+        let display = light.map(|v| (v * 203. / peak).max(0.0));
+        let yd = 0.2627 * display[0] + 0.6780 * display[1] + 0.0593 * display[2];
+        let factor = if yd > 0.0 {
+            yd.powf((1.0 - gamma) / gamma)
+        } else {
+            0.0
+        };
+        display.map(|v| pm_export::hdr::hlg(v * factor))
+    }
     fn halves(b: &metal::Buffer, len: usize) -> Vec<[f64; 3]> {
         let values = unsafe { std::slice::from_raw_parts(b.contents().cast::<u16>(), len * 4) };
         values
@@ -3519,6 +3532,54 @@ mod viewer_output_tests {
         assert!(d < 2e-3, "EDR view {d:e}");
         let lit = hdr_file[(h as usize / 2) * w as usize + 8];
         eprintln!("a pushed column in the PQ delivery's frame: {lit:?} (1.0 = 203 cd/m²)");
+        // PQ and HLG: the view's signal against the codes each file writes
+        // from the same toned frame (pm-export hdr.rs: BT.2020, 203 cd/m²
+        // white, HLG displayed at the master with BT.2100's system gamma).
+        let to_2020 = pm_color::primaries::conversion(
+            pm_protocol::color::Primaries::Bt709,
+            pm_protocol::color::Primaries::Bt2020,
+        )
+        .unwrap();
+        let pq_file: Vec<[f64; 3]> = hdr_file
+            .iter()
+            .map(|p| pm_color::primaries::apply(&to_2020, *p).map(|v| pm_export::hdr::pq(v * 203.)))
+            .collect();
+        let hlg_file: Vec<[f64; 3]> = hdr_file
+            .iter()
+            .map(|p| hlg_codes(pm_color::primaries::apply(&to_2020, *p), 300.))
+            .collect();
+        let signal = |engine: &mut Engine, mastering| {
+            engine.mastering = mastering;
+            engine.sync_tone(&scene);
+            let sub = engine
+                .frame(&scene, spec, None, &Default::default(), true, Arc::default())
+                .unwrap()
+                .unwrap();
+            sub.commit();
+            sub.complete().unwrap();
+            sub.pixels()
+        };
+        let absolute = |a: &[[f64; 3]], b: &[[f64; 3]]| {
+            a.iter()
+                .zip(b)
+                .flat_map(|(x, y)| (0..3).map(move |c| (x[c] - y[c]).abs()))
+                .fold(0f64, f64::max)
+        };
+        let unset = Mastering::Pq {
+            source_peak: 1000.,
+            target_peak: 1000.,
+        };
+        let d = absolute(&signal(&mut engine, unset), &pq_file);
+        eprintln!("PQ view against the PQ delivery's codes: {d:e}");
+        // Half a 10-bit code: the file's quantum.
+        assert!(d < 0.5 / 1023., "PQ view {d:e}");
+        let unset = Mastering::Hlg {
+            source_peak: 1000.,
+            target_peak: 1000.,
+        };
+        let d = absolute(&signal(&mut engine, unset), &hlg_file);
+        eprintln!("HLG view against the HLG delivery's codes: {d:e}");
+        assert!(d < 0.5 / 1023., "HLG view {d:e}");
     }
     /// The range overlay tints what the delivery cannot hold: white pushed a
     /// stop in an SDR project is over SDR white (magenta); the same light in

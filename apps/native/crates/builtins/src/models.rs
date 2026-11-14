@@ -1117,6 +1117,9 @@ impl Backend {
             if options["range"] == "work" && work.is_none() {
                 options["range"] = json!("all");
             }
+            // The dynamic range opens on the project's Output (Settings ›
+            // Project › Output): what the project is set to deliver.
+            options["dynamicRange"] = json!(pm_kernel::model::project_output(root).id());
             // A format this app can't export (v1 `rec`, `web`) keeps the last one.
             if crate::delivery::options(&options).is_err() {
                 options["format"] = base["format"].clone();
@@ -1132,7 +1135,7 @@ impl Backend {
         self.native.export["options"] =
             serde_json::to_value(&options).map_err(|e| e.to_string())?;
         let plan = crate::delivery::plan(&p.snapshot, &options, self.time())?;
-        self.native.export["project"] = json!({"id":p.project,"name":name,"width":width,"height":height,"hasAudio":plan.has_audio,"captionLayers":plan.captions,"hasWorkArea":comp.get("work").is_some(),"hdr":pm_render::composite::project_color(root).is_ok_and(|c|c.mode==pm_protocol::color::ColorMode::Hdr),"summary":plan.summary});
+        self.native.export["project"] = json!({"id":p.project,"name":name,"width":width,"height":height,"hasAudio":plan.has_audio,"captionLayers":plan.captions,"hasWorkArea":comp.get("work").is_some(),"hdr":pm_kernel::model::project_output(root).hdr(),"summary":plan.summary});
         // A composition with 3D layers offers a per-export 3D quality; the sheet
         // names the composition's own preset as the default choice.
         if let Some((_, label)) =

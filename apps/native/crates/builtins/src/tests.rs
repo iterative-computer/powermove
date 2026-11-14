@@ -934,6 +934,43 @@ fn render_presets_use_the_legacy_actor_key_and_archive_same_name_records() {
 }
 
 #[test]
+fn the_export_sheet_opens_on_the_projects_output() {
+    let actor = actor();
+    let kernel = actor.handle();
+    let backend = |realm: &str, panel: &str| {
+        let identity = pm_surface::host_api::Identity {
+            realm: realm.into(),
+            generation: 1,
+            project: "synthetic".into(),
+        };
+        data::Backend::new(kernel.clone(), identity, panel, false).unwrap()
+    };
+    let opened = |realm: &str| {
+        let mut export = backend(realm, "export");
+        let snapshot = export.export_snapshot().unwrap();
+        // Absent is SDR (options leave the default out).
+        let range = snapshot["options"]["dynamicRange"].as_str().unwrap_or("sdr");
+        (json!(range), snapshot["project"]["hdr"].clone())
+    };
+    assert_eq!(opened("export-sdr"), (json!("sdr"), json!(false)));
+    let mut settings = backend("settings-output", "settings");
+    for (choice, realm) in [("hlg", "export-hlg"), ("pq", "export-pq")] {
+        let revision = settings.settings_snapshot().unwrap()["revision"].clone();
+        let models::NativeCommand::Kernel(request) = settings
+            .native_command(
+                "panel.settings",
+                &json!({"revision":revision,"action":{"type":"write","id":"project.output","value":choice}}),
+            )
+            .unwrap()
+        else {
+            panic!("actor request")
+        };
+        kernel.call("synthetic", request).wait().unwrap().unwrap();
+        assert_eq!(opened(realm), (json!(choice), json!(true)), "{choice}");
+    }
+}
+
+#[test]
 fn running_export_refuses_replacement_or_reset_without_mutating_its_run() {
     let actor = actor();
     let identity = pm_surface::host_api::Identity {

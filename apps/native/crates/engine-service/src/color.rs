@@ -107,7 +107,8 @@ mod tests {
             source_peak: 1000.,
             mastering_peak: 1000.,
         };
-        assert_eq!(held.tone(Mastering::Edr), None);
+        // An HDR target always holds at the master, content within it too.
+        assert_eq!(held.tone(Mastering::Edr), tone(1000., 1000.));
         assert_eq!(held.tone(Mastering::LinearP3), tone(1000., 203.));
         let encoded = Mastering::Pq {
             source_peak: 4000.,
@@ -118,8 +119,7 @@ mod tests {
             None,
             "the encoded mode rolls off itself"
         );
-        // ...from the peaks a delivery's tone holds to, and not at all when
-        // the content is within the master.
+        // ...from the peaks a delivery's tone holds to, the master always.
         let hlg = Mastering::Hlg {
             source_peak: 0.,
             target_peak: 0.,
@@ -238,16 +238,14 @@ impl HdrView {
         })
     }
 
-    /// The PQ and HLG views' output: their own shader rolls off from the
-    /// peaks an HDR delivery's tone holds to (`OutputTone::for_target`), and
-    /// rolls nothing off when the content is within the master.
+    /// The PQ and HLG views' output: their own shader holds light with the
+    /// curve and peaks an HDR delivery's tone takes (`OutputTone::for_target`,
+    /// which always holds at the master).
     pub fn mastering(self, mastering: Mastering) -> Mastering {
-        let (source, target) =
-            pm_render::OutputTone::for_target(self.source_peak, self.mastering_peak, true)
-                .map_or((self.mastering_peak, self.mastering_peak), |t| {
-                    (t.source_peak, t.target_peak)
-                });
-        mastering.with_peaks(source, target)
+        match pm_render::OutputTone::for_target(self.source_peak, self.mastering_peak, true) {
+            Some(t) => mastering.with_peaks(t.source_peak, t.target_peak),
+            None => mastering,
+        }
     }
 
     /// The final pass's tone, as for a delivery: SDR for the SDR view, and the
