@@ -3304,6 +3304,23 @@ impl Render for HeaderView {
     }
 }
 
+fn options_len(node: &pm_surface::Node) -> usize {
+    node.props
+        .get("options")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len)
+}
+
+/// A pop-up's `HostRows` (kit `rows`), from its metadata.
+fn host_rows_source(node: &pm_surface::Node) -> Option<Value> {
+    node.props
+        .get("metadata")
+        .and_then(|m| m.get("pmKit"))
+        .and_then(|k| k.get("rows"))
+        .filter(|r| r.is_object())
+        .cloned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::file_drop;
@@ -3320,21 +3337,4 @@ mod tests {
             json!(["/a b/clip.mov", "/c.png"])
         );
     }
-}
-
-fn options_len(node: &pm_surface::Node) -> usize {
-    node.props
-        .get("options")
-        .and_then(Value::as_array)
-        .map_or(0, Vec::len)
-}
-
-/// A pop-up's `HostRows` (kit `rows`), from its metadata.
-fn host_rows_source(node: &pm_surface::Node) -> Option<Value> {
-    node.props
-        .get("metadata")
-        .and_then(|m| m.get("pmKit"))
-        .and_then(|k| k.get("rows"))
-        .filter(|r| r.is_object())
-        .cloned()
 }
