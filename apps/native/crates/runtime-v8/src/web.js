@@ -342,6 +342,8 @@
     hostFile({token, name, type, size, lastModified}) { const file = new File([], name, {type, lastModified}); hostFiles.set(file, {token, size: Number(size)}); heldFiles.register(file, token); blobData.set(file, () => new Uint8Array(__read('file.read', JSON.stringify({token})))); return file; },
     /** The host's token for a File it holds, else undefined. */
     fileToken: file => hostFiles.get(file)?.token,
+    /** The host's token for the File behind a realm blob: URL, else undefined. */
+    urlFileToken: url => { const blob = objectURLs.get(String(url).split('#')[0]); return blob ? hostFiles.get(blob)?.token : undefined; },
     stage(op) { const text=JSON.stringify(op), copy=JSON.parse(text); const bytes=new TextEncoder().encode(text).byteLength+(ops.length?1:0); if(ops.length>=__limits.max_ops || opBytes+bytes>__limits.max_op_bytes) throw new RangeError('Operation quota'); ops.push(copy); opBytes+=bytes; }
   });
   globalThis.__pm = Object.freeze({
@@ -356,28 +358,37 @@
       for (const ref of eventTargets) { const target=ref.deref(); if(target) listenerTables.get(target)?.clear(); }
       eventTargets.clear(); ops=[]; opBytes=2;
     },
-    pump(now, completed) {
-      // Each callback runs as the loads that started it; the microtasks that
-      // follow them all belong to every load that ran here.
+    // One task per call, as a browser runs them: a completed fetch or a due
+    // timer, then (the host settles them before the next call) its
+    // microtasks, which belong to the loads that started it. `next` goes on
+    // with the tasks due when the pump began; later timers wait for the next.
+    pump(now, completed, next) {
+      if (!next) pending = [...completed.map(c => ['fetch', c]), ...[...timers].filter(([, t]) => t.due <= now).map(([id]) => ['timer', id])];
       const ran = new Set();
       const as = list => { tags.clear(); enter(list); if (list) for (const tag of list) ran.add(tag); };
       pumping = true;
-      try { deliver(now, completed, as); } finally { pumping = false; tags.clear(); enter(ran); }
+      try { while (pending.length && !deliver(now, pending.shift(), as)); } finally { pumping = false; tags.clear(); enter(ran); }
+      return pending.length > 0;
     }
   });
-  function deliver(now, completed, as) {
-      for (const [id,result] of completed) {
-        const req=requests.get(id); if(!req) continue;
+  let pending = [];
+  /** Runs one task; false when it was gone by its turn. */
+  function deliver(now, [kind, item], as) {
+      if (kind === 'fetch') {
+        const [id, result] = item;
+        const req=requests.get(id); if(!req) return false;
         as(req.tags);
         requests.delete(id); req.signal?.removeEventListener('abort',req.abort);
         if(result.error) req.reject(new TypeError(result.error));
         else req.resolve(new Response(new Uint8Array(__body(result.body)),{status:result.status,url:result.url,headers:result.headers}));
+        return true;
       }
-      for(const [id,t] of [...timers]) if(t.due<=now && timers.has(id)) {
-        if(t.interval) t.due=now+t.delay; else timers.delete(id);
-        as(t.tags);
-        try { t.fn(...t.args); } catch(e) { console.error(e); }
-      }
+      const t = timers.get(item);
+      if (!t || t.due > now) return false;
+      if(t.interval) t.due=now+t.delay; else timers.delete(item);
+      as(t.tags);
+      try { t.fn(...t.args); } catch(e) { console.error(e); }
+      return true;
   }
   globalThis.__work = Object.freeze({
     /** A task from the host starts: it belongs to no load until one is entered. */

@@ -1332,8 +1332,15 @@ impl Vm {
         let data = self.control("take", json!([]))?;
         serde_json::from_str(&data).map_err(|e| Error::JavaScript(e.to_string()))
     }
+    /// Runs the fetches that completed and the timers due now, one task at a
+    /// time, each followed by its microtasks (a browser's checkpoint): a
+    /// promise a timer resolves goes on before the next task looks.
     pub fn pump(&mut self, completed: Value) -> Result<()> {
-        self.control("pump", json!([self.now(), completed]))?;
+        let now = self.now();
+        let mut more = self.control("pump", json!([now, completed, false]))? == "true";
+        while more {
+            more = self.control("pump", json!([now, [], true]))? == "true";
+        }
         Ok(())
     }
 }

@@ -204,14 +204,18 @@ to render with no Chromium helper or editor window attached.
 
 ## Legacy source sampling
 
-Compatibility level 1 shapes and editable paths retain the Canvas source
-raster: quarter-step density, transparent padding, ceil-rounded dimensions,
-and the original anchor. Coverage is painted on that local grid and the
+At rest in 2D, compatibility level 1 shapes and editable paths retain the
+Canvas source raster: quarter-step density, transparent padding, ceil-rounded
+dimensions, and the original anchor. Coverage is painted on that local grid and the
 compositor samples its retained ink crop through the layer transform.
 The crop retains the transparent texels read by bilinear filtering, so
 subpixel rules preserve the original canvas footprint and remain visible.
-This also applies to 3D planes: the plane projects the same local source
-with bilinear sampling. Enabling 3D without perspective does not change
-its raster grid or edge coverage.
-Level 2 retains device-space analytic coverage. A fractional output move
-reuses the level 1 source, while level 2 recomputes coverage at that position.
+For a shape with its own 3D switch enabled, vector geometry is projected
+before analytic coverage is computed at output resolution. This avoids a
+second bilinear filter on thin strokes, including at 30° and 60° tilt. Text keeps its own compatibility
+sampling policy. Legacy 2D artwork inside a 3D group retains its canvas
+sampling, preserving the group's authored appearance and effects. Native
+level 2 content retains projected coverage in either case. Transformed 2D
+vectors also use device coverage.
+A fractional output move on the legacy 2D canvas path reuses its source.
+Projected coverage is computed at the current output position.

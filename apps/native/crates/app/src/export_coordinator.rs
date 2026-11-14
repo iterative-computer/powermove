@@ -12,7 +12,7 @@ use pm_protocol::{
 };
 use serde_json::{Value, json};
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -26,6 +26,9 @@ pub struct Frozen {
     resources: Arc<pm_engine_service::resources::ResourceSnapshot>,
     playhead: f64,
     pub destination: PathBuf,
+    /// The person said Replace: the files there are replaced once the export
+    /// succeeded, the old ones archived. A retry keeps the answer.
+    replace: bool,
     /// The person chose Export Without Them: offline clips are left out.
     without_offline: bool,
 }
@@ -185,6 +188,9 @@ impl Controller {
                 .unwrap_or("Untitled"),
             typed.format.extension()
         );
+        // NSSavePanel asks before choosing a file that exists; the folder
+        // panel (and a development review folder) never does.
+        let panel_asks = typed.format != Format::Png && !crate::platform::reviewing_saves();
         let picker = if saved.is_none() {
             Some(crate::platform::export_destination(
                 &self.host.borrow().window,
@@ -204,13 +210,34 @@ impl Controller {
         let resources = self.extensions.resources.clone();
         cx.spawn(async move |this, cx| {
             let destination = if let Some(frozen) = saved {
-                Some(frozen.destination)
-            } else if let Some(picker) = picker {
-                picker.recv().await.ok().flatten()
+                Some((frozen.destination, frozen.replace))
+            } else if let Some(picker) = picker
+                && let Some(destination) = picker.recv().await.ok().flatten()
+            {
+                // What the export would replace is one decision: the save
+                // panel's Replace answers for the video alone; caption files
+                // (or no panel) take one question listing every file.
+                let files = sidecar_format(&typed)
+                    .map(|format| sidecar_files(&p, &typed.range, format, &destination))
+                    .unwrap_or_default();
+                let existing = existing_outputs(&destination, &files);
+                if existing.is_empty() {
+                    Some((destination, false))
+                } else if existing == [destination.clone()] && panel_asks {
+                    Some((destination, true))
+                } else {
+                    let asked = this.update(cx, |v, _| {
+                        replace_question(&existing).sheet(&v.host.borrow().window)
+                    });
+                    match asked {
+                        Ok(rx) if rx.recv().await == Ok(Some(true)) => Some((destination, true)),
+                        _ => None,
+                    }
+                }
             } else {
                 None
             };
-            let Some(destination) = destination else {
+            let Some((destination, replace)) = destination else {
                 let _ = runtime.observe_export(json!({"phase":"idle"}));
                 let _ = this.update(cx, |v, cx| {
                     if v.builtins
@@ -268,6 +295,7 @@ impl Controller {
                 resources,
                 playhead,
                 destination,
+                replace,
                 without_offline,
             };
             // The window's extensions as the job starts answer its overrides.
@@ -543,15 +571,16 @@ struct TaskAdmission<'a> {
 
 /// Caption files beside the exported video (today's delivery sidecars):
 /// "Film.mp4" gets "Film.srt", or "Film.en.srt", "Film.fr.srt" with several
-/// captions layers, in times from the start of the exported range.
-pub(crate) fn write_sidecars(
+/// captions layers, in times from the start of the exported range. Each
+/// path with its text; none when the project has no captions.
+pub(crate) fn sidecar_files(
     publication: &pm_kernel::Published,
     exported_range: &str,
     format: pm_captions::CaptionFormat,
-    video: &std::path::Path,
-) -> Result<(), String> {
+    video: &Path,
+) -> Vec<(PathBuf, String)> {
     let Some(doc) = crate::captions_panel::read(publication) else {
-        return Ok(());
+        return vec![];
     };
     let range = match doc.work.filter(|_| exported_range == "work") {
         Some(work) => work,
@@ -566,16 +595,91 @@ pub(crate) fn write_sidecars(
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
-    for (suffix, text) in crate::captions_panel::sidecars(&doc, format, range) {
-        let name = match suffix {
-            Some(tag) => format!("{base}.{tag}.{extension}"),
-            None => format!("{base}.{extension}"),
+    crate::captions_panel::sidecars(&doc, format, range)
+        .into_iter()
+        .map(|(suffix, text)| {
+            let name = match suffix {
+                Some(tag) => format!("{base}.{tag}.{extension}"),
+                None => format!("{base}.{extension}"),
+            };
+            (video.with_file_name(name), text)
+        })
+        .collect()
+}
+/// The caption format the sheet's options write beside a video, if any.
+fn sidecar_format(options: &Options) -> Option<pm_captions::CaptionFormat> {
+    match options.captions_sidecar.as_str() {
+        "srt" if options.format.video() => Some(pm_captions::CaptionFormat::Srt),
+        "vtt" if options.format.video() => Some(pm_captions::CaptionFormat::Vtt),
+        _ => None,
+    }
+}
+/// What an export to `video` would replace: the video, then its caption
+/// files, those that are already there.
+pub(crate) fn existing_outputs(video: &Path, sidecars: &[(PathBuf, String)]) -> Vec<PathBuf> {
+    std::iter::once(video)
+        .chain(sidecars.iter().map(|(path, _)| path.as_path()))
+        .filter(|path| std::fs::symlink_metadata(path).is_ok())
+        .map(Path::to_path_buf)
+        .collect()
+}
+/// The file's name, as a question or a refusal names it.
+pub(crate) fn shown_name(path: &Path) -> String {
+    path.file_name().map_or_else(
+        || path.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    )
+}
+/// Publishes the caption files as the video is: each through a temporary
+/// beside it, never over a file the export was not told to replace (one
+/// that appeared meanwhile included); a replaced file is kept in the export
+/// archive.
+pub(crate) fn write_sidecars(files: &[(PathBuf, String)], replace: bool) -> Result<(), String> {
+    let overwrite = if replace {
+        pm_export::Overwrite::Replace
+    } else {
+        pm_export::Overwrite::Fail
+    };
+    for (path, text) in files {
+        let refused = |e: pm_export::Error| match e {
+            pm_export::Error::Exists(_) => format!(
+                "The video was exported, but “{}” is already there, so its captions weren’t written over it.",
+                shown_name(path)
+            ),
+            _ => "The video was exported, but its caption file couldn’t be written.".to_owned(),
         };
-        crate::captions_panel::write_file(&video.with_file_name(name), text.as_bytes()).map_err(
-            |_| "The video was exported, but its caption file couldn’t be written.".to_owned(),
-        )?;
+        let output =
+            pm_export::atomic::AtomicOutput::new(path, overwrite, None).map_err(refused)?;
+        std::fs::write(output.temp_path(), text.as_bytes())
+            .map_err(|e| refused(pm_export::Error::Io(e.to_string())))?;
+        output.commit().map_err(refused)?;
     }
     Ok(())
+}
+/// One question for every file an export would replace, the video and its
+/// caption files together; Cancel is the default.
+fn replace_question(existing: &[PathBuf]) -> crate::alert::Alert<bool> {
+    use crate::alert::{Alert, Button};
+    let names: Vec<String> = existing
+        .iter()
+        .map(|p| format!("“{}”", shown_name(p)))
+        .collect();
+    let (title, list) = match names.as_slice() {
+        [one] => (format!("Replace {one}?"), format!("{one} already exists.")),
+        [rest @ .., last] => (
+            format!("Replace {} files?", names.len()),
+            format!("{} and {last} already exist.", rest.join(", ")),
+        ),
+        [] => (String::new(), String::new()),
+    };
+    Alert::new(
+        title,
+        format!("{list} The ones replaced are kept in the folder’s export archive."),
+        vec![
+            Button::new("Cancel", false).default().cancel(),
+            Button::new("Replace", true).destructive(),
+        ],
+    )
 }
 async fn execute_inner(
     frozen: &Frozen,
@@ -602,6 +706,7 @@ async fn execute_inner(
             &frozen.publication.snapshot,
             &frozen.media.originals,
             &frozen.destination,
+            frozen.replace,
             &job.cancel,
         )?;
         return Ok(Finished {
@@ -624,6 +729,7 @@ async fn execute_inner(
     .map_err(|e| e.to_string())?;
     request.resources = (*frozen.resources).clone();
     request.without_offline = frozen.without_offline;
+    request.replace = frozen.replace;
     // The sheet's per-export 3D quality; the composition's saved one otherwise.
     request.studio_quality = frozen
         .options
@@ -686,12 +792,13 @@ async fn execute_inner(
                         .path
                         .ok_or("Export completed without an output path")?;
                     if let Some(format) = sidecar {
-                        write_sidecars(
+                        let files = sidecar_files(
                             &frozen.publication,
                             &frozen.options.range,
                             format,
-                            std::path::Path::new(&path),
-                        )?;
+                            Path::new(&path),
+                        );
+                        write_sidecars(&files, frozen.replace)?;
                     }
                     Ok(Finished {
                         path,
@@ -755,6 +862,79 @@ mod agent_tests {
             clipped.line(),
             "Exported Film.mov. Audio clipped: 1,204 samples over full scale, peak +2.1 dB."
         );
+    }
+    /// The archived copies of `name` in `folder`'s export archive.
+    fn archived(folder: &Path, name: &str) -> Vec<String> {
+        std::fs::read_dir(folder.join(".powermove-export-archive"))
+            .map(|entries| {
+                entries
+                    .map(|e| e.unwrap().path())
+                    .filter(|p| p.to_string_lossy().ends_with(name))
+                    .map(|p| std::fs::read_to_string(p).unwrap())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+    /// A hand-corrected Film.srt beside the export is never written over
+    /// unless the person said Replace; then the old one is archived.
+    #[test]
+    fn caption_files_replace_nothing_they_were_not_told_to() {
+        let dir = tempfile::tempdir().unwrap();
+        let (video, srt) = (dir.path().join("Film.mp4"), dir.path().join("Film.srt"));
+        let fresh = dir.path().join("Film.en.srt");
+        std::fs::write(&srt, "1\nhand corrected\n").unwrap();
+        let files = vec![
+            (fresh.clone(), "1\nnew en\n".to_owned()),
+            (srt.clone(), "1\nnew\n".to_owned()),
+        ];
+        assert_eq!(existing_outputs(&video, &files), vec![srt.clone()]);
+        let refused = write_sidecars(&files, false).unwrap_err();
+        assert!(refused.contains("“Film.srt” is already there"), "{refused}");
+        assert_eq!(
+            std::fs::read_to_string(&srt).unwrap(),
+            "1\nhand corrected\n"
+        );
+        assert!(archived(dir.path(), "Film.srt").is_empty());
+        write_sidecars(&files, true).unwrap();
+        assert_eq!(std::fs::read_to_string(&srt).unwrap(), "1\nnew\n");
+        assert_eq!(std::fs::read_to_string(&fresh).unwrap(), "1\nnew en\n");
+        assert_eq!(
+            archived(dir.path(), "Film.srt"),
+            vec!["1\nhand corrected\n"]
+        );
+        // Nothing but the files and the archive is left beside them.
+        let mut names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            [".powermove-export-archive", "Film.en.srt", "Film.srt"]
+        );
+    }
+    /// The video and its caption files are one question; Cancel is the default.
+    #[test]
+    fn one_question_names_every_file_an_export_would_replace() {
+        let files = [PathBuf::from("/d/Film.mp4"), PathBuf::from("/d/Film.srt")];
+        let alert = replace_question(&files);
+        assert_eq!(alert.message, "Replace 2 files?");
+        assert!(
+            alert
+                .informative
+                .starts_with("“Film.mp4” and “Film.srt” already exist."),
+            "{}",
+            alert.informative
+        );
+        let one = replace_question(&files[1..]);
+        assert_eq!(one.message, "Replace “Film.srt”?");
+        let default = one.buttons.iter().find(|b| b.default);
+        assert_eq!(
+            default.map(|b| (b.label, b.action)),
+            Some(("Cancel", false))
+        );
+        let replace = one.buttons.iter().find(|b| b.action);
+        assert!(replace.is_some_and(|b| b.destructive && !b.default));
     }
     use pm_promedia::tasks::TaskState;
 

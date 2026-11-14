@@ -734,7 +734,7 @@ fn signing_in_from_settings_opens_the_browser_and_connects_the_panel() {
     let after = publication(&panel);
     let chatgpt = row(&after, "account.chatgpt");
     assert_eq!(chatgpt["actionLabel"], "Sign Out");
-    assert_eq!(chatgpt["detail"], "user@example.invalid · plus");
+    assert_eq!(chatgpt["detail"], "user@example.invalid · Plus");
     assert!(!panel.text().contains("Connect ChatGPT"));
     panel.choose("agent-model", "model:fixture-5");
     panel.send("Hi");

@@ -2027,6 +2027,7 @@ fn fill_request(
         proxies: Default::default(),
         copies_of: source.scene.media.originals.clone(),
         destination: dir,
+        replace: false,
         shader_cache: crate::jobs::shader_cache(),
         faces_of: crate::jobs::font_broker().map(|broker| broker.generation()),
         saving_app_version: None,

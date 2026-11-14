@@ -47,6 +47,8 @@ objc2-core-foundation = { version = "0.3.2", features = ["CFBase", "CFCGTypes", 
 objc2-core-graphics = { version = "0.3.2", features = ["CGBitmapContext", "CGColorSpace", "CGContext", "CGImage"] }
 objc2-image-io = { version = "0.3.2", features = ["CGImageDestination", "CGImageSource", "objc2-core-graphics"] }
 objc2-core-text = { version = "0.3.2", default-features = false, features = ["std", "CTFontManager"] }
+objc2-av-foundation = { version = "0.3.2", default-features = false, features = ["std", "AVAsset", "AVAssetImageGenerator", "objc2-core-graphics", "objc2-core-media"] }
+objc2-core-media = { version = "0.3.2", default-features = false, features = ["std", "CMTime"] }
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 objc2-app-kit = "0.3.2"

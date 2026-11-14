@@ -70,7 +70,7 @@ impl Controller {
     /// timeline). The viewer shows that frame; the playhead stays.
     pub fn skim(&mut self, seconds: Option<f64>, input: f64) {
         let seconds = seconds.filter(|_| self.skimming.on).map(|s| {
-            crate::session::frame_start_at(self.rate, s.clamp(0., self.duration)).unwrap_or(0)
+            crate::session::frame_start_at(self.rate, s.clamp(0., self.duration())).unwrap_or(0)
                 as f64
                 / pm_protocol::common::TICKS_PER_SECOND as f64
         });
