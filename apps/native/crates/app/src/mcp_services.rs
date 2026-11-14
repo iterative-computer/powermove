@@ -402,6 +402,32 @@ impl EngineJobs {
         ExportHandle::start_scheduled(&self.executable, session, self.activity.clone())
     }
 }
+/// An agent's export as the Export sheet's options: today's defaults, with
+/// the sheet's options the agent gave laid over them, checked by the same
+/// planner as a person's export.
+fn sheet_options(
+    project: &serde_json::Value,
+    agent: &pm_mcp::services::VideoOptions,
+) -> Result<pm_promedia::export_panel::Options> {
+    let mut sheet = json!({
+        "format": agent.format,
+        "scale": 1,
+        "width": project["w"],
+        "height": project["h"],
+        "fps": project["fps"],
+        "range": agent.range,
+        "quality": "high",
+        "mblur": agent.motion_blur,
+        "audio": agent.audio,
+        "alpha": agent.alpha,
+        "captionsBurn": false,
+        "captionsSidecar": "none",
+    });
+    for (key, value) in &agent.sheet {
+        sheet[key] = value.clone();
+    }
+    pm_builtins::delivery::options(&sheet).map_err(Error::invalid)
+}
 fn failed(error: impl std::fmt::Display) -> Error {
     Error {
         code: "export_failed".into(),
@@ -410,11 +436,16 @@ fn failed(error: impl std::fmt::Display) -> Error {
     }
 }
 fn finish(handle: ExportHandle) -> Result<PathBuf> {
+    finished(handle).map(|(path, _)| path)
+}
+/// A finished export's file and what the person is told with it.
+fn finished(handle: ExportHandle) -> Result<(PathBuf, Vec<String>)> {
     let status = handle.wait().map_err(failed)?;
+    let notes = status.notes;
     match status.state {
         JobState::Done => status
             .path
-            .map(PathBuf::from)
+            .map(|path| (PathBuf::from(path), notes))
             .ok_or_else(|| failed("Export completed without an output path")),
         _ => Err(failed(status.error.map(|e| e.message).unwrap_or_else(
             || "Powermove lost contact with the export engine. Try again.".into(),
@@ -437,25 +468,11 @@ fn file_name(name: &str, extension: &str) -> String {
     format!("{stem}-{}.{extension}", pm_kernel::new_id("export"))
 }
 impl ExportChild for EngineJobs {
-    fn video(&self, request: &VideoExportRequest) -> Result<PathBuf> {
+    fn video(&self, request: &VideoExportRequest) -> Result<pm_mcp::services::VideoDelivered> {
         let frozen = &request.snapshot;
         let published = self.published(frozen)?;
         let project = &frozen.project;
-        let options = pm_builtins::delivery::options(&json!({
-            "format": request.options.format,
-            "scale": 1,
-            "width": project["w"],
-            "height": project["h"],
-            "fps": project["fps"],
-            "range": request.options.range,
-            "quality": "high",
-            "mblur": request.options.motion_blur,
-            "audio": request.options.audio,
-            "alpha": request.options.alpha,
-            "captionsBurn": false,
-            "captionsSidecar": "none",
-        }))
-        .map_err(Error::invalid)?;
+        let options = sheet_options(project, &request.options)?;
         let time = project["time"].as_f64().unwrap_or(0.);
         let plan = pm_builtins::delivery::plan(&published.snapshot, &options, time)
             .map_err(Error::invalid)?;
@@ -463,6 +480,8 @@ impl ExportChild for EngineJobs {
             .settings
             .clone()
             .ok_or_else(|| Error::invalid("Missing render settings"))?;
+        // What the file is: the agent may have chosen its size and rate.
+        let (settings_size, settings_rate) = (settings.size, settings.frame_rate);
         std::fs::create_dir_all(&request.directory)?;
         let name = request
             .options
@@ -535,7 +554,31 @@ impl ExportChild for EngineJobs {
             task.finish(Err("cancelled".into()));
             return Err(cancelled());
         }
-        let result = finish(handle);
+        let size = (settings_size.width, settings_size.height);
+        let fps = settings_rate.num as f64 / settings_rate.den as f64;
+        let result = finished(handle).and_then(|(path, notes)| {
+            // Caption files beside the video, as a person's export writes them.
+            let sidecar = match options.captions_sidecar.as_str() {
+                "srt" => Some(pm_captions::CaptionFormat::Srt),
+                "vtt" => Some(pm_captions::CaptionFormat::Vtt),
+                _ => None,
+            };
+            if let Some(format) = sidecar.filter(|_| plan.captions > 0) {
+                crate::export_coordinator::write_sidecars(
+                    &published,
+                    &options.range,
+                    format,
+                    &path,
+                )
+                .map_err(failed)?;
+            }
+            Ok(pm_mcp::services::VideoDelivered {
+                path,
+                size: Some(size),
+                fps: Some(fps),
+                notes,
+            })
+        });
         task.finish(result.as_ref().map(|_| ()).map_err(|e| e.message.clone()));
         result
     }
@@ -872,6 +915,9 @@ impl MediaImporter for EngineJobs {
         if !path.is_absolute() {
             return Err(Error::invalid("Provide an absolute local media file path."));
         }
+        if let Some(fps) = request.sequence {
+            return self.import_sequence(request, fps);
+        }
         let size = std::fs::metadata(path)
             .map_err(|_| {
                 Error::invalid(
@@ -957,6 +1003,7 @@ impl MediaImporter for EngineJobs {
             has_audio,
             fingerprint: fingerprint.clone(),
             revision,
+            note: None,
         };
         let published = self.published(&request.frozen)?;
         let same_bytes = |entry: &pm_kernel::project_io::MediaEntry| {
@@ -1031,13 +1078,111 @@ impl MediaImporter for EngineJobs {
         if request.replace.is_none() && matches!(kind, "video" | "audio") {
             metadata["timing"] = json!(pm_media::clip::ClipTiming::imported());
         }
+        let revision = self.admit(request, &published, &id, &metadata, original, previous)?;
+        let status = if request.replace.is_some() {
+            "replaced"
+        } else {
+            "imported"
+        };
+        Ok(imported(status, id, revision))
+    }
+}
+impl EngineJobs {
+    /// An image sequence, as File ▸ Import Image Sequence imports it
+    /// (`pm_builtins::media_import::choose_image_sequence`): one clip read in
+    /// place, its numbered files at `fps`, its manifest retained as its
+    /// original. Replacing an asset with one relinks it to these files.
+    fn import_sequence(&self, request: &MediaImport, fps: f64) -> Result<ImportedMedia> {
+        use pm_builtins::media_import::{SEQUENCE_MIME, choose_image_sequence};
+        let chosen = choose_image_sequence(&request.path, fps, &AtomicBool::new(false))
+            .map_err(Error::invalid)?
+            .ok_or_else(|| Error::unavailable("The import was cancelled."))?;
+        let project = &request.frozen.project;
+        if let Some(asset) = &request.replace
+            && project["assets"][asset]["kind"] != "video"
+        {
+            return Err(Error::invalid(
+                "Replace media with a file of the same kind.",
+            ));
+        }
+        let size = std::fs::metadata(&chosen.path).map_err(failed)?.len();
+        let fingerprint = fingerprint(&chosen.path, size).map_err(failed)?;
+        let archive = Archive::open(&self.profile).map_err(failed)?;
+        let original = archive
+            .retain_path(&chosen.path, SEQUENCE_MIME, &AtomicBool::new(false))
+            .map_err(failed)?;
+        let mut metadata = chosen.asset.clone();
+        metadata["mimeType"] = json!(SEQUENCE_MIME);
+        metadata["fingerprint"] = json!(fingerprint);
+        let number = |key: &str| metadata[key].as_f64();
+        let imported = |status, asset: String, revision| ImportedMedia {
+            status,
+            asset,
+            name: metadata["name"].as_str().unwrap_or_default().to_owned(),
+            kind: "video".into(),
+            width: number("w"),
+            height: number("h"),
+            duration: number("dur"),
+            has_audio: false,
+            fingerprint: fingerprint.clone(),
+            revision,
+            note: chosen.missing.clone(),
+        };
+        let published = self.published(&request.frozen)?;
+        // The same frames at the same rate are the same manifest bytes.
+        if request.replace.is_none()
+            && let Some(entry) = published.media.iter().find(|entry| {
+                use pm_kernel::project_io::MediaSource::{Embedded, File};
+                matches!(&entry.source, File { sha256, .. } | Embedded { sha256, .. }
+                    if sha256.as_deref() == Some(original.hash()))
+                    && project["assets"][entry.id.to_string()].is_object()
+            })
+        {
+            return Ok(imported(
+                "already_imported",
+                entry.id.to_string(),
+                request.frozen.revision,
+            ));
+        }
+        let id = request
+            .replace
+            .clone()
+            .unwrap_or_else(|| pm_kernel::new_id("asset"));
+        let previous = request
+            .replace
+            .as_ref()
+            .and_then(|asset| published.media.get(asset))
+            .map(|entry| archive.retain_entry(entry))
+            .transpose()
+            .map_err(failed)?;
+        let revision = self.admit(request, &published, &id, &metadata, original, previous)?;
+        let status = if request.replace.is_some() {
+            "replaced"
+        } else {
+            "imported"
+        };
+        Ok(imported(status, id, revision))
+    }
+
+    /// Admits the asset `id` with `metadata` and its retained `original`
+    /// (replacing `previous`) into the project as one media edit; answers
+    /// the project's revision.
+    fn admit(
+        &self,
+        request: &MediaImport,
+        published: &Published,
+        id: &str,
+        metadata: &serde_json::Value,
+        original: pm_kernel::media_archive::Original,
+        previous: Option<pm_kernel::media_archive::Original>,
+    ) -> Result<u64> {
         let catalog =
-            pm_panel_media::Catalog::published(&published).map_err(|e| failed(format!("{e:?}")))?;
+            pm_panel_media::Catalog::published(published).map_err(|e| failed(format!("{e:?}")))?;
         let edit = catalog
             .prepare_import(
                 &catalog.stamp,
                 vec![pm_panel_media::StoredAsset {
-                    id: id.clone(),
+                    id: id.to_owned(),
                     metadata: pm_model::json::parse(&metadata.to_string()).map_err(failed)?,
                     original_version: original.version().into(),
                 }],
@@ -1055,7 +1200,7 @@ impl MediaImporter for EngineJobs {
             .snapshot
             .root()
             .and_then(|root| root.get("assets"))
-            .and_then(|assets| assets.get(&id))
+            .and_then(|assets| assets.get(id))
             .map(pm_model::Node::to_value);
         let writer = pm_kernel::Caller::realm(request.writer, 1, pm_kernel::Origin::Mcp);
         let ack = self
@@ -1065,7 +1210,7 @@ impl MediaImporter for EngineJobs {
                 edit.request_with_media(
                     writer,
                     vec![pm_kernel::MediaBinding {
-                        asset: id.clone(),
+                        asset: id.to_owned(),
                         expected,
                         original,
                         previous,
@@ -1079,15 +1224,9 @@ impl MediaImporter for EngineJobs {
         if let pm_kernel::Reply::Throw(error) = &ack.reply {
             return Err(Error::kernel(error));
         }
-        let status = if request.replace.is_some() {
-            "replaced"
-        } else {
-            "imported"
-        };
-        Ok(imported(status, id, ack.revision))
+        Ok(ack.revision)
     }
-}
-impl EngineJobs {
+
     /// A `.cube` or `.3dl` file, read as Apply LUT… reads it and kept in the
     /// media archive, becomes a `lut` asset; `add_effect applyColorLut` with
     /// `inputs: {lut: {kind: "asset", assetId}}` applies it.
@@ -1145,6 +1284,7 @@ impl EngineJobs {
             has_audio: false,
             fingerprint,
             revision: ack.revision,
+            note: None,
         })
     }
 }
@@ -1625,6 +1765,85 @@ fn decibels(level: f64) -> f64 {
 mod tests {
     use super::*;
     use pm_engine_service::resources::ResourceSnapshot;
+
+    /// Every Export sheet option an agent gives reaches the export as the
+    /// sheet sets it; absent ones keep today's defaults.
+    #[test]
+    fn an_agents_export_options_are_the_sheets() {
+        use pm_promedia::export_panel::{
+            AudioCoding, Codec, ColorTag, DynamicRange, Profile, Scale,
+        };
+        let project = json!({"w": 1920, "h": 1080, "fps": 29.97});
+        let agent = |args: Value| {
+            let options = pm_mcp::services::VideoOptions::parse(&args).unwrap();
+            sheet_options(&project, &options)
+        };
+        let plain = agent(json!({})).unwrap();
+        assert_eq!(
+            (plain.scale.clone(), plain.width, plain.height, plain.fps),
+            (Scale::Preset(1.), 1920, 1080, 29.97)
+        );
+        assert_eq!(
+            (plain.quality.as_str(), plain.range.as_str()),
+            ("high", "all")
+        );
+        assert!(!plain.use_proxies && !plain.captions_burn);
+        let prores = agent(json!({
+            "format": "prores",
+            "profile": "422hq",
+            "colorTag": "rec709",
+            "timecode": "01:00:00;00",
+            "audioCoding": "pcmFloat",
+            "fps": 23.976,
+            "useProxies": true,
+            "captionsBurn": true,
+            "captionsSidecar": "vtt",
+            "dynamicRange": "hlg",
+            "scale": "custom",
+            "width": 1280,
+            "height": 720,
+            "motionBlur": false,
+            "range": "work",
+        }))
+        .unwrap();
+        assert_eq!(prores.profile, Profile::Hq);
+        assert_eq!(prores.color_tag, ColorTag::Rec709);
+        assert_eq!(prores.timecode, "01:00:00;00");
+        assert_eq!(prores.audio_coding, AudioCoding::PcmFloat);
+        assert_eq!(prores.fps, 23.976);
+        assert!(prores.use_proxies && prores.captions_burn && !prores.mblur);
+        assert_eq!(prores.captions_sidecar, "vtt");
+        assert_eq!(prores.dynamic_range, DynamicRange::Hlg);
+        assert_eq!(
+            (
+                prores.scale,
+                prores.width,
+                prores.height,
+                prores.range.as_str()
+            ),
+            (Scale::Custom("custom".into()), 1280, 720, "work")
+        );
+        let hlg = agent(json!({"dynamicRange": "hlg", "dolbyVision": false})).unwrap();
+        assert!(!hlg.dolby_vision && plain.dolby_vision);
+        let mp4 = agent(json!({"codec": "hevc", "quality": "draft", "scale": 0.5})).unwrap();
+        assert_eq!(
+            (mp4.codec, mp4.quality.as_str(), mp4.scale),
+            (Codec::Hevc, "draft", Scale::Preset(0.5))
+        );
+        // A choice the sheet does not offer is refused, as the sheet would.
+        assert!(agent(json!({"quality": "best"})).is_err());
+        let refused = pm_mcp::services::VideoOptions::parse(&json!({"width": 1280})).unwrap_err();
+        assert!(
+            refused.message.contains("custom size"),
+            "{}",
+            refused.message
+        );
+        let refused = pm_mcp::services::VideoOptions::parse(
+            &json!({"format": "prores", "profile": "422", "alpha": true}),
+        )
+        .unwrap_err();
+        assert!(refused.message.contains("4444"), "{}", refused.message);
+    }
     /// A capture's pin from its window alone (production adds the pageless
     /// host for a project with no window).
     fn window_pin(
@@ -2059,6 +2278,7 @@ mod relink_tests {
                 replace: None,
                 expected_fingerprint: None,
                 writer: 1,
+                sequence: None,
             })
         };
         let mut table = String::from("LUT_3D_SIZE 2\n");
@@ -2159,6 +2379,7 @@ mod relink_tests {
                     replace: Some(asset.into()),
                     expected_fingerprint: None,
                     writer: 1,
+                    sequence: None,
                 })
                 .unwrap();
             assert_eq!(replaced.status, "replaced");

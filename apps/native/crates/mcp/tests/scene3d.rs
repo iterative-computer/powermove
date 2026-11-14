@@ -55,7 +55,7 @@ fn error(s: &mut McpSession, args: Value) -> Value {
     serde_json::to_value(error).unwrap()
 }
 #[test]
-fn only_studio_export_and_project_recovery_schemas_change_from_the_frozen_catalog() {
+fn only_studio_export_project_recovery_and_sequence_import_schemas_change_from_the_frozen_catalog() {
     let original: Value =
         serde_json::from_str(include_str!("../fixtures/catalog-main-c7f46a056.json")).unwrap();
     let source: Value =
@@ -77,6 +77,19 @@ fn only_studio_export_and_project_recovery_schemas_change_from_the_frozen_catalo
             );
         } else if name == "open_project" {
             assert_eq!(tool, &projects["tools"][0]);
+        } else if ["import_media", "import_media_to_timeline", "replace_media"].contains(&name) {
+            // The media importer takes an image sequence (additive).
+            let media: Value =
+                serde_json::from_str(include_str!("../fixtures/media-native-catalog.json")).unwrap();
+            assert_eq!(
+                tool,
+                media["tools"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|t| t["name"] == name)
+                    .unwrap()
+            );
         } else {
             assert_eq!(
                 tool,

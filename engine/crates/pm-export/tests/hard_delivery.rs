@@ -507,6 +507,7 @@ fn pq_and_hlg_are_delivered() {
                 white_nits: 203,
                 peak_nits: 1000,
                 metadata: None,
+                dolby_vision: true,
             },
         ),
     ] {

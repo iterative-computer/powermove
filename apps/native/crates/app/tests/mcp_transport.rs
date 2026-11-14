@@ -725,6 +725,93 @@ fn import_media_retains_bytes_places_layers_and_replaces_in_place() {
     client.tool("finish_session", json!({"commit":true}));
 }
 /// A real audio file through the app's media tools: measured, not modelled.
+/// A numbered still, `w`×`h`, all of level `v` (8-bit RGB PNG).
+fn numbered_png(path: &std::path::Path, w: u32, h: u32, v: u8) {
+    let file = std::fs::File::create(path).unwrap();
+    let mut encoder = png::Encoder::new(file, w, h);
+    encoder.set_color(png::ColorType::Rgb);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header().unwrap();
+    writer
+        .write_image_data(&vec![v; (w * h * 3) as usize])
+        .unwrap();
+}
+/// An agent imports an image sequence as a person does with File ▸ Import
+/// Image Sequence: a folder or its first frame, with the frame rate the
+/// sheet asks for. It becomes one clip read in place (its numbered files
+/// at their rate, a missing number named), placed like any clip; another
+/// size in the run is refused as the sheet refuses it.
+#[test]
+fn import_media_takes_an_image_sequence_with_its_frame_rate() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = root.path().join("profile");
+    std::fs::create_dir_all(&profile).unwrap();
+    let renders = root.path().join("renders");
+    std::fs::create_dir_all(&renders).unwrap();
+    for n in [1, 2, 3, 5] {
+        numbered_png(
+            &renders.join(format!("shot.{n:04}.png")),
+            64,
+            36,
+            40 * n as u8,
+        );
+    }
+    std::fs::write(renders.join("notes.txt"), b"not a frame").unwrap();
+    let mut client = Client::new(&profile, None);
+    client.rpc(
+        "initialize",
+        json!({"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1"}}),
+    );
+    client.tool(
+        "create_project",
+        json!({"name":"Synthetic sequence","width":64,"height":36,"fps":24,"duration":4}),
+    );
+    client.tool("start_session", json!({"prompt":"Synthetic sequence"}));
+    // The folder, at 23.976.
+    let imported = client.tool(
+        "import_media",
+        json!({"path":renders,"sequence":{"fps":23.976}}),
+    );
+    assert_eq!(imported["status"], "imported", "{imported}");
+    assert_eq!(imported["name"], "shot.[0001-0005].png");
+    assert_eq!(imported["missing"], "frame 4 missing");
+    let asset = imported["assetId"].as_str().unwrap().to_owned();
+    let listed = client.tool("list_media", json!({"assetId":asset}));
+    let row = &listed["assets"][0];
+    assert_eq!(row["kind"], "video", "{listed}");
+    assert_eq!(row["status"], "available", "{listed}");
+    // Five numbers (one missing) at 24000/1001.
+    let duration = row["duration"].as_f64().unwrap_or_default();
+    assert!((duration - 5.0 * 1001.0 / 24000.0).abs() < 1e-6, "{row}");
+    assert_eq!(
+        (row["width"].as_f64(), row["height"].as_f64()),
+        (Some(64.0), Some(36.0)),
+        "{row}"
+    );
+    // Its first frame, at 12, placed on the timeline.
+    let placed = client.tool(
+        "import_media_to_timeline",
+        json!({"path":renders.join("shot.0001.png"),"sequence":{"fps":12},"at":0}),
+    );
+    assert_eq!(placed["status"], "imported", "{placed}");
+    assert!(placed["layerId"].is_string(), "{placed}");
+    // Another size in the run, and a rate the sheet does not offer.
+    numbered_png(&renders.join("shot.0004.png"), 32, 32, 160);
+    let refused = client.rpc(
+        "tools/call",
+        json!({"name":"import_media","arguments":{"path":renders,"sequence":{"fps":24}}}),
+    );
+    assert_eq!(refused["isError"], true, "{refused}");
+    assert!(
+        refused.to_string().contains("shot.0004.png is 32×32"),
+        "{refused}"
+    );
+    let rate = client.rpc(
+        "tools/call",
+        json!({"name":"import_media","arguments":{"path":renders,"sequence":{"fps":0}}}),
+    );
+    assert_eq!(rate["isError"], true, "{rate}");
+}
 #[test]
 fn media_tools_measure_a_linked_original() {
     let root = tempfile::tempdir().unwrap();
