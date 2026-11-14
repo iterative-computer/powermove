@@ -897,6 +897,12 @@ exports[`Effects spec state: loading-N-A-synchronous-registry has a validated op
           "keys": [],
           "preventDefault": false,
         },
+        "dragstart": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
         "focus": {
           "bubble": true,
           "capture": false,
@@ -1233,6 +1239,12 @@ exports[`Effects spec state: loading-N-A-synchronous-registry has a validated op
           "preventDefault": false,
         },
         "doubleclick": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+        "dragstart": {
           "bubble": true,
           "capture": false,
           "keys": [],
@@ -2227,6 +2239,12 @@ exports[`Effects spec state: selected has a validated op-tree and native accessi
           "keys": [],
           "preventDefault": false,
         },
+        "dragstart": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
         "focus": {
           "bubble": true,
           "capture": false,
@@ -2617,6 +2635,12 @@ exports[`Effects spec state: selected has a validated op-tree and native accessi
           "preventDefault": false,
         },
         "doubleclick": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+        "dragstart": {
           "bubble": true,
           "capture": false,
           "keys": [],
@@ -3611,6 +3635,12 @@ exports[`Effects spec state: hover has a validated op-tree and native accessibil
           "keys": [],
           "preventDefault": false,
         },
+        "dragstart": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
         "focus": {
           "bubble": true,
           "capture": false,
@@ -4001,6 +4031,12 @@ exports[`Effects spec state: hover has a validated op-tree and native accessibil
           "preventDefault": false,
         },
         "doubleclick": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+        "dragstart": {
           "bubble": true,
           "capture": false,
           "keys": [],
@@ -4995,6 +5031,12 @@ exports[`Effects spec state: focus has a validated op-tree and native accessibil
           "keys": [],
           "preventDefault": false,
         },
+        "dragstart": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
         "focus": {
           "bubble": true,
           "capture": false,
@@ -5382,6 +5424,12 @@ exports[`Effects spec state: focus has a validated op-tree and native accessibil
           "preventDefault": false,
         },
         "doubleclick": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+        "dragstart": {
           "bubble": true,
           "capture": false,
           "keys": [],
@@ -6373,6 +6421,12 @@ exports[`Effects spec state: disabled has a validated op-tree and native accessi
           "keys": [],
           "preventDefault": false,
         },
+        "dragstart": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
         "focus": {
           "bubble": true,
           "capture": false,
@@ -6763,6 +6817,12 @@ exports[`Effects spec state: disabled has a validated op-tree and native accessi
           "preventDefault": false,
         },
         "doubleclick": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+        "dragstart": {
           "bubble": true,
           "capture": false,
           "keys": [],
@@ -8661,6 +8721,12 @@ exports[`Effects spec state: drag-source-model-payload-native-image-pending has 
           "keys": [],
           "preventDefault": false,
         },
+        "dragstart": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
         "focus": {
           "bubble": true,
           "capture": false,
@@ -8997,6 +9063,12 @@ exports[`Effects spec state: drag-source-model-payload-native-image-pending has 
           "preventDefault": false,
         },
         "doubleclick": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+        "dragstart": {
           "bubble": true,
           "capture": false,
           "keys": [],
@@ -9978,6 +10050,12 @@ exports[`Effects spec state: drop-N-A-panel-does-not-accept has a validated op-t
           "keys": [],
           "preventDefault": false,
         },
+        "dragstart": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
         "focus": {
           "bubble": true,
           "capture": false,
@@ -10314,6 +10392,12 @@ exports[`Effects spec state: drop-N-A-panel-does-not-accept has a validated op-t
           "preventDefault": false,
         },
         "doubleclick": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+        "dragstart": {
           "bubble": true,
           "capture": false,
           "keys": [],
@@ -11308,6 +11392,12 @@ exports[`Effects spec state: multi-select-N-A-single-ID has a validated op-tree 
           "keys": [],
           "preventDefault": false,
         },
+        "dragstart": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
         "focus": {
           "bubble": true,
           "capture": false,
@@ -11644,6 +11734,12 @@ exports[`Effects spec state: multi-select-N-A-single-ID has a validated op-tree 
           "preventDefault": false,
         },
         "doubleclick": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+        "dragstart": {
           "bubble": true,
           "capture": false,
           "keys": [],
@@ -13825,6 +13921,12 @@ exports[`Effects spec state: search-match has a validated op-tree and native acc
           "keys": [],
           "preventDefault": false,
         },
+        "dragstart": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
         "focus": {
           "bubble": true,
           "capture": false,
@@ -14328,6 +14430,12 @@ exports[`Effects spec state: recent-flat has a validated op-tree and native acce
           "preventDefault": false,
         },
         "doubleclick": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+        "dragstart": {
           "bubble": true,
           "capture": false,
           "keys": [],
@@ -14870,6 +14978,12 @@ exports[`Effects spec state: recent-flat has a validated op-tree and native acce
           "keys": [],
           "preventDefault": false,
         },
+        "dragstart": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
         "focus": {
           "bubble": true,
           "capture": false,
@@ -15394,6 +15508,12 @@ exports[`Effects spec state: collapsed has a validated op-tree and native access
           "preventDefault": false,
         },
         "doubleclick": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+        "dragstart": {
           "bubble": true,
           "capture": false,
           "keys": [],
@@ -16287,6 +16407,12 @@ exports[`Effects spec state: preset-supplied-by-model has a validated op-tree an
           "preventDefault": false,
         },
         "doubleclick": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+        "dragstart": {
           "bubble": true,
           "capture": false,
           "keys": [],
@@ -17626,6 +17752,12 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
           "keys": [],
           "preventDefault": false,
         },
+        "dragstart": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
         "focus": {
           "bubble": true,
           "capture": false,
@@ -17862,6 +17994,12 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
           "keys": [],
           "preventDefault": false,
         },
+        "dragstart": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
         "focus": {
           "bubble": true,
           "capture": false,
@@ -18068,6 +18206,12 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
           "preventDefault": false,
         },
         "doubleclick": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+        "dragstart": {
           "bubble": true,
           "capture": false,
           "keys": [],
@@ -18305,6 +18449,12 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
           "keys": [],
           "preventDefault": false,
         },
+        "dragstart": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
         "focus": {
           "bubble": true,
           "capture": false,
@@ -18501,6 +18651,12 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
           "preventDefault": false,
         },
         "doubleclick": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+        "dragstart": {
           "bubble": true,
           "capture": false,
           "keys": [],
@@ -18950,6 +19106,12 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
           "preventDefault": false,
         },
         "doubleclick": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+        "dragstart": {
           "bubble": true,
           "capture": false,
           "keys": [],

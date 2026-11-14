@@ -194,6 +194,9 @@ pub struct NodeView {
     pub native: Option<SharedString>,
     pub kit: Kit,
     pub virtual_window: Option<pm_builtins::virtualization::Window>,
+    /// What a dragged item is, for its drop targets (`metadata.item` as
+    /// text: an Effects row's effect id).
+    pub drag_item: Option<SharedString>,
     pub is_plain_text: bool,
     pub binding: Option<SharedString>,
     pub number: Option<NumberFacts>,
@@ -201,6 +204,8 @@ pub struct NodeView {
     /// Escape reports an empty change, so a transient editor can close.
     pub cancel_change: bool,
     pub timeline_scrub: Option<(SharedString, SharedString)>,
+    /// The timeline's layer name: a press there can lift into a reorder.
+    pub timeline_layer_drag: Option<SharedString>,
     pub outline_column: bool,
     pub outline_first: Option<SharedString>,
     pub outline_window: Option<(usize, usize)>,
@@ -791,7 +796,12 @@ fn compile(
         })
         .flatten();
     let meta = node.props.get("metadata");
+    let drag_item = meta
+        .and_then(|m| m.get("item"))
+        .and_then(Value::as_str)
+        .map(|s| SharedString::from(s.to_owned()));
     NodeView {
+        drag_item,
         well: slot_control
             && matches!(
                 component,
@@ -815,6 +825,11 @@ fn compile(
                 SharedString::from(t.get("path")?.as_str()?.to_owned()),
             ))
         }),
+        timeline_layer_drag: meta
+            .and_then(|m| m.get("timelineLayerDrag"))
+            .and_then(|t| t.get("layer"))
+            .and_then(Value::as_str)
+            .map(|layer| SharedString::from(layer.to_owned())),
         outline_column: meta.and_then(|m| m.get("nativeColumn")).is_some(),
         outline_first: meta
             .and_then(|m| m.get("nativeFirstRow"))

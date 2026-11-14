@@ -69,6 +69,8 @@ fn open<'a>(
                 Outbound::FocusProject(id) => format!("focus {id}"),
                 Outbound::HideHome => "hide home".into(),
                 Outbound::Command(name) => format!("command {name}"),
+                Outbound::Opening { name, .. } => format!("ghost {name}"),
+                Outbound::OpenEnded => "ghost ended".into(),
             })
         })
     };
@@ -190,26 +192,32 @@ fn a_click_selects_and_return_opens_through_the_kernel() {
         Some("first")
     );
     cx.simulate_keystrokes("enter");
+    // Ghost loading: the window hears of the open at once, before the
+    // project has been read.
+    view.update(cx, |v, cx| v.pump(cx));
+    assert_eq!(log.borrow().first().map(String::as_str), Some("ghost First Film"));
+    assert!(!log.borrow().iter().any(|l| l.starts_with("opened")));
     let start = Instant::now();
-    while log.borrow().is_empty() {
+    while !log.borrow().iter().any(|l| l.starts_with("opened")) {
         view.update(cx, |v, cx| v.pump(cx));
         cx.run_until_parked();
         assert!(start.elapsed() < Duration::from_secs(10), "never opened");
         std::thread::sleep(Duration::from_millis(5));
     }
-    assert_eq!(*log.borrow(), ["opened First Film"]);
+    assert_eq!(*log.borrow(), ["ghost First Film", "ghost ended", "opened First Film"]);
+    log.borrow_mut().clear();
     assert!(fixture.actor.handle().published("first").is_some());
     // Opening it again, from this or another window's list, brings forward the
     // window that shows it: no second open, no alert.
     cx.simulate_keystrokes("enter");
     let start = Instant::now();
-    while log.borrow().len() < 2 {
+    while !log.borrow().iter().any(|l| l.starts_with("focus")) {
         view.update(cx, |v, cx| v.pump(cx));
         cx.run_until_parked();
         assert!(start.elapsed() < Duration::from_secs(10), "never answered");
         std::thread::sleep(Duration::from_millis(5));
     }
-    assert_eq!(log.borrow()[1], "focus first");
+    assert!(log.borrow().iter().any(|l| l == "focus first"));
 }
 #[::core::prelude::v1::test]
 fn sections_switch_and_an_empty_trash_says_so() {

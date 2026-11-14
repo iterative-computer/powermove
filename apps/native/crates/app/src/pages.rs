@@ -22,6 +22,9 @@ fn title(id: &str) -> &'static str {
 pub(crate) struct Pages {
     pub open: Vec<String>,
     pub shown: Option<String>,
+    /// The page that showed before the one showing came forward (`None`:
+    /// the project or Home), which shows again when that one closes.
+    pub previous: Option<String>,
 }
 impl Pages {
     /// Opens `id` (or brings it forward).
@@ -29,17 +32,34 @@ impl Pages {
         if !self.open.iter().any(|p| p == id) {
             self.open.push(id.to_owned());
         }
+        if self.shown.as_deref() != Some(id) {
+            self.previous = self.shown.take();
+        }
         self.shown = Some(id.to_owned());
     }
     /// Closes `id`; whatever it showed over comes back.
     pub fn close(&mut self, id: &str) {
         self.open.retain(|p| p != id);
-        if self.shown.as_deref() == Some(id) {
-            self.shown = None;
+        if self.previous.as_deref() == Some(id) {
+            self.previous = None;
         }
+        if self.shown.as_deref() == Some(id) {
+            // What it came forward over shows again.
+            self.shown = self
+                .previous
+                .take()
+                .filter(|p| self.open.iter().any(|o| o == p));
+        }
+    }
+    /// The toolbar's gear (and ⌘,): a page showing closes, back to what it
+    /// came forward over; one open behind another tab comes forward (a
+    /// second press then closes it). Whether it closed.
+    pub fn toggle_closes(&self, id: &str) -> bool {
+        self.shown.as_deref() == Some(id)
     }
     /// The project (or Home) again; the page stays open. Whether one showed.
     pub fn leave(&mut self) -> bool {
+        self.previous = None;
         self.shown.take().is_some()
     }
     /// The page at place `index` in the strip.
@@ -209,6 +229,29 @@ mod tests {
         assert_eq!(p.open, ["settings"]);
         assert_eq!(p.at(0), Some("settings"));
         assert_eq!(p.at(1), None);
+    }
+
+    #[test]
+    fn closing_a_page_returns_to_what_it_came_forward_over() {
+        let mut p = Pages::default();
+        // From the project: Settings, then the gear again, is the project.
+        p.open("settings");
+        assert!(p.toggle_closes("settings"));
+        p.close("settings");
+        assert_eq!(p.shown, None);
+        // From the Store: Settings closes back to the Store.
+        p.open("store");
+        p.open("settings");
+        p.close("settings");
+        assert_eq!(p.shown.as_deref(), Some("store"));
+        // Settings open behind a project's tab comes forward first.
+        p.open("settings");
+        assert!(p.leave());
+        assert!(!p.toggle_closes("settings"));
+        p.open("settings");
+        assert!(p.toggle_closes("settings"));
+        p.close("settings");
+        assert_eq!(p.shown, None, "back to the project it came forward over");
     }
 
     #[test]
