@@ -63,9 +63,6 @@ enum Editor {
     Multiline(Retained<NSTextView>),
 }
 impl Editor {
-    fn view_ptr(&self) -> *const u8 {
-        (self.view() as *const NSView).cast()
-    }
     fn view(&self) -> &NSView {
         match self {
             Self::Field(v) => v,
@@ -890,9 +887,10 @@ fn place(key: usize, apply: bool) -> bool {
                 }
             }
             // A field that is no longer drawn (its panel went to another
-            // tab) takes its caret with it, and gives the keyboard back:
-            // the system's insertion indicator stayed where the field was,
-            // over the panel shown there now, and keys went to hidden text.
+            // tab) takes its caret with it: the system's insertion indicator
+            // stayed where the field was, over the panel shown there now.
+            // (The keyboard comes back to the editor through the shell's
+            // stray-responder check.)
             if let Some((host, indicator)) = &state.caret
                 && !host.isHidden()
             {
@@ -900,11 +898,6 @@ fn place(key: usize, apply: bool) -> bool {
                 if apply {
                     indicator.setDisplayMode(NSTextInsertionIndicatorDisplayMode::Hidden);
                     host.setHidden(true);
-                }
-            }
-            if apply && holds_keyboard(&state.editor) {
-                if let Some(w) = state.gpui.window() {
-                    w.makeFirstResponder(Some(&state.gpui));
                 }
             }
             continue;
@@ -1076,17 +1069,5 @@ fn configure_editor(editor: &NSText, spell: bool) {
         if supported {
             let _: () = msg_send![editor,setWritingToolsBehavior:0isize];
         }
-    }
-}
-
-/// Whether `editor` holds the keyboard: a field being edited (its window's
-/// shared field editor), or the multiline view itself first responder.
-fn holds_keyboard(editor: &Editor) -> bool {
-    match editor {
-        Editor::Field(v) => v.currentEditor().is_some(),
-        Editor::Multiline(v) => v
-            .window()
-            .and_then(|w| w.firstResponder())
-            .is_some_and(|r| (&*r as *const objc2_app_kit::NSResponder).cast::<u8>() == editor.view_ptr()),
     }
 }
