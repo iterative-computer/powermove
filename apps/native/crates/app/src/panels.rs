@@ -8,33 +8,27 @@ pub fn scopes(v: &mut Controller, id: &str, cx: &mut Context<Controller>) -> Opt
     (id == "scopes").then(|| v.scopes_panel(cx))
 }
 
-/// While the first project is read, and until each panel has mounted for it,
-/// the panels it fills say so instead of offering to open one.
+/// Ghost loading: from the moment a project is chosen, and until each panel
+/// has mounted for it, every panel shows its ghost (`crate::ghost`) in the
+/// shape of what it will show; a panel's real content replaces it when that
+/// panel is ready.
 pub fn opening(v: &Controller, id: &str, bounds: Rect) -> Option<AnyElement> {
-    let name = v.opening_name.as_ref()?;
-    // The viewer stays opening while the project waits for effects its
-    // extensions are still loading: it never shows them bypassed.
-    let waiting = id == "viewer" && v.extensions.settle_after.is_some();
-    if !matches!(id, "assets" | "viewer" | "timeline")
-        || (v.session.is_some()
-            && (v.settling.is_none() || v.builtins.ready.contains(id))
-            && !waiting)
-    {
+    let shows = crate::ghost::shows(crate::ghost::Open {
+        chosen: v.opening_name.is_some(),
+        landed: v.session.is_some(),
+        settling: v.settling.is_some(),
+        ready: v.builtins.ready.contains(id),
+        // The viewer stays opening while the project waits for effects its
+        // extensions are still loading: it never shows them bypassed.
+        waiting: id == "viewer" && v.extensions.settle_after.is_some(),
+        // An extension's own page draws below GPUI: a ghost would sit under it.
+        native: v.extensions.owns_panel(id),
+    });
+    if !shows {
         return None;
     }
     let t = v.host.borrow().tokens.clone();
-    Some(
-        pm_shell::view::empty_state(
-            &t,
-            &format!("Opening “{name}”…"),
-            "It appears here when it’s ready.",
-        )
-        .id(SharedString::from(format!("opening-{id}")))
-        .role(Role::Status)
-        .aria_label(format!("Opening {name}"))
-        .h(px((bounds.h - t.metrics.header).max(0.)))
-        .into_any_element(),
-    )
+    Some(crate::ghost::body(id, bounds, v.ghost_aspect, &t))
 }
 
 impl Controller {

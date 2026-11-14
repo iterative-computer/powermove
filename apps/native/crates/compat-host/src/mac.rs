@@ -603,6 +603,12 @@ pub struct MacDomHost {
     slot: Retained<SlotView>,
     activity: Option<Activity>,
     job_count: u32,
+    /// Where the page's own content may show, when narrower than the
+    /// regions (`set_content_regions`); `None`: everywhere they show.
+    content: Option<Vec<Rect>>,
+    /// The panels' colour under the page (sRGB, 0–1), shown where the
+    /// regions show and the content does not (`set_fill`).
+    fill: Option<[f64; 4]>,
 }
 struct Activity {
     policy: WKInactiveSchedulingPolicy,
@@ -725,6 +731,8 @@ impl MacDomHost {
             slot,
             activity: None,
             job_count: 0,
+            content: None,
+            fill: None,
         };
         host.load();
         Ok(host)
@@ -953,6 +961,29 @@ impl MacDomHost {
         }
         Ok(())
     }
+    /// Where the page's content may show within the regions: a panel whose
+    /// content the page has not moved yet shows its fill there instead of
+    /// another panel's content. `None` shows it wherever the regions do.
+    pub fn set_content_regions(&mut self, content: Option<Vec<Rect>>) -> Result<()> {
+        if let Some(c) = &content
+            && (c.len() > 256 || c.iter().any(|r| !r.valid()))
+        {
+            return Err(Error::InvalidGeometry);
+        }
+        if self.content != content {
+            self.content = content;
+            self.shared.geometry_dirty.set(true);
+        }
+        Ok(())
+    }
+    /// The colour shown under the page within its regions (the panels'
+    /// ground), sRGB red, green, blue and alpha in 0–1.
+    pub fn set_fill(&mut self, fill: Option<[f64; 4]>) {
+        if self.fill != fill {
+            self.fill = fill;
+            self.shared.geometry_dirty.set(true);
+        }
+    }
     /// Called in P-LAYER's present callback, in the same CATransaction as GPUI.
     /// No JS call or wait occurs here.
     pub fn present(&mut self, viewport: Rect) -> Result<()> {
@@ -969,6 +1000,42 @@ impl MacDomHost {
             NSSize::new(viewport.w, viewport.h),
         ));
         self.slot.clip(self.shared.panels.borrow().visible());
+        // The fill shows within the regions; the page's content only where
+        // its own mask lets it.
+        self.slot.setWantsLayer(true);
+        if let Some(layer) = self.slot.layer() {
+            let color = self.fill.map(|[r, g, b, a]| {
+                NSColor::colorWithSRGBRed_green_blue_alpha(r, g, b, a).CGColor()
+            });
+            layer.setBackgroundColor(color.as_deref());
+        }
+        self.web.setWantsLayer(true);
+        if let Some(layer) = self.web.layer() {
+            match &self.content {
+                Some(rects) => {
+                    let path = CGMutablePath::new();
+                    // WebKit's view is flipped (its layer's geometry with it):
+                    // the mask's rectangles are in window points from the top.
+                    let h = self.web.bounds().size.height;
+                    let flipped = self.web.isFlipped();
+                    for r in rects {
+                        let y = if flipped { r.y } else { h - r.y - r.h };
+                        unsafe {
+                            CGMutablePath::add_rect(
+                                Some(&path),
+                                std::ptr::null(),
+                                NSRect::new(NSPoint::new(r.x, y), NSSize::new(r.w, r.h)),
+                            );
+                        }
+                    }
+                    let mask = objc2_quartz_core::CAShapeLayer::new();
+                    mask.setFrame(self.web.bounds());
+                    mask.setPath(Some(&path));
+                    unsafe { layer.setMask(Some(&mask)) }
+                }
+                None => unsafe { layer.setMask(None) },
+            }
+        }
         refuse_drags(&self.web);
         self.shared.geometry_dirty.set(false);
         Ok(())
