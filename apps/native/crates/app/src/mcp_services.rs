@@ -958,17 +958,6 @@ impl MediaImporter for EngineJobs {
             .map_err(|e| {
                 Error::invalid(format!("This environment image could not be read: {e}"))
             })?;
-        let probe = (kind != "model" && !environment)
-            .then(|| pm_media::probe::probe(path).map(|probed| probed.probe))
-            .transpose()
-            .map_err(|_| Error::invalid("This file could not be read as media."))?;
-        let video = probe.as_ref().and_then(|probe| probe.video.as_ref());
-        let width = image_size
-            .map(|d| f64::from(d[0]))
-            .or_else(|| video.map(|video| f64::from(video.width)));
-        let height = image_size
-            .map(|d| f64::from(d[1]))
-            .or_else(|| video.map(|video| f64::from(video.height)));
         // The clip's own length (first frame start to last frame end), as
         // the Project panel's import records it.
         // A relinked asset keeps reading its file's times as it did, so its
@@ -977,6 +966,26 @@ impl MediaImporter for EngineJobs {
             Some(asset) => pm_builtins::media_import::asset_timing(project["assets"].get(asset)),
             None => pm_media::clip::ClipTiming::Presentation,
         };
+        let unreadable = |_| Error::invalid("This file could not be read as media.");
+        // A still is read as Import Media reads it (its displayed size), not
+        // by the container probe, which refuses stills it cannot address
+        // (TGA).
+        let still_size = (kind == "image" && !environment)
+            .then(|| pm_media::facts::media_facts_as(path, None, timing))
+            .transpose()
+            .map_err(unreadable)?
+            .and_then(|facts| facts.display_size);
+        let probe = (!matches!(kind, "model" | "image") && !environment)
+            .then(|| pm_media::probe::probe(path).map(|probed| probed.probe))
+            .transpose()
+            .map_err(unreadable)?;
+        let video = probe.as_ref().and_then(|probe| probe.video.as_ref());
+        let [width, height] = [0, 1].map(|i| {
+            image_size
+                .or(still_size)
+                .map(|d| f64::from(d[i]))
+                .or_else(|| video.map(|video| f64::from([video.width, video.height][i])))
+        });
         let duration = probe
             .as_ref()
             .and_then(|probe| probe.duration_as(timing))
