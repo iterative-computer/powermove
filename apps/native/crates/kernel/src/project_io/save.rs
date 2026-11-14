@@ -203,6 +203,11 @@ pub struct SavePlan {
     pub(crate) replace_existing: bool,
     /// In-place saves may reuse the destination's ranges (`reusePrevious`).
     pub(crate) reuse_previous: bool,
+    /// A save in place with nothing to write (no unsaved change, a file in
+    /// the format this build writes): the file as last read or written. If
+    /// the destination is still exactly that file when the save runs, the
+    /// save writes nothing; otherwise it writes as any save.
+    pub(crate) unchanged: Option<Arc<FileVersion>>,
     pub options: SaveOptions,
     /// Alive while a plan or its receipt exists: the store refuses a second
     /// concurrent save to the same document.
@@ -227,6 +232,9 @@ pub enum SaveLayout {
     Compacted,
     /// The previous file cloned, then new records appended.
     Appended,
+    /// Nothing written: a save in place with no unsaved change, whose file is
+    /// still exactly the one last read or written ([`SavePlan::unchanged`]).
+    Unchanged,
 }
 
 /// What a successful save produced.
@@ -609,6 +617,9 @@ impl SavePlan {
     /// [`ProjectIoError::Finalize`] and [`ProjectIoError::Conflict`] for the
     /// two cases that say otherwise).
     pub fn run(&self) -> Result<SaveReceipt, ProjectIoError> {
+        if let Some(receipt) = self.unchanged_receipt() {
+            return Ok(receipt);
+        }
         let fault = self.options.fault;
         let error = match self.attempt(fault) {
             Err(e) if e.is_disk_full() => e,
@@ -645,6 +656,52 @@ impl SavePlan {
             })
             .unwrap_or_default();
         self.media.iter().any(|entry| !assets.contains(&entry.id))
+    }
+
+    /// The receipt of a save that writes nothing: the destination is still
+    /// the very file last read or written (same identity, size, modified and
+    /// change times), and every media item the plan would write is already a
+    /// range of that file. Bytes held anywhere else (library media found for
+    /// assets the file lacks, an import, legacy base64 media) are written.
+    fn unchanged_receipt(&self) -> Option<SaveReceipt> {
+        let version = self.unchanged.as_ref()?;
+        let now = lstat_file(&self.destination).ok().flatten()?;
+        if !now.same_file(&version.stat) || version.path != self.destination {
+            return None;
+        }
+        let in_file = |entry: &MediaEntry| match &entry.source {
+            MediaSource::Embedded { file, .. } => {
+                file.path == version.path && file.stat.same_file(&version.stat)
+            }
+            _ => false,
+        };
+        if !self.media.iter().all(in_file) {
+            return None;
+        }
+        Some(SaveReceipt {
+            portable: false,
+            unavailable_links: Vec::new(),
+            path: self.destination.clone(),
+            revision: self.revision,
+            doc_id: self.doc_id,
+            state_token: self.state_token,
+            outside_writes: self.outside_writes,
+            size: now.size,
+            layout: SaveLayout::Unchanged,
+            file_hash: version.hash.clone(),
+            // Not read back: no document record was written.
+            document_sha256: String::new(),
+            version: version.clone(),
+            // The store keeps its media ranges as they are.
+            media: MediaTable::default(),
+            reused_media_bytes: 0,
+            backup: None,
+            displaced: None,
+            changed: Vec::new(),
+            unproven: false,
+            local_copy: None,
+            ticket: self.ticket.clone(),
+        })
     }
 
     fn attempt(&self, fault: Option<WriteFault>) -> Result<SaveReceipt, ProjectIoError> {
@@ -785,7 +842,11 @@ impl SavePlan {
                 SaveLayout::Compacted,
             )
         };
-        lap.mark(if layout == SaveLayout::Compacted { "new file created" } else { "previous file cloned and hashed" });
+        lap.mark(if layout == SaveLayout::Compacted {
+            "new file created"
+        } else {
+            "previous file cloned and hashed"
+        });
         let tmp_err = |e: io::Error| io_err(&temp.path, e);
         let limit = match fault {
             Some(WriteFault::DiskFullAfter(n) | WriteFault::DiskFullOnce(n)) => Some(n),
@@ -1152,6 +1213,8 @@ impl SavePlan {
     pub fn with_reference_writer(&self, writer: Option<ReferenceWriter>) -> SavePlan {
         let mut plan = self.clone();
         plan.options.reference_writer = writer;
+        // Compared writers write, even a save with nothing changed.
+        plan.unchanged = None;
         plan
     }
     /// This plan saved to `twin` instead, which holds a copy of what the
@@ -1161,6 +1224,7 @@ impl SavePlan {
         plan.replace_existing = twin.exists();
         plan.destination = twin.to_owned();
         plan.publish = None;
+        plan.unchanged = None;
         plan
     }
 }
@@ -1189,7 +1253,10 @@ impl Lap {
     }
     fn mark(&mut self, phase: &str) {
         if let Some(at) = self.0.replace(std::time::Instant::now()) {
-            eprintln!("PM_SAVE {phase}: {:.0} ms", at.elapsed().as_secs_f64() * 1000.);
+            eprintln!(
+                "PM_SAVE {phase}: {:.0} ms",
+                at.elapsed().as_secs_f64() * 1000.
+            );
         }
     }
 }

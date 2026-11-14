@@ -263,6 +263,10 @@ pub struct DocumentStore {
     metadata_token: u64,
     saved_metadata_token: u64,
     save_metadata_token: u64,
+    /// The file version came from elsewhere since this store last wrote:
+    /// followed to where it was moved, or inherited by a recovered session.
+    /// Its next save in place writes even with nothing unsaved.
+    file_followed: bool,
     log: VecDeque<Arc<Change>>,
     listeners: Vec<(u64, Listener)>,
     next_listener: u64,
@@ -388,6 +392,7 @@ impl DocumentStore {
             metadata_token: 0,
             saved_metadata_token: 0,
             save_metadata_token: 0,
+            file_followed: false,
             log: VecDeque::new(),
             listeners: Vec::new(),
             next_listener: 1,
@@ -1403,6 +1408,22 @@ impl DocumentStore {
         target: SaveTarget,
         options: SaveOptions,
     ) -> Result<SavePlan, ProjectIoError> {
+        // Cmd-S with nothing to save writes nothing, when the file is still
+        // the one this store last read or wrote (the plan checks it again
+        // when it runs). Never for Save As or an export, a file followed to
+        // where it was moved, nor a file this build would write in another
+        // form (read as PMV3 or bare JSON: the save is where it becomes PMV4).
+        let unchanged = (matches!(target, SaveTarget::InPlace)
+            && !options.portable
+            && !self.needs_save()
+            && !self.file_followed
+            && self.file.format == pm_model::container::ContainerFormat::Pmv4
+            && self.file.envelope.wrapped)
+            .then(|| self.file.version.clone())
+            .flatten();
+        // The writers a test compares always write.
+        #[cfg(any(test, feature = "save-reference"))]
+        let unchanged = unchanged.filter(|_| options.reference_writer.is_none());
         let (destination, publish, replace_existing, reuse_previous) = match target {
             SaveTarget::InPlace => {
                 let path = self
@@ -1530,6 +1551,7 @@ impl DocumentStore {
             publish,
             replace_existing,
             reuse_previous,
+            unchanged,
             options,
             ticket,
         })
@@ -1551,6 +1573,7 @@ impl DocumentStore {
         self.file.format = pm_model::container::ContainerFormat::Pmv4;
         self.file.version = Some(receipt.version.clone());
         self.file.envelope.wrapped = true;
+        self.file_followed = false;
         // Keep the raw history until it is changed, including across repeated
         // saves. Changed stacks archive their input in prepare_save.
         for entry in receipt.media.iter() {
@@ -1613,6 +1636,7 @@ impl DocumentStore {
         }
         self.file.path = Some(new.path.clone());
         self.file.version = Some(new);
+        self.file_followed = true;
     }
 
     /// What this project's first save would work out about its undo history
@@ -2177,6 +2201,7 @@ impl DocumentStore {
 
     pub(crate) fn inherit_file(&mut self, file: ProjectFile) {
         self.file = file;
+        self.file_followed = true;
     }
     pub(crate) fn mark_library_saved(&mut self) {
         self.saved_token = self.state_token;

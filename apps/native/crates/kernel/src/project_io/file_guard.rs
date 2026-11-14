@@ -931,6 +931,8 @@ mod tests {
         // Explicitly clear history in the frozen plan. Otherwise Undo of the
         // replace still needs the original future layer and must keep its guard.
         failed.history = super::super::HistoryToWrite::Raw(Value::Null);
+        // The store is clean: these hand-edited plans must write, not skip.
+        failed.unchanged = None;
         assert!(
             std::thread::spawn(move || failed.run())
                 .join()
@@ -942,6 +944,7 @@ mod tests {
             .prepare_save(SaveTarget::InPlace, SaveOptions::default())
             .unwrap();
         append.history = super::super::HistoryToWrite::Raw(Value::Null);
+        append.unchanged = None;
         assert_eq!(run(&mut store, append), SaveLayout::Appended);
         assert_marked(&path, false);
         let mut compact = store
@@ -954,6 +957,7 @@ mod tests {
             )
             .unwrap();
         compact.history = super::super::HistoryToWrite::Raw(Value::Null);
+        compact.unchanged = None;
         assert_eq!(run(&mut store, compact), SaveLayout::Compacted);
         assert_marked(&path, false);
         oracle(&[(path, false)]);
