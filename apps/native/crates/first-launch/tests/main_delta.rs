@@ -369,15 +369,12 @@ fn full_main_source_link_identity_migrates_without_a_sampled_fingerprint() {
     assert_eq!(pass["diskRecords"]["media:proxy"]["source"], "linked");
 }
 
-/// An original from main's Media Store that only lives in a folder the person
-/// skipped is "not reached": offline with its source kept, listed in the
-/// report, and never blocking its project.
+/// Metadata-only links do not open guarded source folders or ask for read access.
 #[test]
-fn skipped_source_linked_media_is_not_reached_and_never_blocks() {
+fn guarded_main_source_links_are_published_without_opening_the_original() {
     use pm_first_launch::{
-        Outcome, run_with_folder_access,
+        Outcome,
         source_access::{self, Choice, PROMPT_TIMEOUT},
-        surfaces::migration::ReportKind,
     };
     let t = tempfile::tempdir().unwrap();
     let root = t.path().canonicalize().unwrap();
@@ -411,112 +408,28 @@ fn skipped_source_linked_media_is_not_reached_and_never_blocks() {
         vec![(downloads.clone(), "Downloads".into())],
         PROMPT_TIMEOUT,
     );
-    assert!(matches!(
-        run(&config, |_| Ok(())).unwrap(),
-        Outcome::NeedsFolderAccess { .. }
-    ));
-    let outcome = run_with_folder_access(&config, Choice::Skip, |_| Ok(())).unwrap();
+    let outcome = run(&config, |_| Ok(())).unwrap();
     assert!(
         matches!(
             outcome,
             Outcome::Complete {
                 blocked_owners: 0,
-                not_reached: 1,
-                ..
-            }
-        ),
-        "{outcome:?}"
-    );
-    let manifest: Value = read(&config.native_profile.join("Media Store/migration.json"));
-    let pass = manifest["passes"]
-        .as_object()
-        .unwrap()
-        .values()
-        .next()
-        .unwrap();
-    assert!(
-        pass["closure"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|e| e["reference"]["key"] == "media:original" && e["status"] == "not-reached"),
-        "{pass:#}"
-    );
-    assert_eq!(pass["blockedOwners"], json!([]));
-    let report = pm_first_launch::report::load(&config.native_profile).unwrap();
-    assert!(
-        report
-            .rows
-            .iter()
-            .any(|r| r.kind == ReportKind::NotReached && r.display_name == "external-original.mov"),
-        "{:?}",
-        report.rows
-    );
-    // The answer is kept per folder: a later run never asks about it again.
-    let state: pm_first_launch::State = read(&config.native_profile.join("migration.json"));
-    assert_eq!(
-        state.folder_outcomes.get(&downloads),
-        Some(&source_access::Outcome::Skipped)
-    );
-    assert_eq!(
-        fs::read(&source).unwrap(),
-        b"synthetic original",
-        "the original is untouched"
-    );
-
-    // Settings › Media lists the folder and its file, and Allow Access brings
-    // the original in (a test folder opens without a macOS prompt).
-    let waiting = pm_first_launch::waiting_folders(&config).unwrap();
-    assert_eq!(
-        waiting,
-        [pm_first_launch::WaitingFolder {
-            path: downloads.clone(),
-            name: "Downloads".into(),
-            files: 1,
-            outcome: source_access::Outcome::Skipped,
-        }]
-    );
-    // macOS refused it later (persisted Denied), then the person allowed
-    // Powermove in System Settings: Check Again reads it now.
-    let state_path = config.native_profile.join("migration.json");
-    let mut state: Value = read(&state_path);
-    let key = downloads.to_string_lossy().into_owned();
-    state["folder_outcomes"][&key] = json!("denied");
-    fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
-    assert_eq!(
-        pm_first_launch::waiting_folders(&config).unwrap()[0].outcome,
-        source_access::Outcome::Denied
-    );
-    let mut events = vec![];
-    let outcome = pm_first_launch::allow_folders(&config, std::slice::from_ref(&downloads), |e| {
-        events.push(e);
-        Ok(())
-    })
-    .unwrap();
-    assert!(
-        matches!(
-            outcome,
-            Outcome::Complete {
                 not_reached: 0,
-                blocked_owners: 0,
                 ..
             }
         ),
         "{outcome:?}"
     );
-    assert_eq!(events.last(), Some(&pm_first_launch::Event::Complete));
     let state: pm_first_launch::State = read(&config.native_profile.join("migration.json"));
-    assert_eq!(
-        state.folder_outcomes.get(&downloads),
-        Some(&source_access::Outcome::Granted)
-    );
-    assert_eq!(pm_first_launch::waiting_folders(&config).unwrap(), []);
-    let report = pm_first_launch::report::load(&config.native_profile).unwrap();
+    assert!(state.folder_outcomes.is_empty());
     assert!(
-        !report.rows.iter().any(|r| r.kind == ReportKind::NotReached),
-        "{:?}",
-        report.rows
+        pm_first_launch::waiting_folders(&config)
+            .unwrap()
+            .is_empty()
     );
+    let summary =
+        pm_native_migrate::linked_summary(&config.native_profile.join("Media Store")).unwrap();
+    assert_eq!(summary.folders[&downloads].items, 1);
     assert_eq!(fs::read(&source).unwrap(), b"synthetic original");
 }
 

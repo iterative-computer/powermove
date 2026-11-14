@@ -747,17 +747,158 @@ fn media(
         },
     )
 }
+fn available_media_keys(native: &Path) -> BTreeSet<String> {
+    use sha2::{Digest, Sha256};
+    let root = native.join("Media Store");
+    let mut keys = BTreeSet::new();
+    for file in fs::read_dir(root.join("keys"))
+        .ok()
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        let Ok(input) = File::open(file.path()) else {
+            continue;
+        };
+        let Ok(key) = serde_json::from_reader::<_, migration::KeyRecord>(input) else {
+            continue;
+        };
+        if file.file_name().to_string_lossy()
+            != format!("{:x}.json", Sha256::digest(key.key.as_bytes()))
+            || key.hash.len() != 64
+            || !key.hash.bytes().all(|b| b.is_ascii_hexdigit())
+        {
+            continue;
+        }
+        let valid = |path: &Path| {
+            fs::symlink_metadata(path).is_ok_and(|m| m.is_file() && m.len() == key.size)
+        };
+        let external = key
+            .path
+            .as_ref()
+            .is_some_and(|p| p.is_absolute() && valid(p));
+        if external || valid(&root.join("objects").join(&key.hash[..2]).join(&key.hash)) {
+            keys.insert(key.key);
+        }
+    }
+    keys
+}
+// A file cannot lend an offline asset its index does not name. This negative
+// check reads only container metadata; possible matches still use the kernel's
+// normal identity/checksum proof, including legacy inline-media handling.
+fn may_lend(path: &Path, wanted: &BTreeSet<String>, stored: &BTreeSet<String>) -> bool {
+    (|| -> Result<bool> {
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(path)?;
+        ensure!(file.metadata()?.is_file(), "not a regular project file");
+        let container = pm_model::container::read_container(
+            &file,
+            pm_model::container::ReadOptions {
+                verify_media: false,
+            },
+        )?;
+        let doc = &container.document;
+        let project = doc.get("proj").unwrap_or(doc);
+        let needed = |id: &str| {
+            if !wanted.contains(id) || stored.contains(id) {
+                return false;
+            }
+            let Some(asset) = project
+                .get("assets")
+                .and_then(|a| a.get(id))
+                .filter(|a| a.as_object().is_some())
+            else {
+                return true;
+            };
+            let key = asset
+                .get("storageKey")
+                .and_then(KernelValue::as_str)
+                .unwrap_or(id);
+            let fingerprint = asset
+                .get("fingerprint")
+                .and_then(KernelValue::as_str)
+                .map(|fp| format!("media:{fp}"));
+            // Every matching identity uses these same keys in for_copy. If any
+            // is already available, its store bytes win and the file lends none.
+            !stored.contains(key)
+                && !stored.contains(id)
+                && !fingerprint.as_ref().is_some_and(|fp| stored.contains(fp))
+        };
+        if container
+            .media
+            .iter()
+            .chain(&container.archived_media)
+            .any(|r| r.id.as_str().is_some_and(needed))
+        {
+            return Ok(true);
+        }
+        for root in [doc, project] {
+            for field in ["media", "nativeLegacyMediaArchive"] {
+                if let Some(map) = root.get(field).and_then(KernelValue::as_object)
+                    && map.iter().any(|(id, _)| id.as_str().is_some_and(needed))
+                {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    })()
+    .unwrap_or(true)
+}
 fn summary(native: &Path, state: &State, pass: &Pass) -> Outcome {
     // Media the original app had lost from its store but kept in a project's
     // file are not offline: the copy reads them from that file.
+    let stored_keys = available_media_keys(native);
     let mut lent = std::collections::BTreeMap::new();
+    let mut wanted = std::collections::BTreeMap::<String, BTreeSet<String>>::new();
+    for entry in pass
+        .closure
+        .iter()
+        .filter(|e| e.status == migration::Status::AlreadyOffline)
+    {
+        if let Some(copy) = state.receipts.get(&entry.reference.owner)
+            && let Some(id) = &entry.reference.legacy_id
+        {
+            wanted
+                .entry(copy.native.clone())
+                .or_default()
+                .insert(id.clone());
+        }
+    }
     let mut offline = |e: &&migration::ClosureEntry| {
         let Some(copy) = state.receipts.get(&e.reference.owner) else {
             return true;
         };
-        let ids = lent
-            .entry(copy.native.clone())
-            .or_insert_with(|| pm_kernel::embedded_media::lent(native, &copy.native));
+        let ids = lent.entry(copy.native.clone()).or_insert_with(|| {
+            // A missing association cannot lend bytes. Read its small metadata
+            // before asking the kernel to load the full project and history.
+            let store = LibraryStore::open(native);
+            let can_lend = ["projectMeta", "projectState"].into_iter().any(|prefix| {
+                store
+                    .read(&format!("{prefix}.{}", copy.native))
+                    .ok()
+                    .flatten()
+                    .and_then(|m| {
+                        m.get("embeddedMedia")
+                            .and_then(|m| m.get("path"))
+                            .and_then(KernelValue::as_str)
+                            .map(PathBuf::from)
+                    })
+                    .is_some_and(|p| {
+                        p.is_file()
+                            && wanted
+                                .get(&copy.native)
+                                .is_some_and(|ids| may_lend(&p, ids, &stored_keys))
+                    })
+            });
+            if can_lend {
+                pm_kernel::embedded_media::lent(native, &copy.native)
+            } else {
+                BTreeSet::new()
+            }
+        });
         !e.reference
             .legacy_id
             .as_ref()

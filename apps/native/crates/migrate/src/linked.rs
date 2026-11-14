@@ -16,8 +16,7 @@ use std::{
 pub(crate) fn valid_file(path: &Path, size: u64) -> bool {
     path.is_absolute()
         && crate::library_media::is_resident(path).unwrap_or(false)
-        && open_regular(path)
-            .is_ok_and(|f| f.metadata().is_ok_and(|m| m.is_file() && m.len() == size))
+        && fs::symlink_metadata(path).is_ok_and(|m| m.is_file() && m.len() == size)
 }
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct LinkedFolder {
@@ -353,21 +352,31 @@ pub fn link_many_with_disk(
                 .as_deref()
                 .and_then(|f| f.strip_prefix("v2:"))
                 .and_then(|f| f.split(':').next())
-                .and_then(|s| s.parse().ok());
+                .and_then(|s| s.parse().ok())
+                .or_else(|| {
+                    // Older originals carry a full hash but no recorded size.
+                    // Preserve their availability without reading their bytes;
+                    // adoption verifies that recorded hash before publication.
+                    r.original_blake3.as_ref().and_then(|_| {
+                        fs::symlink_metadata(path)
+                            .ok()
+                            .filter(|m| m.is_file())
+                            .map(|m| m.len())
+                    })
+                });
             if let Some(size) = size
                 && valid_file(path, size)
             {
-                available.insert(
-                    r.key.clone(),
-                    make_key(
-                        &r.key,
-                        path.clone(),
-                        size,
-                        "application/octet-stream",
-                        r.revision.as_deref(),
-                        None,
-                    ),
+                let mut key = make_key(
+                    &r.key,
+                    path.clone(),
+                    size,
+                    "application/octet-stream",
+                    r.revision.as_deref(),
+                    None,
                 );
+                key.expected_blake3 = r.original_blake3.clone();
+                available.insert(r.key.clone(), key);
             }
         }
     }
@@ -442,6 +451,11 @@ pub fn link_many_with_disk(
         let stored = available
             .get(&r.key)
             .or_else(|| r.legacy_id.as_ref().and_then(|id| available.get(id)))
+            .filter(|key| {
+                r.revision
+                    .as_ref()
+                    .is_none_or(|revision| revision == &key.revision)
+            })
             .cloned();
         let original_available = stored.as_ref().is_some_and(|k| {
             !r.is_proxy()
@@ -508,6 +522,8 @@ mod tests {
         let base = temp.path().canonicalize().unwrap();
         let source = base.join("original.bin");
         fs::write(&source, b"synthetic payload").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o640)).unwrap();
         let root = base.join("media");
         fs::create_dir_all(root.join("keys")).unwrap();
         let key = make_key("item", source.clone(), 17, "video/mp4", Some("v1"), None);
@@ -576,6 +592,10 @@ mod tests {
             )
             .unwrap(),
             fs::read(&source).unwrap()
+        );
+        assert_eq!(
+            fs::metadata(&source).unwrap().permissions().mode() & 0o777,
+            0o640
         );
         fs::remove_file(&source).unwrap();
         let record = crate::library_media::DiskMediaRecord {
