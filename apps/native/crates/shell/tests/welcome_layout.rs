@@ -176,3 +176,88 @@ fn a_summary_breathes_wraps_and_scrolls_inside_the_window() {
         }
     });
 }
+
+#[test]
+fn keychain_failure_and_retry_surfaces_render_headlessly() {
+    objc2::rc::autoreleasepool(|_| {
+        for (name, title, line, retry) in [
+            (
+                "keychain-missing",
+                "Keychain Access Wasn’t Allowed",
+                "The original app’s sign-in key wasn’t found in your Keychain. Open the original app and sign in, then try again. Your sign-ins and extension values stay in the original app. You can continue and sign in here.",
+                true,
+            ),
+            (
+                "keychain-consent",
+                "Keep Your Sign-Ins",
+                "Powermove can keep your extension secrets and sign-ins. Continue to allow one macOS Keychain request for Powermove Safe Storage. Your original app stays unchanged.",
+                false,
+            ),
+        ] {
+            let tokens = Tokens::new(Scheme::Dark, Accessibility::default());
+            let m = tokens.metrics;
+            let mut cx = HeadlessAppContext::with_platform(
+                Arc::new(
+                    gpui_parley::ParleyTextSystem::new(gpui_parley::SystemFonts::Load)
+                        .with_automatic_optical_sizing(),
+                ),
+                Arc::new(()),
+                || {
+                    Some(Box::new(
+                        gpui_apple::metal_renderer::MetalHeadlessRenderer::new(),
+                    ))
+                },
+            );
+            let frame = Frame {
+                surface: "N002".into(),
+                title: title.into(),
+                line: line.into(),
+                buttons: if retry {
+                    vec![
+                        Button::new("quit", "Quit Powermove").leading(),
+                        Button::new("skip_secret_consent", "Continue Without Them"),
+                        Button::new("resume_with_secret_consent", "Try Again"),
+                    ]
+                } else {
+                    vec![
+                        Button::new("quit", "Quit Powermove").leading(),
+                        Button::new("skip_secret_consent", "Not Now"),
+                        Button::new("continue", "Continue"),
+                    ]
+                },
+                default: Some(
+                    if retry {
+                        "skip_secret_consent"
+                    } else {
+                        "continue"
+                    }
+                    .into(),
+                ),
+                ..Frame::default()
+            };
+            let window = cx
+                .open_window(size(px(m.welcome_width), px(m.welcome_height)), |_, cx| {
+                    cx.new(|cx| WelcomeView::new(tokens, frame, Rc::new(|_, _| {}), cx))
+                })
+                .unwrap();
+            cx.run_until_parked();
+            let image = cx.capture_screenshot(window.into()).unwrap();
+            if let Ok(dir) = std::env::var("PM_WELCOME_CAPTURE") {
+                std::fs::create_dir_all(&dir).unwrap();
+                image.save(format!("{dir}/{name}.png")).unwrap();
+            }
+            let title = cx
+                .debug_bounds(window.into(), "welcome-title")
+                .unwrap()
+                .unwrap();
+            assert!(title.top() >= px(0.));
+            let button_id = if retry {
+                "welcome-resume_with_secret_consent"
+            } else {
+                "welcome-continue"
+            };
+            let button = cx.debug_bounds(window.into(), button_id).unwrap().unwrap();
+            assert!(button.bottom() <= px(m.welcome_height));
+        }
+    });
+}

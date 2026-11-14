@@ -52,6 +52,34 @@ pub(super) enum RunInput {
     Refuse(u64),
 }
 
+/// What an export realm is doing, for the export's wait: every step it takes
+/// counts (an input handled, a script started, an extension activated), and
+/// what it is waiting for, in words the person can act on. The wait goes on
+/// while the steps move; a loaded machine is slow, not stopped.
+#[derive(Default)]
+pub struct ExportProgress {
+    steps: AtomicU64,
+    note: Mutex<String>,
+}
+impl ExportProgress {
+    pub(super) fn step(&self) {
+        self.steps.fetch_add(1, Ordering::Relaxed);
+    }
+    pub(super) fn note(&self, note: String) {
+        let mut now = self.note.lock().unwrap();
+        if *now != note {
+            *now = note;
+        }
+    }
+    /// Steps taken so far, and what the realm waits for (`waiting for …`).
+    pub fn read(&self) -> (u64, String) {
+        (
+            self.steps.load(Ordering::Relaxed),
+            self.note.lock().unwrap().clone(),
+        )
+    }
+}
+
 /// The export realms of one window, by job; the app shows each one's page.
 #[derive(Default)]
 pub(super) struct Exports {
@@ -64,8 +92,12 @@ pub(super) struct Route {
     pub(super) view: u64,
     pub(super) batches: VecDeque<AdmittedDomBatch>,
     pub(super) host: Option<Arc<NativeHost>>,
+    pub(super) progress: Arc<ExportProgress>,
 }
 impl Exports {
+    pub(super) fn progress(&self, job: &str) -> Option<Arc<ExportProgress>> {
+        self.runs.get(job).map(|r| r.progress.clone())
+    }
     pub(super) fn inbox(&self, job: &str) -> Option<Sender<RunInput>> {
         self.runs.get(job).map(|r| r.inbox.clone())
     }
@@ -140,6 +172,7 @@ pub(super) struct Start {
     pub(super) closing: Arc<AtomicBool>,
     /// Its host has no window: no page will come for its layout reads.
     pub(super) pageless: bool,
+    pub(super) progress: Arc<ExportProgress>,
 }
 
 struct Events {
@@ -159,9 +192,14 @@ struct Events {
     /// A raster answer's layout read the page did not answer: the export
     /// cannot be drawn right.
     layout_failed: AtomicBool,
+    /// Extensions that have started here (or failed to), by id.
+    started: Mutex<BTreeSet<String>>,
+    progress: Arc<ExportProgress>,
 }
 impl RealmEvents for Arc<Events> {
     fn health(&self, id: &str, health: &Value) {
+        self.started.lock().unwrap().insert(id.to_owned());
+        self.progress.step();
         if matches!(
             health["state"].as_str(),
             Some("activation-error" | "runtime-error")
@@ -261,6 +299,8 @@ struct Run {
     /// Sources the realm's queue had no room for yet, in order.
     queue: VecDeque<String>,
     producing: Arc<AtomicBool>,
+    /// The script the realm ran last, for the progress it shows.
+    last_execution: Option<u64>,
 }
 
 /// Runs one export realm on the calling thread until its export or window ends.
@@ -278,6 +318,8 @@ pub(super) fn run(start: Start, inbox: Sender<RunInput>, input: Receiver<RunInpu
         settled: AtomicBool::new(false),
         failed: Mutex::default(),
         layout_failed: AtomicBool::new(false),
+        started: Mutex::default(),
+        progress: start.progress.clone(),
     });
     let mut run = Run {
         start,
@@ -290,6 +332,7 @@ pub(super) fn run(start: Start, inbox: Sender<RunInput>, input: Receiver<RunInpu
         waiting: VecDeque::new(),
         queue: VecDeque::new(),
         producing: Arc::new(AtomicBool::new(false)),
+        last_execution: None,
     };
 
     if let Err(error) = run.boot() {
@@ -304,7 +347,11 @@ pub(super) fn run(start: Start, inbox: Sender<RunInput>, input: Receiver<RunInpu
         } else {
             Duration::from_millis(2)
         };
-        match input.recv_timeout(wait) {
+        let received = input.recv_timeout(wait);
+        if received.is_ok() {
+            run.events.progress.step();
+        }
+        match received {
             Ok(RunInput::Ask(batch, needs)) => run.ask(batch, needs),
             Ok(RunInput::Booted) => run.booted(),
             Ok(RunInput::Settled) => (),
@@ -320,6 +367,7 @@ pub(super) fn run(start: Start, inbox: Sender<RunInput>, input: Receiver<RunInpu
             Err(RecvTimeoutError::Disconnected) => break,
         }
         run.dispatch();
+        run.report();
     }
     if let Some((realm, ..)) = run.live.take() {
         realm.close();
@@ -434,6 +482,49 @@ impl Run {
         }
         self.events.page_missed.store(true, Ordering::Release);
         true
+    }
+    /// Progress for the export's wait: a new script running is a step, and
+    /// the note says what the realm waits for now.
+    fn report(&mut self) {
+        let progress = &self.events.progress;
+        if let Some((realm, ..)) = &self.live
+            && let Some(active) = realm.active_execution()
+            && self.last_execution != Some(active.execution)
+        {
+            self.last_execution = Some(active.execution);
+            progress.step();
+        }
+        let note = if let Some(failure) = &self.failure {
+            failure.clone()
+        } else if self.booted.is_none() {
+            let started = self.events.started.lock().unwrap();
+            let records = self.start.records.as_array().cloned().unwrap_or_default();
+            let starting: Vec<String> = records
+                .iter()
+                .filter(|r| r["health"]["state"] == "ok")
+                .filter_map(|r| {
+                    let id = r["id"].as_str()?;
+                    (!started.contains(id))
+                        .then(|| r["manifest"]["name"].as_str().unwrap_or(id).to_owned())
+                })
+                .collect();
+            match starting.len() {
+                0 => "waiting for the export's extensions to start".to_owned(),
+                1..=3 => format!("waiting for {} to start", starting.join(", ")),
+                n => format!(
+                    "waiting for {} and {} more to start",
+                    starting[..3].join(", "),
+                    n - 3
+                ),
+            }
+        } else if !self.events.settled.load(Ordering::Acquire) {
+            "waiting for the export's extensions to finish starting".to_owned()
+        } else if !self.ready() {
+            "waiting for the export's page to open".to_owned()
+        } else {
+            "waiting for the extensions that draw its layers".to_owned()
+        };
+        progress.note(note);
     }
     fn ask(&mut self, batch: u64, needs: Value) {
         self.waiting.push_back((batch, needs));

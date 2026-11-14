@@ -1142,13 +1142,26 @@ impl Controller {
         self.apply_viewer_options();
         cx.notify();
     }
-    /// Selection gizmos draw in the engine's own pass, with the safe areas.
-    pub fn set_gizmos(&mut self, lines: Vec<OverlayLine>) {
-        self.gizmo_lines = lines;
-        if let Some(viewer) = &self.viewer
-            && let Err(error) = viewer.safe_areas(self.overlay())
-        {
-            self.message = error.to_string();
+    /// The outline and handles: drawn by the app over the picture
+    /// (`gizmo_layer`), so they follow the pointer whatever a frame costs.
+    pub fn set_gizmos(
+        &mut self,
+        lines: Vec<OverlayLine>,
+        at: Option<crate::gizmo_layer::Placement>,
+    ) {
+        let host = self.host.borrow();
+        let Some(parent) = crate::gizmo_layer::layer_of(&host.viewer_view()) else {
+            return;
+        };
+        let scale = host.window.backingScaleFactor();
+        drop(host);
+        if self.gizmo_layer.as_ref().is_none_or(|l| !l.on(&parent)) {
+            self.gizmo_layer = Some(crate::gizmo_layer::GizmoLayer::new(parent));
+        }
+        let layer = self.gizmo_layer.as_mut().unwrap();
+        match at {
+            Some(at) if !lines.is_empty() => layer.set(&lines, at, scale),
+            _ => layer.clear(),
         }
     }
     /// Guides first; a huge selection loses its last boxes, never the guides.
@@ -1156,12 +1169,8 @@ impl Controller {
     /// beyond a float) are left out, never unwrapped: this runs on the main
     /// thread for whatever the document holds.
     fn overlay(&self) -> OverlayGeometry {
-        OverlayGeometry::lossy(
-            overlay_lines(self.safe_areas, self.guides)
-                .into_iter()
-                .chain(self.gizmo_lines.iter().copied()),
-        )
-        .with_channels(self.channels)
+        OverlayGeometry::lossy(overlay_lines(self.safe_areas, self.guides))
+            .with_channels(self.channels)
     }
     /// Re-applies output mode, media, Preview Resolution and overlays to
     /// every viewer of this editor (after any viewer is created or an option
@@ -1250,7 +1259,7 @@ impl Controller {
                 layer: Some(popout.layer.clone()),
                 rate: self.rate,
                 end: Some(
-                    (crate::session::composition_duration(&p)
+                    (crate::session::composition_duration(p)
                         * pm_protocol::common::TICKS_PER_SECOND as f64) as i64,
                 ),
                 audio: false,

@@ -1627,9 +1627,8 @@ impl DocumentStore {
         let stored = self.file.envelope.history.clone();
         let open = self.root().and_then(model::open_comp_id);
         move || {
-            for record in &records {
-                record.warm();
-            }
+            // Steps are independent: warm them on every core.
+            pm_model::parallel::map(records.len(), |i| records[i].warm());
             if let Some(stored) = stored {
                 // Judged once per member and open composition: a save that
                 // runs this again (every save does, on its worker) finds

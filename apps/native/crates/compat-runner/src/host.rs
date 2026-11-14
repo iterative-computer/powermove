@@ -730,6 +730,12 @@ impl RasterInbox {
         };
         let _ = self.inbox.lock().unwrap().send(Input::Rasters(batch, wire));
     }
+    /// Steps export `job`'s realm has taken and what it waits for
+    /// ([`export::ExportProgress`]), while it runs.
+    pub fn export_progress(&self, job: &str) -> Option<(u64, String)> {
+        let progress = self.shared.exports.lock().unwrap().progress(job)?;
+        Some(progress.read())
+    }
     /// The export `job` froze `published`: its overrides are answered by a
     /// realm of its own (`export.rs`), started now, until `cancel` is set
     /// (the export ended) or the window's extensions stop.
@@ -760,6 +766,7 @@ impl RasterInbox {
                 view: export::next_view(),
                 batches: VecDeque::new(),
                 host: None,
+                progress: Arc::default(),
             },
         );
         drop(exports);
@@ -1545,6 +1552,13 @@ impl Owner {
                 ));
             }
             Input::Export(job, frozen, cancel, (tx, rx)) => {
+                let progress = self
+                    .shared
+                    .exports
+                    .lock()
+                    .unwrap()
+                    .progress(&job)
+                    .unwrap_or_default();
                 let start = export::Start {
                     job,
                     frozen,
@@ -1560,6 +1574,7 @@ impl Owner {
                     shared: self.shared.clone(),
                     closing: self.closing.clone(),
                     pageless: self.config.owner.is_none(),
+                    progress,
                 };
                 let spawned = thread::Builder::new()
                     .name("pm-compat-export".into())
@@ -4759,6 +4774,47 @@ mod tests {
         inbox.ask(3, needs, json!({"job":"job-1"}));
         thread::sleep(Duration::from_millis(100));
         assert!(!answered.lock().unwrap().iter().any(|(b, _)| *b == 3));
+    }
+    /// An export's realm says what it waits for and that it is getting on:
+    /// an extension still starting is named, the realm's steps move as it
+    /// boots and answers (the export's wait goes on for as long as they do;
+    /// an idle await, a timer, is no step), and the answer comes once the
+    /// extension has started.
+    #[test]
+    fn an_export_realm_reports_its_progress_and_names_the_extension_it_waits_for() {
+        const SLOW: &str = "export default async function activate(api: any){
+           await new Promise((done: any)=>setTimeout(done, 1500));
+           api.services.register('raster',(L: any)=>{
+             const c=document.createElement('canvas'); c.width=3; c.height=1;
+             return {cv:c,w:3,h:1,anchorX:0,anchorY:0}});}";
+        let (fixture, answered) = export_window(&[("slowstart", SLOW)], "abc", None);
+        let frozen = fixture.kernel.published("window").unwrap();
+        let needs = needs(&fixture);
+        let inbox = fixture.host.raster_inbox();
+        let cancel = Arc::new(AtomicBool::new(false));
+        inbox.export("job-p", frozen, cancel.clone()).unwrap();
+        inbox.ask(1, needs, json!({"job":"job-p"}));
+        let mut seen: Vec<(u64, String)> = vec![];
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !answered.lock().unwrap().iter().any(|(b, _)| *b == 1) {
+            assert!(Instant::now() < deadline, "answered: {seen:?}");
+            if let Some(progress) = inbox.export_progress("job-p") {
+                seen.push(progress);
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            seen.iter().any(|(_, note)| note == "waiting for slowstart to start"),
+            "named while it starts: {seen:?}"
+        );
+        assert_eq!(answer_of(&answered, 1, Duration::from_secs(5)), json!(3));
+        let steps = inbox.export_progress("job-p").map(|(steps, _)| steps);
+        assert!(
+            seen.first().map(|(steps, _)| *steps) < steps,
+            "steps moved: {:?} then {steps:?}",
+            seen.first()
+        );
+        cancel.store(true, Ordering::Release);
     }
     #[test]
     fn an_export_realms_capture_renders_its_frozen_project_and_asks_it_inline() {
