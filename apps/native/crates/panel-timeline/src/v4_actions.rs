@@ -235,6 +235,7 @@ pub(super) async fn dispatch(
                 value_delta: optional_number(v, "valueDelta", 0.)?,
                 time_scale: optional_number(v, "timeScale", 1.)?,
                 value_scale: optional_number(v, "valueScale", 1.)?,
+                anchor: None,
                 handle_time: optional_number(v, "handleTime", 0.)?,
                 handle_value: optional_number(v, "handleValue", 0.)?,
                 modifiers: crate::Modifiers {
