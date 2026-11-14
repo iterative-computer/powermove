@@ -378,6 +378,9 @@ pub struct ViewerStatus {
     /// Effects the project uses whose provider isn't installed. Their
     /// layers draw without them (bypassed, as After Effects does).
     pub missing_effects: Vec<pm_render::effects::versions::MissingEffect>,
+    /// The installed extensions that would provide `missing_effects` but
+    /// provide nothing now, with why: the notice names them.
+    pub unavailable: Vec<resources::Unavailable>,
     /// Playing frames with a stand-in for a decode that missed its allowance.
     pub stand_in_frames: u64,
     /// Frames whose own stills exceeded the engine's image grant: drawn, and
@@ -430,12 +433,32 @@ impl ViewerStatus {
             ));
         }
         let missing = self.missing_effects.first()?;
+        let owner = self
+            .unavailable
+            .iter()
+            .find(|u| resources::provides(&u.id, &missing.effect));
+        if let (None, Some(owner)) = (&missing.revision, owner) {
+            return Some(format!(
+                "{} {}: {} is bypassed on {}{}",
+                owner.name,
+                owner.why,
+                missing.effect,
+                layers(missing.layers),
+                more(self.missing_effects.len() - 1)
+            ));
+        }
         let what = match &missing.revision {
             Some(revision) => format!(
                 "Effect saved by a newer Powermove: {} version {revision}",
                 missing.effect
             ),
-            None => format!("Effect not installed: {}", missing.effect),
+            None => match resources::named_extension(&missing.effect) {
+                Some(extension) => format!(
+                    "Effect not installed: {} (extension “{extension}”)",
+                    missing.effect
+                ),
+                None => format!("Effect not installed: {}", missing.effect),
+            },
         };
         Some(format!(
             "{what}, bypassed on {}{}",
@@ -2881,6 +2904,8 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 recorder.record(serde_json::json!({
                     "audio_start": true, "at": now, "viewer_id": id,
                     "wait_ms": waited as f64 / 1e3, "fallback": fallback,
+                    "output_latency_us": sample.output_latency_us,
+                    "sample_host_us": sample.host_time.get(), "sample_media": sample.media_time.get(),
                 }));
             }
             changed |= v
@@ -3046,9 +3071,13 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             let shown = plan.map(|p| p.shown);
             let media = if let Some(shown) = shown {
                 let at = |s: f64| {
-                    sample.media_time_at(
-                        pm_protocol::common::HostMicros::new((s.max(0.) * 1e6) as u64).unwrap(),
-                    )
+                    let host = (s.max(0.) * 1e6) as u64;
+                    if pm_media::decode::diag::knob("PM_ABL_PLAY_START_FENCE") == Some(0) {
+                        // The old projection, for a controlled latency A/B.
+                        sample.media_time_at(pm_protocol::common::HostMicros::new(host).unwrap())
+                    } else {
+                        Ticks::new(r.transport.clock.picture_at(host as i64)).unwrap_or(Ticks::ZERO)
+                    }
                 };
                 let plain = at(shown);
                 let lead = at(shown + interval / 2.);
@@ -3122,8 +3151,16 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             // frames keep their policy. (A play waiting for its audio start
             // draws as it is.)
             let resting = quality == 1. && moment == Moment::Paused && !r.transport.running();
+            let text_grid = (quality == 1. && moment != Moment::Scrub)
+                .then(|| engine.text_grid_scale(&scene, &v.config.output))
+                .flatten();
             let (scale, settled) = if capture {
                 (full, false)
+            } else if let Some(scale) = text_grid {
+                // Keep the native glyph grid at Play and at Stop; the
+                // paused worker can settle directly without flashing a
+                // drawable-sized version of the title in between.
+                (scale, resting)
             } else if resting && settling {
                 (full, true)
             } else if resting && FrameSpec::exact(time, v.config.output).settles(&scene) {
@@ -3419,6 +3456,21 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 }
                 if v.status.missing_effects != engine.missing_effects {
                     v.status.missing_effects = engine.missing_effects.clone();
+                }
+                let owners: Vec<_> = v
+                    .resources
+                    .unavailable
+                    .iter()
+                    .filter(|u| {
+                        engine
+                            .missing_effects
+                            .iter()
+                            .any(|m| resources::provides(&u.id, &m.effect))
+                    })
+                    .cloned()
+                    .collect();
+                if v.status.unavailable != owners {
+                    v.status.unavailable = owners;
                 }
                 // A capture asked for belongs to the next frame that lands.
                 if v.stamp != stamp && !only_moved(v, stamp, moves, spec.moment, capture) {
@@ -4464,7 +4516,20 @@ mod worker_tests {
         };
         assert_eq!(
             status.notice().as_deref(),
-            Some("Effect not installed: acme.glow, bypassed on 4 layers (and 1 more)")
+            Some("Effect not installed: acme.glow (extension “acme”), bypassed on 4 layers (and 1 more)")
+        );
+        // Installed, but providing nothing now: named, with why.
+        let off = ViewerStatus {
+            unavailable: vec![resources::Unavailable {
+                id: "acme".into(),
+                name: "Acme Effects".into(),
+                why: "is turned off".into(),
+            }],
+            ..status.clone()
+        };
+        assert_eq!(
+            off.notice().as_deref(),
+            Some("Acme Effects is turned off: acme.glow is bypassed on 4 layers (and 1 more)")
         );
         let newer = ViewerStatus {
             missing_effects: vec![pm_render::effects::versions::MissingEffect {

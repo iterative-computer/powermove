@@ -666,14 +666,16 @@ impl Exec<'_> {
                                 self.media.unreadable_found();
                             }
                             // A sequence's file that is there but does not
-                            // read is damaged: named by its file.
+                            // read: named by its file and why (reading it
+                            // again tells access from damage).
                             Some(Err(MediaFailure::Failed(reason))) if member => self.fail(
                                 plan,
                                 draw,
                                 MediaFailure::Failed(
-                                    crate::DamagedFrame {
+                                    crate::UnreadFrame {
                                         file: path.to_path_buf(),
                                         seconds: None,
+                                        cause: crate::ReadCause::of_file(path),
                                         reason,
                                     }
                                     .message(),

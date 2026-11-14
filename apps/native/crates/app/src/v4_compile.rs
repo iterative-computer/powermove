@@ -212,6 +212,49 @@ pub struct NodeView {
     /// `data-pm-slot="body"`: the part of a sheet between its title and its
     /// actions, which gives way while the sheet's height changes.
     pub sheet_body: bool,
+    /// `metadata.runs`: one wrapped paragraph whose words differ in style
+    /// (prose with bold, italic, code and links), drawn as one text.
+    pub rich: Option<Rich>,
+}
+/// A paragraph of styled runs. Each range carries [`Rich`] style bits.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Rich {
+    pub text: SharedString,
+    pub runs: Arc<Vec<(std::ops::Range<usize>, u8)>>,
+}
+impl Rich {
+    pub const BOLD: u8 = 1;
+    pub const ITALIC: u8 = 2;
+    pub const CODE: u8 = 4;
+    pub const LINK: u8 = 8;
+    /// `[{t, b?, i?, c?, a?}]`; plain runs need no style. Capped like any
+    /// node text, so a runaway reply stays bounded.
+    fn of(node: &Node) -> Option<Self> {
+        let runs = node.props.get("metadata")?.get("runs")?.as_array()?;
+        let (mut text, mut styled) = (String::new(), vec![]);
+        for run in runs.iter().take(4096) {
+            let Some(part) = run.get("t").and_then(Value::as_str) else {
+                continue;
+            };
+            let on = |k: &str| {
+                run.get(k)
+                    .is_some_and(|v| v == &Value::Bool(true) || v == 1)
+            };
+            let bits = u8::from(on("b")) * Self::BOLD
+                | u8::from(on("i")) * Self::ITALIC
+                | u8::from(on("c")) * Self::CODE
+                | u8::from(on("a")) * Self::LINK;
+            let start = text.len();
+            text.push_str(part);
+            if bits != 0 && !part.is_empty() {
+                styled.push((start..text.len(), bits));
+            }
+        }
+        (!text.is_empty()).then(|| Self {
+            text: text.into(),
+            runs: Arc::new(styled),
+        })
+    }
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct NumberFacts {
@@ -795,6 +838,7 @@ fn compile(
         scroll_x: compiled.scroll_x,
         semantic: header_id.map(|s| SharedString::from(s.to_owned())),
         text: (!node.text.is_empty()).then(|| node.text.clone().into()),
+        rich: Rich::of(node),
         symbol,
         symbol_size: compiled.symbol_size.unwrap_or(t.metrics.symbol_panel),
         disabled,

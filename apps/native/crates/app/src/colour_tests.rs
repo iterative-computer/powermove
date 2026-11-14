@@ -525,3 +525,18 @@ fn an_agent_reads_what_the_scopes_counted() {
     let expected = (pm_color::tonemap::pq_eotf(2. / 7.) * 10.).round() / 10.;
     assert_eq!(s["waveformBands"][0]["lowNits"], expected);
 }
+
+#[test]
+fn the_viewer_opens_on_the_outputs_view_and_keeps_a_chosen_one() {
+    use crate::viewer2::OutputMode;
+    use pm_protocol::color::ProjectOutput::{Hlg, Pq, Sdr};
+    assert_eq!(super::default_view(Sdr), OutputMode::Sdr);
+    assert_eq!(super::default_view(Pq), OutputMode::Pq);
+    assert_eq!(super::default_view(Hlg), OutputMode::Hlg);
+    assert_eq!(super::next_view(Sdr, Hlg, OutputMode::Sdr), OutputMode::Hlg);
+    assert_eq!(super::next_view(Hlg, Pq, OutputMode::Hlg), OutputMode::Pq);
+    assert_eq!(super::next_view(Pq, Sdr, OutputMode::Pq), OutputMode::Sdr);
+    // EDR, chosen by the person, survives a change of output.
+    assert_eq!(super::next_view(Pq, Hlg, OutputMode::Edr), OutputMode::Edr);
+    assert_eq!(super::next_view(Sdr, Pq, OutputMode::Hlg), OutputMode::Hlg);
+}

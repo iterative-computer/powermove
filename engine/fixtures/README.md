@@ -34,6 +34,10 @@ A 2.0 s, 48 kHz, stereo, 16-bit PCM WAV is 384,000 bytes before its header and c
 
 `hdr-stills/` holds stills Core Image and ImageIO write on macOS 15 or later (`xcrun swift hdr-stills/gen.swift hdr-stills`): a 64×36 picture whose left half is 18 % grey and whose right half is 0.8 of SDR white in the SDR rendition and 3.0 in the HDR one (light relative to SDR white, linear Rec.709). `still-gainmap.{heic,jpg,avif}` carry the SDR picture with an ISO 21496-1 gain map (headroom 3); `still-hdr-pq.heic` and `still-hdr-hlg.heic` carry the HDR picture as 10-bit BT.2100 PQ and HLG. ImageIO reads SDR white at 203 cd/m² in PQ, so the right half is 609 cd/m².
 
+## HAP
+
+`hap/hap1.mov`, `hap/hap5.mov` and `hap/hapy.mov` are HAP, HAP Alpha and HAP Q: 64×32, two frames of uncompressed texture sections with a different colour (and, for HAP Alpha, alpha) in every 4×4 block column, written by AVAssetWriter in pass-through. No FFmpeg build encodes HAP without Snappy, so `gen.sh` does not make them; `hap/make.swift` does (`swiftc -O make.swift -o /tmp/make-hap && /tmp/make-hap hap1 hap1.mov`). `pm-media`'s `tests/hap.rs` compares their decode with FFmpeg's.
+
 ## Regeneration
 
 ```bash

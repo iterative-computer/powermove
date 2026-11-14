@@ -153,7 +153,9 @@ pub(crate) struct RowScratch {
 
 /// [`output_ycbcra`] of a row of working RGBA pixels, each transfer function
 /// evaluated over the whole row at once: the same formulas in the same
-/// order, written to `out`.
+/// order, written to `out`. Returns the row's light as the file carries it:
+/// the brightest pixel's largest of R, G and B, and their sum, in cd/m²
+/// (MaxCLL and MaxFALL are made of these).
 pub(crate) fn output_row(
     row: &[f32],
     working: WorkingEncoding,
@@ -161,7 +163,7 @@ pub(crate) fn output_row(
     tags: ColorTags,
     scratch: &mut RowScratch,
     out: &mut [([f64; 3], f64)],
-) {
+) -> (f64, f64) {
     let w = row.len() / 4;
     let RowScratch { a, c, t, exp } = scratch;
     a.clear();
@@ -204,6 +206,22 @@ pub(crate) fn output_row(
         c[i] = 0.627_403_896 * r + 0.329_283_038 * g + 0.043_313_066 * b;
         c[w + i] = 0.069_097_289 * r + 0.919_540_395 * g + 0.011_362_316 * b;
         c[2 * w + i] = 0.016_391_439 * r + 0.088_013_308 * g + 0.895_595_253 * b;
+    }
+    // The light each pixel shows, up to what the signal can carry.
+    let (white, cap) = match tags {
+        ColorTags::Rec2100Pq { white_nits, .. } => (f64::from(white_nits), 10_000.0),
+        ColorTags::Rec2100Hlg {
+            white_nits,
+            peak_nits,
+            ..
+        } => (f64::from(white_nits), f64::from(peak_nits)),
+        _ => unreachable!("HDR tags checked by caller"),
+    };
+    let (mut peak, mut sum) = (0f64, 0f64);
+    for i in 0..w {
+        let m = (c[i].max(c[w + i]).max(c[2 * w + i]) * white).clamp(0.0, cap);
+        peak = peak.max(m);
+        sum += m;
     }
     match tags {
         ColorTags::Rec2100Pq { white_nits, .. } => {
@@ -280,6 +298,7 @@ pub(crate) fn output_row(
             },
         );
     }
+    (peak, sum)
 }
 
 #[cfg(test)]

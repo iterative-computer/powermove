@@ -22,6 +22,24 @@ impl PanelClock {
     }
 }
 
+/// The host instant a playing playhead and timecode stand for: the next
+/// vsync (`vsync`, CADisplayLink host seconds, the same clock as
+/// `HostMicros`), never before the sample's own `host_time`. Paused, the
+/// sample's time.
+pub fn shown_at(
+    clock: &pm_protocol::clock::ClockSample,
+    vsync: Option<f64>,
+    playing: bool,
+) -> pm_protocol::common::HostMicros {
+    match vsync {
+        Some(target) if playing && target.is_finite() && target > 0. => {
+            pm_protocol::common::HostMicros::new((target * 1e6) as u64)
+                .map_or(clock.host_time, |t| t.max(clock.host_time))
+        }
+        _ => clock.host_time,
+    }
+}
+
 pub struct Slot {
     pub w: f32,
     pub h: f32,
@@ -195,6 +213,9 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
     let mut shown = None::<String>;
     let mut studio_status = None;
     let mut measured = None::<(f32, Slot)>;
+    // The display link's next vsync (host seconds): where a playing playhead
+    // and timecode will be seen, rather than where the last sample stood.
+    let mut vsync = None::<f64>;
     cx.spawn(async move|cx| {
         loop {
             if rx.recv().await.is_err() { break; }
@@ -217,11 +238,11 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                     if std::env::var_os("PM_ENGINE_TRACE").is_some() {
                         let _ = viewer.command(pm_protocol::clock::TransportCommand::SetLoop { range: Some(pm_protocol::common::TickRange {
                             start: pm_protocol::common::Ticks::ZERO,
-                            end: pm_protocol::common::Ticks::new((v.duration * pm_protocol::common::TICKS_PER_SECOND as f64) as i64).unwrap_or(pm_protocol::common::Ticks::from_whole_seconds(1))
+                            end: pm_protocol::common::Ticks::new((v.duration() * pm_protocol::common::TICKS_PER_SECOND as f64) as i64).unwrap_or(pm_protocol::common::Ticks::from_whole_seconds(1))
                         }) });
                     }
                 }
-                if let Some((target, interval)) = ticks.borrow_mut().take() { let _=viewer.display_tick(target, interval); }
+                if let Some((target, interval)) = ticks.borrow_mut().take() { vsync=Some(target); let _=viewer.display_tick(target, interval); }
                 let status=viewer.status();
                 let next_studio_status=(status.refine_progress,status.export_estimate.clone());
                 if studio_status.as_ref()!=Some(&next_studio_status) {
@@ -256,14 +277,25 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                 if let Some(clock)=status.clock {
                     // Shuttling is a run too: the live timecode shows at every speed.
                     let playing=clock.state!=pm_protocol::clock::TransportState::Stopped;
-                    let fraction=(clock.media_time.get()as f64/pm_protocol::common::TICKS_PER_SECOND as f64/v.duration).clamp(0.,1.);
-                    let _=layers.update(MainThreadMarker::new().unwrap(),&clock,clock.host_time,v.rate,fraction,std::array::from_fn(|i|status.levels.as_ref().and_then(|l|l.master.peak.get(i)).copied().unwrap_or(0.) as f64));
+                    // Playing, the head and timecode show the time at the vsync this
+                    // tick lands on. A sample's own time only moves when a new one
+                    // arrives, so a late sample held the head a frame, then jumped two.
+                    // Never before the sample itself (a run's pre-roll is ahead).
+                    let at=shown_at(&clock,vsync,playing);
+                    let head_time=clock.media_time_at(at);
+                    let fraction=(head_time.get()as f64/pm_protocol::common::TICKS_PER_SECOND as f64/v.duration()).clamp(0.,1.);
+                    // One transaction for the engine's layer feed and this placement.
+                    // The feed sets the playhead layer to a 1×1 progress frame; committed
+                    // apart, a vsync between the two showed the head as that dot (gone).
+                    unsafe {
+                        let _:()=msg_send![objc2::class!(CATransaction),begin];
+                        let _:()=msg_send![objc2::class!(CATransaction),setDisableActions:true];
+                    }
+                    let _=layers.update(MainThreadMarker::new().unwrap(),&clock,at,v.rate,fraction,std::array::from_fn(|i|status.levels.as_ref().and_then(|l|l.master.peak.get(i)).copied().unwrap_or(0.) as f64));
                     let host=v.host.borrow();
                     let height=host.gpui.bounds().size.height;
                     let metrics=host.tokens.metrics;
                     unsafe {
-                        let _:()=msg_send![objc2::class!(CATransaction),begin];
-                        let _:()=msg_send![objc2::class!(CATransaction),setDisableActions:true];
                         let colors=&host.tokens.colors;
                         let _:()=msg_send![&*layers.timecode,setContentsScale:scale];
                         let _:()=msg_send![&*layers.timecode,setFontSize:host.tokens.typography.timecode as f64];
@@ -274,7 +306,7 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                         let (pps,scroll_time,column)=v.builtins.timeline.as_ref().map_or((100.,0.,0.),|t|t.read(cx).time_mapping());
                         // The playhead ends where the tracks do, above the bottom bar.
                         let bar=v.builtins.timeline.as_ref().map_or(0.,|t|t.read(cx).bar_height()) as f32;
-                        let seconds=clock.media_time.get()as f64/pm_protocol::common::TICKS_PER_SECOND as f64;
+                        let seconds=head_time.get()as f64/pm_protocol::common::TICKS_PER_SECOND as f64;
                         let offset=column+(seconds-scroll_time)*pps;
                         // A clear ground over the translucent header. The time is this
                         // layer's paused too: the panel hears play start and stop only
@@ -354,4 +386,45 @@ fn failures_line(
         (n, Some(name)) => format!("“{name}” and {} more aren’t drawn. Select one to see why in Properties.", n - 1),
         (n, None) => format!("{n} layers aren’t drawn. Select one to see why in Properties."),
     })
+}
+
+#[cfg(test)]
+mod shown_at_tests {
+    use super::shown_at;
+    use pm_protocol::clock::{ClockSample, TransportState};
+    use pm_protocol::common::{HostMicros, TICKS_PER_SECOND};
+
+    fn sample(state: TransportState, host_us: u64, media_s: i64) -> ClockSample {
+        ClockSample {
+            seq: pm_protocol::common::Seq::new(1).unwrap(),
+            epoch: 1,
+            state,
+            host_time: HostMicros::new(host_us).unwrap(),
+            media_time: pm_protocol::common::Ticks::new(media_s * TICKS_PER_SECOND).unwrap(),
+            rate: pm_protocol::common::PlaybackRate::NORMAL,
+            output_latency_us: 0,
+            sample_rate: 48_000,
+            loop_range: None,
+        }
+    }
+
+    #[test]
+    fn a_playing_head_shows_the_time_at_the_next_vsync() {
+        // A sample from 1.000 s, drawn for the vsync at 1.050 s: 50 ms on.
+        let c = sample(TransportState::Playing, 1_000_000, 10);
+        let at = shown_at(&c, Some(1.05), true);
+        assert_eq!(at.get(), 1_050_000);
+        let media = c.media_time_at(at).get();
+        assert_eq!(media, 10 * TICKS_PER_SECOND + TICKS_PER_SECOND / 20);
+    }
+
+    #[test]
+    fn never_before_the_sample_and_paused_stays_put() {
+        // Pre-roll: the sample is anchored ahead of the vsync. Use its own time.
+        let c = sample(TransportState::Playing, 2_000_000, 3);
+        assert_eq!(shown_at(&c, Some(1.9), true), c.host_time);
+        let paused = sample(TransportState::Stopped, 1_000_000, 3);
+        assert_eq!(shown_at(&paused, Some(5.0), false), paused.host_time);
+        assert_eq!(shown_at(&c, None, true), c.host_time);
+    }
 }

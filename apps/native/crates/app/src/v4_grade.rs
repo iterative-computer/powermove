@@ -60,7 +60,33 @@ pub(super) fn graph(bounds: Bounds<Pixels>, t: &pm_design::Tokens) -> Graph {
     ))
 }
 
+/// A grading control's height for the width it has: a wheel is square
+/// between `metrics.grade_wheel` and `grade_wheel_max` (centred past the
+/// greatest), a curve editor square between `curve_editor` and
+/// `curve_editor_max`.
+fn side(kit: &Kit, width: f32, t: &pm_design::Tokens) -> f32 {
+    let m = &t.metrics;
+    match kit {
+        Kit::Curve { .. } => width.clamp(m.curve_editor, m.curve_editor_max),
+        _ => width.clamp(m.grade_wheel, m.grade_wheel_max),
+    }
+}
+
 impl SurfaceView {
+    /// The height a drawn grading control takes from the width it was last
+    /// laid out at (its least before it has been).
+    pub(super) fn grade_height(&self, id: Id, kit: &Kit) -> Option<f32> {
+        if !matches!(kit, Kit::Wheel { .. } | Kit::Curve { .. }) {
+            return None;
+        }
+        let width = self
+            .grade_drawn
+            .borrow()
+            .get(&id)
+            .map_or(0., |b| f32::from(b.size.width));
+        Some(side(kit, width, &self.table.tokens))
+    }
+
     /// The drawing of a grading control, showing a drag ahead of the kernel.
     pub(super) fn grade_canvas(
         &self,
@@ -69,6 +95,7 @@ impl SurfaceView {
         disabled: bool,
     ) -> Option<impl IntoElement> {
         let tokens = self.table.tokens.clone();
+        let tokens2 = tokens.clone();
         let drawn = self.grade_drawn.clone();
         let drag = self
             .scrub
@@ -101,9 +128,7 @@ impl SurfaceView {
                     // otherwise (a reset, an undo, another wheel's edit) it
                     // settles there on the layout spring, interruptibly.
                     let puck = settle(&motion, id, target, dragged, &tokens, window);
-                    let started = std::time::Instant::now();
                     grade::paint_wheel(b, puck, master, look, &tokens, window, cx);
-                    timing(started);
                 })
             }
             (Kit::Curve { values, channel }, drag) => {
@@ -119,17 +144,27 @@ impl SurfaceView {
                 let channel = *channel;
                 Box::new(move |b, window, _| {
                     let g = graph(b, &tokens);
-                    let started = std::time::Instant::now();
                     grade::paint_curve(g, &curve, channel, held, leaving, look, &tokens, window);
-                    timing(started);
                 })
             }
             _ => return None,
         };
+        let kit = kit.clone();
         Some(
             canvas(
-                move |bounds, _, _| {
-                    drawn.borrow_mut().insert(id, bounds);
+                move |bounds, window, _| {
+                    // The height follows the width it was given: when that
+                    // width asks for another height, lay out again.
+                    // Once per change of width, so a height held elsewhere
+                    // never loops.
+                    let was = drawn.borrow_mut().insert(id, bounds);
+                    let width = |b: Bounds<Pixels>| f32::from(b.size.width);
+                    let wants = side(&kit, width(bounds), &tokens2);
+                    if was.is_none_or(|w| (width(w) - width(bounds)).abs() > 0.5)
+                        && (wants - f32::from(bounds.size.height)).abs() > 0.5
+                    {
+                        window.refresh();
+                    }
                 },
                 move |bounds, _, window, cx| paint(bounds, window, cx),
             )
@@ -181,14 +216,9 @@ impl SurfaceView {
                 range,
                 ..
             } => {
-                let d = t
-                    .metrics
-                    .grade_wheel
-                    .min(f32::from(bounds.size.width))
-                    .min(f32::from(bounds.size.height));
                 GradeDrag::Wheel {
                     from: grade::puck(rgb, neutral),
-                    reach: (d / 2. - t.metrics.keyframe / 2.).max(1.),
+                    reach: grade::wheel_reach(grade::wheel_diameter(bounds), &t),
                     keep: rgb,
                     neutral,
                     range,
@@ -393,39 +423,6 @@ fn settle(
         window.request_animation_frame();
     }
     (spring.value[0] as f64, spring.value[1] as f64)
-}
-
-/// Development builds with `PM_GRADE_TIMING`: the grading controls' drawing
-/// time, every 240 draws, to the log (item 4c's cost per frame).
-fn timing(started: std::time::Instant) {
-    #[cfg(debug_assertions)]
-    {
-        thread_local! {
-            static ON: bool = std::env::var_os("PM_GRADE_TIMING").is_some();
-            static SAMPLES: RefCell<Vec<f64>> = const { RefCell::new(Vec::new()) };
-        }
-        if !ON.with(|on| *on) {
-            return;
-        }
-        let us = started.elapsed().as_secs_f64() * 1e6;
-        SAMPLES.with(|s| {
-            let mut s = s.borrow_mut();
-            s.push(us);
-            if s.len() >= 240 {
-                s.sort_by(f64::total_cmp);
-                let mean = s.iter().sum::<f64>() / s.len() as f64;
-                eprintln!(
-                    "grade draw ({:?}): mean {mean:.0} us, p95 {:.0} us, max {:.0} us",
-                    pm_shell::grade::material(),
-                    s[s.len() * 95 / 100],
-                    s[s.len() - 1]
-                );
-                s.clear();
-            }
-        });
-    }
-    #[cfg(not(debug_assertions))]
-    let _ = started;
 }
 
 /// The least distance between two points' inputs the editor leaves: the

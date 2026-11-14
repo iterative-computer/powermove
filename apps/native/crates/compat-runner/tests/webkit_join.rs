@@ -233,6 +233,7 @@ mod mac {
             wake: Arc::new(|| ()),
             frames: None,
             rasters: None,
+            clipboard: None,
             vars: None,
         });
         let (feedback, messages) = mpsc::channel();
