@@ -1094,7 +1094,8 @@ export function ProjectPanel({
   const [mode, setMode] = useState<ViewMode>(initialMode ?? "list");
   // Another project in this panel: its own list/grid choice.
   const documentId = service.view?.page.stamp.document;
-  const shownDocument = useRef(documentId);
+  // `undefined` is never a document: the first one shown asks too.
+  const shownDocument = useRef<number | null | undefined>(undefined);
   useLayoutEffect(() => {
     if (documentId === shownDocument.current) return;
     shownDocument.current = documentId;

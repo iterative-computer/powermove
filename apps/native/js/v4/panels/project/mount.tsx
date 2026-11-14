@@ -26,7 +26,10 @@ export async function mount(env: BuiltinEnv): Promise<Mounted> {
       (mode) => (mode === "list" ? "list" : "grid"),
       () => "grid",
     );
-  const viewMode = await loadViewMode();
+  // The panel draws at once as a grid (v1.2.0's view); the project's own
+  // choice follows when the host answers (never waited for: a host that
+  // answers late, or not at all, must not hold the panel's first frame).
+  const viewMode: ViewMode = "grid";
   await service.start();
   const r = root();
   await r.render(
