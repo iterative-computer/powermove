@@ -623,6 +623,37 @@ impl Backend {
                 value["media"] = json!(media);
             }
         }
+        // A step's media or layer, by its name in this project (v1 settles
+        // "Sampling interview.mov…"): the row says what it worked on.
+        if let Some(published) = self.published()
+            && let Some(root) = published.snapshot.root()
+        {
+            let name = |node: Option<&pm_model::Node>| {
+                node.and_then(|n| n.get("name"))
+                    .map(|n| n.to_value())
+                    .and_then(|v| v.as_str().map(str::to_owned))
+                    .filter(|s| !s.is_empty())
+            };
+            for item in snapshot["rows"]["items"]
+                .as_array_mut()
+                .into_iter()
+                .flatten()
+            {
+                let subject = &item["value"]["subject"];
+                let found = subject["assetId"]
+                    .as_str()
+                    .and_then(|id| name(root.get("assets").and_then(|a| a.get(id))))
+                    .or_else(|| {
+                        subject["layerId"].as_str().and_then(|id| {
+                            let at = pm_kernel::model::find_layer(root, id)?;
+                            name(pm_kernel::model::layer_at(root, &at))
+                        })
+                    });
+                if let Some(found) = found {
+                    item["value"]["subjectName"] = json!(found);
+                }
+            }
+        }
         let session = panel.session(active).map_err(|e| format!("{e:?}"))?;
         let (connection, reason) = self.native.agent_link.connection(provider);
         let needs_answer = session.needs_answer();
@@ -1504,11 +1535,20 @@ impl Backend {
                 crate::agent_host::ensure_worker(&agent, &link, &self.kernel, self.application);
                 if let Some(effect) = effect {
                     use pm_panel_agentpanel::model::{EffectKind, ShellAction};
-                    let operation = match effect.kind {
-                        EffectKind::OpenSettings => Some("agent.settings"),
-                        EffectKind::Shell(ShellAction::Open) => Some("agent.open"),
-                        EffectKind::Shell(ShellAction::Close) => Some("agent.close"),
-                        EffectKind::Send { .. } | EffectKind::Stop | EffectKind::Answer { .. } => {
+                    let now = crate::agent_host::now_ms();
+                    let mut store = KernelStore::new(self.kernel.clone(), self.application);
+                    let operation = match &effect.kind {
+                        EffectKind::OpenSettings => Some(("agent.settings", Value::Null)),
+                        EffectKind::Shell(ShellAction::Open) => Some(("agent.open", Value::Null)),
+                        EffectKind::Shell(ShellAction::Close) => Some(("agent.close", Value::Null)),
+                        // Pinned, the panel docks into the workspace (unpinning is
+                        // its dock's Close, which returns it to the popover).
+                        EffectKind::Shell(ShellAction::Pin) => Some(("agent.pin", Value::Null)),
+                        EffectKind::ChooseFiles => Some(("agent.attach", Value::Null)),
+                        EffectKind::Send { .. }
+                        | EffectKind::Stop
+                        | EffectKind::Answer { .. }
+                        | EffectKind::StopTask { .. } => {
                             crate::agent_host::run_effect(
                                 &agent,
                                 &link,
@@ -1518,14 +1558,73 @@ impl Backend {
                             )?;
                             None
                         }
+                        // `/new`: a new thread, as the header's New Thread.
+                        EffectKind::NewThread => {
+                            let mut state = agent.shared();
+                            state
+                                .panel
+                                .new_thread(&new_id("thread"), now)
+                                .map_err(|e| format!("{e:?}"))?;
+                            state
+                                .panel
+                                .save(&mut store, now)
+                                .map_err(|e| format!("{e:?}"))?;
+                            None
+                        }
+                        // `/provider <name>`.
+                        EffectKind::SelectProvider(provider) => {
+                            let provider = match provider.as_str() {
+                                "chatgpt" => pm_agents::Provider::Chatgpt,
+                                "claude" => pm_agents::Provider::Claude,
+                                "compatible" => pm_agents::Provider::Compatible,
+                                _ => return Err("Unknown provider".into()),
+                            };
+                            let mut state = agent.shared();
+                            let thread = effect.target.thread.clone();
+                            state
+                                .panel
+                                .set_provider(
+                                    &thread,
+                                    provider,
+                                    String::new(),
+                                    link.catalog(provider),
+                                )
+                                .map_err(|e| format!("{e:?}"))?;
+                            state
+                                .panel
+                                .save(&mut store, now)
+                                .map_err(|e| format!("{e:?}"))?;
+                            None
+                        }
+                        // Deleting asks first (PM.confirm in v1): the window's
+                        // alert answers through `Builtins::agent_delete_thread`.
+                        EffectKind::ConfirmArchive => {
+                            let state = agent.shared();
+                            let thread = effect.target.thread.clone();
+                            let summary =
+                                state.panel.summaries().into_iter().find(|t| t.id == thread);
+                            Some((
+                                "agent.delete",
+                                json!({"thread":thread,
+                                    "title":summary.as_ref().map(|t| t.title.clone()),
+                                    "busy":summary.is_some_and(|t| t.busy)}),
+                            ))
+                        }
+                        // Full access asks first (language §9); the answer comes
+                        // back through `Builtins::agent_consent`.
+                        EffectKind::ComputerConsent => {
+                            Some(("agent.consent", json!({"effect":effect.id})))
+                        }
+                        // Leaving Full access needs nothing more of the host.
+                        EffectKind::RevokeComputerConsent => None,
                         _ => {
                             return Err(
                                 "Agent provider or native action service is unavailable".into()
                             );
                         }
                     };
-                    if let Some(operation) = operation {
-                        self.native.platform.push((operation.into(), Value::Null));
+                    if let Some((operation, input)) = operation {
+                        self.native.platform.push((operation.into(), input));
                     }
                 }
                 link.touch();
