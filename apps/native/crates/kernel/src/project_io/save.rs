@@ -170,8 +170,9 @@ pub(crate) enum HistoryToWrite {
     /// This session's stack (imported records included), exported at run time.
     Session(HistorySnapshot),
     /// The member exactly as read (it could not be imported and nothing was
-    /// recorded since).
-    Raw(Value),
+    /// recorded since). Decoded by the writer, on the save's thread, and
+    /// only when it writes.
+    Raw(crate::history::CompactJson),
 }
 
 /// A save frozen at one document revision. `Send + 'static`: build it on the
@@ -203,6 +204,14 @@ pub struct SavePlan {
     pub(crate) replace_existing: bool,
     /// In-place saves may reuse the destination's ranges (`reusePrevious`).
     pub(crate) reuse_previous: bool,
+    /// A save in place with nothing to write (no unsaved change, a file in
+    /// the format this build writes): the file as last read or written. If
+    /// the destination is still exactly that file when the save runs, the
+    /// save writes nothing; otherwise it writes as any save.
+    pub(crate) unchanged: Option<Arc<FileVersion>>,
+    /// The undo history this save writes, by step (the store's baseline
+    /// once it finishes).
+    pub(crate) history_steps: crate::history::SavedSteps,
     pub options: SaveOptions,
     /// Alive while a plan or its receipt exists: the store refuses a second
     /// concurrent save to the same document.
@@ -227,11 +236,18 @@ pub enum SaveLayout {
     Compacted,
     /// The previous file cloned, then new records appended.
     Appended,
+    /// Nothing written: a save in place with no unsaved change, whose file is
+    /// still exactly the one last read or written ([`SavePlan::unchanged`]).
+    Unchanged,
 }
 
 /// What a successful save produced.
 #[derive(Clone, Debug)]
 pub struct SaveReceipt {
+    /// What the file holds now of the undo history and the workspace (the
+    /// store's baseline for the next save in place).
+    pub(crate) history_steps: crate::history::SavedSteps,
+    pub(crate) workspace: Option<Value>,
     /// Export receipts must not replace the live document's association.
     pub portable: bool,
     /// These sources were already offline when portable export began. Callers
@@ -609,6 +625,9 @@ impl SavePlan {
     /// [`ProjectIoError::Finalize`] and [`ProjectIoError::Conflict`] for the
     /// two cases that say otherwise).
     pub fn run(&self) -> Result<SaveReceipt, ProjectIoError> {
+        if let Some(receipt) = self.unchanged_receipt() {
+            return Ok(receipt);
+        }
         let fault = self.options.fault;
         let error = match self.attempt(fault) {
             Err(e) if e.is_disk_full() => e,
@@ -647,6 +666,81 @@ impl SavePlan {
         self.media.iter().any(|entry| !assets.contains(&entry.id))
     }
 
+    /// The receipt of a save that writes nothing: the destination is still
+    /// the very file last read or written (same identity, size, modified and
+    /// change times), and every media item the plan would write is already a
+    /// range of that file. Bytes held anywhere else (library media found for
+    /// assets the file lacks, an import, legacy base64 media) are written.
+    ///
+    /// The equal stat proves the bytes only on a volume with fine timestamps,
+    /// sampled after the newest stamp's tick
+    /// ([`FileVersion::stat_proves_content`]); otherwise the file is read and
+    /// its hash must be the version's, every time, or the save writes.
+    fn unchanged_receipt(&self) -> Option<SaveReceipt> {
+        let version = self.unchanged.as_ref()?;
+        let now = lstat_file(&self.destination).ok().flatten()?;
+        if !now.same_file(&version.stat) || version.path != self.destination {
+            if std::env::var_os("PM_SAVE_TRACE").is_some() {
+                eprintln!("PM_SAVE writes: the file changed since it was read or written");
+            }
+            return None;
+        }
+        let trace = std::env::var_os("PM_SAVE_TRACE").is_some();
+        // A stat that cannot prove the bytes (coarse timestamps, or sampled
+        // within the tick): the file is read and its hash must be this
+        // version's, every time; nothing is kept for the next save.
+        if !version.stat_proves_content() {
+            #[cfg(test)]
+            durable::test_hooks::note_read(&self.destination);
+            let read = FileVersion::read(&self.destination).ok().flatten()?;
+            let same = read.stat.same_file(&version.stat) && read.hash == version.hash;
+            if trace {
+                eprintln!("PM_SAVE the stat proves nothing here: bytes read, same: {same}");
+            }
+            if !same {
+                return None;
+            }
+        }
+        let in_file = |entry: &MediaEntry| match &entry.source {
+            MediaSource::Embedded { file, .. } => {
+                file.path == version.path && file.stat.same_file(&version.stat)
+            }
+            _ => false,
+        };
+        if !self.media.iter().all(in_file) {
+            if trace {
+                eprintln!("PM_SAVE writes: media held outside the file");
+            }
+            return None;
+        }
+        Some(SaveReceipt {
+            history_steps: self.history_steps.clone(),
+            workspace: self.workspace.clone(),
+            portable: false,
+            unavailable_links: Vec::new(),
+            path: self.destination.clone(),
+            revision: self.revision,
+            doc_id: self.doc_id,
+            state_token: self.state_token,
+            outside_writes: self.outside_writes,
+            size: now.size,
+            layout: SaveLayout::Unchanged,
+            file_hash: version.hash.clone(),
+            // Not read back: no document record was written.
+            document_sha256: String::new(),
+            version: version.clone(),
+            // The store keeps its media ranges as they are.
+            media: MediaTable::default(),
+            reused_media_bytes: 0,
+            backup: None,
+            displaced: None,
+            changed: Vec::new(),
+            unproven: false,
+            local_copy: None,
+            ticket: self.ticket.clone(),
+        })
+    }
+
     fn attempt(&self, fault: Option<WriteFault>) -> Result<SaveReceipt, ProjectIoError> {
         let mut lap = Lap::new();
         self.validate()?;
@@ -674,8 +768,13 @@ impl SavePlan {
         let publish = match publish {
             Publish::Replace(v) => {
                 durable::check_version(dest, Some(&v), false)?;
+                let stat_taken = durable::wall_ns();
                 let stat = lstat_file(dest)?.ok_or(ProjectIoError::ChangedOnDisk)?;
-                Publish::Replace(FileVersion { stat, ..v })
+                Publish::Replace(FileVersion {
+                    stat,
+                    stat_taken,
+                    ..v
+                })
             }
             Publish::CreateNew => {
                 durable::check_version(dest, None, false)?;
@@ -785,7 +884,11 @@ impl SavePlan {
                 SaveLayout::Compacted,
             )
         };
-        lap.mark(if layout == SaveLayout::Compacted { "new file created" } else { "previous file cloned and hashed" });
+        lap.mark(if layout == SaveLayout::Compacted {
+            "new file created"
+        } else {
+            "previous file cloned and hashed"
+        });
         let tmp_err = |e: io::Error| io_err(&temp.path, e);
         let limit = match fault {
             Some(WriteFault::DiskFullAfter(n) | WriteFault::DiskFullOnce(n)) => Some(n),
@@ -857,6 +960,10 @@ impl SavePlan {
         };
         #[cfg(not(any(test, feature = "save-reference")))]
         let reference: Option<Value> = None;
+        let raw = match (&self.history, &reference) {
+            (HistoryToWrite::Raw(raw), None) => Some(raw.value()),
+            _ => None,
+        };
         let (history, guard) = match (&self.history, &reference) {
             (_, Some(value)) => (
                 HistoryPart::Value(value),
@@ -874,10 +981,13 @@ impl SavePlan {
                     outside_writes: self.outside_writes,
                 },
             ),
-            (HistoryToWrite::Raw(value), None) => (
-                HistoryPart::Value(value),
-                file_guard::GuardHistory::Value(value),
-            ),
+            (HistoryToWrite::Raw(_), None) => {
+                let value = raw.as_ref().expect("decoded above");
+                (
+                    HistoryPart::Value(value),
+                    file_guard::GuardHistory::Value(value),
+                )
+            }
         };
         lap.mark("history exported");
         // Freeze the requirement alongside this exact document/history revision.
@@ -1030,6 +1140,7 @@ impl SavePlan {
             stat: installed.stat,
             hash: file_hash.clone(),
             held: Some(durable::HeldFile::new(installed.file)),
+            stat_taken: installed.taken,
         });
         let reused_media_bytes: u64 = records[..reused_count].iter().map(|r| r.length).sum();
         let mut table = MediaTable::default();
@@ -1047,6 +1158,8 @@ impl SavePlan {
             });
         }
         let receipt = SaveReceipt {
+            history_steps: self.history_steps.clone(),
+            workspace: self.workspace.clone(),
             portable: self.options.portable,
             unavailable_links,
             path: dest.clone(),
@@ -1152,6 +1265,8 @@ impl SavePlan {
     pub fn with_reference_writer(&self, writer: Option<ReferenceWriter>) -> SavePlan {
         let mut plan = self.clone();
         plan.options.reference_writer = writer;
+        // Compared writers write, even a save with nothing changed.
+        plan.unchanged = None;
         plan
     }
     /// This plan saved to `twin` instead, which holds a copy of what the
@@ -1161,6 +1276,7 @@ impl SavePlan {
         plan.replace_existing = twin.exists();
         plan.destination = twin.to_owned();
         plan.publish = None;
+        plan.unchanged = None;
         plan
     }
 }
@@ -1189,7 +1305,10 @@ impl Lap {
     }
     fn mark(&mut self, phase: &str) {
         if let Some(at) = self.0.replace(std::time::Instant::now()) {
-            eprintln!("PM_SAVE {phase}: {:.0} ms", at.elapsed().as_secs_f64() * 1000.);
+            eprintln!(
+                "PM_SAVE {phase}: {:.0} ms",
+                at.elapsed().as_secs_f64() * 1000.
+            );
         }
     }
 }

@@ -253,6 +253,31 @@ enum Gesture {
     Rows {
         grab: f64,
     },
+    /// A layer's name pressed in the layer list: a click stays the row's
+    /// (it selects on release); past v1's 5 pt it lifts into a reorder.
+    LayerPress {
+        layer: String,
+        origin: Point<Pixels>,
+    },
+    /// v1's layer reorder (timeline.ts gutterDown): the layers moving and
+    /// where they would land.
+    Reorder {
+        moving: Vec<String>,
+        drop: Option<LayerDrop>,
+    },
+}
+/// Where a reorder would land (v1's `layerDrop`), in panel space.
+#[derive(Clone, Debug)]
+struct LayerDrop {
+    target: String,
+    mode: pm_panel_timeline::DropMode,
+    /// The insertion line (before/after) and its left end (the depth cue).
+    line: f64,
+    left: f64,
+    /// The target row (an inside drop washes it).
+    top: f64,
+    height: f64,
+    name: String,
 }
 pub struct TimelineSurface {
     kernel: KernelHandle,
@@ -1370,6 +1395,30 @@ impl TimelineSurface {
             }
         }
     }
+    /// The work-area handle under a point of the ruler (panel space): its
+    /// grab zone is `WORK_HANDLE_REACH` either side of the edge, the ruler's
+    /// full height; when both edges are that close, the nearer one (v1's
+    /// workAreaHit).
+    fn work_handle_at(&self, x: f64, y: f64) -> Option<Spec> {
+        let frame = self.frame.as_ref()?;
+        if y < 0. || y >= self.tokens.metrics.ruler as f64 || x < self.view.layer_column {
+            return None;
+        }
+        let edge = |id: &str| {
+            frame
+                .ops
+                .iter()
+                .find(|o| o.id == id)
+                .map(|o| (x - (o.bounds.x + o.bounds.width / 2.)).abs())
+        };
+        let near = |d: Option<f64>| d.filter(|d| *d <= WORK_HANDLE_REACH);
+        match (near(edge("work-in")), near(edge("work-out"))) {
+            (Some(a), Some(b)) => Some(if a <= b { Spec::WorkIn } else { Spec::WorkOut }),
+            (Some(_), None) => Some(Spec::WorkIn),
+            (None, Some(_)) => Some(Spec::WorkOut),
+            (None, None) => None,
+        }
+    }
     fn mods(modifiers: Modifiers) -> Mods {
         Mods {
             shift: modifiers.shift,
@@ -1388,6 +1437,17 @@ impl TimelineSurface {
             return;
         }
         if y >= f32::from(self.bounds.size.height) as f64 {
+            return;
+        }
+        // A work-area handle takes the press before anything else (no seek,
+        // no scrub): the nearer one when both are close.
+        if let Some(spec) = self.work_handle_at(x, y) {
+            self.set_skimmer(None, cx);
+            self.gesture = Gesture::Pressed(Press {
+                origin: event.position,
+                spec: Some(spec),
+                release: None,
+            });
             return;
         }
         // Final Cut: a click moves the playhead to the skimmer; the gesture
@@ -1418,20 +1478,10 @@ impl TimelineSurface {
         let mods = Self::mods(event.modifiers);
         let additive = mods.shift || mods.command();
         if y < m.ruler as f64 {
-            for (prefix, spec) in [("work-in", Spec::WorkIn), ("work-out", Spec::WorkOut)] {
-                if frame
-                    .hit_op(prefix, x, y, m.drag_threshold as f64)
-                    .is_some()
-                {
-                    self.gesture = Gesture::Pressed(Press {
-                        origin: event.position,
-                        spec: Some(spec),
-                        release: None,
-                    });
-                    return;
-                }
-            }
-            if frame.hit_op("work-area", x, y, 0.).is_some() && mods.alt {
+            // v1: the work area's bar (its thin strip at the top of the
+            // ruler) moves it on a plain drag; ⌥ moves it from anywhere on
+            // the ruler; the rest of the ruler scrubs.
+            if frame.hit_op("work-area", x, y, 0.).is_some() && (mods.alt || y <= WORK_BAR_STRIP) {
                 self.gesture = Gesture::Pressed(Press {
                     origin: event.position,
                     spec: Some(Spec::WorkMove),
@@ -1588,6 +1638,72 @@ impl TimelineSurface {
             origin: event.position,
             at: event.position,
         };
+    }
+    /// The layer list's name area was pressed (the JSX outline): a reorder
+    /// starts here if the pointer travels.
+    pub fn press_layer_row(&mut self, layer: String, origin: Point<Pixels>) {
+        if matches!(self.gesture, Gesture::Idle) {
+            self.gesture = Gesture::LayerPress { layer, origin };
+        }
+    }
+    /// v1's `layerDrop` over the scene: the target layer, before / after /
+    /// into a group (its middle half, past the disclosure), and the cue.
+    fn layer_drop(&self, position: Point<Pixels>) -> Option<LayerDrop> {
+        use pm_panel_timeline::DropMode;
+        let Gesture::Reorder { moving, .. } = &self.gesture else {
+            return None;
+        };
+        let (x, y) = self.local(position);
+        let (frame, scene) = (self.frame.as_ref()?, self.scene.as_ref()?);
+        let at = scene.layer_row_at(frame.viewport, &self.tokens, y)?;
+        let pm_panel_timeline::RowId::Layer(id) = pm_panel_timeline::v4::parse_row(&at.id).ok()?
+        else {
+            return None;
+        };
+        let index = &self.model.index;
+        let layer = index.layer(&id)?;
+        if layer.effectively_locked || index.expanded_ids(moving).contains(&id) {
+            return None;
+        }
+        let m = self.tokens.metrics;
+        let inside =
+            layer.kind == "group" && (0.25..=0.75).contains(&at.fraction) && x >= 2. * m.hit as f64;
+        let mode = if inside {
+            DropMode::Inside
+        } else if at.fraction < 0.5 {
+            DropMode::Before
+        } else {
+            DropMode::After
+        };
+        Some(LayerDrop {
+            target: id,
+            mode,
+            line: if mode == DropMode::After {
+                at.end
+            } else {
+                at.top
+            },
+            left: m.inset as f64 + (at.depth + inside as usize) as f64 * m.tree_indent as f64,
+            top: at.top,
+            height: at.height,
+            name: layer.name.to_string_lossy(),
+        })
+    }
+    /// A reorder held past the list's top or bottom scrolls the rows.
+    fn autoscroll_rows(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let (_, y) = self.local(position);
+        let top = self.tokens.metrics.ruler as f64;
+        let bottom = f32::from(self.bounds.size.height) as f64 - self.bar_height();
+        let over = if y < top {
+            y - top
+        } else if y > bottom {
+            y - bottom
+        } else {
+            return;
+        };
+        self.view.scroll_y = (self.view.scroll_y + over * 0.25).max(0.);
+        self.clamp_scroll();
+        self.changed(false, cx);
     }
     pub fn press_property(&mut self, layer: String, path: String, origin: Point<Pixels>) {
         self.gesture = Gesture::Pressed(Press {
@@ -1755,6 +1871,53 @@ impl TimelineSurface {
         if let Some((part, grab)) = held {
             let (x, y) = self.local(event.position);
             self.drag_bar(part, x, y, grab, cx);
+            return true;
+        }
+        if let Gesture::LayerPress { layer, origin } = &self.gesture {
+            let delta = event.position - *origin;
+            if f32::from(delta.x).hypot(f32::from(delta.y))
+                < self.tokens.metrics.panel_drag_threshold
+            {
+                return false;
+            }
+            // v1: the pressed layer joins the selection it moves with, or
+            // becomes it; a locked layer (or group) is not reordered.
+            let layer = layer.clone();
+            let selected = self.model.selection.layers().to_vec();
+            let moving = if selected.contains(&layer) {
+                selected
+            } else {
+                self.queue.push_back(Job::Apply(Plan {
+                    calls: vec![
+                        SelectionCall::Layers {
+                            ids: vec![layer.clone()],
+                            add: false,
+                        }
+                        .into(),
+                    ],
+                    ..Default::default()
+                }));
+                vec![layer]
+            };
+            let index = &self.model.index;
+            let locked = index
+                .expanded_ids(&moving)
+                .iter()
+                .any(|id| index.layer(id).is_none_or(|l| l.effectively_locked));
+            self.gesture = if locked {
+                Gesture::Idle
+            } else {
+                Gesture::Reorder { moving, drop: None }
+            };
+            self.pump(cx);
+        }
+        if matches!(self.gesture, Gesture::Reorder { .. }) {
+            self.autoscroll_rows(event.position, cx);
+            let next = self.layer_drop(event.position);
+            if let Gesture::Reorder { drop, .. } = &mut self.gesture {
+                *drop = next;
+            }
+            cx.notify();
             return true;
         }
         match &mut self.gesture {
@@ -1930,12 +2093,9 @@ impl TimelineSurface {
             return;
         };
         let covered = scene.marquee(frame.viewport, &self.tokens, area);
-        let layers = if self.model.mode == TimelineMode::Tracks {
-            covered.clips
-        } else {
-            vec![]
-        };
-        let plan = session.update(covered.keys, layers);
+        // The layers whose bars (Layers) or clips (Tracks) the box touches;
+        // the session takes them only when it covers no keys (v1's rule).
+        let plan = session.update(covered.keys, covered.clips);
         self.queue.retain(|j| !matches!(j, Job::Apply(_)));
         self.queue.push_back(Job::Apply(plan));
         self.pump(cx);
@@ -1944,6 +2104,24 @@ impl TimelineSurface {
         (self.graph_grab, self.graph_at, self.graph_box) = (None, None, None);
         match std::mem::replace(&mut self.gesture, Gesture::Idle) {
             Gesture::Idle => return false,
+            // A click on a name stays the row's own (it selects).
+            Gesture::LayerPress { .. } => return false,
+            // One undo step ("Move layers"), through the model's drop.
+            Gesture::Reorder { moving, drop } => {
+                if let Some(drop) = drop {
+                    let time = self.delegate.time(cx);
+                    match self.model.drop_layers(
+                        &moving,
+                        &drop.target,
+                        drop.mode,
+                        time,
+                        pm_kernel::Origin::Interface,
+                    ) {
+                        Ok(plan) => self.queue.push_back(Job::Apply(plan)),
+                        Err(error) => self.delegate.report(error.to_string(), cx),
+                    }
+                }
+            }
             Gesture::Pressed(press) => {
                 if let Some(job) = press.release {
                     self.queue.push_back(job);
@@ -1985,7 +2163,9 @@ impl TimelineSurface {
         let delta = event.delta.pixel_delta(window.line_height());
         let (dx, dy) = (f32::from(delta.x) as f64, f32::from(delta.y) as f64);
         let (x, y) = self.local(event.position);
-        if event.modifiers.alt || event.modifiers.platform {
+        // ⌘, ⌥ or Control with the wheel zooms the time (v1, as a trackpad
+        // pinch reads).
+        if event.modifiers.alt || event.modifiers.platform || event.modifiers.control {
             if x >= self.view.layer_column {
                 self.zoom_at(x, (dy * WHEEL_ZOOM).exp(), cx);
             }
@@ -2259,6 +2439,8 @@ impl TimelineSurface {
                 }
             } else if (x - self.view.layer_column).abs() <= m.hit as f64 / 4. && y >= m.ruler as f64 {
                 CursorStyle::ResizeColumn
+            } else if self.work_handle_at(x, y).is_some() {
+                CursorStyle::ResizeLeftRight
             } else if let Some((id, Some(_))) = self.frame.as_ref().and_then(|f| f.hit_clip(x, y))
                 // A locked layer's ends offer no trim.
                 && !self.frame.as_ref().is_some_and(|f| {
@@ -2905,6 +3087,68 @@ impl Render for TimelineSurface {
                     .bg(accent),
             ]
         });
+        // v1's reorder cue: an accent line with a dot at its depth, or a
+        // washed row for into a group, and what the drop will do.
+        let reorder = match &self.gesture {
+            Gesture::Reorder { drop: Some(d), .. } => Some(d.clone()),
+            _ => None,
+        }
+        .map(|d| {
+            use pm_panel_timeline::DropMode;
+            let t = &self.tokens;
+            let accent = t.colors.accent;
+            let width = self.bounds.size.width;
+            let left = px(d.left as f32);
+            let cue = if d.mode == DropMode::Inside {
+                div()
+                    .absolute()
+                    .left(left)
+                    .top(px(d.top as f32))
+                    .w(width - left)
+                    .h(px(d.height as f32))
+                    .bg(rgba((accent << 8) | 0x29))
+                    .border(px(t.metrics.drop_stroke))
+                    .border_color(rgb(accent))
+            } else {
+                div()
+                    .absolute()
+                    .left(left)
+                    .top(px(d.line as f32 - 1.))
+                    .w(width - left)
+                    .h(px(2.))
+                    .bg(rgb(accent))
+            };
+            let dot = (d.mode != DropMode::Inside).then(|| {
+                div()
+                    .absolute()
+                    .left(left - px(3.))
+                    .top(px(d.line as f32 - 3.))
+                    .size(px(6.))
+                    .rounded_full()
+                    .bg(rgb(accent))
+            });
+            let verb = match d.mode {
+                DropMode::Inside => "Move into",
+                DropMode::Before => "Move before",
+                DropMode::After => "Move after",
+            };
+            let label_top = (d.line as f32 - 24.)
+                .max(t.metrics.ruler + 2.)
+                .min(f32::from(self.bounds.size.height) - 24.);
+            let label = div()
+                .absolute()
+                .left(px(self.view.layer_column as f32 + t.metrics.inset))
+                .top(px(label_top))
+                .px(px(t.metrics.gap))
+                .py(px(t.metrics.border * 2.))
+                .rounded(px(t.metrics.control_radius))
+                .bg(rgb(accent))
+                .text_size(px(t.typography.minimum))
+                .text_color(rgb(0xffffff))
+                .whitespace_nowrap()
+                .child(format!("{verb} {}", d.name));
+            [Some(cue), dot, Some(label)]
+        });
         let tip = self.tip.clone().map(|(text, (x, y))| {
             // The shell's tooltip look: floating fill, separator edge, minimum type.
             div()
@@ -3236,6 +3480,7 @@ impl Render for TimelineSurface {
             )
             // Over the canvas.
             .children(landing.into_iter().flatten())
+            .children(reorder.into_iter().flatten().flatten())
             .children(effect_row)
             .children(tip)
             .children(self.skimmer_marks())
@@ -4089,13 +4334,20 @@ pub fn default_layer_column(m: &pm_design::Metrics) -> f64 {
 /// v1's least layer column (`GUTTER_MIN`, 320 pt).
 const V1_LEAST_LAYER_COLUMN: f64 = 320.;
 /// The narrowest the layer column goes: a layer row's number, disclosure,
-/// kind badge, three slots of name and its five switches, with its insets
-/// and gaps, and never narrower than v1's. The name truncates first; the
-/// switches always fit.
+/// kind badge, three slots of name and its three switches (parent link,
+/// lock, visibility), with its insets and gaps, and never narrower than
+/// v1's. The name truncates first; the switches always fit.
 pub fn least_layer_column(m: &pm_design::Metrics) -> f64 {
     let (gap, hit) = (m.gap as f64, m.hit as f64);
     // Insets and the gaps between number, disclosure, badge and name.
     let room = 2. * gap + 4. * gap;
-    let row = room + hit + hit + m.kind_badge as f64 + 3. * hit + 5. * hit;
+    let row = room + hit + hit + m.kind_badge as f64 + 3. * hit + 3. * hit;
     row.max(V1_LEAST_LAYER_COLUMN).ceil()
 }
+
+/// How far either side of a work-area edge its handle takes hold (pt): a
+/// 12 pt zone over the ruler's height, as v1's (WORK_BAR.hit).
+const WORK_HANDLE_REACH: f64 = 6.;
+/// v1's work-area bar: the top strip of the ruler a plain drag moves it by
+/// (WORK_BAR.height with a point of grace).
+const WORK_BAR_STRIP: f64 = 6.;

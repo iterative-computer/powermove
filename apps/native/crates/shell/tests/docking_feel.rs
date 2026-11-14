@@ -140,8 +140,12 @@ fn every_drop_lands_where_its_preview_showed() {
     }
 }
 
+/// The original app's zones (owner request, 2026-11-14): over a body, its
+/// top and bottom 30% dock above and below, its middle joins its tabs; the
+/// viewer (no tabs) splits at its middle; a panel's left and right edges
+/// never make a new column.
 #[test]
-fn zones_follow_the_nearest_edge_of_a_panel() {
+fn zones_follow_the_original_app() {
     let t = tokens();
     let bounds = SIZES[1];
     let l = Layout::preset("design");
@@ -157,20 +161,9 @@ fn zones_follow_the_nearest_edge_of_a_panel() {
             .target
     };
     let (vd, vg, _) = l.find("viewer").unwrap();
-    assert_eq!(
-        at("left"),
-        DropTarget::Beside {
-            dock: vd,
-            after: false
-        }
-    );
-    assert_eq!(
-        at("right"),
-        DropTarget::Beside {
-            dock: vd,
-            after: true
-        }
-    );
+    for zone in ["left", "right", "middle"] {
+        assert!(!matches!(at(zone), DropTarget::Beside { .. }), "{zone}");
+    }
     assert_eq!(
         at("top"),
         DropTarget::Split {
@@ -185,8 +178,6 @@ fn zones_follow_the_nearest_edge_of_a_panel() {
             group: vg + 1
         }
     );
-    // The viewer joins no stack: its middle splits it.
-    assert!(matches!(at("middle"), DropTarget::Split { .. }));
     // A stackable panel's middle and header join its stack.
     let effects = rect_of(&l, bounds, "fxbrowser");
     let (ed, eg, _) = l.find("fxbrowser").unwrap();
@@ -240,36 +231,39 @@ fn a_panel_moved_down_its_own_dock_stays_in_it() {
     }
 }
 
+/// The original app's window edges: a strip only where no dock stands yet
+/// (just outside the docking area counts); far away is no target.
 #[test]
-fn window_edges_dock_and_overshooting_still_counts() {
+fn window_edges_dock_where_no_dock_stands_and_overshooting_still_counts() {
     let t = tokens();
     let bounds = SIZES[1];
-    let l = Layout::preset("design");
+    let mut l = Layout::preset("design");
+    for id in ["assets", "layer-effects", "inspector", "fxbrowser", "timeline"] {
+        l.close_panel(id).unwrap();
+    }
     let g = l.geometry(bounds, &t);
-    let timeline = rect_of(&l, bounds, "timeline");
     let edge = |x: f32, y: f32| {
-        l.drop_target_for(&g, bounds, (x, y), &t, "fxbrowser", false)
-            .map(|p| p.target)
+        l.drop_target(&g, bounds, x, y, &t).map(|p| p.target)
     };
     let mid = bounds.y + bounds.h / 3.;
-    assert_eq!(edge(bounds.x + 2., mid), Some(DropTarget::Edge(Edge::Left)));
     assert_eq!(edge(bounds.x - 6., mid), Some(DropTarget::Edge(Edge::Left)));
     assert_eq!(
-        edge(bounds.x + bounds.w - 2., mid),
+        edge(bounds.x + bounds.w + 6., mid),
         Some(DropTarget::Edge(Edge::Right))
     );
-    // Under the timeline, its bottom edge, and the status bar below it.
-    let under = timeline.x + timeline.w / 2.;
-    assert_eq!(
-        edge(under, bounds.y + bounds.h - 2.),
-        Some(DropTarget::Edge(Edge::Bottom))
-    );
+    let under = bounds.x + bounds.w / 2.;
     assert_eq!(
         edge(under, bounds.y + bounds.h + 12.),
         Some(DropTarget::Edge(Edge::Bottom))
     );
-    // Far away is no target.
     assert_eq!(edge(under, bounds.y + bounds.h + 200.), None);
+    // With every dock standing, no strip: the dock takes the panel.
+    let full = Layout::preset("design");
+    let g = full.geometry(bounds, &t);
+    assert!(!matches!(
+        full.drop_target(&g, bounds, bounds.x - 6., mid, &t).map(|p| p.target),
+        Some(DropTarget::Edge(_))
+    ));
 }
 
 #[test]
@@ -370,15 +364,16 @@ fn a_short_window_shrinks_the_timeline_too() {
         let l = Layout::preset("design");
         sound(&l, bounds, "short");
         let viewer = rect_of(&l, bounds, "viewer");
-        assert!(viewer.h >= h * 0.35 - 0.5, "{h}: viewer {viewer:?}");
+        // The original app leaves `band_room` above the timeline's dock.
+        assert!(viewer.h >= t.metrics.band_room - 0.5, "{h}: viewer {viewer:?}");
         let timeline = rect_of(&l, bounds, "timeline");
         assert!(timeline.h >= least_height(&["timeline".to_owned()], &t) - 0.5 || h < 520.);
     }
 }
 
-/// The window's top edge docks too, as After Effects' window edges do (Final
-/// Cut Pro has no free docking): a band across the timeline's row above the
-/// columns. Just below the edge, a header still takes tabs.
+/// A band across the timeline's row above the columns (the panel menu's
+/// Dock ▸ Top Edge). The pointer never makes one: the original app has no
+/// top dock (owner request, 2026-11-14).
 #[test]
 fn the_top_edge_docks_a_band_above_the_columns() {
     let t = tokens();
@@ -391,10 +386,10 @@ fn the_top_edge_docks_a_band_above_the_columns() {
         l.drop_target_for(&g, bounds, (mid, y), &t, "fxbrowser", false)
             .map(|p| p.target)
     };
-    assert_eq!(at(bounds.y + 2.), Some(DropTarget::Edge(Edge::Top)));
-    // Overshooting into the toolbar band above still counts.
-    assert_eq!(at(bounds.y - 20.), Some(DropTarget::Edge(Edge::Top)));
-    // A little lower is the viewer's own header (it joins no stack: above).
+    for y in [bounds.y + 2., bounds.y - 20., bounds.y + 14.] {
+        assert_ne!(at(y), Some(DropTarget::Edge(Edge::Top)), "{y}");
+    }
+    // The viewer's own header: it joins no stack, so above it.
     assert!(matches!(at(bounds.y + 14.), Some(DropTarget::Split { .. })));
     let mut top = l.clone();
     top.move_panel_to("fxbrowser", DropTarget::Edge(Edge::Top))

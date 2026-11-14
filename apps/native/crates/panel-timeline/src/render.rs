@@ -314,6 +314,18 @@ impl Viewport {
             && self.layer_column < self.width
     }
 }
+/// [`Scene::layer_row_at`]: a layer row under the pointer during a reorder.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LayerRowAt {
+    pub id: String,
+    pub fraction: f64,
+    pub depth: usize,
+    /// Panel-space top of the row, its height, and the top of the row after
+    /// everything it owns.
+    pub top: f64,
+    pub height: f64,
+    pub end: f64,
+}
 #[derive(Clone, Debug)]
 pub struct Scene {
     rows: Vec<PaintRow>,
@@ -643,6 +655,51 @@ impl Scene {
             work_area: (0., duration),
             markers: vec![],
             bars: vec![],
+        })
+    }
+    /// v1's `layerDrop` geometry: the layer row under `y` (panel space; a
+    /// property row counts as its layer's), how far down that row the
+    /// pointer is (past 1 below it), its depth, and where the rows it owns
+    /// (deeper layers and property rows) end. Panel-space tops.
+    pub fn layer_row_at(&self, v: Viewport, t: &Tokens, y: f64) -> Option<LayerRowAt> {
+        let total = self.total();
+        if total == 0 {
+            return None;
+        }
+        let ruler = t.metrics.ruler as f64;
+        let content = (y - ruler + v.scroll_y).max(0.);
+        let mut i = self
+            .tops
+            .partition_point(|top| *top <= content)
+            .saturating_sub(1)
+            .min(total - 1);
+        let is_layer = |i: usize| matches!(self.rows[i].content, RowContent::Layer { .. });
+        while i > 0 && !is_layer(i) {
+            i -= 1;
+        }
+        if !is_layer(i) {
+            return None;
+        }
+        let depth = self.rows[i].depth;
+        let height = self.rows[i].height(t).max(1.);
+        let mut end = i + 1;
+        while end < total && (!is_layer(end) || self.rows[end].depth > depth) {
+            end += 1;
+        }
+        let bottom = |j: usize| {
+            if j < total {
+                self.tops[j]
+            } else {
+                self.tops[total - 1] + self.rows[total - 1].height(t)
+            }
+        };
+        Some(LayerRowAt {
+            id: self.rows[i].id.clone(),
+            fraction: (content - self.tops[i]) / height,
+            depth,
+            top: ruler + self.tops[i] - v.scroll_y,
+            height,
+            end: ruler + bottom(end) - v.scroll_y,
         })
     }
     pub fn total(&self) -> usize {
@@ -1100,42 +1157,50 @@ impl Scene {
         // The work area is the lit stretch of the ruler between two bars, in
         // the ink, not the accent: the playhead is the ruler's one bright
         // mark. The tracks outside it are veiled.
-        if self.work_area != (0., self.duration) {
-            if let Some(r) = span(v.x(self.work_area.0), v.x(self.work_area.1), 0., h, v) {
-                let mut o = Op::new("work-area", "rect", r, c.text);
-                o.opacity = WORK_AREA_WASH;
-                ops.push(o);
+        if self.work_area != (0., self.duration)
+            && let Some(r) = span(v.x(self.work_area.0), v.x(self.work_area.1), 0., h, v)
+        {
+            let mut o = Op::new("work-area", "rect", r, c.text);
+            o.opacity = WORK_AREA_WASH;
+            ops.push(o);
+        }
+        // Its two handles always stand at its edges, as v1's brackets: a
+        // stem down the foot of the ruler with a wing turned into the work
+        // area, and a grab zone wider than either (the surface's reach).
+        for (edge, time) in [("in", self.work_area.0), ("out", self.work_area.1)] {
+            let x = v.x(time);
+            if x < v.layer_column || x > v.width {
+                continue;
             }
-            for (edge, time) in [("in", self.work_area.0), ("out", self.work_area.1)] {
-                let x = v.x(time);
-                if x >= v.layer_column && x <= v.width {
-                    // What the pointer takes hold of is wider than the bar.
-                    let mut o = Op::new(
-                        format!("work-{edge}"),
-                        "work-area-handle",
-                        Rect::new(x - 3., 0., 6., h),
-                        c.text,
-                    );
-                    o.opacity = 0.;
-                    o.detail = json!({"outerEdge":edge});
-                    ops.push(o);
-                    let mut o = Op::new(
-                        format!("work-bar:{edge}"),
-                        "rect",
-                        // The foot of the ruler, clear of a label that
-                        // stands at the same second.
-                        Rect::new(
-                            x - WORK_AREA_BAR / 2.,
-                            h / 2.,
-                            WORK_AREA_BAR,
-                            h / 2. - m.border as f64,
-                        ),
-                        c.text,
-                    );
-                    o.opacity = WORK_AREA_EDGE;
-                    o.radius = WORK_AREA_BAR / 2.;
-                    ops.push(o);
-                }
+            let mut o = Op::new(
+                format!("work-{edge}"),
+                "work-area-handle",
+                Rect::new(x - WORK_HANDLE / 2., 0., WORK_HANDLE, h),
+                c.text,
+            );
+            o.opacity = 0.;
+            o.detail = json!({"outerEdge":edge});
+            ops.push(o);
+            // Inward: right of the in point, left of the out point.
+            let top = h / 2.;
+            let foot = h - m.border as f64;
+            let stem = Rect::new(
+                if edge == "in" { x } else { x - WORK_AREA_BAR },
+                top,
+                WORK_AREA_BAR,
+                foot - top,
+            );
+            let wing = Rect::new(
+                if edge == "in" { x } else { x - WORK_HANDLE },
+                top,
+                WORK_HANDLE,
+                WORK_AREA_WING,
+            );
+            for (part, r) in [("stem", stem), ("wing", wing)] {
+                let mut o = Op::new(format!("work-bar:{edge}:{part}"), "rect", r, c.text);
+                o.opacity = WORK_AREA_EDGE;
+                o.radius = WORK_AREA_BAR / 2.;
+                ops.push(o);
             }
         }
         // Each label stands over a small dot, with a faint line down the
@@ -1282,8 +1347,11 @@ impl Scene {
 /// The work area in the ruler: the wash between its two bars, the bars'
 /// ink and their width.
 const WORK_AREA_WASH: f64 = 0.09;
-const WORK_AREA_EDGE: f64 = 0.6;
+const WORK_AREA_EDGE: f64 = 0.85;
 const WORK_AREA_BAR: f64 = 2.;
+/// v1's bracket: a wing 6 pt long, 3 pt deep, on a 2 pt stem.
+const WORK_HANDLE: f64 = 6.;
+const WORK_AREA_WING: f64 = 3.;
 /// A minor dot's ink against a label's dot, and the least room between two.
 const MINOR_DOT: f64 = 0.55;
 const MINOR_ROOM: f64 = 7.;

@@ -103,16 +103,34 @@
           "clip": null
         },
         {
-          "id": "work-bar:in",
+          "id": "work-bar:in:stem",
           "shape": "rect",
           "bounds": [
-            419.0,
+            420.0,
             12.0,
             2.0,
             11.0
           ],
           "color": 1908517,
-          "opacity": 0.6,
+          "opacity": 0.85,
+          "radius": 1.0,
+          "stroke": 0.0,
+          "text": null,
+          "fontSize": 0.0,
+          "detail": null,
+          "clip": null
+        },
+        {
+          "id": "work-bar:in:wing",
+          "shape": "rect",
+          "bounds": [
+            420.0,
+            12.0,
+            6.0,
+            3.0
+          ],
+          "color": 1908517,
+          "opacity": 0.85,
           "radius": 1.0,
           "stroke": 0.0,
           "text": null,
@@ -3689,16 +3707,34 @@
           "clip": null
         },
         {
-          "id": "work-bar:in",
+          "id": "work-bar:in:stem",
           "shape": "rect",
           "bounds": [
-            419.0,
+            420.0,
             12.0,
             2.0,
             11.0
           ],
           "color": 1908517,
-          "opacity": 0.6,
+          "opacity": 0.85,
+          "radius": 1.0,
+          "stroke": 0.0,
+          "text": null,
+          "fontSize": 0.0,
+          "detail": null,
+          "clip": null
+        },
+        {
+          "id": "work-bar:in:wing",
+          "shape": "rect",
+          "bounds": [
+            420.0,
+            12.0,
+            6.0,
+            3.0
+          ],
+          "color": 1908517,
+          "opacity": 0.85,
           "radius": 1.0,
           "stroke": 0.0,
           "text": null,
@@ -7275,16 +7311,34 @@
           "clip": null
         },
         {
-          "id": "work-bar:in",
+          "id": "work-bar:in:stem",
           "shape": "rect",
           "bounds": [
-            419.0,
+            420.0,
             12.0,
             2.0,
             10.0
           ],
           "color": 1908517,
-          "opacity": 0.6,
+          "opacity": 0.85,
+          "radius": 1.0,
+          "stroke": 0.0,
+          "text": null,
+          "fontSize": 0.0,
+          "detail": null,
+          "clip": null
+        },
+        {
+          "id": "work-bar:in:wing",
+          "shape": "rect",
+          "bounds": [
+            420.0,
+            12.0,
+            6.0,
+            3.0
+          ],
+          "color": 1908517,
+          "opacity": 0.85,
           "radius": 1.0,
           "stroke": 0.0,
           "text": null,
@@ -10845,16 +10899,34 @@
           "clip": null
         },
         {
-          "id": "work-bar:in",
+          "id": "work-bar:in:stem",
           "shape": "rect",
           "bounds": [
-            419.0,
+            420.0,
             12.0,
             2.0,
             10.0
           ],
           "color": 1908517,
-          "opacity": 0.6,
+          "opacity": 0.85,
+          "radius": 1.0,
+          "stroke": 0.0,
+          "text": null,
+          "fontSize": 0.0,
+          "detail": null,
+          "clip": null
+        },
+        {
+          "id": "work-bar:in:wing",
+          "shape": "rect",
+          "bounds": [
+            420.0,
+            12.0,
+            6.0,
+            3.0
+          ],
+          "color": 1908517,
+          "opacity": 0.85,
           "radius": 1.0,
           "stroke": 0.0,
           "text": null,
@@ -14415,16 +14487,34 @@
           "clip": null
         },
         {
-          "id": "work-bar:in",
+          "id": "work-bar:in:stem",
           "shape": "rect",
           "bounds": [
-            419.0,
+            420.0,
             12.0,
             2.0,
             11.0
           ],
           "color": 16119284,
-          "opacity": 0.6,
+          "opacity": 0.85,
+          "radius": 1.0,
+          "stroke": 0.0,
+          "text": null,
+          "fontSize": 0.0,
+          "detail": null,
+          "clip": null
+        },
+        {
+          "id": "work-bar:in:wing",
+          "shape": "rect",
+          "bounds": [
+            420.0,
+            12.0,
+            6.0,
+            3.0
+          ],
+          "color": 16119284,
+          "opacity": 0.85,
           "radius": 1.0,
           "stroke": 0.0,
           "text": null,
@@ -18001,16 +18091,34 @@
           "clip": null
         },
         {
-          "id": "work-bar:in",
+          "id": "work-bar:in:stem",
           "shape": "rect",
           "bounds": [
-            419.0,
+            420.0,
             12.0,
             2.0,
             11.0
           ],
           "color": 16119284,
-          "opacity": 0.6,
+          "opacity": 0.85,
+          "radius": 1.0,
+          "stroke": 0.0,
+          "text": null,
+          "fontSize": 0.0,
+          "detail": null,
+          "clip": null
+        },
+        {
+          "id": "work-bar:in:wing",
+          "shape": "rect",
+          "bounds": [
+            420.0,
+            12.0,
+            6.0,
+            3.0
+          ],
+          "color": 16119284,
+          "opacity": 0.85,
           "radius": 1.0,
           "stroke": 0.0,
           "text": null,
@@ -21587,16 +21695,34 @@
           "clip": null
         },
         {
-          "id": "work-bar:in",
+          "id": "work-bar:in:stem",
           "shape": "rect",
           "bounds": [
-            419.0,
+            420.0,
             12.0,
             2.0,
             10.0
           ],
           "color": 16119284,
-          "opacity": 0.6,
+          "opacity": 0.85,
+          "radius": 1.0,
+          "stroke": 0.0,
+          "text": null,
+          "fontSize": 0.0,
+          "detail": null,
+          "clip": null
+        },
+        {
+          "id": "work-bar:in:wing",
+          "shape": "rect",
+          "bounds": [
+            420.0,
+            12.0,
+            6.0,
+            3.0
+          ],
+          "color": 16119284,
+          "opacity": 0.85,
           "radius": 1.0,
           "stroke": 0.0,
           "text": null,
@@ -25157,16 +25283,34 @@
           "clip": null
         },
         {
-          "id": "work-bar:in",
+          "id": "work-bar:in:stem",
           "shape": "rect",
           "bounds": [
-            419.0,
+            420.0,
             12.0,
             2.0,
             10.0
           ],
           "color": 16119284,
-          "opacity": 0.6,
+          "opacity": 0.85,
+          "radius": 1.0,
+          "stroke": 0.0,
+          "text": null,
+          "fontSize": 0.0,
+          "detail": null,
+          "clip": null
+        },
+        {
+          "id": "work-bar:in:wing",
+          "shape": "rect",
+          "bounds": [
+            420.0,
+            12.0,
+            6.0,
+            3.0
+          ],
+          "color": 16119284,
+          "opacity": 0.85,
           "radius": 1.0,
           "stroke": 0.0,
           "text": null,
