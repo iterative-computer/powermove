@@ -937,6 +937,9 @@ impl MediaImporter for EngineJobs {
         if !path.is_absolute() {
             return Err(Error::invalid("Provide an absolute local media file path."));
         }
+        if let Some(fps) = request.sequence {
+            return self.import_sequence(request, fps);
+        }
         let size = std::fs::metadata(path)
             .map_err(|_| {
                 Error::invalid(
@@ -977,17 +980,6 @@ impl MediaImporter for EngineJobs {
             .map_err(|e| {
                 Error::invalid(format!("This environment image could not be read: {e}"))
             })?;
-        let probe = (kind != "model" && !environment)
-            .then(|| pm_media::probe::probe(path).map(|probed| probed.probe))
-            .transpose()
-            .map_err(|_| Error::invalid("This file could not be read as media."))?;
-        let video = probe.as_ref().and_then(|probe| probe.video.as_ref());
-        let width = image_size
-            .map(|d| f64::from(d[0]))
-            .or_else(|| video.map(|video| f64::from(video.width)));
-        let height = image_size
-            .map(|d| f64::from(d[1]))
-            .or_else(|| video.map(|video| f64::from(video.height)));
         // The clip's own length (first frame start to last frame end), as
         // the Project panel's import records it.
         // A relinked asset keeps reading its file's times as it did, so its
@@ -996,6 +988,26 @@ impl MediaImporter for EngineJobs {
             Some(asset) => pm_builtins::media_import::asset_timing(project["assets"].get(asset)),
             None => pm_media::clip::ClipTiming::Presentation,
         };
+        let unreadable = |_| Error::invalid("This file could not be read as media.");
+        // A still is read as Import Media reads it (its displayed size), not
+        // by the container probe, which refuses stills it cannot address
+        // (TGA).
+        let still_size = (kind == "image" && !environment)
+            .then(|| pm_media::facts::media_facts_as(path, None, timing))
+            .transpose()
+            .map_err(unreadable)?
+            .and_then(|facts| facts.display_size);
+        let probe = (!matches!(kind, "model" | "image") && !environment)
+            .then(|| pm_media::probe::probe(path).map(|probed| probed.probe))
+            .transpose()
+            .map_err(unreadable)?;
+        let video = probe.as_ref().and_then(|probe| probe.video.as_ref());
+        let [width, height] = [0, 1].map(|i| {
+            image_size
+                .or(still_size)
+                .map(|d| f64::from(d[i]))
+                .or_else(|| video.map(|video| f64::from([video.width, video.height][i])))
+        });
         let duration = probe
             .as_ref()
             .and_then(|probe| probe.duration_as(timing))
@@ -1022,6 +1034,7 @@ impl MediaImporter for EngineJobs {
             has_audio,
             fingerprint: fingerprint.clone(),
             revision,
+            note: None,
         };
         let published = self.published(&request.frozen)?;
         let same_bytes = |entry: &pm_kernel::project_io::MediaEntry| {
@@ -1096,13 +1109,111 @@ impl MediaImporter for EngineJobs {
         if request.replace.is_none() && matches!(kind, "video" | "audio") {
             metadata["timing"] = json!(pm_media::clip::ClipTiming::imported());
         }
+        let revision = self.admit(request, &published, &id, &metadata, original, previous)?;
+        let status = if request.replace.is_some() {
+            "replaced"
+        } else {
+            "imported"
+        };
+        Ok(imported(status, id, revision))
+    }
+}
+impl EngineJobs {
+    /// An image sequence, as File ▸ Import Image Sequence imports it
+    /// (`pm_builtins::media_import::choose_image_sequence`): one clip read in
+    /// place, its numbered files at `fps`, its manifest retained as its
+    /// original. Replacing an asset with one relinks it to these files.
+    fn import_sequence(&self, request: &MediaImport, fps: f64) -> Result<ImportedMedia> {
+        use pm_builtins::media_import::{SEQUENCE_MIME, choose_image_sequence};
+        let chosen = choose_image_sequence(&request.path, fps, &AtomicBool::new(false))
+            .map_err(Error::invalid)?
+            .ok_or_else(|| Error::unavailable("The import was cancelled."))?;
+        let project = &request.frozen.project;
+        if let Some(asset) = &request.replace
+            && project["assets"][asset]["kind"] != "video"
+        {
+            return Err(Error::invalid(
+                "Replace media with a file of the same kind.",
+            ));
+        }
+        let size = std::fs::metadata(&chosen.path).map_err(failed)?.len();
+        let fingerprint = fingerprint(&chosen.path, size).map_err(failed)?;
+        let archive = Archive::open(&self.profile).map_err(failed)?;
+        let original = archive
+            .retain_path(&chosen.path, SEQUENCE_MIME, &AtomicBool::new(false))
+            .map_err(failed)?;
+        let mut metadata = chosen.asset.clone();
+        metadata["mimeType"] = json!(SEQUENCE_MIME);
+        metadata["fingerprint"] = json!(fingerprint);
+        let number = |key: &str| metadata[key].as_f64();
+        let imported = |status, asset: String, revision| ImportedMedia {
+            status,
+            asset,
+            name: metadata["name"].as_str().unwrap_or_default().to_owned(),
+            kind: "video".into(),
+            width: number("w"),
+            height: number("h"),
+            duration: number("dur"),
+            has_audio: false,
+            fingerprint: fingerprint.clone(),
+            revision,
+            note: chosen.missing.clone(),
+        };
+        let published = self.published(&request.frozen)?;
+        // The same frames at the same rate are the same manifest bytes.
+        if request.replace.is_none()
+            && let Some(entry) = published.media.iter().find(|entry| {
+                use pm_kernel::project_io::MediaSource::{Embedded, File};
+                matches!(&entry.source, File { sha256, .. } | Embedded { sha256, .. }
+                    if sha256.as_deref() == Some(original.hash()))
+                    && project["assets"][entry.id.to_string()].is_object()
+            })
+        {
+            return Ok(imported(
+                "already_imported",
+                entry.id.to_string(),
+                request.frozen.revision,
+            ));
+        }
+        let id = request
+            .replace
+            .clone()
+            .unwrap_or_else(|| pm_kernel::new_id("asset"));
+        let previous = request
+            .replace
+            .as_ref()
+            .and_then(|asset| published.media.get(asset))
+            .map(|entry| archive.retain_entry(entry))
+            .transpose()
+            .map_err(failed)?;
+        let revision = self.admit(request, &published, &id, &metadata, original, previous)?;
+        let status = if request.replace.is_some() {
+            "replaced"
+        } else {
+            "imported"
+        };
+        Ok(imported(status, id, revision))
+    }
+
+    /// Admits the asset `id` with `metadata` and its retained `original`
+    /// (replacing `previous`) into the project as one media edit; answers
+    /// the project's revision.
+    fn admit(
+        &self,
+        request: &MediaImport,
+        published: &Published,
+        id: &str,
+        metadata: &serde_json::Value,
+        original: pm_kernel::media_archive::Original,
+        previous: Option<pm_kernel::media_archive::Original>,
+    ) -> Result<u64> {
         let catalog =
-            pm_panel_media::Catalog::published(&published).map_err(|e| failed(format!("{e:?}")))?;
+            pm_panel_media::Catalog::published(published).map_err(|e| failed(format!("{e:?}")))?;
         let edit = catalog
             .prepare_import(
                 &catalog.stamp,
                 vec![pm_panel_media::StoredAsset {
-                    id: id.clone(),
+                    id: id.to_owned(),
                     metadata: pm_model::json::parse(&metadata.to_string()).map_err(failed)?,
                     original_version: original.version().into(),
                 }],
@@ -1120,7 +1231,7 @@ impl MediaImporter for EngineJobs {
             .snapshot
             .root()
             .and_then(|root| root.get("assets"))
-            .and_then(|assets| assets.get(&id))
+            .and_then(|assets| assets.get(id))
             .map(pm_model::Node::to_value);
         let writer = pm_kernel::Caller::realm(request.writer, 1, pm_kernel::Origin::Mcp);
         let ack = self
@@ -1130,7 +1241,7 @@ impl MediaImporter for EngineJobs {
                 edit.request_with_media(
                     writer,
                     vec![pm_kernel::MediaBinding {
-                        asset: id.clone(),
+                        asset: id.to_owned(),
                         expected,
                         original,
                         previous,
@@ -1144,15 +1255,9 @@ impl MediaImporter for EngineJobs {
         if let pm_kernel::Reply::Throw(error) = &ack.reply {
             return Err(Error::kernel(error));
         }
-        let status = if request.replace.is_some() {
-            "replaced"
-        } else {
-            "imported"
-        };
-        Ok(imported(status, id, ack.revision))
+        Ok(ack.revision)
     }
-}
-impl EngineJobs {
+
     /// A `.cube` or `.3dl` file, read as Apply LUT… reads it and kept in the
     /// media archive, becomes a `lut` asset; `add_effect applyColorLut` with
     /// `inputs: {lut: {kind: "asset", assetId}}` applies it.
@@ -1210,6 +1315,7 @@ impl EngineJobs {
             has_audio: false,
             fingerprint,
             revision: ack.revision,
+            note: None,
         })
     }
 }
@@ -2221,6 +2327,7 @@ mod relink_tests {
                 replace: None,
                 expected_fingerprint: None,
                 writer: 1,
+                sequence: None,
             })
         };
         let mut table = String::from("LUT_3D_SIZE 2\n");
@@ -2321,6 +2428,7 @@ mod relink_tests {
                     replace: Some(asset.into()),
                     expected_fingerprint: None,
                     writer: 1,
+                    sequence: None,
                 })
                 .unwrap();
             assert_eq!(replaced.status, "replaced");

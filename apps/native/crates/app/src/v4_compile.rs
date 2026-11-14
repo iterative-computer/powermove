@@ -362,6 +362,13 @@ fn compile(
     }
     let hidden = style.get("display").and_then(Value::as_str) == Some("none");
     let mut sheet = StyleRefinement::default().flex().flex_col().min_w(px(0.));
+    // `data-pm-variant="code"`: a command, a path, a tool's output, in the
+    // monospaced face the app's code editors draw. "SF Mono" is no installed
+    // family (text resolution falls back to the proportional face); the
+    // editors fall back to Menlo, so code reads the same everywhere.
+    if variant(node) == Some("code") {
+        sheet = sheet.font_family("Menlo");
+    }
     if node.id == 0 || node.parent == Some(0) {
         sheet = sheet.size_full();
     }
@@ -1202,6 +1209,9 @@ fn apply(mut e: StyleRefinement, style: &pm_surface::Props, table: &TokenTable) 
             "textOverflow" => {
                 if s == Some("ellipsis") {
                     e = e.text_ellipsis().overflow_hidden();
+                } else if s == Some("middle") {
+                    // A command or a path keeps its start and its end.
+                    e = e.text_ellipsis_middle().overflow_hidden();
                 }
             }
             "textAlign" => {

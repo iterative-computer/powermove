@@ -4224,6 +4224,7 @@ fn the_color_panel_lists_the_grade_and_writes_through_its_controls() {
         "Temperature",
         "Curves",
         "Load LUT…",
+        "Color Space Transform",
         "More",
         "Strength",
     ] {

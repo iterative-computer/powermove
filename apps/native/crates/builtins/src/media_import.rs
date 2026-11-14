@@ -17,12 +17,11 @@ use std::{
 };
 
 /// `shared/media-formats.ts`. Formats the engine decodes natively need no proxy.
-/// The stills the still path draws (`pm_media::image::read`), EXR at its
-/// depth. DPX (planar samples not drawn at depth yet), TGA and PSD (outside
-/// the renderer's still classes) are not offered.
+/// The stills the still path draws (`pm_media::image::read`), EXR, DPX and
+/// Photoshop documents at their depth.
 const IMAGES: &[&str] = &[
     "png", "jpg", "jpeg", "gif", "webp", "avif", "bmp", "ico", "svg", "tif", "tiff", "heic",
-    "heif", "exr",
+    "heif", "exr", "dpx", "tga", "psd",
 ];
 const AUDIO: &[&str] = &[
     "wav", "mp3", "m4a", "aac", "ogg", "oga", "opus", "weba", "flac", "aif", "aiff", "aifc", "caf",
@@ -99,6 +98,9 @@ fn mime(path: &Path, kind: &str) -> String {
         ("image", "svg") => "image/svg+xml".into(),
         ("image", "tif") => "image/tiff".into(),
         ("image", "exr") => "image/x-exr".into(),
+        ("image", "dpx") => "image/x-dpx".into(),
+        ("image", "tga") => "image/x-tga".into(),
+        ("image", "psd") => "image/vnd.adobe.photoshop".into(),
         ("audio", "aif" | "aifc") => "audio/aiff".into(),
         ("audio", "caf") => "audio/x-caf".into(),
         ("video", "mov") => "video/quicktime".into(),
@@ -333,17 +335,62 @@ pub fn order_sequence(paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
     }
 }
 /// The type a sequence's retained manifest is kept as.
-const SEQUENCE_MIME: &str = "application/x-powermove-image-sequence";
+pub const SEQUENCE_MIME: &str = "application/x-powermove-image-sequence";
 /// Chosen frames as a sequence read in place: a manifest in scratch
 /// (removed when dropped) that the asset retains as its original, and the
 /// asset record. Frames are never transcoded: each is read as a still at
 /// its own depth when it is drawn.
-struct ChosenSequence {
+pub struct ChosenSequence {
     _dir: tempfile::TempDir,
-    path: PathBuf,
-    asset: serde_json::Value,
+    /// The manifest to retain as the asset's original ([`SEQUENCE_MIME`]).
+    pub path: PathBuf,
+    /// The asset record.
+    pub asset: serde_json::Value,
     /// Numbers in the range with no file, as the status line says them.
-    missing: Option<String>,
+    pub missing: Option<String>,
+}
+
+/// An image sequence chosen as File ▸ Import Image Sequence chooses it, for
+/// a host that imports it another way (the agent's `import_media`): `path`
+/// is the sequence's folder or one of its files (its numbering is read
+/// there), `fps` the sheet's Frame Rate (1 to 240). The same checks and
+/// refusals as the sheet. `None`: cancelled.
+pub fn choose_image_sequence(
+    path: &Path,
+    fps: f64,
+    cancel: &AtomicBool,
+) -> Result<Option<ChosenSequence>, String> {
+    if !fps.is_finite() || !(1.0..=240.0).contains(&fps) {
+        return Err("Choose a frame rate from 1 to 240".into());
+    }
+    let frame = if path.is_dir() {
+        // The folder's first numbered still names the sequence.
+        let mut stills: Vec<PathBuf> = std::fs::read_dir(path)
+            .map_err(|e| e.to_string())?
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|p| kind(p) == Some("image"))
+            .collect();
+        stills.sort();
+        stills
+            .into_iter()
+            .find(|p| matches!(pm_media::image::sequence::detect(p), Ok(Some(_))))
+            .ok_or("This folder has no numbered image frames")?
+    } else {
+        path.to_path_buf()
+    };
+    let frames: Vec<PathBuf> = pm_media::image::sequence::detect(&frame)
+        .map_err(|e| e.to_string())?
+        .ok_or("Choose at least 2 numbered image frames")?
+        .frames
+        .into_iter()
+        .map(|(_, p)| p)
+        .collect();
+    let sequence = SequenceImport {
+        fps,
+        progress: Default::default(),
+    };
+    choose_sequence(&frames, &sequence, cancel)
 }
 fn choose_sequence(
     paths: &[PathBuf],
@@ -1560,10 +1607,9 @@ mod tests {
                 1.055 * v.powf(1. / 2.4) - 0.055
             }
         };
-        for (path, bits, float, linear) in &stills {
+        // Imported into a 32-bit project and drawn alone: the centre pixel.
+        let drawn = |path: &PathBuf| -> Vec<f32> {
             let name = path.file_name().unwrap().to_string_lossy().into_owned();
-            let still = pm_media::image::read(path, &pm_media::pool::FramePool::new(0)).unwrap();
-            assert_eq!((still.bit_depth, still.float), (*bits, *float), "{name}");
             let (f, _session) = opened(
                 r##"{"id":"p","name":"Film","compId":"c","w":16,"h":16,"fps":30,"dur":1,"bg":"#000000","colorDepth":32,"assets":{},"comps":{},"layers":[]}"##,
             );
@@ -1604,13 +1650,84 @@ mod tests {
                 )
                 .unwrap();
             assert!(frame.failures.is_empty(), "{name}: {:?}", frame.failures);
-            let pixel = &renderer.read_rgba(&frame).unwrap()[(8 * 16 + 8) * 4..][..3];
+            renderer.read_rgba(&frame).unwrap()[(8 * 16 + 8) * 4..][..4].to_vec()
+        };
+        for (path, bits, float, linear) in &stills {
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            let still = pm_media::image::read(path, &pm_media::pool::FramePool::new(0)).unwrap();
+            assert_eq!((still.bit_depth, still.float), (*bits, *float), "{name}");
+            let pixel = drawn(path);
             for (got, code) in pixel.iter().zip([0x33, 0x66, 0x99]) {
                 let v = code as f32 / 255.;
                 // Scene-linear files hold the code value as light.
                 let want = if *linear { srgb(v) } else { v };
                 assert!((got - want).abs() < 0.01, "{name}: {pixel:?}");
             }
+        }
+        // Film scans and design files: DPX at 10, 12 and 16 bits, TGA with
+        // alpha, a 16-bit Photoshop document, each from exact samples and
+        // drawn finer than an 8-bit step (each code is further than the
+        // tolerance from one).
+        let codes = [202u16, 410, 618].map(|c| c << 6 | c >> 4);
+        let raw = scratch.path().join("codes.rgb48");
+        std::fs::write(
+            &raw,
+            codes
+                .iter()
+                .flat_map(|c| c.to_le_bytes())
+                .collect::<Vec<_>>()
+                .repeat(256),
+        )
+        .unwrap();
+        let from_codes = |name: &str, args: &[&str]| {
+            let path = scratch.path().join(name);
+            let status = std::process::Command::new(ffmpeg())
+                .args(["-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb48le"])
+                .args(["-s", "16x16", "-i"])
+                .arg(&raw)
+                .args(["-frames:v", "1"])
+                .args(args)
+                .arg(&path)
+                .status()
+                .unwrap();
+            assert!(status.success(), "{name}");
+            path
+        };
+        let mut psd = b"8BPS\0\x01\0\0\0\0\0\0\0\x03".to_vec();
+        psd.extend([16u32, 16].iter().flat_map(|v| v.to_be_bytes()));
+        psd.extend([0, 16, 0, 3]);
+        psd.extend([0; 14]);
+        for c in codes {
+            psd.extend(c.to_be_bytes().repeat(256));
+        }
+        let document_path = scratch.path().join("plate.psd");
+        std::fs::write(&document_path, psd).unwrap();
+        let unit = |c: u16, bits: u32| f32::from(c >> (16 - bits)) / ((1u32 << bits) - 1) as f32;
+        let deep = [
+            (from_codes("scan10.dpx", &["-pix_fmt", "gbrp10le"]), 10),
+            (from_codes("scan12.dpx", &["-pix_fmt", "gbrp12le"]), 12),
+            (from_codes("scan16.dpx", &["-pix_fmt", "rgb48le"]), 16),
+            (document_path, 16),
+        ];
+        for (path, bits) in &deep {
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            let pixel = drawn(path);
+            for (got, code) in pixel.iter().zip(codes) {
+                let want = unit(code, *bits);
+                assert!((got - want).abs() < 1e-4, "{name}: {pixel:?} vs {want}");
+            }
+        }
+        // An 8-bit TGA with straight alpha at one half, top row first,
+        // drawn over the project's black.
+        let mut tga = vec![0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16, 0, 16, 0, 32, 0x28];
+        let [r, g, b] = codes.map(|c| (c >> 8) as u8);
+        tga.extend([b, g, r, 128].repeat(256));
+        let matte = scratch.path().join("matte.tga");
+        std::fs::write(&matte, tga).unwrap();
+        let pixel = drawn(&matte);
+        for (got, code) in pixel.iter().zip(codes) {
+            let want = unit(code, 8) * 128. / 255.;
+            assert!((got - want).abs() < 1e-4, "matte.tga: {pixel:?} vs {want}");
         }
         let tone = ["sine=f=440:d=1:sample_rate=48000"];
         for (name, codec) in [("take.caf", "pcm_s24le"), ("take.aifc", "pcm_f32be")] {

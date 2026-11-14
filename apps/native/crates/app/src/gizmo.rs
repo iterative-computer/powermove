@@ -794,7 +794,10 @@ impl GizmoSurface {
         let panned = std::mem::take(&mut self.space_panned);
         self.space_hand = false;
         self.panning = None;
-        self.hover(window.mouse_position(), cx);
+        // Deferred like `refresh`: this runs from the controller's own
+        // `viewer.spaceUp` command, and `hover` reads the controller through
+        // `Host::frame`, a double lease (abort) while that update is open.
+        cx.defer_in(window, |s, window, cx| s.hover(window.mouse_position(), cx));
         panned
     }
     fn set_cursor(&mut self, cursor: CursorStyle, cx: &mut Context<Self>) {

@@ -51,6 +51,24 @@ pub fn expected_catalog() -> Value {
             .expect("existing main tool");
         *base = overlay.clone();
     }
+    // The native media importer takes an image sequence (an additive
+    // `sequence {fps}`), as File ▸ Import Image Sequence does.
+    let media: Value =
+        serde_json::from_str(include_str!("../data/fixtures/media-native-catalog.json"))
+            .expect("pinned native media contracts");
+    for overlay in media["tools"].as_array().unwrap() {
+        assert!(
+            ["import_media", "import_media_to_timeline", "replace_media"]
+                .contains(&overlay["name"].as_str().unwrap())
+        );
+        let base = catalog["tools"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|tool| tool["name"] == overlay["name"])
+            .expect("existing main tool");
+        *base = overlay.clone();
+    }
     catalog
 }
 pub fn declarations() -> &'static Value {

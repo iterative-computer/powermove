@@ -134,6 +134,26 @@ def codex():
             emit({'method': 'turn/completed', 'params': {'threadId': 'thread', 'turn': {'id': 'turn', 'status': 'interrupted', 'error': None}}})
 
 
+def codex_exec():
+    """`codex exec --json` (project access): the prompt is the last argument,
+    events are JSON lines, the reply also goes to --output-last-message."""
+    last = sys.argv[-1].split('\n')[-1]
+    output = sys.argv[sys.argv.index('--output-last-message') + 1]
+    emit({'type': 'thread.started', 'thread_id': 'exec-thread'})
+    emit({'type': 'turn.started'})
+    if os.environ.get('PM_FAKE_PROVIDER') == 'hold' or last.startswith('Hold:'):
+        sys.stdin.read()
+        return
+    emit({'type': 'item.started', 'item': {'id': 'cmd', 'type': 'command_execution', 'command': 'ls -la', 'status': 'in_progress'}})
+    emit({'type': 'item.completed', 'item': {'id': 'cmd', 'type': 'command_execution', 'command': 'ls -la',
+        'aggregated_output': 'project.pmv', 'exit_code': 0, 'status': 'completed'}})
+    reply = json.dumps({'reply': 'Saw: ' + last})
+    emit({'type': 'item.completed', 'item': {'id': 'answer', 'type': 'agent_message', 'text': reply}})
+    with open(output, 'w') as file:
+        file.write(reply)
+    emit({'type': 'turn.completed', 'usage': {'input_tokens': 1, 'output_tokens': 1}})
+
+
 if os.environ.get('PM_FAKE_RECORD') and '--allowedTools' in sys.argv:
     with open(os.environ['PM_FAKE_RECORD'], 'w') as record:
         json.dump(sys.argv, record)
@@ -143,5 +163,7 @@ elif '--setting-sources' in sys.argv:
     claude_models()
 elif os.path.basename(sys.argv[0]) == 'claude' or '--print' in sys.argv:
     claude()
+elif 'exec' in sys.argv:
+    codex_exec()
 else:
     codex()

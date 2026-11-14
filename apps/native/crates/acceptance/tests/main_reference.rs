@@ -385,6 +385,26 @@ fn studio_overlays_preserve_all_main_operations_and_unrelated_contracts() {
                     .unwrap()
                     .starts_with(tool["description"].as_str().unwrap())
             );
+        } else if ["import_media", "import_media_to_timeline", "replace_media"]
+            .contains(&tool["name"].as_str().unwrap())
+        {
+            // The media importer adds an image sequence's frame rate; main's
+            // fields and description stay.
+            let (base, native) = (&tool["inputSchema"], &actual["inputSchema"]);
+            for (field, schema) in base["properties"].as_object().unwrap() {
+                assert_eq!(schema, &native["properties"][field], "{field}");
+            }
+            for field in ["required", "additionalProperties", "type"] {
+                assert_eq!(base[field], native[field]);
+            }
+            let added: Vec<_> = native["properties"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .filter(|k| base["properties"].get(k.as_str()).is_none())
+                .collect();
+            assert_eq!(added, ["sequence"]);
+            assert_eq!(actual["description"], tool["description"]);
         } else if tool["name"] == "get_3d_scene" || tool["name"] == "open_project" {
             // Native Studio readback adds an optional pick point; the native
             // open_project an explicit recovery choice. Main's fields stay.

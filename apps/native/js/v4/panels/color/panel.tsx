@@ -3,6 +3,7 @@ import * as UI from "../../src/components";
 import type { SurfaceEvent } from "../../src/protocol";
 import { ColorModel, type Intent, type ParameterRow } from "./model";
 import {
+  CST,
   CURVES,
   CURVE_CHANNELS,
   EXPORT_CDL,
@@ -52,8 +53,9 @@ export function ColorPanel({ controller: c, command }: ColorProps) {
   );
   const curves = tools.filter((g) => g.header.definition === CURVES);
   const luts = tools.filter((g) => g.header.definition === LUT);
+  const transforms = tools.filter((g) => g.header.definition === CST);
   const others = tools.filter(
-    (g) => ![WHEELS, CURVES, LUT].includes(g.header.definition ?? ""),
+    (g) => ![WHEELS, CURVES, LUT, CST].includes(g.header.definition ?? ""),
   );
   const rows = (list: (ParameterRow | undefined)[]) =>
     list.map(
@@ -215,6 +217,23 @@ export function ColorPanel({ controller: c, command }: ColorProps) {
               }
             >
               {luts.map((g) => (
+                <Tool
+                  key={g.header.id}
+                  tool={g}
+                  send={send}
+                  editable={editable}
+                >
+                  {rows(g.parameters)}
+                </Tool>
+              ))}
+            </Section>
+            <Section
+              title="Color Space Transform"
+              send={send}
+              editable={editable}
+              action={add(CST, "Add Color Space Transform")}
+            >
+              {transforms.map((g) => (
                 <Tool
                   key={g.header.id}
                   tool={g}
