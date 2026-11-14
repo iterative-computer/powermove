@@ -265,8 +265,8 @@ impl Flow {
         match update {
             // Only while startup still waits: never after the library opened.
             Update::Scanned(scan) if matches!(self.entry, Entry::Waiting) => match scan {
-                Ok(scan) if scan.should_offer() && self.extensions.is_none() => {
-                    self.extensions = Some(Extensions::offer(scan, Place::Startup));
+                Ok(found) if found.scan.should_offer() && self.extensions.is_none() => {
+                    self.extensions = Some(found.model(Place::Startup));
                     vec![]
                 }
                 Ok(_) => self.enter(),
@@ -527,6 +527,7 @@ impl Flow {
             symbol: "exclamationmark.triangle.fill",
             severity: Severity::Warning,
             text: "The Migration Report couldn’t be read, so this list may be incomplete.".into(),
+            detail: None,
         });
         let rows = self.model.summary.as_ref().map_or(vec![], |summary| {
             summary
@@ -543,6 +544,7 @@ impl Flow {
                         symbol,
                         severity,
                         text,
+                        detail: None,
                     }
                 })
                 .chain(unread)

@@ -1,8 +1,12 @@
 //! N004–N006: docs/native/design/surfaces/extensions.md. Bringing the original
 //! app's extensions into a library that already exists, at startup or from
 //! Settings › Storage. Headless: the host maps this to its Welcome frame.
+//!
+//! Each screen leads with the outcome (a sentence and its counts), shows the
+//! exceptions in full with their reasons, and lists the rest by name only.
 use super::{Button, View, migration::StepRow};
 use crate::extension_transfer::{Progress, Scan, ScanStatus, TransferOutcome, TransferResult};
+use std::collections::BTreeMap;
 
 /// Where the step was opened. Startup always ends in the library; Settings
 /// ends where it started.
@@ -22,33 +26,34 @@ pub enum Gate {
     /// N006: the transfer stopped before it finished; nothing else changed.
     Failed,
 }
-/// One extension's line in a list: its tone and its sentence.
+/// An exception's tone, most serious first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Tone {
     /// Couldn't load: copied, but it won't run until it's fixed.
     Warning,
     /// Skipped or already here: nothing to do.
     Note,
-    /// Brought in and loads.
-    Done,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
     Copying,
     Checking,
 }
+/// An extension that didn't simply come in: its name, and why, in full.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Item {
     pub id: String,
+    pub name: String,
     pub tone: Tone,
-    /// `id: reason`, a whole sentence that wraps inside its card.
-    pub text: String,
+    pub reason: String,
 }
 #[derive(Debug, Clone)]
 pub struct Model {
     pub place: Place,
     pub gate: Gate,
     pub scan: Scan,
+    /// Display names from the extensions' manifests, by folder id.
+    pub names: BTreeMap<String, String>,
     pub progress: Option<Progress>,
     pub result: Option<TransferResult>,
     /// Why the transfer stopped, for Details.
@@ -60,29 +65,33 @@ fn extensions(n: usize) -> String {
         n => format!("{n} extensions"),
     }
 }
-fn item(id: &str, tone: Tone, reason: &str) -> Item {
-    Item {
-        id: id.into(),
-        tone,
-        text: if reason.is_empty() {
-            id.into()
-        } else {
-            format!("{id}: {reason}")
-        },
-    }
-}
 const UNTOUCHED: &str =
     "Only extensions are copied. Your projects, settings and sign-ins stay as they are.";
+/// Names shown before Show All: three rows of two.
+pub const PREVIEW: usize = 6;
 impl Model {
     pub fn offer(scan: Scan, place: Place) -> Self {
         Self {
             place,
             gate: Gate::Offer,
             scan,
+            names: BTreeMap::new(),
             progress: None,
             result: None,
             error: None,
         }
+    }
+    pub fn named(mut self, names: BTreeMap<String, String>) -> Self {
+        self.names = names;
+        self
+    }
+    /// The manifest's name, else the folder's.
+    pub fn name(&self, id: &str) -> String {
+        self.names
+            .get(id)
+            .map(|n| n.trim())
+            .filter(|n| !n.is_empty())
+            .map_or_else(|| id.to_owned(), str::to_owned)
     }
     /// New and updated: what Bring In Extensions copies.
     pub fn offered(&self) -> usize {
@@ -133,13 +142,20 @@ impl Model {
             )
         })
     }
+    fn skipped_in_result(&self) -> usize {
+        self.result.as_ref().map_or(0, |r| {
+            r.entries
+                .iter()
+                .filter(|e| e.outcome == TransferOutcome::Skipped && !e.id.starts_with('.'))
+                .count()
+        })
+    }
     pub fn view(&self) -> View {
         let startup = self.place == Place::Startup;
-        let (surface, title, line, status, buttons, default): (
+        let (surface, title, line, buttons, default): (
             &'static str,
             String,
             String,
-            Option<String>,
             Vec<Button>,
             Option<&'static str>,
         ) = match self.gate {
@@ -155,7 +171,6 @@ impl Model {
                         "aren’t"
                     }
                 ),
-                None,
                 vec![
                     Button::new(
                         if startup { "not_now" } else { "cancel" },
@@ -173,49 +188,28 @@ impl Model {
                 "N005",
                 "Bringing In Your Extensions".into(),
                 UNTOUCHED.into(),
-                Some(match (&self.progress, self.phase()) {
-                    (Some(p), Some((Phase::Copying, _, _))) if !p.current.is_empty() => {
-                        format!("Copying {}…", p.current)
-                    }
-                    (Some(p), Some((Phase::Checking, _, _))) if !p.current.is_empty() => {
-                        format!("Checking that {} loads…", p.current)
-                    }
-                    _ => "Getting ready…".into(),
-                }),
                 vec![],
                 None,
             ),
             Gate::Done => {
                 let r = self.result.clone().unwrap_or_default();
-                let mut parts = vec![];
-                if r.brought_in > 0 || r.already_present + r.could_not_load == 0 {
-                    parts.push(format!("{} brought in", r.brought_in));
-                }
-                if r.already_present > 0 {
-                    parts.push(format!("{} already in Powermove", r.already_present));
-                }
-                if r.could_not_load > 0 {
-                    parts.push(format!("{} couldn’t load", r.could_not_load));
-                }
-                let mut counts = match parts.as_slice() {
-                    [one] => one.clone(),
-                    [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
-                    [] => String::new(),
+                let title = if r.brought_in == 0 && r.could_not_load > 0 {
+                    "Your Extensions Couldn’t Load"
+                } else if r.brought_in == 0 {
+                    "Nothing New to Bring In"
+                } else {
+                    "Your Extensions Are In"
                 };
-                if let Some(first) = counts.get(..1) {
-                    counts = first.to_uppercase() + &counts[1..];
-                }
+                let lead = match (r.brought_in, r.could_not_load) {
+                    (0, 0) => "They were already in Powermove.".to_owned(),
+                    (_, 0) => "Each one was checked and loads.".to_owned(),
+                    (_, 1) => "One couldn’t load. The reason is below.".to_owned(),
+                    (_, n) => format!("{n} couldn’t load. The reasons are below."),
+                };
                 (
                     "N006",
-                    if r.brought_in == 0 && r.could_not_load > 0 {
-                        "Your Extensions Couldn’t Load".into()
-                    } else if r.brought_in == 0 {
-                        "Nothing New to Bring In".into()
-                    } else {
-                        "Your Extensions Are In".into()
-                    },
-                    format!("{counts}. Your original app stays unchanged."),
-                    None,
+                    title.into(),
+                    format!("{lead} Your original app stays unchanged."),
                     vec![if startup {
                         Button::new("open_native", "Open Powermove")
                     } else {
@@ -232,7 +226,6 @@ impl Model {
                 } else {
                     "Nothing in your library changed. Check that the original app’s folder is still there, then try again.".into()
                 },
-                None,
                 if startup {
                     vec![
                         Button::new("try_again", "Try Again"),
@@ -251,81 +244,139 @@ impl Model {
             surface,
             title,
             line,
-            status,
+            status: None,
             buttons,
             default,
         }
     }
-    /// The offer's counts card (a row per kind that has any), or the running bar.
-    pub fn rows(&self) -> Vec<StepRow> {
-        let row = |title: &str, n: usize| StepRow {
-            title: title.into(),
-            value: n.to_string(),
-            active: None,
+    /// The counts that lead the offer and the summary: each kind that has any.
+    pub fn stats(&self) -> Vec<(usize, &'static str)> {
+        let mut stats = match self.gate {
+            Gate::Offer => vec![
+                (self.scan.new, "New"),
+                (self.scan.changed, "Updated"),
+                (self.scan.already_present, "Already in Powermove"),
+                (self.skipped(), "Skipped"),
+            ],
+            Gate::Done => {
+                let r = self.result.clone().unwrap_or_default();
+                vec![
+                    (r.brought_in, "Brought in"),
+                    (r.could_not_load, "Couldn’t load"),
+                    (r.already_present, "Already in Powermove"),
+                    (self.skipped_in_result(), "Skipped"),
+                ]
+            }
+            Gate::Running | Gate::Failed => vec![],
         };
-        let mut rows = Vec::new();
-        match self.gate {
-            Gate::Offer => {
-                rows.push(row("New", self.scan.new));
-                rows.push(row("Updated in the original app", self.scan.changed));
-                rows.push(row("Already in Powermove", self.scan.already_present));
-                rows.push(row("Skipped", self.skipped()));
-            }
-            Gate::Running => {
-                let Some(p) = self.progress.as_ref().filter(|p| p.total > 0) else {
-                    return vec![StepRow {
-                        title: "Extensions".into(),
-                        value: String::new(),
-                        active: Some(None),
-                    }];
-                };
-                let (phase, at, of) = self.phase().unwrap_or((Phase::Copying, 0, 0));
-                return vec![StepRow {
-                    title: match phase {
-                        Phase::Copying => "Copying",
-                        Phase::Checking => "Checking",
-                    }
-                    .into(),
-                    value: format!("{at} of {of}"),
-                    active: Some(Some(p.done.min(p.total) as f64 / p.total as f64)),
-                }];
-            }
-            // The line already gives the counts: the list gets the room.
-            Gate::Done | Gate::Failed => {}
-        }
-        rows.retain(|r| r.value != "0");
-        rows
+        stats.retain(|(n, _)| *n > 0);
+        stats
     }
-    /// Each extension with its reason. The offer lists only what it won't
-    /// bring in; the summary lists every extension, problems first.
+    /// The running row: what's happening, to which extension, how far.
+    pub fn rows(&self) -> Vec<StepRow> {
+        if self.gate != Gate::Running {
+            return vec![];
+        }
+        let Some(p) = self.progress.as_ref().filter(|p| p.total > 0) else {
+            return vec![StepRow {
+                title: "Getting ready".into(),
+                value: String::new(),
+                active: Some(None),
+            }];
+        };
+        let (phase, _, _) = self.phase().unwrap_or((Phase::Copying, 0, 0));
+        vec![StepRow {
+            title: match phase {
+                Phase::Copying => "Copying",
+                Phase::Checking => "Checking that it loads",
+            }
+            .into(),
+            value: self.name(&p.current),
+            active: Some(Some(p.done.min(p.total) as f64 / p.total as f64)),
+        }]
+    }
+    /// What didn't simply come in, in full: couldn't load first, then
+    /// skipped, then already here.
     pub fn items(&self) -> Vec<Item> {
-        let mut items: Vec<Item> = match self.gate {
+        let item = |id: &str, tone, reason: &str| Item {
+            id: id.into(),
+            name: self.name(id),
+            tone,
+            reason: reason.into(),
+        };
+        let mut items: Vec<(Item, bool)> = match self.gate {
             Gate::Offer => self
                 .scan
                 .entries
                 .iter()
                 .filter(|e| e.status == ScanStatus::Skipped)
-                .map(|e| item(&e.id, Tone::Note, &e.reason))
+                .map(|e| (item(&e.id, Tone::Note, &e.reason), false))
                 .collect(),
             Gate::Done => self
                 .result
                 .iter()
                 .flat_map(|r| &r.entries)
-                .map(|e| {
-                    let tone = match e.outcome {
-                        TransferOutcome::CouldNotLoad => Tone::Warning,
-                        TransferOutcome::BroughtIn => Tone::Done,
-                        TransferOutcome::AlreadyPresent | TransferOutcome::Skipped => Tone::Note,
-                    };
-                    item(&e.id, tone, &e.reason)
+                .filter_map(|e| match e.outcome {
+                    TransferOutcome::BroughtIn => None,
+                    TransferOutcome::CouldNotLoad => {
+                        Some((item(&e.id, Tone::Warning, &e.reason), false))
+                    }
+                    TransferOutcome::Skipped => Some((item(&e.id, Tone::Note, &e.reason), false)),
+                    TransferOutcome::AlreadyPresent => {
+                        Some((item(&e.id, Tone::Note, &e.reason), true))
+                    }
                 })
                 .collect(),
             Gate::Running | Gate::Failed => vec![],
         };
-        items.retain(|i| !i.id.starts_with('.'));
-        // Stable: within a tone, the engine's (alphabetical) order.
-        items.sort_by_key(|i| i.tone);
-        items
+        items.retain(|(i, _)| !i.id.starts_with('.'));
+        // Stable: within a tone, already-here after skipped, then the
+        // engine's (alphabetical) order.
+        items.sort_by_key(|(i, already)| (i.tone, *already));
+        items.into_iter().map(|(i, _)| i).collect()
+    }
+    pub fn items_title(&self) -> Option<&'static str> {
+        let items = self.items();
+        if items.is_empty() {
+            None
+        } else if items.iter().any(|i| i.tone == Tone::Warning) {
+            Some("Needs a Look")
+        } else {
+            Some("Not Brought In")
+        }
+    }
+    /// Everything that comes in (the offer) or came in (the summary), by
+    /// name only, sorted as a person reads them.
+    pub fn listed(&self) -> Option<(&'static str, Vec<String>)> {
+        let mut names: Vec<String> = match self.gate {
+            Gate::Offer => self
+                .scan
+                .entries
+                .iter()
+                .filter(|e| matches!(e.status, ScanStatus::New | ScanStatus::Changed))
+                .map(|e| self.name(&e.id))
+                .collect(),
+            Gate::Done => self
+                .result
+                .iter()
+                .flat_map(|r| &r.entries)
+                .filter(|e| e.outcome == TransferOutcome::BroughtIn)
+                .map(|e| self.name(&e.id))
+                .collect(),
+            Gate::Running | Gate::Failed => vec![],
+        };
+        if names.is_empty() {
+            return None;
+        }
+        names.sort_by_key(|n| n.to_lowercase());
+        Some((
+            if self.gate == Gate::Offer {
+                "To Bring In"
+            } else {
+                "Brought In"
+            },
+            names,
+        ))
     }
     /// Startup only: where to find this again after Not Now.
     pub fn note(&self) -> Option<&'static str> {
