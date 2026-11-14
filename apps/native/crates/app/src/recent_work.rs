@@ -21,6 +21,10 @@ static RELAUNCH: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None)
 pub fn newer() -> bool {
     NEWER.load(Ordering::Acquire)
 }
+#[cfg(test)]
+pub fn set_newer(newer: bool) {
+    NEWER.store(newer, Ordering::Release);
+}
 pub const NOTICE: &str = "Your original app has newer work.";
 pub const NOTICE_ACTION: &str = "Bring It In…";
 

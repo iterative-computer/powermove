@@ -1083,3 +1083,83 @@ fn synthetic_runs_can_disable_original_discovery() {
         .is_none()
     );
 }
+
+/// Headless pictures of the later-launch screens, for review. Run on demand:
+/// `PM_WELCOME_CAPTURE=<dir> cargo test -p pm-native-app capture_recent_work_frames -- --ignored`
+#[test]
+#[ignore = "writes PNGs; set PM_WELCOME_CAPTURE"]
+fn capture_recent_work_frames() {
+    use gpui::{AppContext, HeadlessAppContext, px, size};
+    use pm_design::{Accessibility, Scheme, Tokens};
+    let dir = std::env::var("PM_WELCOME_CAPTURE").unwrap();
+    fs::create_dir_all(&dir).unwrap();
+    // Before: the frame a later launch showed past a second of merging
+    // (removed; its values as they were).
+    let before = Frame {
+        surface: "N001".into(),
+        title: "Updating Your Library".into(),
+        line: "Your original app stays unchanged.".into(),
+        status: Some("Bringing in your recent work…".into()),
+        spinner: true,
+        buttons: vec![pm_shell::welcome::Button::new("quit", "Quit Powermove").leading()],
+        ..Frame::default()
+    };
+    let frames = [
+        ("before-updating-your-library", before),
+        (
+            "after-asked-bringing-in",
+            recent_frame(&Recent::Running {
+                step: Some(Step::Library),
+                progress: Some((3, 12)),
+            }),
+        ),
+        ("after-asked-waiting-for-original", recent_frame(&Recent::Waiting)),
+        (
+            "after-asked-low-disk",
+            recent_frame(&Recent::Failed {
+                reason: "There wasn’t enough free space on this Mac.".into(),
+                low_disk: Some(("6.9 GB".into(), "6.2 GB".into())),
+                details: "migration paused: 6 GiB free space reserve required".into(),
+            }),
+        ),
+    ];
+    for (name, frame) in frames {
+        objc2::rc::autoreleasepool(|_| {
+            let tokens = Tokens::new(Scheme::Dark, Accessibility::default());
+            let m = tokens.metrics;
+            let mut cx = HeadlessAppContext::with_platform(
+                Arc::new(
+                    gpui_parley::ParleyTextSystem::new(gpui_parley::SystemFonts::Load)
+                        .with_automatic_optical_sizing(),
+                ),
+                Arc::new(()),
+                || {
+                    Some(Box::new(
+                        gpui_apple::metal_renderer::MetalHeadlessRenderer::new(),
+                    ))
+                },
+            );
+            let window = cx
+                .open_window(size(px(m.welcome_width), px(m.welcome_height)), |_, cx| {
+                    cx.new(|cx| {
+                        let mut view = pm_shell::welcome_view::WelcomeView::new(
+                            tokens.clone(),
+                            frame,
+                            Rc::new(|_, _| {}),
+                            cx,
+                        );
+                        view.clock = Some(1.);
+                        view
+                    })
+                })
+                .unwrap();
+            cx.run_until_parked();
+            cx.capture_screenshot(window.into()).unwrap();
+            cx.update_window(window.into(), |_, window, _| window.refresh())
+                .unwrap();
+            cx.run_until_parked();
+            let image = cx.capture_screenshot(window.into()).unwrap();
+            image.save(format!("{dir}/{name}.png")).unwrap();
+        });
+    }
+}

@@ -171,6 +171,24 @@ fn header_buttons_run_the_window_commands_and_sort_reorders() {
     }
 }
 #[::core::prelude::v1::test]
+fn newer_work_in_the_original_app_is_one_line_that_offers_to_bring_it_in() {
+    let fixture = fixture();
+    let mut cx = TestAppContext::single();
+    let (view, cx, log) = open(&mut cx, &fixture);
+    assert!(cx.debug_bounds("home-recent-work").is_none());
+    crate::recent_work::set_newer(true);
+    view.update(cx, |_, cx| cx.notify());
+    cx.run_until_parked();
+    let bounds = cx.debug_bounds("home-recent-work").expect("the line shows");
+    cx.simulate_click(bounds.center(), Modifiers::default());
+    cx.run_until_parked();
+    crate::recent_work::set_newer(false);
+    assert_eq!(
+        log.borrow().last().map(String::as_str),
+        Some("command bringInRecentWork")
+    );
+}
+#[::core::prelude::v1::test]
 fn a_click_selects_and_return_opens_through_the_kernel() {
     let fixture = fixture();
     let mut cx = TestAppContext::single();
@@ -330,4 +348,73 @@ fn create_opens_a_library_project_with_the_forms_format_and_saves_it() {
             .is_some(),
         "the new project is in the library"
     );
+}
+
+/// Headless pictures of Home with and without the newer-work line. Run on
+/// demand: `PM_WELCOME_CAPTURE=<dir> cargo test -p pm-native-app capture_home_recent_work -- --ignored`
+#[::core::prelude::v1::test]
+#[ignore = "writes PNGs; set PM_WELCOME_CAPTURE"]
+fn capture_home_recent_work() {
+    use gpui::{HeadlessAppContext, px, size};
+    let dir = std::env::var("PM_WELCOME_CAPTURE").unwrap();
+    std::fs::create_dir_all(&dir).unwrap();
+    for (name, newer) in [("home-without-line", false), ("after-home-newer-work-line", true)] {
+        objc2::rc::autoreleasepool(|_| {
+            let fixture = fixture();
+            crate::recent_work::set_newer(newer);
+            let mut cx = HeadlessAppContext::with_platform(
+                Arc::new(
+                    gpui_parley::ParleyTextSystem::new(gpui_parley::SystemFonts::Load)
+                        .with_automatic_optical_sizing(),
+                ),
+                Arc::new(()),
+                || {
+                    Some(Box::new(
+                        gpui_apple::metal_renderer::MetalHeadlessRenderer::new(),
+                    ))
+                },
+            );
+            let (port, rx) =
+                ProjectLibrary::port(fixture.actor.handle(), fixture.profile.clone()).unwrap();
+            let tokens = Tokens::new(Scheme::Dark, Accessibility::default());
+            let kernel = fixture.actor.handle();
+            let sink: Sink = Rc::new(|_, _| {});
+            let fill = tokens.colors.window;
+            let window = cx
+                .open_window(size(px(1100.), px(640.)), move |_, cx| {
+                    let view = cx.new(|cx| ProjectLibrary::new(port, rx, tokens, sink, None, kernel, cx));
+                    cx.new(|_| Backed { view, fill })
+                })
+                .unwrap();
+            let library = window
+                .update(&mut cx, |root, _, _| root.view.clone())
+                .unwrap();
+            library.update(&mut cx, |v, cx| {
+                let mut query = v.controller.query.clone();
+                query.section = Section::All;
+                v.controller.set_query(query).unwrap();
+            });
+            for _ in 0..60 {
+                library.update(&mut cx, |v, cx| v.pump(cx));
+                cx.run_until_parked();
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            let image = cx.capture_screenshot(window.into()).unwrap();
+            image.save(format!("{dir}/{name}.png")).unwrap();
+            crate::recent_work::set_newer(false);
+        });
+    }
+}
+struct Backed {
+    view: Entity<ProjectLibrary>,
+    fill: u32,
+}
+impl gpui::Render for Backed {
+    fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+        gpui::div()
+            .size_full()
+            .bg(gpui::rgb(self.fill))
+            .font_family(pm_design::TEXT_FONT)
+            .child(self.view.clone())
+    }
 }
