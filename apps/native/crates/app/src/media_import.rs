@@ -206,52 +206,146 @@ impl Controller {
     }
     /// Files dropped on the window: projects open, media lands at the playhead.
     pub(crate) fn import_dropped(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
-        let media = self.open_dropped_project(paths, cx);
-        // SubRip and WebVTT files become captions layers at the playhead.
-        let (captions, media): (Vec<_>, Vec<_>) = media
-            .into_iter()
-            .partition(|p| crate::captions_panel::is_caption_file(p));
-        if self.session.is_some() {
-            let at = self.time();
-            for path in captions {
-                self.import_captions(path, at, cx);
-            }
-        }
-        if !media.is_empty() && self.session.is_none() {
-            self.message = "Open a project before importing media".into();
-            cx.notify();
-        } else if crate::media_sequence::candidate(&media) {
-            let place_at = Some(self.time());
-            self.choose_sequence(media, false, place_at, None, cx);
-        } else if !media.is_empty() {
-            let place_at = Some(self.time());
-            self.import(
-                ImportRequest {
-                    paths: media,
-                    place_at,
-                    ..Default::default()
-                },
-                cx,
-            );
-        }
+        let at = self.time();
+        self.import_drop(paths, false, Some((at, None)), None, cx);
     }
     /// Files dropped on the Project panel: assets in `folder`, no layers.
     pub(crate) fn import_to_panel(
         &mut self,
         paths: Vec<PathBuf>,
         folder: Option<String>,
+        as_folder: bool,
         cx: &mut Context<Self>,
     ) {
-        let paths = self.open_dropped_project(paths, cx);
-        if crate::media_sequence::candidate(&paths) {
-            self.choose_sequence(paths, false, None, folder, cx);
-        } else if !paths.is_empty() {
-            let request = ImportRequest {
-                paths,
-                folder,
-                ..Default::default()
-            };
-            self.import(request, cx);
+        self.import_drop(paths, as_folder, None, folder, cx);
+    }
+    /// Media dropped on the timeline: Finder files at the time and place in
+    /// the stack under the pointer, or the Project panel's dragged items.
+    pub(crate) fn drop_media(
+        &mut self,
+        drop: crate::timeline_surface::MediaDrop,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::timeline_surface::Dropped;
+        match drop.what {
+            Dropped::Files { paths, alt } => {
+                self.import_drop(paths, alt, Some((drop.at, drop.index)), None, cx)
+            }
+            Dropped::ProjectItems => self.place_project_items(drop.at, drop.index, cx),
+        }
+    }
+    /// The Project panel's dragged items placed at `at` from stack `index`
+    /// (the timeline, the viewer): one Undo step, the new layers selected.
+    pub(crate) fn place_project_items(
+        &mut self,
+        at: f64,
+        index: Option<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        let drag = self
+            .builtins
+            .runtime
+            .as_ref()
+            .and_then(|r| r.project_drag());
+        if let Some(view) = self.builtins.views.get(pm_builtins::PROJECT_PANEL).cloned() {
+            view.update(cx, |v, cx| v.end_drag(cx));
+        }
+        let (Some(drag), Some(published)) = (drag, self.published.clone()) else {
+            return;
+        };
+        let (assets, compositions) = match &drag.primary {
+            pm_panel_media::ItemId::Composition(id) => (vec![], vec![id.clone()]),
+            _ => (drag.assets.clone(), vec![]),
+        };
+        match pm_builtins::media_import::place_items(&published, &assets, &compositions, at, index)
+        {
+            Ok((layers, commands)) => {
+                let label = format!("Add {}", drag.name);
+                let plan = crate::layer_commands::Plan {
+                    label,
+                    commands,
+                    select: Some(layers),
+                    count_keys: None,
+                };
+                self.run_layer_plan(plan, cx);
+            }
+            Err(why) => {
+                self.message = why;
+                cx.notify();
+            }
+        }
+    }
+    /// What a drop imports, as Import Media does: a project opens; caption
+    /// files become captions layers where media lands; a folder of numbered
+    /// frames is offered as one image sequence (Option keeps its files
+    /// apart), any other folder keeps its structure in the Project panel and
+    /// places nothing; loose files are offered as a sequence when they are
+    /// one, else imported. `place`: the time and stack place layers land at
+    /// (`None`: the Project panel only, into `folder`).
+    fn import_drop(
+        &mut self,
+        paths: Vec<PathBuf>,
+        alt: bool,
+        place: Option<(f64, Option<usize>)>,
+        folder: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let media = self.open_dropped_project(paths, cx);
+        if media.is_empty() {
+            return;
+        }
+        if self.session.is_none() {
+            self.message = "Open a project before importing media".into();
+            cx.notify();
+            return;
+        }
+        let (captions, media): (Vec<_>, Vec<_>) = media
+            .into_iter()
+            .partition(|p| crate::captions_panel::is_caption_file(p));
+        if let Some((at, _)) = place {
+            for path in captions {
+                self.import_captions(path, at, cx);
+            }
+        }
+        let (folders, files): (Vec<_>, Vec<_>) = media.into_iter().partition(|p| p.is_dir());
+        let place_at = place.map(|(at, _)| at);
+        let mut sequence = None;
+        let mut kept = vec![];
+        for dir in folders {
+            let frames = folder_frames(&dir);
+            if !alt && sequence.is_none() && crate::media_sequence::candidate(&frames) {
+                sequence = Some(frames);
+            } else {
+                kept.push(dir);
+            }
+        }
+        if !kept.is_empty() {
+            self.import(
+                ImportRequest {
+                    paths: kept,
+                    folder: folder.clone(),
+                    keep_folders: true,
+                    ..Default::default()
+                },
+                cx,
+            );
+        }
+        if sequence.is_none() && crate::media_sequence::candidate(&files) {
+            sequence = Some(files);
+        } else if !files.is_empty() {
+            self.import(
+                ImportRequest {
+                    paths: files,
+                    folder: folder.clone(),
+                    place_at,
+                    place_index: place.and_then(|(_, index)| index),
+                    ..Default::default()
+                },
+                cx,
+            );
+        }
+        if let Some(frames) = sequence {
+            self.choose_sequence(frames, false, place_at, folder, cx);
         }
     }
     /// A dropped project opens instead of importing. Returns the media to import.
@@ -561,4 +655,58 @@ pub(crate) fn stage_pasted_image(data: Vec<u8>, png: bool) -> Option<(tempfile::
     let path = dir.path().join("Pasted Image.png");
     std::fs::write(&path, png).ok()?;
     Some((dir, path))
+}
+
+/// A dropped folder's own media files (not its subfolders'), in name order:
+/// what is offered as an image sequence when they are one.
+fn folder_frames(dir: &std::path::Path) -> Vec<PathBuf> {
+    let mut frames: Vec<PathBuf> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|p| p.is_file() && pm_builtins::media_import::classify(p).is_some())
+        .collect();
+    frames.sort();
+    frames
+}
+
+#[cfg(test)]
+mod drop_tests {
+    use super::folder_frames;
+
+    /// A dropped folder of numbered frames is offered as one image sequence
+    /// (its own media files in name order; notes and subfolders are not
+    /// frames); a folder of unrelated media is not.
+    #[test]
+    fn a_dropped_folder_of_numbered_frames_is_offered_as_a_sequence() {
+        let dir = tempfile::tempdir().unwrap();
+        let renders = dir.path().join("renders");
+        std::fs::create_dir_all(renders.join("old")).unwrap();
+        for n in [3, 1, 2, 10] {
+            std::fs::write(renders.join(format!("shot.{n:04}.png")), b"png").unwrap();
+        }
+        std::fs::write(renders.join("notes.txt"), b"not a frame").unwrap();
+        std::fs::write(renders.join("old/shot.0001.png"), b"png").unwrap();
+        let frames = folder_frames(&renders);
+        let names: Vec<_> = frames
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "shot.0001.png",
+                "shot.0002.png",
+                "shot.0003.png",
+                "shot.0010.png"
+            ]
+        );
+        assert!(crate::media_sequence::candidate(&frames));
+        let mixed = dir.path().join("mixed");
+        std::fs::create_dir_all(&mixed).unwrap();
+        std::fs::write(mixed.join("intro.png"), b"png").unwrap();
+        std::fs::write(mixed.join("music.wav"), b"wav").unwrap();
+        assert!(!crate::media_sequence::candidate(&folder_frames(&mixed)));
+    }
 }

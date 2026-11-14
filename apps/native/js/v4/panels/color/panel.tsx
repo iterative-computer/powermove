@@ -1,9 +1,15 @@
 import { useLayoutEffect, useState } from "preact/hooks";
 import * as UI from "../../src/components";
 import type { SurfaceEvent } from "../../src/protocol";
-import { ColorModel, type Intent, type ParameterRow } from "./model";
+import {
+  ColorModel,
+  type Intent,
+  type MenuItem,
+  type ParameterRow,
+} from "./model";
 import {
   CST,
+  CST_SECTIONS,
   CURVES,
   EXPORT_CDL,
   IMPORT_CDL,
@@ -34,15 +40,30 @@ export interface ColorProps {
   command: (name: string) => void;
 }
 
+/** What the panel's Add menu offers, in the order a colourist reaches for
+ * them; a LUT and a CDL come from a file. */
+const ADD_ITEMS: MenuItem[] = [
+  { id: WHEELS, label: "Color Wheels" },
+  { id: CURVES, label: "Curve" },
+  { id: CST, label: "Color Space Transform" },
+  null,
+  { id: "lut", label: "LUT…" },
+  { id: "import-cdl", label: "CDL…" },
+];
+
 /** The selected layer's grade, by tool: Color Wheels, Curves, LUT, and any
- * other grading effect (an extension's included). */
+ * other grading effect (an extension's included). One family with
+ * Properties: its header's actions, its layer heading, a disclosure section
+ * per grade with the same rows; the wheels and curves are the instruments. */
 export function ColorPanel({ controller: c, command }: ColorProps) {
   const [p, update] = useState(c.snapshot());
   useLayoutEffect(() => c.subscribe(() => update(c.snapshot())), [c]);
-  // Every grading row projected: the whole list, each tool disclosed.
+  // Every grading row projected: the whole list, each tool disclosed. A
+  // grade folded here is folded in this panel only.
   useLayoutEffect(() => {
     for (const intent of coverage(p)) c.send(intent);
   }, [p]);
+  const [folded, fold] = useState<ReadonlySet<string>>(new Set());
   const editable = p.target === "Layer" && !p.locked;
   const send = (intent: Intent) => {
     if (editable) c.send(intent);
@@ -58,73 +79,84 @@ export function ColorPanel({ controller: c, command }: ColorProps) {
       (row) =>
         row && <Control key={row.id} row={row} locked={p.locked} model={c} />,
     );
-  // Balance and Tone as rows, then the four wheels (Lift, Gamma, Gain,
-  // Offset) side by side as the panel's width allows.
+  // Another grade goes after the last one, in one Undo step; a curve starts
+  // on Master (its Channel pop-up chooses another).
+  const add = (choice: string | null) => {
+    if (!editable || !choice) return;
+    if (choice === "lut") command(LOAD_LUT);
+    else if (choice === "import-cdl") command(IMPORT_CDL);
+    else
+      send({
+        type: "add",
+        definition: choice,
+        ...(slot === undefined ? {} : { slot }),
+        ...(choice === CURVES ? { parameters: { channel: 0 } } : {}),
+      });
+  };
+  const menu = (items: MenuItem[]) =>
+    c.platform.contextMenu(items).catch((error) => {
+      c.platform.report(error);
+      return null;
+    });
+  // Balance and Tone as Properties' rows (side by side when the panel is
+  // wide), then the four wheels.
   const wheelControls = (g: GradeEffect) => [
-    <Plate key={`${g.header.id}:balance`} label="Balance and Tone" wide>
+    <div
+      key={`${g.header.id}:balance`}
+      role="group"
+      label="Balance and Tone"
+      style={{ display: "flex", flexDirection: "row", flexWrap: "wrap" }}
+    >
       {WHEEL_SECTIONS.slice(0, 2).map((s) => (
-        <div key={`${g.header.id}:${s.title}`} role="group" label={s.title}>
+        <div
+          key={`${g.header.id}:${s.title}`}
+          role="group"
+          label={s.title}
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            flexGrow: 1,
+            flexBasis: t("metrics.grade_pair"),
+          }}
+        >
           <Subheading title={s.title} />
           {rows(s.keys.map((k) => parameter(g, k)))}
         </div>
       ))}
-    </Plate>,
+    </div>,
     <Wheels key={`${g.header.id}:wheels`} g={g} locked={p.locked} />,
   ];
   const body = (g: GradeEffect) =>
-    g.header.definition === WHEELS ? (
-      wheelControls(g)
-    ) : g.header.definition === CURVES ? (
-      <Plate label="Curve" wide>
-        {rows([parameter(g, "channel")])}
-        <CurveControl g={g} locked={p.locked} />
-      </Plate>
-    ) : (
-      <Plate label={g.header.label} wide>
-        {rows(g.parameters)}
-      </Plate>
-    );
-  // Another grade goes after the last one, in one Undo step; a curve starts
-  // on Master (its Channel pop-up chooses another).
-  const add = (definition: string, label: string, short: string) => (
-    <SectionAction
-      id={`${PANEL_ID}:add:${definition}`}
-      label={label}
-      short={short}
-      symbol="plus"
-      disabled={!editable}
-      onActivate={() =>
-        send({
-          type: "add",
-          definition,
-          ...(slot === undefined ? {} : { slot }),
-          ...(definition === CURVES ? { parameters: { channel: 0 } } : {}),
-        })
-      }
-    />
-  );
-  const cdl = (
-    <>
-      <SectionAction
-        id={`${PANEL_ID}:import-cdl`}
-        label="Import CDL…"
-        short="Import CDL"
-        symbol="square.and.arrow.down"
-        disabled={!editable}
-        onActivate={() => command(IMPORT_CDL)}
-      />
-      {firstWheels && (
-        <SectionAction
-          id={`${PANEL_ID}:export-cdl`}
-          label="Export CDL…"
-          short="Export CDL"
-          symbol="square.and.arrow.up"
-          disabled={p.target !== "Layer"}
-          onActivate={() => command(EXPORT_CDL)}
-        />
-      )}
-    </>
-  );
+    g.header.definition === WHEELS
+      ? wheelControls(g)
+      : g.header.definition === CURVES
+        ? [
+            ...rows([parameter(g, "channel")]),
+            <CurveControl key="curve" g={g} locked={p.locked} />,
+          ]
+        : g.header.definition === CST
+          ? sections(g, CST_SECTIONS)
+          : rows(g.parameters);
+  // A grade's controls under its parts' names; any row no part names
+  // follows them, so nothing is ever left out.
+  function sections(
+    g: GradeEffect,
+    parts: { title: string; keys: string[] }[],
+  ) {
+    const named = new Set(parts.flatMap((s) => s.keys));
+    return [
+      ...parts.map((s) => {
+        const list = s.keys.map((k) => parameter(g, k)).filter(Boolean);
+        return list.length ? (
+          <div key={`${g.header.id}:${s.title}`} role="group" label={s.title}>
+            <Subheading title={s.title} />
+            {rows(list)}
+          </div>
+        ) : null;
+      }),
+      ...rows(g.parameters.filter((r) => !named.has(r.parameter.key ?? ""))),
+    ];
+  }
   return (
     <div
       id={PANEL_ID}
@@ -138,6 +170,24 @@ export function ColorPanel({ controller: c, command }: ColorProps) {
         flexDirection: "column",
       }}
     >
+      <Header
+        canAdd={editable}
+        canExport={p.target === "Layer" && !!firstWheels}
+        onAdd={() => void menu(ADD_ITEMS).then(add)}
+        onMore={() =>
+          void menu([
+            { id: "import", label: "Import CDL…", disabled: !editable },
+            {
+              id: "export",
+              label: "Export CDL…",
+              disabled: !(p.target === "Layer" && firstWheels),
+            },
+          ]).then((choice) => {
+            if (choice === "import" && editable) command(IMPORT_CDL);
+            if (choice === "export" && firstWheels) command(EXPORT_CDL);
+          })
+        }
+      />
       {p.target !== "Layer" ? (
         <UI.EmptyState
           label={p.target === "NoProject" ? "No Composition" : "No Selection"}
@@ -152,45 +202,264 @@ export function ColorPanel({ controller: c, command }: ColorProps) {
           action={null}
         />
       ) : (
-        <>
-          <Heading title={p.name} detail={p.typeLabel} />
-          <scroll
-            id={`${PANEL_ID}:content`}
-            role="group"
-            label={PANEL_TITLE}
-            style={{ display: "flex", flexDirection: "column" }}
-          >
-            <AddRow>
-              {add(WHEELS, "Add Color Wheels", "Color Wheels")}
-              {add(CURVES, "Add Curve", "Curve")}
-              <SectionAction
-                id={`${PANEL_ID}:load-lut`}
-                label="Load LUT…"
-                short="LUT…"
-                symbol="folder"
-                disabled={!editable}
-                onActivate={() => command(LOAD_LUT)}
-              />
-              {add(CST, "Add Color Space Transform", "Transform")}
-              {cdl}
-            </AddRow>
-            {tools.map((g, i) => (
-              <Tool
-                key={g.header.id}
-                title={titles[i]}
-                tool={g}
-                send={send}
-                editable={editable}
-                up={move(tools, i, -1)}
-                down={move(tools, i, 1)}
+        <scroll
+          id={`${PANEL_ID}:content`}
+          role="group"
+          label={PANEL_TITLE}
+          style={{ display: "flex", flexDirection: "column" }}
+        >
+          <Heading title={p.name} detail={p.typeLabel} locked={p.locked} />
+          {tools.length === 0 ? (
+            <Ungraded editable={editable} onAdd={add} />
+          ) : null}
+          {tools.map((g, i) => {
+            const id = g.header.id;
+            const title = titles[i];
+            const up = move(tools, i, -1);
+            const down = move(tools, i, 1);
+            return (
+              <UI.DisclosureGroup
+                key={id}
+                id={`${PANEL_ID}:grade:${id}`}
+                label={title}
+                open={!folded.has(id)}
+                onChange={(open) => {
+                  const next = new Set(folded);
+                  if (open) next.delete(id);
+                  else next.add(id);
+                  fold(next);
+                }}
+                // Its order, Reset and Remove, as Effect Controls' header
+                // menu offers them.
+                onPointerDown={(e: SurfaceEvent) => {
+                  if (e.button !== 2) return;
+                  stop(e);
+                  if (!editable) return;
+                  void menu([
+                    { id: "up", label: "Move Up", disabled: !up },
+                    { id: "down", label: "Move Down", disabled: !down },
+                    null,
+                    { id: "reset", label: "Reset" },
+                    { id: "remove", label: "Remove" },
+                  ]).then((choice) => {
+                    if (choice === "up" && up) send(up);
+                    else if (choice === "down" && down) send(down);
+                    else if (choice === "reset" || choice === "remove")
+                      send({ type: choice, id });
+                  });
+                }}
+                leading={
+                  <UI.Checkbox
+                    id={`${PANEL_ID}:on:${id}`}
+                    preventDefault={{ click: true }}
+                    label={`Enable ${title}`}
+                    binding={`${PANEL_ID}:enable:${id}`}
+                    value={g.header.enabled}
+                    disabled={!editable}
+                    onKeyDown={stop}
+                    onClick={stop}
+                    // A person's click (the AppKit checkbox's action, the
+                    // drawn box's click) and the agent's arrive as the box's
+                    // change.
+                    onChange={(e) => {
+                      stop(e);
+                      send({ type: "toggle", id });
+                    }}
+                  />
+                }
+                accessory={[
+                  <GradeAction
+                    key="reset"
+                    id={`${PANEL_ID}:reset:${id}`}
+                    label={`Reset ${title}`}
+                    title="Reset"
+                    symbol="arrow.counterclockwise"
+                    disabled={!editable}
+                    onActivate={() => send({ type: "reset", id })}
+                  />,
+                  <GradeAction
+                    key="remove"
+                    id={`${PANEL_ID}:remove:${id}`}
+                    label={`Remove ${title}`}
+                    title="Remove"
+                    symbol="minus"
+                    disabled={!editable}
+                    onActivate={() => send({ type: "remove", id })}
+                  />,
+                ]}
               >
                 {body(g)}
-              </Tool>
-            ))}
-          </scroll>
-        </>
+              </UI.DisclosureGroup>
+            );
+          })}
+        </scroll>
       )}
     </div>
+  );
+}
+
+/** The panel's own header: its title (the tab shows it when tabbed) and its
+ * actions at the trailing edge, as Properties' Add Effect: Add a grade, and
+ * a CDL's Import and Export. */
+function Header({
+  canAdd,
+  canExport,
+  onAdd,
+  onMore,
+}: {
+  canAdd: boolean;
+  canExport: boolean;
+  onAdd: () => void;
+  onMore: () => void;
+}) {
+  return (
+    <div
+      id={`${PANEL_ID}:header`}
+      data-pm-slot="header"
+      style={{
+        display: "flex",
+        flexDirection: "row",
+        alignItems: "center",
+        justifyContent: "space-between",
+        height: t("metrics.header"),
+        paddingLeft: t("metrics.inset"),
+        paddingRight: t("metrics.inset"),
+      }}
+    >
+      <text
+        style={{
+          color: t("colors.text"),
+          fontSize: t("typography.title"),
+          fontWeight: t("typography.semibold_weight"),
+        }}
+      >
+        {PANEL_TITLE}
+      </text>
+      <div style={{ display: "flex", flexDirection: "row" }}>
+        <UI.ToolbarItem
+          id={`${PANEL_ID}:add`}
+          label="Add Grade"
+          title="Add Grade"
+          aria-haspopup="menu"
+          disabled={!canAdd}
+          metadata={{ symbol: "plus" }}
+          onKeyDown={stop}
+          onClick={(e) => {
+            stop(e);
+            if (canAdd) onAdd();
+          }}
+        />
+        <UI.ToolbarItem
+          id={`${PANEL_ID}:cdl`}
+          label="CDL"
+          title="Import or Export CDL"
+          aria-haspopup="menu"
+          disabled={!canAdd && !canExport}
+          metadata={{ symbol: "ellipsis.circle" }}
+          onKeyDown={stop}
+          onClick={(e) => {
+            stop(e);
+            if (canAdd || canExport) onMore();
+          }}
+        />
+      </div>
+    </div>
+  );
+}
+
+/** A layer with no grade yet: what can be added, as quiet actions. */
+function Ungraded({
+  editable,
+  onAdd,
+}: {
+  editable: boolean;
+  onAdd: (choice: string) => void;
+}) {
+  return (
+    <div
+      role="group"
+      label="Add a Grade"
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        gap: t("metrics.inner_radius"),
+        paddingLeft: t("metrics.inset"),
+        paddingRight: t("metrics.inset"),
+        paddingTop: t("metrics.gap"),
+      }}
+    >
+      <text
+        style={{ color: t("colors.muted"), fontSize: t("typography.minimum") }}
+      >
+        No grade on this layer.
+      </text>
+      <div
+        style={{
+          display: "flex",
+          flexDirection: "row",
+          flexWrap: "wrap",
+        }}
+      >
+        {ADD_ITEMS.flatMap((i) => {
+          if (!i) return [];
+          const file = i.id === "lut" || i.id === "import-cdl";
+          return [
+            <SectionAction
+              key={i.id}
+              id={`${PANEL_ID}:add:${i.id}`}
+              label={
+                i.id === "lut"
+                  ? "Load LUT…"
+                  : i.id === "import-cdl"
+                    ? "Import CDL…"
+                    : `Add ${i.label}`
+              }
+              short={i.label}
+              symbol={file ? "folder" : "plus"}
+              disabled={!editable}
+              onActivate={() => onAdd(i.id)}
+            />,
+          ];
+        })}
+      </div>
+    </div>
+  );
+}
+
+/** A grade's Reset or Remove: a quiet glyph at its heading's trailing edge. */
+function GradeAction({
+  id,
+  label,
+  title,
+  symbol,
+  disabled,
+  onActivate,
+}: {
+  key?: string;
+  id: string;
+  label: string;
+  title: string;
+  symbol: string;
+  disabled: boolean;
+  onActivate: () => void;
+}) {
+  return (
+    <UI.ToolbarItem
+      id={id}
+      label={label}
+      title={title}
+      disabled={disabled}
+      attr={{ symbol }}
+      onKeyDown={stop}
+      onClick={(e) => {
+        stop(e);
+        if (!disabled) onActivate();
+      }}
+      style={{
+        color: t("colors.muted"),
+        symbolSize: t("metrics.symbol_inline"),
+      }}
+    />
   );
 }
 
@@ -218,7 +487,8 @@ function Wheels({
         columnGap: t("metrics.gap"),
         rowGap: t("metrics.gap"),
         paddingTop: t("metrics.gap"),
-        // Inset as the plate above it (Balance and Tone).
+        paddingBottom: t("metrics.gap"),
+        // On the rows' inset.
         paddingLeft: t("metrics.inset"),
         paddingRight: t("metrics.inset"),
       }}
@@ -312,21 +582,35 @@ function Wheel({
           onKeyDown={stop}
         />
       )}
+      {/* Its numbers are subordinate to it: the master a short field
+          centred under the wheel, the channels a caption under that. */}
       {master && (
-        <UI.NumberField
-          id={`${PANEL_ID}:field:${master.id}`}
-          label={`${w.title} Master`}
-          binding={master.parameter.binding}
-          value={master.parameter.value as number}
-          step={master.parameter.step}
-          min={master.parameter.min}
-          max={master.parameter.max}
-          precision={master.parameter.precision}
-          disabled={locked || master.parameter.readonly}
-          mixed={master.parameter.mixed}
-          onKeyDown={stop}
-          onClick={stop}
-        />
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "row",
+            justifyContent: "center",
+          }}
+        >
+          <UI.NumberField
+            id={`${PANEL_ID}:field:${master.id}`}
+            label={`${w.title} Master`}
+            binding={master.parameter.binding}
+            value={master.parameter.value as number}
+            step={master.parameter.step}
+            min={master.parameter.min}
+            max={master.parameter.max}
+            precision={master.parameter.precision}
+            disabled={locked || master.parameter.readonly}
+            mixed={master.parameter.mixed}
+            onKeyDown={stop}
+            onClick={stop}
+            style={{
+              width: t("metrics.grade_field"),
+              textAlign: "center",
+            }}
+          />
+        </div>
       )}
       <div
         role="group"
@@ -334,7 +618,8 @@ function Wheel({
         style={{
           display: "flex",
           flexDirection: "row",
-          justifyContent: "space-between",
+          justifyContent: "center",
+          gap: t("metrics.gap"),
         }}
       >
         {(["channel_red", "channel_green", "channel_blue"] as const).map(
@@ -357,56 +642,34 @@ function Wheel({
   );
 }
 
-/** A group of grading controls on the grading plate (the host draws it). */
-function Plate({
-  label,
-  children,
-  wide,
-}: {
-  key?: string;
-  label: string;
-  children: any;
-  /** Spans the panel, inset from its edges (else it hugs its content). */
-  wide?: boolean;
-}) {
-  return (
-    <div
-      role="group"
-      label={label}
-      data-pm-variant="plate"
-      style={{
-        display: "flex",
-        flexDirection: "column",
-        paddingTop: t("metrics.gap"),
-        paddingBottom: t("metrics.gap"),
-        paddingLeft: t("metrics.gap"),
-        paddingRight: t("metrics.gap"),
-        ...(wide
-          ? {
-              marginLeft: t("metrics.inset"),
-              marginRight: t("metrics.inset"),
-              marginTop: t("metrics.gap"),
-            }
-          : {}),
-      }}
-    >
-      {children}
-    </div>
-  );
-}
-
 /** A channel value as a colourist reads it: two places, a true minus. */
 function signed(v: number) {
   return v.toFixed(2).replace("-", "\u2212");
 }
 
 /** One curve's drawn editor, on the panel's inset. */
-function CurveControl({ g, locked }: { g: GradeEffect; locked: boolean }) {
+function CurveControl({
+  g,
+  locked,
+}: {
+  key?: string;
+  g: GradeEffect;
+  locked: boolean;
+}) {
   const group = curveGroup(g);
   if (!group) return null;
   const channel = Number(parameter(g, "channel")?.parameter.value ?? 0);
   return (
-    <div role="group" label="Curve" style={{ paddingTop: t("metrics.gap") }}>
+    <div
+      role="group"
+      label="Curve"
+      style={{
+        paddingTop: t("metrics.inner_radius"),
+        paddingBottom: t("metrics.gap"),
+        paddingLeft: t("metrics.inset"),
+        paddingRight: t("metrics.inset"),
+      }}
+    >
       <UI.CurveEditor
         id={`${PANEL_ID}:curve:${g.header.id}`}
         label="Curve"
@@ -415,12 +678,23 @@ function CurveControl({ g, locked }: { g: GradeEffect; locked: boolean }) {
         channel={channel}
         disabled={locked}
         onKeyDown={stop}
+        style={{ maxWidth: t("metrics.curve_editor_wide") }}
       />
     </div>
   );
 }
 
-function Heading({ title, detail }: { title: string; detail: string }) {
+function Heading({
+  title,
+  detail,
+  locked,
+}: {
+  title: string;
+  detail: string;
+  locked: boolean;
+}) {
+  // As Properties names its layer: the label rank, the kind after the name
+  // in the muted ink, a lock when it can't be edited.
   return (
     <div
       role="heading"
@@ -429,20 +703,20 @@ function Heading({ title, detail }: { title: string; detail: string }) {
         display: "flex",
         flexDirection: "row",
         alignItems: "center",
-        gap: t("metrics.gap"),
+        gap: t("metrics.inner_radius"),
         height: t("metrics.row"),
         minHeight: t("metrics.row"),
+        marginTop: t("metrics.pill_inset"),
         paddingLeft: t("metrics.inset"),
         paddingRight: t("metrics.inset"),
-        color: t("colors.text"),
-        // As Properties names its layer: the label rank, the kind after the
-        // name in the muted ink (design language, Properties).
-        fontSize: t("typography.label"),
-        fontWeight: t("typography.semibold_weight"),
       }}
     >
       <text
+        title={title}
         style={{
+          color: t("colors.text"),
+          fontSize: t("typography.label"),
+          fontWeight: t("typography.semibold_weight"),
           whiteSpace: "nowrap",
           overflow: "hidden",
           textOverflow: "ellipsis",
@@ -454,222 +728,45 @@ function Heading({ title, detail }: { title: string; detail: string }) {
         <text
           style={{
             color: t("colors.muted"),
-            fontWeight: t("typography.regular_weight"),
+            fontSize: t("typography.label"),
+            whiteSpace: "nowrap",
           }}
         >
           {`· ${detail}`}
         </text>
       )}
+      {locked && (
+        <text
+          attr={{ symbol: "lock" }}
+          title="Locked layers can’t be edited."
+          style={{
+            color: t("colors.muted"),
+            symbolSize: t("metrics.symbol_inline"),
+          }}
+        />
+      )}
     </div>
   );
 }
 
+/** A part of a grade (Balance, Tone): a step under the grade's heading, on
+ * a row of the rows' rhythm. */
 function Subheading({ title }: { title: string }) {
   return (
     <text
       role="heading"
       style={{
+        display: "flex",
+        alignItems: "center",
+        height: t("metrics.row"),
         paddingLeft: t("metrics.inset"),
-        paddingTop: t("metrics.gap"),
-        color: t("colors.secondary"),
-        fontSize: t("typography.label"),
+        color: t("colors.muted"),
+        fontSize: t("typography.minimum"),
         fontWeight: t("typography.semibold_weight"),
       }}
     >
       {title}
     </text>
-  );
-}
-
-/** The grades' Add actions, at the top of the list (they wrap in a narrow
- * panel). */
-function AddRow({ children }: { children: any }) {
-  return (
-    <div
-      role="group"
-      label="Add a Grade"
-      style={{
-        display: "flex",
-        flexDirection: "row",
-        flexWrap: "wrap",
-        alignItems: "center",
-        paddingLeft: t("metrics.inset"),
-        paddingRight: t("metrics.inset"),
-        paddingBottom: t("metrics.gap"),
-      }}
-    >
-      {children}
-    </div>
-  );
-}
-
-/** One grade: its header (on or off, name, order, Reset, Remove) over its
- * controls. */
-function Tool({
-  title,
-  tool,
-  send,
-  editable,
-  up,
-  down,
-  action,
-  children,
-}: {
-  key?: string;
-  title: string;
-  tool: GradeEffect;
-  send: (intent: Intent) => void;
-  editable: boolean;
-  /** Moves it before the grade above, or after the one below (null at the
-   * ends). */
-  up: Intent | null;
-  down: Intent | null;
-  /** Its own actions (the first Color Wheels' CDL Import and Export). */
-  action?: any;
-  children: any;
-}) {
-  return (
-    <div
-      role="group"
-      label={title}
-      style={{ paddingBottom: t("metrics.inset") }}
-    >
-      <ToolHeader
-        title={title}
-        tool={tool}
-        send={send}
-        editable={editable}
-        up={up}
-        down={down}
-        action={action}
-      />
-      {children}
-    </div>
-  );
-}
-
-function ToolHeader({
-  title,
-  tool,
-  send,
-  editable,
-  up,
-  down,
-  action,
-}: {
-  title: string;
-  tool: GradeEffect;
-  send: (intent: Intent) => void;
-  editable: boolean;
-  up: Intent | null;
-  down: Intent | null;
-  action?: any;
-}) {
-  const id = tool.header.id;
-  const order = (intent: Intent | null, label: string, symbol: string) => (
-    <UI.ToolbarItem
-      id={`${PANEL_ID}:${symbol === "chevron.up" ? "up" : "down"}:${id}`}
-      label={label}
-      title={label}
-      disabled={!editable || !intent}
-      attr={{ symbol }}
-      onClick={(e) => {
-        stop(e);
-        if (intent) send(intent);
-      }}
-    />
-  );
-  return (
-    <div
-      role="heading"
-      label={title}
-      style={{
-        display: "flex",
-        flexDirection: "row",
-        alignItems: "center",
-        gap: t("metrics.gap"),
-        height: t("metrics.row"),
-        paddingLeft: t("metrics.inset"),
-        paddingRight: t("metrics.inset"),
-        color: t("colors.text"),
-        // Section and tool headings: the label rank (design language,
-        // Properties).
-        fontSize: t("typography.label"),
-        fontWeight: t("typography.semibold_weight"),
-      }}
-    >
-      <UI.Checkbox
-        id={`${PANEL_ID}:on:${id}`}
-        preventDefault={{ click: true }}
-        label={`Enable ${title}`}
-        binding={`${PANEL_ID}:enable:${id}`}
-        value={tool.header.enabled}
-        disabled={!editable}
-        onKeyDown={stop}
-        onClick={stop}
-        // A person's click (the AppKit checkbox's action, the drawn box's
-        // click) and the agent's arrive as the box's change.
-        onChange={(e) => {
-          stop(e);
-          send({ type: "toggle", id });
-        }}
-      />
-      {/* The name is part of the switch, as a checkbox's title is on macOS:
-          the box alone was a small target. */}
-      <div
-        id={`${PANEL_ID}:title:${id}`}
-        role="group"
-        label={title}
-        style={{
-          flexGrow: 1,
-          flexShrink: 1,
-          minWidth: 0,
-          display: "flex",
-          alignSelf: "stretch",
-          alignItems: "center",
-        }}
-        onClick={(e) => {
-          stop(e);
-          if (editable) send({ type: "toggle", id });
-        }}
-      >
-        {/* One line: a long name ends in an ellipsis, never wraps. */}
-        <text
-          style={{
-            whiteSpace: "nowrap",
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-          }}
-        >
-          {title}
-        </text>
-      </div>
-      {action}
-      {order(up, `Move ${title} Up`, "chevron.up")}
-      {order(down, `Move ${title} Down`, "chevron.down")}
-      <UI.ToolbarItem
-        id={`${PANEL_ID}:reset:${id}`}
-        label={`Reset ${title}`}
-        title="Reset"
-        disabled={!editable}
-        attr={{ symbol: "arrow.counterclockwise" }}
-        onClick={(e) => {
-          stop(e);
-          send({ type: "reset", id });
-        }}
-      />
-      <UI.ToolbarItem
-        id={`${PANEL_ID}:remove:${id}`}
-        label={`Remove ${title}`}
-        title="Remove"
-        disabled={!editable}
-        attr={{ symbol: "minus.circle" }}
-        onClick={(e) => {
-          stop(e);
-          send({ type: "remove", id });
-        }}
-      />
-    </div>
   );
 }
 
@@ -683,6 +780,7 @@ function SectionAction({
   disabled,
   onActivate,
 }: {
+  key?: string;
   id: string;
   label: string;
   short?: string;

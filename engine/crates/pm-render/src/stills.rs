@@ -46,6 +46,8 @@ struct Header {
     transform: Option<String>,
     /// The first EXIF orientation other than 1.
     exif: Option<u16>,
+    /// A HEIF `nclx` says PQ or HLG.
+    hdr_signal: bool,
 }
 
 impl Header {
@@ -94,6 +96,9 @@ pub fn check(path: &Path, still: &StillImage) -> Result<(), Feature> {
                 return unsupported("HEIF stills outside the 8/16-bit component decoder layouts");
             }
         }
+        // A gain-map AVIF read as HDR: ImageIO's packed BT.709 PQ codes, read
+        // by their H.273 description as other packed stills are.
+        ImageFormat::Avif if still.backend == pm_media::image::ImageBackend::ImageIo => {}
         // Container transforms are applied in the reader, as Blink does.
         ImageFormat::Avif => return avif(still),
         ImageFormat::Svg => return unsupported("SVG stills"),
@@ -101,6 +106,12 @@ pub fn check(path: &Path, still: &StillImage) -> Result<(), Feature> {
     }
     let file = File::open(path).map_err(|e| feature(format!("{}: {e}", path.display())))?;
     let header = parse(&mut BufReader::new(file), still.format)?;
+    // ImageIO's BT.2100 reading keeps PQ and HLG (`pm_media::image::
+    // imageio`); a file saying so whose decode does not carry it is not
+    // drawn as SDR.
+    if header.hdr_signal && !still.color.cicp.is_some_and(|c| matches!(c[1], 16 | 18)) {
+        return unsupported("HEIF PQ/HLG stills whose decode does not keep the transfer");
+    }
     if let Some(t) = &header.transform
         && !transform_matches(still, &header)
     {
@@ -610,9 +621,6 @@ fn heif<R: Read + Seek>(r: &mut R) -> io::Result<Result<Header, Feature>> {
                                 }
                                 let color = array::<7, _>(r)?;
                                 let transfer = u16::from_be_bytes([color[2], color[3]]);
-                                // ImageIO's reader labels integer samples as
-                                // DisplayE; it does not propagate PQ/HLG to
-                                // the still tone-mapping path.
                                 hdr |= matches!(transfer, 16 | 18);
                             }
                             None
@@ -627,12 +635,8 @@ fn heif<R: Read + Seek>(r: &mut R) -> io::Result<Result<Header, Feature>> {
             })
         })
     })?;
-    Ok(if hdr {
-        unsupported("HEIF PQ/HLG stills (native HDR transfer reading is unavailable)")
-            .map(|_| header)
-    } else {
-        Ok(header)
-    })
+    header.hdr_signal = hdr;
+    Ok(Ok(header))
 }
 
 /// A visitor of one ISO BMFF box: `(reader at the body, type, body end)`.
@@ -1086,7 +1090,9 @@ mod tests {
     }
 
     #[test]
-    fn heif_hdr_transfers_stay_explicit_and_truncated_color_is_malformed() {
+    /// A HEIF saying PQ or HLG is recorded: `check` refuses it only when
+    /// its decode does not keep the transfer (tests/hdr_stills.rs draws it).
+    fn heif_hdr_transfers_are_recorded_and_truncated_color_is_malformed() {
         for transfer in [1u16, 13, 16, 18] {
             let color = [
                 b"nclx".as_slice(),
@@ -1096,12 +1102,12 @@ mod tests {
                 &[0x80],
             ]
             .concat();
-            let result = run(ImageFormat::Heif, &heif_with(&[bmff(b"colr", &color)]));
-            if matches!(transfer, 16 | 18) {
-                assert!(result.unwrap_err().to_string().contains("PQ/HLG"));
-            } else {
-                assert!(result.is_ok(), "SDR transfer {transfer}");
-            }
+            let header = run(ImageFormat::Heif, &heif_with(&[bmff(b"colr", &color)])).unwrap();
+            assert_eq!(
+                header.hdr_signal,
+                matches!(transfer, 16 | 18),
+                "transfer {transfer}"
+            );
         }
         let error = run(
             ImageFormat::Heif,

@@ -692,6 +692,11 @@ pub struct AudioDecoder {
     /// Timestamp and byte position of the stream's first packet, read when
     /// the file was opened: a rewind must land there.
     head: Option<(i64, i64)>,
+    /// Program index where the stream's last packet ends, for a container
+    /// that states no length per stream (Matroska): its final block's
+    /// duration excludes the encoder's padding the decoder still returns
+    /// (AAC has no `DiscardPadding`), so the final frame is cut there.
+    end: Option<i64>,
     /// A seek to the start did not land on the first packet (the AVI
     /// demuxer stamps PCM after a seek to entry 0 one packet late), so
     /// rewinds reopen the file instead.
@@ -862,6 +867,7 @@ impl AudioDecoder {
                 packets: 0,
                 head: None,
                 reopen_to_rewind: false,
+                end: None,
             };
             if out.pkt.is_null() || out.frame.is_null() {
                 return Err(MediaError::OutOfMemory(0));
@@ -911,11 +917,21 @@ impl AudioDecoder {
             .map_or(0, |p| p.samples);
             let extra = (probe_priming - ffmpeg_skip).max(0);
             let duration = (*st).duration;
-            let mut length = (duration != ff::AV_NOPTS_VALUE && duration > 0)
+            let stated = duration != ff::AV_NOPTS_VALUE && duration > 0;
+            // Without a stated length the stream ends where its last packet
+            // does, measured from `start_time` as frames are placed.
+            if !stated
+                && let Ok([Some(end)]) = out.input.stream_ends(&[s]).as_deref()
+                && *end > start_pts
+            {
+                out.end = Some(ts_to_samples(end - start_pts, tb, rate) - extra);
+            }
+            let mut length = stated
                 .then(|| ts_to_samples(duration, tb, rate))
+                .or_else(|| out.end.map(|end| end + extra))
                 .or_else(|| {
-                    // Matroska and others keep only the container duration
-                    // (microseconds), measured from the container start.
+                    // Else the container's duration (microseconds),
+                    // measured from the container start.
                     let fmt = out.input.fmt;
                     let total = (*fmt).duration;
                     (total != ff::AV_NOPTS_VALUE && total > 0).then(|| {
@@ -1468,7 +1484,8 @@ impl AudioDecoder {
     /// lies at or after the target to `pending`.
     fn take_frame(&mut self) -> Result<()> {
         let f = self.frame;
-        let (n, pts) = unsafe { ((*f).nb_samples.max(0) as usize, (*f).best_effort_timestamp) };
+        let (mut n, pts) =
+            unsafe { ((*f).nb_samples.max(0) as usize, (*f).best_effort_timestamp) };
         if n == 0 {
             return Ok(());
         }
@@ -1503,6 +1520,13 @@ impl AudioDecoder {
                 ));
             }
         };
+        // The final frame ends where the stream's last packet ends.
+        if let Some(end) = self.end {
+            n = n.min((end - start).max(0) as usize);
+            if n == 0 {
+                return Ok(());
+            }
+        }
         if self.expected.is_none() && start > self.target {
             // A seek that landed past its target.
             self.fault = Some(SeekFault::LandedAfter);

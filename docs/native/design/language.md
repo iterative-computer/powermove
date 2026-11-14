@@ -184,7 +184,9 @@ the surface host (`PopUpButton`, `PushButton`, `Checkbox`, `Toggle`, `Switch`,
 pop-up in a bar of controls (`data-pm-variant="inline"`: the viewer's zoom
 and resolution) keeps the primary ink; one in an option row under the content
 it qualifies (`"quiet"`: a composer's options, Home's sort) is titled in the
-secondary ink. A panel's
+secondary ink. A header's one mode switch (`"glass"` on a `SegmentedControl`:
+the timeline's Layers | Tracks) is the system's capsule at the large size,
+the macOS 26 control, its selection still the neutral pill. A panel's
 header is the child it marks
 `data-pm-slot="header"`: the dock shows it as the panel's one title row. A
 composer is the kit's multi-line `TextField` with `metadata.submitOnReturn`,

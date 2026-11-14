@@ -676,8 +676,11 @@ impl Shape {
     ) -> Option<Shape> {
         // Speed and remaps follow the picture in playback and export alike
         // (AUDIO-4). A conformed rate is ignored (today plays a video's
-        // soundtrack at its own rate), a negative start is clamped to 0,
-        // an animated trim is read once (`Clip::new`).
+        // soundtrack at its own rate), an animated trim is read once
+        // (`Clip::new`). A negative start is kept: a layer that starts
+        // before its composition plays from the matching source time there
+        // (`audioLayers`/`plan` since 16087057b; clamping it to 0 played
+        // Fable 5.5's music bed, at -1.933 s, 1.933 s late).
         if plan.retimed {
             return None;
         }
@@ -690,7 +693,7 @@ impl Shape {
             let layer = comps.get(level.comp)?.layers().get(level.layer)?;
             let from = number(node::member(Some(layer), "from"), 0.0);
             let dur = number(node::member(Some(layer), "dur"), 0.0).max(0.0);
-            let natural = offset + from.max(0.0);
+            let natural = offset + from;
             window = (window.0.max(natural), window.1.min(natural + dur));
             let d = node::member(Some(layer), "d");
             let trim_node = node::member(d, "trim");
@@ -729,7 +732,7 @@ impl Shape {
         let layer = comp.layers().get(last.layer)?;
         let from = number(node::member(Some(layer), "from"), 0.0);
         let dur = number(node::member(Some(layer), "dur"), 0.0).max(0.0);
-        let natural_start = offset + from.max(0.0);
+        let natural_start = offset + from;
         window = (
             window.0.max(natural_start),
             window.1.min(natural_start + dur),
@@ -813,7 +816,7 @@ impl Shape {
         trim: Option<f64>,
     ) -> Option<(i64, i64)> {
         let trim = trim.unwrap_or(self.trim);
-        let layer_start = self.natural_start.max(0.0);
+        let layer_start = self.natural_start;
         let audible = self.dur.max(0.0).min((len as f64 / rate - trim).max(0.0));
         let start = layer_start.max(self.window.0);
         let end = (layer_start + self.dur.max(0.0))
@@ -1016,7 +1019,7 @@ impl Clip {
         rate: f64,
         range: Range,
     ) -> Result<Option<Clip>> {
-        let layer_start = shape.natural_start.max(0.0);
+        let layer_start = shape.natural_start;
         let layer_duration = shape.dur.max(0.0);
         let window_start = layer_start.max(shape.window.0);
         let window_end = (layer_start + layer_duration).min(shape.window.1);

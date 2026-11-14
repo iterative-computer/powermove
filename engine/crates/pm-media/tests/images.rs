@@ -665,6 +665,127 @@ fn bytes_of(f: &DecodedFrame, bits: u16) -> Vec<u16> {
     }
 }
 
+/// The 16-bit RGBA sample at (x, row 18) of a still's single plane.
+fn px16(f: &DecodedFrame, x: usize) -> [u16; 4] {
+    let b = bytes(f);
+    let i = (18 * f.format.width + x) * 8;
+    let at = |k: usize| u16::from_ne_bytes([b[i + 2 * k], b[i + 2 * k + 1]]);
+    [at(0), at(1), at(2), at(3)]
+}
+
+/// HDR HEIC stills (`engine/fixtures/hdr-stills`, a picture whose left half
+/// is 18 % grey and whose right half is three times SDR white) are read
+/// with their BT.2100 transfer: the PQ or HLG codes as stored, at 16 bits,
+/// with their H.273 description, not flattened to SDR light.
+#[test]
+fn hdr_heic_stills_are_read_with_their_transfer() {
+    let pool = FramePool::new(0);
+    let dir = fixtures_dir().join("hdr-stills");
+    // PQ codes of 36.8 and 609 cd/m² (0.18 and 3.0 times 203 cd/m²).
+    for (name, cicp, codes) in [
+        ("still-hdr-pq.heic", [9, 16, 0, 1], [26906u16, 45740]),
+        ("still-hdr-hlg.heic", [9, 18, 0, 1], [28571, 60538]),
+    ] {
+        let s = image::read(&dir.join(name), &pool).unwrap();
+        assert_eq!(
+            (
+                s.bit_depth,
+                s.float,
+                s.color.cicp,
+                s.color.icc_class,
+                s.color.alpha
+            ),
+            (16, false, Some(cicp), None, AlphaMode::Opaque),
+            "{name}"
+        );
+        for (x, code) in [(8, codes[0]), (56, codes[1])] {
+            let got = px16(&s.frame, x);
+            assert!(
+                got[..3].iter().all(|v| v.abs_diff(code) <= 96) && got[3] == u16::MAX,
+                "{name} at {x}: {got:?}, {code} expected"
+            );
+        }
+        assert_eq!(s.color.gain_map, false, "{name}");
+    }
+}
+
+/// Stills with a gain map (ISO 21496-1, written by Core Image into HEIC,
+/// JPEG and AVIF) are read as HDR: ImageIO applies the map at the headroom
+/// it describes and gives BT.709 PQ codes, SDR white at 203 cd/m², the
+/// content peak the headroom. Read for their SDR base only, they are the
+/// base image their own decoder gives.
+#[test]
+fn gain_map_stills_read_as_hdr_or_as_their_sdr_base() {
+    let pool = FramePool::new(0);
+    let dir = fixtures_dir().join("hdr-stills");
+    for (name, format, base_backend) in [
+        (
+            "still-gainmap.heic",
+            ImageFormat::Heif,
+            ImageBackend::ImageIo,
+        ),
+        (
+            "still-gainmap.jpg",
+            ImageFormat::Jpeg,
+            ImageBackend::LibjpegTurbo,
+        ),
+        ("still-gainmap.avif", ImageFormat::Avif, ImageBackend::Dav1d),
+    ] {
+        let path = dir.join(name);
+        assert!(image::has_gain_map(&path).unwrap(), "{name}");
+        let hdr = image::read(&path, &pool).unwrap();
+        assert_eq!(
+            (hdr.format, hdr.backend, hdr.bit_depth, hdr.color.cicp),
+            (format, ImageBackend::ImageIo, 16, Some([1, 16, 0, 1])),
+            "{name}"
+        );
+        assert!(hdr.color.gain_map, "{name}");
+        let peak = hdr.color.mastering_peak.unwrap_or_default();
+        assert!((peak - 609.0).abs() < 3.0, "{name}: peak {peak}");
+        for (x, code) in [(8, 26970u16), (56, 45740)] {
+            let got = px16(&hdr.frame, x);
+            assert!(
+                got[..3].iter().all(|v| v.abs_diff(code) <= 96),
+                "{name} at {x}: {got:?}, {code} expected"
+            );
+        }
+        let base = image::read_with(&path, &pool, image::Rendition::SdrBase).unwrap();
+        assert_eq!(
+            (base.format, base.backend, base.bit_depth),
+            (format, base_backend, 8),
+            "{name}"
+        );
+        // The base's own description (AVIF's unspecified nclx), never PQ.
+        assert!(base.color.cicp.is_none_or(|c| c[1] != 16), "{name}");
+        assert!(base.color.gain_map, "{name}: the base knows its map");
+        // 0.18 and 0.8 linear, sRGB encoded (AVIF's Y′CbCr base is drawn
+        // in pm-render's tests).
+        let w = base.frame.format.width;
+        let packed = base.frame.format.layout == pm_media::frame::Layout::Rgba;
+        for (x, code) in [(8, 118u8), (w - 8, 231)].into_iter().filter(|_| packed) {
+            let got = px8(&base.frame, x, 18);
+            assert!(
+                got[..3].iter().all(|v| v.abs_diff(code) <= 2),
+                "{name} base at {x}: {got:?}, {code} expected"
+            );
+        }
+    }
+    // A JPEG or HEIC without a map reads as before.
+    let plain = image::read(&fixtures_dir().join("still.heic"), &pool).unwrap();
+    assert!(!plain.color.gain_map && plain.color.cicp.is_none());
+    for plain in ["still.heic", "still.avif", "still-red.png"] {
+        assert!(
+            !image::has_gain_map(&fixtures_dir().join(plain)).unwrap(),
+            "{plain}"
+        );
+    }
+    let pq = dir.join("still-hdr-pq.heic");
+    assert!(
+        !image::has_gain_map(&pq).unwrap(),
+        "an HDR HEIC is HDR without a map"
+    );
+}
+
 /// An AVIF tagged PQ or HLG in its `colr nclx` box reads as BT.2100 light,
 /// as a PNG cICP does (pm-render stills
 /// `pq_and_hlg_stills_keep_their_light_in_an_hdr_project` measures that

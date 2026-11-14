@@ -25,7 +25,8 @@
 //!   "fieldOrder": "topFirst" | "bottomFirst" | "progressive",
 //!   "toneMapping": "none" | "bt2390" | "bt2390Luminance" | "bt2390Saturation" | "bt2446a" | "bt2446c",
 //!   "pixelAspect": [10, 11],
-//!   "cleanAperture": true
+//!   "cleanAperture": true,
+//!   "gainMap": "hdr" | "sdrBase"
 //! }
 //! ```
 
@@ -103,6 +104,9 @@ pub struct Interpretation {
     /// Which reading of the file's timestamps the asset's stored times
     /// address: the asset's own `timing` member, not part of `interpret`.
     pub clip: crate::clip::ClipTiming,
+    /// Which picture of a still with a gain map is read: the HDR picture
+    /// (the default) or its SDR base only.
+    pub gain_map: Option<crate::image::Rendition>,
     /// How an HDR source is tone mapped into an SDR project
     /// ([`TONE_MAPPING`], an index of `pm_color::cst::TONE_MAPPING`); `None`
     /// is the default, BT.2390 per channel.
@@ -284,6 +288,16 @@ impl Interpretation {
                 }),
             }
         }
+        if let Some(g) = obj.get("gainMap").filter(|v| !v.is_null()) {
+            match g.as_str() {
+                Some("hdr") => out.gain_map = Some(crate::image::Rendition::Hdr),
+                Some("sdrBase") => out.gain_map = Some(crate::image::Rendition::SdrBase),
+                _ => issues.push(InterpretIssue {
+                    member: "gainMap".into(),
+                    message: format!("{g} is not \"hdr\" or \"sdrBase\""),
+                }),
+            }
+        }
         for key in obj.keys() {
             if !KNOWN.contains(&key.as_str()) {
                 issues.push(InterpretIssue {
@@ -343,6 +357,11 @@ impl Interpretation {
         if let Some(c) = self.clean_aperture {
             put("cleanAperture", Value::Bool(c));
         }
+        match self.gain_map {
+            Some(crate::image::Rendition::Hdr) => put("gainMap", "hdr".into()),
+            Some(crate::image::Rendition::SdrBase) => put("gainMap", "sdrBase".into()),
+            None => {}
+        }
         Value::Object(m)
     }
 
@@ -362,7 +381,7 @@ pub const TONE_MAPPING: [&str; 6] = [
     "bt2446c",
 ];
 
-const KNOWN: [&str; 13] = [
+const KNOWN: [&str; 14] = [
     "toneMapping",
     "primaries",
     "transfer",
@@ -376,6 +395,7 @@ const KNOWN: [&str; 13] = [
     "fieldOrder",
     "pixelAspect",
     "cleanAperture",
+    "gainMap",
 ];
 
 fn gcd(a: i64, b: i64) -> i64 {
@@ -882,7 +902,8 @@ mod tests {
             "frameRate": 23.976,
             "fieldOrder": "bottomFirst",
             "pixelAspect": [20, 22],
-            "cleanAperture": true
+            "cleanAperture": true,
+            "gainMap": "sdrBase"
         });
         let (i, issues) = Interpretation::from_json(&v);
         assert!(issues.is_empty(), "{issues:?}");
@@ -897,6 +918,7 @@ mod tests {
         assert_eq!(i.field_order, FieldOverride::BottomFirst);
         assert_eq!(i.pixel_aspect, Some((10, 11)));
         assert_eq!(i.clean_aperture, Some(true));
+        assert_eq!(i.gain_map, Some(crate::image::Rendition::SdrBase));
         let (back, issues) = Interpretation::from_json(&i.to_json());
         assert!(issues.is_empty());
         assert_eq!(back, i);
@@ -924,6 +946,7 @@ mod tests {
             "alphaMatte": "red",
             "fieldOrder": "sideways",
             "cleanAperture": "yes",
+            "gainMap": "both",
             "colour": 1
         }));
         assert_eq!(i.range, Some(Range::Full));
@@ -938,6 +961,7 @@ mod tests {
                 "fieldOrder",
                 "pixelAspect",
                 "cleanAperture",
+                "gainMap",
                 "colour"
             ]
         );

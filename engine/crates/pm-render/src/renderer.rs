@@ -1624,6 +1624,11 @@ impl Renderer {
         self.media.media_usage()
     }
 
+    /// Whether recent frames read video for display.
+    pub fn reads_video(&self) -> bool {
+        self.media.reads_video()
+    }
+
     /// Frees idle intermediate targets and cached vector textures so that
     /// together they hold at most `bytes` (lease pressure): the pool trims
     /// first, and the vector cache gets what the pool leaves. The text

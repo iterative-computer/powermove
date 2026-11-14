@@ -326,7 +326,8 @@ pub struct ControlSpec<'a> {
     pub symbol: Option<&'a str>,
     /// A push button with the system's liquid glass bezel at the large size
     /// (macOS 26 and later; the plain bezel before): a surface's one raised
-    /// action.
+    /// action. A segmented control in the system's capsule at the large
+    /// size: a header's one mode switch.
     pub glass: bool,
     /// In a row's value column: as high as a value well. A pop-up has no
     /// bezel there and fills the well its row draws under it, so it is the
@@ -463,6 +464,13 @@ impl NativeControl {
                     v.setAction(Some(sel!(act:)));
                 }
                 v.setSelectedSegmentBezelColor(Some(&crate::native::selected_color()));
+                // `glass`: the system's capsule at the large size (macOS 26's
+                // liquid glass control), selection still the neutral pill (the
+                // system's own lights it in the accent).
+                if glass {
+                    v.setBorderShape(NSControlBorderShape::Capsule);
+                    v.setControlSize(NSControlSize::Large);
+                }
                 if well {
                     v.setControlSize(NSControlSize::Small);
                 }

@@ -147,11 +147,21 @@ pub struct ViewFrame {
 }
 pub trait Host: 'static {
     fn time(&self, cx: &App) -> f64;
+    /// The Project panel's dragged items dropped on the viewer: placed at
+    /// the playhead, on top of the stack.
+    fn drop_project_items(&self, _cx: &mut App) {}
     fn playing(&self, cx: &App) -> bool;
     fn frame(&self, bounds: Bounds<Pixels>, cx: &App) -> Option<ViewFrame>;
     fn tool(&self, cx: &App) -> Tool;
     /// Publish engine-drawn lines, normalized to the composition frame.
-    fn overlay(&self, lines: Vec<OverlayLine>, cx: &mut App);
+    /// The outline and handles, normalized to the composition, and where the
+    /// composition sits in the viewer view (`None`: nothing to place them by).
+    fn overlay(
+        &self,
+        lines: Vec<OverlayLine>,
+        at: Option<crate::gizmo_layer::Placement>,
+        cx: &mut App,
+    );
     fn navigate(&self, change: Navigate, cx: &mut App);
     /// The shared layer menu, on the selection the press made.
     /// The right-click menu over `layer`, or over empty canvas.
@@ -223,6 +233,23 @@ pub struct Pose {
     pub scale: [f64; 2],
     pub rotation: f64,
 }
+impl Pose {
+    /// This layer moved by `delta` in the composition (a locked one stays).
+    fn moved(&self, delta: [f64; 2]) -> Pose {
+        let mut pose = self.clone();
+        if !pose.locked {
+            for corner in &mut pose.corners {
+                corner[0] += delta[0];
+                corner[1] += delta[1];
+            }
+            pose.anchor[0] += delta[0];
+            pose.anchor[1] += delta[1];
+            pose.world[4] += delta[0];
+            pose.world[5] += delta[1];
+        }
+        pose
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct ShapeSize {
     width: f64,
@@ -272,6 +299,18 @@ enum Job {
     Select(Option<String>),
     /// Select these layers (the copies an Option-drag made).
     SelectLayers(Vec<String>),
+}
+impl Job {
+    /// For the main-thread trace.
+    fn kind(&self) -> &'static str {
+        match self {
+            Job::Begin(_) => "begin",
+            Job::Step(..) => "step",
+            Job::Finish(_) => "finish",
+            Job::Transact(..) => "transact",
+            Job::Select(_) | Job::SelectLayers(_) => "select",
+        }
+    }
 }
 pub struct GizmoSurface {
     /// The layer a click would select under the pointer, outlined
@@ -613,7 +652,7 @@ impl GizmoSurface {
     fn reread(&mut self, cx: &mut Context<Self>) {
         if self.host.playing(cx) {
             self.poses = Default::default();
-            self.host.overlay(vec![], cx);
+            self.host.overlay(vec![], None, cx);
             return;
         }
         self.latest += 1;
@@ -684,7 +723,15 @@ impl GizmoSurface {
                     s.studio.object_axes = axes.as_deref() == Some("object");
                     s.studio.light_kind = kind.unwrap_or_default();
                     s.studio.light_add = add.as_deref() == Some("on");
-                    s.poses = Arc::new(poses);
+                    // A move under way draws its own outline (`moved`): a
+                    // read of an earlier step would pull it back.
+                    if !s
+                        .drag
+                        .as_ref()
+                        .is_some_and(|d| d.active && d.hit == Hit::Body)
+                    {
+                        s.poses = Arc::new(poses);
+                    }
                     let had = s.studio.scene.is_some();
                     let published = look.as_deref() == Some("free");
                     // A look this viewer wrote holds until it is published.
@@ -763,7 +810,19 @@ impl GizmoSurface {
             lines.extend(self.studio_lines(frame));
         }
         lines.truncate(pm_engine_service::OverlayGeometry::MAX_LINES);
-        self.host.overlay(lines, cx);
+        // The composition's rectangle in the viewer view (the gizmo covers it).
+        let at = crate::gizmo_layer::Placement {
+            origin: [
+                f64::from(f32::from(frame.origin.x - self.bounds.origin.x)),
+                f64::from(f32::from(frame.origin.y - self.bounds.origin.y)),
+            ],
+            size: [frame.size[0] * frame.scale, frame.size[1] * frame.scale],
+            view: [
+                f64::from(f32::from(self.bounds.size.width)),
+                f64::from(f32::from(self.bounds.size.height)),
+            ],
+        };
+        self.host.overlay(lines, Some(at), cx);
     }
     fn to_comp(&self, position: Point<Pixels>, frame: ViewFrame) -> [f64; 2] {
         let at = position - frame.origin;
@@ -1452,6 +1511,17 @@ impl GizmoSurface {
         if let Some(copies) = &drag.copies {
             commands = on_copies(commands, copies);
         }
+        // A move's outline follows the pointer now, not when the kernel's
+        // next publication has been read back (slow on a large project):
+        // each unlocked layer moves by exactly the composition offset.
+        let moved = (drag.hit == Hit::Body).then(|| {
+            let d = locked_delta(origin, at, mods.shift);
+            let delta = [d[0] + offset[0], d[1] + offset[1]];
+            drag.poses
+                .iter()
+                .map(|pose| pose.moved(delta))
+                .collect::<Vec<_>>()
+        });
         // The alignment feedback marks catching something new, not each
         // step that stays caught.
         let caught = |g: &[snap::Guide]| g.iter().map(|(_, to)| *to).collect::<Vec<_>>();
@@ -1461,6 +1531,10 @@ impl GizmoSurface {
         if guides != self.guides {
             self.guides = guides;
             cx.notify();
+        }
+        if let Some(moved) = moved {
+            self.poses = Arc::new(moved);
+            self.draw(cx);
         }
         self.queue.push_back(Job::Step(commands, true));
         // The viewer trace's input time; untraced, no timestamp is read.
@@ -1649,6 +1723,7 @@ impl GizmoSurface {
             self.host.input(at, cx);
         }
         let (kernel, project, gesture) = (self.kernel.clone(), self.project.clone(), self.gesture);
+        let (started, kind) = (std::time::Instant::now(), job.kind());
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
@@ -1716,6 +1791,9 @@ impl GizmoSurface {
                         .map_err(|e| format!("{e:?}"))
                 })
                 .await;
+            crate::diag::line(
+                serde_json::json!({"gizmo": kind, "ms": started.elapsed().as_secs_f64() * 1000.}),
+            );
             let _ = this.update(cx, |s, cx| {
                 s.busy = false;
                 match result {
@@ -2509,6 +2587,12 @@ impl Render for GizmoSurface {
             .id("viewer-gizmos")
             .size_full()
             .cursor(self.cursor)
+            .on_drop(cx.listener(|s, drag: &crate::v4_view::PanelDrag, _, cx| {
+                if drag.panel == pm_builtins::PROJECT_PANEL {
+                    cx.stop_propagation();
+                    s.host.drop_project_items(cx);
+                }
+            }))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|s, event: &MouseDownEvent, window, cx| s.on_down(event, window, cx)),

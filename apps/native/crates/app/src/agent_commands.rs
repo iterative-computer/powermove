@@ -47,7 +47,7 @@ pub const AGENT: [(&str, &str, &str, &str); 10] = [
         "footage.interpret",
         "Interpret Footage",
         "Clip",
-        "[assetId, {primaries?, transfer?, matrix?, range?, siting?, alpha?, alphaMatte?, toneMapping?, frameRate?, fieldOrder?, pixelAspect?, cleanAperture?} (a member null: Automatic; the object null: every member Automatic)]",
+        "[assetId, {primaries?, transfer?, matrix?, range?, siting?, alpha?, alphaMatte?, toneMapping?, gainMap?, frameRate?, fieldOrder?, pixelAspect?, cleanAperture?} (a member null: Automatic; the object null: every member Automatic)]",
     ),
     (
         "color.importCdlFile",

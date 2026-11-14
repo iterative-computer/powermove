@@ -2027,31 +2027,20 @@ impl ProjectLibrary {
                 ))
                 .shadow(vec![
                     BoxShadow {
-                        color: ink(s.rim_top.0, (s.rim_top.1 - s.rim.1).max(0.)).into(),
+                        color: ink(s.light.0, s.light.1).into(),
                         offset: point(px(0.), px(1.)),
-                        blur_radius: px(0.),
+                        blur_radius: px(0.5),
                         spread_radius: px(0.),
                         inset: true,
                     },
                     BoxShadow {
-                        color: ink(s.rim.0, s.rim.1).into(),
+                        color: ink(s.ring.0, s.ring.1).into(),
                         offset: point(px(0.), px(0.)),
                         blur_radius: px(0.),
-                        spread_radius: px(1.),
+                        spread_radius: px(s.ring_width),
                         inset: true,
                     },
                 ])
-                .child(
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .rounded(px(t.strip_radius(height)))
-                        .bg(linear_gradient(
-                            180.,
-                            linear_color_stop(ink(s.glow.0, 0.), 0.42),
-                            linear_color_stop(ink(s.glow.0, s.glow.1), 1.),
-                        )),
-                )
                 .text_role(t, Text::Caption)
                 .text_color(rgb(s.foreground))
                 .child(name.to_string())

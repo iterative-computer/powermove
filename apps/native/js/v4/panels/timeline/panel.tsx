@@ -115,7 +115,9 @@ function Header({ frame: f, send }: { frame: TimelineFrame; send: Send }) {
         id="timeline:tabs"
         label="Open compositions"
         role="tablist"
-        style={{ ...line, alignItems: "stretch" }}
+        // Tabs sit centred in the bar at a control's height, clear of the
+        // panel's top edge and of the row below.
+        style={{ ...line, alignItems: "center", gap: t("metrics.gap") }}
       >
         {f.hasComposition &&
           f.tabs.map((tab) => (
@@ -133,6 +135,11 @@ function Header({ frame: f, send }: { frame: TimelineFrame; send: Send }) {
                   close: false,
                 })}
                 style={{
+                  // A name is text in a cell: the cell keeps the toolbar's
+                  // side margins round it, at a control's height.
+                  height: t("metrics.control"),
+                  paddingLeft: t("metrics.gap"),
+                  paddingRight: t("metrics.gap"),
                   color: t(tab.active ? "colors.text" : "colors.muted"),
                   fontSize: t("typography.reading"),
                   ...(tab.active
@@ -162,6 +169,7 @@ function Header({ frame: f, send }: { frame: TimelineFrame; send: Send }) {
           <UI.SegmentedControl
             id="timeline:mode"
             label="Timeline mode"
+            data-pm-variant="glass"
             value={f.mode}
             options={[
               { id: "Layers", label: "Layers" },
@@ -323,8 +331,11 @@ function Layer({
   send: Send;
   single: boolean;
 }) {
-  // Unset switches appear under the pointer, keyboard focus or a single
-  // selected layer, so a multi-selection never squeezes every name.
+  // As v1: every row keeps its switches' columns at its trailing edge, so
+  // names truncate at the same place on every row and nothing moves under
+  // the pointer. Visibility and the parent link always show; Shy, Solo and
+  // Lock show when set, or under the pointer, keyboard focus or a single
+  // selected layer.
   const show = row.hovered || row.focused || (row.selected && single);
   // In column order, the last at the row's trailing edge.
   const switches = [
@@ -336,6 +347,7 @@ function Layer({
             label: `Parent: ${row.parent.name} · Drag to a layer`,
             symbol: "link",
             active: undefined as boolean | undefined,
+            always: true,
           },
         ]
       : []),
@@ -345,6 +357,7 @@ function Layer({
       label: "Toggle Shy",
       symbol: row.shy ? "face.dashed.fill" : "face.dashed",
       active: row.shy === true,
+      always: false,
     },
     {
       name: "solo" as const,
@@ -352,6 +365,7 @@ function Layer({
       label: "Toggle Solo",
       symbol: row.solo ? "s.circle.fill" : "s.circle",
       active: row.solo,
+      always: false,
     },
     {
       name: "lock" as const,
@@ -359,6 +373,7 @@ function Layer({
       label: "Toggle Lock",
       symbol: row.locked ? "lock" : "lock.open",
       active: undefined,
+      always: false,
     },
     {
       name: "visibility" as const,
@@ -366,6 +381,7 @@ function Layer({
       label: "Toggle Visibility",
       symbol: row.visible ? "eye" : "eye.slash",
       active: undefined,
+      always: true,
     },
   ];
   return (
@@ -373,7 +389,12 @@ function Layer({
       <div
         style={{
           ...line,
+          // The rename field takes the room the switches leave (the name
+          // itself keeps to its text, which a double-click renames).
+          ...(row.nameEditor ? { flexGrow: 1 } : {}),
           gap: t("metrics.gap"),
+          // The name gives way first: this side shrinks, the switches never.
+          flexShrink: 1,
           overflow: "hidden",
           paddingLeft: t("metrics.gap"),
           paddingRight: t("metrics.gap"),
@@ -439,7 +460,12 @@ function Layer({
           }}
         />
         {row.nameEditor ? (
+          // The field takes the name's place across the column while it
+          // edits (a field in a row grows; the cluster gives it the room).
           <UI.TextField
+            // Its own identity: its commit is carried to the newest tree
+            // when the panel has published another on the way.
+            id={`timeline:rename:${row.id}`}
             label={row.label}
             value={row.nameEditor.value}
             binding={row.nameEditor.binding}
@@ -451,6 +477,10 @@ function Layer({
           />
         ) : (
           <text
+            // A stable identity: the double-click that renames lands after
+            // the first click's selection has re-rendered the row, and the
+            // host carries an event to the newest tree only by its id.
+            id={`timeline:name:${row.id}`}
             title={row.label}
             style={{
               ...text,
@@ -465,9 +495,9 @@ function Layer({
           </text>
         )}
       </div>
-      <div style={line}>
-        {switches.map((item, i) =>
-          item.on || show ? (
+      <div style={{ ...line, flexShrink: 0 }}>
+        {switches.map((item) =>
+          item.on || item.always || show ? (
             <Icon
               key={item.name}
               id={`timeline:${item.name}:${row.id}`}
@@ -478,9 +508,8 @@ function Layer({
               send={send}
               intent={{ type: "switch", id: row.id, name: item.name }}
             />
-          ) : switches.slice(0, i).some((before) => before.on) ? (
-            // Each switch keeps its own column: a set one further from the
-            // edge leaves the columns after it open.
+          ) : (
+            // An unset switch keeps its column, so the name never reflows.
             <div
               key={item.name}
               role="presentation"
@@ -491,7 +520,7 @@ function Layer({
                 height: t("metrics.hit"),
               }}
             />
-          ) : null,
+          ),
         )}
       </div>
     </>
@@ -677,6 +706,8 @@ const TimelineRow = memo(
               style={{
                 ...line,
                 gap: t("metrics.gap"),
+                flexGrow: 1,
+                flexShrink: 1,
                 overflow: "hidden",
                 paddingLeft: t("metrics.inset"),
               }}
@@ -707,7 +738,13 @@ const TimelineRow = memo(
                 </text>
               )}
             </div>
-            <div style={{ ...line, paddingRight: t("metrics.gap") }}>
+            <div
+              style={{
+                ...line,
+                flexShrink: 0,
+                paddingRight: t("metrics.gap"),
+              }}
+            >
               <Icon
                 id={`timeline:track-enable:${row.id}`}
                 label={row.accessibilityLabel}
@@ -861,31 +898,43 @@ export function TimelinePanel({
                       single={!f.selection || f.selection.count <= 1}
                     />
                   ))}
-                  {f.window.total === 0 && (
-                    <div
+                </UI.Tree>
+                {f.window.total === 0 && (
+                  // An empty composition: the whole layer area, centred,
+                  // inset from its edges (the playhead never enters it).
+                  // The sentence wraps rather than touch the divider; a
+                  // short panel clips the block below the ruler.
+                  <div
+                    id="timeline:empty"
+                    style={{
+                      position: "absolute",
+                      inset: "fill",
+                      display: "flex",
+                      flexDirection: "column",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      gap: t("metrics.inset"),
+                      padding: t("metrics.inset"),
+                      overflow: "hidden",
+                    }}
+                  >
+                    <text
                       style={{
-                        display: "flex",
-                        flexDirection: "column",
-                        alignItems: "center",
-                        justifyContent: "center",
+                        ...reading,
+                        textAlign: "center",
+                        whiteSpace: "normal",
                       }}
                     >
-                      <text style={reading}>
-                        Drag media here or import from your computer.
-                      </text>
-                      <Icon
-                        id="timeline:import"
-                        label="Import…"
-                        symbol=""
-                        tabIndex={-1}
-                        send={send}
-                        intent={{ type: "import" }}
-                      >
-                        <text>Import…</text>
-                      </Icon>
-                    </div>
-                  )}
-                </UI.Tree>
+                      Drag media here or import from your computer.
+                    </text>
+                    <UI.PushButton
+                      id="timeline:import"
+                      label="Import…"
+                      tabIndex={-1}
+                      onClick={action(send, { type: "import" })}
+                    />
+                  </div>
+                )}
               </div>
             </div>
             {f.announcement && refusal(f.announcement.value) && (

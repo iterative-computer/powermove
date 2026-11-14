@@ -79,7 +79,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use pm_model::json::{Map, Value, parse, to_canonical_string};
+use pm_model::json::{JsString, Map, Value, parse, to_canonical_string};
 use pm_model::ops::{ops_from_value, ops_to_value};
 use pm_model::patch::{patches_from_value, patches_to_value};
 use pm_model::{Document, Op};
@@ -1085,6 +1085,31 @@ impl<W: Write> pm_model::json::write::Sink for HashingFile<W> {
     }
 }
 
+/// `to_canonical_string` of `meta` with `history` set to `history.to_saved()`,
+/// the history written step by step from text each step made once.
+fn meta_line(meta: &Map, history: &HistorySnapshot) -> String {
+    use pm_model::json::write::write_canonical;
+    let mut keys: Vec<&JsString> = meta.keys().collect();
+    let name = JsString::from("history");
+    keys.push(&name);
+    keys.sort_by(|a, b| a.cmp_utf16(b));
+    let mut out = String::from("{");
+    for (i, key) in keys.into_iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        pm_model::json::write::push_quoted(key, &mut out);
+        out.push(':');
+        if *key == name {
+            history.write_saved(&mut out);
+        } else if let Some(value) = meta.iter().find(|(k, _)| *k == key).map(|(_, v)| v) {
+            write_canonical(value, &mut out);
+        }
+    }
+    out.push('}');
+    out
+}
+
 /// `checkpoint-<n>.json`: one metadata line, then the canonical document.
 fn write_checkpoint(
     dir: &Path,
@@ -1127,10 +1152,9 @@ fn write_checkpoint(
     meta.insert("segment", Value::Number(segment as f64));
     meta.insert("revision", Value::Number(state.revision as f64));
     meta.insert("documentHash", Value::from(digest.as_str()));
-    meta.insert("history", state.history.to_saved());
     meta.insert("workspace", state.workspace.clone());
     let mut out = BufWriter::with_capacity(64 * 1024, File::create(&tmp)?);
-    out.write_all(to_canonical_string(&Value::Object(meta)).as_bytes())?;
+    out.write_all(meta_line(&meta, &state.history).as_bytes())?;
     out.write_all(b"\n")?;
     io::copy(&mut File::open(&doc_tmp)?, &mut out)?;
     out.flush()?;
@@ -1827,5 +1851,57 @@ mod durability_tests {
         });
         let error = d.barrier().unwrap_err();
         assert!(error.to_string().contains("checkpoint 0"), "{error}");
+    }
+}
+
+#[cfg(test)]
+mod meta_line_tests {
+    use super::*;
+    use crate::{Command, DocumentStore, Origin};
+
+    /// A checkpoint's metadata line writes each history step from the text
+    /// it made once: exactly the line built from the whole saved history.
+    #[test]
+    fn a_checkpoint_line_is_the_line_of_the_whole_history() {
+        let project = parse(
+            r#"{"id":"P","compId":"C","w":64,"h":36,"fps":30,"dur":5,"assets":{},"layers":[
+            {"id":"a","type":"shape","name":"A","from":0,"dur":5,"on":true,"p":{"opacity":{"v":100,"kf":[]}},"d":{},"fx":[]}]}"#,
+        )
+        .unwrap();
+        let mut store = DocumentStore::new_untitled(project);
+        for i in 0..200u32 {
+            let command = if i.is_multiple_of(2) {
+                Command::SetLayerName {
+                    layer_id: "a".into(),
+                    name: format!("Name \u{e9} \"{i}\""),
+                }
+            } else {
+                Command::SetStaticOpacity {
+                    layer_id: "a".into(),
+                    value: f64::from(i % 100) / 3.0,
+                }
+            };
+            store.execute(command, Origin::Interface).unwrap();
+        }
+        for _ in 0..7 {
+            store.undo().unwrap();
+        }
+        let history = store.history().snapshot();
+        let mut meta = Map::new();
+        meta.insert("format", Value::from(CHECKPOINT_FORMAT));
+        meta.insert("version", Value::Number(f64::from(FORMAT)));
+        meta.insert("project", Value::from("P"));
+        meta.insert("base", Value::from("b"));
+        meta.insert("bases", Value::Array(vec![]));
+        meta.insert("segment", Value::Number(3.0));
+        meta.insert("revision", Value::Number(207.0));
+        meta.insert("documentHash", Value::from("0f"));
+        meta.insert("workspace", Value::Null);
+        let mut whole = meta.clone();
+        whole.insert("history", history.to_saved());
+        assert_eq!(
+            meta_line(&meta, &history),
+            to_canonical_string(&Value::Object(whole))
+        );
     }
 }

@@ -18,7 +18,7 @@ impl DocumentSource {
         scene: &mut Scene,
         instances: &mut Vec<MeshInstance>,
         materials: &mut Vec<GpuMaterial>,
-        maps: &mut Vec<Vec<u8>>,
+        maps: &mut Vec<Arc<Vec<u8>>>,
         indices: &mut HashMap<(String, usize), usize>,
         failures: &mut Vec<pm_render::LayerFailure>,
     ) -> Result<(), String> {

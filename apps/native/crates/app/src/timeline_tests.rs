@@ -543,6 +543,26 @@ fn the_column_splitter_resizes_and_double_click_resets(cx: &mut TestAppContext) 
     s.idle(cx);
     assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.layer_column()), column);
 }
+/// As v1 (GUTTER_MIN): the layer column never narrows past a row's least
+/// width, so a row's switches always fit beside a truncated name.
+#[gpui::test]
+fn the_column_splitter_stops_where_a_rows_switches_still_fit(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    let m = tokens().metrics;
+    let least = crate::timeline_surface::least_layer_column(&m);
+    // Number, disclosure, badge, three slots of name and five switches.
+    let gap = m.gap as f64;
+    let row = 6. * gap + 10. * m.hit as f64 + m.kind_badge as f64;
+    assert!(least >= row && least >= 320., "{least} < {row}");
+    let column = s.surface.read_with(&s.vcx, |t, _| t.layer_column());
+    assert!(column >= least);
+    let y = s.at(1, 0.).y;
+    let at = point(s.origin().x + px(column as f32), y);
+    // Dragged far past the least: it stops there.
+    let far = point(s.origin().x + px(20.), y);
+    s.drag(cx, at, far, Modifiers::none());
+    assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.layer_column()), least);
+}
 #[gpui::test]
 fn each_timeline_draws_its_own_editors_offline_media(cx: &mut TestAppContext) {
     let mut s = stage_project(cx, crate::v4_view_tests::strips_json());
@@ -1142,6 +1162,50 @@ fn option_wheel_and_pinch_zoom_around_the_pointer(cx: &mut TestAppContext) {
     s.idle(cx);
     assert!(s.surface.read_with(&s.vcx, |t, _| t.pps()) > after);
 }
+/// Scrolling and zooming stay on the timeline's time: a long sweep right
+/// stops a little past the end, and zooming out stops once the whole of it
+/// fits the time area (the view never sits on empty time past the end).
+#[gpui::test]
+fn scroll_and_zoom_out_stop_at_the_timelines_end(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    let at = s.at(0, 1.);
+    let end = s
+        .surface
+        .read_with(&s.vcx, |t, _| t.model().index.maximum_time());
+    for _ in 0..40 {
+        s.vcx.simulate_event(ScrollWheelEvent {
+            position: at,
+            delta: ScrollDelta::Pixels(point(px(-400.), px(0.))),
+            modifiers: Modifiers::none(),
+            ..Default::default()
+        });
+    }
+    s.idle(cx);
+    let (pps, scroll, room) = s.surface.read_with(&s.vcx, |t, _| t.time_view());
+    // `time_view`'s width leaves Fit's 48 points: the view's right edge.
+    let right = scroll + (room + 48.) / pps;
+    assert!(right > end, "the end itself can be reached");
+    assert!(right <= end + 48. / pps + 1e-6, "{right} past {end}");
+    for _ in 0..40 {
+        s.vcx.simulate_event(ScrollWheelEvent {
+            position: at,
+            delta: ScrollDelta::Pixels(point(px(0.), px(-400.))),
+            modifiers: Modifiers {
+                alt: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+    }
+    s.idle(cx);
+    let (pps, scroll, room) = s.surface.read_with(&s.vcx, |t, _| t.time_view());
+    let shown = (room + 48.) / pps;
+    assert!(
+        shown <= end + 48. / pps + 1e-6,
+        "zoomed out to {shown} s of {end}"
+    );
+    assert!(scroll >= 0. && scroll + shown >= end);
+}
 /// Wheel scrolling moves the view at once and writes it once, after it rests:
 /// every write publishes to all panels.
 #[gpui::test]
@@ -1305,11 +1369,7 @@ fn clicking_a_layer_name_selects_it_and_a_double_click_renames(cx: &mut TestAppC
             .layers()
             .to_vec()
     };
-    let text = s
-        .view
-        .read_with(&s.vcx, |v, _| v.id_of_text("Layer 1"))
-        .unwrap();
-    let name = bounds(&mut s.vcx, &format!("n{text}")).center();
+    let name = bounds(&mut s.vcx, r#"timeline:name:["layer","l1"]"#).center();
     s.vcx.simulate_mouse_move(name, None, Modifiers::none());
     s.vcx.simulate_click(name, Modifiers::none());
     s.idle(cx);
@@ -1338,6 +1398,51 @@ fn clicking_a_layer_name_selects_it_and_a_double_click_renames(cx: &mut TestAppC
         "the double-click opens the name field"
     );
     assert_eq!(selected(&s), ["l1".to_string()]);
+}
+/// A double-click on an unselected layer's name, as a person makes it: the
+/// second click lands before the first one's selection has re-rendered the
+/// row, and still opens the name field, whose name typed is the layer's.
+/// (That the field has the keyboard needs AppKit's text view: checked by
+/// hand.)
+#[gpui::test]
+fn a_double_click_on_an_unselected_name_opens_its_field(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    let name = bounds(&mut s.vcx, r#"timeline:name:["layer","l1"]"#).center();
+    s.vcx.simulate_mouse_move(name, None, Modifiers::none());
+    for click_count in [1, 2] {
+        s.vcx.simulate_event(MouseDownEvent {
+            button: MouseButton::Left,
+            position: name,
+            modifiers: Modifiers::none(),
+            click_count,
+            first_mouse: false,
+        });
+        s.vcx.simulate_event(MouseUpEvent {
+            button: MouseButton::Left,
+            position: name,
+            modifiers: Modifiers::none(),
+            click_count,
+        });
+    }
+    s.idle(cx);
+    s.idle(cx);
+    let field = s
+        .view
+        .read_with(&s.vcx, |v, _| v.cancellable_field())
+        .expect("the name field opened");
+    s.view
+        .update(&mut s.vcx, |v, cx| v.change(field, serde_json::json!("Logo"), cx));
+    s.idle(cx);
+    s.idle(cx);
+    let p = s.rig.kernel.published(PROJECT).unwrap();
+    let names: Vec<_> = pm_kernel::model::list_layers(p.snapshot.root().unwrap(), None)
+        .into_iter()
+        .map(|l| (l.id, l.name))
+        .collect();
+    assert!(
+        names.contains(&("l1".to_owned(), "Logo".to_owned())),
+        "the typed name is the layer's: {names:?}"
+    );
 }
 /// Key ids may repeat across layers: pressing the earlier layer's key selects
 /// that layer and that key, never the later layer holding the same id.

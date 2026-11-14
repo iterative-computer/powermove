@@ -1,6 +1,7 @@
 //! Interpret Footage…: how the selected clip's file is read. Each value shows
 //! what the file says (or the rule that filled it in), and can be set here to
-//! correct a wrong tag: primaries, transfer, matrix, range and alpha. One
+//! correct a wrong tag: primaries, transfer, matrix, range and alpha; a
+//! still with a gain map can be read for its SDR base only. One
 //! Apply is one Undo step on the asset, so the viewer, proxies, the render
 //! cache and exports all read it the same way.
 use crate::{
@@ -9,6 +10,7 @@ use crate::{
     sheets::{OpenSheet, from_surface},
 };
 use gpui::{AppContext, Context};
+use pm_media::image::Rendition;
 use pm_media::interpret::{AlphaChoice, Field as Read, Interpretation, Origin, VideoReading};
 use pm_model::{Map, Value};
 use pm_protocol::color::{AlphaMode, MatrixCoefficients, Primaries, Range, Transfer};
@@ -70,6 +72,11 @@ const ALPHAS: [(&str, AlphaChoice); 4] = [
         "Premultiplied (Matted With Color)",
         AlphaChoice::PremultipliedWithColor,
     ),
+];
+
+const GAIN_MAPS: [(&str, Rendition); 2] = [
+    ("HDR Picture", Rendition::Hdr),
+    ("SDR Base Only", Rendition::SdrBase),
 ];
 
 /// A value as the document stores it (the engine's own name for it).
@@ -170,6 +177,8 @@ fn read<T>(field: &Read<T>) -> (&T, &Origin) {
 
 /// The sheet for `name`. `video` has a matrix and a range; a still does not.
 /// `reading` is the file as the engine reads it, when the file could be read.
+/// `gain_map`: the still carries a gain map (its picture is HDR unless its
+/// SDR base is chosen).
 pub fn surface(
     id: DialogId,
     owner: WindowId,
@@ -177,6 +186,7 @@ pub fn surface(
     video: bool,
     chosen: &Interpretation,
     reading: Option<&VideoReading>,
+    gain_map: bool,
 ) -> Surface {
     let alpha = reading.map(|r| (alpha_choice(&r.alpha.automatic), r.alpha.origin.clone()));
     let mut matrix = popup(
@@ -246,6 +256,21 @@ pub fn surface(
                 vec![matte_hex(chosen.alpha_matte)],
             )
         },
+        Field {
+            enabled: gain_map,
+            description: Some(if gain_map {
+                "Automatic is the HDR picture, at the headroom its gain map describes.".into()
+            } else {
+                "Only a still with a gain map has an SDR base to read.".into()
+            }),
+            ..popup(
+                "gainMap",
+                "Gain Map",
+                &GAIN_MAPS,
+                chosen.gain_map.as_ref(),
+                None,
+            )
+        },
     ];
     let mut surface = Surface::sheet(id, owner, "Interpret Footage", fields, "Apply");
     surface.line = Some(name.to_owned());
@@ -257,6 +282,10 @@ pub fn surface(
         FieldGroup {
             title: "Alpha",
             fields: vec!["alpha", "alphaMatte"],
+        },
+        FieldGroup {
+            title: "HDR",
+            fields: vec!["gainMap"],
         },
     ];
     surface
@@ -271,6 +300,7 @@ pub struct Chosen {
     pub range: usize,
     pub tone_mapping: usize,
     pub alpha: usize,
+    pub gain_map: usize,
     /// The matte well's colour, once the person has changed it.
     pub matte: Option<String>,
 }
@@ -285,6 +315,7 @@ impl Chosen {
             range: at("range"),
             tone_mapping: at("toneMapping"),
             alpha: at("alpha"),
+            gain_map: at("gainMap"),
             matte,
         }
     }
@@ -348,6 +379,12 @@ impl Chosen {
         );
         changed |= set(interpret, "matrix", &MATRICES, (self.matrix, opened.matrix));
         changed |= set(interpret, "range", &RANGES, (self.range, opened.range));
+        changed |= set(
+            interpret,
+            "gainMap",
+            &GAIN_MAPS,
+            (self.gain_map, opened.gain_map),
+        );
         changed |= set(
             interpret,
             "toneMapping",
@@ -444,12 +481,18 @@ impl Controller {
         cx.spawn(async move |this, cx| {
             // The file is read off the main thread; an offline or still file
             // opens the sheet without what "Automatic" resolves to.
-            let reading = cx
+            let (reading, gain_map) = cx
                 .background_spawn({
                     let chosen = chosen.clone();
                     async move {
-                        path.filter(|_| video)
-                            .and_then(|p| video_reading(&p, &chosen, sequence))
+                        let reading = path
+                            .clone()
+                            .filter(|_| video)
+                            .and_then(|p| video_reading(&p, &chosen, sequence));
+                        let gain_map = path
+                            .filter(|_| !video && !sequence)
+                            .is_some_and(|p| pm_media::image::has_gain_map(&p).unwrap_or(false));
+                        (reading, gain_map)
                     }
                 })
                 .await;
@@ -460,6 +503,7 @@ impl Controller {
                 video,
                 &chosen,
                 reading.as_ref(),
+                gain_map,
             );
             let opened = Chosen::shown(&surface);
             let Ok(open) = this.update(cx, |v, _| {
@@ -524,7 +568,7 @@ mod tests {
 
     fn sheet(chosen: &Interpretation) -> Surface {
         let (id, owner) = ids();
-        surface(id, owner, "Clip.mov", true, chosen, None)
+        surface(id, owner, "Clip.mov", true, chosen, None, false)
     }
 
     /// Every stored name is one the engine parses back to the same value.
@@ -539,6 +583,7 @@ mod tests {
                 range: at(RANGES.len()),
                 tone_mapping: at(tones().len()),
                 alpha: at(ALPHAS.len()),
+                gain_map: at(GAIN_MAPS.len()),
                 matte: None,
             };
             let mut interpret = Map::new();
@@ -550,6 +595,7 @@ mod tests {
             assert_eq!(parsed.matrix, Some(MATRICES[chosen.matrix - 1].1));
             assert_eq!(parsed.range, Some(RANGES[chosen.range - 1].1));
             assert_eq!(parsed.alpha, Some(ALPHAS[chosen.alpha - 1].1));
+            assert_eq!(parsed.gain_map, Some(GAIN_MAPS[chosen.gain_map - 1].1));
         }
     }
 
@@ -619,9 +665,13 @@ mod tests {
                 "premultipliedWithColor",
             ],
         );
+        offered(&GAIN_MAPS, &["hdr", "sdrBase"]);
         // A variant added to the engine fails to compile here until it is
         // offered above.
-        let _ = |p: Primaries, t: Transfer, m: MatrixCoefficients, a: AlphaChoice| {
+        let _ = |p: Primaries, t: Transfer, m: MatrixCoefficients, a: AlphaChoice, g: Rendition| {
+            match g {
+                Rendition::Hdr | Rendition::SdrBase => {}
+            }
             match p {
                 Primaries::Bt709
                 | Primaries::Bt601_625
@@ -810,7 +860,15 @@ mod tests {
             ..Interpretation::default()
         };
         let (id, owner) = ids();
-        let sheet = surface(id, owner, "Screen Recording.mov", true, &chosen, None);
+        let sheet = surface(
+            id,
+            owner,
+            "Screen Recording.mov",
+            true,
+            &chosen,
+            None,
+            false,
+        );
         assert_eq!(sheet.line.as_deref(), Some("Screen Recording.mov"));
         let field = |id: &str| sheet.fields.iter().find(|f| f.id == id).unwrap();
         assert_eq!(field("range").selected, 2, "Full is chosen");
@@ -829,10 +887,61 @@ mod tests {
             false,
             &Interpretation::default(),
             None,
+            false,
         );
         let field = |id: &str| still.fields.iter().find(|f| f.id == id).unwrap();
         assert!(!field("matrix").enabled && !field("range").enabled);
         assert!(field("alpha").enabled);
+        assert!(
+            !field("gainMap").enabled,
+            "no gain map, no SDR base to read"
+        );
+    }
+
+    /// A still with a gain map is read as its HDR picture unless its SDR
+    /// base is chosen: the choice is stored as the engine reads it, and
+    /// shown as itself when the sheet opens again.
+    #[test]
+    fn a_still_with_a_gain_map_can_be_read_for_its_sdr_base() {
+        let (id, owner) = ids();
+        let open = |chosen: &Interpretation| {
+            surface(
+                id.clone(),
+                owner.clone(),
+                "Sunset.heic",
+                false,
+                chosen,
+                None,
+                true,
+            )
+        };
+        let sheet = open(&Interpretation::default());
+        let field = sheet.fields.iter().find(|f| f.id == "gainMap").unwrap();
+        assert!(field.enabled);
+        assert_eq!(
+            field.values,
+            ["Automatic", "HDR Picture", "SDR Base Only"].map(String::from)
+        );
+        assert_eq!(field.selected, 0);
+        let opened = Chosen::shown(&sheet);
+        let mut interpret = Map::new();
+        let base = Chosen {
+            gain_map: 2,
+            ..opened.clone()
+        };
+        assert!(base.write(&opened, &mut interpret));
+        let parsed = parsed(&interpret);
+        assert_eq!(parsed.gain_map, Some(Rendition::SdrBase));
+        let again = open(&parsed);
+        let field = again.fields.iter().find(|f| f.id == "gainMap").unwrap();
+        assert_eq!(field.selected, 2);
+        // Automatic again removes the member.
+        let automatic = Chosen {
+            gain_map: 0,
+            ..Chosen::shown(&again)
+        };
+        assert!(automatic.write(&Chosen::shown(&again), &mut interpret));
+        assert_eq!(interpret.get("gainMap"), None);
     }
 
     /// A v1 project's asset (`videoColor`) is read as Powermove 1 showed it:
@@ -872,6 +981,7 @@ mod tests {
                 true,
                 chosen,
                 Some(&reading),
+                false,
             );
             let field = |name: &str| {
                 surface

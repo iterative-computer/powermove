@@ -174,17 +174,17 @@ fn a_strip_keeps_its_layer_hue_and_its_states_differ_by_the_rim() {
         (m.top, m.bottom),
         "hover is the rim alone"
     );
-    assert!(hover.rim.1 > m.rim.1 && hover.rim_top.1 > m.rim_top.1);
+    assert!(hover.ring.1 > m.ring.1 && hover.light.1 > m.light.1);
     assert!(dark.strip(green, StripState::Dragging).shadow.1 > 0.);
     // Selection is a 2 px ring at the edge: white on the dark canvas, the
     // hue's deepest shade on the light one.
     let light = Tokens::new(Scheme::Light, Accessibility::default());
     let selected = dark.strip(green, StripState::Selected);
-    assert_eq!((selected.rim.0, selected.rim_width), (0xffffff, 2.));
+    assert_eq!((selected.ring.0, selected.ring_width), (0xffffff, 2.));
     let pale = light.strip(light.colors.labels.green, StripState::Rest);
     let ringed = light.strip(light.colors.labels.green, StripState::Selected);
-    assert_eq!((ringed.rim_width, ringed.rim_inset), (2., 0.));
-    assert!(lightness(ringed.rim.0) < 0.5 && ringed.rim.1 == 1.);
+    assert_eq!(ringed.ring_width, 2.);
+    assert!(lightness(ringed.ring.0) < 0.5 && ringed.ring.1 == 1.);
     // The light canvas's strip is a pale tint of the hue under a dark name,
     // never the dark canvas's slab.
     assert!(lightness(pale.top) > 0.8 && lightness(pale.bottom) > lightness(pale.top));

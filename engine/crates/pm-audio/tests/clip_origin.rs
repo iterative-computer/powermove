@@ -436,8 +436,8 @@ fn a_waveform_shows_the_sound_where_the_mix_plays_it() {
 /// Matroska keeps no length per stream: a ten-second picture with half a
 /// second of sound must not report ten seconds of sound. The imported
 /// sound length is where the mix stops playing it, read either way, for
-/// PCM, FLAC, AAC and Opus (the coded ones within one codec frame: their
-/// container times are whole milliseconds and the mix drops the priming).
+/// PCM, FLAC, AAC and Opus (AAC to Matroska's millisecond, its last block
+/// ending the sound; Opus within one codec frame).
 #[test]
 fn a_short_soundtrack_in_matroska_reports_its_own_length() {
     let dir = temp_dir("clip-origin-mkv-short-sound");
@@ -446,7 +446,7 @@ fn a_short_soundtrack_in_matroska_reports_its_own_length() {
     for (codec, slack) in [
         ("pcm_s16le", 48.0),
         ("flac", 48.0),
-        ("aac", 1024.0),
+        ("aac", 48.0),
         ("libopus", 960.0),
     ] {
         let file = dir.join(format!("short-{codec}.mkv"));
@@ -601,6 +601,157 @@ fn the_remaining_sound_classes_are_heard_as_measured() {
             assert!(
                 (at as i64 - expected).abs() <= tolerance,
                 "{name}, timing {timing:?}: the click is at sample {at}, {expected} expected",
+            );
+        }
+    }
+}
+
+/// Matroska and WebM present a soundtrack from before zero as authored
+/// (MP4 and QuickTime turn it into a head-trimming edit, tested above).
+/// Read with `timing: 2`, a soundtrack starting a tenth of a second before
+/// the picture is the clip's origin and keeps its offset; one starting
+/// within a frame before it gives way to the picture, and its sound before
+/// the picture is not part of the clip. An older project hears the program
+/// sample its edits address, wherever the stream starts.
+#[test]
+fn a_soundtrack_presented_before_zero_is_placed_against_the_presentation() {
+    let dir = temp_dir("clip-origin-negative");
+    let wav = dir.join("click.wav");
+    let click = clicks(SR as usize, &[CLICK], 0.9);
+    write_wav(&wav, SR, &[click.clone(), click]);
+    let pcm_mkv: &[&str] = &[
+        "-c:v",
+        "mpeg4",
+        "-q:v",
+        "4",
+        "-c:a",
+        "pcm_s16le",
+        "-avoid_negative_ts",
+        "disabled",
+    ];
+    let opus_webm: &[&str] = &[
+        "-c:v",
+        "libvpx-vp9",
+        "-crf",
+        "30",
+        "-b:v",
+        "0",
+        "-c:a",
+        "libopus",
+        "-b:a",
+        "256k",
+        "-avoid_negative_ts",
+        "disabled",
+    ];
+    let start = |path: &std::path::Path| -> f64 {
+        let out = std::process::Command::new(ffmpeg().with_file_name("ffprobe"))
+            .args(["-v", "error", "-select_streams", "a:0", "-show_entries"])
+            .args(["stream=start_time", "-of", "csv=p=0"])
+            .arg(path)
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap()
+    };
+    // (file, sound start, codecs, tolerance in samples)
+    let cases: [(&str, f64, &[&str], i64); 3] = [
+        ("early-sound.mkv", -0.1, pcm_mkv, 1),
+        ("sound-a-frame-early.mkv", -0.02, pcm_mkv, 1),
+        ("early-sound.webm", -0.1, opus_webm, 2),
+    ];
+    for (name, sound_at, codecs, tolerance) in cases {
+        let path = dir.join(name);
+        clip(&path, &wav, 0.0, sound_at, codecs);
+        let sound_starts = start(&path);
+        assert!(
+            sound_starts < 0.0,
+            "{name}: the container must present the sound before zero ({sound_starts})"
+        );
+        // The click sits CLICK samples after the authored soundtrack's
+        // start, its first program sample (the stream's start counts
+        // Opus's pre-skip, which is not presented).
+        let origin = if -sound_at <= 0.04 { 0.0 } else { sound_at };
+        let versioned = CLICK as i64 + ((sound_at - origin) * SR as f64).round() as i64;
+        for (timing, expected) in [
+            (None, CLICK as i64),
+            (Some(pm_media::clip::ASSET_TIMING), versioned),
+        ] {
+            let (at, level) = click_with(&path, r#""trim":0,"speed":1"#, timing);
+            assert!(level.abs() > 0.2, "{name}: no click ({level})");
+            assert!(
+                (at as i64 - expected).abs() <= tolerance,
+                "{name}, timing {timing:?}: the click is at sample {at}, {expected} expected",
+            );
+        }
+    }
+}
+
+/// AAC in Matroska has no edit list: the stream's end is where its last
+/// block ends (that block's duration), and what the decoder returns past it
+/// is the encoder's padding. The mix ends the sound there, and the length
+/// an import records is the same, to Matroska's millisecond, read either
+/// way, with a picture and without.
+#[test]
+fn aac_in_matroska_ends_where_its_last_block_ends() {
+    let dir = temp_dir("clip-origin-mkv-aac-end");
+    let wav = dir.join("tone.wav");
+    write_wav(&wav, SR, &[tone(SR, 0.5, 1000.0, 0.5)]);
+    let with_picture = dir.join("aac.mkv");
+    let status = std::process::Command::new(ffmpeg())
+        .args(["-hide_banner", "-loglevel", "error", "-y"])
+        .args([
+            "-f",
+            "lavfi",
+            "-i",
+            "color=gray:size=64x64:rate=25:duration=2",
+        ])
+        .arg("-i")
+        .arg(&wav)
+        .args(["-c:v", "mpeg4", "-q:v", "8", "-c:a", "aac"])
+        .arg(&with_picture)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let alone = dir.join("aac.mka");
+    let status = std::process::Command::new(ffmpeg())
+        .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
+        .arg(&wav)
+        .args(["-c:a", "aac"])
+        .arg(&alone)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let end = SR as f64 * 0.5;
+    for (path, kind) in [(&with_picture, "video"), (&alone, "audio")] {
+        let name = path.file_name().unwrap().to_string_lossy();
+        for (timing, member) in [
+            (pm_media::clip::ClipTiming::Presentation, r#","timing":2"#),
+            (pm_media::clip::ClipTiming::Legacy, ""),
+        ] {
+            let a = audio("A", "v", 0.0, 1.0, "", "");
+            let text = format!(
+                r#"{{"id":"P","compId":"C","name":"T","w":320,"h":180,"fps":25,"dur":1,"layers":[{a}],"comps":{{}},"assets":{{"v":{{"id":"v","kind":"{kind}"{member}}}}},"params":{{}}}}"#
+            );
+            let doc = pm_model::Document::new(Some(pm_model::json::parse(&text).unwrap()), 1);
+            let rig = Rig::new(&[("v", path)]);
+            let mut mixer = rig.mixer(doc, "C", MixFormat::stereo(SR));
+            let out = rig.render(&mut mixer, 0, SR as i64, 4096).remove(0);
+            let last = out.iter().rposition(|v| v.abs() > 1e-3).unwrap() + 1;
+            assert!(
+                (last as f64 - end).abs() <= 48.0,
+                "{name}, {timing:?}: the mix plays to sample {last}, the sound ends at {end}"
+            );
+            let facts = pm_media::facts::media_facts_as(path, None, timing).unwrap();
+            let length = facts
+                .audio_duration
+                .or(facts.duration.filter(|_| kind == "audio"))
+                .map(|d| d * f64::from(SR));
+            assert!(
+                length.is_some_and(|l| (l - end).abs() <= 48.0),
+                "{name}, {timing:?}: imported sound {length:?} samples, the sound ends at {end}"
             );
         }
     }

@@ -9,9 +9,9 @@ use std::borrow::Cow;
 use pm_model::json::write::{JsonTree, View};
 use pm_model::{Map, Node, Value};
 
-use crate::history::History;
+use crate::history::{History, HistorySnapshot};
 
-const MARKER: &str = "requiresEngine";
+pub(super) const MARKER: &str = "requiresEngine";
 const NATIVE: &str = "native";
 
 fn field<'a, T: JsonTree>(value: &'a T, key: &str) -> Option<&'a T> {
@@ -198,7 +198,11 @@ fn project_needs_native<T: JsonTree>(root: &T) -> bool {
     false
 }
 
-fn history_needs_native(root: Option<&Node>, saved: &Value) -> bool {
+/// Each reachable state the replay judged: undo (`true`) or redo, the
+/// imported record's index, and whether that state needs the native reader.
+type Judged<'a> = Option<&'a mut dyn FnMut(bool, usize, bool)>;
+
+fn history_needs_native(root: Option<&Node>, saved: &Value, mut judged: Judged<'_>) -> bool {
     if matches!(saved, Value::Null) {
         return false;
     }
@@ -238,12 +242,18 @@ fn history_needs_native(root: Option<&Node>, saved: &Value) -> bool {
     for undo in [true, false] {
         let mut state = root.clone();
         let records = history.records();
+        let applied = history.applied();
         let steps: Box<dyn Iterator<Item = _>> = if undo {
-            Box::new(records[..history.applied()].iter().rev())
+            Box::new(records[..applied].iter().enumerate().rev())
         } else {
-            Box::new(records[history.applied()..].iter())
+            Box::new(
+                records[applied..]
+                    .iter()
+                    .enumerate()
+                    .map(|(i, r)| (applied + i, r)),
+            )
         };
-        for record in steps {
+        for (index, record) in steps {
             let ops = if undo {
                 &record.inverse.to_vec()
             } else {
@@ -254,7 +264,11 @@ fn history_needs_native(root: Option<&Node>, saved: &Value) -> bool {
                 return true;
             }
             state = replay.root().expect("replayed project").clone();
-            if project_needs_native(&state) {
+            let needs = project_needs_native(&state);
+            if let Some(judged) = judged.as_mut() {
+                judged(undo, index, needs);
+            }
+            if needs {
                 return true;
             }
         }
@@ -262,11 +276,139 @@ fn history_needs_native(root: Option<&Node>, saved: &Value) -> bool {
     false
 }
 
+/// The history a save writes, as the file guard reads it.
+pub(super) enum GuardHistory<'a> {
+    /// The member as written (raw preserved history, or none).
+    Value(&'a Value),
+    /// This session's stack, with the document state the save writes: its
+    /// token and outside-write count name the root.
+    Session {
+        snapshot: &'a HistorySnapshot,
+        state_token: u64,
+        outside_writes: u64,
+    },
+}
+
+/// The state undoing document record `i` reaches.
+fn undone(documents: &[&crate::history::HistoryRecord], base: u64, i: usize) -> u64 {
+    if i == 0 { base } else { documents[i - 1].id }
+}
+
+/// `project || history_needs_native(root, to_saved(snapshot))`, without
+/// rebuilding the saved history: what importing each step would find is
+/// found once per step, and each reachable document state's verdict is kept
+/// by its token. A state token names one content only while no write
+/// outside the history has happened: such a write can overlap a recorded
+/// change, and undo or redo then reach content the token never named
+/// (review w31 F1). From the first one, every save replays in full and
+/// keeps no verdicts. Any state not judged before also sends it to the full
+/// replay, which records what it judges. The kept verdicts never outgrow
+/// the snapshot's current and reachable states.
+fn session_needs_native(
+    root: Option<&Node>,
+    snapshot: &HistorySnapshot,
+    project: bool,
+    state_token: u64,
+    outside_writes: u64,
+) -> bool {
+    let states = snapshot.guard_states();
+    let full = |judged: Judged<'_>| {
+        states.lock().expect("guard states").full_replays += 1;
+        history_needs_native(root, &snapshot.to_saved(), judged)
+    };
+    if outside_writes != 0 {
+        states.lock().expect("guard states").states.clear();
+        return project || full(None);
+    }
+    let chain = snapshot.guard_chain();
+    let tokens: Vec<u64> = match &chain {
+        Some((documents, base, applied)) => (0..*applied)
+            .rev()
+            .map(|i| undone(documents, *base, i))
+            .chain(documents[*applied..].iter().map(|r| r.id))
+            .collect(),
+        None => Vec::new(),
+    };
+    {
+        let reachable: std::collections::HashSet<u64> = tokens.iter().copied().collect();
+        let mut known = states.lock().expect("guard states");
+        known
+            .states
+            .retain(|t, _| *t == state_token || reachable.contains(t));
+        if root.is_some() {
+            // The state being written, judged now: a later save that reaches
+            // it by undo or redo knows it.
+            known.states.insert(state_token, project);
+        }
+    }
+    if project {
+        return true;
+    }
+    if root.is_none() {
+        return true;
+    }
+    let Some((documents, base, applied)) = &chain else {
+        return full(None);
+    };
+    if documents.len() > crate::history::MAX_ENTRIES {
+        return true;
+    }
+    let mut bytes = Vec::with_capacity(documents.len());
+    let mut operations = false;
+    for record in documents {
+        match record.import_facts() {
+            Ok(facts) => {
+                bytes.push(facts.bytes);
+                operations |= facts.operations;
+            }
+            Err(_) => return true,
+        }
+    }
+    if crate::history::import_kept(&bytes, *applied) != documents.len() || operations {
+        return true;
+    }
+    {
+        let known = states.lock().expect("guard states");
+        let verdicts: Option<Vec<bool>> = tokens
+            .iter()
+            .map(|t| known.states.get(t).copied())
+            .collect();
+        if let Some(verdicts) = verdicts {
+            return verdicts.into_iter().any(|v| v);
+        }
+    }
+    let mut record = |undo: bool, index: usize, needs: bool| {
+        let token = if undo {
+            undone(documents, *base, index)
+        } else {
+            documents[index].id
+        };
+        states
+            .lock()
+            .expect("guard states")
+            .states
+            .insert(token, needs);
+    };
+    full(Some(&mut record))
+}
+
 /// Recompute only the writer-owned envelope stamp. Root declarations and
 /// unknown envelope requirements are never removed or overwritten (N4).
 /// Borrow the original extras for ordinary projects; don't copy a large tree.
-pub(super) fn save_extra<'a>(root: Option<&Node>, history: &Value, extra: &'a Map) -> Cow<'a, Map> {
-    let needed = root.is_some_and(project_needs_native) || history_needs_native(root, history);
+pub(super) fn save_extra<'a>(
+    root: Option<&Node>,
+    history: GuardHistory<'_>,
+    extra: &'a Map,
+) -> Cow<'a, Map> {
+    let project = root.is_some_and(project_needs_native);
+    let needed = match history {
+        GuardHistory::Value(saved) => project || history_needs_native(root, saved, None),
+        GuardHistory::Session {
+            snapshot,
+            state_token,
+            outside_writes,
+        } => session_needs_native(root, snapshot, project, state_token, outside_writes),
+    };
     let ours = extra.get(MARKER).and_then(Value::as_str) == Some(NATIVE);
     let absent = extra.get(MARKER).is_none_or(|v| matches!(v, Value::Null));
     if needed && absent {
@@ -738,7 +880,7 @@ mod tests {
             let mut extra = Map::new();
             extra.insert(MARKER, requirement.clone());
             assert_eq!(
-                save_extra(Some(&root), &Value::Null, &extra).get(MARKER),
+                save_extra(Some(&root), GuardHistory::Value(&Value::Null), &extra).get(MARKER),
                 Some(&requirement)
             );
         }

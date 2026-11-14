@@ -77,8 +77,12 @@ pub struct Events {
     pub pointer_up: bool,
     pub hover: bool,
     pub wheel: bool,
-    /// Takes files dropped from Finder (`data-pm-drop="files"`).
+    /// Takes files dropped from Finder (`data-pm-drop="files"`), and the
+    /// panel's own items dragged onto it.
     pub file_drop: bool,
+    /// Starts a drag of a panel item (`onDragStart`): onto the panel's own
+    /// targets, the timeline or the viewer.
+    pub drag_start: bool,
     pub key_down: bool,
 }
 impl Events {
@@ -96,6 +100,7 @@ impl Events {
             file_drop: (has("drop") || has("dragover"))
                 && node.props.get("data-pm-drop").and_then(Value::as_str) == Some("files"),
             key_down: has("keydown"),
+            drag_start: has("dragstart"),
         }
     }
     pub fn pointer(self) -> bool {

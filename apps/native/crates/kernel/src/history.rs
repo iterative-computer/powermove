@@ -199,6 +199,76 @@ pub struct HistoryRecord {
     /// The assets the step refers to ([`Self::referenced_assets`]), found
     /// once and shared by every copy.
     assets: Arc<std::sync::OnceLock<Box<[String]>>>,
+    /// The step's entry exactly as the saved history writes it
+    /// ([`Self::saved_text`]), made once and shared by every copy.
+    saved_text: Arc<std::sync::OnceLock<SavedText>>,
+    /// The step's entry in the packed history form ([`Self::packed_text`]),
+    /// made once and shared by every copy.
+    packed_text: Arc<std::sync::OnceLock<PackedText>>,
+}
+
+/// One step's saved entry as the packed history form (`pack`) sees it:
+/// each patch written whole, or a record array's metadata and the canonical
+/// text of each item it holds, all kept once, compressed. A save assigns
+/// record ids across steps from these texts instead of re-serializing every
+/// layer of every step.
+#[derive(Debug)]
+pub(crate) struct PackedText {
+    data: Box<[u8]>,
+    len: usize,
+    /// Forward then backward: what each patch is.
+    sides: [Vec<PackedPiece>; 2],
+}
+#[derive(Debug)]
+enum PackedPiece {
+    /// `{"patch": <text>}`.
+    Whole(std::ops::Range<usize>),
+    /// `{"patch": <meta>, "refs": [ids of items]}`.
+    Records {
+        meta: std::ops::Range<usize>,
+        items: Vec<std::ops::Range<usize>>,
+    },
+}
+impl PackedText {
+    fn text(&self) -> String {
+        let bytes = zstd::bulk::decompress(&self.data, self.len).expect("internal history bytes");
+        String::from_utf8(bytes).expect("canonical history text")
+    }
+    /// Whether the step gives `pack` any record: a record array with at
+    /// least one item (an empty one alone leaves the history plain).
+    fn has_records(&self) -> bool {
+        self.sides
+            .iter()
+            .flatten()
+            .any(|p| matches!(p, PackedPiece::Records { items, .. } if !items.is_empty()))
+    }
+}
+
+/// One step's saved entry as canonical JSON text, compressed: what
+/// `to_saved` writes for it before its label. A save writes these bytes
+/// instead of rebuilding and serializing the step again.
+#[derive(Debug)]
+pub(crate) struct SavedText {
+    data: Box<[u8]>,
+    len: usize,
+    /// What reading the entry back finds (`History::import` of a history
+    /// saved with composition paths, which never consults the open
+    /// composition), for the file guard.
+    import: Result<ImportFacts, String>,
+}
+/// What `History::import` makes of one saved entry, as the file guard asks.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ImportFacts {
+    /// The imported record's byte size (the import budget's measure).
+    pub bytes: usize,
+    /// The entry is saved as id-keyed operations rather than leaf patches.
+    pub operations: bool,
+}
+impl SavedText {
+    fn text(&self) -> String {
+        let bytes = zstd::bulk::decompress(&self.data, self.len).expect("internal history bytes");
+        String::from_utf8(bytes).expect("canonical history text")
+    }
 }
 
 impl HistoryRecord {
@@ -276,7 +346,45 @@ impl HistoryRecord {
         self.referenced_assets();
         if self.is_document() {
             self.digest();
+            self.saved_text();
+            self.packed_text();
         }
+    }
+    /// The entry `to_saved` writes for this step, less its label: the
+    /// canonical `{"backward":…,"forward":…` exactly as that export
+    /// serializes it. Built once from the same values the export builds.
+    pub(crate) fn saved_text(&self) -> &SavedText {
+        self.saved_forms();
+        self.saved_text.get().expect("saved forms")
+    }
+    /// The step's entry as `pack` reads it, made once.
+    pub(crate) fn packed_text(&self) -> &PackedText {
+        self.saved_forms();
+        self.packed_text.get().expect("saved forms")
+    }
+    /// Both saved forms of the step and what importing it finds, from one
+    /// decoding of its saved lists.
+    fn saved_forms(&self) {
+        if self.saved_text.get().is_some() && self.packed_text.get().is_some() {
+            return;
+        }
+        let (forward, backward) = self.saved_sides();
+        self.packed_text
+            .get_or_init(|| packed_form(&forward, &backward));
+        self.saved_text
+            .get_or_init(|| saved_form_text(&self.label, forward, backward));
+    }
+    /// The forward and backward lists `to_saved` stores for this step.
+    fn saved_sides(&self) -> (Value, Value) {
+        let list = |p: Vec<Patch>| Value::Array(p.iter().map(Patch::to_value).collect());
+        match self.saved_form() {
+            Some((forward, backward)) => (list(forward), list(backward)),
+            None => (self.forward.value(), self.inverse.value()),
+        }
+    }
+    /// What `History::import` makes of this step's saved entry.
+    pub(crate) fn import_facts(&self) -> Result<ImportFacts, String> {
+        self.saved_text().import.clone()
     }
     pub(crate) fn saved_form(&self) -> Option<(Vec<Patch>, Vec<Patch>)> {
         if let Some(saved) = &self.saved {
@@ -303,6 +411,92 @@ impl HistoryRecord {
             leaves(&self.forward.to_vec())?,
             leaves(&self.inverse.to_vec())?,
         ))
+    }
+}
+
+/// A step's saved entry as text (less its label) and what importing it finds.
+fn saved_form_text(label: &str, forward: Value, backward: Value) -> SavedText {
+    use pm_model::json::write::write_canonical;
+    let mut entry = Map::new();
+    entry.insert("label", Value::from(label));
+    entry.insert("forward", forward);
+    entry.insert("backward", backward);
+    let entry = Value::Object(entry);
+    // The file guard's test for id-keyed operations, on this entry.
+    let operations = ["forward", "backward"].iter().any(|side| {
+        entry
+            .get(side)
+            .and_then(Value::as_array)
+            .is_some_and(|ops| {
+                ops.iter().any(|op| {
+                    let op = op.get("patch").unwrap_or(op);
+                    op.get("op").and_then(Value::as_str).is_some()
+                })
+            })
+    });
+    let import = import_entry_bytes(&entry, None).map(|bytes| ImportFacts { bytes, operations });
+    let mut text = String::from("{\"backward\":");
+    write_canonical(entry.get("backward").expect("backward"), &mut text);
+    text.push_str(",\"forward\":");
+    write_canonical(entry.get("forward").expect("forward"), &mut text);
+    let len = text.len();
+    SavedText {
+        data: zstd::bulk::compress(text.as_bytes(), 1)
+            .expect("history compression")
+            .into(),
+        len,
+        import,
+    }
+}
+
+/// A step's entry as `pack` reads it: each patch whole, or a record array's
+/// metadata and its items.
+fn packed_form(forward: &Value, backward: &Value) -> PackedText {
+    use pm_model::json::write::write_canonical;
+    fn put(text: &mut String, value: &Value) -> std::ops::Range<usize> {
+        let start = text.len();
+        write_canonical(value, text);
+        start..text.len()
+    }
+    let side = |list: &Value, text: &mut String| -> Vec<PackedPiece> {
+        list.as_array()
+            .map(|patches| {
+                patches
+                    .iter()
+                    .map(|patch| {
+                        if !record_array_patch(patch) {
+                            return PackedPiece::Whole(put(text, patch));
+                        }
+                        let object = patch.as_object().expect("checked");
+                        let mut meta = Map::new();
+                        for (key, value) in object.iter() {
+                            if key.as_str() != Some("value") {
+                                meta.insert(key.clone(), value.clone());
+                            }
+                        }
+                        let meta = put(text, &Value::Object(meta));
+                        let items = object
+                            .get("value")
+                            .and_then(Value::as_array)
+                            .expect("checked")
+                            .iter()
+                            .map(|item| put(text, item))
+                            .collect();
+                        PackedPiece::Records { meta, items }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let mut text = String::new();
+    let sides = [side(forward, &mut text), side(backward, &mut text)];
+    let len = text.len();
+    PackedText {
+        data: zstd::bulk::compress(text.as_bytes(), 1)
+            .expect("history compression")
+            .into(),
+        len,
+        sides,
     }
 }
 
@@ -345,6 +539,21 @@ pub struct History {
     /// External entries with a cleanup that fell off the stack, waiting for
     /// the kernel to ask their realm to run it.
     retired: Vec<ExternalRef>,
+    /// The file guard's verdict on document states it has judged, by state
+    /// token, each with the outside-write count it was judged under.
+    guard_states: GuardStates,
+}
+/// Shared by a history and its snapshots: whether a document state (named
+/// by its token, judged under an outside-write count) needs the native
+/// reader (the project file guard).
+pub(crate) type GuardStates = Arc<std::sync::Mutex<GuardMemo>>;
+#[derive(Debug, Default)]
+pub(crate) struct GuardMemo {
+    /// Whether each judged state (by token) needs the native reader. Only
+    /// kept while no write outside the history has happened.
+    pub states: std::collections::HashMap<u64, bool>,
+    /// Saves that had to replay the whole history (diagnostics, tests).
+    pub full_replays: u64,
 }
 
 impl Default for History {
@@ -364,6 +573,8 @@ pub struct HistoryMark {
 pub struct HistorySnapshot {
     records: Vec<HistoryRecord>,
     cursor: usize,
+    base_token: u64,
+    guard_states: GuardStates,
 }
 
 impl History {
@@ -379,6 +590,7 @@ impl History {
             max_entries,
             max_bytes,
             base_token: next_token(),
+            guard_states: Default::default(),
             retired: Vec::new(),
         }
     }
@@ -494,6 +706,11 @@ impl History {
         self.total_bytes = 0;
         self.cursor = 0;
         self.base_token = next_token();
+        self.guard_states
+            .lock()
+            .expect("guard states")
+            .states
+            .clear();
     }
 
     fn drop_oldest(&mut self) {
@@ -566,6 +783,8 @@ impl History {
             selection: None,
             digest: Default::default(),
             assets: Default::default(),
+            saved_text: Default::default(),
+            packed_text: Default::default(),
         });
         self.total_bytes += bytes;
         self.cursor = self.entries.len();
@@ -599,6 +818,8 @@ impl History {
             selection: None,
             digest: Default::default(),
             assets: Default::default(),
+            saved_text: Default::default(),
+            packed_text: Default::default(),
         });
         self.total_bytes += bytes;
         self.cursor = self.entries.len();
@@ -629,6 +850,8 @@ impl History {
             selection: Some(Arc::new((before, after))),
             digest: Default::default(),
             assets: Default::default(),
+            saved_text: Default::default(),
+            packed_text: Default::default(),
         });
         self.total_bytes += bytes;
         self.cursor = self.entries.len();
@@ -811,10 +1034,22 @@ impl History {
         }
         next == theirs.len()
     }
+    /// Saves of this history whose file guard replayed the whole history.
+    #[cfg(test)]
+    pub(crate) fn full_replays(&self) -> u64 {
+        self.guard_states.lock().expect("guard states").full_replays
+    }
+    /// How many state verdicts the file guard keeps for this history.
+    #[cfg(test)]
+    pub(crate) fn guard_verdicts(&self) -> usize {
+        self.guard_states.lock().expect("guard states").states.len()
+    }
     pub fn snapshot(&self) -> HistorySnapshot {
         HistorySnapshot {
             records: self.entries.clone(),
             cursor: self.cursor,
+            base_token: self.base_token,
+            guard_states: self.guard_states.clone(),
         }
     }
 }
@@ -965,6 +1200,8 @@ impl History {
                 selection: None,
                 digest: Default::default(),
                 assets: Default::default(),
+                saved_text: Default::default(),
+                packed_text: Default::default(),
             });
             history.total_bytes += bytes;
         }
@@ -977,6 +1214,25 @@ impl History {
         history.trim();
         Ok(history)
     }
+}
+
+/// How many entries `History::import` keeps of a saved history with these
+/// imported record sizes and `applied` applied: the same budget steps as
+/// import (distant redo first, then the oldest), on sizes alone.
+pub(crate) fn import_kept(bytes: &[usize], applied: usize) -> usize {
+    let (max_entries, max_bytes) = (MAX_ENTRIES, DEFAULT_MAX_BYTES);
+    let mut len = bytes.len();
+    let mut total: usize = bytes.iter().sum();
+    while total > max_bytes && len > applied {
+        len -= 1;
+        total -= bytes[len];
+    }
+    let mut first = 0;
+    while len - first > max_entries || total > max_bytes && len - first > 1 {
+        total -= bytes[first];
+        first += 1;
+    }
+    len - first
 }
 
 /// One saved history entry: its label, forward and backward operations
@@ -1009,6 +1265,78 @@ fn restored_assets(path: &[PathPart], value: &Value) -> Option<Value> {
     Some(value)
 }
 
+/// The canonical text `History::import` stores for one side of a saved
+/// entry with composition paths (no exact numbers to keep).
+fn entry_operations_text(e: &Map, side: &str) -> Result<String, String> {
+    let items = e
+        .get(side)
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("a history entry has no {side} list"))?;
+    let mut text = String::from("[");
+    for (i, item) in items.iter().enumerate() {
+        let source = item
+            .as_object()
+            .ok_or_else(|| format!("a {side} patch is malformed"))?;
+        let mut shape = Map::new();
+        for (key, value) in source.iter() {
+            shape.insert(
+                key.clone(),
+                if key.as_str() == Some("value") {
+                    Value::Null
+                } else {
+                    value.clone()
+                },
+            );
+        }
+        let op = Op::from_value(&Value::Object(shape))
+            .map_err(|_| format!("a {side} patch is malformed"))?;
+        if !valid_path(op.path()) {
+            return Err(format!("a {side} patch has an invalid path"));
+        }
+        let restored = source
+            .get("value")
+            .and_then(|v| restored_assets(op.path(), v));
+        let normalized = op.to_value();
+        let mut members: Vec<_> = normalized.as_object().unwrap().iter().collect();
+        members.sort_by_key(|(a, _)| *a);
+        if i > 0 {
+            text.push(',');
+        }
+        text.push('{');
+        for (j, (key, value)) in members.into_iter().enumerate() {
+            if j > 0 {
+                text.push(',');
+            }
+            pm_model::json::write_canonical(&Value::String(key.clone()), &mut text);
+            text.push(':');
+            let value = if key.as_str() == Some("value") {
+                restored.as_ref().or(source.get("value")).unwrap_or(value)
+            } else {
+                value
+            };
+            pm_model::json::write_canonical(value, &mut text);
+        }
+        text.push('}');
+    }
+    text.push(']');
+    Ok(text)
+}
+
+/// The byte size `History::import` measures for a saved entry, without
+/// keeping (or compressing) what it would store.
+fn import_entry_bytes(entry: &Value, open_comp: Option<&str>) -> Result<usize, String> {
+    let e = entry
+        .as_object()
+        .ok_or("a history entry is not an object")?;
+    e.get("label")
+        .and_then(Value::as_str)
+        .ok_or("a history entry has no label")?;
+    if needs_exact(entry) {
+        return import_entry(entry, false, open_comp).map(|(_, _, _, bytes)| bytes);
+    }
+    Ok(entry_operations_text(e, "forward")?.len() + entry_operations_text(e, "backward")?.len())
+}
+
 fn import_entry(
     entry: &Value,
     root_relative: bool,
@@ -1024,58 +1352,9 @@ fn import_entry(
         .to_owned();
     if !root_relative && !needs_exact(entry) {
         let operations = |side: &str| -> Result<StoredOps, String> {
-            let items = e
-                .get(side)
-                .and_then(Value::as_array)
-                .ok_or_else(|| format!("a history entry has no {side} list"))?;
-            let mut text = String::from("[");
-            for (i, item) in items.iter().enumerate() {
-                let source = item
-                    .as_object()
-                    .ok_or_else(|| format!("a {side} patch is malformed"))?;
-                let mut shape = Map::new();
-                for (key, value) in source.iter() {
-                    shape.insert(
-                        key.clone(),
-                        if key.as_str() == Some("value") {
-                            Value::Null
-                        } else {
-                            value.clone()
-                        },
-                    );
-                }
-                let op = Op::from_value(&Value::Object(shape))
-                    .map_err(|_| format!("a {side} patch is malformed"))?;
-                if !valid_path(op.path()) {
-                    return Err(format!("a {side} patch has an invalid path"));
-                }
-                let restored = source
-                    .get("value")
-                    .and_then(|v| restored_assets(op.path(), v));
-                let normalized = op.to_value();
-                let mut members: Vec<_> = normalized.as_object().unwrap().iter().collect();
-                members.sort_by_key(|(a, _)| *a);
-                if i > 0 {
-                    text.push(',');
-                }
-                text.push('{');
-                for (j, (key, value)) in members.into_iter().enumerate() {
-                    if j > 0 {
-                        text.push(',');
-                    }
-                    pm_model::json::write_canonical(&Value::String(key.clone()), &mut text);
-                    text.push(':');
-                    let value = if key.as_str() == Some("value") {
-                        restored.as_ref().or(source.get("value")).unwrap_or(value)
-                    } else {
-                        value
-                    };
-                    pm_model::json::write_canonical(value, &mut text);
-                }
-                text.push('}');
-            }
-            text.push(']');
-            Ok(StoredOps(CompactJson::text(text)))
+            Ok(StoredOps(CompactJson::text(entry_operations_text(
+                e, side,
+            )?)))
         };
         let (forward, backward) = (operations("forward")?, operations("backward")?);
         let bytes = forward.0.len + backward.0.len;
@@ -1163,6 +1442,165 @@ impl HistorySnapshot {
         &self.records
     }
 
+    /// Writes exactly `write_canonical(&self.to_saved())`, each step from
+    /// the entry text it made once ([`HistoryRecord::saved_text`]) rather
+    /// than rebuilding the whole history as values on every save.
+    pub fn write_saved<S: pm_model::json::write::Sink>(&self, sink: &mut S) {
+        use pm_model::json::write::write_canonical;
+        let applied = self.records[..self.cursor]
+            .iter()
+            .filter(|r| r.is_document())
+            .count();
+        // Keys in canonical order: entries, index, paths, version.
+        sink.push_str("{\"entries\":[");
+        for (i, r) in self.records.iter().filter(|r| r.is_document()).enumerate() {
+            if i > 0 {
+                sink.push_str(",");
+            }
+            sink.push_str(&r.saved_text().text());
+            sink.push_str(",\"label\":");
+            write_canonical(&Value::from(r.label.as_str()), sink);
+            sink.push_str("}");
+        }
+        sink.push_str("],\"index\":");
+        write_canonical(&Value::Number(applied as f64 - 1.0), sink);
+        sink.push_str(",\"paths\":");
+        write_canonical(&Value::from("composition"), sink);
+        sink.push_str(",\"version\":");
+        write_canonical(&Value::Number(1.0), sink);
+        sink.push_str("}");
+    }
+
+    /// Writes exactly `write_canonical(&self.to_saved_packed())`: the packed
+    /// history form the old app's library used, which every reader of the
+    /// file reads (`unpackHistory`, `History::import`). Each distinct item of
+    /// a layer or edit-log array is written once, in the order `pack` meets
+    /// it, from the text each step made once ([`HistoryRecord::packed_text`]).
+    pub fn write_saved_packed<S: pm_model::json::write::Sink>(&self, sink: &mut S) {
+        use pm_model::json::write::write_canonical;
+        let documents: Vec<&HistoryRecord> =
+            self.records.iter().filter(|r| r.is_document()).collect();
+        // `pack` keeps the plain form when nothing is packable.
+        if !documents.iter().any(|r| r.packed_text().has_records()) {
+            return self.write_saved(sink);
+        }
+        let applied = self.records[..self.cursor]
+            .iter()
+            .filter(|r| r.is_document())
+            .count();
+        let mut ids: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut records: Vec<String> = Vec::new();
+        let number = |n: usize, sink: &mut S| write_canonical(&Value::Number(n as f64), sink);
+        // Keys in canonical order: format, history (entries, index, paths,
+        // version), records, version.
+        sink.push_str("{\"format\":");
+        write_canonical(&Value::from(DICTIONARY_FORMAT), sink);
+        sink.push_str(",\"history\":{\"entries\":[");
+        for (i, r) in documents.iter().enumerate() {
+            let packed = r.packed_text();
+            let text = packed.text();
+            // Ids are given forward first, then backward (`pack`'s order);
+            // an entry writes backward first (canonical key order).
+            let mut refs: [Vec<Vec<usize>>; 2] = [Vec::new(), Vec::new()];
+            for (side, pieces) in packed.sides.iter().enumerate() {
+                for piece in pieces {
+                    if let PackedPiece::Records { items, .. } = piece {
+                        let ids_of = items
+                            .iter()
+                            .map(|range| {
+                                let item = &text[range.clone()];
+                                match ids.get(item) {
+                                    Some(id) => *id,
+                                    None => {
+                                        let id = records.len();
+                                        records.push(item.to_owned());
+                                        ids.insert(item.to_owned(), id);
+                                        id
+                                    }
+                                }
+                            })
+                            .collect();
+                        refs[side].push(ids_of);
+                    }
+                }
+            }
+            if i > 0 {
+                sink.push_str(",");
+            }
+            for (n, (key, side)) in [("backward", 1), ("forward", 0)].into_iter().enumerate() {
+                sink.push_str(if n == 0 { "{\"" } else { ",\"" });
+                sink.push_str(key);
+                sink.push_str("\":[");
+                let mut refs = refs[side].iter();
+                for (j, piece) in packed.sides[side].iter().enumerate() {
+                    if j > 0 {
+                        sink.push_str(",");
+                    }
+                    match piece {
+                        PackedPiece::Whole(range) => {
+                            sink.push_str("{\"patch\":");
+                            sink.push_str(&text[range.clone()]);
+                            sink.push_str("}");
+                        }
+                        PackedPiece::Records { meta, .. } => {
+                            sink.push_str("{\"patch\":");
+                            sink.push_str(&text[meta.clone()]);
+                            sink.push_str(",\"refs\":[");
+                            for (k, id) in refs.next().expect("refs").iter().enumerate() {
+                                if k > 0 {
+                                    sink.push_str(",");
+                                }
+                                number(*id, sink);
+                            }
+                            sink.push_str("]}");
+                        }
+                    }
+                }
+                sink.push_str("]");
+            }
+            sink.push_str(",\"label\":");
+            write_canonical(&Value::from(r.label.as_str()), sink);
+            sink.push_str("}");
+        }
+        sink.push_str("],\"index\":");
+        write_canonical(&Value::Number(applied as f64 - 1.0), sink);
+        sink.push_str(",\"paths\":");
+        write_canonical(&Value::from("composition"), sink);
+        sink.push_str(",\"version\":");
+        write_canonical(&Value::Number(1.0), sink);
+        sink.push_str("},\"records\":[");
+        for (i, item) in records.iter().enumerate() {
+            if i > 0 {
+                sink.push_str(",");
+            }
+            sink.push_str(item);
+        }
+        sink.push_str("],\"version\":");
+        write_canonical(&Value::Number(1.0), sink);
+        sink.push_str("}");
+    }
+
+    /// The document records in order, the base state's token and how many
+    /// are applied: the states the file guard reconstructs. `None` when a
+    /// realm's step is on the stack: it changes the document outside the
+    /// saved history, so the states around it are not what replaying the
+    /// saved steps makes.
+    pub(crate) fn guard_chain(&self) -> Option<(Vec<&HistoryRecord>, u64, usize)> {
+        if self.records.iter().any(|r| r.external.is_some()) {
+            return None;
+        }
+        let documents: Vec<&HistoryRecord> =
+            self.records.iter().filter(|r| r.is_document()).collect();
+        let applied = self.records[..self.cursor]
+            .iter()
+            .filter(|r| r.is_document())
+            .count();
+        Some((documents, self.base_token, applied))
+    }
+    pub(crate) fn guard_states(&self) -> &GuardStates {
+        &self.guard_states
+    }
+
     /// `packHistory(export())`: the dictionary form `projectHistory.<id>`
     /// stores. Equal layer/edit records are stored once (the old packer
     /// shared them by object identity after interning by content; equal
@@ -1171,6 +1609,18 @@ impl HistorySnapshot {
     pub fn to_saved_packed(&self) -> Value {
         pack(self.to_saved())
     }
+}
+
+/// A patch `pack` stores as references into its records table: one that
+/// sets a whole layer or edit-log array.
+fn record_array_patch(patch: &Value) -> bool {
+    patch.as_object().is_some_and(|p| {
+        p.get("exists") == Some(&Value::Bool(true))
+            && p.get("path")
+                .and_then(Value::as_array)
+                .is_some_and(|path| is_record_array_path(path))
+            && p.get("value").and_then(Value::as_array).is_some()
+    })
 }
 
 /// `packHistory`.
@@ -1186,14 +1636,7 @@ pub fn pack(saved: Value) -> Value {
     let mut ids: HashMap<String, usize> = HashMap::new();
     let mut pack_patch = |patch: &Value| -> Value {
         let mut out = Map::new();
-        let record_array = patch.as_object().is_some_and(|p| {
-            p.get("exists") == Some(&Value::Bool(true))
-                && p.get("path")
-                    .and_then(Value::as_array)
-                    .is_some_and(|path| is_record_array_path(path))
-                && p.get("value").and_then(Value::as_array).is_some()
-        });
-        if !record_array {
+        if !record_array_patch(patch) {
             out.insert("patch", patch.clone());
             return Value::Object(out);
         }

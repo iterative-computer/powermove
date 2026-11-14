@@ -35,6 +35,9 @@ const VIDEO: &[&str] = &[
     "mp4", "mov", "m4v", "webm", "mkv", "avi", "wmv", "asf", "flv", "mpg", "mpeg", "m2v", "mts",
     "m2ts", "ts", "3gp", "3g2", "mxf", "ogv", "dv", "vob",
 ];
+/// What Import Media says of a file it cannot read (a drop of one says
+/// why in the status line: "notes.txt · Not a video, …").
+const UNSUPPORTED: &str = "Not a video, audio or image file Powermove can read";
 /// What Import Media says of a camera raw file.
 const RAW: &str =
     "Camera raw files can't be imported yet · export TIFF or EXR from your raw developer";
@@ -283,6 +286,9 @@ pub struct ImportRequest {
     pub replace: Option<String>,
     /// `placement`: a layer per file at this time. `None`: Project panel only.
     pub place_at: Option<f64>,
+    /// Where the placed layers join the stack (0: the top, the default),
+    /// each next file below the one before (a drop between timeline rows).
+    pub place_index: Option<usize>,
     /// An extension's `assets.import`: 3D models (glb, glTF, OBJ) are media too.
     pub models: bool,
     /// The layer definition an extension asked its asset to place as.
@@ -696,7 +702,7 @@ impl Builtins {
                 let raw = RAW_EXTENSIONS.contains(&extension(&path).as_str());
                 outcome
                     .failed
-                    .push((name, if raw { RAW } else { "Unsupported file" }.into()));
+                    .push((name, if raw { RAW } else { UNSUPPORTED }.into()));
                 continue;
             };
             let type_ = match (&sequence, model) {
@@ -816,7 +822,16 @@ impl Builtins {
                 .stamp;
             let (layers, place) = match request.place_at.filter(|_| request.replace.is_none()) {
                 Some(at) => {
-                    placement(&published, &items, at, request.placed_as.as_ref()).ok_or(SWITCHED)?
+                    let items: Vec<(&str, &Value)> =
+                        items.iter().map(|i| (i.id.as_str(), &i.metadata)).collect();
+                    placement(
+                        &published,
+                        &items,
+                        at,
+                        request.place_index,
+                        request.placed_as.as_ref(),
+                    )
+                    .ok_or(SWITCHED)?
                 }
                 None => (vec![], vec![]),
             };
@@ -885,12 +900,85 @@ fn edit_open(error: &KernelError) -> bool {
     )
 }
 
-/// `PM.commandForAsset` for each imported asset: new layer ids and the
-/// commands adding them at `at`. `None`: no project to place in.
+/// Project items placed on the timeline (dragged from the Project panel):
+/// a layer per media asset as an import places it, a precomposition per
+/// composition, at `at` from `index` in the stack. New layer ids and the
+/// commands adding them; `Err` says in a sentence why nothing can be placed.
+pub fn place_items(
+    published: &Published,
+    assets: &[String],
+    compositions: &[String],
+    at: f64,
+    index: Option<usize>,
+) -> Result<(Vec<String>, Vec<Command>), String> {
+    let root = published.snapshot.root().ok_or("Open a project first")?;
+    let records = root
+        .get("assets")
+        .map(|a| a.to_value())
+        .unwrap_or(Value::Null);
+    let items: Vec<(&str, &Value)> = assets
+        .iter()
+        .filter_map(|id| Some((id.as_str(), records.get(id)?)))
+        .collect();
+    let (mut layers, mut commands) =
+        placement(published, &items, at, index, None).ok_or("Open a project first")?;
+    let open = published.snapshot.open_comp();
+    let comps = root
+        .get("comps")
+        .map(|c| c.to_value())
+        .unwrap_or(Value::Null);
+    for (n, id) in compositions.iter().enumerate() {
+        if open.as_deref() == Some(id.as_str()) {
+            return Err("A composition can't be placed inside itself".into());
+        }
+        let comp = comps
+            .get(id)
+            .ok_or("That composition is no longer in the project")?;
+        let number =
+            |key: &str, default: f64| comp.get(key).and_then(Value::as_f64).unwrap_or(default);
+        let mut content = Map::new();
+        content.insert("comp", Value::from(id.as_str()));
+        content.insert("w", Value::from(number("w", 1920.)));
+        content.insert("h", Value::from(number("h", 1080.)));
+        let layer = pm_kernel::commands::new_id("L");
+        layers.push(layer.clone());
+        commands.push(
+            LayerCommand::Add(Box::new(pm_kernel::commands::layers::AddLayer {
+                id: layer,
+                layer_type: "precomp".into(),
+                comp: None,
+                name: comp.get("name").and_then(Value::as_str).map(str::to_owned),
+                from: None,
+                duration: Some(number("dur", 1.)),
+                content,
+                properties: Map::new(),
+                color: None,
+                index: index.map(|i| i + items.len() + n),
+                parent: None,
+                blend: None,
+                motion_blur: None,
+                visible: None,
+                shy: None,
+                collapsed: None,
+                time: at,
+            }))
+            .into(),
+        );
+    }
+    if layers.is_empty() {
+        return Err("Nothing here can be placed on the timeline".into());
+    }
+    Ok((layers, commands))
+}
+
+/// `PM.commandForAsset` for each asset: new layer ids and the commands
+/// adding them at `at`, from stack `index` down. `None`: no project to
+/// place in.
 fn placement(
     published: &Published,
-    items: &[RetainedAsset],
+    items: &[(&str, &Value)],
     at: f64,
+    index: Option<usize>,
     placed_as: Option<&PlacedAs>,
 ) -> Option<(Vec<String>, Vec<Command>)> {
     let root = published.snapshot.root()?;
@@ -910,8 +998,7 @@ fn placement(
     );
     let mut commands: Vec<Command> = vec![];
     let mut layers = vec![];
-    for item in items {
-        let (id, asset) = (item.id.as_str(), &item.metadata);
+    for (n, &(id, asset)) in items.iter().enumerate() {
         let field = |key: &str| asset.get(key).and_then(Value::as_f64).filter(|n| *n > 0.);
         let kind = asset.get("kind").and_then(Value::as_str).unwrap_or("image");
         let mut content = Map::new();
@@ -964,7 +1051,7 @@ fn placement(
                 content,
                 properties: Map::new(),
                 color: None,
-                index: None,
+                index: index.map(|i| i + n),
                 parent: None,
                 blend: None,
                 motion_blur: None,
@@ -1051,6 +1138,98 @@ mod tests {
     }
     fn document(f: &Fixture) -> u64 {
         f.actor.handle().published("p").unwrap().snapshot.doc_id
+    }
+
+    /// Project items dragged onto the timeline: each a layer at the time
+    /// under the pointer, joining the stack where the pointer is, first item
+    /// on top, in one Undo step; a composition nests; the open composition
+    /// is refused in a sentence.
+    #[test]
+    fn project_items_are_placed_at_a_time_and_a_place_in_the_stack() {
+        let f = fixture();
+        let a = write(&f.root, "A.png", PNG);
+        let b = write(&f.root, "B.png", PNG);
+        let outcome = f
+            .runtime
+            .import_media(
+                document(&f),
+                &f.root,
+                ImportRequest {
+                    paths: vec![a, b],
+                    // An existing layer first, then the two stills only in
+                    // the Project panel.
+                    ..Default::default()
+                },
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        assert_eq!(outcome.imported, ["A.png", "B.png"], "{outcome:?}");
+        let kernel = f.actor.handle();
+        let commit = |commands: Vec<Command>| {
+            let call = pm_kernel::Call::Transact {
+                label: Some("Add media".into()),
+                expected_revision: None,
+                body: pm_kernel::WriteBody::Commands(commands),
+            };
+            let reply = kernel
+                .call("p", Request::new(Caller::native(), call))
+                .wait()
+                .unwrap()
+                .unwrap();
+            assert!(!matches!(reply.reply, Reply::Throw(_)), "{:?}", reply.reply);
+        };
+        let solid = pm_kernel::commands::layers::AddLayer {
+            id: "S".into(),
+            layer_type: "solid".into(),
+            comp: None,
+            name: Some("Solid".into()),
+            from: None,
+            duration: Some(10.),
+            content: Map::new(),
+            properties: Map::new(),
+            color: None,
+            index: None,
+            parent: None,
+            blend: None,
+            motion_blur: None,
+            visible: None,
+            shy: None,
+            collapsed: None,
+            time: 0.,
+        };
+        commit(vec![LayerCommand::Add(Box::new(solid)).into()]);
+        let published = kernel.published("p").unwrap();
+        let (placed, commands) =
+            place_items(&published, &outcome.assets, &[], 1.5, Some(1)).unwrap();
+        assert_eq!(placed.len(), 2);
+        commit(commands);
+        let published = kernel.published("p").unwrap();
+        let open = published.snapshot.open_comp();
+        let layers =
+            pm_kernel::model::comp_node(published.snapshot.root().unwrap(), open.as_deref())
+                .unwrap()
+                .to_value()
+                .get("layers")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .clone();
+        let ids: Vec<&str> = layers
+            .iter()
+            .map(|l| l.get("id").unwrap().as_str().unwrap())
+            .collect();
+        assert_eq!(
+            ids,
+            ["S", placed[0].as_str(), placed[1].as_str()],
+            "under the solid, A above B"
+        );
+        for layer in &layers[1..] {
+            assert_eq!(layer.get("from").unwrap().as_f64(), Some(1.5));
+        }
+        assert_eq!(
+            place_items(&published, &[], open.as_slice(), 0., None).unwrap_err(),
+            "A composition can't be placed inside itself"
+        );
     }
 
     #[test]
@@ -2336,10 +2515,7 @@ mod tests {
             .unwrap();
         assert_eq!(outcome.imported, ["zebra.png", "apple.png"]);
         assert_eq!(outcome.failed.len(), 2);
-        assert_eq!(
-            outcome.failed[0],
-            ("notes.txt".into(), "Unsupported file".into())
-        );
+        assert_eq!(outcome.failed[0], ("notes.txt".into(), UNSUPPORTED.into()));
         assert_eq!(outcome.failed[1].0, "broken.png");
         let published = f.actor.handle().published("p").unwrap();
         let root = published.snapshot.root().unwrap().to_value();

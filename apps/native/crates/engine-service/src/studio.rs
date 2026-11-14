@@ -72,6 +72,7 @@ impl FreeView {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Preview {
+    Fast,
     #[default]
     Live,
     Refine,
@@ -88,10 +89,11 @@ impl Preview {
     }
     pub fn parse(value: &str) -> Result<Self, String> {
         match value {
+            "fast" => Ok(Self::Fast),
             "live" => Ok(Self::Live),
             "refine" => Ok(Self::Refine),
             "final" => Ok(Self::Final),
-            _ => Err("Studio tier must be live, refine or final".into()),
+            _ => Err("Studio tier must be fast, live, refine or final".into()),
         }
     }
 }
@@ -186,6 +188,7 @@ pub(crate) fn attach_with_camera_fonts_progress(
         .with_camera_for(&request.composition, camera)
         .with_refine_observer(observer);
     let tier = match preview {
+        Preview::Fast => Tier::Fast,
         Preview::Live => Tier::QualityLive,
         Preview::Refine => Tier::QualityRefine { samples: 32 },
         Preview::Final => Tier::Final {
@@ -238,4 +241,16 @@ fn attach_source(renderer: &mut pm_render::Renderer, source: DocumentSource, pre
             ..Default::default()
         },
     );
+}
+
+#[cfg(test)]
+mod preview_tests {
+    use super::Preview;
+    #[test]
+    fn fast_is_a_transient_preview_choice() {
+        assert_eq!(Preview::parse("fast").unwrap(),Preview::Fast);
+        assert_eq!(Preview::parse("live").unwrap(),Preview::Live);
+        assert_eq!(Preview::parse("refine").unwrap(),Preview::Refine);
+        assert_eq!(Preview::parse("final").unwrap(),Preview::Final);
+    }
 }
