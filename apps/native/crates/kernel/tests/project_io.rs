@@ -406,6 +406,38 @@ fn a_file_changed_on_disk_is_never_overwritten() {
     ));
 }
 
+/// A v1 project whose export frame rate nobody chose (30, from when it was
+/// created; its composition is 24 fps): the Export sheet opens it on 24 by
+/// reading alone, so a project nobody exports from at another rate saves
+/// byte-identical, its stored defaults as they were.
+#[test]
+fn an_unchosen_export_rate_saves_byte_identical() {
+    let dir = TempDir::new("export-rate");
+    let project = parse(
+        r##"{"id":"P","name":"Old","compId":"C","w":640,"h":360,"fps":24,"dur":5,"bg":"#000000","assets":{},"comps":{},
+            "exportDefaults":{"format":"mp4","scale":1,"fps":30,"range":"work","quality":"high","mblur":true,"audio":true,"alpha":false},
+            "layers":[]}"##,
+    )
+    .unwrap();
+    let first = dir.path("first.pmv");
+    save_as(&mut DocumentStore::new_untitled(project), &first).unwrap();
+    let mut reopened = open_store(&first);
+    let second = dir.path("second.pmv");
+    save_as(&mut reopened, &second).unwrap();
+    assert_eq!(read(&first), read(&second));
+    let doc = read_container(
+        &std::fs::File::open(&second).unwrap(),
+        ReadOptions::default(),
+    )
+    .unwrap()
+    .document;
+    let defaults = to_canonical_string(project_of(&doc).get("exportDefaults").unwrap());
+    assert!(
+        defaults.contains("\"fps\":30") && !defaults.contains("fpsChosen"),
+        "{defaults}"
+    );
+}
+
 #[test]
 fn touched_but_identical_files_are_still_saved() {
     let dir = TempDir::new("touch");

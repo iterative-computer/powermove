@@ -625,7 +625,7 @@ fn earlier_recipe(inner: &Inner, content: &str, original: &Path) -> Vec<Renditio
 }
 
 /// The FFmpeg pair pm-proxy encodes with.
-fn ffmpeg() -> Option<(PathBuf, PathBuf)> {
+pub(crate) fn ffmpeg() -> Option<(PathBuf, PathBuf)> {
     let pair = |dir: &Path| {
         let (f, p) = (dir.join("ffmpeg"), dir.join("ffprobe"));
         (f.is_file() && p.is_file()).then_some((f, p))
