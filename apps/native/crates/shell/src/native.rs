@@ -310,19 +310,17 @@ pub fn window_backdrop(w: &gpui::Window, t: &Tokens) {
 /// A sidebar's material, `width` wide and `height` tall at the content
 /// view's leading edge: liquid glass on macOS 26 and later (clear style, a
 /// heavy tint of the window colour), the sidebar visual effect before, the
-/// solid window colour under Reduce Transparency. It runs on under the
-/// content sheet's leading corners, so its own rim is hidden and the two
-/// meet in one step.
+/// solid window colour under Reduce Transparency. Its frame is
+/// `sidebar_rect`: every edge of the glass, which draws a light rim, lies
+/// outside the window or under the content sheet.
 fn sidebar_material(
     mtm: MainThreadMarker,
     t: &Tokens,
     width: f32,
     height: f64,
 ) -> Retained<NSView> {
-    let frame = NSRect::new(
-        NSPoint::ZERO,
-        NSSize::new((width + t.metrics.panel_radius + t.space.xs) as f64, height),
-    );
+    let [x, y, w, h] = sidebar_rect(t, width, height);
+    let frame = NSRect::new(NSPoint::new(x, y), NSSize::new(w, h));
     let view = material(mtm, frame, t, Surface::Sidebar);
     if let Ok(glass) = view.clone().downcast::<NSGlassEffectView>() {
         glass.setCornerRadius(0.);
@@ -341,6 +339,22 @@ fn sidebar_material(
     }
     view.setAutoresizingMask(NSAutoresizingMaskOptions::ViewHeightSizable);
     view
+}
+/// The sidebar material's frame in a content view `height` tall (AppKit's
+/// bottom-up points: x, y, width, height). Liquid glass draws a light rim
+/// along each of its edges; the owner saw the top one as a stray line along
+/// the window's top edge, as wide as the sidebar (2026-11-14). So the glass
+/// runs past the window's top, leading and bottom edges, where the window
+/// clips it, and on under the content sheet's leading corners, where the
+/// sheet covers it: no edge of it shows.
+pub fn sidebar_rect(t: &Tokens, width: f32, height: f64) -> [f64; 4] {
+    let beyond = f64::from(t.metrics.panel_radius);
+    [
+        -beyond,
+        -beyond,
+        f64::from(width + t.metrics.panel_radius + t.space.xs) + beyond,
+        height + beyond * 2.,
+    ]
 }
 /// Gives a sheet a new content height. The first time, its top edge is put
 /// where a sheet `tallest` high stands centred in its parent (the most it
@@ -2281,19 +2295,36 @@ impl Host {
                     return event.as_ptr();
                 }
                 if let Some(host) = weak.upgrade() {
-                    let (palette, fields, window, splitter_focus) = {
+                    let (palette, fields, window, splitter_focus, gpui) = {
                         let h = host.borrow();
                         (
                             h.palette.clone(),
                             h.fields.clone(),
                             h.window.clone(),
                             h.splitter_focus,
+                            h.gpui.clone(),
                         )
                     };
                     if matches!(
                         e.r#type(),
                         NSEventType::LeftMouseDown | NSEventType::RightMouseDown
                     ) {
+                        // A press on the window's own content (a timeline, a
+                        // canvas, a list), not on a hosted control, ends the
+                        // editing of a hosted text field: the keyboard comes
+                        // back with it, so ⌘Z and the other shortcuts reach
+                        // the project, not the field a person left.
+                        if e.windowNumber() == window.windowNumber() {
+                            let editing = window.firstResponder().is_some_and(|r| unsafe {
+                                msg_send![&*r, isKindOfClass: NSTextView::class()]
+                            });
+                            let content = window.contentView().and_then(|v| {
+                                v.hitTest(e.locationInWindow())
+                            });
+                            if editing && content.is_some_and(|hit| std::ptr::eq(&*hit, &*gpui)) {
+                                window.makeFirstResponder(Some(&gpui));
+                            }
+                        }
                         for popup in [&palette, &fields] {
                             let mut p = popup.borrow_mut();
                             if p.model.open && e.windowNumber() != p.window.windowNumber() {
@@ -6224,5 +6255,23 @@ fn stray_responder(responder: &NSResponder) -> bool {
         let window: *mut AnyObject = msg_send![&*view, window];
         let hidden: bool = msg_send![&*view, isHiddenOrHasHiddenAncestor];
         window.is_null() || hidden
+    }
+}
+
+#[cfg(test)]
+mod sidebar_rect_tests {
+    use pm_design::{Accessibility, Scheme, Tokens};
+    /// No edge of the sidebar's glass (each drawn with a light rim) shows:
+    /// top, leading and bottom lie outside the window, the trailing one under
+    /// the content sheet, which starts at the sidebar's width.
+    #[test]
+    fn the_sidebar_glass_has_no_edge_inside_the_window() {
+        let t = Tokens::new(Scheme::Dark, Accessibility::default());
+        let (width, height) = (t.metrics.sidebar, 900.);
+        let [x, y, w, h] = super::sidebar_rect(&t, width, height);
+        assert!(x < 0., "leading edge outside: {x}");
+        assert!(y < 0., "bottom edge outside: {y}");
+        assert!(y + h > height, "top edge outside: {}", y + h);
+        assert!(x + w > f64::from(width + t.metrics.panel_radius), "trailing edge under the sheet's corner");
     }
 }
