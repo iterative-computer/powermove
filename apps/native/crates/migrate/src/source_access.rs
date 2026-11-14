@@ -287,6 +287,56 @@ fn resolve_dir(path: &Path, hops: &mut u32) -> PathBuf {
     out
 }
 
+/// How long a briefly refused quarantined file is retried before giving up.
+const QUARANTINE_WAIT: Duration = Duration::from_secs(90);
+/// macOS can refuse (EPERM) to open a downloaded, quarantined file for a while
+/// after first access while it assesses it, then allow it. Such a file is
+/// retried briefly instead of stopping the whole copy. Only files that carry the
+/// quarantine mark wait; everything else answers at once.
+fn open_direct(path: &Path, options: &OpenOptions) -> io::Result<File> {
+    let started = Instant::now();
+    let mut delay = Duration::from_millis(200);
+    loop {
+        match options.open(path) {
+            Err(e)
+                if e.raw_os_error() == Some(libc::EPERM)
+                    && started.elapsed() < QUARANTINE_WAIT
+                    && quarantined(path) =>
+            {
+                std::thread::sleep(delay);
+                delay = (delay * 2).min(Duration::from_secs(5));
+            }
+            result => return result,
+        }
+    }
+}
+/// Lists attribute names only: reading the value can itself be refused.
+#[cfg(target_os = "macos")]
+fn quarantined(path: &Path) -> bool {
+    use std::{ffi::CString, os::unix::ffi::OsStrExt};
+    let Ok(c) = CString::new(path.as_os_str().as_bytes()) else {
+        return false;
+    };
+    let mut names = vec![0u8; 4096];
+    // SAFETY: valid NUL-terminated path and a buffer of the length given.
+    let n = unsafe {
+        libc::listxattr(
+            c.as_ptr(),
+            names.as_mut_ptr().cast(),
+            names.len(),
+            libc::XATTR_NOFOLLOW,
+        )
+    };
+    n > 0
+        && names[..n as usize]
+            .split(|b| *b == 0)
+            .any(|name| name == b"com.apple.quarantine")
+}
+#[cfg(not(target_os = "macos"))]
+fn quarantined(_: &Path) -> bool {
+    false
+}
+
 /// Counts bytes the running step has read once (never its verification passes).
 pub fn add_bytes(n: u64) {
     POLICY.with(|p| {
@@ -357,7 +407,7 @@ pub fn open(path: &Path, options: &OpenOptions) -> io::Result<File> {
         }
     });
     let (root, name, activity, timeout) = match plan {
-        Plan::Direct => return options.open(path),
+        Plan::Direct => return open_direct(path, options),
         Plan::Refuse => return Err(not_reached()),
         Plan::Guarded(root, name, activity, timeout) => (root, name, activity, timeout),
     };

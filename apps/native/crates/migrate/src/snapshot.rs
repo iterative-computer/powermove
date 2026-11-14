@@ -99,7 +99,10 @@ impl Snapshot {
             BTreeMap::new()
         };
         let blob_bytes_before = total(&blob_before)?;
+        // Same-volume APFS copies are clones and share the source's blocks;
+        // a streamed fallback checks space per file before writing.
         let reserve = match policy {
+            BlobCopy::All if blobs.is_some_and(|p| clone_volume(p, &parent)) => 0,
             BlobCopy::All => blob_bytes_before,
             BlobCopy::CloneAll { min_free } | BlobCopy::Deferred { min_free } => {
                 check_capacity_above(fs2::available_space(&parent)?, min_free.max(MIN_FREE), 0)
@@ -110,10 +113,15 @@ impl Snapshot {
                 max_bytes.min(MAX_BLOB_COPY).min(blob_bytes_before)
             }
         };
+        let leveldb_bytes = if clone_volume(leveldb, &parent) {
+            0
+        } else {
+            total(&before)?
+        };
         check_space(
             &parent,
             reserve
-                .checked_add(total(&before)?)
+                .checked_add(leveldb_bytes)
                 .context("snapshot size overflow")?,
         )?;
         fs::create_dir(&target)?;
@@ -487,6 +495,40 @@ fn inventory(root: &Path, recursive: bool) -> Result<BTreeMap<PathBuf, Stamp>> {
     walk(root, root, recursive, &mut out)?;
     Ok(out)
 }
+/// True when a copy from `source` into `destination` (or its nearest existing
+/// ancestor) stays on one APFS volume, so `clonefile` shares blocks instead
+/// of writing new ones. Anything uncertain answers false: count the bytes.
+pub fn clone_volume(source: &Path, destination: &Path) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        use std::{ffi::CString, os::unix::ffi::OsStrExt};
+        let Some(destination) = destination.ancestors().find(|p| p.exists()) else {
+            return false;
+        };
+        let (Ok(a), Ok(b)) = (fs::metadata(source), fs::metadata(destination)) else {
+            return false;
+        };
+        if a.dev() != b.dev() {
+            return false;
+        }
+        let Ok(path) = CString::new(destination.as_os_str().as_bytes()) else {
+            return false;
+        };
+        // SAFETY: zeroed statfs is a valid out-parameter; path is NUL-terminated.
+        let mut fs_info: libc::statfs = unsafe { std::mem::zeroed() };
+        if unsafe { libc::statfs(path.as_ptr(), &mut fs_info) } != 0 {
+            return false;
+        }
+        // SAFETY: the kernel writes a NUL-terminated type name.
+        let name = unsafe { std::ffi::CStr::from_ptr(fs_info.f_fstypename.as_ptr()) };
+        name.to_bytes() == b"apfs"
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (source, destination);
+        false
+    }
+}
 pub(crate) fn check_space(root: &Path, needed: u64) -> Result<()> {
     check_capacity(fs2::available_space(root)?, needed)
 }
@@ -550,6 +592,7 @@ pub(crate) fn copy_verified_length(source: &Path, destination: &Path, size: u64)
     let mut input = open_regular(source)?;
     ensure!(input.metadata()?.len() == size, "source length changed");
     if !try_clone(source, destination)? {
+        check_space(destination.parent().context("copy needs a parent")?, size)?;
         let mut out = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -645,6 +688,25 @@ pub(crate) fn atomic_json(path: &Path, value: &impl Serialize) -> Result<()> {
 #[cfg(test)]
 mod capacity_tests {
     use super::*;
+
+    #[test]
+    fn clone_volume_is_only_claimed_for_one_apfs_volume() {
+        let t = tempfile::tempdir().unwrap();
+        let file = t.path().join("a");
+        fs::write(&file, b"x").unwrap();
+        // macOS temp folders live on the APFS system volume. A destination
+        // not yet created is judged by its nearest existing ancestor.
+        let expected = cfg!(target_os = "macos");
+        assert_eq!(clone_volume(&file, t.path()), expected);
+        assert_eq!(clone_volume(&file, &t.path().join("not/yet")), expected);
+        assert!(!clone_volume(&t.path().join("missing"), t.path()));
+        if cfg!(target_os = "macos") {
+            assert!(
+                !clone_volume(&file, Path::new("/dev")),
+                "devfs is not the source volume"
+            );
+        }
+    }
 
     #[test]
     fn dataless_sources_are_unavailable_even_with_other_file_flags() {

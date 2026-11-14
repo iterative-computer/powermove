@@ -738,3 +738,29 @@ fn content_addressed_main_store_media_migrate_as_verified_originals() {
         original
     );
 }
+
+#[test]
+fn a_leftover_content_named_payload_no_record_names_does_not_stop_the_copy() {
+    let t = private_tempdir();
+    let config = main_profile(&t.path().canonicalize().unwrap());
+    let name = format!("{}.webm", "d".repeat(64));
+    fs::write(
+        config.electron_profile.join("Media Store").join(&name),
+        b"leftover",
+    )
+    .unwrap();
+    let source = files(&config.electron_profile);
+    run(&config, |_| Ok(())).unwrap();
+    assert_eq!(source, files(&config.electron_profile));
+    // Kept with the checkpoint, like everything else the original app had.
+    assert_eq!(
+        fs::read(
+            config
+                .native_profile
+                .join("first-launch-checkpoint/profile/Media Store")
+                .join(&name)
+        )
+        .unwrap(),
+        b"leftover"
+    );
+}

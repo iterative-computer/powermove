@@ -95,9 +95,15 @@ impl Checkpoint {
                 disk::walk(&source.join("IndexedDB"))?,
                 disk::walk(&source.join("Local Storage"))?,
             );
-            let needed = before.keys().try_fold(0u64, |n, p| {
-                Ok::<_, anyhow::Error>(n.saturating_add(fs::metadata(source.join(p))?.len()))
-            })?;
+            // The stage and the later native copy are both clones on the
+            // same APFS volume; only families on another volume cost bytes.
+            let needed = before.iter().fold(0u64, |n, (p, stamp)| {
+                let family = p
+                    .components()
+                    .next()
+                    .map_or(p.as_path(), |c| Path::new(c.as_os_str()));
+                n.saturating_add(disk::copy_cost(&source.join(family), &stage, stamp.size))
+            });
             disk::space(&stage, needed.saturating_mul(2))?;
             let profile = stage.join("profile");
             disk::private_dir(&profile)?;
@@ -132,7 +138,10 @@ impl Checkpoint {
                         let out = PathBuf::from(format!("chromium/media-{}", indexeddb.len()));
                         let bytes =
                             disk::tree_bytes(&dir)?.saturating_add(disk::tree_bytes(&blobs)?);
-                        disk::space(&stage, bytes.saturating_mul(2))?;
+                        disk::space(
+                            &stage,
+                            disk::copy_cost(&dir, &stage, bytes).saturating_mul(2),
+                        )?;
                         Snapshot::capture(
                             &dir,
                             blobs.is_dir().then_some(blobs.as_path()),
@@ -158,7 +167,10 @@ impl Checkpoint {
             let local = source.join("Local Storage/leveldb");
             let local_storage = if local.is_dir() {
                 let out = PathBuf::from("chromium/local-storage");
-                disk::space(&stage, disk::tree_bytes(&local)?)?;
+                disk::space(
+                    &stage,
+                    disk::copy_cost(&local, &stage, disk::tree_bytes(&local)?),
+                )?;
                 Snapshot::capture(&local, None, &stage.join(&out), BlobCopy::All)?;
                 Some(out)
             } else {
@@ -286,13 +298,13 @@ fn inventory(source: &Path) -> Result<BTreeMap<PathBuf, disk::Stamp>> {
         let path = source.join(family);
         if path.is_file() {
             out.extend(
-                disk::walk(&path)?
+                disk::walk_source(&path, &[])?
                     .into_values()
                     .map(|v| (PathBuf::from(family), v)),
             );
         } else {
             out.extend(
-                disk::walk_filtered(
+                disk::walk_source(
                     &path,
                     if *family == "extensions" {
                         &["node_modules", "extensions-build", ".git", ".cache"]
@@ -311,7 +323,7 @@ fn inventory(source: &Path) -> Result<BTreeMap<PathBuf, disk::Stamp>> {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().into_owned();
         if name.starts_with("project-files.json.pending-") && name.ends_with(".json") {
-            for stamp in disk::walk(&entry.path())?.into_values() {
+            for stamp in disk::walk_source(&entry.path(), &[])?.into_values() {
                 out.insert(PathBuf::from(&name), stamp);
             }
         }

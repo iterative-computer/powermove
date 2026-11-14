@@ -255,10 +255,14 @@ pub(crate) fn capture_retry(source: &Path, native: &Path) -> Result<std::path::P
         for family in ["env", "cloud", "agent-provider.json"] {
             let root = source.join(family);
             if root.is_file() {
-                out.extend(disk::walk(&root)?.into_values().map(|s| (family.into(), s)));
+                out.extend(
+                    disk::walk_source(&root, &[])?
+                        .into_values()
+                        .map(|s| (family.into(), s)),
+                );
             } else {
                 out.extend(
-                    disk::walk(&root)?
+                    disk::walk_source(&root, &[])?
                         .into_iter()
                         .map(|(p, s)| (std::path::Path::new(family).join(p), s)),
                 );

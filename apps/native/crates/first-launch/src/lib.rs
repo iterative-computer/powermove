@@ -72,6 +72,26 @@ impl std::fmt::Display for MigrationRequirement {
     }
 }
 impl std::error::Error for MigrationRequirement {}
+/// `Media Store/<64 hex>.<ext>`: how the original app names owned payloads.
+fn leftover_payload(path: &Path) -> bool {
+    let mut parts = path.components();
+    let (Some(first), Some(name), None) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    if first.as_os_str() != "Media Store" {
+        return false;
+    }
+    let name = name.as_os_str().to_string_lossy();
+    let Some((hash, extension)) = name.split_once('.') else {
+        return false;
+    };
+    hash.len() == 64
+        && hash
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        && (1..=8).contains(&extension.len())
+        && extension.bytes().all(|b| b.is_ascii_alphanumeric())
+}
 fn require_supported_media(cp: &Checkpoint, checkpoint_root: &Path) -> Result<()> {
     let paths = cp
         .files
@@ -103,7 +123,14 @@ fn require_supported_media(cp: &Checkpoint, checkpoint_root: &Path) -> Result<()
             admitted.insert(Path::new("Media Store").join(name));
         }
     }
-    if paths.iter().any(|path| !admitted.contains(*path)) {
+    // The original app finds media only through its Index. A content-named
+    // payload no record names is a leftover (an interrupted import, a removed
+    // item): unreachable there too, so it stays preserved in the checkpoint
+    // and is no reason to refuse the library. Anything else unknown still is.
+    if paths
+        .iter()
+        .any(|path| !admitted.contains(*path) && !leftover_payload(path))
+    {
         return Err(MigrationRequirement::MainFileMediaAdapter.into());
     }
     Ok(())
@@ -686,10 +713,13 @@ fn media(
 ) -> Result<Pass> {
     let disk_records =
         pm_native_migrate::library_media::read_index(&checkpoint_root.join("profile/Media Store"))?;
+    // Captured payloads sit in the checkpoint beside `native`; on APFS the
+    // Media Store copy clones them, so only bytes from another volume count.
     let mut needed = 0u64;
     for (_, records) in batches {
         for r in records {
-            needed = needed.saturating_add(r.payload().size);
+            needed =
+                needed.saturating_add(disk::copy_cost(checkpoint_root, native, r.payload().size));
         }
     }
     // Disk space is conservative; the bar counts only what will be read: every
@@ -713,7 +743,7 @@ fn media(
             && p.is_file()
         {
             let size = fs::metadata(p)?.len();
-            needed = needed.saturating_add(size);
+            needed = needed.saturating_add(disk::copy_cost(p, native, size));
             let stands_in = captured(&r.key) || r.legacy_id.as_deref().is_some_and(captured);
             if !stands_in && !r.unreached && !r.poster {
                 expected = expected.saturating_add(size);

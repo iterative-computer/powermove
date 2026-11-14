@@ -804,7 +804,10 @@ fn import_file(root: &Path, source: &Path, size: u64, info: ImportInfo<'_>) -> R
         at,
         expected,
     } = info;
-    check_space(root, size)?;
+    // A same-volume APFS import is a clone; a streamed copy checks space itself.
+    if !crate::snapshot::clone_volume(source, root) {
+        check_space(root, size)?;
+    }
     let (hash, read_size) = hash_file_counted(source)?;
     ensure!(read_size == size, "source length changed");
     if let Some(expected) = expected {

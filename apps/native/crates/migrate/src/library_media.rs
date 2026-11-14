@@ -201,7 +201,12 @@ pub fn is_resident(path: &Path) -> Result<bool> {
             return Ok(false);
         }
     }
-    ensure!(metadata.is_file(), "source link is not a regular file");
+    // A link that couldn't be resolved to a real file (dangling, or pointing
+    // at a folder) is media that isn't here: the project keeps it offline.
+    if metadata.file_type().is_symlink() {
+        return Ok(false);
+    }
+    ensure!(metadata.is_file(), "source is not a regular file");
     Ok(true)
 }
 

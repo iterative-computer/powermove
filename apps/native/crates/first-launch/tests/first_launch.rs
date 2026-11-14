@@ -306,9 +306,13 @@ fn rejects_overlap_symlink_destination_tampered_checkpoint_and_low_space() {
     assert!(run(&config, |_| Ok(())).is_err());
     let t = tempdir().unwrap();
     let config = profile(t.path());
-    let f = fs::File::create(config.electron_profile.join("Agent State/huge")).unwrap();
-    f.set_len(1_000_000_000_000).unwrap();
-    assert!(format!("{:#}", run(&config, |_| Ok(())).unwrap_err()).contains("6 GiB"));
+    // Up-front space is only demanded for bytes that must be written: on one
+    // APFS volume the copy is a clone, so this check applies off APFS only.
+    if !pm_native_migrate::snapshot::clone_volume(&config.electron_profile, t.path()) {
+        let f = fs::File::create(config.electron_profile.join("Agent State/huge")).unwrap();
+        f.set_len(1_000_000_000_000).unwrap();
+        assert!(format!("{:#}", run(&config, |_| Ok(())).unwrap_err()).contains("6 GiB"));
+    }
 }
 const VECTOR: &str = "djEw521BZIsrMJSAMb+RQ1RKlWAueRfLNPqKVz3YbvlR1wyDW+SU+AhcTt32biud/p0d";
 struct SyntheticSecrets {
@@ -1386,5 +1390,79 @@ fn a_captured_payload_means_its_protected_original_is_never_opened() {
     assert!(
         matches!(result, Outcome::Complete { not_reached: 0, .. }),
         "{result:?}"
+    );
+}
+
+#[test]
+fn agent_work_links_and_special_files_are_left_behind_not_refused() {
+    let t = tempdir().unwrap();
+    let config = profile(t.path());
+    let work = config
+        .electron_profile
+        .join("Agent Workspaces/synthetic/artifacts/run/work");
+    fs::create_dir_all(work.join("venv/bin")).unwrap();
+    fs::write(work.join("notes.txt"), "kept").unwrap();
+    // What a Python venv and a package cache leave behind: relative, absolute,
+    // dangling and profile-internal links, plus a named pipe.
+    symlink("/usr/bin/python3", work.join("venv/bin/python")).unwrap();
+    symlink("python", work.join("venv/bin/python3")).unwrap();
+    symlink(work.join("missing"), work.join("dangling")).unwrap();
+    symlink(
+        config.electron_profile.join("store"),
+        work.join("store-link"),
+    )
+    .unwrap();
+    let fifo = std::ffi::CString::new(work.join("pipe").to_str().unwrap()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+    let result = run(&config, |_| Ok(())).unwrap();
+    assert!(matches!(result, Outcome::Complete { .. }), "{result:?}");
+    let copied = config
+        .native_profile
+        .join("Agent Workspaces/synthetic/artifacts/run/work");
+    assert_eq!(
+        fs::read_to_string(copied.join("notes.txt")).unwrap(),
+        "kept"
+    );
+    for name in [
+        "venv/bin/python",
+        "venv/bin/python3",
+        "dangling",
+        "store-link",
+        "pipe",
+    ] {
+        assert!(
+            fs::symlink_metadata(copied.join(name)).is_err(),
+            "{name} was carried over"
+        );
+    }
+    // Links inside the source are untouched.
+    assert!(
+        fs::symlink_metadata(work.join("venv/bin/python"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+}
+
+#[test]
+fn a_family_moved_behind_a_link_is_read_through_it() {
+    let t = tempdir().unwrap();
+    let config = profile(t.path());
+    let moved = t.path().join("Elsewhere/Agent Tasks");
+    fs::create_dir_all(&moved).unwrap();
+    fs::write(moved.join("task.json"), "{}").unwrap();
+    symlink(&moved, config.electron_profile.join("Agent Tasks")).unwrap();
+    let result = run(&config, |_| Ok(())).unwrap();
+    assert!(matches!(result, Outcome::Complete { .. }), "{result:?}");
+    assert!(
+        config
+            .native_profile
+            .join("Agent Tasks/task.json")
+            .is_file()
+    );
+    assert!(
+        fs::symlink_metadata(config.native_profile.join("Agent Tasks"))
+            .unwrap()
+            .is_dir()
     );
 }

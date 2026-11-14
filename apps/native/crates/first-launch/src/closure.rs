@@ -316,6 +316,11 @@ fn add(
                 };
             }
         }
+        // A project may name its media through a link (a moved or aliased
+        // folder). Read the file where it really is: reads never follow links.
+        if let Some(path) = &r.source_path {
+            r.source_path = Some(real_media_path(path));
+        }
         if r.before != Availability::Original
             && let Some(path) = r.source_path.clone()
             && pm_native_migrate::library_media::is_resident(&path)?
@@ -396,4 +401,14 @@ fn matches_original(path: &Path, r: &Reference) -> Result<bool> {
         return Ok(fingerprinted(path)? == *fp);
     }
     Ok(false)
+}
+fn real_media_path(path: &Path) -> std::path::PathBuf {
+    match std::fs::symlink_metadata(path) {
+        Ok(m) if m.file_type().is_symlink() => path
+            .canonicalize()
+            .ok()
+            .filter(|real| real.is_file())
+            .unwrap_or_else(|| path.to_path_buf()),
+        _ => path.to_path_buf(),
+    }
 }

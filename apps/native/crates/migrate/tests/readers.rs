@@ -186,13 +186,17 @@ fn snapshot_rejects_symlinks_overlapping_output_and_insufficient_space() {
         "symlink",
     );
     fs::remove_file(source.join("unsafe.log")).unwrap();
-    let f = fs::File::create(source.join("999999.log")).unwrap();
-    f.set_len(1_000_000_000_000).unwrap();
-    assert_error(
-        Snapshot::capture(&source, None, &t.path().join("space"), BlobCopy::All),
-        "free space",
-    );
-    assert!(!t.path().join("space").exists());
+    // Space is demanded up front only for bytes a copy must write: on one APFS
+    // volume the snapshot is a clone, so this check applies off APFS only.
+    if !pm_native_migrate::snapshot::clone_volume(&source, t.path()) {
+        let f = fs::File::create(source.join("999999.log")).unwrap();
+        f.set_len(1_000_000_000_000).unwrap();
+        assert_error(
+            Snapshot::capture(&source, None, &t.path().join("space"), BlobCopy::All),
+            "free space",
+        );
+        assert!(!t.path().join("space").exists());
+    }
 }
 #[test]
 fn unknown_structured_values_and_versions_fail_closed() {
