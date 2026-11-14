@@ -566,23 +566,30 @@ pub(crate) fn adopt_electron_rendering(project: &mut Value, legacy_container: bo
         return;
     };
     for (_, asset) in assets.iter_mut() {
-        let Some(asset) = asset.as_object_mut() else {
-            continue;
-        };
-        if asset.get("kind").and_then(Value::as_str) == Some("video")
-            && !asset.contains_key("videoColor")
-            // New native imports write timing:2. Older Electron PMV4 files
-            // have the same container version as native, so the asset's own
-            // legacy timing provenance identifies their preview reading.
-            && (legacy_container
-                || !asset.contains_key("timing")
-                    && asset
-                        .get("interpret")
-                        .and_then(Value::as_object)
-                        .is_none_or(|p| p.is_empty()))
-        {
-            asset.insert("videoColor", Value::from("electron"));
-        }
+        adopt_electron_asset(asset, legacy_container);
+    }
+}
+
+/// One asset record as [`adopt_electron_rendering`] leaves it: a v1 video
+/// asset gains `videoColor: "electron"`. Also applied to the asset records
+/// an imported Undo history restores (`History::import`).
+pub(crate) fn adopt_electron_asset(asset: &mut Value, legacy_container: bool) {
+    let Some(asset) = asset.as_object_mut() else {
+        return;
+    };
+    if asset.get("kind").and_then(Value::as_str) == Some("video")
+        && !asset.contains_key("videoColor")
+        // New native imports write timing:2. Older Electron PMV4 files
+        // have the same container version as native, so the asset's own
+        // legacy timing provenance identifies their preview reading.
+        && (legacy_container
+            || !asset.contains_key("timing")
+                && asset
+                    .get("interpret")
+                    .and_then(Value::as_object)
+                    .is_none_or(|p| p.is_empty()))
+    {
+        asset.insert("videoColor", Value::from("electron"));
     }
 }
 
