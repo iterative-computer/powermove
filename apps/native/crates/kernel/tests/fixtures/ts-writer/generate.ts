@@ -7,7 +7,7 @@
 //     apps/desktop/src/main/file-upload.ts apps/desktop/src/main/read-retry.ts \
 //     apps/desktop/src/shared/project-incremental.ts apps/desktop/src/shared/sha256.ts \
 //     | tar -x -C /tmp/pm-main-src
-//   bun apps/native/crates/core/tests/fixtures/ts-writer/generate.ts /tmp/pm-main-src
+//   bun apps/native/crates/kernel/tests/fixtures/ts-writer/generate.ts /tmp/pm-main-src
 //
 // Every object below has its keys in canonical (code unit) order, so
 // `JSON.stringify` writes exactly the canonical serialization the Rust writer
@@ -33,7 +33,8 @@ const project = (opacity: number) => sorted({
     { id: 'a', type: 'image', name: 'Still', from: 0, dur: 2, on: true, lock: false, d: { asset: 'img' }, p: { opacity: channel(opacity) } },
     { id: 'b', type: 'video', name: 'Clip', from: 0.5, dur: 1.5, on: true, lock: false, d: { asset: 'clip' }, p: { opacity: channel(100) } },
   ],
-  assets: { img: { id: 'img', kind: 'image', name: 'still.png' }, clip: { id: 'clip', kind: 'video', name: 'clip.webm' } },
+  // The clip as V2 opens a v1 video asset: with the v1 video reading marker.
+  assets: { img: { id: 'img', kind: 'image', name: 'still.png' }, clip: { id: 'clip', kind: 'video', name: 'clip.webm', videoColor: 'electron' } },
   comps: { C2: { id: 'C2', name: 'Other', w: 32, h: 32, fps: 30, dur: 1, layers: [], futureCompField: { x: 1 } } },
   markers: [], work: [0, 2],
   futureField: { keep: ['me', 1.5, null, true] },

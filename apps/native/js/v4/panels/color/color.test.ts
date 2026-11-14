@@ -22,8 +22,33 @@ const operations = [
     .matchAll(/"([a-z_]+)"/g),
 ].map((m) => m[1]);
 
+// The native tools served beside main's catalog, and the agent's commands.
+const native = JSON.parse(
+  readFileSync(
+    new URL(
+      "../../../../crates/mcp/fixtures/native-tools.json",
+      import.meta.url,
+    ),
+    "utf8",
+  ),
+) as { name: string }[];
+const agentCommands = [
+  ...readFileSync(
+    new URL("../../../../crates/app/src/agent_commands.rs", import.meta.url),
+    "utf8",
+  )
+    .split("pub const AGENT")[1]
+    .split("];")[0]
+    .matchAll(/\(\s*"([A-Za-z.]+)"/g),
+].map((m) => m[1]);
+
 test("every panel action names agent tools and operations that exist", () => {
-  const tools = new Set(catalog.tools.map((t) => t.name));
+  const tools = new Set([
+    ...catalog.tools.map((t) => t.name),
+    ...native.map((t) => t.name),
+    ...agentCommands,
+  ]);
+  expect(agentCommands).toContain("color.importCdlFile");
   expect(operations).toContain("add_effect");
   for (const { action, agent } of ACTIONS) {
     expect(agent.length).toBeGreaterThan(0);

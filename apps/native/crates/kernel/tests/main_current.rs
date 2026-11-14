@@ -58,6 +58,37 @@ fn diff(a: &Value, b: &Value, at: &str, out: &mut Vec<String>) {
     }
 }
 
+/// `doc` as V2 opens it: a video asset without `timing` or an Interpret
+/// Footage choice is a v1 one and keeps the video reading v1 showed, so
+/// opening adds `videoColor: "electron"` to it. That marker is the one member
+/// a V2 save of an untouched main project adds.
+fn as_opened(doc: &Value) -> Value {
+    let mut doc = doc.clone();
+    let assets = doc
+        .as_object_mut()
+        .and_then(|d| d.get_mut("proj"))
+        .and_then(Value::as_object_mut)
+        .and_then(|p| p.get_mut("assets"))
+        .and_then(Value::as_object_mut);
+    for (_, asset) in assets.into_iter().flat_map(|a| a.iter_mut()) {
+        let Some(asset) = asset.as_object_mut() else {
+            continue;
+        };
+        let chosen = asset
+            .get("interpret")
+            .and_then(Value::as_object)
+            .is_some_and(|i| !i.is_empty());
+        if asset.get("kind").and_then(Value::as_str) == Some("video")
+            && asset.get("timing").is_none()
+            && asset.get("videoColor").is_none()
+            && !chosen
+        {
+            asset.insert("videoColor", Value::from("electron"));
+        }
+    }
+    doc
+}
+
 fn layer_index(doc: &Value, name: &str) -> usize {
     doc.get("proj")
         .unwrap()
@@ -138,12 +169,14 @@ fn main_saved_project_opens_and_an_untouched_save_keeps_every_document_value() {
     let output = dir.path("saved.pmv");
     save_as(&mut store, &output);
     let saved = document(&output);
+    let opened = as_opened(&original);
+    assert_ne!(opened, original, "the fixture has a v1 video asset");
     let mut changed = vec![];
-    diff(&original, &saved, "", &mut changed);
+    diff(&opened, &saved, "", &mut changed);
     assert!(changed.is_empty(), "untouched save changed {changed:?}");
     // V2 writes canonical JSON (sorted keys); every number and string is
     // otherwise identical to main's bytes. Main's reader re-checks it below.
-    assert_eq!(to_canonical_string(&saved), to_canonical_string(&original));
+    assert_eq!(to_canonical_string(&saved), to_canonical_string(&opened));
     let reopened = open_project(&output, OpenOptions { verify_media: true }).unwrap();
     assert_eq!(reopened.file.media.len(), 1);
 }
@@ -185,7 +218,7 @@ fn an_edit_with_undo_and_redo_saves_and_reopens_changing_only_the_edited_field()
     let after = document(&edited);
     let mut changed = vec![];
     diff(
-        original.get("proj").unwrap(),
+        as_opened(&original).get("proj").unwrap(),
         after.get("proj").unwrap(),
         "proj",
         &mut changed,
@@ -220,7 +253,7 @@ fn an_edit_with_undo_and_redo_saves_and_reopens_changing_only_the_edited_field()
     let back = document(&undone);
     let mut changed = vec![];
     diff(
-        original.get("proj").unwrap(),
+        as_opened(&original).get("proj").unwrap(),
         back.get("proj").unwrap(),
         "proj",
         &mut changed,

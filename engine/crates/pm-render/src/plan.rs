@@ -1819,10 +1819,9 @@ fn native_content_quad<'d>(
             let mut path = path;
             // Drawn from a proxy or optimized copy: the interpretation as
             // the copy carries it, or the original when it can't.
-            if let Some(original) = b.assets.original(&asset_id).filter(|o| *o != path)
-                && let Some(i) = interpret.take()
-            {
-                interpret = match crate::footage::for_copy(i, &original) {
+            if let Some(original) = b.assets.original(&asset_id).filter(|o| *o != path) {
+                let i = interpret.take().unwrap_or_default();
+                interpret = match crate::footage::for_copy(i, &original, sequence) {
                     crate::footage::CopyReading::Copy(i) => i,
                     crate::footage::CopyReading::Original(i) => {
                         path = original;
