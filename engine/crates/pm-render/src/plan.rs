@@ -1183,7 +1183,12 @@ fn draw_layer<'d>(
             None => Ok(None),
         };
     }
-    let Some(draw) = layer_draw(scope, b, layer, time, width, height, scale, alpha)? else {
+    let padding = effects
+        .as_ref()
+        .map_or(composite::effects::Padding::NONE, |e| e.padding);
+    let Some(draw) =
+        layer_draw_with_padding(scope, b, layer, time, width, height, scale, alpha, padding)?
+    else {
         return Ok(None);
     };
     if slow {
@@ -1205,7 +1210,30 @@ pub(crate) fn layer_draw<'d>(
     scale: (f64, f64),
     alpha: f64,
 ) -> JsResult<Option<Draw>> {
-    let Some(quad) = content_quad(scope, b, layer, time, width, height, scale)? else {
+    // Shutter samples paint into the same bounded target individually. Source
+    // captures, mattes, nested precomps and effects without a finite contract
+    // retain their existing source until graph-wide ROI propagation is added.
+    let padding = if scope.has_renderable_effects(layer, time)? {
+        composite::effects::Padding::Full
+    } else {
+        composite::effects::Padding::NONE
+    };
+    layer_draw_with_padding(scope, b, layer, time, width, height, scale, alpha, padding)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn layer_draw_with_padding<'d>(
+    scope: &mut Scope<'_, 'd>,
+    b: &mut Build<'_>,
+    layer: &'d Node,
+    time: f64,
+    width: u32,
+    height: u32,
+    scale: (f64, f64),
+    alpha: f64,
+    padding: composite::effects::Padding,
+) -> JsResult<Option<Draw>> {
+    let Some(mut quad) = content_quad(scope, b, layer, time, width, height, scale)? else {
         return Ok(None);
     };
     if matches!(quad, Quad::Screen { .. })
@@ -1219,6 +1247,70 @@ pub(crate) fn layer_draw<'d>(
         });
     }
     let world = b.world(scope, layer, time, scale)?;
+    // Clip the retained texels on the original local grid, after the size
+    // anchor has been applied. Every shutter sample and intermediate pass
+    // reaches here with its own transform and actual target dimensions.
+    if !scope.is_3d_layer(layer)?
+        && b.precomp_depth == 0
+        && b.source_raster.is_none()
+        && b.forced_on.is_none()
+        && b.material.is_none()
+        && !js::flag(layer, "matteSource")
+        && let composite::effects::Padding::Pixels(margin) = padding
+    {
+        if let Quad::Texture {
+            source,
+            w,
+            h,
+            ax,
+            ay,
+            ..
+        } = &mut quad
+        {
+            let old = match source {
+                Source::Vector(v) => match &**v {
+                    crate::vector::VectorSource::Scene { rect, .. } => Some(*rect),
+                    _ => None,
+                },
+                Source::Text(p) => Some(pm_vector::render::scene::PixelRect::new(
+                    p.crop[0] as i32,
+                    p.crop[1] as i32,
+                    p.width(),
+                    p.height(),
+                )),
+                _ => None,
+            };
+            if let Some(old) = old {
+                let sx = *w / old.width as f64;
+                let sy = *h / old.height as f64;
+                let map = kurbo::Affine::new(world)
+                    * kurbo::Affine::translate((-*ax, -*ay))
+                    * kurbo::Affine::scale_non_uniform(sx, sy)
+                    * kurbo::Affine::translate((-(old.x as f64), -(old.y as f64)));
+                let Some(rect) = crate::raster_roi::visible(
+                    old,
+                    map,
+                    kurbo::Rect::new(0., 0., width as f64, height as f64)
+                        .inflate(margin as f64, margin as f64),
+                ) else {
+                    return Ok(None);
+                };
+                *ax -= (rect.x - old.x) as f64 * sx;
+                *ay -= (rect.y - old.y) as f64 * sy;
+                *w = rect.width as f64 * sx;
+                *h = rect.height as f64 * sy;
+                match source {
+                    Source::Vector(v) => {
+                        if let crate::vector::VectorSource::Scene { rect: r, .. } = &mut **v {
+                            *r = rect;
+                        }
+                    }
+                    Source::Text(p) => p.retain_rect(rect),
+                    _ => unreachable!(),
+                }
+            }
+        }
+    }
     let id = js::layer_id(layer);
     let full = [f64::from(width), 0.0, 0.0, f64::from(height), 0.0, 0.0];
     let ty = js::layer_type(layer);
