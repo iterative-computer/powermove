@@ -682,8 +682,10 @@ pub(crate) fn comp_pass<'d>(
     // final output; in a viewer frame, one whose shader addresses physical
     // texels) is drawn whole at the composition's size and density, then
     // resampled to its output, so an export's look never depends on its size.
-    // Electron extension effects use the output raster directly and do not
-    // request this replay. A window onto the composition keeps its density.
+    // Electron extension effects use the output raster directly in final
+    // output and do not request this replay; in a viewer frame one that
+    // addresses physical texels does. A window onto the composition keeps
+    // its density.
     if view.is_none()
         && ((scale.0 - 1.0).abs() > 1e-9 || (scale.1 - 1.0).abs() > 1e-9)
         && let Some(host) = b.effects
@@ -941,6 +943,7 @@ fn draw_layer<'d>(
             height,
             scale,
             time,
+            final_output: b.final_output,
         };
         match b.effects {
             None => {
@@ -1004,6 +1007,7 @@ fn draw_layer<'d>(
                 height,
                 scale,
                 time,
+                final_output: b.final_output,
             };
             match host.prepare_transition(scope, layer, frame)? {
                 Ok(t) => t,
@@ -3076,6 +3080,7 @@ fn source_plan<'d>(
                 height,
                 scale,
                 time,
+                final_output: b.final_output,
             },
             prefix,
             raster,
@@ -3430,6 +3435,7 @@ fn effect_inputs_once<'d>(
                         height,
                         scale,
                         time: at,
+                        final_output: b.final_output,
                     },
                     request.prefix,
                 )? {
