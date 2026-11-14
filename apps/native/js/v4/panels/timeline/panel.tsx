@@ -451,6 +451,10 @@ function Layer({
           />
         ) : (
           <text
+            // A stable identity: the double-click that renames lands after
+            // the first click's selection has re-rendered the row, and the
+            // host carries an event to the newest tree only by its id.
+            id={`timeline:name:${row.id}`}
             title={row.label}
             style={{
               ...text,

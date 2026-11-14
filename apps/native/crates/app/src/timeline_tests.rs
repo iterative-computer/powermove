@@ -1305,11 +1305,7 @@ fn clicking_a_layer_name_selects_it_and_a_double_click_renames(cx: &mut TestAppC
             .layers()
             .to_vec()
     };
-    let text = s
-        .view
-        .read_with(&s.vcx, |v, _| v.id_of_text("Layer 1"))
-        .unwrap();
-    let name = bounds(&mut s.vcx, &format!("n{text}")).center();
+    let name = bounds(&mut s.vcx, r#"timeline:name:["layer","l1"]"#).center();
     s.vcx.simulate_mouse_move(name, None, Modifiers::none());
     s.vcx.simulate_click(name, Modifiers::none());
     s.idle(cx);
@@ -1338,6 +1334,51 @@ fn clicking_a_layer_name_selects_it_and_a_double_click_renames(cx: &mut TestAppC
         "the double-click opens the name field"
     );
     assert_eq!(selected(&s), ["l1".to_string()]);
+}
+/// A double-click on an unselected layer's name, as a person makes it: the
+/// second click lands before the first one's selection has re-rendered the
+/// row, and still opens the name field, whose name typed is the layer's.
+/// (That the field has the keyboard needs AppKit's text view: checked by
+/// hand.)
+#[gpui::test]
+fn a_double_click_on_an_unselected_name_opens_its_field(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    let name = bounds(&mut s.vcx, r#"timeline:name:["layer","l1"]"#).center();
+    s.vcx.simulate_mouse_move(name, None, Modifiers::none());
+    for click_count in [1, 2] {
+        s.vcx.simulate_event(MouseDownEvent {
+            button: MouseButton::Left,
+            position: name,
+            modifiers: Modifiers::none(),
+            click_count,
+            first_mouse: false,
+        });
+        s.vcx.simulate_event(MouseUpEvent {
+            button: MouseButton::Left,
+            position: name,
+            modifiers: Modifiers::none(),
+            click_count,
+        });
+    }
+    s.idle(cx);
+    s.idle(cx);
+    let field = s
+        .view
+        .read_with(&s.vcx, |v, _| v.cancellable_field())
+        .expect("the name field opened");
+    s.view
+        .update(&mut s.vcx, |v, cx| v.change(field, serde_json::json!("Logo"), cx));
+    s.idle(cx);
+    s.idle(cx);
+    let p = s.rig.kernel.published(PROJECT).unwrap();
+    let names: Vec<_> = pm_kernel::model::list_layers(p.snapshot.root().unwrap(), None)
+        .into_iter()
+        .map(|l| (l.id, l.name))
+        .collect();
+    assert!(
+        names.contains(&("l1".to_owned(), "Logo".to_owned())),
+        "the typed name is the layer's: {names:?}"
+    );
 }
 /// Key ids may repeat across layers: pressing the earlier layer's key selects
 /// that layer and that key, never the later layer holding the same id.
