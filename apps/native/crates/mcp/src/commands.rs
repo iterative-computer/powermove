@@ -184,6 +184,8 @@ fn comp_patch(v: &Value) -> Result<CompPatch> {
         "shutter",
         "workArea",
         "colorDepth",
+        "output",
+        "masteringPeak",
         "audioGain",
     ];
     let o = v
@@ -228,7 +230,15 @@ fn comp_patch(v: &Value) -> Result<CompPatch> {
         work_area,
         color_depth: v["colorDepth"].as_u64().map(|v| v as u32),
         hdr: None,
-        mastering_peak: None,
+        mastering_peak: num("masteringPeak")?,
+        output: v
+            .get("output")
+            .map(|o| {
+                o.as_str()
+                    .and_then(pm_kernel::commands::comps::ProjectOutput::parse)
+                    .ok_or_else(|| Error::invalid("output must be sdr, pq or hlg"))
+            })
+            .transpose()?,
         audio_gain: num("audioGain")?,
         export_defaults: None,
     })

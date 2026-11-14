@@ -436,6 +436,7 @@ pub mod test_sinks {
                 width,
                 height,
                 planes,
+                light: None,
             });
         }
         Ok(frames)

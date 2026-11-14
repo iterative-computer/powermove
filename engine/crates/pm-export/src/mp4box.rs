@@ -323,15 +323,45 @@ impl Movie {
 /// without one, and players then read an unknown layout. The movie's `moov`
 /// must be its last box, so no chunk offset moves.
 pub fn add_channel_layout(path: &Path, channels: u16) -> Result<(), Error> {
-    use std::io::{Read, Seek, SeekFrom, Write};
-    let bad = |m: &str| Error::Verify(format!("container: {m}"));
-    let io = |e: std::io::Error| Error::Io(format!("{}: {e}", path.display()));
     // kAudioChannelLayoutTag_Mono (100 << 16) | 1, _Stereo (101 << 16) | 2.
     let tag: u32 = match channels {
         1 => (100 << 16) | 1,
         2 => (101 << 16) | 2,
         _ => return Ok(()),
     };
+    let mut payload = Vec::with_capacity(16);
+    payload.extend_from_slice(&0u32.to_be_bytes()); // version and flags
+    payload.extend_from_slice(&tag.to_be_bytes());
+    payload.extend_from_slice(&[0u8; 8]); // bitmap, no channel descriptions
+    add_to_sample_entry(path, b"soun", None, *b"chan", &payload)
+}
+
+/// Writes the `clli` (content light level) box of a finished file's video
+/// sample entry: MaxCLL and MaxFALL measured from its frames, over the one
+/// the encoder wrote (in place: a faststart MP4's chunks do not move), or
+/// added to a movie whose `moov` is its last box.
+pub fn set_content_light(path: &Path, max_cll: u16, max_fall: u16) -> Result<(), Error> {
+    let mut payload = max_cll.to_be_bytes().to_vec();
+    payload.extend_from_slice(&max_fall.to_be_bytes());
+    add_to_sample_entry(path, b"vide", Some(78), *b"clli", &payload)
+}
+
+/// Adds box `kind` holding `payload` to the first sample entry of the track
+/// whose handler is `handler`, growing every box above it. With `fields`
+/// (the entry's own fields' length, 78 for video) a box of that kind
+/// already there is written over; without (a sound entry's fields vary by
+/// version) an entry that holds the kind anywhere is left as it is. The
+/// movie box must be the file's last, so no chunk offset moves.
+fn add_to_sample_entry(
+    path: &Path,
+    handler: &[u8; 4],
+    fields: Option<usize>,
+    kind: [u8; 4],
+    payload: &[u8],
+) -> Result<(), Error> {
+    use std::io::{Read, Seek, SeekFrom, Write};
+    let bad = |m: &str| Error::Verify(format!("container: {m}"));
+    let io = |e: std::io::Error| Error::Io(format!("{}: {e}", path.display()));
     let mut file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -353,13 +383,13 @@ pub fn add_channel_layout(path: &Path, channels: u16) -> Result<(), Error> {
         at += size;
     }
     let (at, size) = moov.ok_or_else(|| bad("no moov box"))?;
-    if at + size != len || size > 1 << 30 {
-        return Err(bad("moov is not the movie's last box"));
+    if size > 1 << 30 {
+        return Err(bad("the movie box is too large"));
     }
     let mut d = vec![0u8; size as usize];
     file.seek(SeekFrom::Start(at)).map_err(io)?;
     file.read_exact(&mut d).map_err(io)?;
-    // The boxes from `moov` down to the sound sample entry, each grown by `chan`.
+    // The boxes from `moov` down to the sample entry, each grown by the box.
     let mut chain = vec![BoxRef {
         kind: *b"moov",
         start: 8,
@@ -372,40 +402,52 @@ pub fn add_channel_layout(path: &Path, channels: u16) -> Result<(), Error> {
             find(&children(&d, t.start, t.end), b"mdia")
                 .and_then(|m| find(&children(&d, m.start, m.end), b"hdlr"))
                 .and_then(|h| d.get(h.start + 8..h.start + 12))
-                == Some(b"soun".as_slice())
+                == Some(handler.as_slice())
         })
-        .ok_or_else(|| bad("no sound track"))?;
+        .ok_or_else(|| bad("no such track"))?;
     chain.push(trak);
     for kind in [b"mdia", b"minf", b"stbl", b"stsd"] {
         let parent = chain[chain.len() - 1];
         chain.push(
             find(&children(&d, parent.start, parent.end), kind)
-                .ok_or_else(|| bad("malformed sound track"))?,
+                .ok_or_else(|| bad("malformed track"))?,
         );
     }
     let stsd = chain[chain.len() - 1];
     let entry = *children(&d, stsd.start + 8, stsd.end)
         .first()
-        .ok_or_else(|| bad("no sound sample entry"))?;
-    if d[entry.start..entry.end].windows(4).any(|w| w == b"chan") {
-        return Ok(());
-    }
-    chain.push(entry);
-    let mut chan = Vec::with_capacity(24);
-    chan.extend_from_slice(&24u32.to_be_bytes());
-    chan.extend_from_slice(b"chan");
-    chan.extend_from_slice(&0u32.to_be_bytes()); // version and flags
-    chan.extend_from_slice(&tag.to_be_bytes());
-    chan.extend_from_slice(&[0u8; 8]); // bitmap, no channel descriptions
-    for b in &chain {
-        let header = b.start - 8;
-        if be32(&d, header) != Some((b.end - header) as u32) {
-            return Err(bad("unexpected 64-bit box size in the sound track"));
+        .ok_or_else(|| bad("no sample entry"))?;
+    let boxed = 8 + payload.len();
+    let old = match fields {
+        Some(fields) => find(&children(&d, entry.start + fields, entry.end), &kind),
+        None if d[entry.start..entry.end].windows(4).any(|w| w == kind) => return Ok(()),
+        None => None,
+    };
+    if let Some(old) = old {
+        if old.end - old.start != payload.len() {
+            return Err(bad("a box of another size is already there"));
         }
-        let grown = (b.end - header + chan.len()) as u32;
-        d[header..header + 4].copy_from_slice(&grown.to_be_bytes());
+        d[old.start..old.end].copy_from_slice(payload);
+    } else {
+        // Growing the movie box moves whatever follows it.
+        if at + size != len {
+            return Err(bad("moov is not the movie's last box"));
+        }
+        chain.push(entry);
+        for b in &chain {
+            let header = b.start - 8;
+            if be32(&d, header) != Some((b.end - header) as u32) {
+                return Err(bad("unexpected 64-bit box size"));
+            }
+            let grown = (b.end - header + boxed) as u32;
+            d[header..header + 4].copy_from_slice(&grown.to_be_bytes());
+        }
+        let mut new = Vec::with_capacity(boxed);
+        new.extend_from_slice(&(boxed as u32).to_be_bytes());
+        new.extend_from_slice(&kind);
+        new.extend_from_slice(payload);
+        d.splice(entry.end..entry.end, new);
     }
-    d.splice(entry.end..entry.end, chan);
     file.seek(SeekFrom::Start(at)).map_err(io)?;
     file.write_all(&d).map_err(io)?;
     file.sync_all().map_err(io)

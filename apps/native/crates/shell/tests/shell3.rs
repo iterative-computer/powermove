@@ -62,9 +62,22 @@ fn drop_previews_cover_only_the_drop_zone() {
     assert!(matches!(tab.target, DropTarget::Split { .. }));
     assert!(tab.rect.h < viewer.h / 2.);
     let half = l
-        .drop_target(&g, BOUNDS, viewer.x + 40., viewer.y + viewer.h * 0.7, &t)
+        .drop_target(
+            &g,
+            BOUNDS,
+            viewer.x + viewer.w / 2.,
+            viewer.y + viewer.h * 0.9,
+            &t,
+        )
         .unwrap();
+    assert!(matches!(half.target, DropTarget::Split { .. }));
     assert!(half.rect.h < viewer.h / 2. + 0.5);
+    // Near its side, beside it: half its width.
+    let side = l
+        .drop_target(&g, BOUNDS, viewer.x + 40., viewer.y + viewer.h * 0.6, &t)
+        .unwrap();
+    assert!(matches!(side.target, DropTarget::Beside { after: false, .. }));
+    assert!(side.rect.w < viewer.w / 2. + 0.5);
 }
 
 #[test]

@@ -768,6 +768,7 @@ fn frame_input(f: &ff::AVFrame, alpha: bool) -> Result<EncoderInput, Error> {
         width: w as u32,
         height: h as u32,
         planes,
+        light: None,
     })
 }
 
@@ -902,6 +903,7 @@ fn frame_blocks(
             width: region.width,
             height: region.height,
             planes,
+            light: None,
         };
         let means_started = times.as_ref().map(|_| Instant::now());
         let mut block = verify::block_means(&crop, frame)
@@ -1212,6 +1214,7 @@ pub fn verify_webm(
         picture,
         notes,
         dolby_vision: None,
+        content_light: None,
         hardware_encoder: Some(false),
         bytes: 0,
         mix: None,

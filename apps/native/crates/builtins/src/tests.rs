@@ -934,6 +934,43 @@ fn render_presets_use_the_legacy_actor_key_and_archive_same_name_records() {
 }
 
 #[test]
+fn the_export_sheet_opens_on_the_projects_output() {
+    let actor = actor();
+    let kernel = actor.handle();
+    let backend = |realm: &str, panel: &str| {
+        let identity = pm_surface::host_api::Identity {
+            realm: realm.into(),
+            generation: 1,
+            project: "synthetic".into(),
+        };
+        data::Backend::new(kernel.clone(), identity, panel, false).unwrap()
+    };
+    let opened = |realm: &str| {
+        let mut export = backend(realm, "export");
+        let snapshot = export.export_snapshot().unwrap();
+        // Absent is SDR (options leave the default out).
+        let range = snapshot["options"]["dynamicRange"].as_str().unwrap_or("sdr");
+        (json!(range), snapshot["project"]["hdr"].clone())
+    };
+    assert_eq!(opened("export-sdr"), (json!("sdr"), json!(false)));
+    let mut settings = backend("settings-output", "settings");
+    for (choice, realm) in [("hlg", "export-hlg"), ("pq", "export-pq")] {
+        let revision = settings.settings_snapshot().unwrap()["revision"].clone();
+        let models::NativeCommand::Kernel(request) = settings
+            .native_command(
+                "panel.settings",
+                &json!({"revision":revision,"action":{"type":"write","id":"project.output","value":choice}}),
+            )
+            .unwrap()
+        else {
+            panic!("actor request")
+        };
+        kernel.call("synthetic", request).wait().unwrap().unwrap();
+        assert_eq!(opened(realm), (json!(choice), json!(true)), "{choice}");
+    }
+}
+
+#[test]
 fn running_export_refuses_replacement_or_reset_without_mutating_its_run() {
     let actor = actor();
     let identity = pm_surface::host_api::Identity {
@@ -1099,11 +1136,12 @@ fn select_layer(kernel: &pm_kernel::KernelHandle, id: &str) {
 }
 
 #[test]
-fn the_hdr_setting_reaches_the_kernel_and_unlocks_its_peak() {
+fn the_output_setting_reaches_the_kernel_and_unlocks_its_peak() {
+    use pm_protocol::color::ProjectOutput;
     let actor = actor();
     let kernel = actor.handle();
     let identity = pm_surface::host_api::Identity {
-        realm: "settings-hdr".into(),
+        realm: "settings-output".into(),
         generation: 1,
         project: "synthetic".into(),
     };
@@ -1118,27 +1156,44 @@ fn the_hdr_setting_reaches_the_kernel_and_unlocks_its_peak() {
             .clone()
     };
     let publication = backend.settings_snapshot().unwrap();
-    assert_eq!(row(&publication, "project.hdr")["value"], json!(false));
+    let output = row(&publication, "project.output");
+    assert_eq!(output["value"], json!("sdr"));
+    assert_eq!(output["control"], json!("choice"));
+    assert_eq!(
+        output["options"],
+        json!([{"v":"sdr","label":"SDR Rec. 709"},{"v":"pq","label":"HDR PQ"},{"v":"hlg","label":"HDR HLG"}])
+    );
     assert_eq!(
         row(&publication, "project.masteringPeak")["disabled"],
         json!(true)
     );
-    let models::NativeCommand::Kernel(request) = backend.native_command("panel.settings", &json!({"revision":publication["revision"],"action":{"type":"write","id":"project.hdr","value":true}})).unwrap() else { panic!("actor request") };
-    let ack = kernel.call("synthetic", request).wait().unwrap().unwrap();
-    assert!(!matches!(ack.reply, pm_kernel::Reply::Throw(_)));
-    let root = kernel.published("synthetic").unwrap();
-    let root = root.snapshot.root().unwrap();
-    assert_eq!(
-        pm_render::composite::project_color(root).unwrap().mode,
-        pm_protocol::color::ColorMode::Hdr
-    );
-    let publication = backend.settings_snapshot().unwrap();
-    assert_eq!(row(&publication, "project.hdr")["value"], json!(true));
-    assert_eq!(
-        row(&publication, "project.masteringPeak")["disabled"],
-        json!(false)
-    );
-    assert_eq!(row(&publication, "project.colorDepth")["value"], json!(32));
+    let mut revision = publication["revision"].clone();
+    for (id, choice) in [
+        ("hlg", ProjectOutput::Hlg),
+        ("pq", ProjectOutput::Pq),
+        ("sdr", ProjectOutput::Sdr),
+    ] {
+        let models::NativeCommand::Kernel(request) = backend.native_command("panel.settings", &json!({"revision":revision,"action":{"type":"write","id":"project.output","value":id}})).unwrap() else { panic!("actor request") };
+        let ack = kernel.call("synthetic", request).wait().unwrap().unwrap();
+        assert!(!matches!(ack.reply, pm_kernel::Reply::Throw(_)));
+        let root = kernel.published("synthetic").unwrap();
+        let root = root.snapshot.root().unwrap();
+        assert_eq!(
+            pm_render::composite::project_color(root).unwrap().output(),
+            choice
+        );
+        let publication = backend.settings_snapshot().unwrap();
+        revision = publication["revision"].clone();
+        assert_eq!(row(&publication, "project.output")["value"], json!(id));
+        assert_eq!(
+            row(&publication, "project.masteringPeak")["disabled"],
+            json!(!choice.hdr())
+        );
+        if choice.hdr() {
+            assert_eq!(row(&publication, "project.colorDepth")["value"], json!(32));
+        }
+    }
+    assert!(backend.native_command("panel.settings", &json!({"revision":revision,"action":{"type":"write","id":"project.output","value":"aces"}})).is_err());
 }
 
 #[test]
@@ -4931,4 +4986,46 @@ fn properties_list_an_imported_models_parts_with_their_own_values() {
     presenter.snapshot(&mut model, 0., false).unwrap();
     let p = publish(&mut presenter);
     assert_eq!(section(&p, "3d.part.1")["focused"], false);
+}
+
+/// Playing, Properties shows a keyframed value at the playhead: the time the
+/// app hands over each display tick (`follow_time`) republishes that panel.
+#[test]
+fn properties_follow_the_playhead_while_playing() {
+    let actor = KernelActor::spawn(KernelConfig::default());
+    let project = pm_model::json::parse(r##"{"id":"synthetic","name":"Synthetic Film","compId":"c","w":640,"h":360,"fps":30,"dur":10,"bg":"#000000","assets":{},"comps":{},"layers":[{"id":"a","type":"shape","name":"Headline","from":0,"dur":10,"on":true,"lock":false,"p":{"opacity":{"v":100,"kf":[{"t":0,"v":0},{"t":10,"v":100}]},"position.x":{"v":320,"kf":[]},"position.y":{"v":180,"kf":[]}},"d":{"w":100,"h":100},"fx":[]}]}"##).unwrap();
+    let kernel = actor.handle();
+    kernel
+        .open("synthetic", OpenSource::Untitled(project))
+        .wait()
+        .unwrap()
+        .unwrap();
+    select_layer(&kernel, "a");
+    let mut panels = Builtins::new(kernel.clone(), "synthetic", || {}).unwrap();
+    panels.update_facts(json!({"time":0,"playing":false,"stage":[640.,360.]}));
+    finish(panels.mount("inspector").unwrap());
+    let opacity = |panels: &Builtins| {
+        let publication = panels.take_publications().pop()?;
+        publication
+            .surface
+            .nodes()
+            .values()
+            .find(|n| n.props.get("id").and_then(Value::as_str) == Some("value:opacity:0"))
+            .map(|n| Value::Object(n.props.clone()))
+    };
+    let first = opacity(&panels).expect("an opacity field");
+    assert!(first.to_string().contains("\"value\":0"), "{first}");
+    for time in [2.5, 5.] {
+        finish(
+            panels
+                .follow_time("inspector", time, true)
+                .unwrap()
+                .unwrap(),
+        );
+        let shown = opacity(&panels).expect("Properties published while playing");
+        let wanted = format!("\"value\":{}", time * 10.);
+        assert!(shown.to_string().contains(&wanted), "{time}: {shown}");
+    }
+    assert!(panels.follow_time("not-open", 1., true).is_none());
+    assert!(panels.take_errors().is_empty());
 }

@@ -67,7 +67,7 @@ pub use capability::{
     unsupported_with_fonts, unsupported_with_media,
 };
 pub use effects::{Effects, builtin_definitions};
-pub use error::{DamagedFrame, LayerFailure, RenderError, SvgFallback};
+pub use error::{LayerFailure, ReadCause, RenderError, SvgFallback, UnreadFrame};
 pub use renderer::{
     CommandBracket, Frame, FrameFootage, HOST_COMPILE_WAITS, LayerPixels, LayerQuad, LayerRaster,
     MediaPreparation, PassThrough, Rendered, Renderer, SnapshotRows, TextRaster,

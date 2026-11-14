@@ -109,6 +109,18 @@ struct Capture {
     target: Id,
     button: u64,
 }
+/// A scroller anchored at its end (`metadata.scrollAnchor: "end"`): the
+/// panel hears when the reader scrolls away from the end and back (a
+/// `scroll` event, `{away}`) so it can offer the way back, and a new
+/// `metadata.scrollToken` takes it there.
+#[derive(Default)]
+struct Follow {
+    token: Value,
+    away: bool,
+}
+/// How far from the end still counts as at the end (the original panel's
+/// jump threshold).
+const FOLLOW_SLACK: f32 = 48.;
 /// A publication compiled off the main thread, waiting to install.
 struct Compiled {
     ticket: u64,
@@ -140,6 +152,8 @@ pub struct SurfaceView {
     anchors: Rc<RefCell<HashMap<Id, Bounds<Pixels>>>>,
     /// The height a sheet's body wants, measured as it is laid out.
     sheet_fit: Rc<std::cell::Cell<f32>>,
+    /// End-anchored scrollers' tokens and whether the reader is away, by node.
+    follow: RefCell<HashMap<Id, Follow>>,
     /// While an agent tool draws (`agent::probe`), controls record where they
     /// were drawn so a panel point maps to the control under it.
     probing: bool,
@@ -215,6 +229,7 @@ impl SurfaceView {
             origin: Rc::new(Cell::new(Point::default())),
             anchors: Default::default(),
             sheet_fit: Default::default(),
+            follow: Default::default(),
             probing: false,
             targets: Default::default(),
             capture: None,
@@ -249,7 +264,35 @@ impl SurfaceView {
     /// A reopened panel window keeps its view; later publications install
     /// there, and so does one that finished while no window was open.
     pub fn attach(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.window = window.window_handle();
+        let handle = window.window_handle();
+        if handle != self.window && (!self.controls.is_empty() || !self.fields.is_empty()) {
+            // AppKit controls and editors live in the window they were
+            // mounted in. A reopened window (the Agent popover closes and
+            // opens again with the same view) mounts its own, or its
+            // pop-ups, buttons and composer would be missing.
+            // Their text carries over: once typed, a field's text lives in
+            // the editor, not in the published value.
+            let texts: Vec<(Id, String)> = self
+                .fields
+                .iter()
+                .map(|(id, f)| (*id, f.read(cx).value().to_owned()))
+                .collect();
+            self.controls.clear();
+            self.fields.clear();
+            self.leases.clear();
+            self.option_sets.clear();
+            self.subscriptions.clear();
+            cx.defer_in(window, move |v, window, cx| {
+                v.reconcile(window, cx);
+                for (id, text) in texts {
+                    if let Some(field) = v.fields.get(&id) {
+                        field.update(cx, |f, cx| f.set_value(&text, cx));
+                    }
+                }
+                cx.notify();
+            });
+        }
+        self.window = handle;
         if let Some(compiled) = self.parked.take() {
             self.install(compiled, window, cx);
         }
@@ -825,6 +868,22 @@ impl SurfaceView {
                             this.change(id, json!(""), cx);
                         }
                     }
+                    // Escape in a composer reaches its panel as the key
+                    // (the Agent's shortcuts menu, then its popover).
+                    TextEvent::Key("escape") => {
+                        if this
+                            .publication
+                            .surface
+                            .node(id)
+                            .is_some_and(|n| n.listeners.contains_key("keydown"))
+                        {
+                            let detail = EventDetail {
+                                key: Some("Escape".into()),
+                                ..Default::default()
+                            };
+                            this.send(id, "keydown", detail, cx);
+                        }
+                    }
                     // Canvas editors only.
                     TextEvent::Selection { .. } | TextEvent::Key(_) | TextEvent::Blurred => {}
                 }
@@ -930,6 +989,11 @@ impl SurfaceView {
             .filter(|(key, _)| key.as_str() == semantic || key.ends_with(semantic))
             .min_by_key(|(key, _)| key.len())
             .map(|(_, id)| *id);
+        // A value committed to a field goes where typing and Return send it
+        // (a bound field writes through its lease, not a JS listener).
+        if let (Some(id), "change", Some(value)) = (id, event, value.clone()) {
+            return self.change(id, value, cx);
+        }
         if let Some(id) = id {
             let detail = EventDetail {
                 value,
@@ -1723,6 +1787,58 @@ impl SurfaceView {
             if node.scroll_y {
                 element = element.overflow_y_scroll();
             }
+            if follows {
+                // `metadata.scrollToken`: a new value goes back to the end
+                // (the panel's Scroll to Latest).
+                let token = self
+                    .publication
+                    .surface
+                    .node(id)
+                    .and_then(|n| n.props.get("metadata"))
+                    .and_then(|m| m.get("scrollToken"))
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                let mut follow = self.follow.borrow_mut();
+                let f = follow.entry(id).or_insert_with(|| Follow {
+                    token: token.clone(),
+                    away: false,
+                });
+                if f.token != token {
+                    f.token = token;
+                    scroll.scroll_to_bottom();
+                }
+                element = element.on_scroll_wheel(cx.listener(move |_, _, window, cx| {
+                    cx.defer_in(window, move |v, _, cx| {
+                        let Some(scroll) = v.scrolls.get(&id) else {
+                            return;
+                        };
+                        let distance =
+                            f32::from(scroll.max_offset().y) + f32::from(scroll.offset().y);
+                        let away = distance > FOLLOW_SLACK;
+                        let changed = {
+                            let mut follow = v.follow.borrow_mut();
+                            let f = follow.entry(id).or_default();
+                            std::mem::replace(&mut f.away, away) != away
+                        };
+                        let listens = v
+                            .publication
+                            .surface
+                            .node(id)
+                            .is_some_and(|n| n.listeners.contains_key("scroll"));
+                        if changed && listens {
+                            v.send(
+                                id,
+                                "scroll",
+                                EventDetail {
+                                    value: Some(json!({ "away": away })),
+                                    ..Default::default()
+                                },
+                                cx,
+                            );
+                        }
+                    });
+                }));
+            }
             if node.scroll_x {
                 element = element.overflow_x_scroll();
             }
@@ -1777,6 +1893,9 @@ impl SurfaceView {
         element = self.decorate(element, node, window);
         if let Some(drawing) = self.grade_canvas(id, &node.kit, node.disabled) {
             element = element.relative().child(drawing);
+            if let Some(h) = self.grade_height(id, &node.kit) {
+                element = element.h(px(h));
+            }
             if !node.disabled {
                 element = element.on_mouse_down(
                     MouseButton::Left,
@@ -2124,6 +2243,12 @@ impl SurfaceView {
             );
         if !disabled && (clickable || events.double_click) {
             element = element.on_click(cx.listener(move |v, event: &ClickEvent, window, cx| {
+                // A node that only takes double-clicks (a layer's name) leaves
+                // a single click to what it sits in (its row selects).
+                let double = events.double_click && event.click_count() == 2;
+                if !clickable && !double {
+                    return;
+                }
                 cx.stop_propagation();
                 let position = event.position();
                 let detail = v.detail(position, Some(0), 0, event.click_count(), event.modifiers());
@@ -2503,6 +2628,9 @@ impl SurfaceView {
         if let Some(text) = &node.text {
             element = element.child(text.clone());
         }
+        if let Some(rich) = &node.rich {
+            element = element.child(rich_text(rich, t));
+        }
         if let Some(number) = node.number.filter(|_| self.draws_number(node)) {
             let shown = self
                 .scrub_shown
@@ -2681,6 +2809,10 @@ impl Render for Tooltip {
             .px(px(t.metrics.gap))
             .py(px(t.metrics.inner_radius))
             .bg(rgb(t.colors.floating))
+            // A hairline keeps it legible over a surface of its own fill
+            // (the Agent popover is `floating` too).
+            .border(px(t.metrics.border))
+            .border_color(rgb(t.colors.hairline))
             .rounded(px(t.metrics.inner_radius))
             .text_size(px(t.typography.minimum))
             .text_color(rgb(t.colors.text))
@@ -2711,6 +2843,30 @@ pub(crate) fn status_announcements(
     };
     *seen = Some(current);
     messages
+}
+/// A paragraph of styled runs: bold and italic as the system font draws
+/// them, code on a quiet fill, links in the accent's text ink.
+fn rich_text(rich: &crate::v4_compile::Rich, t: &pm_design::Tokens) -> StyledText {
+    use crate::v4_compile::Rich;
+    let ink = |c: u32| gpui::rgb_to_hsla(rgb(c));
+    let highlights = rich.runs.iter().map(|(range, bits)| {
+        let mut style = HighlightStyle::default();
+        if bits & Rich::BOLD != 0 {
+            style.font_weight = Some(FontWeight(t.typography.display_weight));
+        }
+        if bits & Rich::ITALIC != 0 {
+            style.font_style = Some(FontStyle::Italic);
+        }
+        if bits & Rich::CODE != 0 {
+            style.background_color = Some(ink(t.colors.fill));
+            style.color = Some(ink(t.colors.text));
+        }
+        if bits & Rich::LINK != 0 {
+            style.color = Some(ink(t.colors.accent_text));
+        }
+        (range.clone(), style)
+    });
+    StyledText::new(rich.text.clone()).with_highlights(highlights.collect::<Vec<_>>())
 }
 /// A segmented control's segments as the native control takes them (a label,
 /// and a symbol where the segment is a glyph), the selected one's index (-1

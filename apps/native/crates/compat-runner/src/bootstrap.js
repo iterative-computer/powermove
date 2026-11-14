@@ -455,6 +455,64 @@ globalThis.__compat = {
         this.realm.PM.invalidate();
       });
     };
+    // `document.fonts` (a FontFaceSet) as extensions use it: `ready` settles
+    // once every face asked for so far has loaded or could not be had (the
+    // same bound as PM.Fonts.ensure), and `load` asks for a CSS font's face.
+    const faceOf = (font) => {
+      const parts = String(font ?? "").trim().split(/\s+/);
+      // The size always has its unit; a bare number before it is the weight.
+      const size = parts.findIndex((part) => /^[\d.]+(px|pt|em|rem|%)(\/|$)/.test(part));
+      const before = size < 0 ? [] : parts.slice(0, size);
+      const family = clean((size < 0 ? parts : parts.slice(size + 1)).join(" ").split(",")[0].replace(/^["']|["']$/g, ""));
+      const named = before.find((part) => /^(bold|bolder|lighter|\d{3})$/.test(part));
+      const weight = named === "bold" || named === "bolder" ? 700 : named === "lighter" ? 300 : Number(named) || 400;
+      return { family, weight, italic: before.some((part) => part === "italic" || part === "oblique") };
+    };
+    const faceSet = {
+      get status() {
+        return pending.size ? "loading" : "loaded";
+      },
+      get ready() {
+        return Promise.race([
+          Promise.all([...pending.values()].map((face) => face.promise)),
+          new Promise((resolve) => setTimeout(resolve, 15000)),
+        ]).then(() => faceSet);
+      },
+      load: (font) => {
+        const face = faceOf(font);
+        return (face.family ? requestFaces([face]) : Promise.resolve()).then(() => []);
+      },
+      check: (font) => {
+        const face = faceOf(font);
+        return !face.family || !pending.has(faceKey(face));
+      },
+      size: 0,
+      has: () => false,
+      add() {
+        return faceSet;
+      },
+      delete: () => false,
+      clear() {},
+      forEach() {},
+      values: () => [][Symbol.iterator](),
+      [Symbol.iterator]: () => [][Symbol.iterator](),
+      addEventListener() {},
+      removeEventListener() {},
+    };
+    if (this.dom?.document)
+      Object.defineProperty(this.dom.document, "fonts", { value: faceSet, configurable: true });
+    // `navigator.clipboard`'s text, through the app's pasteboard. A realm
+    // without one (an export's, an agent's) is refused, as a browser refuses
+    // a page without the permission.
+    const textClipboard = {
+      writeText: async (text) => {
+        call("clipboard.text", { write: String(text) });
+      },
+      readText: async () => call("clipboard.text", {}),
+    };
+    // The DOM's window installs its `navigator` as the realm's global.
+    const navigator = this.dom?.window?.navigator ?? (globalThis.navigator ??= {});
+    Object.defineProperty(navigator, "clipboard", { value: textClipboard, configurable: true });
     const capabilities = {
       rasterProducing: (on, epoch) => call("compat.producing", { on: !!on, epoch }),
       // A capture this realm waits for asks it for overrides: answered inline.

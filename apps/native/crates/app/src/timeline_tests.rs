@@ -1291,6 +1291,54 @@ fn clicking_a_layer_row_selects_it(cx: &mut TestAppContext) {
         .to_vec();
     assert_eq!(selected, ["l1".to_string()]);
 }
+/// A click on a layer's name selects the layer, as anywhere on its header;
+/// a double-click on the name still renames it (v1's timeline).
+#[gpui::test]
+fn clicking_a_layer_name_selects_it_and_a_double_click_renames(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    let selected = |s: &Stage| {
+        s.rig
+            .kernel
+            .published(PROJECT)
+            .unwrap()
+            .selection
+            .layers()
+            .to_vec()
+    };
+    let text = s
+        .view
+        .read_with(&s.vcx, |v, _| v.id_of_text("Layer 1"))
+        .unwrap();
+    let name = bounds(&mut s.vcx, &format!("n{text}")).center();
+    s.vcx.simulate_mouse_move(name, None, Modifiers::none());
+    s.vcx.simulate_click(name, Modifiers::none());
+    s.idle(cx);
+    assert_eq!(selected(&s), ["l1".to_string()], "the name's click selects");
+    for click_count in [1, 2] {
+        s.vcx.simulate_event(MouseDownEvent {
+            button: MouseButton::Left,
+            position: name,
+            modifiers: Modifiers::none(),
+            click_count,
+            first_mouse: false,
+        });
+        s.vcx.simulate_event(MouseUpEvent {
+            button: MouseButton::Left,
+            position: name,
+            modifiers: Modifiers::none(),
+            click_count,
+        });
+    }
+    s.idle(cx);
+    s.idle(cx);
+    assert!(
+        s.view
+            .read_with(&s.vcx, |v, _| v.cancellable_field())
+            .is_some(),
+        "the double-click opens the name field"
+    );
+    assert_eq!(selected(&s), ["l1".to_string()]);
+}
 /// Key ids may repeat across layers: pressing the earlier layer's key selects
 /// that layer and that key, never the later layer holding the same id.
 #[gpui::test]

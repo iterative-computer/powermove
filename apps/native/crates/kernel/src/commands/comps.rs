@@ -44,10 +44,16 @@ pub struct CompPatch {
     pub hdr: Option<bool>,
     /// The HDR mastering display peak in cd/m² (`color.masteringPeak`).
     pub mastering_peak: Option<f64>,
+    /// The project's Output: SDR Rec. 709, HDR PQ or HDR HLG (`color.mode`
+    /// and `color.hdrTransfer`). An HDR choice moves the project to 32-bit
+    /// float as `hdr` does; it wins over `hdr` when both are given.
+    pub output: Option<ProjectOutput>,
     /// The project's `exportDefaults` (v1 `ExportDefaults`): what the Export
     /// sheet opens with, edited in Settings ▸ Project.
     pub export_defaults: Option<Value>,
 }
+
+pub use pm_protocol::color::ProjectOutput;
 
 /// How Pre-compose treats the selection (`PM.Comps.precompose`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -324,12 +330,21 @@ fn set_composition(cx: &mut Cx<'_>, p: &CompPatch) -> Result<(), CommandError> {
         }
         cx.set(vec!["colorDepth".into()], n(f64::from(depth)))?;
     }
-    if p.hdr.is_some() || p.mastering_peak.is_some() {
+    if p.hdr.is_some() || p.mastering_peak.is_some() || p.output.is_some() {
         if cx.lookup(&["color".into()]).is_none() {
             cx.set(vec!["color".into()], Value::Object(Map::new()))?;
         }
         let color = |key: &str| vec!["color".into(), key.into()];
-        if let Some(hdr) = p.hdr {
+        if let Some(output) = p.output.filter(|o| o.hdr()) {
+            cx.set(
+                color("hdrTransfer"),
+                values::s(match output {
+                    ProjectOutput::Hlg => "hlg",
+                    _ => "pq",
+                }),
+            )?;
+        }
+        if let Some(hdr) = p.output.map(|o| o.hdr()).or(p.hdr) {
             cx.set(
                 color("mode"),
                 values::s(if hdr { "hdr" } else { "standard" }),

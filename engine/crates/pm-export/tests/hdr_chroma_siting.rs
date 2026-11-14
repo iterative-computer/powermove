@@ -63,6 +63,23 @@ fn pq() -> ColorTags {
     }
 }
 
+/// The tags without Dolby Vision, which only the VideoToolbox sink writes.
+fn plain(tags: ColorTags) -> ColorTags {
+    match tags {
+        ColorTags::Rec2100Hlg {
+            white_nits,
+            peak_nits,
+            metadata,
+            ..
+        } => ColorTags::Rec2100Hlg {
+            white_nits,
+            peak_nits,
+            metadata,
+            dolby_vision: false,
+        },
+        tags => tags,
+    }
+}
 fn hlg() -> ColorTags {
     ColorTags::Rec2100Hlg {
         white_nits: 203,
@@ -268,7 +285,7 @@ fn check(name: &str, tags: ColorTags) {
     // The software encoder's file.
     if software_hevc() {
         let software = dir.join("software.mov");
-        let s = spec(software.clone(), tags);
+        let s = spec(software.clone(), plain(tags));
         push_all(
             Pipeline::new(
                 s.clone(),

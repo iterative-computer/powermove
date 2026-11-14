@@ -273,10 +273,17 @@ pub struct Metrics {
     pub ruler: f32,
     /// The viewer's rulers: a band along the top and the leading edge.
     pub viewer_ruler: f32,
-    /// A colour wheel's diameter (Lift, Gamma, Gain, Offset).
+    /// A colour wheel's least diameter (Lift, Gamma, Gain, Offset); wheels
+    /// grow with the panel's width up to `grade_wheel_max`.
     pub grade_wheel: f32,
-    /// The curve editor's graph height.
+    pub grade_wheel_max: f32,
+    /// The least width of two colour wheels side by side on their plates
+    /// (each wheel and its plate's padding, and the gap between them).
+    pub grade_pair: f32,
+    /// The curve editor's least graph height; it grows square with the
+    /// panel's width up to `curve_editor_max`.
     pub curve_editor: f32,
+    pub curve_editor_max: f32,
     pub layer_column: f32,
     /// Timeline clip bar corners (v1–3's `chrome.timeline.clipRadius`).
     pub clip_radius: f32,
@@ -294,6 +301,11 @@ pub struct Metrics {
     pub popover_radius: f32,
     pub sheet_width: f32,
     pub agent_width: f32,
+    /// The Agent popover's height when the window has room (the original
+    /// app's 680 pt conversation).
+    pub agent_height: f32,
+    /// Space between turns in the Agent conversation (`space.xl`).
+    pub agent_gap: f32,
     /// Indent per outline level.
     pub tree_indent: f32,
     /// Layer-kind badge square (timeline, Project list).
@@ -745,7 +757,10 @@ impl Tokens {
                 ruler: 24.,
                 viewer_ruler: 16.,
                 grade_wheel: 112.,
+                grade_wheel_max: 220.,
+                grade_pair: 2. * (112. + 2. * space.sm) + space.sm,
                 curve_editor: 200.,
+                curve_editor_max: 360.,
                 layer_column: 320.,
                 clip_radius: radius.sm,
                 playhead: 1.,
@@ -757,7 +772,11 @@ impl Tokens {
                 popover_width: 260.,
                 popover_radius: radius.xl,
                 sheet_width: 480.,
-                agent_width: 360.,
+                // The original app's popover: room for a reply beside a
+                // tool group's mono chips without wrapping every line.
+                agent_width: 440.,
+                agent_height: 680.,
+                agent_gap: space.xl,
                 tree_indent: 16.,
                 kind_badge: 18.,
                 thumbnail_min: 120.,

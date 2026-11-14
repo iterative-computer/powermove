@@ -495,6 +495,9 @@ mod held {
             frame.origin.x + (frame.size.width - own.size.width) / 2.,
             top - own.size.height,
         ));
+        // A panel hides while its app is inactive (AppKit's default), and a
+        // review lane's app is: the staged sheet would be taken down at once.
+        sheet.setHidesOnDeactivate(false);
         sheet.orderWindow_relativeTo(NSWindowOrderingMode::Above, parent.windowNumber());
     }
 

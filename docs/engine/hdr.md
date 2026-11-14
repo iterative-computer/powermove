@@ -13,17 +13,21 @@ projects render as they always have.
 The working space stays Rec.709 primaries, extended, E-encoded or linear. Wide colours are
 negative values, so effects written for 0 to 1 can clip them.
 
-**Tone mapping** runs only where the target holds less light than the frame:
-`OutputTone::for_target`, in the final encode pass. The viewer's SDR and EDR views use the
-same pass and rule as SDR and HDR delivery. HDR delivery tone maps only when a source is
-brighter than `color.masteringPeak`. The content's peak comes from what the composition can
-show: switched-off layers and unused compositions don't count. Camera log has no stated peak,
-so a shown log clip counts as what its curve can hold (S-Log3 about 7800 cd/m²).
+**Tone mapping** is `OutputTone::for_target`, in the final encode pass; the viewer's SDR and
+EDR views and the Output scopes use the same pass and rule as SDR and HDR delivery. An HDR
+target always holds `color.masteringPeak`: content stated brighter rolls off to it (BT.2390),
+and light a grade lifts past it is held at it, each channel at most the master. SDR targets
+tone map when the content or the master is brighter than SDR white. The content's peak comes
+from what the composition can show: switched-off layers and unused compositions don't count.
+Camera log has no stated peak, so a shown log clip counts as what its curve can hold (S-Log3
+about 7800 cd/m²).
 
-**Metadata.** Mastering primaries and content light come from the sources
-(`media::hdr_content`), held to the project's peak. With no stated display, delivery states
-Display P3 primaries, D65 and the project's peak. MaxCLL and MaxFALL are written only when
-every HDR source states them; they describe the sources, not a measured render.
+**Metadata.** The mastering display is the project's master: its peak, with Display P3
+primaries and D65, whatever the sources state. MaxCLL and MaxFALL are measured from the frames
+the export renders, after the tone: the most of each frame's brightest largest-of-R, G and B,
+and of each frame's average of it, in cd/m² (`VerifyReport::content_light`). They are written
+into the file's `clli` once every frame is encoded, and the file check holds the file to them.
+macOS writes `mdcv` and `clli` in the container only, not as SEI in the stream.
 
 **Camera log** is an Interpret Footage reading: View ▸ Interpret Selection As. Files don't
 carry a tag for these curves, so nothing is detected. A curve reads the code after the
