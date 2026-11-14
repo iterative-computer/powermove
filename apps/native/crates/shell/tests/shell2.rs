@@ -79,7 +79,14 @@ fn drop_targets_cover_header_group_viewer_splits_and_edges() {
         .drop_target(&g, BOUNDS, mid, BOUNDS.y + BOUNDS.h - 2., &t)
         .unwrap();
     assert_eq!(bottom.target, DropTarget::Edge(Edge::Bottom));
-    assert!(l.drop_target(&g, BOUNDS, -5., 300., &t).is_none());
+    // Just outside the docking area is its edge (a hand overshoots); far
+    // outside is nothing.
+    assert_eq!(
+        l.drop_target(&g, BOUNDS, BOUNDS.x - 5., 300., &t)
+            .map(|p| p.target),
+        Some(DropTarget::Edge(Edge::Left))
+    );
+    assert!(l.drop_target(&g, BOUNDS, BOUNDS.x - 200., 300., &t).is_none());
 }
 
 #[test]

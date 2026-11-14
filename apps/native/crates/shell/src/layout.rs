@@ -277,8 +277,8 @@ impl Layout {
         let bh = bottom.map_or(0., |(_, d)| {
             d.size
                 .unwrap_or(DEFAULT_TIMELINE)
-                .max(t.metrics.header + 2. * t.metrics.ruler + 3. * t.metrics.track_row)
-                .min((bounds.h - t.metrics.min_panel - gap).max(0.))
+                .max(dock_floor(d, t))
+                .min((bounds.h - upper_least(bounds, t) - gap).max(0.))
         });
         let bg = if bottom.is_some() { gap } else { 0. };
         let upper = bounds.h - bh - bg;
@@ -336,27 +336,10 @@ impl Layout {
             let rect = rects[&di];
             let n = d.groups.len();
             let space = (rect.h - gap * (n - 1) as f32).max(0.);
-            let fixed: f32 = d.groups.iter().filter_map(|g| g.size).sum();
-            let flex = d.groups.iter().filter(|g| g.size.is_none()).count();
-            // On small windows, shrink sized rows too; never overlap or lose a group.
-            let reserved = t.metrics.min_panel * flex as f32;
-            let shrink = if fixed > 0. {
-                ((space - reserved).max(0.) / fixed).min(1.)
-            } else {
-                1.
-            };
-            let fh = if flex > 0 {
-                (space - fixed * shrink).max(0.) / flex as f32
-            } else {
-                0.
-            };
+            let heights = group_heights(&d.groups, space, t);
             let mut y = rect.y;
-            for (gi, g) in d.groups.iter().enumerate() {
-                let h = if flex == 0 {
-                    space / n as f32
-                } else {
-                    g.size.map_or(fh, |h| h * shrink)
-                };
+            for (gi, _) in d.groups.iter().enumerate() {
+                let h = heights[gi];
                 out.panels.push(Placement {
                     dock: di,
                     group: gi,
@@ -460,36 +443,110 @@ impl Layout {
             .collect();
         self.fluid(&columns).is_some_and(|f| dock > f)
     }
-    pub fn resize(&mut self, divider: &Divider, delta: f32, t: &Tokens) {
+    /// Moves `divider` by `delta` points from this layout as laid out in
+    /// `bounds`: the panels on either side take their present sizes (none
+    /// jumps), the one growing takes only what its neighbour can give (it
+    /// keeps `min_panel`; the fluid column keeps `min_center`; the timeline
+    /// its least height), so nothing overlaps or scales the other docks, and
+    /// dragging back to where it began gives the layout it began with.
+    pub fn resize(&mut self, divider: &Divider, delta: f32, bounds: Rect, t: &Tokens) {
+        let geometry = self.geometry(bounds, t);
+        let min = t.metrics.min_panel;
+        let height = |dock: usize, group: usize| {
+            geometry
+                .panels
+                .iter()
+                .find(|p| (p.dock, p.group) == (dock, group))
+                .map(|p| p.rect.h)
+        };
         if let Some(i) = divider.group {
+            let (Some(a), Some(b)) = (height(divider.dock, i), height(divider.dock, i + 1)) else {
+                return;
+            };
+            let total = a + b;
+            let groups = &self.docks[divider.dock].groups;
+            let (least_a, least_b) = (
+                least_height(&groups[i].tabs, t),
+                least_height(&groups[i + 1].tabs, t),
+            );
+            let upper = if total >= least_a + least_b {
+                (a + delta).clamp(least_a, total - least_b)
+            } else {
+                a
+            };
             let d = &mut self.docks[divider.dock];
-            // Keep a flexible partner to fill the dock; resize either side of it.
-            let target = if d.groups[i].size.is_some() { i } else { i + 1 };
-            let sign = if target == i { 1. } else { -1. };
-            let old = d.groups[target].size.unwrap_or(t.metrics.min_panel);
-            d.groups[target].size = Some((old + delta * sign).max(t.metrics.min_panel));
-            if d.groups.iter().all(|g| g.size.is_some()) {
-                let other = if target == i { i + 1 } else { i };
-                d.groups[other].size = None;
+            // Every group at the height it shows; the first that was flexible
+            // stays so (it takes exactly that height, and a window resize).
+            let flexible = d
+                .groups
+                .iter()
+                .position(|g| g.size.is_none())
+                .unwrap_or(d.groups.len() - 1);
+            for (gi, g) in d.groups.iter_mut().enumerate() {
+                g.size = height(divider.dock, gi);
             }
-        } else {
-            let sign = if self.docks[divider.dock].id == "bottom" || self.trailing(divider.dock) {
-                -1.
-            } else {
-                1.
-            };
-            let d = &mut self.docks[divider.dock];
-            let minimum = if d.id == "bottom" {
-                t.metrics.header + 2. * t.metrics.ruler + 3. * t.metrics.track_row
-            } else {
-                t.metrics.min_panel
-            };
-            d.size = Some((d.size.unwrap_or(minimum) + delta * sign).max(minimum));
+            d.groups[i].size = Some(upper);
+            d.groups[i + 1].size = Some(total - upper);
+            d.groups[flexible].size = None;
+            return;
         }
+        let rect = |dock: usize| {
+            let mut placed = geometry.panels.iter().filter(|p| p.dock == dock);
+            let first = placed.next()?.rect;
+            let last = placed.last().map_or(first, |p| p.rect);
+            Some(Rect {
+                h: last.y + last.h - first.y,
+                ..first
+            })
+        };
+        let Some(current) = rect(divider.dock) else {
+            return;
+        };
+        if self.docks[divider.dock].id == "bottom" {
+            let least = dock_floor(&self.docks[divider.dock], t);
+            let most = (bounds.h - upper_least(bounds, t) - t.metrics.dock_gap).max(least);
+            self.docks[divider.dock].size = Some((current.h - delta).clamp(least, most));
+            return;
+        }
+        // Columns give and take with the fluid column only; every fixed
+        // column keeps the width it shows (so none rescales).
+        let columns: Vec<usize> = (0..self.docks.len())
+            .filter(|&i| {
+                let d = &self.docks[i];
+                !d.collapsed && !d.groups.is_empty() && d.id != "bottom"
+            })
+            .collect();
+        let fluid = self.fluid(
+            &columns
+                .iter()
+                .copied()
+                .filter(|&i| self.docks[i].id != "right")
+                .collect::<Vec<_>>(),
+        );
+        for &i in &columns {
+            if Some(i) != fluid
+                && let Some(r) = rect(i)
+            {
+                self.docks[i].size = Some(r.w);
+            }
+        }
+        let room = fluid
+            .and_then(rect)
+            .map_or(0., |f| (f.w - t.metrics.min_center).max(0.));
+        let sign = if self.trailing(divider.dock) { -1. } else { 1. };
+        let width = (current.w + delta * sign).clamp(min.min(current.w), current.w + room);
+        self.docks[divider.dock].size = Some(width);
     }
     /// Where `(x, y)` would drop a dragged panel, in the coordinates of `geometry`.
-    /// `bounds` is the docking area passed to [`Layout::geometry`]. Edge zones win
-    /// over panels so a dock can be created even when its neighbour fills the edge.
+    /// `bounds` is the docking area passed to [`Layout::geometry`].
+    ///
+    /// As in After Effects and Final Cut: over a panel, its header or its
+    /// middle joins its tab stack, and the rest splits it toward the nearest
+    /// edge: above, below, or beside it (a new column). A thin band along the
+    /// docking area's left and right edges, and its bottom edge under the
+    /// timeline's row, docks at that edge. A point just outside the area (the
+    /// status bar below it) counts as its edge. `rect` is where the drop
+    /// zone is; [`Layout::drop_target_for`] gives the panel's exact place.
     pub fn drop_target(
         &self,
         geometry: &Geometry,
@@ -498,22 +555,33 @@ impl Layout {
         y: f32,
         t: &Tokens,
     ) -> Option<DropPreview> {
-        if !bounds.contains(x, y) {
+        let reach = t.metrics.header;
+        let inside = |v: f32, lo: f32, len: f32| v >= lo - reach && v < lo + len + reach;
+        if !inside(x, bounds.x, bounds.w) || !inside(y, bounds.y, bounds.h) {
             return None;
         }
-        let zone = t.metrics.drag_threshold.max(4.) * 4.;
+        let x = x.clamp(bounds.x, bounds.x + bounds.w - 0.5);
+        let y = y.clamp(bounds.y, bounds.y + bounds.h - 0.5);
+        let band = t.metrics.dock_gap * 1.5;
         let gap = t.metrics.dock_gap;
-        let edge = if x < bounds.x + zone {
+        // The timeline's row: the bottom dock spans it (all but the right dock).
+        let row_end = self
+            .docks
+            .iter()
+            .enumerate()
+            .find(|(_, d)| d.id == "right" && !d.collapsed && !d.groups.is_empty())
+            .and_then(|(i, _)| geometry.panels.iter().find(|p| p.dock == i))
+            .map_or(bounds.x + bounds.w, |p| p.rect.x - gap);
+        let edge = if x < bounds.x + band {
             Some(Edge::Left)
-        } else if x > bounds.x + bounds.w - zone {
+        } else if x >= bounds.x + bounds.w - band {
             Some(Edge::Right)
-        } else if y > bounds.y + bounds.h - zone {
+        } else if y >= bounds.y + bounds.h - band && x < row_end {
             Some(Edge::Bottom)
         } else {
             None
         };
         if let Some(edge) = edge {
-            // Only the drop zone lights up: the outer quarter of the docking area.
             let rect = match edge {
                 Edge::Left => Rect {
                     w: bounds.w * EDGE_ZONE,
@@ -527,6 +595,7 @@ impl Layout {
                 Edge::Bottom => Rect {
                     y: bounds.y + bounds.h * (1. - EDGE_ZONE),
                     h: bounds.h * EDGE_ZONE,
+                    w: row_end - bounds.x,
                     ..bounds
                 },
             };
@@ -535,33 +604,88 @@ impl Layout {
                 rect,
             });
         }
-        let p = geometry.panels.iter().find(|p| p.rect.contains(x, y))?;
+        // Over a gap between panels: the panel nearest the point.
+        let p = geometry
+            .panels
+            .iter()
+            .find(|p| p.rect.contains(x, y))
+            .or_else(|| {
+                geometry.panels.iter().min_by(|a, b| {
+                    let d = |r: Rect| {
+                        let dx = (r.x - x).max(x - (r.x + r.w)).max(0.);
+                        let dy = (r.y - y).max(y - (r.y + r.h)).max(0.);
+                        dx.hypot(dy)
+                    };
+                    d(a.rect).total_cmp(&d(b.rect))
+                })
+            })?;
         let r = p.rect;
         let g = &self.docks[p.dock].groups[p.group];
-        let header_end = (r.y + t.metrics.header).min(r.y + r.h);
-        let relative = (y - header_end) / (r.y + r.h - header_end).max(1.);
         let groupable = g.tabs.iter().all(|id| stacks(id));
-        if groupable && (y < header_end || (0.3..=0.7).contains(&relative)) {
+        let header_end = (r.y + t.metrics.header).min(r.y + r.h);
+        let tab = |index: usize| DropPreview {
+            target: DropTarget::Tab {
+                dock: p.dock,
+                group: p.group,
+                index,
+            },
+            rect: Rect {
+                y: header_end,
+                h: (r.y + r.h - header_end).max(0.),
+                ..r
+            },
+        };
+        if y < header_end && groupable {
             let n = g.tabs.len();
-            let index = if y < header_end {
-                ((((x - r.x) / r.w.max(1.)) * n as f32).round() as usize).min(n)
-            } else {
-                n
-            };
+            return Some(tab(
+                ((((x - r.x) / r.w.max(1.)) * n as f32).round() as usize).min(n),
+            ));
+        }
+        let fx = ((x - r.x) / r.w.max(1.)).clamp(0., 1.);
+        let fy = if y < header_end {
+            0.
+        } else {
+            ((y - header_end) / (r.y + r.h - header_end).max(1.)).clamp(0., 1.)
+        };
+        if groupable && (0.25..=0.75).contains(&fx) && (0.25..=0.75).contains(&fy) {
+            return Some(tab(g.tabs.len()));
+        }
+        // Beside a panel is a new column: next to a column dock, or before the
+        // full-height right dock. The bottom dock has no columns.
+        let dock_id = self.docks[p.dock].id.as_str();
+        let beside = |after: bool| match dock_id {
+            "bottom" => false,
+            "right" => !after,
+            _ => true,
+        };
+        // On a tie (the middle of a panel that joins no stack) above or
+        // below wins: moving a panel up or down is the commoner intent.
+        let sides = [
+            (fy, None),
+            (1. - fy, None),
+            (fx, Some(false)),
+            (1. - fx, Some(true)),
+        ];
+        let (nearest, side) = sides
+            .into_iter()
+            .filter(|(_, s)| s.is_none_or(beside))
+            .min_by(|a, b| a.0.total_cmp(&b.0))?;
+        if let Some(after) = side {
+            let half = ((r.w - gap) / 2.).max(0.);
             return Some(DropPreview {
-                target: DropTarget::Tab {
+                target: DropTarget::Beside {
                     dock: p.dock,
-                    group: p.group,
-                    index,
+                    after,
                 },
                 rect: Rect {
-                    y: header_end,
-                    h: (r.y + r.h - header_end).max(0.),
+                    x: if after { r.x + r.w - half } else { r.x },
+                    w: half,
                     ..r
                 },
             });
         }
-        let lower = relative >= 0.5;
+        let _ = nearest;
+        let lower = fy >= 0.5;
         let half = ((r.h - gap) / 2.).max(0.);
         Some(DropPreview {
             target: DropTarget::Split {
@@ -575,8 +699,10 @@ impl Layout {
             },
         })
     }
-    /// Resolve a real drag. The source has no target when dropping the whole
-    /// stack back on itself. Viewer cannot join another stack in either direction.
+    /// Resolve a real drag: the target under the pointer and, as its preview,
+    /// exactly where the panel would be once dropped there (the move applied
+    /// to a copy and laid out). No target when the drop would change nothing
+    /// or can't be made, so a drop always lands where the preview showed.
     pub fn drop_target_for(
         &self,
         geometry: &Geometry,
@@ -588,38 +714,45 @@ impl Layout {
     ) -> Option<DropPreview> {
         let (di, gi, _) = self.find(id)?;
         let mut preview = self.drop_target(geometry, bounds, at.0, at.1, t)?;
-        if let Some(p) = geometry.panels.iter().find(|p| p.rect.contains(at.0, at.1))
-            && (p.dock, p.group) == (di, gi)
-            && (stack || self.docks[di].groups[gi].tabs.len() == 1)
+        let whole = stack || self.docks[di].groups[gi].tabs.len() == 1;
+        if let DropTarget::Tab { dock, group, .. } = preview.target
+            && (dock, group) == (di, gi)
+            && whole
         {
             return None;
         }
         if (!stacks(id) || (stack && !self.docks[di].groups[gi].tabs.iter().all(|id| stacks(id))))
-            && matches!(preview.target, DropTarget::Tab { .. })
+            && let DropTarget::Tab { dock, group, .. } = preview.target
         {
-            // An ungroupable source still offers above/below zones.
-            let p = geometry
+            // An ungroupable source splits the panel instead, toward the
+            // nearer of its top and bottom.
+            let r = geometry
                 .panels
                 .iter()
-                .find(|p| p.rect.contains(at.0, at.1))?;
-            let lower = at.1 >= p.rect.y + p.rect.h / 2.;
-            let half = ((p.rect.h - t.metrics.dock_gap) / 2.).max(0.);
-            preview = DropPreview {
-                target: DropTarget::Split {
-                    dock: p.dock,
-                    group: p.group + usize::from(lower),
-                },
-                rect: Rect {
-                    y: if lower {
-                        p.rect.y + p.rect.h - half
-                    } else {
-                        p.rect.y
-                    },
-                    h: half,
-                    ..p.rect
-                },
+                .find(|p| (p.dock, p.group) == (dock, group))?
+                .rect;
+            let lower = at.1 >= r.y + r.h / 2.;
+            preview.target = DropTarget::Split {
+                dock,
+                group: group + usize::from(lower),
             };
         }
+        let mut next = self.clone();
+        if stack {
+            next.move_stack_to(id, preview.target).ok()?;
+        } else {
+            next.move_panel_to(id, preview.target).ok()?;
+        }
+        if next == *self {
+            return None;
+        }
+        let (dock, group, _) = next.find(id)?;
+        preview.rect = next
+            .geometry(bounds, t)
+            .panels
+            .into_iter()
+            .find(|p| (p.dock, p.group) == (dock, group))?
+            .rect;
         Some(preview)
     }
     /// Validated, atomic move. Destination indices address the original layout.
@@ -669,15 +802,35 @@ impl Layout {
                     return Ok(());
                 }
             }
+            DropTarget::Beside { dock, after } => {
+                let d = self
+                    .docks
+                    .get(dock)
+                    .ok_or_else(|| anyhow::anyhow!("Unknown dock"))?;
+                anyhow::ensure!(
+                    d.id != "bottom" && !(d.id == "right" && after),
+                    "No column there"
+                );
+                // A lone panel beside its own column changes nothing.
+                if whole_source(self, di, gi, stack) && dock == di && d.groups.len() == 1 {
+                    return Ok(());
+                }
+            }
             DropTarget::Edge(_) => {}
         }
         let mut next = self.clone();
         let source = &mut next.docks[di].groups[gi];
+        // A stack keeps its height within its dock; in another dock it
+        // shares the room (its old height means nothing there).
+        let same_dock = match target {
+            DropTarget::Tab { dock, .. } | DropTarget::Split { dock, .. } => dock == di,
+            DropTarget::Beside { .. } | DropTarget::Edge(_) => false,
+        };
         let moved = if stack {
             Group {
                 tabs: std::mem::take(&mut source.tabs),
                 active: source.active,
-                size: source.size,
+                size: source.size.filter(|_| same_dock),
             }
         } else {
             let item = source.tabs.remove(ti);
@@ -697,6 +850,28 @@ impl Layout {
             DropTarget::Split { dock, group } => {
                 next.docks[dock].groups.insert(group, moved);
                 next.docks[dock].collapsed = false;
+            }
+            DropTarget::Beside { dock, after } => {
+                // Half the width of the column it is put beside, which gives
+                // it up; beside the fluid column, a left dock's width.
+                let width = match next.docks[dock].size {
+                    Some(w) => {
+                        next.docks[dock].size = Some(w / 2.);
+                        w / 2.
+                    }
+                    None => DEFAULT_LEFT,
+                };
+                let mut n = 1;
+                while next.docks.iter().any(|d| d.id == format!("column-{n}")) {
+                    n += 1;
+                }
+                let column = self::dock(&format!("column-{n}"), Some(width), vec![moved]);
+                let at = if next.docks[dock].id == "right" {
+                    dock
+                } else {
+                    dock + usize::from(after)
+                };
+                next.docks.insert(at, column);
             }
             DropTarget::Edge(edge) => {
                 if let Some(d) = next.docks.iter_mut().find(|d| d.id == edge.dock_id()) {
@@ -738,6 +913,10 @@ impl Layout {
             "below" => DropTarget::Split {
                 dock,
                 group: group + 1,
+            },
+            "left" | "right" => DropTarget::Beside {
+                dock,
+                after: placement == "right",
             },
             _ => anyhow::bail!("Unknown placement"),
         };
@@ -855,6 +1034,7 @@ impl Layout {
                     None => self.add_dock(dock_for(edge.dock_id(), single())),
                 }
             }
+            DropTarget::Beside { dock, .. } => self.insert_at(id, DropTarget::Split { dock, group: 0 }),
         }
     }
     /// Adds a dock where its id puts it: a left dock is the first column.
@@ -885,6 +1065,11 @@ impl Layout {
     fn commit(mut self, into: &mut Layout) -> anyhow::Result<()> {
         for d in &mut self.docks {
             d.groups.retain(|g| !g.tabs.is_empty());
+        }
+        // A column made by a drop goes when its last panel leaves.
+        self.docks
+            .retain(|d| !(d.groups.is_empty() && d.id.starts_with("column-")));
+        for d in &mut self.docks {
             for g in &mut d.groups {
                 g.active = g.active.min(g.tabs.len() - 1);
             }
@@ -919,6 +1104,99 @@ impl Layout {
         };
         self.move_panel_to(id, target)
     }
+}
+/// The least height a group of `tabs` keeps: the timeline its ruler and
+/// three rows, any other panel `min_panel`.
+pub fn least_height(tabs: &[String], t: &Tokens) -> f32 {
+    if tabs.iter().any(|id| id == "timeline") {
+        t.metrics.header + 2. * t.metrics.ruler + 3. * t.metrics.track_row
+    } else {
+        t.metrics.min_panel
+    }
+}
+/// The least height of the row above the timeline: a share of the docking
+/// area, so a short window shrinks the timeline too and the viewer never
+/// collapses to a header.
+fn upper_least(bounds: Rect, t: &Tokens) -> f32 {
+    (bounds.h * 0.35).max(t.metrics.min_panel)
+}
+/// The least height of a dock: every group's least height and the gaps.
+fn dock_floor(d: &Dock, t: &Tokens) -> f32 {
+    d.groups
+        .iter()
+        .map(|g| least_height(&g.tabs, t))
+        .sum::<f32>()
+        + t.metrics.dock_gap * d.groups.len().saturating_sub(1) as f32
+}
+/// The heights of a dock's groups in `space`: sized groups keep their size,
+/// flexible ones share the rest, and every group keeps its least height
+/// while there is room for it (sized groups give way first, then flexible
+/// ones share what is left). Nothing overlaps or is lost.
+fn group_heights(groups: &[Group], space: f32, t: &Tokens) -> Vec<f32> {
+    let least: Vec<f32> = groups.iter().map(|g| least_height(&g.tabs, t)).collect();
+    let total_least: f32 = least.iter().sum();
+    if total_least >= space {
+        // No room for every least height: in proportion to them.
+        return least
+            .iter()
+            .map(|l| space * l / total_least.max(1.))
+            .collect();
+    }
+    let mut h: Vec<f32> = groups
+        .iter()
+        .zip(&least)
+        .map(|(g, l)| g.size.map_or(*l, |s| s.max(*l)))
+        .collect();
+    let flex: Vec<usize> = (0..groups.len())
+        .filter(|&i| groups[i].size.is_none())
+        .collect();
+    // Sized groups give way (down to their least) until the flexible ones
+    // have their least heights.
+    let sized_extra: f32 = (0..groups.len())
+        .filter(|i| !flex.contains(i))
+        .map(|i| h[i] - least[i])
+        .sum();
+    let over = (h.iter().sum::<f32>() - space).max(0.);
+    if over > 0. && sized_extra > 0. {
+        let keep = ((sized_extra - over) / sized_extra).max(0.);
+        for i in (0..groups.len()).filter(|i| !flex.contains(i)) {
+            h[i] = least[i] + (h[i] - least[i]) * keep;
+        }
+    }
+    let left = (space - h.iter().sum::<f32>()).max(0.);
+    if flex.is_empty() {
+        // Every group sized: they share what is left as they are.
+        let sum: f32 = h.iter().sum();
+        return h.iter().map(|x| x * space / sum.max(1.)).collect();
+    }
+    // Flexible groups share the rest evenly over their least heights, the
+    // least first: each ends at the same height where it can.
+    let mut pool = left + flex.iter().map(|&i| h[i]).sum::<f32>();
+    let mut open: Vec<usize> = flex.clone();
+    loop {
+        let share = pool / open.len().max(1) as f32;
+        let (low, high): (Vec<usize>, Vec<usize>) =
+            open.iter().partition(|&&i| least[i] > share);
+        if low.is_empty() {
+            for &i in &open {
+                h[i] = share;
+            }
+            break;
+        }
+        for &i in &low {
+            h[i] = least[i];
+            pool -= least[i];
+        }
+        if high.is_empty() {
+            break;
+        }
+        open = high;
+    }
+    h
+}
+/// The whole of a group moves (a header drag, or its only tab).
+fn whole_source(l: &Layout, dock: usize, group: usize, stack: bool) -> bool {
+    stack || l.docks[dock].groups[group].tabs.len() == 1
 }
 /// Longest accepted workspace name, in characters.
 pub const LAYOUT_NAME_MAX: usize = 80;
@@ -1105,6 +1383,8 @@ pub enum DropTarget {
     },
     /// A new group inserted into `dock` before `group` (`group == len` appends).
     Split { dock: usize, group: usize },
+    /// A new column beside `dock` (a column, or before the right dock).
+    Beside { dock: usize, after: bool },
     /// Dock at a window edge; creates or reopens that dock.
     Edge(Edge),
 }

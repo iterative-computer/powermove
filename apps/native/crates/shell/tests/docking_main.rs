@@ -267,7 +267,7 @@ fn bottom_dock_floor_uses_opus_metrics_and_stays_bounded() {
         .into_iter()
         .find(|d| d.group.is_none() && l.docks[d.dock].id == "bottom")
         .unwrap();
-    l.resize(&divider, 10000., &t);
+    l.resize(&divider, 10000., BOUNDS, &t);
     let floor = t.metrics.header + 2. * t.metrics.ruler + 3. * t.metrics.track_row;
     assert_eq!(l.docks[divider.dock].size, Some(floor));
     assert_eq!(panel(&l, "timeline").h, floor);
