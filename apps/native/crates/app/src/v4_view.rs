@@ -229,6 +229,13 @@ pub struct SurfaceView {
     /// Told when a new tree is installed: the timeline's native timecode
     /// layer steps aside while its time field is open, and back after.
     pub(crate) installed: Option<async_channel::Sender<()>>,
+    /// The panel sits in a body that scrolls (every side panel): its root
+    /// is at least the body (`fit`) and grows with content taller than it,
+    /// whose height (`natural`) sizes the body's content, so the body has
+    /// something to scroll. The viewer and the timeline fit their slot.
+    pub(crate) grows: bool,
+    fit: Cell<f32>,
+    natural: Rc<Cell<f32>>,
     #[cfg(test)]
     pub renders: usize,
     #[cfg(test)]
@@ -293,6 +300,9 @@ impl SurfaceView {
             focus_text: None,
             reveal: None,
             installed: None,
+            grows: false,
+            fit: Cell::new(0.),
+            natural: Rc::new(Cell::new(0.)),
             #[cfg(test)]
             renders: 0,
             #[cfg(test)]
@@ -2023,6 +2033,13 @@ impl SurfaceView {
         }
         let mut element = div().id(("v4", id));
         *element.style() = node.style.clone();
+        // In a body that scrolls, the root and the panel fill the body by
+        // growing into it, not as a share of a height that their content
+        // sets (which would leave them their content's height).
+        if self.grows && (id == 0 || node.parent == Some(0)) {
+            element.style().size.height = None;
+            element = element.flex_grow(1.);
+        }
         if let Some(sample) = &node.fixed_width {
             let mut text = window.text_style();
             text.refine(&node.style.text);
@@ -2053,14 +2070,30 @@ impl SurfaceView {
             element = element.debug_selector(|| name);
         }
         if let Some(scroll) = self.scrolls.get(&id) {
+            // A scroller may shrink to nothing unless its panel asks to keep
+            // some rows (`metadata.rowFloor`, Effect Controls' effects): a
+            // panel body shorter than those rows scrolls instead.
+            let floor = self
+                .publication
+                .surface
+                .node(id)
+                .and_then(|n| n.props.get("metadata"))
+                .and_then(|m| m.get("rowFloor"))
+                .and_then(Value::as_f64)
+                .filter(|rows| rows.is_finite() && *rows > 0.)
+                .map_or(0., |rows| rows as f32 * self.table.tokens.metrics.row);
             // A scroll region with a max height (a sheet body) keeps its
             // content height up to that cap; panel scrollers fill their dock.
             element = if node.style.max_size.height.is_some() {
                 element.flex_grow(1.).flex_shrink(1.)
+            } else if self.grows {
+                // In a body that scrolls the panel's height comes from its
+                // content: a scroller adds only its floor, then fills.
+                element.flex_grow(1.).flex_shrink(1.).flex_basis(px(floor))
             } else {
                 element.flex_1()
             };
-            element = element.min_h(px(0.)).track_scroll(scroll);
+            element = element.min_h(px(floor)).track_scroll(scroll);
             // `metadata.scrollAnchor: "end"` (a conversation): a scroller that
             // was at its end stays there as content grows; once scrolled up,
             // it stays where the person left it.
@@ -3214,10 +3247,21 @@ impl Render for SurfaceView {
         self.presence = presence;
         self.motion.frame(window);
         let t = &self.table.tokens;
-        div()
-            .relative()
-            .size_full()
-            .flex()
+        let root = div().relative().w_full();
+        let root = if self.grows {
+            // Measured each frame: a change resizes the body's content.
+            let natural = self.natural.clone();
+            root.min_h(px(self.fit.get()))
+                .on_children_prepainted(move |children, window, _| {
+                    let height = children.first().map_or(0., |b| f32::from(b.size.height));
+                    if (natural.replace(height) - height).abs() > 0.5 {
+                        window.refresh();
+                    }
+                })
+        } else {
+            root.h_full()
+        };
+        root.flex()
             .flex_col()
             .text_color(rgb(t.colors.text))
             .text_size(px(t.typography.body))
@@ -3607,5 +3651,16 @@ fn button_held() -> bool {
         true
     } else {
         pm_shell::left_button_held()
+    }
+}
+
+impl SurfaceView {
+    /// The style of a scrolling body's content (`panel_body`): the panel at
+    /// least `body` tall, and as tall as it last measured.
+    pub(crate) fn in_body(&self, body: f32) -> gpui::StyleRefinement {
+        self.fit.set(body);
+        gpui::StyleRefinement::default()
+            .w_full()
+            .h(px(body.max(self.natural.get())))
     }
 }

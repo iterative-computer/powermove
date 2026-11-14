@@ -156,6 +156,19 @@ test("§2/5/6 one list stop, stable value column, exact names and separate param
   await f.root.dispose();
   await f.controller.dispose();
 });
+test("the effect rows keep their height in a short dock: the list asks for them", async () => {
+  const f = await fixture(selected());
+  await f.root.render(
+    <EffectControls controller={f.controller} rowHeight={24} />,
+  );
+  const list = find(f.root, (p) => p.id === "layer-effects:list");
+  const count = find(f.root, (p) => p.itemSize === 24).props.count as number;
+  expect(count).toBeGreaterThan(1);
+  // A body shorter than the rows scrolls the panel, never squeezes the list.
+  expect((list.props.metadata as Record<string, unknown>).rowFloor).toBe(count);
+  await f.root.dispose();
+  await f.controller.dispose();
+});
 test("model projection rejects invalid windows, duplicate ids, values and control schemas", () => {
   for (const mutate of [
     (p: any) => (p.range = [0, 99]),

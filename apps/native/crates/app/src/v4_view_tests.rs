@@ -700,6 +700,121 @@ fn a_key_the_window_hands_over_reaches_the_panels_root(cx: &mut TestAppContext) 
         ]
     );
 }
+/// U4: a scroller that asks to keep rows keeps them in a body too short for
+/// its panel (the body scrolls instead); one that does not may shrink away.
+#[gpui::test]
+fn a_scroller_keeps_the_rows_its_panel_asks_for_in_a_short_body(cx: &mut TestAppContext) {
+    let rig = rig("viewer", 1);
+    let _ = publication(&rig);
+    let column = json!({"display":"flex","flexDirection":"column","width":200,"height":60});
+    let mut ops = node_ops(1, 0, "div", json!({ "style": column }), &[]);
+    ops.extend(node_ops(
+        2,
+        1,
+        "div",
+        json!({"style":{"height":50,"flexShrink":0}}),
+        &[],
+    ));
+    ops.extend(node_ops(
+        3,
+        1,
+        "scroll",
+        json!({"metadata":{"rowFloor":3}}),
+        &[],
+    ));
+    ops.extend(node_ops(4, 3, "div", json!({"style":{"height":500}}), &[]));
+    ops.extend(node_ops(5, 1, "scroll", json!({}), &[]));
+    ops.extend(node_ops(6, 5, "div", json!({"style":{"height":500}}), &[]));
+    let (_view, mut vcx) = window(cx, &rig, synthetic(&rig, ops), Default::default());
+    vcx.run_until_parked();
+    let row = tokens().metrics.row;
+    assert_eq!(f32::from(bounds(&mut vcx, "n3").size.height), 3. * row);
+    assert!(f32::from(bounds(&mut vcx, "n5").size.height) < row);
+}
+/// A side panel's body as `panel_body` builds it: a slot that scrolls, the
+/// panel as tall as its content and at least the slot.
+struct ScrollingBody {
+    view: Entity<SurfaceView>,
+    scroll: gpui::ScrollHandle,
+}
+impl Render for ScrollingBody {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        use gpui::{InteractiveElement, StatefulInteractiveElement};
+        div().w(px(200.)).h(px(60.)).child(
+            div()
+                .id("body")
+                .size_full()
+                .overflow_y_scroll()
+                .track_scroll(&self.scroll)
+                .child({
+                    let content = self.view.read(cx).in_body(60.);
+                    self.view.clone().cached(content)
+                }),
+        )
+    }
+}
+/// U4: a side panel taller than its body grows with its rows (the body then
+/// scrolls to them); a panel that fits still fills its body.
+#[gpui::test]
+fn a_side_panel_taller_than_its_body_gives_the_body_something_to_scroll(cx: &mut TestAppContext) {
+    let rig = rig("viewer", 1);
+    let _ = publication(&rig);
+    for (rows, scrolls) in [(3, true), (0, false)] {
+        let column = json!({"display":"flex","flexDirection":"column","flexGrow":1});
+        let mut ops = node_ops(1, 0, "div", json!({ "style": column }), &[]);
+        ops.extend(node_ops(
+            2,
+            1,
+            "div",
+            json!({"style":{"height":50,"flexShrink":0}}),
+            &[],
+        ));
+        ops.extend(node_ops(
+            3,
+            1,
+            "scroll",
+            json!({"metadata":{"rowFloor":rows}}),
+            &[],
+        ));
+        ops.extend(node_ops(4, 3, "div", json!({"style":{"height":500}}), &[]));
+        cx.executor().allow_parking();
+        let runtime = rig.runtime.clone();
+        let first = synthetic(&rig, ops);
+        let scroll = gpui::ScrollHandle::new();
+        let handle = scroll.clone();
+        let (_, mut vcx) = cx.add_window_view(move |window, cx| {
+            let view = cx.new(|cx| {
+                let mut v =
+                    SurfaceView::new(runtime, first, tokens(), Default::default(), window, cx);
+                v.grows = true;
+                v
+            });
+            ScrollingBody {
+                view,
+                scroll: handle,
+            }
+        });
+        vcx.simulate_resize(size(px(400.), px(300.)));
+        vcx.run_until_parked();
+        // The first frame measures the panel; the next sizes the body by it.
+        vcx.update(|window, _| window.refresh());
+        vcx.run_until_parked();
+        let reach = f32::from(scroll.max_offset().y);
+        eprintln!(
+            "DEBUG rows={rows} reach={reach} n1={:?} n3={:?}",
+            bounds(&mut vcx, "n1"),
+            bounds(&mut vcx, "n3")
+        );
+        if scrolls {
+            let row = tokens().metrics.row;
+            assert_eq!(reach, 50. + 3. * row - 60., "the rows are within reach");
+        } else {
+            assert_eq!(reach, 0., "a panel that fits does not scroll");
+            // Its list fills what the header leaves.
+            assert_eq!(f32::from(bounds(&mut vcx, "n3").size.height), 10.);
+        }
+    }
+}
 /// S3: a real panel and its real V8 worker under the production gate.
 #[gpui::test]
 fn playback_never_reaches_a_panel_between_its_start_and_end(cx: &mut TestAppContext) {

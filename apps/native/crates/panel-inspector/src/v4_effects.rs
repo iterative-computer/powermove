@@ -241,13 +241,12 @@ impl EffectsPanel {
         &self,
         model: &mut Inspector,
         effect: &Value,
-        property: &PropertyId,
-        key: &String,
-        param: &Option<crate::ParamDefinition>,
+        member: &Member,
         time: f64,
         layer: &str,
         id: &str,
     ) -> Result<Value, InspectorError> {
+        let (property, key, param) = member;
         let saved_display = model.saved_parameter_presentation(effect, key);
         let display = saved_display.as_ref().or_else(|| {
             self.presentation
@@ -478,10 +477,8 @@ impl EffectsPanel {
             }
             if let Some((group, title, members)) = &entry.group {
                 let mut parameters = Vec::with_capacity(members.len());
-                for (property, key, param) in members {
-                    parameters.push(
-                        self.parameter_value(model, effect, property, key, param, time, &layer, id)?,
-                    );
+                for member in members {
+                    parameters.push(self.parameter_value(model, effect, member, time, &layer, id)?);
                 }
                 rows.push(object([
                     ("kind", "summary".into()),
@@ -495,8 +492,8 @@ impl EffectsPanel {
                 ]));
                 continue;
             }
-            if let Some((property, key, param)) = &entry.parameter {
-                let p = self.parameter_value(model, effect, property, key, param, time, &layer, id)?;
+            if let Some(member @ (property, _, _)) = &entry.parameter {
+                let p = self.parameter_value(model, effect, member, time, &layer, id)?;
                 rows.push(object([
                     ("kind", "parameter".into()),
                     (

@@ -14,6 +14,8 @@ import {
 const t = UI.token;
 const hit = { minWidth: t("metrics.hit"), minHeight: t("metrics.hit") };
 const stop = (e: SurfaceEvent) => e.stopPropagation();
+/** The rows the panel first publishes (the native side's 0..96 window). */
+const ROW_WINDOW = 96;
 export interface PanelProps {
   controller: EffectsController;
   /** Must be resolved from pm-design Tokens.metrics.row by the native worker. */
@@ -253,18 +255,15 @@ export function EffectControls(props: PanelProps) {
           <UI.List
             id={`${PANEL_ID}:list`}
             label="Effects"
-            // The rows take the room the panel has left and scroll in it,
-            // never less than one row (a short dock left them none, U4).
-            style={{
-              ...hit,
-              flexGrow: 1,
-              flexShrink: 1,
-              minHeight: t("metrics.row"),
-            }}
+            style={{ ...hit, flexGrow: 1, flexShrink: 1 }}
             tabIndex={p.locked ? -1 : 0}
             disabled={p.locked}
             metadata={{
               multiselectable: true,
+              // The rows keep their height: in a dock too short for them the
+              // panel's body scrolls (a short dock left them none, U4). A
+              // stack longer than the first row window scrolls in the list.
+              rowFloor: Math.min(p.count, ROW_WINDOW),
               rowCount: p.count,
               effectCount: p.effectCount,
               focus: p.focus,
