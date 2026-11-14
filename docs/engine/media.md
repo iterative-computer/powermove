@@ -674,11 +674,14 @@ measurements there supersede these earlier gaps. Level 1 AVIF draws the
 32 CICP pairs listed under "Level 1 HDR and chromaticity stills", each
 compared with the app; other primaries/transfers remain named failures.
 
-OpenEXR and DPX are unreachable through today's importer: neither extension
-is in `media-formats.ts`, and both the ordinary picker import and forced
-`image/x-exr` / `image/x-dpx` MIME imports reject the captured originals.
-The original native decoding APIs remain available. No app import or
-persistence behavior changes in this lane.
+OpenEXR, DPX, TGA and PSD were unreachable through the shipped importer
+(none is in `media-formats.ts`). The native app imports them: EXR and DPX
+at their depth, TGA with its straight alpha in stored row order, a
+Photoshop document's flattened image at 8 or 16 bits with its profile
+(ImageIO). Each is offered by Import Media and Import Image Sequence and
+drawn exactly (`tests/stills.rs`, `pm-builtins` import tests). TGA has no
+signature: `pm_media::image::sniff` takes it only when all 18 header bytes
+describe an image.
 
 ### Broken level-1 SVG documents
 
