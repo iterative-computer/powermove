@@ -440,7 +440,11 @@ export function EffectControls(props: PanelProps) {
                         value={row.enabled}
                         disabled={p.locked}
                         tabIndex={-1}
-                        onClick={(e) => {
+                        onClick={stop}
+                        // A person's click (the AppKit checkbox's action, the
+                        // drawn box's click) and the agent's arrive as the
+                        // box's change: no host sends a click for a checkbox.
+                        onChange={(e) => {
                           stop(e);
                           send({ type: "toggle", id: row.id });
                         }}

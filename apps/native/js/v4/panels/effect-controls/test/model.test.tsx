@@ -40,7 +40,8 @@ test("B285/B379 selection, range, toggle, disclosure, outside and nested control
     await root.render(<EffectControls controller={c} rowHeight={24} />);
     const checkbox = find(root, (p) => p.label === "Enable Glow");
     const header = find(root, (p) => p.id === "layer-effects:effect:f1");
-    await event(root, checkbox.id, "click", {}, [header.id]);
+    // The checkbox's change, as every host sends it (no click event).
+    await event(root, checkbox.id, "change", { value: false }, [header.id]);
     await c.drive({ type: "range", range: [0, 32] });
     expect(c.snapshot().selectedCount).toBe(1);
     expect(c.snapshot().rows[0]).toMatchObject({

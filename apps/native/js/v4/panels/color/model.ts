@@ -40,6 +40,8 @@ export interface EffectHeader {
   label: string;
   enabled: boolean;
   expanded: boolean;
+  /** Its place in the layer's whole effect stack (grades and the rest). */
+  ordinal?: number;
 }
 export interface ParameterRow {
   kind: "parameter";
@@ -69,7 +71,11 @@ export type Intent =
       definition: string;
       /** Values the new effect starts with, in the same Undo step. */
       parameters?: Record<string, Json>;
+      /** Where in the effect stack it goes (the end when absent). */
+      slot?: number;
     }
+  /** Moves an effect to before the effect now at `slot` (the end: count). */
+  | { type: "drop"; id: string; slot: number }
   | {
       type: "parameter";
       id: string;

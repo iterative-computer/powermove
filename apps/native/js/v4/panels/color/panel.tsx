@@ -5,7 +5,6 @@ import { ColorModel, type Intent, type ParameterRow } from "./model";
 import {
   CST,
   CURVES,
-  CURVE_CHANNELS,
   EXPORT_CDL,
   IMPORT_CDL,
   LOAD_LUT,
@@ -15,9 +14,12 @@ import {
   WHEELS,
   WHEELS_OF,
   WHEEL_SECTIONS,
+  addSlot,
   coverage,
   curveGroup,
   grade,
+  move,
+  names,
   parameter,
   wheelGroup,
   type GradeEffect,
@@ -45,18 +47,12 @@ export function ColorPanel({ controller: c, command }: ColorProps) {
   const send = (intent: Intent) => {
     if (editable) c.send(intent);
   };
+  // Every grade in the order it applies (the effect stack's), each named so
+  // two of a kind can be told apart.
   const tools = grade(p);
-  // The first Color Wheels is the section's own; any further one (each grades
-  // the picture) follows as a tool of its own.
-  const [wheels, ...moreWheels] = tools.filter(
-    (g) => g.header.definition === WHEELS,
-  );
-  const curves = tools.filter((g) => g.header.definition === CURVES);
-  const luts = tools.filter((g) => g.header.definition === LUT);
-  const transforms = tools.filter((g) => g.header.definition === CST);
-  const others = tools.filter(
-    (g) => ![WHEELS, CURVES, LUT, CST].includes(g.header.definition ?? ""),
-  );
+  const titles = names(tools);
+  const firstWheels = tools.find((g) => g.header.definition === WHEELS);
+  const slot = addSlot(tools);
   const rows = (list: (ParameterRow | undefined)[]) =>
     list.map(
       (row) =>
@@ -75,15 +71,59 @@ export function ColorPanel({ controller: c, command }: ColorProps) {
     </Plate>,
     <Wheels key={`${g.header.id}:wheels`} g={g} locked={p.locked} />,
   ];
-  const add = (definition: string, label: string) => (
+  const body = (g: GradeEffect) =>
+    g.header.definition === WHEELS ? (
+      wheelControls(g)
+    ) : g.header.definition === CURVES ? (
+      <Plate label="Curve" wide>
+        {rows([parameter(g, "channel")])}
+        <CurveControl g={g} locked={p.locked} />
+      </Plate>
+    ) : (
+      <Plate label={g.header.label} wide>
+        {rows(g.parameters)}
+      </Plate>
+    );
+  // Another grade goes after the last one, in one Undo step; a curve starts
+  // on Master (its Channel pop-up chooses another).
+  const add = (definition: string, label: string, short: string) => (
     <SectionAction
       id={`${PANEL_ID}:add:${definition}`}
       label={label}
-      short="Add"
+      short={short}
       symbol="plus"
       disabled={!editable}
-      onActivate={() => send({ type: "add", definition })}
+      onActivate={() =>
+        send({
+          type: "add",
+          definition,
+          ...(slot === undefined ? {} : { slot }),
+          ...(definition === CURVES ? { parameters: { channel: 0 } } : {}),
+        })
+      }
     />
+  );
+  const cdl = (
+    <>
+      <SectionAction
+        id={`${PANEL_ID}:import-cdl`}
+        label="Import CDL…"
+        short="Import CDL"
+        symbol="square.and.arrow.down"
+        disabled={!editable}
+        onActivate={() => command(IMPORT_CDL)}
+      />
+      {firstWheels && (
+        <SectionAction
+          id={`${PANEL_ID}:export-cdl`}
+          label="Export CDL…"
+          short="Export CDL"
+          symbol="square.and.arrow.up"
+          disabled={p.target !== "Layer"}
+          onActivate={() => command(EXPORT_CDL)}
+        />
+      )}
+    </>
   );
   return (
     <div
@@ -120,148 +160,33 @@ export function ColorPanel({ controller: c, command }: ColorProps) {
             label={PANEL_TITLE}
             style={{ display: "flex", flexDirection: "column" }}
           >
-            <Section
-              title="Color Wheels"
-              tool={wheels}
-              send={send}
-              editable={editable}
-              action={
-                <>
-                  {wheels ? null : add(WHEELS, "Add Color Wheels")}
-                  <SectionAction
-                    id={`${PANEL_ID}:import-cdl`}
-                    label="Import CDL…"
-                    short="Import"
-                    symbol="square.and.arrow.down"
-                    disabled={!editable}
-                    onActivate={() => command(IMPORT_CDL)}
-                  />
-                  {wheels && (
-                    <SectionAction
-                      id={`${PANEL_ID}:export-cdl`}
-                      label="Export CDL…"
-                      short="Export"
-                      symbol="square.and.arrow.up"
-                      disabled={p.target !== "Layer"}
-                      onActivate={() => command(EXPORT_CDL)}
-                    />
-                  )}
-                </>
-              }
-            >
-              {wheels ? wheelControls(wheels) : null}
-              {moreWheels.map((g) => (
-                <Tool
-                  key={g.header.id}
-                  tool={g}
-                  send={send}
-                  editable={editable}
-                >
-                  {wheelControls(g)}
-                </Tool>
-              ))}
-            </Section>
-            <Section
-              title="Curves"
-              send={send}
-              editable={editable}
-              action={
-                <SectionAction
-                  id={`${PANEL_ID}:add:${CURVES}`}
-                  label="Add Curve"
-                  short="Add"
-                  symbol="plus"
-                  disabled={!editable}
-                  onActivate={() => {
-                    // A curve is made on the channel chosen, in one Undo step.
-                    void c.platform
-                      .contextMenu(
-                        CURVE_CHANNELS.map((label, v) => ({
-                          id: String(v),
-                          label: `${label} Curve`,
-                        })),
-                      )
-                      .then((choice) => {
-                        if (choice !== null)
-                          send({
-                            type: "add",
-                            definition: CURVES,
-                            parameters: { channel: Number(choice) },
-                          });
-                      })
-                      .catch((error) => c.platform.report(error));
-                  }}
-                />
-              }
-            >
-              {curves.map((g) => (
-                <Tool
-                  key={g.header.id}
-                  tool={g}
-                  send={send}
-                  editable={editable}
-                >
-                  {rows([parameter(g, "channel")])}
-                  <CurveControl g={g} locked={p.locked} />
-                </Tool>
-              ))}
-            </Section>
-            <Section
-              title="LUT"
-              send={send}
-              editable={editable}
-              action={
-                <SectionAction
-                  id={`${PANEL_ID}:load-lut`}
-                  label="Load LUT…"
-                  symbol="folder"
-                  disabled={!editable}
-                  onActivate={() => command(LOAD_LUT)}
-                />
-              }
-            >
-              {luts.map((g) => (
-                <Tool
-                  key={g.header.id}
-                  tool={g}
-                  send={send}
-                  editable={editable}
-                >
-                  {rows(g.parameters)}
-                </Tool>
-              ))}
-            </Section>
-            <Section
-              title="Color Space Transform"
-              send={send}
-              editable={editable}
-              action={add(CST, "Add Color Space Transform")}
-            >
-              {transforms.map((g) => (
-                <Tool
-                  key={g.header.id}
-                  tool={g}
-                  send={send}
-                  editable={editable}
-                >
-                  {rows(g.parameters)}
-                </Tool>
-              ))}
-            </Section>
-            {others.length > 0 && (
-              <Section title="More" send={send} editable={editable}>
-                {others.map((g) => (
-                  <Tool
-                    key={g.header.id}
-                    tool={g}
-                    send={send}
-                    editable={editable}
-                  >
-                    {rows(g.parameters)}
-                  </Tool>
-                ))}
-              </Section>
-            )}
+            <AddRow>
+              {add(WHEELS, "Add Color Wheels", "Color Wheels")}
+              {add(CURVES, "Add Curve", "Curve")}
+              <SectionAction
+                id={`${PANEL_ID}:load-lut`}
+                label="Load LUT…"
+                short="LUT…"
+                symbol="folder"
+                disabled={!editable}
+                onActivate={() => command(LOAD_LUT)}
+              />
+              {add(CST, "Add Color Space Transform", "Transform")}
+              {cdl}
+            </AddRow>
+            {tools.map((g, i) => (
+              <Tool
+                key={g.header.id}
+                title={titles[i]}
+                tool={g}
+                send={send}
+                editable={editable}
+                up={move(tools, i, -1)}
+                down={move(tools, i, 1)}
+              >
+                {body(g)}
+              </Tool>
+            ))}
           </scroll>
         </>
       )}
@@ -338,7 +263,8 @@ function Wheel({
     number,
     number,
   ];
-  const disabled = locked || !g.header.enabled || !group;
+  // A grade that is off can still be set up before it is turned on.
+  const disabled = locked || !group;
   return (
     <div
       role="group"
@@ -487,7 +413,7 @@ function CurveControl({ g, locked }: { g: GradeEffect; locked: boolean }) {
         binding={group.binding}
         value={group.value}
         channel={channel}
-        disabled={locked || !g.header.enabled}
+        disabled={locked}
         onKeyDown={stop}
       />
     </div>
@@ -555,20 +481,50 @@ function Subheading({ title }: { title: string }) {
   );
 }
 
-/** A section; with `tool`, its header carries the tool's switch and Reset. */
-function Section({
+/** The grades' Add actions, at the top of the list (they wrap in a narrow
+ * panel). */
+function AddRow({ children }: { children: any }) {
+  return (
+    <div
+      role="group"
+      label="Add a Grade"
+      style={{
+        display: "flex",
+        flexDirection: "row",
+        flexWrap: "wrap",
+        alignItems: "center",
+        paddingLeft: t("metrics.inset"),
+        paddingRight: t("metrics.inset"),
+        paddingBottom: t("metrics.gap"),
+      }}
+    >
+      {children}
+    </div>
+  );
+}
+
+/** One grade: its header (on or off, name, order, Reset, Remove) over its
+ * controls. */
+function Tool({
   title,
   tool,
   send,
   editable,
+  up,
+  down,
   action,
   children,
 }: {
+  key?: string;
   title: string;
-  tool?: GradeEffect;
+  tool: GradeEffect;
   send: (intent: Intent) => void;
   editable: boolean;
-  /** The section's own action, at the trailing edge of its heading. */
+  /** Moves it before the grade above, or after the one below (null at the
+   * ends). */
+  up: Intent | null;
+  down: Intent | null;
+  /** Its own actions (the first Color Wheels' CDL Import and Export). */
   action?: any;
   children: any;
 }) {
@@ -583,41 +539,11 @@ function Section({
         tool={tool}
         send={send}
         editable={editable}
+        up={up}
+        down={down}
         action={action}
       />
       {children}
-    </div>
-  );
-}
-
-function Tool({
-  tool,
-  send,
-  editable,
-  children,
-}: {
-  key?: string;
-  tool: GradeEffect;
-  send: (intent: Intent) => void;
-  editable: boolean;
-  children: any;
-}) {
-  const channel = parameter(tool, "channel");
-  const label =
-    channel?.parameter.options?.find((o) => o.v === channel.parameter.value)
-      ?.label ?? tool.header.label;
-  return (
-    <div role="group" label={label}>
-      <ToolHeader
-        title={label}
-        tool={tool}
-        send={send}
-        editable={editable}
-        removable
-      />
-      <Plate label={label} wide>
-        {children}
-      </Plate>
     </div>
   );
 }
@@ -627,17 +553,32 @@ function ToolHeader({
   tool,
   send,
   editable,
-  removable,
+  up,
+  down,
   action,
 }: {
   title: string;
-  tool?: GradeEffect;
+  tool: GradeEffect;
   send: (intent: Intent) => void;
   editable: boolean;
-  removable?: boolean;
+  up: Intent | null;
+  down: Intent | null;
   action?: any;
 }) {
-  const id = tool?.header.id;
+  const id = tool.header.id;
+  const order = (intent: Intent | null, label: string, symbol: string) => (
+    <UI.ToolbarItem
+      id={`${PANEL_ID}:${symbol === "chevron.up" ? "up" : "down"}:${id}`}
+      label={label}
+      title={label}
+      disabled={!editable || !intent}
+      attr={{ symbol }}
+      onClick={(e) => {
+        stop(e);
+        if (intent) send(intent);
+      }}
+    />
+  );
   return (
     <div
       role="heading"
@@ -657,49 +598,77 @@ function ToolHeader({
         fontWeight: t("typography.semibold_weight"),
       }}
     >
-      {id && (
-        <UI.Checkbox
-          id={`${PANEL_ID}:on:${id}`}
-          preventDefault={{ click: true }}
-          label={`Enable ${title}`}
-          binding={`${PANEL_ID}:enable:${id}`}
-          value={tool!.header.enabled}
-          disabled={!editable}
-          onKeyDown={stop}
-          onClick={(e) => {
-            stop(e);
-            send({ type: "toggle", id });
+      <UI.Checkbox
+        id={`${PANEL_ID}:on:${id}`}
+        preventDefault={{ click: true }}
+        label={`Enable ${title}`}
+        binding={`${PANEL_ID}:enable:${id}`}
+        value={tool.header.enabled}
+        disabled={!editable}
+        onKeyDown={stop}
+        onClick={stop}
+        // A person's click (the AppKit checkbox's action, the drawn box's
+        // click) and the agent's arrive as the box's change.
+        onChange={(e) => {
+          stop(e);
+          send({ type: "toggle", id });
+        }}
+      />
+      {/* The name is part of the switch, as a checkbox's title is on macOS:
+          the box alone was a small target. */}
+      <div
+        id={`${PANEL_ID}:title:${id}`}
+        role="group"
+        label={title}
+        style={{
+          flexGrow: 1,
+          flexShrink: 1,
+          minWidth: 0,
+          display: "flex",
+          alignSelf: "stretch",
+          alignItems: "center",
+        }}
+        onClick={(e) => {
+          stop(e);
+          if (editable) send({ type: "toggle", id });
+        }}
+      >
+        {/* One line: a long name ends in an ellipsis, never wraps. */}
+        <text
+          style={{
+            whiteSpace: "nowrap",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
           }}
-        />
-      )}
-      <text style={{ flexGrow: 1 }}>{title}</text>
+        >
+          {title}
+        </text>
+      </div>
       {action}
-      {id && (
-        <UI.ToolbarItem
-          id={`${PANEL_ID}:reset:${id}`}
-          label={`Reset ${title}`}
-          title="Reset"
-          disabled={!editable}
-          attr={{ symbol: "arrow.counterclockwise" }}
-          onClick={(e) => {
-            stop(e);
-            send({ type: "reset", id });
-          }}
-        />
-      )}
-      {id && removable && (
-        <UI.ToolbarItem
-          id={`${PANEL_ID}:remove:${id}`}
-          label={`Remove ${title}`}
-          title="Remove"
-          disabled={!editable}
-          attr={{ symbol: "minus.circle" }}
-          onClick={(e) => {
-            stop(e);
-            send({ type: "remove", id });
-          }}
-        />
-      )}
+      {order(up, `Move ${title} Up`, "chevron.up")}
+      {order(down, `Move ${title} Down`, "chevron.down")}
+      <UI.ToolbarItem
+        id={`${PANEL_ID}:reset:${id}`}
+        label={`Reset ${title}`}
+        title="Reset"
+        disabled={!editable}
+        attr={{ symbol: "arrow.counterclockwise" }}
+        onClick={(e) => {
+          stop(e);
+          send({ type: "reset", id });
+        }}
+      />
+      <UI.ToolbarItem
+        id={`${PANEL_ID}:remove:${id}`}
+        label={`Remove ${title}`}
+        title="Remove"
+        disabled={!editable}
+        attr={{ symbol: "minus.circle" }}
+        onClick={(e) => {
+          stop(e);
+          send({ type: "remove", id });
+        }}
+      />
     </div>
   );
 }

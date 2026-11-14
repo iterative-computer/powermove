@@ -41,11 +41,14 @@ test("§4 header selection, disclosure, checkbox, reset/remove, and outside cont
       selected: true,
       expanded: false,
     });
+    // A click on the checkbox reaches the panel as the box's change (the
+    // AppKit checkbox's action, the drawn box's click, the agent's click):
+    // a host sends no click event for a checkbox.
     await event(
       root,
       find(root, (p) => p.label === "Enable Glow").id,
-      "click",
-      {},
+      "change",
+      { value: false },
       [header().id],
     );
     await settle();
