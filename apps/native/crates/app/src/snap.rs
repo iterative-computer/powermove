@@ -91,7 +91,7 @@ pub fn snap(
 pub fn snap_with_rulers(
     moving: &[[f64; 2]],
     targets: &[[f64; 2]],
-    rulers: &[crate::viewer_rulers::RulerGuide],
+    rulers: &[crate::gizmo::viewer_rulers::RulerGuide],
     threshold: f64,
     axes: [bool; 2],
 ) -> ([f64; 2], Vec<Guide>) {
@@ -100,8 +100,8 @@ pub fn snap_with_rulers(
         for &m in moving {
             let ruler_targets = rulers.iter().filter_map(|guide| {
                 let guide_axis = match guide.axis {
-                    crate::viewer_rulers::Axis::Vertical => 0,
-                    crate::viewer_rulers::Axis::Horizontal => 1,
+                    crate::gizmo::viewer_rulers::Axis::Vertical => 0,
+                    crate::gizmo::viewer_rulers::Axis::Horizontal => 1,
                 };
                 (guide_axis == axis && guide.at.is_finite()).then(|| {
                     let mut point = [0., 0.];
@@ -193,7 +193,7 @@ mod tests {
 #[cfg(test)]
 mod ruler_snap_tests {
     use super::{DISTANCE, snap_with_rulers};
-    use crate::viewer_rulers::{Axis, RulerGuide};
+    use crate::gizmo::viewer_rulers::{Axis, RulerGuide};
     #[test]
     fn ruler_guides_snap_only_their_own_axis() {
         let rulers = [RulerGuide {
