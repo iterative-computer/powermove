@@ -417,7 +417,7 @@ pub(super) fn image(model: &Launcher, time: u64, t: &Tokens) -> Retained<NSImage
                 .fill();
             }
         } else if tone == Tone::Attention {
-            let alpha = if reduced || model.snapshot.panel_open || model.running_count() == 0 {
+            let alpha = if reduced || !model.attention_unseen() || model.running_count() == 0 {
                 1.
             } else {
                 crate::agent_launcher::pulse_opacity((time % 1400) as f64 / 1400.)
@@ -475,7 +475,7 @@ pub(super) fn image(model: &Launcher, time: u64, t: &Tokens) -> Retained<NSImage
 mod captures {
     use super::*;
     #[test]
-    fn launcher_dark_and_light_headless() {
+    fn agent_launcher_dark_and_light_headless() {
         let Ok(dir) = std::env::var("PM_AGENT_LAUNCHER_CAPTURE") else {
             return;
         };

@@ -28,6 +28,7 @@ pub struct Launcher {
     pub unseen: bool,
     pub receiving_at: Option<u64>,
     pub done_at: Option<u64>,
+    seen_attention: Vec<String>,
 }
 impl Launcher {
     pub fn update(&mut self, next: Snapshot, now: u64) {
@@ -46,7 +47,14 @@ impl Launcher {
         {
             self.receiving_at = Some(now);
         }
+        self.seen_attention
+            .retain(|id| next.tasks.iter().any(|t| t.id == *id && t.attention));
         if next.panel_open {
+            for task in next.tasks.iter().filter(|t| t.attention) {
+                if !self.seen_attention.contains(&task.id) {
+                    self.seen_attention.push(task.id.clone());
+                }
+            }
             self.unseen = false;
             self.receiving_at = None;
         }
@@ -68,11 +76,17 @@ impl Launcher {
             && (self.tone() == Tone::Working
                 || (self.tone() == Tone::Attention
                     && self.running_count() > 0
-                    && !self.snapshot.panel_open)
+                    && self.attention_unseen())
                 || self.done_at.is_some_and(|at| now.saturating_sub(at) < 360)
                 || self
                     .receiving_at
                     .is_some_and(|at| now.saturating_sub(at) < 420))
+    }
+    pub fn attention_unseen(&self) -> bool {
+        self.snapshot
+            .tasks
+            .iter()
+            .any(|t| t.attention && !self.seen_attention.contains(&t.id))
     }
     pub fn tooltip(&self, now: u64) -> String {
         let label = match self.tone() {
@@ -205,6 +219,11 @@ mod tests {
         s.panel_open = true;
         l.update(s, 1000);
         assert!(!l.requests_frames(1000, false));
+        let mut closed = l.snapshot.clone();
+        closed.panel_open = false;
+        l.update(closed, 1100);
+        assert!(!l.attention_unseen());
+        assert!(!l.requests_frames(1520, false));
     }
     #[test]
     fn consent_without_a_run_does_not_drive_frames() {
