@@ -57,6 +57,37 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                     let r_layer = r["layer"].as_str().map(str::to_owned);
                     match op {
                         "status" => {},
+                        "coedit_metrics" => {},
+                        "coedit_begin" => v.host.borrow_mut().set_agent_status(pm_shell::AgentStatus {
+                            working:true,progress:Some("Synthetic agent perf gate".into()),..Default::default()
+                        }),
+                        "coedit_end" => v.host.borrow_mut().set_agent_status(pm_shell::AgentStatus::default()),
+                        "coedit_load" => {
+                            let project=v.session.as_ref().ok_or_else(||anyhow::anyhow!("open a temporary 1080p project first"))?.project.clone();
+                            let layers:Vec<_>=v.layers().iter().filter(|l|!l.effectively_locked).take(6).map(|l|l.id.clone()).collect();
+                            anyhow::ensure!(!layers.is_empty(),"no editable synthetic layers");
+                            let kernel=v.kernel.clone();let host=v.mcp.clone();
+                            std::thread::spawn(move || {
+                                let started=std::time::Instant::now();
+                                for index in 0..40 {
+                                    let layer=layers[index%layers.len()].clone();
+                                    if let Some(publication)=kernel.published(&project) {
+                                        let request=pm_kernel::Request::new(pm_kernel::Caller::realm(90_001,1,pm_kernel::Origin::Agent),pm_kernel::Call::Transact {
+                                            label:Some("Synthetic coedit perf".into()),expected_revision:Some(publication.revision()),
+                                            body:vec![pm_kernel::Command::SetStaticOpacity{layer_id:layer.clone(),value:30.+((index/layers.len())%2)as f64}].into(),
+                                        }).with_document(publication.snapshot.doc_id).outside_revision(publication.revision());
+                                        let _=kernel.call(&project,request).wait();
+                                        host.publish_presence(pm_mcp::presence::Presence {
+                                            project:project.clone(),run:"synthetic-perf".into(),kind:pm_mcp::presence::Kind::Key,
+                                            layer:Some(layer),property:None,times:vec![],
+                                        });
+                                    }
+                                    let next=started+std::time::Duration::from_millis((index as u64+1)*50);
+                                    std::thread::sleep(next.saturating_duration_since(std::time::Instant::now()));
+                                }
+                            });
+                        },
+
                         "focus" => {
                             v.host.borrow().window.makeKeyAndOrderFront(None);
                             let app=objc2_app_kit::NSApplication::sharedApplication(objc2::MainThreadMarker::new().unwrap());
@@ -180,6 +211,14 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                         },
                         _ => anyhow::bail!("unknown perf operation"),
                     }
+                    let coedit=(op=="coedit_metrics").then(|| {
+                        let mut usage:libc::rusage=unsafe{std::mem::zeroed()};
+                        unsafe{libc::getrusage(libc::RUSAGE_SELF,&mut usage);}
+                        let seconds=|t:libc::timeval|t.tv_sec as f64+t.tv_usec as f64/1_000_000.;
+                        let timeline=v.builtins.timeline.as_ref().map(|t|t.read(cx).agent_ink_metrics());
+                        json!({"shell_frames":v.host.borrow().agent_effect_frames(),"timeline":timeline,
+                            "process_cpu_s":seconds(usage.ru_utime)+seconds(usage.ru_stime)})
+                    });
                     let status = v.viewer.as_ref().map(|v| v.status());
                     let frame = status.as_ref().and_then(|s| s.frame.as_ref());
                     let mut out = json!({
@@ -210,6 +249,7 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                             "accent_dark":hex(pm_shell::system_accent(pm_design::Scheme::Dark))})
                     };
                     let more = json!({
+                        "coedit":coedit,
                         "layer_count":v.layers().len(),
                         "has_layer":r_layer.as_deref().map(|id| v.layers().iter().any(|l| l.id == id)),
                         "saving":v.published.as_ref().map(|p| p.saving),

@@ -10,6 +10,7 @@
 mod action_toast;
 mod access;
 mod after_open;
+mod agent_coedit;
 mod agent_clients;
 mod alert;
 mod builtins;
