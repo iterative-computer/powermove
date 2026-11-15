@@ -172,9 +172,18 @@ define_class!(
             let staged = self.ivars().borrow().upgrade().and_then(|s| s.input_rect.get());
             match (staged, self.window()) {
                 (Some(rect), Some(window)) => {
-                    let h = window.contentView().map_or(0., |v| v.bounds().size.height);
+                    // From GPUI's view (P-EMBED): its frame in the window.
+                    let s = self.ivars().borrow().upgrade();
+                    let g = s.as_ref().map(|s| {
+                        let v = &s.gpui;
+                        v.convertRect_toView(v.bounds(), None)
+                    });
+                    let g = g.unwrap_or_else(|| window.contentView().map_or(NSRect::ZERO, |v| v.bounds()));
                     let flipped = NSRect::new(
-                        NSPoint::new(rect.origin.x, h - rect.origin.y - rect.size.height),
+                        NSPoint::new(
+                            g.origin.x + rect.origin.x,
+                            g.origin.y + g.size.height - rect.origin.y - rect.size.height,
+                        ),
                         rect.size,
                     );
                     window.convertRectToScreen(flipped)
@@ -565,7 +574,9 @@ impl NativeTextSlot {
         }
         // Writing Tools, dictation, emoji and Services use NSTextView's ordinary responder.
         // No input-context replacement or keyDown override is installed.
-        if let Some(content) = gpui.window().and_then(|w| w.contentView()) {
+        // In GPUI's view's parent: the window's content view, or the detail
+        // view of a split view hosting GPUI's view (P-EMBED).
+        if let Some(content) = unsafe { gpui.superview() } {
             // As a hosted control: it keeps its distance from the window's
             // top edge until the next paint places it.
             let top = objc2_app_kit::NSAutoresizingMaskOptions::ViewMinYMargin;
@@ -902,14 +913,14 @@ fn place(key: usize, apply: bool) -> bool {
             }
             continue;
         };
-        let h = state
-            .gpui
-            .window()
-            .and_then(|w| w.contentView())
-            .map_or(0., |v| v.bounds().size.height);
+        // From GPUI's frame in its parent (P-EMBED).
+        let g = state.gpui.frame();
         let visible = intersection(bounds, clip);
         let frame = NSRect::new(
-            NSPoint::new(visible.origin.x, h - visible.origin.y - visible.size.height),
+            NSPoint::new(
+                g.origin.x + visible.origin.x,
+                g.origin.y + g.size.height - visible.origin.y - visible.size.height,
+            ),
             visible.size,
         );
         if state.wrapper.frame() != frame {
@@ -957,17 +968,16 @@ fn place(key: usize, apply: bool) -> bool {
             }
         }
         if let Some((host, indicator)) = &state.caret {
-            let content_h = state
-                .gpui
-                .window()
-                .and_then(|w| w.contentView())
-                .map_or(0., |v| v.bounds().size.height);
+            let g = state.gpui.frame();
             let focused = state.editing.get();
             match state.caret_staged.get().filter(|_| focused) {
                 Some((rect, clip)) => {
                     let shown = intersection(rect, clip);
                     let frame = NSRect::new(
-                        NSPoint::new(rect.origin.x, content_h - rect.origin.y - rect.size.height),
+                        NSPoint::new(
+                            g.origin.x + rect.origin.x,
+                            g.origin.y + g.size.height - rect.origin.y - rect.size.height,
+                        ),
                         rect.size,
                     );
                     let visible = shown.size.width > 0. && shown.size.height > 0.;
