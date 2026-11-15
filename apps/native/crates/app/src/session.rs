@@ -1053,6 +1053,18 @@ impl Controller {
                 cx.notify();
             });
             if let Some((id, name)) = found {
+                // Every restored window reopens its project, one open at a
+                // time (an open holds the project-operation fence): a tab
+                // waits for the one before it instead of giving up.
+                for _ in 0..300 {
+                    let busy = this.update(cx, |v, _| v.mcp.operation_in_progress());
+                    if !matches!(busy, Ok(true)) {
+                        break;
+                    }
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(200))
+                        .await;
+                }
                 let _ = this.update(cx, |v, cx| {
                     if v.session.is_none() && !v.opening {
                         v.open_named(

@@ -140,6 +140,9 @@ const POINTER: u64 = 1;
 #[path = "v4_grade.rs"]
 mod grade;
 
+#[path = "v4_cull.rs"]
+mod cull;
+
 /// A number field's value after an arrow key: the typed text (else the
 /// field's value) one step up or down, ten with Shift, within its limits.
 fn arrow_step(typed: &str, facts: crate::v4_compile::NumberFacts, key: &str) -> f64 {
@@ -215,6 +218,8 @@ pub struct SurfaceView {
     natives: Natives,
     fields: BTreeMap<Id, Entity<TextField>>,
     controls: BTreeMap<Id, Entity<crate::v4_control::NativeControl>>,
+    /// Rows of a long scroller left out of a frame (`v4_cull`).
+    cull: cull::Cull,
     /// Pop-ups whose rows the host lists, by the source they were given.
     row_sources: HashMap<Id, (EntityId, Value)>,
     /// Disclosure buttons pressed whose group the script has not yet shown
@@ -318,6 +323,7 @@ impl SurfaceView {
             natives,
             fields: BTreeMap::new(),
             controls: BTreeMap::new(),
+            cull: Default::default(),
             row_sources: HashMap::new(),
             disclosures: HashMap::new(),
             scrolls: BTreeMap::new(),
@@ -545,6 +551,7 @@ impl SurfaceView {
         let prepared = self.prepared.clone();
         let live = |id: &Id| prepared.nodes.contains_key(id);
         self.controls.retain(|id, _| live(id));
+        self.cull.retain(|id| live(id));
         self.row_sources.retain(|id, _| live(id));
         self.scrolls.retain(|id, _| live(id));
         self.subscriptions.retain(|id, _| live(id));
@@ -599,18 +606,23 @@ impl SurfaceView {
                 .then(|| control_kind(&self.publication.panel, node))
                 .flatten();
             if let Some(kind) = kind {
-                let started = std::time::Instant::now();
-                let existed = self.controls.contains_key(&id);
-                self.mount_control(kind, view, node, lease, window, cx);
-                self.host_rows(id, node, cx);
-                mounts.0 += 1;
-                mounts.1 += started.elapsed();
-                if crate::diag::enabled() && started.elapsed().as_secs_f64() > 0.0005 {
-                    crate::diag::line(
-                        serde_json::json!({"ui": "control", "popup": matches!(kind, crate::v4_control::Kind::Popup),
-                        "new": !existed, "options": options_len(node),
-                        "ms": started.elapsed().as_secs_f64() * 1000.}),
-                    );
+                if !self.controls.contains_key(&id) && self.cull_large() && self.in_scroller(id) {
+                    // Made when its row is first built (`v4_cull`).
+                    self.cull.deferred.insert(id, kind);
+                } else {
+                    let started = std::time::Instant::now();
+                    let existed = self.controls.contains_key(&id);
+                    self.mount_control(kind, view, node, lease, window, cx);
+                    self.host_rows(id, node, cx);
+                    mounts.0 += 1;
+                    mounts.1 += started.elapsed();
+                    if crate::diag::enabled() && started.elapsed().as_secs_f64() > 0.0005 {
+                        crate::diag::line(
+                            serde_json::json!({"ui": "control", "popup": matches!(kind, crate::v4_control::Kind::Popup),
+                            "new": !existed, "options": options_len(node),
+                            "ms": started.elapsed().as_secs_f64() * 1000.}),
+                        );
+                    }
                 }
                 // A native control is a Tab stop too: the panel draws its
                 // focus ring and forwards its keys (Full Keyboard Access).
@@ -764,6 +776,21 @@ impl SurfaceView {
                 crate::v4_native::announce(&ns_window, &message);
             }
         }
+    }
+    /// A control whose row is built for the first time (`v4_cull`).
+    fn mount_deferred(
+        &mut self,
+        id: Id,
+        kind: crate::v4_control::Kind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (prepared, surface) = (self.prepared.clone(), self.publication.surface.clone());
+        let (Some(view), Some(node)) = (prepared.node(id), surface.node(id)) else {
+            return;
+        };
+        self.mount_control(kind, view, node, view.binding.clone(), window, cx);
+        self.host_rows(id, node, cx);
     }
     fn mount_control(
         &mut self,
@@ -1476,7 +1503,11 @@ impl SurfaceView {
     /// Re-stage AppKit slots whose cached paint did not run this frame (a
     /// slot inside a scroll layer follows the layer's offset).
     pub fn keep_native_slots(&self, window: &Window, cx: &App) {
-        for control in self.controls.values() {
+        for (id, control) in &self.controls {
+            // A control whose row is left out stays where it is: hidden.
+            if self.left_out(*id) {
+                continue;
+            }
             control.read(cx).keep(window);
         }
         for field in self.fields.values() {
@@ -2232,9 +2263,24 @@ impl SurfaceView {
             if node.scroll_y {
                 element = element.overflow_y_scroll();
             }
-            // A wheel step only moves the content (a native view inside
-            // draws on its own and keeps the full redraw).
-            if !self.holds_native(id) {
+            // A wheel step only moves the content, in the Project panel: the
+            // one long list the layer made faster (PM-311). Elsewhere it gained
+            // nothing measurable and held hover and AppKit controls a frame
+            // behind the content (PM-389, PM-390). A native view inside draws
+            // on its own and keeps the full redraw. Nor does one whose content
+            // fits it while it leaves rows out (`v4_cull`: a page in a body
+            // that scrolls around it): a step the layer replays carries its
+            // offset past its range until the next layout, showing rows that
+            // are not built. A scroller that scrolls keeps the layer: what it
+            // records past its edges (one viewport) is what the culling builds.
+            let fits = self
+                .scrolls
+                .get(&id)
+                .is_some_and(|s| s.max_offset().y <= px(0.));
+            if &*self.publication.panel == pm_builtins::PROJECT_PANEL
+                && !self.holds_native(id)
+                && !(fits && self.culls_in(id))
+            {
                 element = element.scroll_layer();
             }
             if follows {
@@ -2424,6 +2470,10 @@ impl SurfaceView {
             usize::MAX
         };
         for child in node.children.iter().take(shown) {
+            if let Some(stand_in) = self.cull.stand_in(*child) {
+                children.push(stand_in);
+                continue;
+            }
             match self.prepared.node(*child) {
                 Some(c) if c.is_plain_text => {
                     if let Some(text) = &c.text {
@@ -2449,6 +2499,7 @@ impl SurfaceView {
             let (_, after) = geometry.spacers();
             children.push(div().flex_none().h(px(after as f32)).into_any_element());
         }
+        children.extend(self.cull.record(id));
         if let Some(surface) = &node.native
             && let Some(view) = self.natives.views.borrow().get(surface.as_ref())
         {
@@ -3488,6 +3539,7 @@ impl Render for SurfaceView {
         }
         self.presence = presence;
         self.motion.frame(window);
+        self.plan_cull(window, cx);
         let t = &self.table.tokens;
         let root = div().relative().w_full();
         let root = if self.grows {
@@ -3510,6 +3562,7 @@ impl Render for SurfaceView {
             .font_family(pm_design::TEXT_FONT)
             .child(self.element(0, window, cx, self.prepared.header))
             .child(Self::tracking(cx, self.origin.clone()))
+            .children(self.cull.outer_mark())
     }
 }
 pub(crate) struct Tooltip {

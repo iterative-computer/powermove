@@ -122,6 +122,9 @@ pub struct Host {
     pub settings_page: Option<String>,
     pub export_job: Option<crate::export_coordinator::Job>,
     pub export_retry: Option<crate::export_coordinator::Frozen>,
+    /// Projects whose offline clips the person chose to export without, this
+    /// session: their later exports go without them and say so, not asking again.
+    pub export_without_offline: BTreeSet<String>,
     pub export_tasks: Arc<std::sync::Mutex<pm_promedia::tasks::BackgroundTasks>>,
     pub media_runtime: pm_panel_media::readiness::ObservedRuntime,
     media_probes: Arc<pm_builtins::delivery::MediaProbes>,
@@ -1105,6 +1108,54 @@ impl Controller {
             .then(|| scroll_thumb(&handle, bounds.w, body, &t))
             .flatten();
         let panel = id.to_owned();
+        let surface = view.clone();
+        view.update(cx, |v, _| v.scrolls_in(&handle));
+        let on_wheel = {
+            let panel = panel.clone();
+            cx.listener(move |v, _: &ScrollWheelEvent, window, cx| {
+                v.builtins.scrolled_at.insert(panel.clone(), std::time::Instant::now());
+                // A panel that leaves rows out draws again as its body
+                // scrolls, so they come back before they show (`v4_cull`).
+                if surface.read(cx).culls() {
+                    surface.update(cx, |_, cx| cx.notify());
+                }
+                // The thumb goes once the scrolling has stopped.
+                cx.spawn_in(window, async move |this, cx| {
+                    cx.background_executor().timer(SCROLL_THUMB_HOLD).await;
+                    let _ = this.update(cx, |_, cx| cx.notify());
+                })
+                .detach();
+                cx.notify();
+            })
+        };
+        // Only the Project panel's body is a view of its own, a scroll layer
+        // (PM-311). Every other body scrolls inside the window's own frame, as
+        // before: a cached body there drew its AppKit controls a row off their
+        // labels for a frame now and then while scrolling (PM-389).
+        if id != pm_builtins::PROJECT_PANEL {
+            return Some(
+                div()
+                    .relative()
+                    .w_full()
+                    .h(px(body))
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("panel-body-{id}")))
+                            .size_full()
+                            .overflow_y_scroll()
+                            .track_scroll(&handle)
+                            .on_scroll_wheel(on_wheel)
+                            // As tall as its content, at least its slot.
+                            .child({
+                                let content = view.read(cx).in_body(body);
+                                view.clone().cached(content)
+                            })
+                            .child(keep),
+                    )
+                    .children(thumb)
+                    .into_any_element(),
+            );
+        }
         // As tall as its content, at least its slot.
         let height = view.read(cx).body_height(body);
         let panel_body = self
@@ -1133,16 +1184,7 @@ impl Controller {
                 .relative()
                 .w_full()
                 .h(px(body))
-                .on_scroll_wheel(cx.listener(move |v, _, window, cx| {
-                    v.builtins.scrolled_at.insert(panel.clone(), std::time::Instant::now());
-                    // The thumb goes once the scrolling has stopped.
-                    cx.spawn_in(window, async move |this, cx| {
-                        cx.background_executor().timer(SCROLL_THUMB_HOLD).await;
-                        let _ = this.update(cx, |_, cx| cx.notify());
-                    })
-                    .detach();
-                    cx.notify();
-                }))
+                .on_scroll_wheel(on_wheel)
                 .child(panel_body.cached(StyleRefinement::default().size_full()))
                 .child(keep)
                 .children(thumb)
@@ -3139,7 +3181,7 @@ impl Render for PanelBody {
         // playhead and its springs) pays the recording on each redraw and
         // lost frames with the layer (PM-311). A native view inside draws on
         // its own: the body draws in full.
-        let native = !self.id.ends_with("-assets") || self.view.read(cx).has_native();
+        let native = self.view.read(cx).has_native();
         div()
             .id(self.id.clone())
             .size_full()
