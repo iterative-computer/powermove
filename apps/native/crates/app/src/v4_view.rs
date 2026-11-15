@@ -2293,7 +2293,7 @@ impl SurfaceView {
                 text = text.with_highlights([(
                     range,
                     HighlightStyle {
-                        color: Some(rgb(self.table.tokens.colors.selected_text).into()),
+                        color: Some(gpui::rgb_to_hsla(rgb(self.table.tokens.colors.selected_text))),
                         ..Default::default()
                     },
                 )]);
@@ -2318,7 +2318,7 @@ impl SurfaceView {
             text,
             id,
             selection: self.quote_selection.clone(),
-            color: rgb(self.table.tokens.colors.selected_fill).into(),
+            color: gpui::rgb_to_hsla(rgb(self.table.tokens.colors.selected_fill)),
         }
         .into_any_element()
     }
@@ -2755,7 +2755,7 @@ impl SurfaceView {
                         let at = v.quote_selection.borrow().hit(id, event.position);
                         if let Some(at) = at {
                             if let Some(focus) = v.focus.get(&id) {
-                                window.focus(focus);
+                                window.focus(focus, cx);
                             }
                             let mut selected = v.quote_selection.borrow_mut();
                             selected.owner = Some(id);

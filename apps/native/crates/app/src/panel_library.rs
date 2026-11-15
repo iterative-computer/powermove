@@ -1538,7 +1538,7 @@ mod shelf_geometry_tests {
 #[cfg(test)]
 mod capture_tests {
     use super::PanelLibrary;
-    use gpui::{AppContext, HeadlessAppContext, px, size};
+    use gpui::{AppContext, HeadlessAppContext, ScrollHandle, px, size};
     #[test]
     #[ignore = "writes review PNGs; set PM_LIBRARY_CAPTURE"]
     fn capture_panel_library() {

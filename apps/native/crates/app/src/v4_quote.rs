@@ -283,7 +283,7 @@ mod shaped_tests {
                             text,
                             id,
                             selection: self.selection.clone(),
-                            color: rgb(0x6699ff).into(),
+                            color: gpui::rgb_to_hsla(rgb(0x6699ff)),
                         }
                     }),
                 )

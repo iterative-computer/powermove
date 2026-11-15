@@ -25,7 +25,7 @@ pub(super) fn capture(
         .as_deref()
         .and_then(|id| kernel.published(id))
         .and_then(|p| p.snapshot.document.to_value())
-        .and_then(|value| serde_json::to_vec(&value).ok())
+        .map(|value| pm_model::json::to_canonical_string(&value).into_bytes())
         .unwrap_or_default();
     let version = cache_stamp(
         Builtins::cover_version(),
