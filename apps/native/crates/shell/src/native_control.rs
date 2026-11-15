@@ -302,6 +302,12 @@ pub struct NativeControl {
     focus: Rc<std::cell::Cell<bool>>,
     /// The last text the view's host set (`host_text`).
     host_revision: Option<u64>,
+    /// A search field's last value from its view. The view's value can lag
+    /// what is typed (an echo of the typing commits nothing), so only a new
+    /// value replaces the field's text; an unchanged one is left alone
+    /// (PM-342: a panel laid out again showed the search empty while its
+    /// list stayed filtered).
+    search_value: Option<Value>,
     /// Where the slot was painted inside a scroll layer, to follow it.
     layer: Rc<crate::layer_stage::LayerStage>,
 }
@@ -723,6 +729,7 @@ impl NativeControl {
             stretch: well && matches!(kind, Kind::Popup),
             focus: Rc::default(),
             host_revision: None,
+            search_value: None,
             layer: Rc::default(),
         }
     }
@@ -892,7 +899,11 @@ impl NativeControl {
             }
         }
         let shown = self._target.ivars().options.borrow().clone();
-        self.control.value(value, &shown);
+        let unchanged_search = matches!(self.control, Control::Search(_))
+            && self.search_value.replace(value.clone()).as_ref() == Some(value);
+        if !unchanged_search {
+            self.control.value(value, &shown);
+        }
         self.control.enabled(!disabled);
         if self.inline {
             // The title names the current value, so the width follows it.
