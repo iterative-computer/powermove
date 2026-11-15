@@ -166,6 +166,7 @@ enum Spec {
     StretchKeys {
         grabbed: f64,
     },
+    QuickOffsetKeys,
 }
 enum Job {
     Sync,
@@ -243,6 +244,8 @@ enum Gesture {
         origin: Point<Pixels>,
         proedit: bool,
         readout: bool,
+        quick: Option<(Point<Pixels>, f64, usize)>,
+        quick_limits: Vec<(f64, f64)>,
         /// A handle drag: its key's layer start, for layer-local handle times.
         handle: Option<f64>,
     },
@@ -1488,7 +1491,7 @@ impl TimelineSurface {
             return;
         }
         let mods = Self::mods(event.modifiers);
-        let additive = mods.shift || mods.command();
+        let additive = !(mods.alt && mods.command()) && (mods.shift || mods.command());
         if y < m.ruler as f64 {
             // v1: the work area's bar (its thin strip at the top of the
             // ruler) moves it on a plain drag; ⌥ moves it from anywhere on
@@ -1558,7 +1561,9 @@ impl TimelineSurface {
             });
             // v1: ⌥ stretches the selected keys' timing from the far end
             // when the first or last of them is grabbed.
-            let spec = if mods.alt && !additive && !mods.command() {
+            let spec = if mods.alt && mods.command() {
+                Spec::QuickOffsetKeys
+            } else if mods.alt && !additive && !mods.command() {
                 Spec::StretchKeys { grabbed }
             } else {
                 Spec::Keys
@@ -1911,7 +1916,11 @@ impl TimelineSurface {
             });
             self.gesture = Gesture::Pressed(Press {
                 origin: event.position,
-                spec: Some(Spec::GraphKeys),
+                spec: Some(if event.modifiers.alt && event.modifiers.platform {
+                    Spec::QuickOffsetKeys
+                } else {
+                    Spec::GraphKeys
+                }),
                 release: None,
             });
             self.pump(cx);
@@ -2074,6 +2083,43 @@ impl TimelineSurface {
                     Spec::Ripple(_) | Spec::Roll(_) | Spec::Slip | Spec::Slide
                 );
                 let readout = matches!(spec, Spec::Property { .. });
+                let quick_count = match spec {
+                    Spec::QuickOffsetKeys => self
+                        .model
+                        .index
+                        .layers
+                        .iter()
+                        .filter(|l| {
+                            l.channels.iter().any(|c| {
+                                c.keys
+                                    .iter()
+                                    .any(|k| self.model.selection.keys().contains(&k.id))
+                            })
+                        })
+                        .count(),
+                    Spec::Offset => self.model.selection.layers().len(),
+                    _ => 0,
+                };
+                let quick = (quick_count > 1).then_some((event.position, 0., quick_count));
+                let mut quick_limits = Vec::new();
+                if quick_count > 1 && matches!(spec, Spec::QuickOffsetKeys) {
+                    let mut rank = 0;
+                    for layer in &self.model.index.layers {
+                        let times: Vec<_> = layer
+                            .channels
+                            .iter()
+                            .flat_map(|c| &c.keys)
+                            .filter(|k| self.model.selection.keys().contains(&k.id))
+                            .map(|k| layer.from + k.time)
+                            .collect();
+                        if times.is_empty() {
+                            continue;
+                        }
+                        let factor = rank as f64 / (quick_count - 1) as f64;
+                        quick_limits.extend(times.into_iter().map(|time| (time, factor)));
+                        rank += 1;
+                    }
+                }
                 let handle = match &spec {
                     Spec::Handle { key, .. } => self
                         .graph
@@ -2093,6 +2139,8 @@ impl TimelineSurface {
                     origin,
                     proedit,
                     readout,
+                    quick,
+                    quick_limits,
                     handle,
                 };
             }
@@ -2103,8 +2151,21 @@ impl TimelineSurface {
                 origin,
                 proedit,
                 readout,
+                quick,
+                quick_limits,
                 handle,
             } => {
+                if let Some((at, total, _)) = quick {
+                    *at = event.position;
+                    *total = f32::from(event.position.x - origin.x) as f64 / self.view.pps;
+                    // v1 drawQuickOffset reads the planner's bounded total.
+                    for &(time, factor) in quick_limits.iter().filter(|(_, factor)| *factor > 0.) {
+                        *total = total
+                            .max((time.min(0.) - time) / factor)
+                            .min((time.max(self.model.index.duration) - time) / factor);
+                    }
+                    cx.notify();
+                }
                 let (origin, proedit, readout, handle) = (*origin, *proedit, *readout, *handle);
                 let mut sample = self.sample(origin, event.position, event.modifiers, cx);
                 if let (Some(layer_from), Some(area), Some(graph)) =
@@ -3007,6 +3068,31 @@ fn drag_kind(model: &TimelineModel, spec: Spec, time: f64) -> Result<DragKind, S
         Spec::Trim(Edge::Out) => DragKind::TrimOut { ids },
         Spec::Offset => DragKind::QuickOffsetLayers { ids },
         Spec::Keys => DragKind::Keys { ids: keys },
+        Spec::QuickOffsetKeys => {
+            let groups: Vec<Vec<String>> = model
+                .index
+                .layers
+                .iter()
+                .filter_map(|layer| {
+                    let ids: Vec<_> = keys
+                        .iter()
+                        .filter(|id| {
+                            model
+                                .index
+                                .key(id)
+                                .is_some_and(|(l, _, _)| l.id == layer.id)
+                        })
+                        .cloned()
+                        .collect();
+                    (!ids.is_empty()).then_some(ids)
+                })
+                .collect();
+            if groups.len() < 2 {
+                DragKind::Keys { ids: keys }
+            } else {
+                DragKind::QuickOffsetKeys { groups, time }
+            }
+        }
         Spec::StretchKeys { grabbed } => {
             // v1's keyframeStretchAnchor: two or more keys apart, grabbed at
             // the first or last; anything else moves them.
@@ -3778,6 +3864,64 @@ impl TimelineSurface {
     fn graph_readout(&self) -> Option<AnyElement> {
         if !matches!(self.gesture, Gesture::Dragging { .. }) {
             return None;
+        }
+        let quick = match &self.gesture {
+            Gesture::Dragging {
+                quick: Some(quick), ..
+            } => Some(*quick),
+            _ => None,
+        };
+        if let Some((at, total, count)) = quick {
+            let local = at - self.bounds.origin;
+            let t = &self.tokens;
+            let left = (f32::from(local.x) + 14.)
+                .max(self.view.layer_column as f32 + 8.)
+                .min(
+                    (f32::from(self.bounds.size.width) - 222.)
+                        .max(self.view.layer_column as f32 + 8.),
+                );
+            let top = (f32::from(local.y) + 14.)
+                .max(t.metrics.ruler + 8.)
+                .min((f32::from(self.bounds.size.height) - 53.).max(t.metrics.ruler + 8.));
+            let column = |left, label: &'static str, value: f64| {
+                div()
+                    .absolute()
+                    .left(px(left))
+                    .top(px(6.))
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(rgb(t.colors.muted))
+                            .child(label),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(rgb(t.colors.text))
+                            .child(format!(
+                                "{}{}",
+                                if value < 0. { "−" } else { "+" },
+                                crate::captions_panel::timecode(value.abs(), self.model.index.fps)
+                            )),
+                    )
+            };
+            return Some(
+                div()
+                    .absolute()
+                    .left(px(left))
+                    .top(px(top))
+                    .w(px(214.))
+                    .h(px(45.))
+                    .rounded(px(7.))
+                    .bg(rgb(t.colors.floating))
+                    .border(px(t.metrics.border))
+                    .border_color(rgb(t.colors.separator))
+                    .child(column(10., "TOTAL OFFSET", total))
+                    .child(column(112., "PER LAYER", total / (count - 1) as f64))
+                    .into_any_element(),
+            );
         }
         let at = self.graph_at?;
         let text = match &self.graph_box {

@@ -977,6 +977,10 @@ pub enum DragKind {
     TrimOut {
         ids: Vec<String>,
     },
+    QuickOffsetKeys {
+        groups: Vec<Vec<String>>,
+        time: f64,
+    },
     QuickOffsetLayers {
         ids: Vec<String>,
     },
@@ -1099,6 +1103,20 @@ impl Drag {
             | DragKind::StretchKeys { ids, .. }
             | DragKind::TransformKeys { ids, .. } => {
                 for id in ids {
+                    let (l, _, _) = index
+                        .key(id)
+                        .ok_or_else(|| ModelError::UnknownId(id.clone()))?;
+                    if l.effectively_locked {
+                        return Err(ModelError::Locked(l.id.clone()));
+                    }
+                }
+            }
+            DragKind::QuickOffsetKeys { groups, time } => {
+                finite(*time)?;
+                if groups.len() < 2 {
+                    return Err(ModelError::InvalidGesture);
+                }
+                for id in groups.iter().flatten() {
                     let (l, _, _) = index
                         .key(id)
                         .ok_or_else(|| ModelError::UnknownId(id.clone()))?;
@@ -1247,6 +1265,7 @@ impl Drag {
             DragKind::DuplicateLayers { .. } => "Duplicate Layers",
             DragKind::TrimIn { .. } | DragKind::TrimOut { .. } => "Trim clip",
             DragKind::QuickOffsetLayers { .. } => "Quick offset layers",
+            DragKind::QuickOffsetKeys { .. } => "Quick offset keyframes",
             DragKind::Keys { .. } => "Move keyframe",
             DragKind::GraphKeys { .. } => "Edit curve",
             DragKind::StretchKeys { .. } => "Stretch keyframes",
@@ -1322,6 +1341,20 @@ impl Drag {
         };
         let mut out = Vec::new();
         match &self.kind {
+            DragKind::QuickOffsetKeys { groups, time } => {
+                let mut model = TimelineModel::default();
+                model.index = self.start.clone();
+                let plan = model.quick_offset_keys(groups, sample.time_delta, *time)?;
+                for call in plan.calls {
+                    if let pm_kernel::Call::Transact {
+                        body: pm_kernel::WriteBody::Commands(commands),
+                        ..
+                    } = call
+                    {
+                        out.extend(commands);
+                    }
+                }
+            }
             DragKind::ProEdit(command) => {
                 use pm_kernel::commands::pro_edit::ProEditCommand as Pro;
                 let mut command = command.clone();

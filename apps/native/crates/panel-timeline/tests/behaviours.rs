@@ -2380,6 +2380,25 @@ fn async_disposal_cancels_owned_drag_without_blocking_in_drop() {
 }
 
 #[test]
+fn quick_offset_key_gesture_replaces_preview_and_undoes_in_one_step() {
+    let (_a, mut c) = client();
+    block_on(c.begin_drag(DragKind::QuickOffsetKeys {
+        groups: vec![strings(&["a0", "a2"]), strings(&["b0"])],
+        time: 0.,
+    }))
+    .unwrap();
+    block_on(c.drag(sample(0.125))).unwrap();
+    block_on(c.drag(sample(0.25))).unwrap();
+    block_on(c.finish_drag(true)).unwrap();
+    assert_eq!(key_time(&c, "a0"), 0.);
+    assert_eq!(key_time(&c, "a2"), 2.);
+    assert_eq!(key_time(&c, "b0"), 0.25);
+    block_on(c.call(Call::History(HistoryCall::Undo))).unwrap();
+    c.sync().unwrap();
+    assert_eq!(key_time(&c, "b0"), 0.);
+}
+
+#[test]
 fn scale_axis_scrub_adjusts_selected_paired_keys_without_keying_the_playhead() {
     let mut v = fixture();
     layer_mut(&mut v, 0).insert("scaleLinked", Value::Bool(true));
