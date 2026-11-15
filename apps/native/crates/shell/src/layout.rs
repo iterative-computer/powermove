@@ -1867,7 +1867,7 @@ pub fn reserve_build(layout: &mut Layout, id: &str, placement: &serde_json::Valu
     let beside = placement["beside"].as_str();
     let tab = placement["tab_in"].as_str();
     let found = beside.or(tab).and_then(|id| layout.docks.iter().enumerate().find_map(|(d, dock)| dock.groups.iter().position(|g| g.tabs.iter().any(|p| p == id)).map(|g| (d,g))));
-    let requested = placement["dock"].as_str().filter(|d| ["left", "right", "bottom"].contains(d));
+    let requested = placement["dock"].as_str().filter(|d| beside.is_none() && tab.is_none() && ["left", "right", "bottom"].contains(d));
     let fallback = found.is_none() && requested.is_none();
     let dock_name = requested.unwrap_or("right");
     let d = found.map(|p| p.0).unwrap_or_else(|| {
@@ -1885,7 +1885,8 @@ pub fn reserve_build(layout: &mut Layout, id: &str, placement: &serde_json::Valu
     }
     let g = found.map(|p| p.1+1).unwrap_or_else(|| if fallback { dock.groups.iter().position(|g| g.tabs.iter().any(|p| p == "inspector")).map(|g| g+1).unwrap_or(dock.groups.len()) } else { dock.groups.len() });
     dock.groups.insert(g, Group { tabs: vec![id.into()], active: 0, size: Some(height.clamp(120., 1200.)), collapsed: false });
-    serde_json::json!({"dock":dock.id,"beside":if fallback { Some("inspector") } else { beside },"fallback":fallback})
+    let neighbor = g.checked_sub(1).map(|g| dock.groups[g].active().to_owned());
+    serde_json::json!({"dock":dock.id,"beside":neighbor,"fallback":fallback})
 }
 
 pub fn remove_build(layout: &mut Layout, id: &str) {
