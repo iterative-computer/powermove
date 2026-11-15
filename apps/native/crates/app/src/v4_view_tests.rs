@@ -1570,3 +1570,36 @@ fn viewer_repaints_through_reveal_without_a_new_panel_publication(cx: &mut TestA
         }
     }
 }
+
+
+#[gpui::test]
+fn render_queue_keyboard_focus_reveals_inline_actions(cx: &mut TestAppContext) {
+    let rig = rig("export", 1);
+    let wait = |ticket: pm_runtime_v8::Ticket<pm_runtime_v8::Evaluation>| {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while ticket.try_take().is_none() {
+            assert!(Instant::now() < deadline, "export realm did not settle");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    };
+    wait(rig.runtime.observe_render_queue(json!([
+        {"id":4,"name":"Credits","format":"mp4","path":"/Exports/Credits.mp4","status":"Failed","progress":0.,"error":"Missing media","finishedAt":1794686460}
+    ])).unwrap());
+    wait(rig.runtime.observe_export(json!({"phase":"rendering","frame":42,"total":100,"elapsed":2.})).unwrap());
+    wait(rig.runtime.show("export").unwrap());
+    let (view, mut vcx) = window(cx, &rig, publication(&rig), Default::default());
+    vcx.run_until_parked();
+    vcx.update(|window, cx| view.update(cx, |v, cx| v.focus_semantic("queue.retry.4", window, cx)));
+    let revealed = std::cell::Cell::new(false);
+    settle(&mut vcx, |cx| {
+        for publication in rig.runtime.take_publications() {
+            let surface = &publication.surface;
+            if let Some(button) = surface.nodes().values().find(|n|n.props.get("id").and_then(Value::as_str) == Some("queue.retry.4")) {
+                if button.parent.and_then(|id|surface.node(id)).and_then(|n|n.props.get("style")).and_then(|s|s.get("opacity")).and_then(Value::as_u64) == Some(1) { revealed.set(true); }
+            }
+            view.update(cx, |v,cx|v.publish(publication,cx));
+        }
+        revealed.get()
+    });
+    assert!(revealed.get(), "keyboard focus reveals the row's actions");
+}

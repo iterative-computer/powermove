@@ -201,6 +201,7 @@ pub struct SurfaceView {
     /// in they are this frame, 0–1. Set before the motion frame steps.
     presence: HashMap<Id, f32>,
     subscriptions: BTreeMap<Id, Vec<Subscription>>,
+    focus_events: std::collections::BTreeSet<Id>,
     origin: Rc<Cell<Point<Pixels>>>,
     anchors: Rc<RefCell<HashMap<Id, Bounds<Pixels>>>>,
     /// The height a sheet's body wants, measured as it is laid out.
@@ -298,6 +299,7 @@ impl SurfaceView {
             ready_text: None,
             presence: HashMap::new(),
             subscriptions: BTreeMap::new(),
+            focus_events: Default::default(),
             origin: Rc::new(Cell::new(Point::default())),
             anchors: Default::default(),
             sheet_fit: Default::default(),
@@ -360,6 +362,7 @@ impl SurfaceView {
             self.leases.clear();
             self.option_sets.clear();
             self.subscriptions.clear();
+            self.focus_events.clear();
             cx.defer_in(window, move |v, window, cx| {
                 v.reconcile(window, cx);
                 for (id, text) in texts {
@@ -505,6 +508,7 @@ impl SurfaceView {
         self.option_sets.clear();
         self.focus.clear();
         self.subscriptions.clear();
+        self.focus_events.clear();
         self.anchors.borrow_mut().clear();
         self.capture = None;
         self.scrub = None;
@@ -524,6 +528,7 @@ impl SurfaceView {
         self.subscriptions.retain(|id, _| live(id));
         self.fields.retain(|id, _| live(id));
         self.focus.retain(|id, _| live(id));
+        self.focus_events.retain(|id| live(id));
         self.leases.retain(|id, _| live(id));
         self.option_sets.retain(|id, _| live(id));
         if self.capture.is_some_and(|c| !live(&c.target)) {
@@ -620,6 +625,27 @@ impl SurfaceView {
             self.mount_field(view, node, lease, window, cx);
             mounts.2 += 1;
             mounts.3 += started.elapsed();
+        }
+        // Focus is an input event too. Rows listening on an ancestor need it
+        // when a descendant's native focus handle changes (for inline actions).
+        for (&id, handle) in &self.focus {
+            if self.focus_events.contains(&id) { continue; }
+            let mut at = Some(id);
+            let mut interested = false;
+            while let Some(target) = at {
+                let Some(node) = surface.node(target) else { break; };
+                interested |= node.listeners.contains_key("focus") || node.listeners.contains_key("blur");
+                at = node.parent;
+            }
+            if !interested { continue; }
+            let focused = cx.on_focus(handle, window, move |v, _, cx| {
+                v.pointer(id, "focus", EventDetail::default(), cx);
+            });
+            let blurred = cx.on_blur(handle, window, move |v, _, cx| {
+                v.pointer(id, "blur", EventDetail::default(), cx);
+            });
+            self.subscriptions.entry(id).or_default().extend([focused, blurred]);
+            self.focus_events.insert(id);
         }
         if crate::diag::enabled() {
             crate::diag::line(
