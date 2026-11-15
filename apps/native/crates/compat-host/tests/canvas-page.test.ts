@@ -30,7 +30,7 @@ const batch = {
 async function page(events: unknown[]) {
   const dom = new JSDOM(
     "<!doctype html><html><head></head><body></body></html>",
-    { runScripts: "outside-only" },
+    { runScripts: "outside-only", pretendToBeVisual: true },
   );
   const calls: any[] = [],
     draws: any[] = [],
