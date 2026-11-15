@@ -174,6 +174,32 @@ impl Kit {
     fn focusable(&self, d: Stateful<Div>) -> Stateful<Div> {
         d
     }
+    /// A neutral action toast. The owner places it at the window's bottom
+    /// centre and attaches its Undo listener and hover lifetime handling.
+    /// No focus handle is requested by this recipe.
+    pub fn action_toast(
+        &self,
+        message: impl Into<SharedString>,
+        undo: Stateful<Div>,
+    ) -> Stateful<Div> {
+        let t = &self.t;
+        let message = message.into();
+        div()
+            .id("action-toast")
+            .flex()
+            .items_center()
+            .gap(px(t.space.lg))
+            .p(px(t.space.md))
+            .bg(rgb(t.colors.floating))
+            .text_color(rgb(t.colors.text))
+            .text_role(t, Text::Label)
+            .corner(t, t.radius.lg)
+            .elevated(t, Elevation::Menu)
+            .aria_label(message.clone())
+            .child(message)
+            .child(undo)
+    }
+
     /// A push button: 28 pt, label in the medium weight, an optional leading
     /// symbol and trailing chevron (a pop-up).
     pub fn button(
