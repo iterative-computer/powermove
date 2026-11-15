@@ -539,6 +539,8 @@ pub fn extras() -> Vec<(&'static str, Item)> {
         )
     };
     vec![
+        ("Project", Item::registered(&keymap, "Add Composition to Timeline", "native.addCompositionToTimeline", json!([]))),
+        ("Project", Item::registered(&keymap, "Add Layer from Asset", "native.addLayerFromAsset", json!([]))),
         view("Show Rulers", "viewer.rulers"),
         view("Show Grid", "viewer.grid"),
         view("Clear Guides", "viewer.clearGuides"),

@@ -3099,5 +3099,25 @@
     "in_fields": false,
     "repeat": false,
     "loose": false
+  },
+  {
+    "id": "native.addCompositionToTimeline",
+    "chord": "",
+    "command": "native.addCompositionToTimeline",
+    "args": [],
+    "priority": 0,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "native.addLayerFromAsset",
+    "chord": "",
+    "command": "native.addLayerFromAsset",
+    "args": [],
+    "priority": 0,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
   }
 ]

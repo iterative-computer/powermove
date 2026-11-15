@@ -3382,6 +3382,35 @@ impl Controller {
             "native.saveTake" => {
                 crate::takes_panel::dispatch(&cmd.name, || self.save_take(cx));
             }
+            "native.addCompositionToTimeline" | "native.addLayerFromAsset" => {
+                if let (Some(runtime), Some(published)) = (&self.builtins.runtime, &self.published)
+                {
+                    let (assets, comps) = runtime
+                        .project_timeline_items(cmd.name == "native.addCompositionToTimeline");
+                    match pm_builtins::media_import::place_items(
+                        published,
+                        &assets,
+                        &comps,
+                        self.time(),
+                        None,
+                    ) {
+                        Ok((layers, commands)) if !commands.is_empty() => self.run_layer_plan(
+                            crate::layer_commands::Plan {
+                                label: "Add to Timeline".into(),
+                                commands,
+                                select: Some(layers),
+                                count_keys: None,
+                            },
+                            cx,
+                        ),
+                        Err(why) => {
+                            self.message = why;
+                            cx.notify();
+                        }
+                        _ => {}
+                    }
+                }
+            }
             "saveAs" => self.save_dialog(cx),
             "export" => self.show_builtin("export", window, cx),
             "undo" | "contextUndo" => {

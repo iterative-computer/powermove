@@ -7163,7 +7163,7 @@ exports[`importing-cards: op tree, real validator and AX projection 1`] = `
       "actions": [
         {
           "id": 5,
-          "label": "Add to Timeline",
+          "label": "Add Layer from Asset",
         },
         {
           "id": 4,
@@ -8221,7 +8221,7 @@ exports[`selected: op tree, real validator and AX projection 1`] = `
       "actions": [
         {
           "id": 5,
-          "label": "Add to Timeline",
+          "label": "Add Layer from Asset",
         },
         {
           "id": 4,
@@ -8976,7 +8976,7 @@ exports[`focus: op tree, real validator and AX projection 1`] = `
       "actions": [
         {
           "id": 5,
-          "label": "Add to Timeline",
+          "label": "Add Layer from Asset",
         },
         {
           "id": 4,
@@ -9070,7 +9070,7 @@ exports[`focus: op tree, real validator and AX projection 1`] = `
       "actions": [],
       "disabled": false,
       "id": 18,
-      "label": "Add to Timeline",
+      "label": "Add Layer from Asset",
       "multiselectable": false,
       "role": "Button",
       "rowCount": null,
@@ -9556,7 +9556,7 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                                             "symbol": "plus",
                                           },
                                           "data-pm-component": "toolbar-item",
-                                          "label": "Add to Timeline",
+                                          "label": "Add Layer from Asset",
                                           "style": {
                                             "color": {
                                               "token": "colors.selected_text",
@@ -9572,7 +9572,7 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                                             },
                                           },
                                           "tabIndex": -1,
-                                          "title": "Add to Timeline",
+                                          "title": "Add Layer from Asset",
                                         },
                                         "",
                                         [],
@@ -9832,7 +9832,7 @@ exports[`multi-select: op tree, real validator and AX projection 1`] = `
       "actions": [
         {
           "id": 5,
-          "label": "Add to Timeline",
+          "label": "Add Layer from Asset",
         },
         {
           "id": 4,
@@ -9970,7 +9970,7 @@ exports[`multi-select: op tree, real validator and AX projection 1`] = `
       "actions": [
         {
           "id": 5,
-          "label": "Add to Timeline",
+          "label": "Add Layer from Asset",
         },
         {
           "id": 4,
@@ -11153,7 +11153,7 @@ exports[`disabled-composition: op tree, real validator and AX projection 1`] = `
       "actions": [],
       "disabled": true,
       "id": 20,
-      "label": "Add to Timeline",
+      "label": "Add Composition to Timeline",
       "multiselectable": false,
       "role": "Button",
       "rowCount": null,
@@ -11682,7 +11682,7 @@ exports[`disabled-composition: op tree, real validator and AX projection 1`] = `
                                           },
                                           "data-pm-component": "toolbar-item",
                                           "disabled": true,
-                                          "label": "Add to Timeline",
+                                          "label": "Add Composition to Timeline",
                                           "style": {
                                             "color": {
                                               "token": "colors.muted",
@@ -11698,7 +11698,7 @@ exports[`disabled-composition: op tree, real validator and AX projection 1`] = `
                                             },
                                           },
                                           "tabIndex": -1,
-                                          "title": "Add to Timeline",
+                                          "title": "Add Composition to Timeline",
                                         },
                                         "",
                                         [],
@@ -15097,7 +15097,7 @@ exports[`transport-error: op tree, real validator and AX projection 1`] = `
       "actions": [],
       "disabled": true,
       "id": 22,
-      "label": "Add to Timeline",
+      "label": "Add Layer from Asset",
       "multiselectable": false,
       "role": "Button",
       "rowCount": null,
@@ -15635,7 +15635,7 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                                           },
                                           "data-pm-component": "toolbar-item",
                                           "disabled": true,
-                                          "label": "Add to Timeline",
+                                          "label": "Add Layer from Asset",
                                           "style": {
                                             "color": {
                                               "token": "colors.selected_text",
@@ -15651,7 +15651,7 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                                             },
                                           },
                                           "tabIndex": -1,
-                                          "title": "Add to Timeline",
+                                          "title": "Add Layer from Asset",
                                         },
                                         "",
                                         [],
@@ -19209,7 +19209,7 @@ exports[`drag-source: op tree, real validator and AX projection 1`] = `
       "actions": [
         {
           "id": 5,
-          "label": "Add to Timeline",
+          "label": "Add Layer from Asset",
         },
         {
           "id": 4,
@@ -20065,7 +20065,7 @@ exports[`external-drop: op tree, real validator and AX projection 1`] = `
       "actions": [
         {
           "id": 5,
-          "label": "Add to Timeline",
+          "label": "Add Layer from Asset",
         },
         {
           "id": 4,
@@ -22434,7 +22434,7 @@ exports[`60000-items: op tree, real validator and AX projection 1`] = `
       "actions": [
         {
           "id": 5,
-          "label": "Add to Timeline",
+          "label": "Add Layer from Asset",
         },
         {
           "id": 4,
@@ -22561,7 +22561,7 @@ exports[`60000-items: op tree, real validator and AX projection 1`] = `
       "actions": [
         {
           "id": 5,
-          "label": "Add to Timeline",
+          "label": "Add Layer from Asset",
         },
         {
           "id": 4,
@@ -22699,7 +22699,7 @@ exports[`60000-items: op tree, real validator and AX projection 1`] = `
       "actions": [
         {
           "id": 5,
-          "label": "Add to Timeline",
+          "label": "Add Layer from Asset",
         },
         {
           "id": 4,
@@ -22826,7 +22826,7 @@ exports[`60000-items: op tree, real validator and AX projection 1`] = `
       "actions": [
         {
           "id": 5,
-          "label": "Add to Timeline",
+          "label": "Add Layer from Asset",
         },
         {
           "id": 4,
@@ -22964,7 +22964,7 @@ exports[`60000-items: op tree, real validator and AX projection 1`] = `
       "actions": [
         {
           "id": 5,
-          "label": "Add to Timeline",
+          "label": "Add Layer from Asset",
         },
         {
           "id": 4,
@@ -23091,7 +23091,7 @@ exports[`60000-items: op tree, real validator and AX projection 1`] = `
       "actions": [
         {
           "id": 5,
-          "label": "Add to Timeline",
+          "label": "Add Layer from Asset",
         },
         {
           "id": 4,
@@ -23229,7 +23229,7 @@ exports[`60000-items: op tree, real validator and AX projection 1`] = `
       "actions": [
         {
           "id": 5,
-          "label": "Add to Timeline",
+          "label": "Add Layer from Asset",
         },
         {
           "id": 4,
@@ -23356,7 +23356,7 @@ exports[`60000-items: op tree, real validator and AX projection 1`] = `
       "actions": [
         {
           "id": 5,
-          "label": "Add to Timeline",
+          "label": "Add Layer from Asset",
         },
         {
           "id": 4,
@@ -23494,7 +23494,7 @@ exports[`60000-items: op tree, real validator and AX projection 1`] = `
       "actions": [
         {
           "id": 5,
-          "label": "Add to Timeline",
+          "label": "Add Layer from Asset",
         },
         {
           "id": 4,
@@ -23621,7 +23621,7 @@ exports[`60000-items: op tree, real validator and AX projection 1`] = `
       "actions": [
         {
           "id": 5,
-          "label": "Add to Timeline",
+          "label": "Add Layer from Asset",
         },
         {
           "id": 4,
@@ -23759,7 +23759,7 @@ exports[`60000-items: op tree, real validator and AX projection 1`] = `
       "actions": [
         {
           "id": 5,
-          "label": "Add to Timeline",
+          "label": "Add Layer from Asset",
         },
         {
           "id": 4,
@@ -23886,7 +23886,7 @@ exports[`60000-items: op tree, real validator and AX projection 1`] = `
       "actions": [
         {
           "id": 5,
-          "label": "Add to Timeline",
+          "label": "Add Layer from Asset",
         },
         {
           "id": 4,
@@ -26964,7 +26964,7 @@ exports[`hover actions appear, never become Tab stops and disappear during a dra
       "actions": [
         {
           "id": 5,
-          "label": "Add to Timeline",
+          "label": "Add Layer from Asset",
         },
         {
           "id": 4,
@@ -27113,7 +27113,7 @@ exports[`hover actions appear, never become Tab stops and disappear during a dra
       "actions": [],
       "disabled": false,
       "id": 25,
-      "label": "Add to Timeline",
+      "label": "Add Layer from Asset",
       "multiselectable": false,
       "role": "Button",
       "rowCount": null,
@@ -27513,7 +27513,7 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                                             "symbol": "plus",
                                           },
                                           "data-pm-component": "toolbar-item",
-                                          "label": "Add to Timeline",
+                                          "label": "Add Layer from Asset",
                                           "style": {
                                             "color": {
                                               "token": "colors.selected_text",
@@ -27529,7 +27529,7 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                                             },
                                           },
                                           "tabIndex": -1,
-                                          "title": "Add to Timeline",
+                                          "title": "Add Layer from Asset",
                                         },
                                         "",
                                         [],
