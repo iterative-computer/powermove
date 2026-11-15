@@ -493,9 +493,13 @@ define_class!(
         fn act(&self, sender: &AnyObject) {
             let tag: isize = unsafe { msg_send![sender, tag] };
             if let Some((name, args)) = self.ivars().commands.get(tag as usize) {
-                // ⌘, with Settings in front closes it (its title is the
-                // section's name; it is known by its identifier).
-                if name == "settings" {
+                // ⌘, or ⌘W with Settings in front closes Settings, never
+                // the project behind it (it is known by its identifier: its
+                // title is the section's name).
+                if matches!(
+                    name.as_str(),
+                    "settings" | "closeTab" | "closeWindow" | "closeProject"
+                ) {
                     let app = NSApplication::sharedApplication(self.mtm());
                     if let Some(w) = app.keyWindow()
                         && crate::settings_window::is_settings(&w)

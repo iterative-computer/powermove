@@ -222,6 +222,60 @@ impl Chrome {
 pub struct SettingsChrome {
     chrome: Retained<Chrome>,
     window: Retained<NSWindow>,
+    /// The window's own keys (⌘F, typing in the sidebar).
+    monitor: Option<Retained<AnyObject>>,
+}
+
+impl Drop for SettingsChrome {
+    fn drop(&mut self) {
+        if let Some(monitor) = self.monitor.take() {
+            unsafe { NSEvent::removeMonitor(&monitor) };
+        }
+    }
+}
+
+/// Settings' own keys, as System Settings has them: ⌘F goes to the search
+/// field, and typing while the sidebar has the keyboard starts a search
+/// with what was typed (never the source list's jump to a row by name).
+fn keys(window: &NSWindow, search: &NSSearchField, outline: &NSOutlineView) -> Option<Retained<AnyObject>> {
+    let window = objc2::rc::Weak::from(window);
+    let search = objc2::rc::Weak::from(search);
+    let outline = objc2::rc::Weak::from(outline);
+    let handler = block2::RcBlock::new(move |event: std::ptr::NonNull<NSEvent>| -> *mut NSEvent {
+        let e = unsafe { event.as_ref() };
+        let (Some(window), Some(search), Some(outline)) =
+            (window.load(), search.load(), outline.load())
+        else {
+            return event.as_ptr();
+        };
+        if e.windowNumber() != window.windowNumber() {
+            return event.as_ptr();
+        }
+        let flags = e.modifierFlags();
+        let command = flags.contains(NSEventModifierFlags::Command);
+        let chars = e.charactersIgnoringModifiers().map(|c| c.to_string()).unwrap_or_default();
+        if command
+            && chars == "f"
+            && !flags.intersects(NSEventModifierFlags::Shift | NSEventModifierFlags::Option | NSEventModifierFlags::Control)
+        {
+            window.makeFirstResponder(Some(&search));
+            return std::ptr::null_mut();
+        }
+        let typed = e.characters().map(|c| c.to_string()).unwrap_or_default();
+        let sidebar = window
+            .firstResponder()
+            .is_some_and(|r| std::ptr::eq(Retained::as_ptr(&r).cast::<AnyObject>(), Retained::as_ptr(&outline).cast()));
+        let printable = !typed.is_empty() && typed.chars().all(|c| !c.is_control() && !('\u{f700}'..='\u{f8ff}').contains(&c));
+        if sidebar && printable && !flags.intersects(NSEventModifierFlags::Command | NSEventModifierFlags::Control) {
+            window.makeFirstResponder(Some(&search));
+            if let Some(editor) = search.currentEditor() {
+                unsafe { editor.insertText(&NSString::from_str(&typed)) };
+            }
+            return std::ptr::null_mut();
+        }
+        event.as_ptr()
+    });
+    unsafe { NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::KeyDown, &handler) }
 }
 
 impl SettingsChrome {
@@ -378,6 +432,7 @@ impl SettingsChrome {
         window.setFrameAutosaveName(&NSString::from_str(FRAME_NAME));
         window.setAutorecalculatesKeyViewLoop(true);
         window.makeFirstResponder(Some(&outline));
+        let monitor = keys(&window, &search, &outline);
 
         *chrome.ivars().outline.borrow_mut() = Some(outline);
         *chrome.ivars().search.borrow_mut() = Some(search);
@@ -386,7 +441,7 @@ impl SettingsChrome {
         if let Some(content) = window.contentView() {
             content.layoutSubtreeIfNeeded();
         }
-        Some(SettingsChrome { chrome, window })
+        Some(SettingsChrome { chrome, window, monitor })
     }
 
     /// The sidebar lists `sections` with `active` selected; the title names it.
