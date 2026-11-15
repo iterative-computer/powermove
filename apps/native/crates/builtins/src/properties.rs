@@ -552,8 +552,8 @@ impl Properties {
                         ("speed", "Speed", ""), ("spread", "Spread", ""),
                         ("x", "Position X", "px"), ("y", "Position Y", "px"),
                         ("opacity", "Opacity", "%"), ("scale", "Scale", "%"),
-                        ("rotation", "Rotation", "°"), ("blur", "Blur", "px"),
-                        ("tracking", "Tracking", "px"),
+                        ("rotation", "Rotation", "°"), ("skew", "Skew", "°"), ("blur", "Blur", "px"),
+                        ("tracking", "Tracking", "px"), ("color", "Color", ""),
                     ] {
                         if animator["p"].get(key).is_none() { continue; }
                         let path = format!("ta.{id}.{key}");
@@ -561,8 +561,12 @@ impl Properties {
                         let state = model.binding_state(&binding, time).map_err(|e| e.to_string())?;
                         let lease = self.lease(model, &path, binding)?;
                         let animation = if state.key_at_playhead { "key-at-playhead" } else if state.animated { "animated" } else { "static" };
-                        rows.push(json!({"id":path,"label":label,"locked":!model.editable(&layer),"animation":animation,
-                            "control":{"kind":"number","axes":[{"binding":lease,"value":super::data::wire(&state.value),"unit":unit,"step":if matches!(key,"delay"|"duration"|"stagger") {0.01} else {1.0},"precision":2}]}}));
+                        let control = if key == "color" {
+                            json!({"kind":"colour","binding":lease,"value":super::data::wire(&state.value)})
+                        } else {
+                            json!({"kind":"number","axes":[{"binding":lease,"value":super::data::wire(&state.value),"unit":unit,"step":if matches!(key,"delay"|"duration"|"stagger") {0.01} else if matches!(key,"tracking"|"blur") {0.5} else {1.0},"precision":2}]})
+                        };
+                        rows.push(json!({"id":path,"label":label,"locked":!model.editable(&layer),"animation":animation,"control":control}));
                     }
                     animators.push(json!({"id":id,"name":animator["name"],"rows":rows}));
                 }
@@ -2119,7 +2123,7 @@ impl Properties {
             if !matches!(field, "unit" | "order" | "shape" | "easing") { return Err("Invalid animator field".into()); }
             let layer = model.primary().ok_or("No selected layer")?.to_owned();
             if model.selected_layers().len() != 1 || !model.editable(&layer) { return Err("Select one unlocked text layer".into()); }
-            let mut record = model.layer(&layer).map_err(|e| e.to_string())?;
+            let record = model.layer(&layer).map_err(|e| e.to_string())?;
             let mut animators = record.get("d").and_then(|d| d.get("animators")).cloned().ok_or("No animators")?;
             let list = animators.as_array_mut().ok_or("Invalid animators")?;
             let animator = list.iter_mut().find(|a| a.get("id").and_then(pm_model::Value::as_str) == Some(id)).ok_or("Animator removed")?;
