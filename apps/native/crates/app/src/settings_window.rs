@@ -58,6 +58,10 @@ impl History {
         self.going = self.pages.get(self.at).cloned();
         self.going.clone()
     }
+    /// The section showing.
+    pub fn current(&self) -> Option<String> {
+        self.pages.get(self.at).cloned()
+    }
     pub fn can(&self) -> (bool, bool) {
         (self.at > 0, self.at + 1 < self.pages.len())
     }

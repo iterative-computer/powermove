@@ -165,8 +165,20 @@ impl Controller {
             runtime.close();
         }
         let windows = std::mem::take(&mut self.builtins.windows);
+        // The Settings window stays open across the restart: its chrome,
+        // where its back and forward go, and that this editor hosts it.
+        let settings = (
+            self.builtins.settings_chrome.take(),
+            std::mem::take(&mut self.builtins.settings_history),
+            self.builtins.settings_me.take(),
+        );
         self.builtins = Host::default();
         self.builtins.windows = windows;
+        (
+            self.builtins.settings_chrome,
+            self.builtins.settings_history,
+            self.builtins.settings_me,
+        ) = settings;
         self.builtins.agent_carry = carry;
         self.builtins.project = Some(project.clone());
         self.builtins.document = document;
@@ -279,8 +291,12 @@ impl Controller {
                             // A panel window kept open across a restart (Export
                             // asked for before the project arrived) shows its
                             // panel from the new realm, not an empty sheet.
+                            // Settings, on the section it was showing.
                             if v.builtins.windows.contains_key(&id) {
-                                let _ = check.show(&id);
+                                let _ = match v.builtins.settings_history.current() {
+                                    Some(page) if id == "settings" => check.show_section(&id, &page),
+                                    _ => check.show(&id),
+                                };
                             }
                             v.builtins.ready.insert(id);
                         }

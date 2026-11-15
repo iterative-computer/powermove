@@ -132,6 +132,12 @@ define_class!(
         fn cell(&self, _: &NSOutlineView, _: *mut AnyObject, item: *mut AnyObject) -> Option<Retained<NSView>> {
             self.row_of(item).flatten().map(|section| cell(MainThreadMarker::from(self), &section, self.ivars().dark.get()))
         }
+        #[unsafe(method_id(outlineView:rowViewForItem:))]
+        fn row_view(&self, _: &NSOutlineView, _: *mut AnyObject) -> Option<Retained<NSTableRowView>> {
+            let mtm = MainThreadMarker::from(self);
+            let row: Retained<NeutralRow> = unsafe { msg_send![NeutralRow::alloc(mtm), init] };
+            Some(Retained::into_super(row))
+        }
         #[unsafe(method(outlineViewSelectionDidChange:))]
         fn selection_changed(&self, _: &NSNotification) {
             if self.ivars().quiet.get() { return; }
@@ -169,6 +175,19 @@ define_class!(
             let (back, forward) = self.ivars().can.get();
             match item.label().to_string().as_str() { "Back" => back, "Forward" => forward, _ => true }
         }
+    }
+);
+
+define_class!(
+    /// A sidebar row whose selection is the system's neutral source-list
+    /// highlight, never the accent (the build note).
+    #[unsafe(super(NSTableRowView, NSView, NSResponder, NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "PMSettingsRowView"]
+    struct NeutralRow;
+    impl NeutralRow {
+        #[unsafe(method(isEmphasized))]
+        fn emphasized(&self) -> bool { false }
     }
 );
 
