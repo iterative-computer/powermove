@@ -98,7 +98,13 @@ function JobRow({
       onPointerEnter={() => setHover(true)}
       onPointerLeave={() => setHover(false)}
       onFocus={() => setFocus(true)}
-      onBlur={() => setFocus(false)}
+      onBlur={(event) =>
+        setFocus(
+          jobActions(job.status).some(
+            (action) => event.value === `queue.${action}.${job.id}`,
+          ),
+        )
+      }
       style={{
         ...row,
         height: t("metrics.export_job_row"),

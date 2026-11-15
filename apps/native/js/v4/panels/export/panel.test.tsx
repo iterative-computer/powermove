@@ -671,6 +671,18 @@ test("each queue status has exactly its inline actions, revealed on hover and ke
     expect(
       named(f.root, `queue.${actions[0]}.${id}`).parent?.props.style,
     ).toMatchObject({ opacity: 1 });
+    await event(f.root, jobRow.id, "blur", {
+      value: `queue.${actions.at(-1)}.${id}`,
+    });
+    await f.root.flush();
+    expect(
+      named(f.root, `queue.${actions[0]}.${id}`).parent?.props.style,
+    ).toMatchObject({ opacity: 1 });
+    await event(f.root, jobRow.id, "blur", { value: "export.cancel" });
+    await f.root.flush();
+    expect(
+      named(f.root, `queue.${actions[0]}.${id}`).parent?.props.style,
+    ).toMatchObject({ opacity: 0 });
   }
   check(replay(f.commits));
   await f.root.dispose();

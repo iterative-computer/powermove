@@ -641,8 +641,12 @@ impl SurfaceView {
             let focused = cx.on_focus(handle, window, move |v, _, cx| {
                 v.pointer(id, "focus", EventDetail::default(), cx);
             });
-            let blurred = cx.on_blur(handle, window, move |v, _, cx| {
-                v.pointer(id, "blur", EventDetail::default(), cx);
+            let blurred = cx.on_blur(handle, window, move |v, window, cx| {
+                // Carry the next control's semantic name so a row retains its
+                // reveal while Tab moves between actions in that same row.
+                let next = v.focused_node(window).and_then(|next|v.publication.surface.node(next))
+                    .and_then(|node|node.props.get("id")).cloned();
+                v.pointer(id, "blur", EventDetail { value: next, ..Default::default() }, cx);
             });
             self.subscriptions.entry(id).or_default().extend([focused, blurred]);
             self.focus_events.insert(id);
