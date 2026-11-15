@@ -6,10 +6,10 @@ use crate::{
     SourceMetadata, SystemNotification, SystemNotificationResponse, Task, TestDisplay, TestWindow,
     ThermalState, WindowAppearance, WindowParams, size,
 };
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "headless-support"))]
 use crate::{PathPromptOptions, TestTextSystem};
 use anyhow::Result;
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "headless-support"))]
 use collections::VecDeque;
 use futures::channel::oneshot;
 use parking_lot::Mutex;
@@ -33,7 +33,7 @@ pub(crate) struct TestPlatform {
     current_primary_item: Mutex<Option<ClipboardItem>>,
     #[cfg(target_os = "macos")]
     current_find_pasteboard_item: Mutex<Option<ClipboardItem>>,
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "headless-support"))]
     pub(crate) prompts: RefCell<TestPrompts>,
     screen_capture_sources: RefCell<Vec<TestScreenCaptureSource>>,
     pub opened_url: RefCell<Option<String>>,
@@ -81,7 +81,7 @@ impl ScreenCaptureStream for TestScreenCaptureStream {
     }
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "headless-support"))]
 struct TestPrompt {
     msg: String,
     detail: Option<String>,
@@ -98,7 +98,7 @@ pub(crate) struct TestSystemNotifications {
     response_callback: Option<Box<dyn FnMut(SystemNotificationResponse)>>,
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "headless-support"))]
 #[derive(Default)]
 pub(crate) struct TestPrompts {
     multiple_choice: VecDeque<TestPrompt>,
@@ -114,7 +114,7 @@ impl TestPlatform {
         *self.active_cursor.lock()
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "headless-support"))]
     pub fn new(executor: BackgroundExecutor, foreground_executor: ForegroundExecutor) -> Rc<Self> {
         Self::with_platform(
             executor,
@@ -124,7 +124,7 @@ impl TestPlatform {
         )
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "headless-support"))]
     pub fn with_text_system(
         executor: BackgroundExecutor,
         foreground_executor: ForegroundExecutor,
@@ -144,7 +144,7 @@ impl TestPlatform {
         Rc::new_cyclic(|weak| TestPlatform {
             background_executor: executor,
             foreground_executor,
-            #[cfg(any(test, feature = "test-support"))]
+            #[cfg(any(test, feature = "headless-support"))]
             prompts: Default::default(),
             screen_capture_sources: Default::default(),
             active_cursor: Default::default(),
@@ -164,7 +164,7 @@ impl TestPlatform {
         })
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "headless-support"))]
     pub(crate) fn simulate_new_path_selection(
         &self,
         select_path: impl FnOnce(&std::path::Path) -> Option<std::path::PathBuf>,
@@ -178,7 +178,7 @@ impl TestPlatform {
         tx.send(Ok(select_path(&path))).ok();
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "headless-support"))]
     pub(crate) fn simulate_path_prompt_response(
         &self,
         select_paths: impl FnOnce(&PathPromptOptions) -> Option<Vec<std::path::PathBuf>>,
@@ -202,12 +202,12 @@ impl TestPlatform {
         tx.send(Ok(selection)).ok();
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "headless-support"))]
     pub(crate) fn did_prompt_for_paths(&self) -> bool {
         !self.prompts.borrow().paths.is_empty()
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "headless-support"))]
     #[track_caller]
     pub(crate) fn simulate_prompt_answer(&self, response: &str) {
         let prompt = self
@@ -225,12 +225,12 @@ impl TestPlatform {
         prompt.tx.send(ix).ok();
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "headless-support"))]
     pub(crate) fn has_pending_prompt(&self) -> bool {
         !self.prompts.borrow().multiple_choice.is_empty()
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "headless-support"))]
     pub(crate) fn pending_prompt(&self) -> Option<(String, String)> {
         let prompts = self.prompts.borrow();
         let prompt = prompts.multiple_choice.front()?;
@@ -240,14 +240,14 @@ impl TestPlatform {
         ))
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "headless-support"))]
     pub(crate) fn set_screen_capture_sources(&self, sources: Vec<TestScreenCaptureSource>) {
         *self.screen_capture_sources.borrow_mut() = sources;
     }
 
     /// Queues the prompt so a test can later inspect or answer it through
     /// [`Self::pending_prompt`] and [`Self::simulate_prompt_answer`].
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "headless-support"))]
     pub(crate) fn prompt(
         &self,
         msg: &str,
@@ -271,7 +271,7 @@ impl TestPlatform {
     /// Benchmarks have no API to answer a prompt, so this doesn't retain it
     /// for later inspection; dropping the sender immediately cancels the
     /// returned receiver instead of leaving it pending indefinitely.
-    #[cfg(not(any(test, feature = "test-support")))]
+    #[cfg(not(any(test, feature = "headless-support")))]
     pub(crate) fn prompt(
         &self,
         _msg: &str,
@@ -303,32 +303,32 @@ impl TestPlatform {
             .detach();
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "headless-support"))]
     pub(crate) fn did_prompt_for_new_path(&self) -> bool {
         !self.prompts.borrow().new_path.is_empty()
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "headless-support"))]
     pub(crate) fn app_identity(&self) -> Option<(SharedString, SharedString)> {
         self.system_notifications.borrow().app_identity.clone()
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "headless-support"))]
     pub(crate) fn shown_system_notifications(&self) -> Vec<SystemNotification> {
         self.system_notifications.borrow().shown.clone()
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "headless-support"))]
     pub(crate) fn delivered_system_notifications(&self) -> Vec<SystemNotification> {
         self.system_notifications.borrow().delivered.clone()
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "headless-support"))]
     pub(crate) fn dismissed_system_notifications(&self) -> Vec<SharedString> {
         self.system_notifications.borrow().dismissed.clone()
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "headless-support"))]
     pub(crate) fn simulate_system_notification_response(
         &self,
         response: SystemNotificationResponse,
@@ -470,7 +470,7 @@ impl Platform for TestPlatform {
 
     /// Queues the prompt so a test can later answer it through
     /// [`Self::simulate_path_prompt_response`].
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "headless-support"))]
     fn prompt_for_paths(
         &self,
         options: crate::PathPromptOptions,
@@ -484,7 +484,7 @@ impl Platform for TestPlatform {
     /// retain it for later inspection; dropping the sender immediately
     /// cancels the returned receiver instead of leaving it pending
     /// indefinitely.
-    #[cfg(not(any(test, feature = "test-support")))]
+    #[cfg(not(any(test, feature = "headless-support")))]
     fn prompt_for_paths(
         &self,
         _options: crate::PathPromptOptions,
@@ -494,7 +494,7 @@ impl Platform for TestPlatform {
 
     /// Queues the prompt so a test can later answer it through
     /// [`Self::simulate_new_path_selection`].
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "headless-support"))]
     fn prompt_for_new_path(
         &self,
         directory: &std::path::Path,
@@ -512,7 +512,7 @@ impl Platform for TestPlatform {
     /// retain it for later inspection; dropping the sender immediately
     /// cancels the returned receiver instead of leaving it pending
     /// indefinitely.
-    #[cfg(not(any(test, feature = "test-support")))]
+    #[cfg(not(any(test, feature = "headless-support")))]
     fn prompt_for_new_path(
         &self,
         _directory: &std::path::Path,
@@ -661,7 +661,7 @@ impl Platform for TestPlatform {
 
 impl TestScreenCaptureSource {
     /// Create a fake screen capture source, for testing.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "headless-support"))]
     pub fn new() -> Self {
         Self {}
     }

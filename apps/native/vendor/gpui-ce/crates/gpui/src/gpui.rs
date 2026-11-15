@@ -44,7 +44,7 @@ pub mod profiler;
     target_os = "windows",
     target_os = "linux",
     target_family = "wasm",
-    feature = "test-support",
+    feature = "headless-support",
     feature = "bench-support"
 ))]
 #[expect(missing_docs)]
@@ -60,7 +60,7 @@ mod subscription;
 mod svg_renderer;
 mod tab_stop;
 mod taffy;
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "headless-support"))]
 pub mod test;
 mod text_system;
 mod transition;
@@ -68,7 +68,7 @@ mod util;
 mod view;
 mod window;
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "headless-support"))]
 pub use proptest;
 
 #[cfg(doc)]
@@ -170,7 +170,7 @@ pub use svg_renderer::*;
 pub(crate) use tab_stop::*;
 use taffy::TaffyLayoutEngine;
 pub use taffy::{AvailableSpace, LayoutId};
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "headless-support"))]
 pub use test::*;
 pub use text_system::*;
 pub use transition::*;

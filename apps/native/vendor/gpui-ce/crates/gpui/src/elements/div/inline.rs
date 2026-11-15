@@ -416,7 +416,7 @@ impl InlineParagraphCollector<'_> {
 }
 
 impl InlineDivFrameState {
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "headless-support"))]
     pub(super) fn measured_paragraphs(&self) -> Vec<(SharedString, Arc<InlineLayout>)> {
         self.paragraphs
             .iter()

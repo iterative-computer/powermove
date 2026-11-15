@@ -408,7 +408,7 @@ impl A11y {
         self.nodes.begin_frame(self.window_title.as_ref());
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "headless-support"))]
     pub(crate) fn simulate_activation(&mut self) {
         self.adapter_synced.store(false, Ordering::SeqCst);
         self.active_flag.store(true, Ordering::SeqCst);

@@ -375,6 +375,11 @@ impl SurfaceView {
             self.install(compiled, window, cx);
         }
     }
+    /// The already drawn window scene supplies library covers without mounting
+    /// another interactive view or requesting an editor redraw.
+    pub(super) fn library_window(&self) -> AnyWindowHandle {
+        self.window
+    }
     pub fn tokens(&self) -> &pm_design::Tokens {
         &self.table.tokens
     }

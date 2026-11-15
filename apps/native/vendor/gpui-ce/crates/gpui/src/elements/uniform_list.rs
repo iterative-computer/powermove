@@ -218,7 +218,7 @@ impl UniformListScrollHandle {
     }
 
     /// Get the index of the topmost visible child.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "headless-support"))]
     pub fn logical_scroll_top_index(&self) -> usize {
         let this = self.0.borrow();
         this.deferred_scroll_to_item

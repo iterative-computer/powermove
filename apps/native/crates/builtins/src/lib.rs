@@ -393,6 +393,11 @@ impl EffectDesk {
     }
 }
 impl Builtins {
+    /// Invalidates disk covers whenever the built-in panel bundle changes.
+    pub fn cover_version() -> &'static str {
+        BUNDLE
+    }
+
     pub fn new(
         kernel: KernelHandle,
         project: &str,
