@@ -626,10 +626,10 @@ impl SurfaceView {
             mounts.2 += 1;
             mounts.3 += started.elapsed();
         }
-        // Focus is an input event too. Rows listening on an ancestor need it
-        // when a descendant's native focus handle changes (for inline actions).
+        // Glyph actions deliver focus to their row as well as pointer hover.
+        // Text fields and AppKit form controls keep their existing lifecycle.
         for (&id, handle) in &self.focus {
-            if self.focus_events.contains(&id) { continue; }
+            if self.focus_events.contains(&id) || !prepared.node(id).is_some_and(|node|node.component == Some(Component::ToolbarItem)) { continue; }
             let mut at = Some(id);
             let mut interested = false;
             while let Some(target) = at {
